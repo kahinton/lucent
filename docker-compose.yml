@@ -1,0 +1,38 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: hindsight-db
+    environment:
+      POSTGRES_DB: hindsight
+      POSTGRES_USER: hindsight
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hindsight_dev_password}
+    volumes:
+      - hindsight_data:/var/lib/postgresql/data
+      - ./docker/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hindsight -d hindsight"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  hindsight:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hindsight-server
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://hindsight:${POSTGRES_PASSWORD:-hindsight_dev_password}@postgres:5432/hindsight
+    stdin_open: true
+    tty: true
+    restart: unless-stopped
+
+volumes:
+  hindsight_data:
+    driver: local
