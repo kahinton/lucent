@@ -47,6 +47,26 @@ async def _get_current_user_id() -> UUID | None:
     return None
 
 
+async def _get_current_user_context() -> tuple[UUID | None, UUID | None]:
+    """Get the current user ID and organization ID.
+    
+    Returns:
+        Tuple of (user_id, organization_id), either may be None.
+    """
+    # Check if we have a user in context (set by auth middleware)
+    current_user = get_current_user()
+    if current_user:
+        return current_user["id"], current_user.get("organization_id")
+    
+    # In dev mode, ensure dev user exists and use it
+    if is_dev_mode():
+        dev_user = await ensure_dev_user()
+        return dev_user["id"], dev_user.get("organization_id")
+    
+    # No user context and not in dev mode
+    return None, None
+
+
 async def _get_repository() -> MemoryRepository:
     """Get a memory repository, initializing the database if needed."""
     try:
@@ -106,8 +126,8 @@ def register_tools(mcp: FastMCP) -> None:
                 metadata=metadata or {},
             )
             
-            # Get current user ID (from auth context or dev mode)
-            user_id = await _get_current_user_id()
+            # Get current user context (from auth context or dev mode)
+            user_id, org_id = await _get_current_user_context()
             
             repo = await _get_repository()
             
@@ -120,6 +140,7 @@ def register_tools(mcp: FastMCP) -> None:
                 related_memory_ids=input_data.related_memory_ids,
                 metadata=input_data.metadata,
                 user_id=user_id,
+                organization_id=org_id,
             )
             
             return json.dumps(_serialize_memory(result), indent=2)
@@ -133,21 +154,31 @@ def register_tools(mcp: FastMCP) -> None:
     async def get_memory(memory_id: str) -> str:
         """Retrieve a memory by its ID.
 
+        Returns the memory only if you own it or it's shared within your organization.
+
         Args:
             memory_id: The UUID of the memory to retrieve.
 
         Returns:
-            JSON string with the full memory details, or an error if not found.
+            JSON string with the full memory details, or an error if not found or not accessible.
         """
         try:
             uuid_id = UUID(memory_id)
             
             repo = await _get_repository()
             
-            result = await repo.get(uuid_id)
+            # Get current user context for access control
+            user_id, org_id = await _get_current_user_context()
+            
+            if user_id is not None and org_id is not None:
+                # Use access-controlled get
+                result = await repo.get_accessible(uuid_id, user_id, org_id)
+            else:
+                # No auth context, use basic get (for backward compatibility)
+                result = await repo.get(uuid_id)
             
             if result is None:
-                return json.dumps({"error": f"Memory not found: {memory_id}"})
+                return json.dumps({"error": f"Memory not found or not accessible: {memory_id}"})
             
             return json.dumps(_serialize_memory(result), indent=2)
             
@@ -219,6 +250,9 @@ def register_tools(mcp: FastMCP) -> None:
             
             repo = await _get_repository()
             
+            # Get current user context for access control
+            user_id, org_id = await _get_current_user_context()
+            
             result = await repo.search(
                 query=search_input.query,
                 username=search_input.username,
@@ -231,6 +265,8 @@ def register_tools(mcp: FastMCP) -> None:
                 memory_ids=search_input.memory_ids,
                 offset=search_input.offset,
                 limit=search_input.limit,
+                requesting_user_id=user_id,
+                requesting_org_id=org_id,
             )
             
             # Serialize the results
@@ -290,6 +326,9 @@ def register_tools(mcp: FastMCP) -> None:
             
             repo = await _get_repository()
             
+            # Get current user context for access control
+            user_id, org_id = await _get_current_user_context()
+            
             result = await repo.search_full(
                 query=query.strip(),
                 username=username,
@@ -298,6 +337,8 @@ def register_tools(mcp: FastMCP) -> None:
                 importance_max=importance_max,
                 offset=offset,
                 limit=min(limit, 50),
+                requesting_user_id=user_id,
+                requesting_org_id=org_id,
             )
             
             serialized = {
@@ -475,6 +516,87 @@ def register_tools(mcp: FastMCP) -> None:
         except Exception as e:
             return json.dumps({"error": f"Failed to get tag suggestions: {str(e)}"})
 
+    @mcp.tool()
+    async def share_memory(memory_id: str) -> str:
+        """Share a memory with other users in your organization.
+
+        Only the owner of the memory can share it. Once shared, other users
+        in the same organization will be able to see this memory in their
+        search results.
+
+        Args:
+            memory_id: The UUID of the memory to share.
+
+        Returns:
+            JSON string with the updated memory showing shared=true, or an error.
+        """
+        try:
+            # Get current user context
+            user_id, org_id = await _get_current_user_context()
+            
+            if user_id is None:
+                return json.dumps({"error": "Authentication required to share memories"})
+            
+            repo = await _get_repository()
+            
+            result = await repo.set_shared(
+                memory_id=UUID(memory_id),
+                user_id=user_id,
+                shared=True,
+            )
+            
+            if result is None:
+                return json.dumps({
+                    "error": "Memory not found or you are not the owner. Only the owner can share a memory."
+                })
+            
+            return json.dumps(_serialize_memory(result), indent=2)
+            
+        except ValueError as e:
+            return json.dumps({"error": f"Invalid memory_id: {str(e)}"})
+        except Exception as e:
+            return json.dumps({"error": f"Failed to share memory: {str(e)}"})
+
+    @mcp.tool()
+    async def unshare_memory(memory_id: str) -> str:
+        """Stop sharing a memory with your organization.
+
+        Only the owner of the memory can unshare it. Once unshared, the memory
+        will only be visible to the owner.
+
+        Args:
+            memory_id: The UUID of the memory to unshare.
+
+        Returns:
+            JSON string with the updated memory showing shared=false, or an error.
+        """
+        try:
+            # Get current user context
+            user_id, org_id = await _get_current_user_context()
+            
+            if user_id is None:
+                return json.dumps({"error": "Authentication required to unshare memories"})
+            
+            repo = await _get_repository()
+            
+            result = await repo.set_shared(
+                memory_id=UUID(memory_id),
+                user_id=user_id,
+                shared=False,
+            )
+            
+            if result is None:
+                return json.dumps({
+                    "error": "Memory not found or you are not the owner. Only the owner can unshare a memory."
+                })
+            
+            return json.dumps(_serialize_memory(result), indent=2)
+            
+        except ValueError as e:
+            return json.dumps({"error": f"Invalid memory_id: {str(e)}"})
+        except Exception as e:
+            return json.dumps({"error": f"Failed to unshare memory: {str(e)}"})
+
 
 def _serialize_memory(memory: dict[str, Any]) -> dict[str, Any]:
     """Serialize a memory dict for JSON output."""
@@ -491,6 +613,8 @@ def _serialize_memory(memory: dict[str, Any]) -> dict[str, Any]:
         "updated_at": memory["updated_at"].isoformat() if memory["updated_at"] else None,
         "deleted_at": memory["deleted_at"].isoformat() if memory.get("deleted_at") else None,
         "user_id": str(memory["user_id"]) if memory.get("user_id") else None,
+        "organization_id": str(memory["organization_id"]) if memory.get("organization_id") else None,
+        "shared": memory.get("shared", False),
     }
 
 
@@ -509,4 +633,6 @@ def _serialize_truncated_memory(memory: dict[str, Any]) -> dict[str, Any]:
         "updated_at": memory["updated_at"].isoformat() if memory["updated_at"] else None,
         "similarity_score": memory.get("similarity_score"),
         "user_id": str(memory["user_id"]) if memory.get("user_id") else None,
+        "organization_id": str(memory["organization_id"]) if memory.get("organization_id") else None,
+        "shared": memory.get("shared", False),
     }

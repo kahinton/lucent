@@ -120,6 +120,7 @@ class MemoryRepository:
         related_memory_ids: list[UUID] | None = None,
         metadata: dict[str, Any] | None = None,
         user_id: UUID | None = None,
+        organization_id: UUID | None = None,
     ) -> dict[str, Any]:
         """Create a new memory.
         
@@ -132,6 +133,7 @@ class MemoryRepository:
             related_memory_ids: Optional list of related memory UUIDs.
             metadata: Optional type-specific metadata.
             user_id: Optional user ID (foreign key to users table).
+            organization_id: Optional organization ID (for efficient org-scoped queries).
             
         Returns:
             The created memory record.
@@ -141,10 +143,10 @@ class MemoryRepository:
             await self._validate_related_ids(related_memory_ids)
         
         query = """
-            INSERT INTO memories (username, type, content, tags, importance, related_memory_ids, metadata, user_id)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            INSERT INTO memories (username, type, content, tags, importance, related_memory_ids, metadata, user_id, organization_id, shared)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, false)
             RETURNING id, username, type, content, tags, importance, related_memory_ids, metadata, 
-                      created_at, updated_at, deleted_at, user_id
+                      created_at, updated_at, deleted_at, user_id, organization_id, shared
         """
         
         async with self.pool.acquire() as conn:
@@ -158,12 +160,13 @@ class MemoryRepository:
                 [str(uid) for uid in (related_memory_ids or [])],
                 metadata or {},
                 str(user_id) if user_id else None,
+                str(organization_id) if organization_id else None,
             )
         
         return self._row_to_dict(row)
     
     async def get(self, memory_id: UUID) -> dict[str, Any] | None:
-        """Get a memory by ID.
+        """Get a memory by ID (no access control).
         
         Args:
             memory_id: The UUID of the memory to retrieve.
@@ -173,13 +176,87 @@ class MemoryRepository:
         """
         query = """
             SELECT id, username, type, content, tags, importance, related_memory_ids, metadata,
-                   created_at, updated_at, deleted_at, user_id
+                   created_at, updated_at, deleted_at, user_id, organization_id, shared
             FROM memories
             WHERE id = $1 AND deleted_at IS NULL
         """
         
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(query, str(memory_id))
+        
+        if row is None:
+            return None
+        
+        return self._row_to_dict(row)
+    
+    async def get_accessible(
+        self,
+        memory_id: UUID,
+        user_id: UUID,
+        organization_id: UUID,
+    ) -> dict[str, Any] | None:
+        """Get a memory by ID with access control.
+        
+        Returns the memory only if:
+        - The user owns the memory, OR
+        - The memory is shared within the user's organization
+        
+        Args:
+            memory_id: The UUID of the memory to retrieve.
+            user_id: The ID of the requesting user.
+            organization_id: The organization of the requesting user.
+            
+        Returns:
+            The memory record, or None if not found, deleted, or not accessible.
+        """
+        query = """
+            SELECT id, username, type, content, tags, importance, related_memory_ids, metadata,
+                   created_at, updated_at, deleted_at, user_id, organization_id, shared
+            FROM memories
+            WHERE id = $1 
+              AND deleted_at IS NULL
+              AND (
+                  user_id = $2
+                  OR (organization_id = $3 AND shared = true)
+              )
+        """
+        
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(query, str(memory_id), str(user_id), str(organization_id))
+        
+        if row is None:
+            return None
+        
+        return self._row_to_dict(row)
+    
+    async def set_shared(
+        self,
+        memory_id: UUID,
+        user_id: UUID,
+        shared: bool,
+    ) -> dict[str, Any] | None:
+        """Set the shared status of a memory.
+        
+        Only the owner of the memory can change its shared status.
+        
+        Args:
+            memory_id: The UUID of the memory to update.
+            user_id: The ID of the requesting user (must be owner).
+            shared: Whether to share (True) or unshare (False) the memory.
+            
+        Returns:
+            The updated memory record, or None if not found or not owned by user.
+        """
+        query = """
+            UPDATE memories
+            SET shared = $1
+            WHERE id = $2 AND user_id = $3 AND deleted_at IS NULL
+            RETURNING id, username, type, content, tags, importance, related_memory_ids, metadata,
+                      created_at, updated_at, deleted_at, user_id, organization_id, shared
+        """
+        
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(query, shared, str(memory_id), str(user_id))
         
         if row is None:
             return None
@@ -257,7 +334,7 @@ class MemoryRepository:
             SET {", ".join(updates)}
             WHERE id = ${param_idx} AND deleted_at IS NULL
             RETURNING id, username, type, content, tags, importance, related_memory_ids, metadata,
-                      created_at, updated_at, deleted_at, user_id
+                      created_at, updated_at, deleted_at, user_id, organization_id, shared
         """
         
         async with self.pool.acquire() as conn:
@@ -302,8 +379,15 @@ class MemoryRepository:
         memory_ids: list[UUID] | None = None,
         offset: int = 0,
         limit: int = 5,
+        # Access control parameters
+        requesting_user_id: UUID | None = None,
+        requesting_org_id: UUID | None = None,
     ) -> dict[str, Any]:
         """Search for memories with fuzzy matching and filters.
+        
+        If access control parameters are provided, only returns:
+        - Memories owned by the requesting user, OR
+        - Memories shared within the requesting user's organization
         
         Args:
             query: Optional fuzzy search query for content.
@@ -317,6 +401,8 @@ class MemoryRepository:
             memory_ids: Optional filter by specific memory IDs.
             offset: Pagination offset.
             limit: Maximum results to return.
+            requesting_user_id: User ID for access control (if provided, enables access control).
+            requesting_org_id: Organization ID for access control.
             
         Returns:
             Search result with memories, total count, and pagination info.
@@ -324,6 +410,13 @@ class MemoryRepository:
         conditions = ["deleted_at IS NULL"]
         params: list[Any] = []
         param_idx = 1
+        
+        # Add access control condition if user context is provided
+        if requesting_user_id is not None and requesting_org_id is not None:
+            conditions.append(f"(user_id = ${param_idx} OR (organization_id = ${param_idx + 1} AND shared = true))")
+            params.append(str(requesting_user_id))
+            params.append(str(requesting_org_id))
+            param_idx += 2
         
         # Build WHERE conditions
         if username is not None:
@@ -378,7 +471,7 @@ class MemoryRepository:
             
             search_query = f"""
                 SELECT id, username, type, content, tags, importance, related_memory_ids,
-                       created_at, updated_at, user_id,
+                       created_at, updated_at, user_id, organization_id, shared,
                        similarity(content, ${similarity_param}) as sim_score
                 FROM memories
                 WHERE {where_clause}
@@ -396,7 +489,7 @@ class MemoryRepository:
         else:
             search_query = f"""
                 SELECT id, username, type, content, tags, importance, related_memory_ids,
-                       created_at, updated_at, user_id,
+                       created_at, updated_at, user_id, organization_id, shared,
                        NULL::float as sim_score
                 FROM memories
                 WHERE {where_clause}
@@ -442,6 +535,11 @@ class MemoryRepository:
             if row["user_id"]:
                 user_id = row["user_id"] if isinstance(row["user_id"], UUID) else UUID(row["user_id"])
             
+            # Handle organization_id
+            org_id = None
+            if row["organization_id"]:
+                org_id = row["organization_id"] if isinstance(row["organization_id"], UUID) else UUID(row["organization_id"])
+            
             memories.append({
                 "id": row["id"],
                 "username": row["username"],
@@ -455,6 +553,8 @@ class MemoryRepository:
                 "updated_at": row["updated_at"],
                 "similarity_score": row["sim_score"],
                 "user_id": user_id,
+                "organization_id": org_id,
+                "shared": row["shared"],
             })
         
         return {
@@ -474,11 +574,18 @@ class MemoryRepository:
         importance_max: int | None = None,
         offset: int = 0,
         limit: int = 5,
+        # Access control parameters
+        requesting_user_id: UUID | None = None,
+        requesting_org_id: UUID | None = None,
     ) -> dict[str, Any]:
         """Search across all text fields: content, tags, and metadata.
         
         This is a broader search that looks at all text in a memory,
         useful when you're not sure which field contains the information.
+        
+        If access control parameters are provided, only returns:
+        - Memories owned by the requesting user, OR
+        - Memories shared within the requesting user's organization
         
         Args:
             query: Search query to match against content, tags, and metadata.
@@ -488,6 +595,8 @@ class MemoryRepository:
             importance_max: Optional maximum importance.
             offset: Pagination offset.
             limit: Maximum results to return.
+            requesting_user_id: User ID for access control (if provided, enables access control).
+            requesting_org_id: Organization ID for access control.
             
         Returns:
             Search result with memories, total count, and pagination info.
@@ -495,6 +604,13 @@ class MemoryRepository:
         conditions = ["deleted_at IS NULL"]
         params: list[Any] = []
         param_idx = 1
+        
+        # Add access control condition if user context is provided
+        if requesting_user_id is not None and requesting_org_id is not None:
+            conditions.append(f"(user_id = ${param_idx} OR (organization_id = ${param_idx + 1} AND shared = true))")
+            params.append(str(requesting_user_id))
+            params.append(str(requesting_org_id))
+            param_idx += 2
         
         if username is not None:
             conditions.append(f"username = ${param_idx}")
@@ -526,7 +642,7 @@ class MemoryRepository:
         # Search across content, array_to_string(tags), and metadata::text
         search_query = f"""
             SELECT id, username, type, content, tags, importance, related_memory_ids,
-                   created_at, updated_at, user_id,
+                   created_at, updated_at, user_id, organization_id, shared,
                    GREATEST(
                        similarity(content, ${query_param}),
                        similarity(array_to_string(tags, ' '), ${query_param}),
@@ -583,6 +699,11 @@ class MemoryRepository:
             if row["user_id"]:
                 user_id = row["user_id"] if isinstance(row["user_id"], UUID) else UUID(row["user_id"])
             
+            # Handle organization_id
+            org_id = None
+            if row["organization_id"]:
+                org_id = row["organization_id"] if isinstance(row["organization_id"], UUID) else UUID(row["organization_id"])
+            
             memories.append({
                 "id": row["id"],
                 "username": row["username"],
@@ -596,6 +717,8 @@ class MemoryRepository:
                 "updated_at": row["updated_at"],
                 "similarity_score": row["sim_score"],
                 "user_id": user_id,
+                "organization_id": org_id,
+                "shared": row["shared"],
             })
         
         return {
@@ -757,6 +880,14 @@ class MemoryRepository:
         if "user_id" in row.keys() and row["user_id"]:
             user_id = row["user_id"] if isinstance(row["user_id"], UUID) else UUID(row["user_id"])
         
+        # Handle organization_id which may not be present in all queries
+        org_id = None
+        if "organization_id" in row.keys() and row["organization_id"]:
+            org_id = row["organization_id"] if isinstance(row["organization_id"], UUID) else UUID(row["organization_id"])
+        
+        # Handle shared flag
+        shared = row["shared"] if "shared" in row.keys() else False
+        
         return {
             "id": row["id"],
             "username": row["username"],
@@ -770,6 +901,8 @@ class MemoryRepository:
             "updated_at": row["updated_at"],
             "deleted_at": row["deleted_at"],
             "user_id": user_id,
+            "organization_id": org_id,
+            "shared": shared,
         }
 
 
