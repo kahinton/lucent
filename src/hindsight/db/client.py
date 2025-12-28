@@ -119,6 +119,7 @@ class MemoryRepository:
         importance: int = 5,
         related_memory_ids: list[UUID] | None = None,
         metadata: dict[str, Any] | None = None,
+        user_id: UUID | None = None,
     ) -> dict[str, Any]:
         """Create a new memory.
         
@@ -130,6 +131,7 @@ class MemoryRepository:
             importance: Importance rating (1-10).
             related_memory_ids: Optional list of related memory UUIDs.
             metadata: Optional type-specific metadata.
+            user_id: Optional user ID (foreign key to users table).
             
         Returns:
             The created memory record.
@@ -139,10 +141,10 @@ class MemoryRepository:
             await self._validate_related_ids(related_memory_ids)
         
         query = """
-            INSERT INTO memories (username, type, content, tags, importance, related_memory_ids, metadata)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            INSERT INTO memories (username, type, content, tags, importance, related_memory_ids, metadata, user_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             RETURNING id, username, type, content, tags, importance, related_memory_ids, metadata, 
-                      created_at, updated_at, deleted_at
+                      created_at, updated_at, deleted_at, user_id
         """
         
         async with self.pool.acquire() as conn:
@@ -155,6 +157,7 @@ class MemoryRepository:
                 importance,
                 [str(uid) for uid in (related_memory_ids or [])],
                 metadata or {},
+                str(user_id) if user_id else None,
             )
         
         return self._row_to_dict(row)
@@ -170,7 +173,7 @@ class MemoryRepository:
         """
         query = """
             SELECT id, username, type, content, tags, importance, related_memory_ids, metadata,
-                   created_at, updated_at, deleted_at
+                   created_at, updated_at, deleted_at, user_id
             FROM memories
             WHERE id = $1 AND deleted_at IS NULL
         """
@@ -254,7 +257,7 @@ class MemoryRepository:
             SET {", ".join(updates)}
             WHERE id = ${param_idx} AND deleted_at IS NULL
             RETURNING id, username, type, content, tags, importance, related_memory_ids, metadata,
-                      created_at, updated_at, deleted_at
+                      created_at, updated_at, deleted_at, user_id
         """
         
         async with self.pool.acquire() as conn:
@@ -375,7 +378,7 @@ class MemoryRepository:
             
             search_query = f"""
                 SELECT id, username, type, content, tags, importance, related_memory_ids,
-                       created_at, updated_at,
+                       created_at, updated_at, user_id,
                        similarity(content, ${similarity_param}) as sim_score
                 FROM memories
                 WHERE {where_clause}
@@ -393,7 +396,7 @@ class MemoryRepository:
         else:
             search_query = f"""
                 SELECT id, username, type, content, tags, importance, related_memory_ids,
-                       created_at, updated_at,
+                       created_at, updated_at, user_id,
                        NULL::float as sim_score
                 FROM memories
                 WHERE {where_clause}
@@ -434,6 +437,11 @@ class MemoryRepository:
                     else:
                         related_ids.append(UUID(uid))
             
+            # Handle user_id
+            user_id = None
+            if row["user_id"]:
+                user_id = row["user_id"] if isinstance(row["user_id"], UUID) else UUID(row["user_id"])
+            
             memories.append({
                 "id": row["id"],
                 "username": row["username"],
@@ -446,6 +454,7 @@ class MemoryRepository:
                 "created_at": row["created_at"],
                 "updated_at": row["updated_at"],
                 "similarity_score": row["sim_score"],
+                "user_id": user_id,
             })
         
         return {
@@ -517,7 +526,7 @@ class MemoryRepository:
         # Search across content, array_to_string(tags), and metadata::text
         search_query = f"""
             SELECT id, username, type, content, tags, importance, related_memory_ids,
-                   created_at, updated_at,
+                   created_at, updated_at, user_id,
                    GREATEST(
                        similarity(content, ${query_param}),
                        similarity(array_to_string(tags, ' '), ${query_param}),
@@ -569,6 +578,11 @@ class MemoryRepository:
                     else:
                         related_ids.append(UUID(uid))
             
+            # Handle user_id
+            user_id = None
+            if row["user_id"]:
+                user_id = row["user_id"] if isinstance(row["user_id"], UUID) else UUID(row["user_id"])
+            
             memories.append({
                 "id": row["id"],
                 "username": row["username"],
@@ -581,6 +595,7 @@ class MemoryRepository:
                 "created_at": row["created_at"],
                 "updated_at": row["updated_at"],
                 "similarity_score": row["sim_score"],
+                "user_id": user_id,
             })
         
         return {
@@ -737,6 +752,11 @@ class MemoryRepository:
                 else:
                     related_ids.append(UUID(uid))
         
+        # Handle user_id which may not be present in all queries
+        user_id = None
+        if "user_id" in row.keys() and row["user_id"]:
+            user_id = row["user_id"] if isinstance(row["user_id"], UUID) else UUID(row["user_id"])
+        
         return {
             "id": row["id"],
             "username": row["username"],
@@ -749,4 +769,268 @@ class MemoryRepository:
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
             "deleted_at": row["deleted_at"],
+            "user_id": user_id,
+        }
+
+
+class UserRepository:
+    """Repository for user CRUD operations."""
+    
+    def __init__(self, pool: Pool):
+        self.pool = pool
+    
+    async def create(
+        self,
+        external_id: str,
+        provider: str,
+        email: str | None = None,
+        display_name: str | None = None,
+        avatar_url: str | None = None,
+        provider_metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Create a new user.
+        
+        Args:
+            external_id: Unique ID from the auth provider.
+            provider: Auth provider name (google, github, saml, local).
+            email: User's email address.
+            display_name: User's display name.
+            avatar_url: URL to user's avatar.
+            provider_metadata: Provider-specific metadata.
+            
+        Returns:
+            The created user record.
+        """
+        query = """
+            INSERT INTO users (external_id, provider, email, display_name, avatar_url, provider_metadata)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            RETURNING id, external_id, provider, email, display_name, avatar_url, 
+                      provider_metadata, is_active, created_at, updated_at, last_login_at
+        """
+        
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                query,
+                external_id,
+                provider,
+                email,
+                display_name,
+                avatar_url,
+                provider_metadata or {},
+            )
+        
+        return self._row_to_dict(row)
+    
+    async def get_by_id(self, user_id: UUID) -> dict[str, Any] | None:
+        """Get a user by their internal ID.
+        
+        Args:
+            user_id: The internal UUID of the user.
+            
+        Returns:
+            The user record, or None if not found.
+        """
+        query = """
+            SELECT id, external_id, provider, email, display_name, avatar_url,
+                   provider_metadata, is_active, created_at, updated_at, last_login_at
+            FROM users
+            WHERE id = $1
+        """
+        
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(query, str(user_id))
+        
+        if row is None:
+            return None
+        
+        return self._row_to_dict(row)
+    
+    async def get_by_external_id(
+        self, 
+        external_id: str, 
+        provider: str
+    ) -> dict[str, Any] | None:
+        """Get a user by their external ID and provider.
+        
+        Args:
+            external_id: The ID from the auth provider.
+            provider: The auth provider name.
+            
+        Returns:
+            The user record, or None if not found.
+        """
+        query = """
+            SELECT id, external_id, provider, email, display_name, avatar_url,
+                   provider_metadata, is_active, created_at, updated_at, last_login_at
+            FROM users
+            WHERE external_id = $1 AND provider = $2
+        """
+        
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(query, external_id, provider)
+        
+        if row is None:
+            return None
+        
+        return self._row_to_dict(row)
+    
+    async def get_or_create(
+        self,
+        external_id: str,
+        provider: str,
+        email: str | None = None,
+        display_name: str | None = None,
+        avatar_url: str | None = None,
+        provider_metadata: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, Any], bool]:
+        """Get an existing user or create a new one.
+        
+        Args:
+            external_id: Unique ID from the auth provider.
+            provider: Auth provider name.
+            email: User's email address.
+            display_name: User's display name.
+            avatar_url: URL to user's avatar.
+            provider_metadata: Provider-specific metadata.
+            
+        Returns:
+            Tuple of (user record, was_created boolean).
+        """
+        existing = await self.get_by_external_id(external_id, provider)
+        if existing:
+            return existing, False
+        
+        new_user = await self.create(
+            external_id=external_id,
+            provider=provider,
+            email=email,
+            display_name=display_name,
+            avatar_url=avatar_url,
+            provider_metadata=provider_metadata,
+        )
+        return new_user, True
+    
+    async def update(
+        self,
+        user_id: UUID,
+        email: str | None = None,
+        display_name: str | None = None,
+        avatar_url: str | None = None,
+        provider_metadata: dict[str, Any] | None = None,
+        is_active: bool | None = None,
+    ) -> dict[str, Any] | None:
+        """Update an existing user.
+        
+        Args:
+            user_id: The internal UUID of the user.
+            email: New email address.
+            display_name: New display name.
+            avatar_url: New avatar URL.
+            provider_metadata: New provider metadata.
+            is_active: New active status.
+            
+        Returns:
+            The updated user record, or None if not found.
+        """
+        updates = []
+        params = []
+        param_idx = 1
+        
+        if email is not None:
+            updates.append(f"email = ${param_idx}")
+            params.append(email)
+            param_idx += 1
+        
+        if display_name is not None:
+            updates.append(f"display_name = ${param_idx}")
+            params.append(display_name)
+            param_idx += 1
+        
+        if avatar_url is not None:
+            updates.append(f"avatar_url = ${param_idx}")
+            params.append(avatar_url)
+            param_idx += 1
+        
+        if provider_metadata is not None:
+            updates.append(f"provider_metadata = ${param_idx}")
+            params.append(provider_metadata)
+            param_idx += 1
+        
+        if is_active is not None:
+            updates.append(f"is_active = ${param_idx}")
+            params.append(is_active)
+            param_idx += 1
+        
+        if not updates:
+            return await self.get_by_id(user_id)
+        
+        params.append(str(user_id))
+        
+        query = f"""
+            UPDATE users
+            SET {", ".join(updates)}
+            WHERE id = ${param_idx}
+            RETURNING id, external_id, provider, email, display_name, avatar_url,
+                      provider_metadata, is_active, created_at, updated_at, last_login_at
+        """
+        
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(query, *params)
+        
+        if row is None:
+            return None
+        
+        return self._row_to_dict(row)
+    
+    async def update_last_login(self, user_id: UUID) -> None:
+        """Update the last login timestamp for a user.
+        
+        Args:
+            user_id: The internal UUID of the user.
+        """
+        query = """
+            UPDATE users
+            SET last_login_at = NOW()
+            WHERE id = $1
+        """
+        
+        async with self.pool.acquire() as conn:
+            await conn.execute(query, str(user_id))
+    
+    async def delete(self, user_id: UUID) -> bool:
+        """Permanently delete a user.
+        
+        Note: This will cascade delete all memories for this user.
+        
+        Args:
+            user_id: The internal UUID of the user.
+            
+        Returns:
+            True if the user was deleted, False if not found.
+        """
+        query = """
+            DELETE FROM users
+            WHERE id = $1
+            RETURNING id
+        """
+        
+        async with self.pool.acquire() as conn:
+            result = await conn.fetchrow(query, str(user_id))
+        
+        return result is not None
+    
+    def _row_to_dict(self, row: asyncpg.Record) -> dict[str, Any]:
+        """Convert a database row to a dictionary."""
+        return {
+            "id": row["id"],
+            "external_id": row["external_id"],
+            "provider": row["provider"],
+            "email": row["email"],
+            "display_name": row["display_name"],
+            "avatar_url": row["avatar_url"],
+            "provider_metadata": row["provider_metadata"],
+            "is_active": row["is_active"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "last_login_at": row["last_login_at"],
         }

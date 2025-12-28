@@ -6,6 +6,7 @@ import sys
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 
+from hindsight.auth import is_dev_mode
 from hindsight.prompts.memory_usage import get_memory_system_prompt, get_memory_system_prompt_short
 from hindsight.tools.memories import register_tools
 
@@ -53,11 +54,15 @@ def main() -> None:
         print("Example: postgresql://user:password@localhost:5432/hindsight", file=sys.stderr)
         sys.exit(1)
     
-    # Run the MCP server with SSE transport
+    # Show dev mode status
+    if is_dev_mode():
+        print("Running in DEVELOPMENT MODE - authentication disabled", file=sys.stderr)
+    
+    # Run the MCP server with streamable HTTP transport
     print(f"Starting Hindsight MCP server on http://{HOST}:{PORT}", file=sys.stderr)
     mcp.settings.host = HOST
     mcp.settings.port = PORT
-    mcp.run(transport="sse")
+    mcp.run(transport="streamable-http")
 
 
 if __name__ == "__main__":

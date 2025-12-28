@@ -8,13 +8,43 @@ from uuid import UUID
 
 from mcp.server.fastmcp import FastMCP
 
-from hindsight.db.client import MemoryRepository, get_pool, init_db
+from hindsight.auth import ensure_dev_user, get_current_user, is_dev_mode
+from hindsight.db.client import MemoryRepository, UserRepository, get_pool, init_db
 from hindsight.models.memory import (
     CreateMemoryInput,
     MemoryType,
     SearchMemoriesInput,
     UpdateMemoryInput,
 )
+
+
+async def _get_repository() -> MemoryRepository:
+    """Get a memory repository, initializing the database if needed."""
+    try:
+        pool = await get_pool()
+    except RuntimeError:
+        # Pool not initialized yet, initialize it now
+        database_url = os.environ.get("DATABASE_URL")
+        if not database_url:
+            raise RuntimeError("DATABASE_URL environment variable is required")
+        pool = await init_db(database_url)
+    return MemoryRepository(pool)
+
+
+async def _get_current_user_id() -> UUID | None:
+    """Get the current user ID, creating dev user if in dev mode."""
+    # Check if we have a user in context (set by auth middleware)
+    current_user = get_current_user()
+    if current_user:
+        return current_user["id"]
+    
+    # In dev mode, ensure dev user exists and use it
+    if is_dev_mode():
+        dev_user = await ensure_dev_user()
+        return dev_user["id"]
+    
+    # No user context and not in dev mode
+    return None
 
 
 async def _get_repository() -> MemoryRepository:
@@ -76,6 +106,9 @@ def register_tools(mcp: FastMCP) -> None:
                 metadata=metadata or {},
             )
             
+            # Get current user ID (from auth context or dev mode)
+            user_id = await _get_current_user_id()
+            
             repo = await _get_repository()
             
             result = await repo.create(
@@ -86,6 +119,7 @@ def register_tools(mcp: FastMCP) -> None:
                 importance=input_data.importance,
                 related_memory_ids=input_data.related_memory_ids,
                 metadata=input_data.metadata,
+                user_id=user_id,
             )
             
             return json.dumps(_serialize_memory(result), indent=2)
@@ -456,6 +490,7 @@ def _serialize_memory(memory: dict[str, Any]) -> dict[str, Any]:
         "created_at": memory["created_at"].isoformat() if memory["created_at"] else None,
         "updated_at": memory["updated_at"].isoformat() if memory["updated_at"] else None,
         "deleted_at": memory["deleted_at"].isoformat() if memory.get("deleted_at") else None,
+        "user_id": str(memory["user_id"]) if memory.get("user_id") else None,
     }
 
 
@@ -473,4 +508,5 @@ def _serialize_truncated_memory(memory: dict[str, Any]) -> dict[str, Any]:
         "created_at": memory["created_at"].isoformat() if memory["created_at"] else None,
         "updated_at": memory["updated_at"].isoformat() if memory["updated_at"] else None,
         "similarity_score": memory.get("similarity_score"),
+        "user_id": str(memory["user_id"]) if memory.get("user_id") else None,
     }

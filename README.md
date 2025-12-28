@@ -6,7 +6,10 @@ An MCP (Model Context Protocol) server providing persistent memory functionality
 
 - **Five Memory Types**: Experience, Technical, Procedural, Goal, and Individual memories with type-specific metadata
 - **Fuzzy Search**: PostgreSQL trigram-based similarity search for natural language queries
+- **Dual Search Modes**: Content-only search (`search_memories`) or full-field search (`search_memories_full`)
+- **Tag Management**: Built-in tools to promote tag consistency across memories
 - **Memory Linking**: Connect related memories for contextual retrieval
+- **User Management**: OAuth support (Google, GitHub) and SAML for enterprises
 - **Soft Delete**: Recoverable deletions with future hard-delete cleanup planned
 - **Docker Ready**: PostgreSQL with persistent storage out of the box
 
@@ -61,14 +64,28 @@ cp .env.example .env
 ### 4. Run the Server
 
 ```bash
-# Set database URL
+# Set database URL and enable dev mode
 export DATABASE_URL="postgresql://hindsight:hindsight_dev_password@localhost:5432/hindsight"
+export HINDSIGHT_DEV_MODE=true
 
 # Run the MCP server
 hindsight
 ```
 
 ### 5. Configure Your MCP Client
+
+For VS Code with the MCP extension, add to `.vscode/mcp.json`:
+
+```json
+{
+  "servers": {
+    "memory-server": {
+      "url": "http://localhost:8765/mcp",
+      "type": "http"
+    }
+  }
+}
+```
 
 For Claude Desktop, add to your `claude_desktop_config.json`:
 
@@ -78,33 +95,70 @@ For Claude Desktop, add to your `claude_desktop_config.json`:
     "hindsight": {
       "command": "hindsight",
       "env": {
-        "DATABASE_URL": "postgresql://hindsight:hindsight_dev_password@localhost:5432/hindsight"
+        "DATABASE_URL": "postgresql://hindsight:hindsight_dev_password@localhost:5432/hindsight",
+        "HINDSIGHT_DEV_MODE": "true"
       }
     }
   }
 }
 ```
 
-Or if using a virtual environment:
+## Authentication
 
-```json
-{
-  "mcpServers": {
-    "hindsight": {
-      "command": "/path/to/hindsight/.venv/bin/hindsight",
-      "env": {
-        "DATABASE_URL": "postgresql://hindsight:hindsight_dev_password@localhost:5432/hindsight"
-      }
-    }
-  }
-}
+### Development Mode
+
+For local development and testing, enable dev mode to bypass authentication:
+
+```bash
+export HINDSIGHT_DEV_MODE=true
 ```
+
+This creates a local "dev-user" that all memories are associated with.
+
+### Production Mode
+
+In production, disable dev mode and configure OAuth or SAML:
+
+```bash
+export HINDSIGHT_DEV_MODE=false
+# Configure your OAuth provider(s)
+```
+
+Supported providers:
+- **Google OAuth**
+- **GitHub OAuth**
+- **SAML** (for enterprise SSO)
+
+Each user gets a unique user_id, and all memories are linked to their user account via foreign key.
 
 ## Available Tools
 
-### create_memory
+### Memory CRUD
 
-Create a new memory in the knowledge base.
+| Tool | Purpose |
+|------|---------|
+| `create_memory` | Create a new memory with type, content, tags, importance, and metadata |
+| `get_memory` | Retrieve a full memory by its UUID |
+| `update_memory` | Update an existing memory |
+| `delete_memory` | Soft delete a memory (can be recovered) |
+
+### Search Tools
+
+| Tool | Purpose |
+|------|---------|
+| `search_memories` | Fuzzy search on **content field only** - faster, focused results |
+| `search_memories_full` | Fuzzy search across **all fields** (content, tags, metadata) |
+
+### Tag Management
+
+| Tool | Purpose |
+|------|---------|
+| `get_existing_tags` | List all tags with usage counts - use before creating memories! |
+| `get_tag_suggestions` | Fuzzy search for similar existing tags |
+
+### Tool Parameters
+
+#### create_memory
 
 ```
 Arguments:
@@ -117,53 +171,18 @@ Arguments:
 - metadata: Type-specific metadata object
 ```
 
-### get_memory
-
-Retrieve a memory by its UUID.
+#### search_memories / search_memories_full
 
 ```
 Arguments:
-- memory_id (required): The UUID of the memory
-```
-
-### search_memories
-
-Search with fuzzy matching and filters. Returns truncated results (1000 chars) with pagination.
-
-```
-Arguments:
-- query: Fuzzy search query for content
+- query: Fuzzy search query
 - username: Filter by username
 - type: Filter by memory type
 - tags: Filter by tags (any match)
 - importance_min/max: Filter by importance range
 - created_after/before: Filter by date range (ISO format)
-- memory_ids: Filter by specific UUIDs
 - offset: Pagination offset (default: 0)
 - limit: Results per page (default: 5, max: 50)
-```
-
-### update_memory
-
-Update an existing memory.
-
-```
-Arguments:
-- memory_id (required): UUID of memory to update
-- content: New content
-- tags: New tags (replaces existing)
-- importance: New importance rating
-- related_memory_ids: New related memories (replaces existing)
-- metadata: New metadata (replaces existing)
-```
-
-### delete_memory
-
-Soft delete a memory (can be recovered).
-
-```
-Arguments:
-- memory_id (required): UUID of memory to delete
 ```
 
 ## System Prompts
