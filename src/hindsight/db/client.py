@@ -783,6 +783,7 @@ class UserRepository:
         self,
         external_id: str,
         provider: str,
+        organization_id: UUID,
         email: str | None = None,
         display_name: str | None = None,
         avatar_url: str | None = None,
@@ -793,6 +794,7 @@ class UserRepository:
         Args:
             external_id: Unique ID from the auth provider.
             provider: Auth provider name (google, github, saml, local).
+            organization_id: The organization this user belongs to.
             email: User's email address.
             display_name: User's display name.
             avatar_url: URL to user's avatar.
@@ -802,9 +804,9 @@ class UserRepository:
             The created user record.
         """
         query = """
-            INSERT INTO users (external_id, provider, email, display_name, avatar_url, provider_metadata)
-            VALUES ($1, $2, $3, $4, $5, $6)
-            RETURNING id, external_id, provider, email, display_name, avatar_url, 
+            INSERT INTO users (external_id, provider, organization_id, email, display_name, avatar_url, provider_metadata)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            RETURNING id, external_id, provider, organization_id, email, display_name, avatar_url, 
                       provider_metadata, is_active, created_at, updated_at, last_login_at
         """
         
@@ -813,6 +815,7 @@ class UserRepository:
                 query,
                 external_id,
                 provider,
+                str(organization_id),
                 email,
                 display_name,
                 avatar_url,
@@ -831,7 +834,7 @@ class UserRepository:
             The user record, or None if not found.
         """
         query = """
-            SELECT id, external_id, provider, email, display_name, avatar_url,
+            SELECT id, external_id, provider, organization_id, email, display_name, avatar_url,
                    provider_metadata, is_active, created_at, updated_at, last_login_at
             FROM users
             WHERE id = $1
@@ -860,7 +863,7 @@ class UserRepository:
             The user record, or None if not found.
         """
         query = """
-            SELECT id, external_id, provider, email, display_name, avatar_url,
+            SELECT id, external_id, provider, organization_id, email, display_name, avatar_url,
                    provider_metadata, is_active, created_at, updated_at, last_login_at
             FROM users
             WHERE external_id = $1 AND provider = $2
@@ -878,6 +881,7 @@ class UserRepository:
         self,
         external_id: str,
         provider: str,
+        organization_id: UUID,
         email: str | None = None,
         display_name: str | None = None,
         avatar_url: str | None = None,
@@ -888,6 +892,7 @@ class UserRepository:
         Args:
             external_id: Unique ID from the auth provider.
             provider: Auth provider name.
+            organization_id: The organization this user belongs to.
             email: User's email address.
             display_name: User's display name.
             avatar_url: URL to user's avatar.
@@ -903,6 +908,7 @@ class UserRepository:
         new_user = await self.create(
             external_id=external_id,
             provider=provider,
+            organization_id=organization_id,
             email=email,
             display_name=display_name,
             avatar_url=avatar_url,
@@ -970,7 +976,7 @@ class UserRepository:
             UPDATE users
             SET {", ".join(updates)}
             WHERE id = ${param_idx}
-            RETURNING id, external_id, provider, email, display_name, avatar_url,
+            RETURNING id, external_id, provider, organization_id, email, display_name, avatar_url,
                       provider_metadata, is_active, created_at, updated_at, last_login_at
         """
         
@@ -1021,10 +1027,16 @@ class UserRepository:
     
     def _row_to_dict(self, row: asyncpg.Record) -> dict[str, Any]:
         """Convert a database row to a dictionary."""
+        # Handle organization_id which may be a string or UUID
+        org_id = None
+        if "organization_id" in row.keys() and row["organization_id"]:
+            org_id = row["organization_id"] if isinstance(row["organization_id"], UUID) else UUID(row["organization_id"])
+        
         return {
             "id": row["id"],
             "external_id": row["external_id"],
             "provider": row["provider"],
+            "organization_id": org_id,
             "email": row["email"],
             "display_name": row["display_name"],
             "avatar_url": row["avatar_url"],
@@ -1033,4 +1045,171 @@ class UserRepository:
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
             "last_login_at": row["last_login_at"],
+        }
+
+
+class OrganizationRepository:
+    """Repository for organization CRUD operations."""
+    
+    def __init__(self, pool: Pool):
+        self.pool = pool
+    
+    async def create(self, name: str) -> dict[str, Any]:
+        """Create a new organization.
+        
+        Args:
+            name: The organization name.
+            
+        Returns:
+            The created organization record.
+        """
+        query = """
+            INSERT INTO organizations (name)
+            VALUES ($1)
+            RETURNING id, name, created_at, updated_at
+        """
+        
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(query, name)
+        
+        return self._row_to_dict(row)
+    
+    async def get_by_id(self, org_id: UUID) -> dict[str, Any] | None:
+        """Get an organization by ID.
+        
+        Args:
+            org_id: The UUID of the organization.
+            
+        Returns:
+            The organization record, or None if not found.
+        """
+        query = """
+            SELECT id, name, created_at, updated_at
+            FROM organizations
+            WHERE id = $1
+        """
+        
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(query, str(org_id))
+        
+        if row is None:
+            return None
+        
+        return self._row_to_dict(row)
+    
+    async def get_by_name(self, name: str) -> dict[str, Any] | None:
+        """Get an organization by name.
+        
+        Args:
+            name: The organization name.
+            
+        Returns:
+            The organization record, or None if not found.
+        """
+        query = """
+            SELECT id, name, created_at, updated_at
+            FROM organizations
+            WHERE name = $1
+        """
+        
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(query, name)
+        
+        if row is None:
+            return None
+        
+        return self._row_to_dict(row)
+    
+    async def get_or_create(self, name: str) -> tuple[dict[str, Any], bool]:
+        """Get an existing organization or create a new one.
+        
+        Args:
+            name: The organization name.
+            
+        Returns:
+            Tuple of (organization record, was_created boolean).
+        """
+        existing = await self.get_by_name(name)
+        if existing:
+            return existing, False
+        
+        new_org = await self.create(name)
+        return new_org, True
+    
+    async def update(self, org_id: UUID, name: str) -> dict[str, Any] | None:
+        """Update an organization's name.
+        
+        Args:
+            org_id: The UUID of the organization.
+            name: The new name.
+            
+        Returns:
+            The updated organization record, or None if not found.
+        """
+        query = """
+            UPDATE organizations
+            SET name = $1
+            WHERE id = $2
+            RETURNING id, name, created_at, updated_at
+        """
+        
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(query, name, str(org_id))
+        
+        if row is None:
+            return None
+        
+        return self._row_to_dict(row)
+    
+    async def delete(self, org_id: UUID) -> bool:
+        """Permanently delete an organization.
+        
+        Note: This will cascade delete all users and their memories.
+        
+        Args:
+            org_id: The UUID of the organization.
+            
+        Returns:
+            True if deleted, False if not found.
+        """
+        query = """
+            DELETE FROM organizations
+            WHERE id = $1
+            RETURNING id
+        """
+        
+        async with self.pool.acquire() as conn:
+            result = await conn.fetchrow(query, str(org_id))
+        
+        return result is not None
+    
+    async def list_all(self, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
+        """List all organizations.
+        
+        Args:
+            limit: Maximum number to return.
+            offset: Pagination offset.
+            
+        Returns:
+            List of organization records.
+        """
+        query = """
+            SELECT id, name, created_at, updated_at
+            FROM organizations
+            ORDER BY name ASC
+            LIMIT $1 OFFSET $2
+        """
+        
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(query, limit, offset)
+        
+        return [self._row_to_dict(row) for row in rows]
+    
+    def _row_to_dict(self, row: asyncpg.Record) -> dict[str, Any]:
+        """Convert a database row to a dictionary."""
+        return {
+            "id": row["id"],
+            "name": row["name"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
         }

@@ -20,6 +20,7 @@ class CreateUserInput(BaseModel):
     """Input model for creating a new user."""
     external_id: str = Field(..., min_length=1, description="Unique ID from auth provider")
     provider: AuthProvider
+    organization_id: UUID = Field(..., description="Organization this user belongs to")
     email: EmailStr | None = None
     display_name: str | None = None
     avatar_url: str | None = None
@@ -40,6 +41,7 @@ class User(BaseModel):
     id: UUID
     external_id: str
     provider: AuthProvider
+    organization_id: UUID
     email: str | None
     display_name: str | None
     avatar_url: str | None
@@ -53,6 +55,7 @@ class User(BaseModel):
 class UserSummary(BaseModel):
     """Condensed user info for embedding in responses."""
     id: UUID
+    organization_id: UUID
     display_name: str | None
     email: str | None
     provider: AuthProvider
