@@ -9,7 +9,7 @@ from uuid import UUID
 from mcp.server.fastmcp import FastMCP
 
 from hindsight.auth import ensure_dev_user, get_current_user, is_dev_mode
-from hindsight.db.client import MemoryRepository, UserRepository, get_pool, init_db
+from hindsight.db.client import AuditRepository, MemoryRepository, get_pool, init_db
 from hindsight.models.memory import (
     CreateMemoryInput,
     MemoryType,
@@ -80,6 +80,18 @@ async def _get_repository() -> MemoryRepository:
     return MemoryRepository(pool)
 
 
+async def _get_audit_repository() -> AuditRepository:
+    """Get an audit repository, initializing the database if needed."""
+    try:
+        pool = await get_pool()
+    except RuntimeError:
+        database_url = os.environ.get("DATABASE_URL")
+        if not database_url:
+            raise RuntimeError("DATABASE_URL environment variable is required")
+        pool = await init_db(database_url)
+    return AuditRepository(pool)
+
+
 def register_tools(mcp: FastMCP) -> None:
     """Register all memory tools with the MCP server."""
 
@@ -141,6 +153,23 @@ def register_tools(mcp: FastMCP) -> None:
                 metadata=input_data.metadata,
                 user_id=user_id,
                 organization_id=org_id,
+            )
+            
+            # Log the creation in audit log
+            audit_repo = await _get_audit_repository()
+            await audit_repo.log(
+                memory_id=result["id"],
+                action_type="create",
+                user_id=user_id,
+                organization_id=org_id,
+                new_values={
+                    "username": input_data.username,
+                    "type": input_data.type.value,
+                    "content": input_data.content,
+                    "tags": input_data.tags,
+                    "importance": input_data.importance,
+                    "metadata": input_data.metadata,
+                },
             )
             
             return json.dumps(_serialize_memory(result), indent=2)
@@ -391,6 +420,11 @@ def register_tools(mcp: FastMCP) -> None:
             
             repo = await _get_repository()
             
+            # Get old values before update for audit
+            old_memory = await repo.get(uuid_id)
+            if old_memory is None:
+                return json.dumps({"error": f"Memory not found: {memory_id}"})
+            
             result = await repo.update(
                 memory_id=uuid_id,
                 content=update_input.content,
@@ -402,6 +436,52 @@ def register_tools(mcp: FastMCP) -> None:
             
             if result is None:
                 return json.dumps({"error": f"Memory not found: {memory_id}"})
+            
+            # Build audit log entry
+            changed_fields = []
+            old_values = {}
+            new_values = {}
+            
+            if content is not None and old_memory["content"] != content:
+                changed_fields.append("content")
+                old_values["content"] = old_memory["content"]
+                new_values["content"] = content
+            
+            if tags is not None and old_memory["tags"] != tags:
+                changed_fields.append("tags")
+                old_values["tags"] = old_memory["tags"]
+                new_values["tags"] = tags
+            
+            if importance is not None and old_memory["importance"] != importance:
+                changed_fields.append("importance")
+                old_values["importance"] = old_memory["importance"]
+                new_values["importance"] = importance
+            
+            if metadata is not None and old_memory["metadata"] != metadata:
+                changed_fields.append("metadata")
+                old_values["metadata"] = old_memory["metadata"]
+                new_values["metadata"] = metadata
+            
+            if related_memory_ids is not None:
+                old_related = [str(uid) for uid in old_memory["related_memory_ids"]]
+                if old_related != related_memory_ids:
+                    changed_fields.append("related_memory_ids")
+                    old_values["related_memory_ids"] = old_related
+                    new_values["related_memory_ids"] = related_memory_ids
+            
+            # Log the update if anything changed
+            if changed_fields:
+                user_id, org_id = await _get_current_user_context()
+                audit_repo = await _get_audit_repository()
+                await audit_repo.log(
+                    memory_id=uuid_id,
+                    action_type="update",
+                    user_id=user_id,
+                    organization_id=org_id,
+                    changed_fields=changed_fields,
+                    old_values=old_values,
+                    new_values=new_values,
+                )
             
             return json.dumps(_serialize_memory(result), indent=2)
             
@@ -425,10 +505,30 @@ def register_tools(mcp: FastMCP) -> None:
             
             repo = await _get_repository()
             
+            # Get memory info before deletion for audit
+            old_memory = await repo.get(uuid_id)
+            if old_memory is None:
+                return json.dumps({"error": f"Memory not found: {memory_id}"})
+            
             success = await repo.delete(uuid_id)
             
             if not success:
                 return json.dumps({"error": f"Memory not found: {memory_id}"})
+            
+            # Log the deletion
+            user_id, org_id = await _get_current_user_context()
+            audit_repo = await _get_audit_repository()
+            await audit_repo.log(
+                memory_id=uuid_id,
+                action_type="delete",
+                user_id=user_id,
+                organization_id=org_id,
+                old_values={
+                    "content": old_memory["content"],
+                    "tags": old_memory["tags"],
+                    "importance": old_memory["importance"],
+                },
+            )
             
             return json.dumps({
                 "success": True,
@@ -550,6 +650,18 @@ def register_tools(mcp: FastMCP) -> None:
                     "error": "Memory not found or you are not the owner. Only the owner can share a memory."
                 })
             
+            # Log the share action
+            audit_repo = await _get_audit_repository()
+            await audit_repo.log(
+                memory_id=UUID(memory_id),
+                action_type="share",
+                user_id=user_id,
+                organization_id=org_id,
+                changed_fields=["shared"],
+                old_values={"shared": False},
+                new_values={"shared": True},
+            )
+            
             return json.dumps(_serialize_memory(result), indent=2)
             
         except ValueError as e:
@@ -589,6 +701,18 @@ def register_tools(mcp: FastMCP) -> None:
                 return json.dumps({
                     "error": "Memory not found or you are not the owner. Only the owner can unshare a memory."
                 })
+            
+            # Log the unshare action
+            audit_repo = await _get_audit_repository()
+            await audit_repo.log(
+                memory_id=UUID(memory_id),
+                action_type="unshare",
+                user_id=user_id,
+                organization_id=org_id,
+                changed_fields=["shared"],
+                old_values={"shared": True},
+                new_values={"shared": False},
+            )
             
             return json.dumps(_serialize_memory(result), indent=2)
             
