@@ -1,13 +1,11 @@
 """Hindsight MCP Server - Memory functionality for LLMs."""
 
-import asyncio
+import multiprocessing
 import os
 import sys
-import threading
 
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
-import uvicorn
 
 from hindsight.auth import is_dev_mode
 from hindsight.prompts.memory_usage import get_memory_system_prompt, get_memory_system_prompt_short
@@ -49,6 +47,13 @@ def memory_usage_guide_short() -> str:
     return get_memory_system_prompt_short()
 
 
+def run_api_server():
+    """Run the Admin API server in a separate process."""
+    import uvicorn
+    from hindsight.api.app import app
+    uvicorn.run(app, host=HOST, port=API_PORT, log_level="info")
+
+
 def main() -> None:
     """Main entry point for the Hindsight MCP server."""
     # Validate DATABASE_URL is set
@@ -67,13 +72,9 @@ def main() -> None:
     print(f"Starting Hindsight Admin API on http://{HOST}:{API_PORT}", file=sys.stderr)
     print(f"API documentation at http://{HOST}:{API_PORT}/api/docs", file=sys.stderr)
     
-    # Start the Admin API in a separate thread
-    def run_api():
-        from hindsight.api.app import app
-        uvicorn.run(app, host=HOST, port=API_PORT, log_level="info")
-    
-    api_thread = threading.Thread(target=run_api, daemon=True)
-    api_thread.start()
+    # Start the Admin API in a separate process
+    api_process = multiprocessing.Process(target=run_api_server, daemon=True)
+    api_process.start()
     
     # Run the MCP server (this blocks)
     mcp.settings.host = HOST

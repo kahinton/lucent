@@ -26,15 +26,16 @@ router = APIRouter()
 
 def _memory_to_response(memory: dict[str, Any]) -> MemoryResponse:
     """Convert a memory dict to a response model."""
+    related_ids = memory.get("related_memory_ids") or []
     return MemoryResponse(
         id=memory["id"],
         username=memory["username"],
         type=memory["type"],
         content=memory["content"],
-        tags=memory["tags"] or [],
+        tags=memory.get("tags") or [],
         importance=memory["importance"],
-        related_memory_ids=[uid for uid in memory["related_memory_ids"]],
-        metadata=memory["metadata"] or {},
+        related_memory_ids=[uid for uid in related_ids],
+        metadata=memory.get("metadata") or {},
         created_at=memory["created_at"],
         updated_at=memory["updated_at"],
         deleted_at=memory.get("deleted_at"),
@@ -101,6 +102,63 @@ async def create_memory(
     return _memory_to_response(result)
 
 
+# Tag routes - MUST be defined before /{memory_id} routes to avoid path conflicts
+@router.get(
+    "/tags/list",
+    response_model=TagListResponse,
+)
+async def list_tags(
+    user: AuthenticatedUser,
+    username: str | None = None,
+    type: str | None = None,
+    limit: int = 50,
+) -> TagListResponse:
+    """Get existing tags with usage counts."""
+    pool = await get_pool()
+    repo = MemoryRepository(pool)
+    
+    result = await repo.get_existing_tags(
+        username=username,
+        type=type,
+        limit=min(limit, 100),
+    )
+    
+    return TagListResponse(
+        tags=[TagCount(tag=t["tag"], count=t["count"]) for t in result],
+        total_count=len(result),
+    )
+
+
+@router.get(
+    "/tags/suggest",
+    response_model=TagSuggestionsResponse,
+)
+async def suggest_tags(
+    query: str,
+    user: AuthenticatedUser,
+    username: str | None = None,
+    limit: int = 10,
+) -> TagSuggestionsResponse:
+    """Get tag suggestions based on fuzzy matching."""
+    pool = await get_pool()
+    repo = MemoryRepository(pool)
+    
+    result = await repo.get_tag_suggestions(
+        query=query,
+        username=username,
+        limit=min(limit, 25),
+    )
+    
+    return TagSuggestionsResponse(
+        suggestions=[
+            TagSuggestion(tag=s["tag"], count=s["count"], similarity=s["similarity"])
+            for s in result
+        ],
+        query=query,
+    )
+
+
+# Memory by ID routes - after tag routes
 @router.get(
     "/{memory_id}",
     response_model=MemoryResponse,
@@ -118,8 +176,8 @@ async def get_memory(
     # Use access-controlled get
     result = await repo.get_accessible(
         memory_id=memory_id,
-        requesting_user_id=user.id,
-        requesting_org_id=user.organization_id,
+        user_id=user.id,
+        organization_id=user.organization_id,
     )
     
     if result is None:
@@ -370,58 +428,3 @@ async def unshare_memory(
     )
     
     return _memory_to_response(result)
-
-
-@router.get(
-    "/tags/list",
-    response_model=TagListResponse,
-)
-async def list_tags(
-    user: AuthenticatedUser,
-    username: str | None = None,
-    type: str | None = None,
-    limit: int = 50,
-) -> TagListResponse:
-    """Get existing tags with usage counts."""
-    pool = await get_pool()
-    repo = MemoryRepository(pool)
-    
-    result = await repo.get_existing_tags(
-        username=username,
-        type=type,
-        limit=min(limit, 100),
-    )
-    
-    return TagListResponse(
-        tags=[TagCount(tag=t["tag"], count=t["count"]) for t in result],
-        total_count=len(result),
-    )
-
-
-@router.get(
-    "/tags/suggest",
-    response_model=TagSuggestionsResponse,
-)
-async def suggest_tags(
-    query: str,
-    user: AuthenticatedUser,
-    username: str | None = None,
-    limit: int = 10,
-) -> TagSuggestionsResponse:
-    """Get tag suggestions based on fuzzy matching."""
-    pool = await get_pool()
-    repo = MemoryRepository(pool)
-    
-    result = await repo.get_tag_suggestions(
-        query=query,
-        username=username,
-        limit=min(limit, 25),
-    )
-    
-    return TagSuggestionsResponse(
-        suggestions=[
-            TagSuggestion(tag=s["tag"], count=s["count"], similarity=s["similarity"])
-            for s in result
-        ],
-        query=query,
-    )

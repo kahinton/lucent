@@ -21,15 +21,16 @@ router = APIRouter()
 
 def _memory_to_search_result(memory: dict[str, Any]) -> SearchResultMemory:
     """Convert a memory dict to a search result model."""
+    related_ids = memory.get("related_memory_ids") or []
     return SearchResultMemory(
         id=memory["id"],
         username=memory["username"],
         type=memory["type"],
         content=memory["content"],
         content_truncated=memory.get("content_truncated", False),
-        tags=memory["tags"] or [],
+        tags=memory.get("tags") or [],
         importance=memory["importance"],
-        related_memory_ids=[uid for uid in memory["related_memory_ids"]],
+        related_memory_ids=[uid for uid in related_ids],
         created_at=memory["created_at"],
         updated_at=memory["updated_at"],
         similarity_score=memory.get("similarity_score"),

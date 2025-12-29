@@ -12,11 +12,13 @@ The API is designed to power a web-based admin dashboard and
 runs alongside the MCP server.
 """
 
+import traceback
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from hindsight.api.routers import memories, search, audit, access, users, organizations
 from hindsight.db.client import init_db, close_db
@@ -70,6 +72,16 @@ def create_app() -> FastAPI:
     async def health_check() -> dict[str, str]:
         """Health check endpoint."""
         return {"status": "healthy"}
+    
+    @app.exception_handler(Exception)
+    async def global_exception_handler(request: Request, exc: Exception):
+        """Handle unhandled exceptions with detailed logging."""
+        error_detail = traceback.format_exc()
+        print(f"Unhandled exception: {error_detail}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(exc), "detail": error_detail},
+        )
     
     return app
 

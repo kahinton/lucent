@@ -2,6 +2,7 @@
 
 import json
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -1564,6 +1565,8 @@ class AuditRepository:
     async def get_by_user_id(
         self,
         user_id: UUID,
+        action_type: str | None = None,
+        since: datetime | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> dict[str, Any]:
@@ -1571,32 +1574,52 @@ class AuditRepository:
         
         Args:
             user_id: The UUID of the user.
+            action_type: Optional filter by action type.
+            since: Optional filter to entries after this time.
             limit: Maximum entries to return.
             offset: Pagination offset.
             
         Returns:
             Dict with entries list and pagination info.
         """
-        query = """
+        conditions = ["user_id = $1"]
+        params: list[Any] = [str(user_id)]
+        param_idx = 2
+        
+        if action_type:
+            conditions.append(f"action_type = ${param_idx}")
+            params.append(action_type)
+            param_idx += 1
+        
+        if since:
+            conditions.append(f"created_at >= ${param_idx}")
+            params.append(since)
+            param_idx += 1
+        
+        where_clause = " AND ".join(conditions)
+        
+        query = f"""
             SELECT id, memory_id, user_id, organization_id, action_type,
                    created_at, changed_fields, old_values, new_values, context, notes
             FROM memory_audit_log
-            WHERE user_id = $1
+            WHERE {where_clause}
             ORDER BY created_at DESC
-            LIMIT $2 OFFSET $3
+            LIMIT ${param_idx} OFFSET ${param_idx + 1}
         """
         
-        count_query = """
+        count_query = f"""
             SELECT COUNT(*) as total
             FROM memory_audit_log
-            WHERE user_id = $1
+            WHERE {where_clause}
         """
         
+        params.extend([limit, offset])
+        
         async with self.pool.acquire() as conn:
-            count_row = await conn.fetchrow(count_query, str(user_id))
+            count_row = await conn.fetchrow(count_query, *params[:-2])
             total_count = count_row["total"] if count_row else 0
             
-            rows = await conn.fetch(query, str(user_id), limit, offset)
+            rows = await conn.fetch(query, *params)
         
         return {
             "entries": [self._row_to_dict(row) for row in rows],
@@ -1610,6 +1633,7 @@ class AuditRepository:
         self,
         organization_id: UUID,
         action_type: str | None = None,
+        since: datetime | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> dict[str, Any]:
@@ -1618,6 +1642,7 @@ class AuditRepository:
         Args:
             organization_id: The UUID of the organization.
             action_type: Optional filter by action type.
+            since: Optional filter to entries after this time.
             limit: Maximum entries to return.
             offset: Pagination offset.
             
@@ -1631,6 +1656,11 @@ class AuditRepository:
         if action_type:
             conditions.append(f"action_type = ${param_idx}")
             params.append(action_type)
+            param_idx += 1
+        
+        if since:
+            conditions.append(f"created_at >= ${param_idx}")
+            params.append(since)
             param_idx += 1
         
         where_clause = " AND ".join(conditions)
