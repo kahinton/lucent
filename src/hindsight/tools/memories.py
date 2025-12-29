@@ -9,7 +9,7 @@ from uuid import UUID
 from mcp.server.fastmcp import FastMCP
 
 from hindsight.auth import ensure_dev_user, get_current_user, is_dev_mode
-from hindsight.db.client import AuditRepository, MemoryRepository, get_pool, init_db
+from hindsight.db.client import AccessRepository, AuditRepository, MemoryRepository, get_pool, init_db
 from hindsight.models.memory import (
     CreateMemoryInput,
     MemoryType,
@@ -90,6 +90,18 @@ async def _get_audit_repository() -> AuditRepository:
             raise RuntimeError("DATABASE_URL environment variable is required")
         pool = await init_db(database_url)
     return AuditRepository(pool)
+
+
+async def _get_access_repository() -> AccessRepository:
+    """Get an access repository, initializing the database if needed."""
+    try:
+        pool = await get_pool()
+    except RuntimeError:
+        database_url = os.environ.get("DATABASE_URL")
+        if not database_url:
+            raise RuntimeError("DATABASE_URL environment variable is required")
+        pool = await init_db(database_url)
+    return AccessRepository(pool)
 
 
 def register_tools(mcp: FastMCP) -> None:
@@ -209,6 +221,18 @@ def register_tools(mcp: FastMCP) -> None:
             if result is None:
                 return json.dumps({"error": f"Memory not found or not accessible: {memory_id}"})
             
+            # Log the access
+            try:
+                access_repo = await _get_access_repository()
+                await access_repo.log_access(
+                    memory_id=uuid_id,
+                    access_type="view",
+                    user_id=user_id,
+                    organization_id=org_id,
+                )
+            except Exception:
+                pass  # Don't fail the request if access logging fails
+            
             return json.dumps(_serialize_memory(result), indent=2)
             
         except ValueError as e:
@@ -298,6 +322,25 @@ def register_tools(mcp: FastMCP) -> None:
                 requesting_org_id=org_id,
             )
             
+            # Log access for returned memories
+            if result["memories"]:
+                try:
+                    access_repo = await _get_access_repository()
+                    memory_ids_accessed = [m["id"] for m in result["memories"]]
+                    await access_repo.log_batch_access(
+                        memory_ids=memory_ids_accessed,
+                        access_type="search_result",
+                        user_id=user_id,
+                        organization_id=org_id,
+                        context={
+                            "query": search_input.query,
+                            "type": search_input.type.value if search_input.type else None,
+                            "tags": search_input.tags,
+                        },
+                    )
+                except Exception:
+                    pass  # Don't fail the request if access logging fails
+            
             # Serialize the results
             serialized = {
                 "memories": [_serialize_truncated_memory(m) for m in result["memories"]],
@@ -369,6 +412,25 @@ def register_tools(mcp: FastMCP) -> None:
                 requesting_user_id=user_id,
                 requesting_org_id=org_id,
             )
+            
+            # Log access for returned memories
+            if result["memories"]:
+                try:
+                    access_repo = await _get_access_repository()
+                    memory_ids_accessed = [m["id"] for m in result["memories"]]
+                    await access_repo.log_batch_access(
+                        memory_ids=memory_ids_accessed,
+                        access_type="search_result",
+                        user_id=user_id,
+                        organization_id=org_id,
+                        context={
+                            "query": query.strip(),
+                            "search_type": "full",
+                            "type": memory_type.value if memory_type else None,
+                        },
+                    )
+                except Exception:
+                    pass  # Don't fail the request if access logging fails
             
             serialized = {
                 "memories": [_serialize_truncated_memory(m) for m in result["memories"]],
@@ -739,6 +801,7 @@ def _serialize_memory(memory: dict[str, Any]) -> dict[str, Any]:
         "user_id": str(memory["user_id"]) if memory.get("user_id") else None,
         "organization_id": str(memory["organization_id"]) if memory.get("organization_id") else None,
         "shared": memory.get("shared", False),
+        "last_accessed_at": memory["last_accessed_at"].isoformat() if memory.get("last_accessed_at") else None,
     }
 
 
@@ -759,4 +822,5 @@ def _serialize_truncated_memory(memory: dict[str, Any]) -> dict[str, Any]:
         "user_id": str(memory["user_id"]) if memory.get("user_id") else None,
         "organization_id": str(memory["organization_id"]) if memory.get("organization_id") else None,
         "shared": memory.get("shared", False),
+        "last_accessed_at": memory["last_accessed_at"].isoformat() if memory.get("last_accessed_at") else None,
     }
