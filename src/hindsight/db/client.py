@@ -946,7 +946,7 @@ class UserRepository:
             INSERT INTO users (external_id, provider, organization_id, email, display_name, avatar_url, provider_metadata)
             VALUES ($1, $2, $3, $4, $5, $6, $7)
             RETURNING id, external_id, provider, organization_id, email, display_name, avatar_url, 
-                      provider_metadata, is_active, created_at, updated_at, last_login_at
+                      provider_metadata, is_active, created_at, updated_at, last_login_at, role
         """
         
         async with self.pool.acquire() as conn:
@@ -974,7 +974,7 @@ class UserRepository:
         """
         query = """
             SELECT id, external_id, provider, organization_id, email, display_name, avatar_url,
-                   provider_metadata, is_active, created_at, updated_at, last_login_at
+                   provider_metadata, is_active, created_at, updated_at, last_login_at, role
             FROM users
             WHERE id = $1
         """
@@ -1003,7 +1003,7 @@ class UserRepository:
         """
         query = """
             SELECT id, external_id, provider, organization_id, email, display_name, avatar_url,
-                   provider_metadata, is_active, created_at, updated_at, last_login_at
+                   provider_metadata, is_active, created_at, updated_at, last_login_at, role
             FROM users
             WHERE external_id = $1 AND provider = $2
         """
@@ -1116,7 +1116,7 @@ class UserRepository:
             SET {", ".join(updates)}
             WHERE id = ${param_idx}
             RETURNING id, external_id, provider, organization_id, email, display_name, avatar_url,
-                      provider_metadata, is_active, created_at, updated_at, last_login_at
+                      provider_metadata, is_active, created_at, updated_at, last_login_at, role
         """
         
         async with self.pool.acquire() as conn:
@@ -1141,6 +1141,73 @@ class UserRepository:
         
         async with self.pool.acquire() as conn:
             await conn.execute(query, str(user_id))
+    
+    async def update_role(
+        self,
+        user_id: UUID,
+        new_role: str,
+    ) -> dict[str, Any] | None:
+        """Update a user's role.
+        
+        Args:
+            user_id: The internal UUID of the user.
+            new_role: The new role (member, admin, owner).
+            
+        Returns:
+            The updated user record, or None if not found.
+        """
+        query = """
+            UPDATE users
+            SET role = $1, updated_at = NOW()
+            WHERE id = $2
+            RETURNING id, external_id, provider, organization_id, email, display_name, avatar_url,
+                      provider_metadata, is_active, created_at, updated_at, last_login_at, role
+        """
+        
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(query, new_role, str(user_id))
+        
+        if row is None:
+            return None
+        
+        return self._row_to_dict(row)
+    
+    async def get_by_organization(
+        self,
+        organization_id: UUID,
+        role: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Get all users in an organization.
+        
+        Args:
+            organization_id: The organization UUID.
+            role: Optional filter by role.
+            
+        Returns:
+            List of user records.
+        """
+        if role:
+            query = """
+                SELECT id, external_id, provider, organization_id, email, display_name, avatar_url,
+                       provider_metadata, is_active, created_at, updated_at, last_login_at, role
+                FROM users
+                WHERE organization_id = $1 AND role = $2
+                ORDER BY display_name
+            """
+            async with self.pool.acquire() as conn:
+                rows = await conn.fetch(query, str(organization_id), role)
+        else:
+            query = """
+                SELECT id, external_id, provider, organization_id, email, display_name, avatar_url,
+                       provider_metadata, is_active, created_at, updated_at, last_login_at, role
+                FROM users
+                WHERE organization_id = $1
+                ORDER BY display_name
+            """
+            async with self.pool.acquire() as conn:
+                rows = await conn.fetch(query, str(organization_id))
+        
+        return [self._row_to_dict(row) for row in rows]
     
     async def delete(self, user_id: UUID) -> bool:
         """Permanently delete a user.
@@ -1184,6 +1251,7 @@ class UserRepository:
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
             "last_login_at": row["last_login_at"],
+            "role": row["role"] if "role" in row.keys() else "member",
         }
 
 

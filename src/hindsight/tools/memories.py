@@ -47,24 +47,24 @@ async def _get_current_user_id() -> UUID | None:
     return None
 
 
-async def _get_current_user_context() -> tuple[UUID | None, UUID | None]:
-    """Get the current user ID and organization ID.
+async def _get_current_user_context() -> tuple[UUID | None, UUID | None, str | None]:
+    """Get the current user ID, organization ID, and role.
     
     Returns:
-        Tuple of (user_id, organization_id), either may be None.
+        Tuple of (user_id, organization_id, role), any may be None.
     """
     # Check if we have a user in context (set by auth middleware)
     current_user = get_current_user()
     if current_user:
-        return current_user["id"], current_user.get("organization_id")
+        return current_user["id"], current_user.get("organization_id"), current_user.get("role", "member")
     
     # In dev mode, ensure dev user exists and use it
     if is_dev_mode():
         dev_user = await ensure_dev_user()
-        return dev_user["id"], dev_user.get("organization_id")
+        return dev_user["id"], dev_user.get("organization_id"), dev_user.get("role", "member")
     
     # No user context and not in dev mode
-    return None, None
+    return None, None, None
 
 
 async def _get_repository() -> MemoryRepository:
@@ -151,7 +151,7 @@ def register_tools(mcp: FastMCP) -> None:
             )
             
             # Get current user context (from auth context or dev mode)
-            user_id, org_id = await _get_current_user_context()
+            user_id, org_id, user_role = await _get_current_user_context()
             
             repo = await _get_repository()
             
@@ -209,7 +209,7 @@ def register_tools(mcp: FastMCP) -> None:
             repo = await _get_repository()
             
             # Get current user context for access control
-            user_id, org_id = await _get_current_user_context()
+            user_id, org_id, user_role = await _get_current_user_context()
             
             if user_id is not None and org_id is not None:
                 # Use access-controlled get
@@ -304,7 +304,7 @@ def register_tools(mcp: FastMCP) -> None:
             repo = await _get_repository()
             
             # Get current user context for access control
-            user_id, org_id = await _get_current_user_context()
+            user_id, org_id, user_role = await _get_current_user_context()
             
             result = await repo.search(
                 query=search_input.query,
@@ -399,7 +399,7 @@ def register_tools(mcp: FastMCP) -> None:
             repo = await _get_repository()
             
             # Get current user context for access control
-            user_id, org_id = await _get_current_user_context()
+            user_id, org_id, user_role = await _get_current_user_context()
             
             result = await repo.search_full(
                 query=query.strip(),
@@ -533,7 +533,7 @@ def register_tools(mcp: FastMCP) -> None:
             
             # Log the update if anything changed
             if changed_fields:
-                user_id, org_id = await _get_current_user_context()
+                user_id, org_id, user_role = await _get_current_user_context()
                 audit_repo = await _get_audit_repository()
                 await audit_repo.log(
                     memory_id=uuid_id,
@@ -578,7 +578,7 @@ def register_tools(mcp: FastMCP) -> None:
                 return json.dumps({"error": f"Memory not found: {memory_id}"})
             
             # Log the deletion
-            user_id, org_id = await _get_current_user_context()
+            user_id, org_id, user_role = await _get_current_user_context()
             audit_repo = await _get_audit_repository()
             await audit_repo.log(
                 memory_id=uuid_id,
@@ -694,7 +694,7 @@ def register_tools(mcp: FastMCP) -> None:
         """
         try:
             # Get current user context
-            user_id, org_id = await _get_current_user_context()
+            user_id, org_id, user_role = await _get_current_user_context()
             
             if user_id is None:
                 return json.dumps({"error": "Authentication required to share memories"})
@@ -746,7 +746,7 @@ def register_tools(mcp: FastMCP) -> None:
         """
         try:
             # Get current user context
-            user_id, org_id = await _get_current_user_context()
+            user_id, org_id, user_role = await _get_current_user_context()
             
             if user_id is None:
                 return json.dumps({"error": "Authentication required to unshare memories"})
