@@ -1,10 +1,13 @@
 """Hindsight MCP Server - Memory functionality for LLMs."""
 
+import asyncio
 import os
 import sys
+import threading
 
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
+import uvicorn
 
 from hindsight.auth import is_dev_mode
 from hindsight.prompts.memory_usage import get_memory_system_prompt, get_memory_system_prompt_short
@@ -17,6 +20,7 @@ load_dotenv()
 # Server configuration
 HOST = os.environ.get("HINDSIGHT_HOST", "0.0.0.0")
 PORT = int(os.environ.get("HINDSIGHT_PORT", "8765"))
+API_PORT = int(os.environ.get("HINDSIGHT_API_PORT", "8766"))
 
 # Create the MCP server
 mcp = FastMCP("Hindsight")
@@ -60,6 +64,18 @@ def main() -> None:
     
     # Run the MCP server with streamable HTTP transport
     print(f"Starting Hindsight MCP server on http://{HOST}:{PORT}", file=sys.stderr)
+    print(f"Starting Hindsight Admin API on http://{HOST}:{API_PORT}", file=sys.stderr)
+    print(f"API documentation at http://{HOST}:{API_PORT}/api/docs", file=sys.stderr)
+    
+    # Start the Admin API in a separate thread
+    def run_api():
+        from hindsight.api.app import app
+        uvicorn.run(app, host=HOST, port=API_PORT, log_level="info")
+    
+    api_thread = threading.Thread(target=run_api, daemon=True)
+    api_thread.start()
+    
+    # Run the MCP server (this blocks)
     mcp.settings.host = HOST
     mcp.settings.port = PORT
     mcp.run(transport="streamable-http")

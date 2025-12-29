@@ -1412,6 +1412,41 @@ class OrganizationRepository:
         
         return [self._row_to_dict(row) for row in rows]
     
+    async def list(
+        self,
+        offset: int = 0,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        """List all organizations with pagination.
+        
+        Args:
+            offset: Pagination offset.
+            limit: Maximum number to return.
+            
+        Returns:
+            Dict with organizations list and pagination info.
+        """
+        count_query = "SELECT COUNT(*) as total FROM organizations"
+        query = """
+            SELECT id, name, created_at, updated_at
+            FROM organizations
+            ORDER BY name ASC
+            LIMIT $1 OFFSET $2
+        """
+        
+        async with self.pool.acquire() as conn:
+            count_row = await conn.fetchrow(count_query)
+            total_count = count_row["total"] if count_row else 0
+            rows = await conn.fetch(query, limit, offset)
+        
+        return {
+            "organizations": [self._row_to_dict(row) for row in rows],
+            "total_count": total_count,
+            "offset": offset,
+            "limit": limit,
+            "has_more": offset + len(rows) < total_count,
+        }
+    
     def _row_to_dict(self, row: asyncpg.Record) -> dict[str, Any]:
         """Convert a database row to a dictionary."""
         return {
