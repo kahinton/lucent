@@ -21,58 +21,58 @@
 
 <!-- Form -->
 <div class="bg-white rounded-xl border border-gray-200 shadow-sm">
-    <form method="post" action="/memories/new" class="divide-y divide-gray-100">
+    <form method="post" action="/memories/new" class="divide-y divide-gray-100" id="memory-form">
         <div class="p-6 space-y-6">
-            <!-- Username -->
-            <div>
-                <label for="username" class="block text-sm font-medium text-gray-700 mb-2">Username</label>
-                <input 
-                    type="text" 
-                    id="username" 
-                    name="username" 
-                    required
-                    placeholder="Your identifier"
-                    value="{{ user.display_name or '' }}"
-                    class="w-full px-4 py-2.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none transition-shadow"
-                >
-                <p class="mt-1.5 text-xs text-gray-500">This identifies who created the memory</p>
+            <!-- Creator Info (read-only) -->
+            <div class="flex items-center gap-4 p-4 bg-gray-50 rounded-lg">
+                <div class="flex items-center justify-center w-10 h-10 rounded-full bg-gradient-to-br from-primary-400 to-primary-600 text-white text-sm font-semibold">
+                    {{ (user.display_name or user.email or 'U')[0] | upper }}
+                </div>
+                <div>
+                    <p class="text-sm font-medium text-gray-900">{{ user.display_name or user.external_id }}</p>
+                    <p class="text-xs text-gray-500">Creating as this user</p>
+                </div>
             </div>
             
-            <!-- Type -->
+            <!-- Type Selection -->
             <div>
-                <label for="type" class="block text-sm font-medium text-gray-700 mb-2">Memory Type</label>
-                <select 
-                    id="type" 
-                    name="type" 
-                    required
-                    class="w-full px-4 py-2.5 border border-gray-300 rounded-lg text-sm bg-white focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none"
-                >
-                    <option value="">Select a type...</option>
-                    {% for t in memory_types %}
-                    <option value="{{ t }}">{{ t | capitalize }}</option>
-                    {% endfor %}
-                </select>
-                <div class="mt-3 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
-                    <div class="p-3 bg-blue-50 rounded-lg border border-blue-100">
-                        <p class="text-xs font-medium text-blue-800">Experience</p>
-                        <p class="text-xs text-blue-600 mt-1">Events, decisions, lessons learned</p>
-                    </div>
-                    <div class="p-3 bg-emerald-50 rounded-lg border border-emerald-100">
-                        <p class="text-xs font-medium text-emerald-800">Technical</p>
-                        <p class="text-xs text-emerald-600 mt-1">Code, solutions, patterns</p>
-                    </div>
-                    <div class="p-3 bg-amber-50 rounded-lg border border-amber-100">
-                        <p class="text-xs font-medium text-amber-800">Procedural</p>
-                        <p class="text-xs text-amber-600 mt-1">Step-by-step processes</p>
-                    </div>
-                    <div class="p-3 bg-purple-50 rounded-lg border border-purple-100">
-                        <p class="text-xs font-medium text-purple-800">Goal</p>
-                        <p class="text-xs text-purple-600 mt-1">Objectives, milestones, progress</p>
-                    </div>
-                    <div class="p-3 bg-pink-50 rounded-lg border border-pink-100">
-                        <p class="text-xs font-medium text-pink-800">Individual</p>
-                        <p class="text-xs text-pink-600 mt-1">Info about people</p>
-                    </div>
+                <label class="block text-sm font-medium text-gray-700 mb-3">Memory Type</label>
+                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-3">
+                    <label class="relative cursor-pointer">
+                        <input type="radio" name="type" value="experience" class="peer sr-only" onchange="showTypeFields('experience')">
+                        <div class="p-4 rounded-lg border-2 border-gray-200 hover:border-blue-300 peer-checked:border-blue-500 peer-checked:bg-blue-50 transition-all">
+                            <p class="text-sm font-medium text-gray-900">Experience</p>
+                            <p class="text-xs text-gray-500 mt-1">Events, decisions, lessons</p>
+                        </div>
+                    </label>
+                    <label class="relative cursor-pointer">
+                        <input type="radio" name="type" value="technical" class="peer sr-only" onchange="showTypeFields('technical')">
+                        <div class="p-4 rounded-lg border-2 border-gray-200 hover:border-emerald-300 peer-checked:border-emerald-500 peer-checked:bg-emerald-50 transition-all">
+                            <p class="text-sm font-medium text-gray-900">Technical</p>
+                            <p class="text-xs text-gray-500 mt-1">Code, solutions, patterns</p>
+                        </div>
+                    </label>
+                    <label class="relative cursor-pointer">
+                        <input type="radio" name="type" value="procedural" class="peer sr-only" onchange="showTypeFields('procedural')">
+                        <div class="p-4 rounded-lg border-2 border-gray-200 hover:border-amber-300 peer-checked:border-amber-500 peer-checked:bg-amber-50 transition-all">
+                            <p class="text-sm font-medium text-gray-900">Procedural</p>
+                            <p class="text-xs text-gray-500 mt-1">Step-by-step processes</p>
+                        </div>
+                    </label>
+                    <label class="relative cursor-pointer">
+                        <input type="radio" name="type" value="goal" class="peer sr-only" onchange="showTypeFields('goal')">
+                        <div class="p-4 rounded-lg border-2 border-gray-200 hover:border-purple-300 peer-checked:border-purple-500 peer-checked:bg-purple-50 transition-all">
+                            <p class="text-sm font-medium text-gray-900">Goal</p>
+                            <p class="text-xs text-gray-500 mt-1">Objectives, milestones</p>
+                        </div>
+                    </label>
+                    <label class="relative cursor-pointer">
+                        <input type="radio" name="type" value="individual" class="peer sr-only" onchange="showTypeFields('individual')">
+                        <div class="p-4 rounded-lg border-2 border-gray-200 hover:border-pink-300 peer-checked:border-pink-500 peer-checked:bg-pink-50 transition-all">
+                            <p class="text-sm font-medium text-gray-900">Individual</p>
+                            <p class="text-xs text-gray-500 mt-1">Info about people</p>
+                        </div>
+                    </label>
                 </div>
             </div>
             
@@ -82,11 +82,189 @@
                 <textarea 
                     id="content" 
                     name="content" 
-                    rows="8" 
+                    rows="6" 
                     required
                     placeholder="Describe the memory in detail..."
                     class="w-full px-4 py-3 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none transition-shadow resize-y"
                 ></textarea>
+            </div>
+            
+            <!-- Type-specific fields container -->
+            <div id="type-fields">
+                <!-- Experience Fields -->
+                <div id="experience-fields" class="hidden space-y-4 p-4 bg-blue-50 rounded-lg border border-blue-200">
+                    <h4 class="text-sm font-semibold text-blue-800">Experience Details</h4>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-xs font-medium text-gray-700 mb-1">Context</label>
+                            <input type="text" name="meta_context" placeholder="What was happening?" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-medium text-gray-700 mb-1">Outcome</label>
+                            <input type="text" name="meta_outcome" placeholder="What resulted?" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                        </div>
+                    </div>
+                    <div>
+                        <label class="block text-xs font-medium text-gray-700 mb-1">Lessons Learned</label>
+                        <input type="text" name="meta_lessons_learned" placeholder="Key takeaways (comma-separated)" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                    </div>
+                    <div>
+                        <label class="block text-xs font-medium text-gray-700 mb-1">Related Entities</label>
+                        <input type="text" name="meta_related_entities" placeholder="People, projects, things involved (comma-separated)" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                    </div>
+                </div>
+                
+                <!-- Technical Fields -->
+                <div id="technical-fields" class="hidden space-y-4 p-4 bg-emerald-50 rounded-lg border border-emerald-200">
+                    <h4 class="text-sm font-semibold text-emerald-800">Technical Details</h4>
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <div>
+                            <label class="block text-xs font-medium text-gray-700 mb-1">Category</label>
+                            <input type="text" name="meta_category" placeholder="e.g., programming, architecture" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-medium text-gray-700 mb-1">Language</label>
+                            <input type="text" name="meta_language" placeholder="e.g., Python, JavaScript" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-medium text-gray-700 mb-1">Version Info</label>
+                            <input type="text" name="meta_version_info" placeholder="e.g., Python 3.12" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                        </div>
+                    </div>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-xs font-medium text-gray-700 mb-1">Repository</label>
+                            <input type="text" name="meta_repo" placeholder="Repository name or URL" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-medium text-gray-700 mb-1">Filename</label>
+                            <input type="text" name="meta_filename" placeholder="Related file path" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                        </div>
+                    </div>
+                    <div>
+                        <label class="block text-xs font-medium text-gray-700 mb-1">Code Snippet</label>
+                        <textarea name="meta_code_snippet" rows="4" placeholder="Example code..." class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono"></textarea>
+                    </div>
+                    <div>
+                        <label class="block text-xs font-medium text-gray-700 mb-1">References</label>
+                        <input type="text" name="meta_references" placeholder="URLs or documentation links (comma-separated)" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                    </div>
+                </div>
+                
+                <!-- Procedural Fields -->
+                <div id="procedural-fields" class="hidden space-y-4 p-4 bg-amber-50 rounded-lg border border-amber-200">
+                    <h4 class="text-sm font-semibold text-amber-800">Procedural Details</h4>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-xs font-medium text-gray-700 mb-1">Estimated Time</label>
+                            <input type="text" name="meta_estimated_time" placeholder="e.g., 30 minutes, 2 hours" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-medium text-gray-700 mb-1">Success Criteria</label>
+                            <input type="text" name="meta_success_criteria" placeholder="How to know it's complete" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                        </div>
+                    </div>
+                    <div>
+                        <label class="block text-xs font-medium text-gray-700 mb-1">Prerequisites</label>
+                        <input type="text" name="meta_prerequisites" placeholder="Required setup, tools, knowledge (comma-separated)" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                    </div>
+                    <div>
+                        <label class="block text-xs font-medium text-gray-700 mb-1">Common Pitfalls</label>
+                        <input type="text" name="meta_common_pitfalls" placeholder="Things that commonly go wrong (comma-separated)" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                    </div>
+                    <div>
+                        <label class="block text-xs font-medium text-gray-700 mb-1">Steps</label>
+                        <p class="text-xs text-gray-500 mb-2">Add the steps of the procedure (one per line, format: "Step description | Optional notes")</p>
+                        <textarea name="meta_steps" rows="5" placeholder="Install dependencies | Use pip or poetry&#10;Configure environment variables&#10;Run the setup script | May take a few minutes" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"></textarea>
+                    </div>
+                </div>
+                
+                <!-- Goal Fields -->
+                <div id="goal-fields" class="hidden space-y-4 p-4 bg-purple-50 rounded-lg border border-purple-200">
+                    <h4 class="text-sm font-semibold text-purple-800">Goal Details</h4>
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <div>
+                            <label class="block text-xs font-medium text-gray-700 mb-1">Status</label>
+                            <select name="meta_status" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white">
+                                <option value="active">Active</option>
+                                <option value="paused">Paused</option>
+                                <option value="completed">Completed</option>
+                                <option value="abandoned">Abandoned</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-xs font-medium text-gray-700 mb-1">Priority (1-5)</label>
+                            <select name="meta_priority" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white">
+                                <option value="1">1 - Low</option>
+                                <option value="2">2 - Below Normal</option>
+                                <option value="3" selected>3 - Normal</option>
+                                <option value="4">4 - High</option>
+                                <option value="5">5 - Critical</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-xs font-medium text-gray-700 mb-1">Deadline</label>
+                            <input type="date" name="meta_deadline" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                        </div>
+                    </div>
+                    <div>
+                        <label class="block text-xs font-medium text-gray-700 mb-1">Blockers</label>
+                        <input type="text" name="meta_blockers" placeholder="Current obstacles (comma-separated)" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                    </div>
+                    <div>
+                        <label class="block text-xs font-medium text-gray-700 mb-1">Milestones</label>
+                        <input type="text" name="meta_milestones" placeholder="Key milestones (comma-separated)" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                    </div>
+                </div>
+                
+                <!-- Individual Fields -->
+                <div id="individual-fields" class="hidden space-y-4 p-4 bg-pink-50 rounded-lg border border-pink-200">
+                    <h4 class="text-sm font-semibold text-pink-800">Individual Details</h4>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-xs font-medium text-gray-700 mb-1">Name *</label>
+                            <input type="text" name="meta_name" placeholder="Person's full name" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-medium text-gray-700 mb-1">Relationship</label>
+                            <input type="text" name="meta_relationship" placeholder="e.g., colleague, client, mentor" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                        </div>
+                    </div>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-xs font-medium text-gray-700 mb-1">Organization</label>
+                            <input type="text" name="meta_organization" placeholder="Company or organization" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-medium text-gray-700 mb-1">Role</label>
+                            <input type="text" name="meta_role" placeholder="Their role or title" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                        </div>
+                    </div>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-xs font-medium text-gray-700 mb-1">Email</label>
+                            <input type="email" name="meta_email" placeholder="email@example.com" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-medium text-gray-700 mb-1">Phone</label>
+                            <input type="tel" name="meta_phone" placeholder="Phone number" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                        </div>
+                    </div>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-xs font-medium text-gray-700 mb-1">LinkedIn</label>
+                            <input type="url" name="meta_linkedin" placeholder="LinkedIn profile URL" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-medium text-gray-700 mb-1">GitHub</label>
+                            <input type="url" name="meta_github" placeholder="GitHub profile URL" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                        </div>
+                    </div>
+                    <div>
+                        <label class="block text-xs font-medium text-gray-700 mb-1">Preferences</label>
+                        <input type="text" name="meta_preferences" placeholder="Known preferences or working style (comma-separated)" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                    </div>
+                </div>
             </div>
             
             <!-- Tags -->
@@ -164,5 +342,28 @@ function addTag(tag) {
         input.value = currentTags.join(', ');
     }
 }
+
+function showTypeFields(type) {
+    // Hide all type-specific fields
+    document.querySelectorAll('#type-fields > div').forEach(el => {
+        el.classList.add('hidden');
+    });
+    
+    // Show selected type's fields
+    const fields = document.getElementById(type + '-fields');
+    if (fields) {
+        fields.classList.remove('hidden');
+    }
+}
+
+// Form validation
+document.getElementById('memory-form').addEventListener('submit', function(e) {
+    const typeSelected = document.querySelector('input[name="type"]:checked');
+    if (!typeSelected) {
+        e.preventDefault();
+        alert('Please select a memory type');
+        return false;
+    }
+});
 </script>
 {% endblock %}

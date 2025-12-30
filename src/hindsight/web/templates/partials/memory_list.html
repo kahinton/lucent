@@ -3,6 +3,7 @@
     Found <span class="font-medium text-gray-900">{{ total_count }}</span> memor{{ "y" if total_count == 1 else "ies" }}
     {% if query %}<span class="text-gray-400">matching</span> "<span class="font-medium text-gray-700">{{ query }}</span>"{% endif %}
     {% if type_filter %}<span class="text-gray-400">of type</span> <span class="font-medium text-gray-700">{{ type_filter }}</span>{% endif %}
+    {% if tag_filter %}<span class="text-gray-400">tagged</span> <span class="inline-block px-2 py-0.5 bg-gray-100 text-gray-700 rounded text-xs">{{ tag_filter }}</span>{% endif %}
 </div>
 
 {% if memories %}
@@ -82,7 +83,7 @@
 {% if total_pages > 1 %}
 <div class="flex items-center justify-center gap-2 mt-8">
     {% if page > 1 %}
-    <a href="/memories?q={{ query or '' }}&type={{ type_filter or '' }}&page={{ page - 1 }}" 
+    <a href="/memories?q={{ query or '' }}&type={{ type_filter or '' }}&tag={{ tag_filter or '' }}&page={{ page - 1 }}" 
        class="inline-flex items-center gap-1 px-3 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors">
         <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
             <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" />
@@ -96,7 +97,7 @@
             {% if p == page %}
             <span class="px-3 py-2 text-sm font-medium text-white bg-primary-600 rounded-lg">{{ p }}</span>
             {% elif p <= 2 or p > total_pages - 1 or (p >= page - 1 and p <= page + 1) %}
-            <a href="/memories?q={{ query or '' }}&type={{ type_filter or '' }}&page={{ p }}" 
+            <a href="/memories?q={{ query or '' }}&type={{ type_filter or '' }}&tag={{ tag_filter or '' }}&page={{ p }}" 
                class="px-3 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors">{{ p }}</a>
             {% elif p == 3 and page > 4 %}
             <span class="px-2 text-gray-400">...</span>
@@ -107,7 +108,7 @@
     </div>
     
     {% if page < total_pages %}
-    <a href="/memories?q={{ query or '' }}&type={{ type_filter or '' }}&page={{ page + 1 }}" 
+    <a href="/memories?q={{ query or '' }}&type={{ type_filter or '' }}&tag={{ tag_filter or '' }}&page={{ page + 1 }}" 
        class="inline-flex items-center gap-1 px-3 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors">
         Next
         <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">

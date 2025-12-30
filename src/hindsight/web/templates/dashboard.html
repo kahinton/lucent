@@ -10,7 +10,7 @@
 </div>
 
 <!-- Stats Grid -->
-<div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+<div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
     <div class="bg-white rounded-xl border border-gray-200 p-6 shadow-sm hover:shadow-md transition-shadow">
         <div class="flex items-center gap-4">
             <div class="flex items-center justify-center w-12 h-12 rounded-lg bg-primary-100">
@@ -36,20 +36,6 @@
             <div>
                 <p class="text-sm font-medium text-gray-500">Unique Tags</p>
                 <p class="text-3xl font-bold text-gray-900">{{ top_tags | length }}</p>
-            </div>
-        </div>
-    </div>
-    
-    <div class="bg-white rounded-xl border border-gray-200 p-6 shadow-sm hover:shadow-md transition-shadow">
-        <div class="flex items-center gap-4">
-            <div class="flex items-center justify-center w-12 h-12 rounded-lg bg-amber-100">
-                <svg class="w-6 h-6 text-amber-600" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z" />
-                </svg>
-            </div>
-            <div>
-                <p class="text-sm font-medium text-gray-500">Active Memories</p>
-                <p class="text-3xl font-bold text-gray-900">{{ most_accessed | length }}</p>
             </div>
         </div>
     </div>
