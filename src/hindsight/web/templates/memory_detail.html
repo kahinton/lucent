@@ -129,11 +129,369 @@
             </div>
         </div>
         
-        <!-- Custom Metadata -->
+        <!-- Type-Specific Metadata -->
         {% if memory.metadata %}
         <div class="mt-6 pt-6 border-t border-gray-100">
+            <!-- Experience Metadata -->
+            {% if memory.type == 'experience' %}
+            <div class="p-4 bg-blue-50 rounded-lg border border-blue-200">
+                <h4 class="text-sm font-semibold text-blue-800 mb-4">Experience Details</h4>
+                <div class="space-y-4">
+                    {% if memory.metadata.context %}
+                    <div>
+                        <dt class="text-xs font-medium text-gray-500 uppercase tracking-wider">Context</dt>
+                        <dd class="mt-1 text-sm text-gray-900">{{ memory.metadata.context }}</dd>
+                    </div>
+                    {% endif %}
+                    {% if memory.metadata.outcome %}
+                    <div>
+                        <dt class="text-xs font-medium text-gray-500 uppercase tracking-wider">Outcome</dt>
+                        <dd class="mt-1 text-sm text-gray-900">{{ memory.metadata.outcome }}</dd>
+                    </div>
+                    {% endif %}
+                    {% if memory.metadata.lessons_learned %}
+                    <div>
+                        <dt class="text-xs font-medium text-gray-500 uppercase tracking-wider">Lessons Learned</dt>
+                        <dd class="mt-2 flex flex-wrap gap-2">
+                            {% for lesson in memory.metadata.lessons_learned %}
+                            <span class="inline-block px-3 py-1 bg-blue-100 text-blue-800 rounded-full text-xs">{{ lesson }}</span>
+                            {% endfor %}
+                        </dd>
+                    </div>
+                    {% endif %}
+                    {% if memory.metadata.related_entities %}
+                    <div>
+                        <dt class="text-xs font-medium text-gray-500 uppercase tracking-wider">Related Entities</dt>
+                        <dd class="mt-2 flex flex-wrap gap-2">
+                            {% for entity in memory.metadata.related_entities %}
+                            <span class="inline-block px-3 py-1 bg-gray-100 text-gray-700 rounded-full text-xs">{{ entity }}</span>
+                            {% endfor %}
+                        </dd>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+            
+            <!-- Technical Metadata -->
+            {% elif memory.type == 'technical' %}
+            <div class="p-4 bg-emerald-50 rounded-lg border border-emerald-200">
+                <h4 class="text-sm font-semibold text-emerald-800 mb-4">Technical Details</h4>
+                <div class="space-y-4">
+                    <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+                        {% if memory.metadata.category %}
+                        <div>
+                            <dt class="text-xs font-medium text-gray-500 uppercase tracking-wider">Category</dt>
+                            <dd class="mt-1 text-sm text-gray-900">{{ memory.metadata.category }}</dd>
+                        </div>
+                        {% endif %}
+                        {% if memory.metadata.language %}
+                        <div>
+                            <dt class="text-xs font-medium text-gray-500 uppercase tracking-wider">Language</dt>
+                            <dd class="mt-1 text-sm text-gray-900">{{ memory.metadata.language }}</dd>
+                        </div>
+                        {% endif %}
+                        {% if memory.metadata.version_info %}
+                        <div>
+                            <dt class="text-xs font-medium text-gray-500 uppercase tracking-wider">Version</dt>
+                            <dd class="mt-1 text-sm text-gray-900">{{ memory.metadata.version_info }}</dd>
+                        </div>
+                        {% endif %}
+                        {% if memory.metadata.repo %}
+                        <div>
+                            <dt class="text-xs font-medium text-gray-500 uppercase tracking-wider">Repository</dt>
+                            <dd class="mt-1 text-sm text-gray-900 font-mono">{{ memory.metadata.repo }}</dd>
+                        </div>
+                        {% endif %}
+                    </div>
+                    {% if memory.metadata.filename %}
+                    <div>
+                        <dt class="text-xs font-medium text-gray-500 uppercase tracking-wider">Filename</dt>
+                        <dd class="mt-1 text-sm text-gray-900 font-mono bg-gray-100 px-2 py-1 rounded inline-block">{{ memory.metadata.filename }}</dd>
+                    </div>
+                    {% endif %}
+                    {% if memory.metadata.code_snippet %}
+                    <div>
+                        <dt class="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Code Snippet</dt>
+                        <pre class="text-xs font-mono bg-gray-900 text-gray-100 p-4 rounded-lg overflow-x-auto">{{ memory.metadata.code_snippet }}</pre>
+                    </div>
+                    {% endif %}
+                    {% if memory.metadata.references %}
+                    <div>
+                        <dt class="text-xs font-medium text-gray-500 uppercase tracking-wider">References</dt>
+                        <dd class="mt-2 space-y-1">
+                            {% for ref in memory.metadata.references %}
+                            {% if ref.startswith('http') %}
+                            <a href="{{ ref }}" target="_blank" class="block text-sm text-primary-600 hover:text-primary-700 truncate">{{ ref }}</a>
+                            {% else %}
+                            <span class="block text-sm text-gray-700">{{ ref }}</span>
+                            {% endif %}
+                            {% endfor %}
+                        </dd>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+            
+            <!-- Procedural Metadata -->
+            {% elif memory.type == 'procedural' %}
+            <div class="p-4 bg-amber-50 rounded-lg border border-amber-200">
+                <h4 class="text-sm font-semibold text-amber-800 mb-4">Procedural Details</h4>
+                <div class="space-y-4">
+                    <div class="grid grid-cols-2 gap-4">
+                        {% if memory.metadata.estimated_time %}
+                        <div>
+                            <dt class="text-xs font-medium text-gray-500 uppercase tracking-wider">Estimated Time</dt>
+                            <dd class="mt-1 text-sm text-gray-900">{{ memory.metadata.estimated_time }}</dd>
+                        </div>
+                        {% endif %}
+                        {% if memory.metadata.success_criteria %}
+                        <div>
+                            <dt class="text-xs font-medium text-gray-500 uppercase tracking-wider">Success Criteria</dt>
+                            <dd class="mt-1 text-sm text-gray-900">{{ memory.metadata.success_criteria }}</dd>
+                        </div>
+                        {% endif %}
+                    </div>
+                    {% if memory.metadata.prerequisites %}
+                    <div>
+                        <dt class="text-xs font-medium text-gray-500 uppercase tracking-wider">Prerequisites</dt>
+                        <dd class="mt-2 flex flex-wrap gap-2">
+                            {% for prereq in memory.metadata.prerequisites %}
+                            <span class="inline-block px-3 py-1 bg-amber-100 text-amber-800 rounded-full text-xs">{{ prereq }}</span>
+                            {% endfor %}
+                        </dd>
+                    </div>
+                    {% endif %}
+                    {% if memory.metadata.steps %}
+                    <div>
+                        <dt class="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Steps</dt>
+                        <dd class="space-y-2">
+                            {% for step in memory.metadata.steps %}
+                            <div class="flex gap-3 p-3 bg-white rounded-lg border border-amber-100">
+                                <span class="flex-shrink-0 w-6 h-6 rounded-full bg-amber-200 text-amber-800 text-xs font-semibold flex items-center justify-center">{{ step.order }}</span>
+                                <div class="flex-1">
+                                    <p class="text-sm text-gray-900">{{ step.description }}</p>
+                                    {% if step.notes %}
+                                    <p class="text-xs text-gray-500 mt-1 italic">{{ step.notes }}</p>
+                                    {% endif %}
+                                </div>
+                            </div>
+                            {% endfor %}
+                        </dd>
+                    </div>
+                    {% endif %}
+                    {% if memory.metadata.common_pitfalls %}
+                    <div>
+                        <dt class="text-xs font-medium text-gray-500 uppercase tracking-wider">Common Pitfalls</dt>
+                        <dd class="mt-2 space-y-1">
+                            {% for pitfall in memory.metadata.common_pitfalls %}
+                            <div class="flex items-start gap-2 text-sm text-gray-700">
+                                <svg class="w-4 h-4 text-red-500 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+                                </svg>
+                                {{ pitfall }}
+                            </div>
+                            {% endfor %}
+                        </dd>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+            
+            <!-- Goal Metadata -->
+            {% elif memory.type == 'goal' %}
+            <div class="p-4 bg-purple-50 rounded-lg border border-purple-200">
+                <h4 class="text-sm font-semibold text-purple-800 mb-4">Goal Details</h4>
+                <div class="space-y-4">
+                    <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+                        {% if memory.metadata.status %}
+                        <div>
+                            <dt class="text-xs font-medium text-gray-500 uppercase tracking-wider">Status</dt>
+                            <dd class="mt-1">
+                                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium
+                                    {% if memory.metadata.status == 'active' %}bg-green-100 text-green-800
+                                    {% elif memory.metadata.status == 'paused' %}bg-yellow-100 text-yellow-800
+                                    {% elif memory.metadata.status == 'completed' %}bg-blue-100 text-blue-800
+                                    {% else %}bg-gray-100 text-gray-800{% endif %}">
+                                    {{ memory.metadata.status | capitalize }}
+                                </span>
+                            </dd>
+                        </div>
+                        {% endif %}
+                        {% if memory.metadata.priority %}
+                        <div>
+                            <dt class="text-xs font-medium text-gray-500 uppercase tracking-wider">Priority</dt>
+                            <dd class="mt-1 text-sm text-gray-900">{{ memory.metadata.priority }}/5</dd>
+                        </div>
+                        {% endif %}
+                        {% if memory.metadata.deadline %}
+                        <div>
+                            <dt class="text-xs font-medium text-gray-500 uppercase tracking-wider">Deadline</dt>
+                            <dd class="mt-1 text-sm text-gray-900">{{ memory.metadata.deadline }}</dd>
+                        </div>
+                        {% endif %}
+                    </div>
+                    {% if memory.metadata.milestones %}
+                    <div>
+                        <dt class="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Milestones</dt>
+                        <dd class="space-y-2">
+                            {% for milestone in memory.metadata.milestones %}
+                            <div class="flex items-center gap-3 p-2 bg-white rounded-lg border border-purple-100">
+                                {% if milestone.status == 'completed' %}
+                                <svg class="w-5 h-5 text-green-500" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+                                    <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                </svg>
+                                {% else %}
+                                <svg class="w-5 h-5 text-gray-300" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+                                    <path stroke-linecap="round" stroke-linejoin="round" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                </svg>
+                                {% endif %}
+                                <span class="text-sm {% if milestone.status == 'completed' %}text-gray-500 line-through{% else %}text-gray-900{% endif %}">{{ milestone.description }}</span>
+                            </div>
+                            {% endfor %}
+                        </dd>
+                    </div>
+                    {% endif %}
+                    {% if memory.metadata.blockers %}
+                    <div>
+                        <dt class="text-xs font-medium text-gray-500 uppercase tracking-wider">Blockers</dt>
+                        <dd class="mt-2 space-y-1">
+                            {% for blocker in memory.metadata.blockers %}
+                            <div class="flex items-start gap-2 text-sm text-gray-700">
+                                <svg class="w-4 h-4 text-red-500 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                                    <path stroke-linecap="round" stroke-linejoin="round" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" />
+                                </svg>
+                                {{ blocker }}
+                            </div>
+                            {% endfor %}
+                        </dd>
+                    </div>
+                    {% endif %}
+                    {% if memory.metadata.progress_notes %}
+                    <div>
+                        <dt class="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Progress Notes</dt>
+                        <dd class="space-y-2">
+                            {% for note in memory.metadata.progress_notes %}
+                            <div class="p-2 bg-white rounded-lg border border-purple-100">
+                                <p class="text-sm text-gray-900">{{ note.note }}</p>
+                                <p class="text-xs text-gray-500 mt-1">{{ note.date }}</p>
+                            </div>
+                            {% endfor %}
+                        </dd>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+            
+            <!-- Individual Metadata -->
+            {% elif memory.type == 'individual' %}
+            <div class="p-4 bg-pink-50 rounded-lg border border-pink-200">
+                <h4 class="text-sm font-semibold text-pink-800 mb-4">Individual Details</h4>
+                <div class="space-y-4">
+                    <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+                        {% if memory.metadata.name %}
+                        <div>
+                            <dt class="text-xs font-medium text-gray-500 uppercase tracking-wider">Name</dt>
+                            <dd class="mt-1 text-sm font-medium text-gray-900">{{ memory.metadata.name }}</dd>
+                        </div>
+                        {% endif %}
+                        {% if memory.metadata.relationship %}
+                        <div>
+                            <dt class="text-xs font-medium text-gray-500 uppercase tracking-wider">Relationship</dt>
+                            <dd class="mt-1 text-sm text-gray-900">{{ memory.metadata.relationship }}</dd>
+                        </div>
+                        {% endif %}
+                        {% if memory.metadata.organization %}
+                        <div>
+                            <dt class="text-xs font-medium text-gray-500 uppercase tracking-wider">Organization</dt>
+                            <dd class="mt-1 text-sm text-gray-900">{{ memory.metadata.organization }}</dd>
+                        </div>
+                        {% endif %}
+                        {% if memory.metadata.role %}
+                        <div>
+                            <dt class="text-xs font-medium text-gray-500 uppercase tracking-wider">Role</dt>
+                            <dd class="mt-1 text-sm text-gray-900">{{ memory.metadata.role }}</dd>
+                        </div>
+                        {% endif %}
+                    </div>
+                    {% if memory.metadata.contact_info %}
+                    <div>
+                        <dt class="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Contact Info</dt>
+                        <dd class="grid grid-cols-2 md:grid-cols-4 gap-3">
+                            {% if memory.metadata.contact_info.email %}
+                            <a href="mailto:{{ memory.metadata.contact_info.email }}" class="flex items-center gap-2 p-2 bg-white rounded-lg border border-pink-100 hover:bg-pink-100 transition-colors">
+                                <svg class="w-4 h-4 text-gray-500" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                                    <path stroke-linecap="round" stroke-linejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 01-2.25 2.25h-15a2.25 2.25 0 01-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25m19.5 0v.243a2.25 2.25 0 01-1.07 1.916l-7.5 4.615a2.25 2.25 0 01-2.36 0L3.32 8.91a2.25 2.25 0 01-1.07-1.916V6.75" />
+                                </svg>
+                                <span class="text-xs text-gray-700 truncate">{{ memory.metadata.contact_info.email }}</span>
+                            </a>
+                            {% endif %}
+                            {% if memory.metadata.contact_info.phone %}
+                            <a href="tel:{{ memory.metadata.contact_info.phone }}" class="flex items-center gap-2 p-2 bg-white rounded-lg border border-pink-100 hover:bg-pink-100 transition-colors">
+                                <svg class="w-4 h-4 text-gray-500" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                                    <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 6.75c0 8.284 6.716 15 15 15h2.25a2.25 2.25 0 002.25-2.25v-1.372c0-.516-.351-.966-.852-1.091l-4.423-1.106c-.44-.11-.902.055-1.173.417l-.97 1.293c-.282.376-.769.542-1.21.38a12.035 12.035 0 01-7.143-7.143c-.162-.441.004-.928.38-1.21l1.293-.97c.363-.271.527-.734.417-1.173L6.963 3.102a1.125 1.125 0 00-1.091-.852H4.5A2.25 2.25 0 002.25 4.5v2.25z" />
+                                </svg>
+                                <span class="text-xs text-gray-700">{{ memory.metadata.contact_info.phone }}</span>
+                            </a>
+                            {% endif %}
+                            {% if memory.metadata.contact_info.linkedin %}
+                            <a href="{{ memory.metadata.contact_info.linkedin }}" target="_blank" class="flex items-center gap-2 p-2 bg-white rounded-lg border border-pink-100 hover:bg-pink-100 transition-colors">
+                                <svg class="w-4 h-4 text-[#0077B5]" fill="currentColor" viewBox="0 0 24 24">
+                                    <path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433c-1.144 0-2.063-.926-2.063-2.065 0-1.138.92-2.063 2.063-2.063 1.14 0 2.064.925 2.064 2.063 0 1.139-.925 2.065-2.064 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/>
+                                </svg>
+                                <span class="text-xs text-gray-700">LinkedIn</span>
+                            </a>
+                            {% endif %}
+                            {% if memory.metadata.contact_info.github %}
+                            <a href="{{ memory.metadata.contact_info.github }}" target="_blank" class="flex items-center gap-2 p-2 bg-white rounded-lg border border-pink-100 hover:bg-pink-100 transition-colors">
+                                <svg class="w-4 h-4 text-gray-800" fill="currentColor" viewBox="0 0 24 24">
+                                    <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
+                                </svg>
+                                <span class="text-xs text-gray-700">GitHub</span>
+                            </a>
+                            {% endif %}
+                        </dd>
+                    </div>
+                    {% endif %}
+                    {% if memory.metadata.preferences %}
+                    <div>
+                        <dt class="text-xs font-medium text-gray-500 uppercase tracking-wider">Preferences</dt>
+                        <dd class="mt-2 flex flex-wrap gap-2">
+                            {% for pref in memory.metadata.preferences %}
+                            <span class="inline-block px-3 py-1 bg-pink-100 text-pink-800 rounded-full text-xs">{{ pref }}</span>
+                            {% endfor %}
+                        </dd>
+                    </div>
+                    {% endif %}
+                    {% if memory.metadata.last_interaction %}
+                    <div>
+                        <dt class="text-xs font-medium text-gray-500 uppercase tracking-wider">Last Interaction</dt>
+                        <dd class="mt-1 text-sm text-gray-900">{{ memory.metadata.last_interaction }}</dd>
+                    </div>
+                    {% endif %}
+                    {% if memory.metadata.interaction_history %}
+                    <div>
+                        <dt class="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Interaction History</dt>
+                        <dd class="space-y-2">
+                            {% for interaction in memory.metadata.interaction_history %}
+                            <div class="p-2 bg-white rounded-lg border border-pink-100">
+                                <p class="text-sm font-medium text-gray-900">{{ interaction.context }}</p>
+                                {% if interaction.notes %}
+                                <p class="text-xs text-gray-600 mt-1">{{ interaction.notes }}</p>
+                                {% endif %}
+                                <p class="text-xs text-gray-400 mt-1">{{ interaction.date }}</p>
+                            </div>
+                            {% endfor %}
+                        </dd>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+            
+            <!-- Fallback: Raw JSON for unknown types -->
+            {% else %}
             <h4 class="text-xs font-medium text-gray-500 uppercase tracking-wider mb-3">Custom Metadata</h4>
             <pre class="text-xs font-mono bg-gray-900 text-gray-100 p-4 rounded-lg overflow-x-auto">{{ memory.metadata | tojson(indent=2) }}</pre>
+            {% endif %}
         </div>
         {% endif %}
         
