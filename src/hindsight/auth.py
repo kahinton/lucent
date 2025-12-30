@@ -5,7 +5,7 @@ from contextvars import ContextVar
 from typing import Any
 from uuid import UUID
 
-from hindsight.db.client import OrganizationRepository, UserRepository, get_pool
+from hindsight.db.client import OrganizationRepository, UserRepository, get_pool, init_db
 
 # Context variable to store the current user for the request
 _current_user: ContextVar[dict[str, Any] | None] = ContextVar("current_user", default=None)
@@ -15,6 +15,18 @@ DEV_MODE = os.environ.get("HINDSIGHT_DEV_MODE", "false").lower() in ("true", "1"
 DEV_USER_ID = os.environ.get("HINDSIGHT_DEV_USER_ID", "dev-user")
 DEV_USER_NAME = os.environ.get("HINDSIGHT_DEV_USER_NAME", "Development User")
 DEV_ORG_NAME = os.environ.get("HINDSIGHT_DEV_ORG_NAME", "Development Organization")
+
+
+async def _ensure_pool():
+    """Ensure the database pool is initialized, lazily initializing if needed."""
+    try:
+        return await get_pool()
+    except RuntimeError:
+        # Pool not initialized yet, initialize it now
+        database_url = os.environ.get("DATABASE_URL")
+        if not database_url:
+            raise RuntimeError("DATABASE_URL environment variable is required")
+        return await init_db(database_url)
 
 
 def get_current_user() -> dict[str, Any] | None:
@@ -53,7 +65,7 @@ async def ensure_dev_organization() -> dict[str, Any]:
     Returns:
         The development organization record.
     """
-    pool = await get_pool()
+    pool = await _ensure_pool()
     org_repo = OrganizationRepository(pool)
     
     org, created = await org_repo.get_or_create(name=DEV_ORG_NAME)
@@ -76,7 +88,7 @@ async def ensure_dev_user() -> dict[str, Any]:
     # First ensure the dev organization exists
     dev_org = await ensure_dev_organization()
     
-    pool = await get_pool()
+    pool = await _ensure_pool()
     user_repo = UserRepository(pool)
     
     user, created = await user_repo.get_or_create(
@@ -127,7 +139,7 @@ async def get_or_create_user_from_oauth(
     Returns:
         The user record.
     """
-    pool = await get_pool()
+    pool = await _ensure_pool()
     user_repo = UserRepository(pool)
     
     user, created = await user_repo.get_or_create(

@@ -16,6 +16,7 @@ from hindsight.models.memory import (
     SearchMemoriesInput,
     UpdateMemoryInput,
 )
+from hindsight.models.validation import validate_metadata, METADATA_DOCS
 
 
 async def _get_repository() -> MemoryRepository:
@@ -107,7 +108,27 @@ async def _get_access_repository() -> AccessRepository:
 def register_tools(mcp: FastMCP) -> None:
     """Register all memory tools with the MCP server."""
 
-    @mcp.tool()
+    # Build the docstring dynamically from the models
+    create_memory_description = f"""Create a new memory in the knowledge base.
+
+Args:
+    username: Username of the person this memory is being created for (required).
+    type: Type of memory - one of: experience, technical, procedural, goal, individual.
+    content: The main content/description of the memory.
+    tags: Optional list of tags for categorization.
+    importance: Importance rating from 1 (routine) to 10 (essential). Default is 5.
+    related_memory_ids: Optional list of UUIDs of related memories to link.
+    metadata: Type-specific metadata. MUST match the schema for the memory type.
+        All fields are optional unless marked (REQUIRED).
+        Unknown fields will be ignored.
+
+{METADATA_DOCS}
+
+Returns:
+    JSON string with the created memory including its ID.
+"""
+
+    @mcp.tool(description=create_memory_description)
     async def create_memory(
         username: str,
         type: str,
@@ -117,28 +138,12 @@ def register_tools(mcp: FastMCP) -> None:
         related_memory_ids: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> str:
-        """Create a new memory in the knowledge base.
-
-        Args:
-            username: Username of the person this memory is being created for (required).
-            type: Type of memory - one of: experience, technical, procedural, goal, individual.
-            content: The main content/description of the memory.
-            tags: Optional list of tags for categorization.
-            importance: Importance rating from 1 (routine) to 10 (essential). Default is 5.
-            related_memory_ids: Optional list of UUIDs of related memories to link.
-            metadata: Optional type-specific metadata. Structure depends on memory type:
-                - experience: {context, outcome, lessons_learned[], related_entities[]}
-                - technical: {category, language, code_snippet, references[], version_info, repo, filename}
-                - procedural: {steps[{order, description, notes}], prerequisites[], estimated_time, success_criteria, common_pitfalls[]}
-                - goal: {status, deadline, milestones[{description, status, completed_at}], blockers[], progress_notes[{date, note}], priority}
-                - individual: {name, relationship, organization, role, contact_info{email, phone, linkedin, github, other}, preferences[], interaction_history[{date, context, notes}], last_interaction}
-
-        Returns:
-            JSON string with the created memory including its ID.
-        """
         try:
             # Validate input
             memory_type = MemoryType(type)
+            
+            # Validate and normalize metadata for the memory type
+            validated_metadata = validate_metadata(memory_type, metadata)
             
             input_data = CreateMemoryInput(
                 username=username,
@@ -147,7 +152,7 @@ def register_tools(mcp: FastMCP) -> None:
                 tags=tags or [],
                 importance=importance,
                 related_memory_ids=[UUID(uid) for uid in (related_memory_ids or [])],
-                metadata=metadata or {},
+                metadata=validated_metadata,
             )
             
             # Get current user context (from auth context or dev mode)
@@ -464,7 +469,8 @@ def register_tools(mcp: FastMCP) -> None:
             tags: Optional new list of tags (replaces existing tags).
             importance: Optional new importance rating (1-10).
             related_memory_ids: Optional new list of related memory UUIDs (replaces existing).
-            metadata: Optional new metadata (replaces existing metadata).
+            metadata: Optional new metadata (replaces existing). Must match the memory's type schema.
+                      See create_memory for the metadata schema for each memory type.
 
         Returns:
             JSON string with the updated memory, or an error if not found.
@@ -472,20 +478,25 @@ def register_tools(mcp: FastMCP) -> None:
         try:
             uuid_id = UUID(memory_id)
             
+            repo = await _get_repository()
+            
+            # Get old values before update for audit (also needed for metadata validation)
+            old_memory = await repo.get(uuid_id)
+            if old_memory is None:
+                return json.dumps({"error": f"Memory not found: {memory_id}"})
+            
+            # Validate metadata if provided
+            validated_metadata = metadata
+            if metadata is not None:
+                validated_metadata = validate_metadata(old_memory["type"], metadata)
+            
             update_input = UpdateMemoryInput(
                 content=content,
                 tags=tags,
                 importance=importance,
                 related_memory_ids=[UUID(uid) for uid in related_memory_ids] if related_memory_ids else None,
-                metadata=metadata,
+                metadata=validated_metadata,
             )
-            
-            repo = await _get_repository()
-            
-            # Get old values before update for audit
-            old_memory = await repo.get(uuid_id)
-            if old_memory is None:
-                return json.dumps({"error": f"Memory not found: {memory_id}"})
             
             result = await repo.update(
                 memory_id=uuid_id,

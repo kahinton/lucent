@@ -18,6 +18,7 @@ from hindsight.api.models import (
     TagSuggestion,
 )
 from hindsight.db.client import MemoryRepository, AuditRepository, AccessRepository, get_pool
+from hindsight.models.validation import validate_metadata
 from hindsight.rbac import Permission
 
 
@@ -71,6 +72,15 @@ async def create_memory(
             detail=f"Invalid memory type. Must be one of: {', '.join(valid_types)}",
         )
     
+    # Validate and normalize metadata for the memory type
+    try:
+        validated_metadata = validate_metadata(data.type, data.metadata)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    
     result = await repo.create(
         username=data.username,
         type=data.type,
@@ -78,7 +88,7 @@ async def create_memory(
         tags=data.tags,
         importance=data.importance,
         related_memory_ids=data.related_memory_ids,
-        metadata=data.metadata,
+        metadata=validated_metadata,
         user_id=user.id,
         organization_id=user.organization_id,
     )
@@ -239,13 +249,24 @@ async def update_memory(
             detail="You can only update your own memories",
         )
     
+    # Validate metadata if provided
+    validated_metadata = data.metadata
+    if data.metadata is not None:
+        try:
+            validated_metadata = validate_metadata(existing["type"], data.metadata)
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(e),
+            )
+    
     result = await repo.update(
         memory_id=memory_id,
         content=data.content,
         tags=data.tags,
         importance=data.importance,
         related_memory_ids=data.related_memory_ids,
-        metadata=data.metadata,
+        metadata=validated_metadata,
     )
     
     if result is None:
