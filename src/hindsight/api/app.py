@@ -1,15 +1,10 @@
-"""FastAPI application for the Hindsight Admin API.
+"""FastAPI application for the Hindsight Admin API and Web Interface.
 
-This module provides a REST API for:
-- Memory CRUD operations
-- Memory search
-- Audit log viewing
-- Access log viewing  
-- User management
-- Organization management
+This module provides:
+- REST API for memory management
+- Web-based admin dashboard using Jinja2 + HTMX
 
-The API is designed to power a web-based admin dashboard and
-runs alongside the MCP server.
+The API and web interface run alongside the MCP server.
 """
 
 import traceback
@@ -21,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from hindsight.api.routers import memories, search, audit, access, users, organizations
+from hindsight.web.routes import router as web_router
 from hindsight.db.client import init_db, close_db
 
 
@@ -60,13 +56,16 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     
-    # Include routers
+    # Include API routers
     app.include_router(memories.router, prefix="/api/memories", tags=["Memories"])
     app.include_router(search.router, prefix="/api/search", tags=["Search"])
     app.include_router(audit.router, prefix="/api/audit", tags=["Audit"])
     app.include_router(access.router, prefix="/api/access", tags=["Access"])
     app.include_router(users.router, prefix="/api/users", tags=["Users"])
     app.include_router(organizations.router, prefix="/api/organizations", tags=["Organizations"])
+    
+    # Include web interface routes
+    app.include_router(web_router, tags=["Web Interface"])
     
     @app.get("/api/health", tags=["Health"])
     async def health_check() -> dict[str, str]:

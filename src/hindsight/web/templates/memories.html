@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+
+{% block title %}Memories - Hindsight{% endblock %}
+
+{% block content %}
+<!-- Page Header -->
+<div class="flex items-center justify-between mb-8">
+    <div>
+        <h1 class="text-2xl font-bold text-gray-900">Memories</h1>
+        <p class="mt-1 text-sm text-gray-500">Search and manage your memory collection</p>
+    </div>
+    <a href="/memories/new" class="inline-flex items-center gap-2 px-4 py-2.5 bg-primary-600 text-white rounded-lg font-medium text-sm hover:bg-primary-700 transition-colors shadow-sm">
+        <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+        </svg>
+        New Memory
+    </a>
+</div>
+
+<!-- Search and Filters -->
+<div class="bg-white rounded-xl border border-gray-200 p-4 mb-6 shadow-sm">
+    <form class="flex flex-wrap gap-4" method="get" action="/memories">
+        <div class="flex-1 min-w-[300px]">
+            <div class="relative">
+                <svg class="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
+                </svg>
+                <input 
+                    type="search" 
+                    name="q" 
+                    placeholder="Search memories..." 
+                    value="{{ query or '' }}"
+                    class="w-full pl-10 pr-4 py-2.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none transition-shadow"
+                    hx-get="/memories"
+                    hx-trigger="keyup changed delay:300ms"
+                    hx-target="#memory-results"
+                    hx-include="[name='type']"
+                >
+            </div>
+        </div>
+        <select 
+            name="type" 
+            class="px-4 py-2.5 border border-gray-300 rounded-lg text-sm bg-white focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none"
+            hx-get="/memories" 
+            hx-trigger="change" 
+            hx-target="#memory-results" 
+            hx-include="[name='q']"
+        >
+            <option value="">All Types</option>
+            {% for t in memory_types %}
+            <option value="{{ t }}" {% if type_filter == t %}selected{% endif %}>{{ t | capitalize }}</option>
+            {% endfor %}
+        </select>
+        <button type="submit" class="px-4 py-2.5 bg-gray-100 text-gray-700 rounded-lg font-medium text-sm hover:bg-gray-200 transition-colors">
+            Search
+        </button>
+    </form>
+</div>
+
+<!-- Results -->
+<div id="memory-results">
+    {% include "partials/memory_list.html" %}
+</div>
+{% endblock %}

@@ -1,0 +1,168 @@
+{% extends "base.html" %}
+
+{% block title %}New Memory - Hindsight{% endblock %}
+
+{% block content %}
+<!-- Breadcrumb -->
+<nav class="mb-6">
+    <a href="/memories" class="inline-flex items-center gap-2 text-sm text-gray-500 hover:text-gray-700 transition-colors">
+        <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" />
+        </svg>
+        Back to Memories
+    </a>
+</nav>
+
+<!-- Page Header -->
+<div class="mb-8">
+    <h1 class="text-2xl font-bold text-gray-900">Create New Memory</h1>
+    <p class="mt-1 text-sm text-gray-500">Store knowledge, experiences, and insights for future reference</p>
+</div>
+
+<!-- Form -->
+<div class="bg-white rounded-xl border border-gray-200 shadow-sm">
+    <form method="post" action="/memories/new" class="divide-y divide-gray-100">
+        <div class="p-6 space-y-6">
+            <!-- Username -->
+            <div>
+                <label for="username" class="block text-sm font-medium text-gray-700 mb-2">Username</label>
+                <input 
+                    type="text" 
+                    id="username" 
+                    name="username" 
+                    required
+                    placeholder="Your identifier"
+                    value="{{ user.display_name or '' }}"
+                    class="w-full px-4 py-2.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none transition-shadow"
+                >
+                <p class="mt-1.5 text-xs text-gray-500">This identifies who created the memory</p>
+            </div>
+            
+            <!-- Type -->
+            <div>
+                <label for="type" class="block text-sm font-medium text-gray-700 mb-2">Memory Type</label>
+                <select 
+                    id="type" 
+                    name="type" 
+                    required
+                    class="w-full px-4 py-2.5 border border-gray-300 rounded-lg text-sm bg-white focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none"
+                >
+                    <option value="">Select a type...</option>
+                    {% for t in memory_types %}
+                    <option value="{{ t }}">{{ t | capitalize }}</option>
+                    {% endfor %}
+                </select>
+                <div class="mt-3 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
+                    <div class="p-3 bg-blue-50 rounded-lg border border-blue-100">
+                        <p class="text-xs font-medium text-blue-800">Experience</p>
+                        <p class="text-xs text-blue-600 mt-1">Events, decisions, lessons learned</p>
+                    </div>
+                    <div class="p-3 bg-emerald-50 rounded-lg border border-emerald-100">
+                        <p class="text-xs font-medium text-emerald-800">Technical</p>
+                        <p class="text-xs text-emerald-600 mt-1">Code, solutions, patterns</p>
+                    </div>
+                    <div class="p-3 bg-amber-50 rounded-lg border border-amber-100">
+                        <p class="text-xs font-medium text-amber-800">Procedural</p>
+                        <p class="text-xs text-amber-600 mt-1">Step-by-step processes</p>
+                    </div>
+                    <div class="p-3 bg-purple-50 rounded-lg border border-purple-100">
+                        <p class="text-xs font-medium text-purple-800">Goal</p>
+                        <p class="text-xs text-purple-600 mt-1">Objectives, milestones, progress</p>
+                    </div>
+                    <div class="p-3 bg-pink-50 rounded-lg border border-pink-100">
+                        <p class="text-xs font-medium text-pink-800">Individual</p>
+                        <p class="text-xs text-pink-600 mt-1">Info about people</p>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Content -->
+            <div>
+                <label for="content" class="block text-sm font-medium text-gray-700 mb-2">Content</label>
+                <textarea 
+                    id="content" 
+                    name="content" 
+                    rows="8" 
+                    required
+                    placeholder="Describe the memory in detail..."
+                    class="w-full px-4 py-3 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none transition-shadow resize-y"
+                ></textarea>
+            </div>
+            
+            <!-- Tags -->
+            <div>
+                <label for="tags" class="block text-sm font-medium text-gray-700 mb-2">Tags</label>
+                <input 
+                    type="text" 
+                    id="tags" 
+                    name="tags" 
+                    placeholder="tag1, tag2, tag3"
+                    class="w-full px-4 py-2.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none transition-shadow"
+                >
+                <p class="mt-1.5 text-xs text-gray-500">Separate tags with commas</p>
+                
+                {% if existing_tags %}
+                <div class="mt-3">
+                    <p class="text-xs text-gray-500 mb-2">Popular tags (click to add):</p>
+                    <div class="flex flex-wrap gap-2">
+                        {% for tag in existing_tags[:15] %}
+                        <button 
+                            type="button"
+                            onclick="addTag('{{ tag.tag }}')"
+                            class="inline-flex items-center px-2.5 py-1 bg-gray-100 text-gray-700 rounded-full text-xs hover:bg-primary-100 hover:text-primary-700 transition-colors"
+                        >
+                            {{ tag.tag }}
+                        </button>
+                        {% endfor %}
+                    </div>
+                </div>
+                {% endif %}
+            </div>
+            
+            <!-- Importance -->
+            <div>
+                <label for="importance" class="block text-sm font-medium text-gray-700 mb-2">
+                    Importance: <span id="importance-value" class="text-primary-600 font-semibold">5</span>/10
+                </label>
+                <input 
+                    type="range" 
+                    id="importance" 
+                    name="importance" 
+                    min="1" 
+                    max="10" 
+                    value="5"
+                    class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-primary-600"
+                    oninput="document.getElementById('importance-value').textContent = this.value"
+                >
+                <div class="flex justify-between text-xs text-gray-400 mt-2">
+                    <span>Routine (1-3)</span>
+                    <span>Useful (4-6)</span>
+                    <span>Important (7-8)</span>
+                    <span>Critical (9-10)</span>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Actions -->
+        <div class="px-6 py-4 bg-gray-50 flex items-center justify-end gap-3">
+            <a href="/memories" class="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors">
+                Cancel
+            </a>
+            <button type="submit" class="px-4 py-2 text-sm font-medium text-white bg-primary-600 rounded-lg hover:bg-primary-700 transition-colors shadow-sm">
+                Create Memory
+            </button>
+        </div>
+    </form>
+</div>
+
+<script>
+function addTag(tag) {
+    const input = document.getElementById('tags');
+    const currentTags = input.value.split(',').map(t => t.trim()).filter(t => t);
+    if (!currentTags.includes(tag)) {
+        currentTags.push(tag);
+        input.value = currentTags.join(', ');
+    }
+}
+</script>
+{% endblock %}

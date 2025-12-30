@@ -1,0 +1,152 @@
+{% extends "base.html" %}
+
+{% block title %}Audit Log - Hindsight{% endblock %}
+
+{% block content %}
+<!-- Page Header -->
+<div class="mb-8">
+    <h1 class="text-2xl font-bold text-gray-900">Audit Log</h1>
+    <p class="mt-1 text-sm text-gray-500">Track all changes made to memories in your organization</p>
+</div>
+
+<!-- Filters -->
+<div class="bg-white rounded-xl border border-gray-200 p-4 mb-6 shadow-sm">
+    <div class="flex items-center gap-4">
+        <select 
+            class="px-4 py-2.5 border border-gray-300 rounded-lg text-sm bg-white focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none"
+            onchange="window.location.href='/audit?action_type=' + this.value"
+        >
+            <option value="">All Actions</option>
+            {% for t in action_types %}
+            <option value="{{ t }}" {% if action_type == t %}selected{% endif %}>{{ t | capitalize }}</option>
+            {% endfor %}
+        </select>
+        <span class="text-sm text-gray-500">
+            <span class="font-medium text-gray-900">{{ total_count }}</span> entries
+        </span>
+    </div>
+</div>
+
+<!-- Audit Entries -->
+<div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+    {% if entries %}
+    <div class="divide-y divide-gray-100">
+        {% for entry in entries %}
+        <div class="p-4 hover:bg-gray-50 transition-colors">
+            <div class="flex items-start gap-4">
+                <!-- Action Icon -->
+                <div class="shrink-0 w-10 h-10 rounded-full flex items-center justify-center
+                    {% if entry.action_type == 'create' %}bg-emerald-100 text-emerald-600
+                    {% elif entry.action_type == 'update' %}bg-blue-100 text-blue-600
+                    {% elif entry.action_type == 'delete' %}bg-red-100 text-red-600
+                    {% elif entry.action_type == 'share' %}bg-amber-100 text-amber-600
+                    {% elif entry.action_type == 'unshare' %}bg-gray-100 text-gray-600
+                    {% else %}bg-gray-100 text-gray-600{% endif %}">
+                    {% if entry.action_type == 'create' %}
+                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+                    </svg>
+                    {% elif entry.action_type == 'update' %}
+                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125" />
+                    </svg>
+                    {% elif entry.action_type == 'delete' %}
+                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" />
+                    </svg>
+                    {% else %}
+                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M7.217 10.907a2.25 2.25 0 100 2.186m0-2.186c.18.324.283.696.283 1.093s-.103.77-.283 1.093m0-2.186l9.566-5.314m-9.566 7.5l9.566 5.314m0 0a2.25 2.25 0 103.935 2.186 2.25 2.25 0 00-3.935-2.186zm0-12.814a2.25 2.25 0 103.933-2.185 2.25 2.25 0 00-3.933 2.185z" />
+                    </svg>
+                    {% endif %}
+                </div>
+                
+                <!-- Content -->
+                <div class="flex-1 min-w-0">
+                    <div class="flex items-center gap-2">
+                        <span class="text-sm font-semibold text-gray-900 capitalize">{{ entry.action_type }}</span>
+                        <span class="text-sm text-gray-500">on memory</span>
+                        <a href="/memories/{{ entry.memory_id }}" class="text-sm font-mono text-primary-600 hover:text-primary-700">
+                            {{ entry.memory_id | string | truncate(12) }}
+                        </a>
+                    </div>
+                    
+                    {% if entry.changed_fields %}
+                    <p class="text-sm text-gray-500 mt-1">
+                        Changed: <span class="font-medium text-gray-700">{{ entry.changed_fields | join(', ') }}</span>
+                    </p>
+                    {% endif %}
+                    
+                    {% if entry.old_values or entry.new_values %}
+                    <details class="mt-3">
+                        <summary class="text-sm text-primary-600 cursor-pointer hover:text-primary-700">View changes</summary>
+                        <div class="mt-3 grid grid-cols-1 md:grid-cols-2 gap-4">
+                            {% if entry.old_values %}
+                            <div>
+                                <p class="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Before</p>
+                                <pre class="text-xs font-mono bg-gray-900 text-gray-100 p-3 rounded-lg overflow-x-auto">{{ entry.old_values | tojson(indent=2) }}</pre>
+                            </div>
+                            {% endif %}
+                            {% if entry.new_values %}
+                            <div>
+                                <p class="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">After</p>
+                                <pre class="text-xs font-mono bg-gray-900 text-gray-100 p-3 rounded-lg overflow-x-auto">{{ entry.new_values | tojson(indent=2) }}</pre>
+                            </div>
+                            {% endif %}
+                        </div>
+                    </details>
+                    {% endif %}
+                </div>
+                
+                <!-- Timestamp -->
+                <div class="shrink-0 text-right">
+                    <p class="text-xs text-gray-500">{{ entry.created_at | datetime }}</p>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    
+    <!-- Pagination -->
+    {% if total_pages > 1 %}
+    <div class="px-6 py-4 border-t border-gray-100 bg-gray-50">
+        <div class="flex items-center justify-center gap-2">
+            {% if page > 1 %}
+            <a href="/audit?action_type={{ action_type or '' }}&page={{ page - 1 }}" 
+               class="inline-flex items-center gap-1 px-3 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors">
+                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" />
+                </svg>
+                Previous
+            </a>
+            {% endif %}
+            
+            <span class="px-3 py-2 text-sm text-gray-500">
+                Page {{ page }} of {{ total_pages }}
+            </span>
+            
+            {% if page < total_pages %}
+            <a href="/audit?action_type={{ action_type or '' }}&page={{ page + 1 }}" 
+               class="inline-flex items-center gap-1 px-3 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors">
+                Next
+                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
+                </svg>
+            </a>
+            {% endif %}
+        </div>
+    </div>
+    {% endif %}
+    {% else %}
+    <div class="p-12 text-center">
+        <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
+        </svg>
+        <h3 class="mt-4 text-sm font-medium text-gray-900">No audit entries</h3>
+        <p class="mt-1 text-sm text-gray-500">
+            {% if action_type %}No entries for this action type{% else %}The audit log is empty{% endif %}
+        </p>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

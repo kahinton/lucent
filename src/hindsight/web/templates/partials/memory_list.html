@@ -1,0 +1,137 @@
+<!-- Memory list partial - used for HTMX updates -->
+<div class="mb-4 text-sm text-gray-500">
+    Found <span class="font-medium text-gray-900">{{ total_count }}</span> memor{{ "y" if total_count == 1 else "ies" }}
+    {% if query %}<span class="text-gray-400">matching</span> "<span class="font-medium text-gray-700">{{ query }}</span>"{% endif %}
+    {% if type_filter %}<span class="text-gray-400">of type</span> <span class="font-medium text-gray-700">{{ type_filter }}</span>{% endif %}
+</div>
+
+{% if memories %}
+<div class="space-y-3">
+    {% for memory in memories %}
+    <a href="/memories/{{ memory.id }}" class="block bg-white rounded-xl border border-gray-200 p-5 hover:border-primary-300 hover:shadow-md transition-all group">
+        <div class="flex items-start gap-4">
+            <!-- Type badge -->
+            <span class="shrink-0 inline-flex items-center px-2.5 py-1 rounded-lg text-xs font-semibold
+                {% if memory.type == 'technical' %}bg-emerald-100 text-emerald-700
+                {% elif memory.type == 'experience' %}bg-blue-100 text-blue-700
+                {% elif memory.type == 'procedural' %}bg-amber-100 text-amber-700
+                {% elif memory.type == 'goal' %}bg-purple-100 text-purple-700
+                {% else %}bg-pink-100 text-pink-700{% endif %}">
+                {{ memory.type }}
+            </span>
+            
+            <!-- Content -->
+            <div class="flex-1 min-w-0">
+                <p class="text-sm font-medium text-gray-900 group-hover:text-primary-700 transition-colors">
+                    {{ memory.content | truncate(120) }}
+                </p>
+                
+                <!-- Meta -->
+                <div class="flex flex-wrap items-center gap-x-4 gap-y-1 mt-2 text-xs text-gray-500">
+                    <!-- Importance -->
+                    <span class="inline-flex items-center gap-1">
+                        <span class="w-2 h-2 rounded-full 
+                            {% if memory.importance >= 8 %}bg-red-500
+                            {% elif memory.importance >= 6 %}bg-orange-500
+                            {% elif memory.importance >= 4 %}bg-yellow-500
+                            {% else %}bg-gray-400{% endif %}">
+                        </span>
+                        {{ memory.importance }}/10
+                    </span>
+                    
+                    <!-- Username -->
+                    <span>{{ memory.username }}</span>
+                    
+                    <!-- Date -->
+                    <span>{{ memory.created_at | datetime }}</span>
+                    
+                    <!-- Shared badge -->
+                    {% if memory.shared %}
+                    <span class="inline-flex items-center gap-1 text-amber-600">
+                        <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M7.217 10.907a2.25 2.25 0 100 2.186m0-2.186c.18.324.283.696.283 1.093s-.103.77-.283 1.093m0-2.186l9.566-5.314m-9.566 7.5l9.566 5.314m0 0a2.25 2.25 0 103.935 2.186 2.25 2.25 0 00-3.935-2.186zm0-12.814a2.25 2.25 0 103.933-2.185 2.25 2.25 0 00-3.933 2.185z" />
+                        </svg>
+                        Shared
+                    </span>
+                    {% endif %}
+                </div>
+                
+                <!-- Tags -->
+                {% if memory.tags %}
+                <div class="flex flex-wrap gap-1.5 mt-3">
+                    {% for tag in memory.tags[:5] %}
+                    <span class="inline-block px-2 py-0.5 bg-gray-100 text-gray-600 rounded text-xs">{{ tag }}</span>
+                    {% endfor %}
+                    {% if memory.tags | length > 5 %}
+                    <span class="inline-block px-2 py-0.5 bg-gray-100 text-gray-500 rounded text-xs">+{{ memory.tags | length - 5 }} more</span>
+                    {% endif %}
+                </div>
+                {% endif %}
+            </div>
+            
+            <!-- Arrow -->
+            <svg class="w-5 h-5 text-gray-400 group-hover:text-primary-600 transition-colors shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
+            </svg>
+        </div>
+    </a>
+    {% endfor %}
+</div>
+
+<!-- Pagination -->
+{% if total_pages > 1 %}
+<div class="flex items-center justify-center gap-2 mt-8">
+    {% if page > 1 %}
+    <a href="/memories?q={{ query or '' }}&type={{ type_filter or '' }}&page={{ page - 1 }}" 
+       class="inline-flex items-center gap-1 px-3 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors">
+        <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" />
+        </svg>
+        Previous
+    </a>
+    {% endif %}
+    
+    <div class="flex items-center gap-1">
+        {% for p in range(1, total_pages + 1) %}
+            {% if p == page %}
+            <span class="px-3 py-2 text-sm font-medium text-white bg-primary-600 rounded-lg">{{ p }}</span>
+            {% elif p <= 2 or p > total_pages - 1 or (p >= page - 1 and p <= page + 1) %}
+            <a href="/memories?q={{ query or '' }}&type={{ type_filter or '' }}&page={{ p }}" 
+               class="px-3 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors">{{ p }}</a>
+            {% elif p == 3 and page > 4 %}
+            <span class="px-2 text-gray-400">...</span>
+            {% elif p == total_pages - 1 and page < total_pages - 3 %}
+            <span class="px-2 text-gray-400">...</span>
+            {% endif %}
+        {% endfor %}
+    </div>
+    
+    {% if page < total_pages %}
+    <a href="/memories?q={{ query or '' }}&type={{ type_filter or '' }}&page={{ page + 1 }}" 
+       class="inline-flex items-center gap-1 px-3 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors">
+        Next
+        <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
+        </svg>
+    </a>
+    {% endif %}
+</div>
+{% endif %}
+
+{% else %}
+<div class="bg-white rounded-xl border border-gray-200 p-12 text-center">
+    <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375" />
+    </svg>
+    <h3 class="mt-4 text-sm font-medium text-gray-900">No memories found</h3>
+    <p class="mt-1 text-sm text-gray-500">
+        {% if query %}Try a different search term{% else %}Create your first memory to get started{% endif %}
+    </p>
+    <a href="/memories/new" class="mt-6 inline-flex items-center gap-2 px-4 py-2 bg-primary-600 text-white rounded-lg font-medium text-sm hover:bg-primary-700 transition-colors">
+        <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+        </svg>
+        Create Memory
+    </a>
+</div>
+{% endif %}
