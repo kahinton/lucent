@@ -454,6 +454,41 @@ async def memory_edit_submit(
     content: str = Form(...),
     tags: str = Form(""),
     importance: int = Form(5),
+    # Experience metadata
+    meta_context: str = Form(""),
+    meta_outcome: str = Form(""),
+    meta_lessons_learned: str = Form(""),
+    meta_related_entities: str = Form(""),
+    # Technical metadata
+    meta_category: str = Form(""),
+    meta_language: str = Form(""),
+    meta_version_info: str = Form(""),
+    meta_repo: str = Form(""),
+    meta_filename: str = Form(""),
+    meta_code_snippet: str = Form(""),
+    meta_references: str = Form(""),
+    # Procedural metadata
+    meta_estimated_time: str = Form(""),
+    meta_success_criteria: str = Form(""),
+    meta_prerequisites: str = Form(""),
+    meta_common_pitfalls: str = Form(""),
+    meta_steps: str = Form(""),
+    # Goal metadata
+    meta_status: str = Form("active"),
+    meta_priority: int = Form(3),
+    meta_deadline: str = Form(""),
+    meta_blockers: str = Form(""),
+    meta_milestones: str = Form(""),
+    # Individual metadata
+    meta_name: str = Form(""),
+    meta_relationship: str = Form(""),
+    meta_organization: str = Form(""),
+    meta_role: str = Form(""),
+    meta_email: str = Form(""),
+    meta_phone: str = Form(""),
+    meta_linkedin: str = Form(""),
+    meta_github: str = Form(""),
+    meta_preferences: str = Form(""),
 ):
     """Handle memory edit form submission."""
     user = await get_user_context(request)
@@ -471,7 +506,94 @@ async def memory_edit_submit(
         raise HTTPException(status_code=403, detail="You can only edit your own memories")
     
     # Parse tags
-    tag_list = [t.strip() for t in tags.split(",") if t.strip()]
+    tag_list = [t.strip().lower() for t in tags.split(",") if t.strip()]
+    
+    # Build type-specific metadata based on the memory's type
+    memory_type = existing.get("type")
+    metadata: dict = {}
+    
+    if memory_type == "experience":
+        if meta_context:
+            metadata["context"] = meta_context
+        if meta_outcome:
+            metadata["outcome"] = meta_outcome
+        if meta_lessons_learned:
+            metadata["lessons_learned"] = [l.strip() for l in meta_lessons_learned.split(",") if l.strip()]
+        if meta_related_entities:
+            metadata["related_entities"] = [e.strip() for e in meta_related_entities.split(",") if e.strip()]
+    
+    elif memory_type == "technical":
+        if meta_category:
+            metadata["category"] = meta_category
+        if meta_language:
+            metadata["language"] = meta_language
+        if meta_version_info:
+            metadata["version_info"] = meta_version_info
+        if meta_repo:
+            metadata["repo"] = meta_repo
+        if meta_filename:
+            metadata["filename"] = meta_filename
+        if meta_code_snippet:
+            metadata["code_snippet"] = meta_code_snippet
+        if meta_references:
+            metadata["references"] = [r.strip() for r in meta_references.split(",") if r.strip()]
+    
+    elif memory_type == "procedural":
+        if meta_estimated_time:
+            metadata["estimated_time"] = meta_estimated_time
+        if meta_success_criteria:
+            metadata["success_criteria"] = meta_success_criteria
+        if meta_prerequisites:
+            metadata["prerequisites"] = [p.strip() for p in meta_prerequisites.split(",") if p.strip()]
+        if meta_common_pitfalls:
+            metadata["common_pitfalls"] = [p.strip() for p in meta_common_pitfalls.split(",") if p.strip()]
+        if meta_steps:
+            steps = []
+            for i, line in enumerate(meta_steps.strip().split("\n"), 1):
+                if line.strip():
+                    parts = line.split("|", 1)
+                    step = {"order": i, "description": parts[0].strip()}
+                    if len(parts) > 1 and parts[1].strip():
+                        step["notes"] = parts[1].strip()
+                    steps.append(step)
+            if steps:
+                metadata["steps"] = steps
+    
+    elif memory_type == "goal":
+        metadata["status"] = meta_status
+        metadata["priority"] = meta_priority
+        if meta_deadline:
+            metadata["deadline"] = meta_deadline
+        if meta_blockers:
+            metadata["blockers"] = [b.strip() for b in meta_blockers.split(",") if b.strip()]
+        if meta_milestones:
+            metadata["milestones"] = [
+                {"description": m.strip(), "status": "active"} 
+                for m in meta_milestones.split(",") if m.strip()
+            ]
+    
+    elif memory_type == "individual":
+        if meta_name:
+            metadata["name"] = meta_name
+        if meta_relationship:
+            metadata["relationship"] = meta_relationship
+        if meta_organization:
+            metadata["organization"] = meta_organization
+        if meta_role:
+            metadata["role"] = meta_role
+        contact_info = {}
+        if meta_email:
+            contact_info["email"] = meta_email
+        if meta_phone:
+            contact_info["phone"] = meta_phone
+        if meta_linkedin:
+            contact_info["linkedin"] = meta_linkedin
+        if meta_github:
+            contact_info["github"] = meta_github
+        if contact_info:
+            metadata["contact_info"] = contact_info
+        if meta_preferences:
+            metadata["preferences"] = [p.strip() for p in meta_preferences.split(",") if p.strip()]
     
     # Update
     result = await repo.update(
@@ -479,6 +601,7 @@ async def memory_edit_submit(
         content=content,
         tags=tag_list if tag_list else None,
         importance=importance,
+        metadata=metadata if metadata else None,
     )
     
     # Log the update
@@ -487,16 +610,18 @@ async def memory_edit_submit(
         action_type="update",
         user_id=user.id,
         organization_id=user.organization_id,
-        changed_fields=["content", "tags", "importance"],
+        changed_fields=["content", "tags", "importance", "metadata"],
         old_values={
             "content": existing["content"],
             "tags": existing["tags"],
             "importance": existing["importance"],
+            "metadata": existing.get("metadata"),
         },
         new_values={
             "content": content,
             "tags": tag_list,
             "importance": importance,
+            "metadata": metadata,
         },
     )
     

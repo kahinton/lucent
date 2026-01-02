@@ -64,10 +64,10 @@ def create_app() -> FastAPI:
     app.include_router(users.router, prefix="/api/users", tags=["Users"])
     app.include_router(organizations.router, prefix="/api/organizations", tags=["Organizations"])
     
-    # Include web interface routes
-    app.include_router(web_router, tags=["Web Interface"])
+    # Include web interface routes (excluded from API docs)
+    app.include_router(web_router, include_in_schema=False)
     
-    @app.get("/api/health", tags=["Health"])
+    @app.get("/api/health", include_in_schema=False)
     async def health_check() -> dict[str, str]:
         """Health check endpoint."""
         return {"status": "healthy"}
