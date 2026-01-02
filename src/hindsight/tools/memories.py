@@ -109,11 +109,14 @@ def register_tools(mcp: FastMCP) -> None:
     """Register all memory tools with the MCP server."""
 
     # Build the docstring dynamically from the models
+    # Note: Individual memories are excluded because they are auto-created when users join
     create_memory_description = f"""Create a new memory in the knowledge base.
 
 Args:
     username: Username of the person this memory is being created for (required).
-    type: Type of memory - one of: experience, technical, procedural, goal, individual.
+    type: Type of memory - one of: experience, technical, procedural, goal.
+        NOTE: "individual" type cannot be created via this tool - individual memories
+        are automatically created when users are added to the system.
     content: The main content/description of the memory.
     tags: Optional list of tags for categorization.
     importance: Importance rating from 1 (routine) to 10 (essential). Default is 5.
@@ -141,6 +144,12 @@ Returns:
         try:
             # Validate input
             memory_type = MemoryType(type)
+            
+            # Individual memories cannot be created via MCP - they are auto-created when users are added
+            if memory_type == MemoryType.INDIVIDUAL:
+                return json.dumps({
+                    "error": "Individual memories cannot be created directly. They are automatically created when users are added to the system."
+                })
             
             # Validate and normalize metadata for the memory type
             validated_metadata = validate_metadata(memory_type, metadata)
@@ -567,6 +576,9 @@ Returns:
     async def delete_memory(memory_id: str) -> str:
         """Delete a memory (soft delete - can be recovered).
 
+        NOTE: Individual memories cannot be deleted via this tool - they are
+        automatically deleted when users are removed from the system.
+
         Args:
             memory_id: The UUID of the memory to delete.
 
@@ -582,6 +594,12 @@ Returns:
             old_memory = await repo.get(uuid_id)
             if old_memory is None:
                 return json.dumps({"error": f"Memory not found: {memory_id}"})
+            
+            # Individual memories cannot be deleted via MCP - they are deleted when users are removed
+            if old_memory.get("type") == "individual":
+                return json.dumps({
+                    "error": "Individual memories cannot be deleted directly. They are automatically deleted when users are removed from the system."
+                })
             
             success = await repo.delete(uuid_id)
             

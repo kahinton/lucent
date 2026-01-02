@@ -187,12 +187,16 @@ async def memory_new_form(request: Request):
     user = await get_user_context(request)
     pool = await get_pool()
     repo = MemoryRepository(pool)
+    user_repo = UserRepository(pool)
     
     tags = await repo.get_existing_tags(
         limit=30,
         requesting_user_id=user.id,
         requesting_org_id=user.organization_id,
     )
+    
+    # Get users in the organization for linking individual memories
+    org_users = await user_repo.get_by_organization(user.organization_id) if user.organization_id else []
     
     return templates.TemplateResponse(
         "memory_new.html",
@@ -201,6 +205,7 @@ async def memory_new_form(request: Request):
             "user": user,
             "memory_types": ["experience", "technical", "procedural", "goal", "individual"],
             "existing_tags": tags,
+            "org_users": org_users,
         },
     )
 
@@ -238,6 +243,7 @@ async def memory_new_submit(
     meta_blockers: str = Form(""),
     meta_milestones: str = Form(""),
     # Individual metadata
+    meta_user_id: str = Form(""),
     meta_name: str = Form(""),
     meta_relationship: str = Form(""),
     meta_organization: str = Form(""),
@@ -260,6 +266,13 @@ async def memory_new_submit(
     
     # Parse tags
     tag_list = [t.strip().lower() for t in tags.split(",") if t.strip()]
+    
+    # Individual memories cannot be created via web interface - they are auto-created when users join
+    if type == "individual":
+        raise HTTPException(
+            status_code=400,
+            detail="Individual memories cannot be created directly. They are automatically created when users are added to the system.",
+        )
     
     # Build type-specific metadata
     metadata: dict = {}
@@ -325,6 +338,8 @@ async def memory_new_submit(
             ]
     
     elif type == "individual":
+        if meta_user_id:
+            metadata["user_id"] = meta_user_id
         if meta_name:
             metadata["name"] = meta_name
         if meta_relationship:
@@ -428,6 +443,7 @@ async def memory_edit_form(request: Request, memory_id: UUID):
     user = await get_user_context(request)
     pool = await get_pool()
     repo = MemoryRepository(pool)
+    user_repo = UserRepository(pool)
     
     memory = await repo.get_accessible(memory_id, user.id, user.organization_id)
     if memory is None:
@@ -436,6 +452,9 @@ async def memory_edit_form(request: Request, memory_id: UUID):
     if memory.get("user_id") != user.id:
         raise HTTPException(status_code=403, detail="You can only edit your own memories")
     
+    # Get users in the organization for linking individual memories
+    org_users = await user_repo.get_by_organization(user.organization_id) if user.organization_id else []
+    
     return templates.TemplateResponse(
         "memory_edit.html",
         {
@@ -443,6 +462,7 @@ async def memory_edit_form(request: Request, memory_id: UUID):
             "user": user,
             "memory": memory,
             "memory_types": ["experience", "technical", "procedural", "goal", "individual"],
+            "org_users": org_users,
         },
     )
 
@@ -480,6 +500,7 @@ async def memory_edit_submit(
     meta_blockers: str = Form(""),
     meta_milestones: str = Form(""),
     # Individual metadata
+    meta_user_id: str = Form(""),
     meta_name: str = Form(""),
     meta_relationship: str = Form(""),
     meta_organization: str = Form(""),
@@ -573,6 +594,8 @@ async def memory_edit_submit(
             ]
     
     elif memory_type == "individual":
+        if meta_user_id:
+            metadata["user_id"] = meta_user_id
         if meta_name:
             metadata["name"] = meta_name
         if meta_relationship:
@@ -683,6 +706,13 @@ async def memory_delete(request: Request, memory_id: UUID):
     memory = await repo.get(memory_id)
     if memory is None:
         raise HTTPException(status_code=404, detail="Memory not found")
+    
+    # Individual memories cannot be deleted via web interface - they are deleted when users are removed
+    if memory.get("type") == "individual":
+        raise HTTPException(
+            status_code=400,
+            detail="Individual memories cannot be deleted directly. They are automatically deleted when users are removed from the system.",
+        )
     
     if memory.get("user_id") != user.id:
         raise HTTPException(status_code=403, detail="You can only delete your own memories")

@@ -116,6 +116,7 @@ class InteractionRecord(BaseModel):
 class IndividualMetadata(BaseModel):
     """Metadata specific to individual memories."""
 
+    user_id: UUID | None = Field(default=None, description="ID of the linked user in the system (if they are a system user)")
     name: str = Field(..., description="Person's name")
     relationship: str | None = Field(default=None, description="How you know this person")
     organization: str | None = Field(default=None, description="Company or organization affiliation")

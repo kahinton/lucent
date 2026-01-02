@@ -72,6 +72,13 @@ async def create_memory(
             detail=f"Invalid memory type. Must be one of: {', '.join(valid_types)}",
         )
     
+    # Individual memories cannot be created via API - they are auto-created when users are added
+    if data.type == "individual":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Individual memories cannot be created directly. They are automatically created when users are added to the system.",
+        )
+    
     # Validate and normalize metadata for the memory type
     try:
         validated_metadata = validate_metadata(data.type, data.metadata)
@@ -334,6 +341,13 @@ async def delete_memory(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Memory not found",
+        )
+    
+    # Individual memories cannot be deleted via API - they are deleted when users are removed
+    if existing.get("type") == "individual":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Individual memories cannot be deleted directly. They are automatically deleted when users are removed from the system.",
         )
     
     # Check permissions
