@@ -9,13 +9,14 @@ from fastapi import APIRouter, Request, Form, Query, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from mnememcp.api.deps import get_current_user, CurrentUser
+from mnememcp.api.deps import get_current_user_for_web, CurrentUser
 from mnememcp.db.client import (
     MemoryRepository, 
     AuditRepository, 
     AccessRepository,
     UserRepository,
     OrganizationRepository,
+    ApiKeyRepository,
     get_pool,
 )
 
@@ -48,8 +49,11 @@ templates.env.filters["truncate"] = truncate
 
 
 async def get_user_context(request: Request) -> CurrentUser:
-    """Get the current user for web routes."""
-    return await get_current_user()
+    """Get the current user for web routes.
+    
+    Uses get_current_user_for_web which allows dev mode fallback for browser access.
+    """
+    return await get_current_user_for_web()
 
 
 # =============================================================================
@@ -808,8 +812,10 @@ async def settings(request: Request):
     user = await get_user_context(request)
     pool = await get_pool()
     org_repo = OrganizationRepository(pool)
+    api_key_repo = ApiKeyRepository(pool)
     
     org = await org_repo.get_by_id(user.organization_id)
+    api_keys = await api_key_repo.list_by_user(user.id)
     
     return templates.TemplateResponse(
         "settings.html",
@@ -817,5 +823,61 @@ async def settings(request: Request):
             "request": request,
             "user": user,
             "organization": org,
+            "api_keys": api_keys,
+            "new_api_key": None,  # Will be set after key creation
         },
     )
+
+
+# =============================================================================
+# API Keys
+# =============================================================================
+
+@router.post("/settings/api-keys", response_class=HTMLResponse)
+async def create_api_key(
+    request: Request,
+    name: str = Form(...),
+):
+    """Create a new API key."""
+    user = await get_user_context(request)
+    pool = await get_pool()
+    api_key_repo = ApiKeyRepository(pool)
+    org_repo = OrganizationRepository(pool)
+    
+    # Create the new key
+    key_record, plain_key = await api_key_repo.create(
+        user_id=user.id,
+        organization_id=user.organization_id,
+        name=name,
+    )
+    
+    # Get other data for the settings page
+    org = await org_repo.get_by_id(user.organization_id)
+    api_keys = await api_key_repo.list_by_user(user.id)
+    
+    return templates.TemplateResponse(
+        "settings.html",
+        {
+            "request": request,
+            "user": user,
+            "organization": org,
+            "api_keys": api_keys,
+            "new_api_key": plain_key,  # Show the key once
+            "new_key_name": name,
+        },
+    )
+
+
+@router.post("/settings/api-keys/{key_id}/revoke", response_class=HTMLResponse)
+async def revoke_api_key(request: Request, key_id: UUID):
+    """Revoke an API key."""
+    user = await get_user_context(request)
+    pool = await get_pool()
+    api_key_repo = ApiKeyRepository(pool)
+    
+    success = await api_key_repo.revoke(key_id, user.id)
+    
+    if not success:
+        raise HTTPException(status_code=404, detail="API key not found")
+    
+    return RedirectResponse("/settings", status_code=303)

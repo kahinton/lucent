@@ -6,10 +6,34 @@
 <!-- Page Header -->
 <div class="mb-8">
     <h1 class="text-2xl font-bold text-gray-900">Settings</h1>
-    <p class="mt-1 text-sm text-gray-500">Manage your profile and view system information</p>
+    <p class="mt-1 text-sm text-gray-500">Manage your profile, API keys, and view system information</p>
 </div>
 
 <div class="space-y-6">
+    <!-- Newly Created API Key Alert -->
+    {% if new_api_key %}
+    <div class="bg-green-50 border border-green-200 rounded-xl p-6">
+        <div class="flex items-start gap-4">
+            <div class="flex-shrink-0">
+                <svg class="w-6 h-6 text-green-500" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+            </div>
+            <div class="flex-1">
+                <h3 class="text-lg font-semibold text-green-800">API Key Created: {{ new_key_name }}</h3>
+                <p class="mt-1 text-sm text-green-700">Copy your API key now. You won't be able to see it again!</p>
+                <div class="mt-3 flex items-center gap-2">
+                    <code id="new-api-key" class="flex-1 text-sm font-mono bg-white text-gray-800 px-4 py-3 rounded-lg border border-green-300 select-all">{{ new_api_key }}</code>
+                    <button onclick="copyApiKey()" class="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors text-sm font-medium">
+                        Copy
+                    </button>
+                </div>
+                <p class="mt-2 text-xs text-green-600">Use this key in your MCP client configuration with: Authorization: Bearer {{ new_api_key[:20] }}...</p>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
     <!-- User Profile -->
     <div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
         <div class="px-6 py-4 border-b border-gray-100">
@@ -49,7 +73,85 @@
                     </div>
                 </div>
             </div>
-            <p class="mt-4 text-xs text-gray-400">Profile editing is not available in development mode</p>
+        </div>
+    </div>
+
+    <!-- API Keys -->
+    <div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+        <div class="px-6 py-4 border-b border-gray-100">
+            <div class="flex items-center justify-between">
+                <div class="flex items-center gap-3">
+                    <svg class="w-5 h-5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 5.25a3 3 0 013 3m3 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121.75 8.25z" />
+                    </svg>
+                    <h2 class="text-lg font-semibold text-gray-900">API Keys</h2>
+                </div>
+            </div>
+            <p class="mt-1 text-sm text-gray-500">Create API keys to authenticate MCP clients and API requests</p>
+        </div>
+        <div class="p-6">
+            <!-- Create New Key Form -->
+            <form action="/settings/api-keys" method="post" class="mb-6">
+                <div class="flex gap-3">
+                    <input 
+                        type="text" 
+                        name="name" 
+                        placeholder="Key name (e.g., VS Code, Claude Desktop)" 
+                        required
+                        class="flex-1 px-4 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none"
+                    >
+                    <button type="submit" class="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition-colors text-sm font-medium whitespace-nowrap">
+                        Create API Key
+                    </button>
+                </div>
+            </form>
+
+            <!-- Existing Keys -->
+            {% if api_keys %}
+            <div class="overflow-x-auto">
+                <table class="w-full">
+                    <thead>
+                        <tr class="border-b border-gray-100">
+                            <th class="text-left py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
+                            <th class="text-left py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Key</th>
+                            <th class="text-left py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Created</th>
+                            <th class="text-left py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Last Used</th>
+                            <th class="text-left py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Uses</th>
+                            <th class="text-right py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-gray-100">
+                        {% for key in api_keys %}
+                        <tr class="{% if not key.is_active %}opacity-50{% endif %}">
+                            <td class="py-3 text-sm font-medium text-gray-900">{{ key.name }}</td>
+                            <td class="py-3">
+                                <code class="text-sm font-mono bg-gray-100 text-gray-600 px-2 py-1 rounded">{{ key.key_prefix }}...</code>
+                            </td>
+                            <td class="py-3 text-sm text-gray-600">{{ key.created_at | datetime }}</td>
+                            <td class="py-3 text-sm text-gray-600">{{ key.last_used_at | datetime if key.last_used_at else 'Never' }}</td>
+                            <td class="py-3 text-sm text-gray-600">{{ key.use_count }}</td>
+                            <td class="py-3 text-right">
+                                {% if key.is_active %}
+                                <form action="/settings/api-keys/{{ key.id }}/revoke" method="post" class="inline" onsubmit="return confirm('Are you sure you want to revoke this API key? This cannot be undone.')">
+                                    <button type="submit" class="text-sm text-red-600 hover:text-red-700 font-medium">Revoke</button>
+                                </form>
+                                {% else %}
+                                <span class="text-sm text-gray-400">Revoked</span>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% else %}
+            <div class="text-center py-8">
+                <svg class="mx-auto w-12 h-12 text-gray-300" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 5.25a3 3 0 013 3m3 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121.75 8.25z" />
+                </svg>
+                <p class="mt-2 text-sm text-gray-500">No API keys yet. Create one to get started.</p>
+            </div>
+            {% endif %}
         </div>
     </div>
 
@@ -126,20 +228,45 @@
             </div>
             
             <div class="mt-6">
-                <p class="text-xs font-medium text-gray-500 uppercase tracking-wider mb-3">Example Usage</p>
+                <p class="text-xs font-medium text-gray-500 uppercase tracking-wider mb-3">Example Usage with API Key</p>
                 <pre class="text-xs font-mono bg-gray-900 text-gray-100 p-4 rounded-lg overflow-x-auto">
-<span class="text-gray-500"># Search memories</span>
-curl "http://localhost:8766/api/search?query=python"
-
-<span class="text-gray-500"># Get a specific memory</span>
-curl "http://localhost:8766/api/memories/{memory_id}"
+<span class="text-gray-500"># Search memories (with API key)</span>
+curl "http://localhost:8766/api/search?query=python" \
+  -H "Authorization: Bearer mcp_your_api_key_here"
 
 <span class="text-gray-500"># Create a memory</span>
 curl -X POST "http://localhost:8766/api/memories" \
+  -H "Authorization: Bearer mcp_your_api_key_here" \
   -H "Content-Type: application/json" \
   -d '{"username": "user", "type": "technical", "content": "..."}'</pre>
+            </div>
+            
+            <div class="mt-6">
+                <p class="text-xs font-medium text-gray-500 uppercase tracking-wider mb-3">VS Code MCP Configuration</p>
+                <pre class="text-xs font-mono bg-gray-900 text-gray-100 p-4 rounded-lg overflow-x-auto">
+<span class="text-gray-500">// .vscode/mcp.json</span>
+{
+  "servers": {
+    "mnememcp": {
+      "url": "http://localhost:8765/mcp",
+      "type": "http",
+      "headers": {
+        "Authorization": "Bearer mcp_your_api_key_here"
+      }
+    }
+  }
+}</pre>
             </div>
         </div>
     </div>
 </div>
+
+<script>
+function copyApiKey() {
+    const keyElement = document.getElementById('new-api-key');
+    navigator.clipboard.writeText(keyElement.textContent).then(() => {
+        alert('API key copied to clipboard!');
+    });
+}
+</script>
 {% endblock %}
