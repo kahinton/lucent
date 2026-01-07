@@ -4,7 +4,7 @@ import pytest
 from uuid import UUID
 from datetime import datetime
 
-from hindsight.models.memory import (
+from mnememcp.models.memory import (
     Memory,
     MemoryType,
     GoalStatus,

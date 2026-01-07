@@ -1,4 +1,4 @@
-# Hindsight
+# mnemeMCP
 
 An MCP (Model Context Protocol) server providing persistent memory functionality for LLMs. Store, search, and retrieve memories across conversations to enhance AI assistant capabilities.
 
@@ -35,7 +35,7 @@ An MCP (Model Context Protocol) server providing persistent memory functionality
 
 ```bash
 # Clone and enter the repository
-cd hindsight
+cd mnememcp
 
 # Start PostgreSQL with Docker
 docker compose up -d postgres
@@ -65,11 +65,11 @@ cp .env.example .env
 
 ```bash
 # Set database URL and enable dev mode
-export DATABASE_URL="postgresql://hindsight:hindsight_dev_password@localhost:5432/hindsight"
-export HINDSIGHT_DEV_MODE=true
+export DATABASE_URL="postgresql://mnememcp:mnememcp_dev_password@localhost:5433/mnememcp"
+export MNEMEMCP_DEV_MODE=true
 
 # Run the MCP server
-hindsight
+mnememcp
 ```
 
 ### 5. Configure Your MCP Client
@@ -92,11 +92,11 @@ For Claude Desktop, add to your `claude_desktop_config.json`:
 ```json
 {
   "mcpServers": {
-    "hindsight": {
-      "command": "hindsight",
+    "mnememcp": {
+      "command": "mnememcp",
       "env": {
-        "DATABASE_URL": "postgresql://hindsight:hindsight_dev_password@localhost:5432/hindsight",
-        "HINDSIGHT_DEV_MODE": "true"
+        "DATABASE_URL": "postgresql://mnememcp:mnememcp_dev_password@localhost:5433/mnememcp",
+        "MNEMEMCP_DEV_MODE": "true"
       }
     }
   }
@@ -110,7 +110,7 @@ For Claude Desktop, add to your `claude_desktop_config.json`:
 For local development and testing, enable dev mode to bypass authentication:
 
 ```bash
-export HINDSIGHT_DEV_MODE=true
+export MNEMEMCP_DEV_MODE=true
 ```
 
 This creates a local "dev-user" that all memories are associated with.
@@ -120,7 +120,7 @@ This creates a local "dev-user" that all memories are associated with.
 In production, disable dev mode and configure OAuth or SAML:
 
 ```bash
-export HINDSIGHT_DEV_MODE=false
+export MNEMEMCP_DEV_MODE=false
 # Configure your OAuth provider(s)
 ```
 
@@ -187,7 +187,7 @@ Arguments:
 
 ## System Prompts
 
-Hindsight provides prompt templates to help LLMs use the memory system effectively:
+mnemeMCP provides prompt templates to help LLMs use the memory system effectively:
 
 - **memory_usage_guide**: Comprehensive guidance on memory types, importance ratings, and best practices
 - **memory_usage_guide_short**: Condensed version for limited prompt space
@@ -212,7 +212,7 @@ Run both PostgreSQL and the MCP server in containers:
 docker compose up -d
 
 # View logs
-docker compose logs -f hindsight
+docker compose logs -f mnememcp
 ```
 
 ### Database Only
@@ -225,10 +225,10 @@ docker compose up -d postgres
 
 ### Persistent Storage
 
-Data is stored in a Docker volume (`hindsight_data`). To backup:
+Data is stored in a Docker volume (`mnememcp_data`). To backup:
 
 ```bash
-docker compose exec postgres pg_dump -U hindsight hindsight > backup.sql
+docker compose exec postgres pg_dump -U mnememcp mnememcp > backup.sql
 ```
 
 ## Development
@@ -255,7 +255,7 @@ ruff format src/
 ## Architecture
 
 ```
-src/hindsight/
+src/mnememcp/
 ├── server.py          # MCP server entry point
 ├── db/
 │   ├── client.py      # asyncpg connection pool & repository

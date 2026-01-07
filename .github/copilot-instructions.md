@@ -1,6 +1,6 @@
-# Copilot Instructions for Hindsight Memory System
+# Copilot Instructions for mnemeMCP Memory System
 
-This repository contains the Hindsight MCP server, a persistent memory system for LLMs. When working in this repository or any repository where the Hindsight memory server is available, follow these guidelines.
+This repository contains the mnemeMCP MCP server, a persistent memory system for LLMs. When working in this repository or any repository where the mnemeMCP memory server is available, follow these guidelines.
 
 ## Using the Memory System
 
@@ -60,7 +60,7 @@ You have access to a persistent memory system that allows you to store and retri
 - Use **lowercase** (tags are auto-normalized anyway)
 - Use **hyphens** for multi-word tags: `bug-fix`, `code-review`, `api-design`
 - Be **specific but not overly granular**: `python` not `python3.12`
-- Use **prefixes** for organization: `lang-python`, `project-hindsight`, `team-backend`
+- Use **prefixes** for organization: `lang-python`, `project-mnememcp`, `team-backend`
 
 ### ❌ Don't Do This
 ```
@@ -141,7 +141,7 @@ Creating memory with tags: ["Python", "py", "python3"]
 
 ## Repository-Specific Notes
 
-This is the Hindsight repository itself. When working on this codebase:
+This is the mnemeMCP repository itself. When working on this codebase:
 
 - **Language**: Python 3.12+
 - **Key dependencies**: mcp (FastMCP), asyncpg, pydantic
@@ -150,7 +150,7 @@ This is the Hindsight repository itself. When working on this codebase:
 
 ### Project Structure
 ```
-src/hindsight/
+src/mnememcp/
 ├── server.py          # MCP server entry point
 ├── db/
 │   ├── client.py      # asyncpg connection pool & MemoryRepository
@@ -167,6 +167,6 @@ src/hindsight/
 ```bash
 docker compose up -d postgres
 source .venv/bin/activate
-export DATABASE_URL="postgresql://hindsight:hindsight_dev_password@localhost:5433/hindsight"
-hindsight
+export DATABASE_URL="postgresql://mnememcp:mnememcp_dev_password@localhost:5433/mnememcp"
+mnememcp
 ```

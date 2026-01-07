@@ -1,0 +1,145 @@
+{% extends "base.html" %}
+
+{% block title %}Settings - mnemeMCP{% endblock %}
+
+{% block content %}
+<!-- Page Header -->
+<div class="mb-8">
+    <h1 class="text-2xl font-bold text-gray-900">Settings</h1>
+    <p class="mt-1 text-sm text-gray-500">Manage your profile and view system information</p>
+</div>
+
+<div class="space-y-6">
+    <!-- User Profile -->
+    <div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+        <div class="px-6 py-4 border-b border-gray-100">
+            <div class="flex items-center gap-3">
+                <svg class="w-5 h-5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" />
+                </svg>
+                <h2 class="text-lg font-semibold text-gray-900">Your Profile</h2>
+            </div>
+        </div>
+        <div class="p-6">
+            <div class="flex items-start gap-6">
+                <div class="flex items-center justify-center w-20 h-20 rounded-full bg-gradient-to-br from-primary-400 to-primary-600 text-white text-2xl font-bold shadow-lg">
+                    {{ (user.display_name or user.email or 'U')[0] | upper }}
+                </div>
+                <div class="flex-1 grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                        <label class="block text-xs font-medium text-gray-500 uppercase tracking-wider">Display Name</label>
+                        <p class="mt-1 text-sm font-medium text-gray-900">{{ user.display_name or '—' }}</p>
+                    </div>
+                    <div>
+                        <label class="block text-xs font-medium text-gray-500 uppercase tracking-wider">Email</label>
+                        <p class="mt-1 text-sm font-medium text-gray-900">{{ user.email or '—' }}</p>
+                    </div>
+                    <div>
+                        <label class="block text-xs font-medium text-gray-500 uppercase tracking-wider">Role</label>
+                        <span class="mt-1 inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium
+                            {% if user.role == 'owner' %}bg-purple-100 text-purple-700
+                            {% elif user.role == 'admin' %}bg-blue-100 text-blue-700
+                            {% else %}bg-gray-100 text-gray-700{% endif %}">
+                            {{ user.role | capitalize }}
+                        </span>
+                    </div>
+                    <div>
+                        <label class="block text-xs font-medium text-gray-500 uppercase tracking-wider">User ID</label>
+                        <p class="mt-1 text-xs font-mono text-gray-600 bg-gray-100 px-2 py-1 rounded inline-block">{{ user.id }}</p>
+                    </div>
+                </div>
+            </div>
+            <p class="mt-4 text-xs text-gray-400">Profile editing is not available in development mode</p>
+        </div>
+    </div>
+
+    <!-- Organization -->
+    <div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+        <div class="px-6 py-4 border-b border-gray-100">
+            <div class="flex items-center gap-3">
+                <svg class="w-5 h-5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 21h19.5m-18-18v18m10.5-18v18m6-13.5V21M6.75 6.75h.75m-.75 3h.75m-.75 3h.75m3-6h.75m-.75 3h.75m-.75 3h.75M6.75 21v-3.375c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125V21M3 3h12m-.75 4.5H21m-3.75 3.75h.008v.008h-.008v-.008zm0 3h.008v.008h-.008v-.008zm0 3h.008v.008h-.008v-.008z" />
+                </svg>
+                <h2 class="text-lg font-semibold text-gray-900">Organization</h2>
+            </div>
+        </div>
+        <div class="p-6">
+            {% if organization %}
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div>
+                    <label class="block text-xs font-medium text-gray-500 uppercase tracking-wider">Name</label>
+                    <p class="mt-1 text-sm font-medium text-gray-900">{{ organization.name }}</p>
+                </div>
+                <div>
+                    <label class="block text-xs font-medium text-gray-500 uppercase tracking-wider">Organization ID</label>
+                    <p class="mt-1 text-xs font-mono text-gray-600 bg-gray-100 px-2 py-1 rounded inline-block">{{ organization.id }}</p>
+                </div>
+                <div>
+                    <label class="block text-xs font-medium text-gray-500 uppercase tracking-wider">Created</label>
+                    <p class="mt-1 text-sm font-medium text-gray-900">{{ organization.created_at | datetime }}</p>
+                </div>
+            </div>
+            {% else %}
+            <p class="text-sm text-gray-500">No organization information available</p>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- API Access -->
+    <div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+        <div class="px-6 py-4 border-b border-gray-100">
+            <div class="flex items-center gap-3">
+                <svg class="w-5 h-5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M17.25 6.75L22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3l-4.5 16.5" />
+                </svg>
+                <h2 class="text-lg font-semibold text-gray-900">API Access</h2>
+            </div>
+        </div>
+        <div class="p-6">
+            <p class="text-sm text-gray-600 mb-4">Use these endpoints to integrate with mnemeMCP:</p>
+            
+            <div class="overflow-x-auto">
+                <table class="w-full">
+                    <tbody class="divide-y divide-gray-100">
+                        <tr>
+                            <td class="py-3 text-sm font-medium text-gray-700">MCP Server</td>
+                            <td class="py-3">
+                                <code class="text-sm font-mono bg-gray-100 text-gray-800 px-3 py-1 rounded">http://localhost:8765/mcp</code>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="py-3 text-sm font-medium text-gray-700">REST API</td>
+                            <td class="py-3">
+                                <code class="text-sm font-mono bg-gray-100 text-gray-800 px-3 py-1 rounded">http://localhost:8766/api</code>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="py-3 text-sm font-medium text-gray-700">API Docs</td>
+                            <td class="py-3">
+                                <a href="http://localhost:8766/api/docs" target="_blank" class="text-sm text-primary-600 hover:text-primary-700">
+                                    http://localhost:8766/api/docs →
+                                </a>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            
+            <div class="mt-6">
+                <p class="text-xs font-medium text-gray-500 uppercase tracking-wider mb-3">Example Usage</p>
+                <pre class="text-xs font-mono bg-gray-900 text-gray-100 p-4 rounded-lg overflow-x-auto">
+<span class="text-gray-500"># Search memories</span>
+curl "http://localhost:8766/api/search?query=python"
+
+<span class="text-gray-500"># Get a specific memory</span>
+curl "http://localhost:8766/api/memories/{memory_id}"
+
+<span class="text-gray-500"># Create a memory</span>
+curl -X POST "http://localhost:8766/api/memories" \
+  -H "Content-Type: application/json" \
+  -d '{"username": "user", "type": "technical", "content": "..."}'</pre>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
