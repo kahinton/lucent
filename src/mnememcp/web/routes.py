@@ -806,8 +806,48 @@ async def users_list(request: Request):
 # Settings
 # =============================================================================
 
+# Temporary storage for newly created API keys (shown once after redirect)
+# Key: key_id, Value: (plain_key, created_at)
+# Entries are cleaned up after being read or after 60 seconds
+_pending_api_keys: dict[str, tuple[str, float]] = {}
+
+
+def _store_pending_key(key_id: str, plain_key: str) -> None:
+    """Store a newly created API key for display after redirect."""
+    import time
+    _pending_api_keys[key_id] = (plain_key, time.time())
+
+
+def _get_pending_key(key_id: str) -> str | None:
+    """Get and remove a pending API key. Returns None if not found or expired."""
+    import time
+    if key_id not in _pending_api_keys:
+        return None
+    
+    plain_key, created_at = _pending_api_keys.pop(key_id)
+    
+    # Expire after 60 seconds
+    if time.time() - created_at > 60:
+        return None
+    
+    return plain_key
+
+
+def _cleanup_pending_keys() -> None:
+    """Remove expired pending keys."""
+    import time
+    now = time.time()
+    expired = [k for k, (_, created_at) in _pending_api_keys.items() if now - created_at > 60]
+    for k in expired:
+        _pending_api_keys.pop(k, None)
+
+
 @router.get("/settings", response_class=HTMLResponse)
-async def settings(request: Request):
+async def settings(
+    request: Request,
+    new_key_id: str | None = Query(default=None),
+    error: str | None = Query(default=None),
+):
     """User and organization settings."""
     user = await get_user_context(request)
     pool = await get_pool()
@@ -817,6 +857,19 @@ async def settings(request: Request):
     org = await org_repo.get_by_id(user.organization_id)
     api_keys = await api_key_repo.list_by_user(user.id)
     
+    # Check for newly created key to display
+    new_api_key = None
+    new_key_name = None
+    if new_key_id:
+        _cleanup_pending_keys()
+        new_api_key = _get_pending_key(new_key_id)
+        if new_api_key:
+            # Find the key name
+            for key in api_keys:
+                if str(key["id"]) == new_key_id:
+                    new_key_name = key["name"]
+                    break
+    
     return templates.TemplateResponse(
         "settings.html",
         {
@@ -824,7 +877,9 @@ async def settings(request: Request):
             "user": user,
             "organization": org,
             "api_keys": api_keys,
-            "new_api_key": None,  # Will be set after key creation
+            "new_api_key": new_api_key,
+            "new_key_name": new_key_name,
+            "error": error,
         },
     )
 
@@ -833,7 +888,7 @@ async def settings(request: Request):
 # API Keys
 # =============================================================================
 
-@router.post("/settings/api-keys", response_class=HTMLResponse)
+@router.post("/settings/api-keys")
 async def create_api_key(
     request: Request,
     name: str = Form(...),
@@ -842,30 +897,26 @@ async def create_api_key(
     user = await get_user_context(request)
     pool = await get_pool()
     api_key_repo = ApiKeyRepository(pool)
-    org_repo = OrganizationRepository(pool)
     
-    # Create the new key
-    key_record, plain_key = await api_key_repo.create(
-        user_id=user.id,
-        organization_id=user.organization_id,
-        name=name,
-    )
-    
-    # Get other data for the settings page
-    org = await org_repo.get_by_id(user.organization_id)
-    api_keys = await api_key_repo.list_by_user(user.id)
-    
-    return templates.TemplateResponse(
-        "settings.html",
-        {
-            "request": request,
-            "user": user,
-            "organization": org,
-            "api_keys": api_keys,
-            "new_api_key": plain_key,  # Show the key once
-            "new_key_name": name,
-        },
-    )
+    try:
+        # Create the new key
+        key_record, plain_key = await api_key_repo.create(
+            user_id=user.id,
+            organization_id=user.organization_id,
+            name=name.strip(),
+        )
+        
+        # Store the plain key temporarily for display after redirect
+        key_id = str(key_record["id"])
+        _store_pending_key(key_id, plain_key)
+        
+        # Redirect to settings with key ID (POST-Redirect-GET pattern)
+        return RedirectResponse(f"/settings?new_key_id={key_id}", status_code=303)
+        
+    except ValueError as e:
+        # Duplicate name error
+        from urllib.parse import quote
+        return RedirectResponse(f"/settings?error={quote(str(e))}", status_code=303)
 
 
 @router.post("/settings/api-keys/{key_id}/revoke", response_class=HTMLResponse)

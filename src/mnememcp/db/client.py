@@ -1476,9 +1476,17 @@ class ApiKeyRepository:
         Returns:
             Tuple of (api_key record, plain_text_key).
             The plain text key is only returned once at creation time.
+            
+        Raises:
+            ValueError: If a key with this name already exists for this user.
         """
         import secrets
         import bcrypt
+        
+        # Check for existing active key with this name
+        existing = await self.get_by_name(user_id, name)
+        if existing:
+            raise ValueError(f"An API key named '{name}' already exists")
         
         # Generate a secure random key with prefix
         raw_key = secrets.token_urlsafe(32)
@@ -1508,6 +1516,31 @@ class ApiKeyRepository:
             )
         
         return self._row_to_dict(row), plain_key
+    
+    async def get_by_name(self, user_id: UUID, name: str) -> dict[str, Any] | None:
+        """Get an active API key by name for a user.
+        
+        Args:
+            user_id: The user ID.
+            name: The key name.
+            
+        Returns:
+            The API key record, or None if not found.
+        """
+        query = """
+            SELECT id, user_id, organization_id, name, key_prefix, scopes,
+                   last_used_at, use_count, expires_at, is_active, created_at, updated_at
+            FROM api_keys
+            WHERE user_id = $1 AND name = $2 AND revoked_at IS NULL
+        """
+        
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(query, str(user_id), name)
+        
+        if row is None:
+            return None
+        
+        return self._row_to_dict(row)
     
     async def verify(self, plain_key: str) -> dict[str, Any] | None:
         """Verify an API key and return the associated record.
