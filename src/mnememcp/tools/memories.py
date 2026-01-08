@@ -8,7 +8,7 @@ from uuid import UUID
 
 from mcp.server.fastmcp import FastMCP
 
-from mnememcp.auth import ensure_dev_user, get_current_user, is_dev_mode
+from mnememcp.auth import ensure_dev_user, get_current_user, is_dev_mode, get_current_api_key_id
 from mnememcp.db.client import AccessRepository, AuditRepository, MemoryRepository, get_pool, init_db
 from mnememcp.models.memory import (
     CreateMemoryInput,
@@ -66,6 +66,21 @@ async def _get_current_user_context() -> tuple[UUID | None, UUID | None, str | N
     
     # No user context and not in dev mode
     return None, None, None
+
+
+def _get_audit_context() -> dict[str, Any]:
+    """Get the audit context including API key ID if authenticated via API key.
+    
+    Returns:
+        Dict with auth_method and optional api_key_id.
+    """
+    api_key_id = get_current_api_key_id()
+    if api_key_id:
+        return {
+            "auth_method": "api_key",
+            "api_key_id": str(api_key_id),
+        }
+    return {"auth_method": "session"}
 
 
 async def _get_repository() -> MemoryRepository:
@@ -196,6 +211,7 @@ Returns:
                     "importance": input_data.importance,
                     "metadata": input_data.metadata,
                 },
+                context=_get_audit_context(),
             )
             
             return json.dumps(_serialize_memory(result), indent=2)
@@ -563,6 +579,7 @@ Returns:
                     changed_fields=changed_fields,
                     old_values=old_values,
                     new_values=new_values,
+                    context=_get_audit_context(),
                 )
             
             return json.dumps(_serialize_memory(result), indent=2)
@@ -619,6 +636,7 @@ Returns:
                     "tags": old_memory["tags"],
                     "importance": old_memory["importance"],
                 },
+                context=_get_audit_context(),
             )
             
             return json.dumps({
@@ -751,6 +769,7 @@ Returns:
                 changed_fields=["shared"],
                 old_values={"shared": False},
                 new_values={"shared": True},
+                context=_get_audit_context(),
             )
             
             return json.dumps(_serialize_memory(result), indent=2)
@@ -803,6 +822,7 @@ Returns:
                 changed_fields=["shared"],
                 old_values={"shared": True},
                 new_values={"shared": False},
+                context=_get_audit_context(),
             )
             
             return json.dumps(_serialize_memory(result), indent=2)

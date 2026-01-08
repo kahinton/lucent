@@ -22,6 +22,7 @@ class CurrentUser:
         email: str | None,
         display_name: str | None,
         auth_method: str = "session",  # "session", "api_key", "oauth"
+        api_key_id: UUID | None = None,  # Set when authenticated via API key
     ):
         self.id = id
         self.organization_id = organization_id
@@ -29,6 +30,7 @@ class CurrentUser:
         self.email = email
         self.display_name = display_name
         self.auth_method = auth_method
+        self.api_key_id = api_key_id
     
     def has_permission(self, permission: Permission) -> bool:
         """Check if this user has a specific permission."""
@@ -41,6 +43,13 @@ class CurrentUser:
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"Permission denied: {permission.value}",
             )
+    
+    def get_audit_context(self) -> dict[str, Any]:
+        """Get context dict for audit logging."""
+        ctx = {"auth_method": self.auth_method}
+        if self.api_key_id:
+            ctx["api_key_id"] = str(self.api_key_id)
+        return ctx
 
 
 async def _authenticate_with_api_key(api_key: str) -> CurrentUser | None:
@@ -80,6 +89,7 @@ async def _authenticate_with_api_key(api_key: str) -> CurrentUser | None:
         email=user.get("email"),
         display_name=user.get("display_name"),
         auth_method="api_key",
+        api_key_id=key_info["id"],  # Include the API key ID for auditing
     )
 
 

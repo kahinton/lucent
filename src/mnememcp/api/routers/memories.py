@@ -114,6 +114,7 @@ async def create_memory(
             "importance": data.importance,
             "metadata": data.metadata,
         },
+        context=user.get_audit_context(),
     )
     
     return _memory_to_response(result)
@@ -316,6 +317,7 @@ async def update_memory(
             changed_fields=changed_fields,
             old_values=old_values,
             new_values=new_values,
+            context=user.get_audit_context(),
         )
     
     return _memory_to_response(result)
@@ -380,6 +382,7 @@ async def delete_memory(
             "tags": existing["tags"],
             "importance": existing["importance"],
         },
+        context=user.get_audit_context(),
     )
     
     return SuccessResponse(success=True, message=f"Memory {memory_id} deleted")
@@ -421,6 +424,7 @@ async def share_memory(
         changed_fields=["shared"],
         old_values={"shared": False},
         new_values={"shared": True},
+        context=user.get_audit_context(),
     )
     
     return _memory_to_response(result)
@@ -460,6 +464,7 @@ async def unshare_memory(
         changed_fields=["shared"],
         old_values={"shared": True},
         new_values={"shared": False},
+        context=user.get_audit_context(),
     )
     
     return _memory_to_response(result)

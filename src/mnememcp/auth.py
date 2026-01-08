@@ -10,6 +10,9 @@ from mnememcp.db.client import OrganizationRepository, UserRepository, get_pool,
 # Context variable to store the current user for the request
 _current_user: ContextVar[dict[str, Any] | None] = ContextVar("current_user", default=None)
 
+# Context variable to store the current API key ID (when authenticated via API key)
+_current_api_key_id: ContextVar[UUID | None] = ContextVar("current_api_key_id", default=None)
+
 # Development mode settings
 DEV_MODE = os.environ.get("MNEMEMCP_DEV_MODE", "false").lower() in ("true", "1", "yes")
 DEV_USER_ID = os.environ.get("MNEMEMCP_DEV_USER_ID", "dev-user")
@@ -45,6 +48,24 @@ def set_current_user(user: dict[str, Any] | None) -> None:
         user: The user dict to set as current, or None to clear.
     """
     _current_user.set(user)
+
+
+def get_current_api_key_id() -> UUID | None:
+    """Get the current API key ID from context.
+    
+    Returns:
+        The API key UUID if authenticated via API key, or None otherwise.
+    """
+    return _current_api_key_id.get()
+
+
+def set_current_api_key_id(api_key_id: UUID | None) -> None:
+    """Set the current API key ID in context.
+    
+    Args:
+        api_key_id: The API key UUID, or None to clear.
+    """
+    _current_api_key_id.set(api_key_id)
 
 
 def get_current_user_id() -> UUID | None:

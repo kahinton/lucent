@@ -9,7 +9,7 @@ from mcp.server.fastmcp import FastMCP
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 
-from mnememcp.auth import ensure_dev_user, is_dev_mode, set_current_user
+from mnememcp.auth import ensure_dev_user, is_dev_mode, set_current_user, set_current_api_key_id
 from mnememcp.prompts.memory_usage import get_memory_system_prompt, get_memory_system_prompt_short
 from mnememcp.tools.memories import register_tools
 
@@ -71,8 +71,10 @@ class MCPAuthMiddleware(BaseHTTPMiddleware):
                             user = await user_repo.get_by_id(key_info["user_id"])
                             if user:
                                 set_current_user(user)
+                                set_current_api_key_id(key_info["id"])  # Store API key ID for auditing
                                 response = await call_next(request)
                                 set_current_user(None)  # Clear after request
+                                set_current_api_key_id(None)
                                 return response
                 except Exception as e:
                     print(f"API key auth error: {e}", file=sys.stderr)
