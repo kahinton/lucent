@@ -16,7 +16,7 @@ MCP config example:
 ### CRUD
 | Tool | Use |
 |------|-----|
-| `create_memory` | New memory (username, type, content required) |
+| `create_memory` | New memory (type, content required) |
 | `get_memory` | Fetch full memory by UUID |
 | `update_memory` | Modify existing memory |
 | `delete_memory` | Soft delete (recoverable) |

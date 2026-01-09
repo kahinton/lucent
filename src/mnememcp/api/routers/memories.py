@@ -88,8 +88,11 @@ async def create_memory(
             detail=str(e),
         )
     
+    # Use authenticated user's info if username not provided
+    username = data.username or user.display_name or user.email or str(user.id)
+    
     result = await repo.create(
-        username=data.username,
+        username=username,
         type=data.type,
         content=data.content,
         tags=data.tags,
@@ -107,7 +110,7 @@ async def create_memory(
         user_id=user.id,
         organization_id=user.organization_id,
         new_values={
-            "username": data.username,
+            "username": username,
             "type": data.type,
             "content": data.content,
             "tags": data.tags,

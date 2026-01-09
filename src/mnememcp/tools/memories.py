@@ -68,6 +68,18 @@ async def _get_current_user_context() -> tuple[UUID | None, UUID | None, str | N
     return None, None, None
 
 
+def _get_current_username() -> str | None:
+    """Get the current user's display name or username.
+    
+    Returns:
+        The user's display_name, email, username, or None if not authenticated.
+    """
+    current_user = get_current_user()
+    if current_user:
+        return current_user.get("display_name") or current_user.get("email") or current_user.get("username") or str(current_user["id"])
+    return None
+
+
 def _get_audit_context() -> dict[str, Any]:
     """Get the audit context including API key ID if authenticated via API key.
     
@@ -125,22 +137,21 @@ def register_tools(mcp: FastMCP) -> None:
 
     # Build the docstring dynamically from the models
     # Note: Individual memories are excluded because they are auto-created when users join
-    create_memory_description = f"""Create a new memory in the knowledge base.
+    create_memory_description = """Create a new memory in the knowledge base.
 
 Args:
-    username: Username of the person this memory is being created for (required).
     type: Type of memory - one of: experience, technical, procedural, goal.
-        NOTE: "individual" type cannot be created via this tool - individual memories
-        are automatically created when users are added to the system.
     content: The main content/description of the memory.
+    username: Optional username (defaults to authenticated user).
     tags: Optional list of tags for categorization.
     importance: Importance rating from 1 (routine) to 10 (essential). Default is 5.
     related_memory_ids: Optional list of UUIDs of related memories to link.
-    metadata: Type-specific metadata. MUST match the schema for the memory type.
-        All fields are optional unless marked (REQUIRED).
-        Unknown fields will be ignored.
-
-{METADATA_DOCS}
+    metadata: Optional type-specific metadata. Structure depends on memory type:
+        - experience: {context, outcome, lessons_learned[], related_entities[]}
+        - technical: {category, language, code_snippet, references[], version_info, repo, filename}
+        - procedural: {steps[{order, description, notes}], prerequisites[], estimated_time, success_criteria, common_pitfalls[]}
+        - goal: {status, deadline, milestones[{description, status, completed_at}], blockers[], progress_notes[{date, note}], priority}
+        - individual: {name, relationship, organization, role, contact_info{email, phone, linkedin, github, other}, preferences[], interaction_history[{date, context, notes}], last_interaction}
 
 Returns:
     JSON string with the created memory including its ID.
@@ -148,9 +159,9 @@ Returns:
 
     @mcp.tool(description=create_memory_description)
     async def create_memory(
-        username: str,
         type: str,
         content: str,
+        username: str | None = None,
         tags: list[str] | None = None,
         importance: int = 5,
         related_memory_ids: list[str] | None = None,
@@ -169,8 +180,11 @@ Returns:
             # Validate and normalize metadata for the memory type
             validated_metadata = validate_metadata(memory_type, metadata)
             
+            # Use authenticated user's name if username not provided
+            effective_username = username or _get_current_username() or "unknown"
+            
             input_data = CreateMemoryInput(
-                username=username,
+                username=effective_username,
                 type=memory_type,
                 content=content,
                 tags=tags or [],
@@ -185,7 +199,7 @@ Returns:
             repo = await _get_repository()
             
             result = await repo.create(
-                username=input_data.username,
+                username=effective_username,
                 type=input_data.type.value,
                 content=input_data.content,
                 tags=input_data.tags,

@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 
 class MemoryCreate(BaseModel):
     """Request model for creating a memory."""
-    username: str = Field(..., description="Username of the person this memory is for")
+    username: str | None = Field(default=None, description="Username for this memory (defaults to authenticated user)")
     type: str = Field(..., description="Type: experience, technical, procedural, goal, individual")
     content: str = Field(..., description="Main content/description of the memory")
     tags: list[str] | None = Field(default=None, description="Tags for categorization")

@@ -170,7 +170,7 @@ class TruncatedMemory(BaseModel):
 class CreateMemoryInput(BaseModel):
     """Input for creating a new memory."""
 
-    username: str = Field(..., min_length=1, description="Username of the user creating this memory")
+    username: str | None = Field(default=None, description="Username for this memory (defaults to authenticated user)")
     type: MemoryType = Field(..., description="Type of memory to create")
     content: str = Field(..., min_length=1, description="Main content of the memory")
     tags: list[str] = Field(default_factory=list, description="Tags for categorization")
