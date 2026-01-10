@@ -1,6 +1,11 @@
-"""mnemeMCP MCP Server - Memory functionality for LLMs."""
+"""mnemeMCP Server - Unified MCP + API + Web Interface.
 
-import multiprocessing
+This module provides a single unified server that handles:
+- MCP protocol at /mcp
+- REST API at /api/*
+- Web dashboard at /
+"""
+
 import os
 import sys
 
@@ -9,7 +14,7 @@ from mcp.server.fastmcp import FastMCP
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 
-from mnememcp.auth import ensure_dev_user, is_dev_mode, set_current_user, set_current_api_key_id
+from mnememcp.auth import is_dev_mode, set_current_user, set_current_api_key_id
 from mnememcp.prompts.memory_usage import get_memory_system_prompt, get_memory_system_prompt_short
 from mnememcp.tools.memories import register_tools
 
@@ -19,8 +24,7 @@ load_dotenv()
 
 # Server configuration
 HOST = os.environ.get("MNEMEMCP_HOST", "0.0.0.0")
-PORT = int(os.environ.get("MNEMEMCP_PORT", "8765"))
-API_PORT = int(os.environ.get("MNEMEMCP_API_PORT", "8766"))
+PORT = int(os.environ.get("MNEMEMCP_PORT", "8766"))
 
 # Create the MCP server
 mcp = FastMCP("mnemeMCP")
@@ -128,15 +132,21 @@ def memory_usage_guide_short() -> str:
     return get_memory_system_prompt_short()
 
 
-def run_api_server():
-    """Run the Admin API server in a separate process."""
-    import uvicorn
-    from mnememcp.api.app import app
-    uvicorn.run(app, host=HOST, port=API_PORT, log_level="info")
+def get_mcp_app():
+    """Get the MCP Starlette app with auth middleware.
+    
+    Returns the MCP app which has routes at /mcp.
+    """
+    mcp_app = mcp.streamable_http_app()
+    mcp_app.add_middleware(MCPAuthMiddleware)
+    return mcp_app
 
 
 def main() -> None:
-    """Main entry point for the mnemeMCP MCP server."""
+    """Main entry point for the unified mnemeMCP server."""
+    import uvicorn
+    from mnememcp.api.app import create_app, set_mcp_session_manager
+    
     # Validate DATABASE_URL is set
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
@@ -150,22 +160,27 @@ def main() -> None:
     else:
         print("Running in PRODUCTION MODE - API key required for MCP/API access", file=sys.stderr)
     
-    # Run the MCP server with streamable HTTP transport
-    print(f"Starting mnemeMCP MCP server on http://{HOST}:{PORT}", file=sys.stderr)
-    print(f"Starting mnemeMCP Admin API on http://{HOST}:{API_PORT}", file=sys.stderr)
-    print(f"API documentation at http://{HOST}:{API_PORT}/api/docs", file=sys.stderr)
+    # Get MCP app and session manager
+    mcp_app = get_mcp_app()
     
-    # Start the Admin API in a separate process
-    api_process = multiprocessing.Process(target=run_api_server, daemon=True)
-    api_process.start()
+    # Set the session manager for lifecycle integration
+    set_mcp_session_manager(mcp.session_manager)
     
-    # Get the MCP Starlette app and add auth middleware
-    mcp_app = mcp.streamable_http_app()
-    mcp_app.add_middleware(MCPAuthMiddleware)
+    # Create the unified FastAPI app (after setting session manager)
+    app = create_app()
     
-    # Run the MCP server with the middleware-enhanced app
-    import uvicorn
-    uvicorn.run(mcp_app, host=HOST, port=PORT, log_level="info")
+    # Add MCP routes directly (MCP SDK creates route at /mcp)
+    for route in mcp_app.routes:
+        app.routes.append(route)
+    
+    print(f"Starting mnemeMCP server on http://{HOST}:{PORT}", file=sys.stderr)
+    print(f"  MCP endpoint: http://{HOST}:{PORT}/mcp", file=sys.stderr)
+    print(f"  REST API: http://{HOST}:{PORT}/api", file=sys.stderr)
+    print(f"  Web UI: http://{HOST}:{PORT}/", file=sys.stderr)
+    print(f"  API docs: http://{HOST}:{PORT}/api/docs", file=sys.stderr)
+    
+    # Run the unified server
+    uvicorn.run(app, host=HOST, port=PORT, log_level="info")
 
 
 if __name__ == "__main__":

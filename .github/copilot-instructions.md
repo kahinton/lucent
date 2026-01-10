@@ -8,7 +8,7 @@ Persistent memory for LLMs. Store/retrieve information across conversations.
 
 MCP config example:
 ```json
-{"servers":{"mnememcp":{"url":"http://localhost:8765/mcp","type":"http","headers":{"Authorization":"Bearer mcp_your_key"}}}}
+{"servers":{"mnememcp":{"url":"http://localhost:8766/mcp","type":"http","headers":{"Authorization":"Bearer mcp_your_key"}}}}
 ```
 
 ## Tools Reference
@@ -67,9 +67,9 @@ Both support: `query`, `username`, `type`, `tags`, `importance_min/max`, `create
 ### When search results truncated:
 - Use `get_memory(id)` for full content
 
-## Endpoints
+## Endpoints (all on port 8766)
 
-- **MCP**: `http://localhost:8765/mcp`
+- **MCP**: `http://localhost:8766/mcp`
 - **REST API**: `http://localhost:8766/api`
 - **Web UI**: `http://localhost:8766/`
 - **API Docs**: `http://localhost:8766/api/docs`

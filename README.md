@@ -79,13 +79,18 @@ For VS Code with the MCP extension, add to `.vscode/mcp.json`:
 ```json
 {
   "servers": {
-    "memory-server": {
-      "url": "http://localhost:8765/mcp",
-      "type": "http"
+    "mnememcp": {
+      "url": "http://localhost:8766/mcp",
+      "type": "http",
+      "headers": {
+        "Authorization": "Bearer mcp_your_api_key_here"
+      }
     }
   }
 }
 ```
+
+Generate an API key at http://localhost:8766/settings after starting the server.
 
 For Claude Desktop, add to your `claude_desktop_config.json`:
 
@@ -162,8 +167,7 @@ Each user gets a unique user_id, and all memories are linked to their user accou
 
 ```
 Arguments:
-- username (required): Username of the person this memory is for
-- type (required): experience | technical | procedural | goal | individual
+- type (required): experience | technical | procedural | goal
 - content (required): Main content of the memory
 - tags: List of categorization tags
 - importance: Rating 1-10 (default: 5)
@@ -256,9 +260,15 @@ ruff format src/
 
 ```
 src/mnememcp/
-├── server.py          # MCP server entry point
+├── server.py          # Unified server entry point (MCP + API + Web)
+├── api/
+│   ├── app.py         # FastAPI application
+│   └── routers/       # REST API endpoints
+├── web/
+│   ├── routes.py      # Web UI routes
+│   └── templates/     # Jinja2 templates
 ├── db/
-│   ├── client.py      # asyncpg connection pool & repository
+│   ├── client.py      # asyncpg connection pool & repositories
 │   └── migrations/    # SQL migration files
 ├── models/
 │   └── memory.py      # Pydantic models for all memory types
@@ -267,6 +277,18 @@ src/mnememcp/
 └── prompts/
     └── memory_usage.py # System prompt templates
 ```
+
+## Endpoints
+
+All services run on a single port (default 8766):
+
+| Endpoint | Purpose |
+|----------|--------|
+| `/mcp` | MCP protocol (requires API key) |
+| `/api/*` | REST API (requires API key) |
+| `/api/docs` | OpenAPI documentation |
+| `/` | Web dashboard |
+| `/settings` | API key management |
 
 ## License
 

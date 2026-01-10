@@ -24,6 +24,15 @@ from mnememcp.db.client import init_db, close_db
 # Path to static files directory
 STATIC_DIR = Path(__file__).parent.parent / "web" / "static"
 
+# MCP session manager - set by server.py before creating the app
+_mcp_session_manager = None
+
+
+def set_mcp_session_manager(session_manager):
+    """Set the MCP session manager for lifecycle integration."""
+    global _mcp_session_manager
+    _mcp_session_manager = session_manager
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -34,7 +43,12 @@ async def lifespan(app: FastAPI):
     if database_url:
         await init_db(database_url)
     
-    yield
+    # Start MCP session manager if configured
+    if _mcp_session_manager:
+        async with _mcp_session_manager.run():
+            yield
+    else:
+        yield
     
     # Shutdown: Close database pool
     await close_db()

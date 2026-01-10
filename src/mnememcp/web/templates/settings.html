@@ -218,7 +218,7 @@
                         <tr>
                             <td class="py-3 text-sm font-medium text-gray-700">MCP Server</td>
                             <td class="py-3">
-                                <code class="text-sm font-mono bg-gray-100 text-gray-800 px-3 py-1 rounded">http://localhost:8765/mcp</code>
+                                <code class="text-sm font-mono bg-gray-100 text-gray-800 px-3 py-1 rounded">http://localhost:8766/mcp</code>
                             </td>
                         </tr>
                         <tr>
@@ -230,7 +230,7 @@
                         <tr>
                             <td class="py-3 text-sm font-medium text-gray-700">API Docs</td>
                             <td class="py-3">
-                                <a href="http://localhost:8766/api/docs" target="_blank" class="text-sm text-primary-600 hover:text-primary-700">
+                                <a href="/api/docs" target="_blank" class="text-sm text-primary-600 hover:text-primary-700">
                                     http://localhost:8766/api/docs →
                                 </a>
                             </td>
@@ -260,7 +260,7 @@ curl -X POST "http://localhost:8766/api/memories" \
 {
   "servers": {
     "mnememcp": {
-      "url": "http://localhost:8765/mcp",
+      "url": "http://localhost:8766/mcp",
       "type": "http",
       "headers": {
         "Authorization": "Bearer mcp_your_api_key_here"
