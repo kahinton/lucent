@@ -13,6 +13,9 @@ _current_user: ContextVar[dict[str, Any] | None] = ContextVar("current_user", de
 # Context variable to store the current API key ID (when authenticated via API key)
 _current_api_key_id: ContextVar[UUID | None] = ContextVar("current_api_key_id", default=None)
 
+# Context variable to store impersonation info (original user when impersonating)
+_impersonating_user: ContextVar[dict[str, Any] | None] = ContextVar("impersonating_user", default=None)
+
 # Development mode settings
 DEV_MODE = os.environ.get("MNEMEMCP_DEV_MODE", "false").lower() in ("true", "1", "yes")
 DEV_USER_ID = os.environ.get("MNEMEMCP_DEV_USER_ID", "dev-user")
@@ -66,6 +69,33 @@ def set_current_api_key_id(api_key_id: UUID | None) -> None:
         api_key_id: The API key UUID, or None to clear.
     """
     _current_api_key_id.set(api_key_id)
+
+
+def get_impersonating_user() -> dict[str, Any] | None:
+    """Get the original user who is impersonating.
+    
+    Returns:
+        The original user dict if currently impersonating, or None.
+    """
+    return _impersonating_user.get()
+
+
+def set_impersonating_user(user: dict[str, Any] | None) -> None:
+    """Set the original user who is doing the impersonation.
+    
+    Args:
+        user: The original admin/owner user, or None to clear.
+    """
+    _impersonating_user.set(user)
+
+
+def is_impersonating() -> bool:
+    """Check if the current request is in impersonation mode.
+    
+    Returns:
+        True if impersonating another user.
+    """
+    return _impersonating_user.get() is not None
 
 
 def get_current_user_id() -> UUID | None:

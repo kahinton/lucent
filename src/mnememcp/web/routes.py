@@ -52,8 +52,18 @@ async def get_user_context(request: Request) -> CurrentUser:
     """Get the current user for web routes.
     
     Uses get_current_user_for_web which allows dev mode fallback for browser access.
+    Also handles impersonation via cookie.
     """
-    return await get_current_user_for_web()
+    # Extract headers and cookies manually since we're not using DI
+    authorization = request.headers.get("authorization")
+    x_user_id = request.headers.get("x-user-id")
+    impersonate_cookie = request.cookies.get("mnememcp_impersonate")
+    
+    return await get_current_user_for_web(
+        authorization=authorization,
+        x_user_id=x_user_id,
+        impersonate_user_id=impersonate_cookie,
+    )
 
 
 # =============================================================================
@@ -792,14 +802,131 @@ async def users_list(request: Request):
     
     users = await user_repo.get_by_organization(user.organization_id)
     
+    # Check if user can manage users (admin or owner)
+    can_manage = user.role in ("admin", "owner") if hasattr(user, "role") and isinstance(user.role, str) else user.role.value in ("admin", "owner")
+    can_impersonate = user.role == "owner" if isinstance(user.role, str) else user.role.value == "owner"
+    
     return templates.TemplateResponse(
         "users.html",
         {
             "request": request,
             "user": user,
             "users": users,
+            "can_manage": can_manage,
+            "can_impersonate": can_impersonate,
         },
     )
+
+
+@router.post("/users/create", response_class=HTMLResponse)
+async def create_user(
+    request: Request,
+    display_name: str = Form(...),
+    email: str = Form(...),
+    role: str = Form("member"),
+):
+    """Create a new user in the organization."""
+    user = await get_user_context(request)
+    
+    # Check permission
+    if not (hasattr(user, "role") and (
+        (isinstance(user.role, str) and user.role in ("admin", "owner")) or
+        (hasattr(user.role, "value") and user.role.value in ("admin", "owner"))
+    )):
+        raise HTTPException(status_code=403, detail="Permission denied")
+    
+    pool = await get_pool()
+    user_repo = UserRepository(pool)
+    
+    # Generate a unique external_id for local users
+    import secrets
+    external_id = f"local_{secrets.token_hex(8)}"
+    
+    # Validate role
+    valid_roles = ["member", "admin"]
+    user_role_value = user.role if isinstance(user.role, str) else user.role.value
+    if user_role_value == "owner":
+        valid_roles.append("owner")
+    
+    if role not in valid_roles:
+        role = "member"
+    
+    # Check if user with this email already exists
+    users = await user_repo.get_by_organization(user.organization_id)
+    for u in users:
+        if u.get("email") == email:
+            # Redirect back with error
+            return RedirectResponse(
+                url=f"/users?error=User+with+email+{email}+already+exists",
+                status_code=303,
+            )
+    
+    # Create the user
+    new_user = await user_repo.create(
+        external_id=external_id,
+        provider="local",
+        organization_id=user.organization_id,
+        email=email,
+        display_name=display_name,
+    )
+    
+    # Update role if not member
+    if role != "member":
+        await user_repo.update_role(new_user["id"], role)
+    
+    return RedirectResponse(url="/users?success=User+created", status_code=303)
+
+
+@router.post("/users/{user_id}/impersonate")
+async def start_impersonation(request: Request, user_id: UUID):
+    """Start impersonating a user."""
+    user = await get_user_context(request)
+    
+    # Only owners can impersonate (admins have limited impersonation in the dep)
+    user_role_value = user.role if isinstance(user.role, str) else user.role.value
+    if user_role_value not in ("admin", "owner"):
+        raise HTTPException(status_code=403, detail="Permission denied")
+    
+    # Can't impersonate yourself
+    if user_id == user.id:
+        return RedirectResponse(url="/users?error=Cannot+impersonate+yourself", status_code=303)
+    
+    pool = await get_pool()
+    user_repo = UserRepository(pool)
+    
+    target = await user_repo.get_by_id(user_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Check same org
+    if target.get("organization_id") != user.organization_id:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Check role restrictions
+    target_role = target.get("role", "member")
+    if user_role_value == "admin" and target_role != "member":
+        return RedirectResponse(url="/users?error=Admins+can+only+impersonate+members", status_code=303)
+    if user_role_value == "owner" and target_role == "owner":
+        return RedirectResponse(url="/users?error=Cannot+impersonate+other+owners", status_code=303)
+    
+    # Set impersonation cookie and redirect to dashboard
+    response = RedirectResponse(url="/?impersonating=true", status_code=303)
+    response.set_cookie(
+        key="mnememcp_impersonate",
+        value=str(user_id),
+        httponly=True,
+        samesite="lax",
+        max_age=3600,  # 1 hour max
+    )
+    return response
+
+
+@router.post("/users/stop-impersonation")
+async def stop_impersonation(request: Request):
+    """Stop impersonating and return to original user."""
+    response = RedirectResponse(url="/users", status_code=303)
+    response.delete_cookie(key="mnememcp_impersonate")
+    return response
 
 
 # =============================================================================
