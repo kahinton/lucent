@@ -796,6 +796,9 @@ class MemoryRepository:
         query: str,
         username: str | None = None,
         limit: int = 10,
+        # Access control parameters
+        requesting_user_id: UUID | None = None,
+        requesting_org_id: UUID | None = None,
     ) -> list[dict[str, Any]]:
         """Get tag suggestions based on fuzzy matching.
         
@@ -803,6 +806,8 @@ class MemoryRepository:
             query: The partial tag to search for.
             username: Optional filter by username.
             limit: Maximum number of suggestions (default 10).
+            requesting_user_id: User ID for access control (if provided, enables access control).
+            requesting_org_id: Organization ID for access control.
             
         Returns:
             List of {tag, count, similarity} sorted by similarity descending.
@@ -810,6 +815,13 @@ class MemoryRepository:
         conditions = ["deleted_at IS NULL"]
         params: list[Any] = []
         param_idx = 1
+        
+        # Add access control condition if user context is provided
+        if requesting_user_id is not None and requesting_org_id is not None:
+            conditions.append(f"(user_id = ${param_idx} OR (organization_id = ${param_idx + 1} AND shared = true))")
+            params.append(str(requesting_user_id))
+            params.append(str(requesting_org_id))
+            param_idx += 2
         
         if username is not None:
             conditions.append(f"username = ${param_idx}")

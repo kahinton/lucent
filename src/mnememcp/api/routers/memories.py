@@ -245,8 +245,8 @@ async def update_memory(
     repo = MemoryRepository(pool)
     audit_repo = AuditRepository(pool)
     
-    # Get the memory first to check ownership
-    existing = await repo.get(memory_id)
+    # Get the memory first to check ownership - use get_accessible to prevent leaking existence
+    existing = await repo.get_accessible(memory_id, user.id, user.organization_id)
     if existing is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -340,8 +340,8 @@ async def delete_memory(
     repo = MemoryRepository(pool)
     audit_repo = AuditRepository(pool)
     
-    # Get memory first
-    existing = await repo.get(memory_id)
+    # Get memory first - use get_accessible to prevent leaking existence of other org's memories
+    existing = await repo.get_accessible(memory_id, user.id, user.organization_id)
     if existing is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

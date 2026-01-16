@@ -519,10 +519,21 @@ Returns:
             
             repo = await _get_repository()
             
+            # Get current user context for ownership check
+            user_id, org_id, user_role = await _get_current_user_context()
+            
+            if user_id is None:
+                return json.dumps({"error": "Authentication required to update memories"})
+            
             # Get old values before update for audit (also needed for metadata validation)
-            old_memory = await repo.get(uuid_id)
+            # Use get_accessible to ensure user can at least see this memory
+            old_memory = await repo.get_accessible(uuid_id, user_id, org_id)
             if old_memory is None:
-                return json.dumps({"error": f"Memory not found: {memory_id}"})
+                return json.dumps({"error": f"Memory not found or not accessible: {memory_id}"})
+            
+            # Check ownership - only the owner can update a memory
+            if old_memory.get("user_id") != user_id:
+                return json.dumps({"error": "Permission denied: only the owner can update this memory"})
             
             # Validate metadata if provided
             validated_metadata = metadata
@@ -621,10 +632,21 @@ Returns:
             
             repo = await _get_repository()
             
+            # Get current user context for ownership check
+            user_id, org_id, user_role = await _get_current_user_context()
+            
+            if user_id is None:
+                return json.dumps({"error": "Authentication required to delete memories"})
+            
             # Get memory info before deletion for audit
-            old_memory = await repo.get(uuid_id)
+            # Use get_accessible to ensure user can at least see this memory
+            old_memory = await repo.get_accessible(uuid_id, user_id, org_id)
             if old_memory is None:
-                return json.dumps({"error": f"Memory not found: {memory_id}"})
+                return json.dumps({"error": f"Memory not found or not accessible: {memory_id}"})
+            
+            # Check ownership - only the owner can delete a memory
+            if old_memory.get("user_id") != user_id:
+                return json.dumps({"error": "Permission denied: only the owner can delete this memory"})
             
             # Individual memories cannot be deleted via MCP - they are deleted when users are removed
             if old_memory.get("type") == "individual":
@@ -685,10 +707,15 @@ Returns:
         try:
             repo = await _get_repository()
             
+            # Get current user context for access control
+            user_id, org_id, user_role = await _get_current_user_context()
+            
             result = await repo.get_existing_tags(
                 username=username,
                 type=type,
                 limit=min(limit, 100),
+                requesting_user_id=user_id,
+                requesting_org_id=org_id,
             )
             
             return json.dumps({
@@ -724,10 +751,15 @@ Returns:
             
             repo = await _get_repository()
             
+            # Get current user context for access control
+            user_id, org_id, user_role = await _get_current_user_context()
+            
             result = await repo.get_tag_suggestions(
                 query=query.strip(),
                 username=username,
                 limit=min(limit, 25),
+                requesting_user_id=user_id,
+                requesting_org_id=org_id,
             )
             
             return json.dumps({
