@@ -999,9 +999,8 @@ class UserRepository:
         if user.get("email"):
             content += f" Contact: {user['email']}."
         
-        # Build metadata with user_id linked
+        # Build metadata (user_id is already tracked at the memory level, no need to duplicate)
         metadata = {
-            "user_id": str(user["id"]),
             "name": name,
             "role": user.get("role", "member"),
             "contact_info": {},
