@@ -15,7 +15,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 
 from mnememcp.auth import is_dev_mode, set_current_user, set_current_api_key_id
-from mnememcp.prompts.memory_usage import get_memory_system_prompt, get_memory_system_prompt_short
+from mnememcp.prompts.memory_usage import get_memory_system_prompt, get_memory_system_prompt_short, get_user_introduction_prompt
 from mnememcp.tools.memories import register_tools
 
 
@@ -130,6 +130,22 @@ def memory_usage_guide_short() -> str:
     A shorter version of the memory usage guide for contexts with limited prompt space.
     """
     return get_memory_system_prompt_short()
+
+
+@mcp.prompt()
+def user_introduction() -> str:
+    """Get guidance for greeting users and personalizing interactions.
+    
+    This prompt walks you through:
+    1. Checking if the user is new or returning (via individual memories)
+    2. Greeting them appropriately - warmly if returning, introductory if new
+    3. Learning about their preferences, working style, and communication style
+    4. Storing what you learn for personalized future interactions
+    
+    Use this at the start of conversations to make interactions feel like
+    working with an actual teammate who remembers and knows the user.
+    """
+    return get_user_introduction_prompt()
 
 
 def get_mcp_app():
