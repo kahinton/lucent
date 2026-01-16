@@ -72,7 +72,8 @@ def validate_metadata(memory_type: str | MemoryType, metadata: dict[str, Any] | 
     try:
         validated = metadata_model.model_validate(metadata)
         # Convert back to dict, excluding unset/None values for cleaner storage
-        return validated.model_dump(exclude_none=True, exclude_unset=False)
+        # Use mode='json' to properly serialize enums, datetimes, etc.
+        return validated.model_dump(exclude_none=True, exclude_unset=False, mode='json')
     except ValidationError as e:
         # Format a nice error message
         errors = []

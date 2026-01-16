@@ -240,6 +240,8 @@ Returns:
         """Retrieve a memory by its ID.
 
         Returns the memory only if you own it or it's shared within your organization.
+        
+        For retrieving multiple memories at once, use get_memories instead.
 
         Args:
             memory_id: The UUID of the memory to retrieve.
@@ -283,6 +285,74 @@ Returns:
             return json.dumps({"error": f"Invalid memory ID format: {str(e)}"})
         except Exception as e:
             return json.dumps({"error": f"Failed to retrieve memory: {str(e)}"})
+
+    @mcp.tool()
+    async def get_memories(memory_ids: list[str]) -> str:
+        """Retrieve multiple memories by their IDs in a single call.
+
+        Returns only memories you own or that are shared within your organization.
+        More efficient than calling get_memory multiple times when you need
+        several memories (e.g., after a search returns truncated results).
+
+        Args:
+            memory_ids: List of UUIDs of memories to retrieve.
+
+        Returns:
+            JSON string with:
+            - memories: List of full memory details for accessible memories
+            - not_found: List of IDs that were not found or not accessible
+            - total_requested: Number of IDs requested
+            - total_found: Number of memories successfully retrieved
+        """
+        try:
+            if not memory_ids:
+                return json.dumps({"error": "memory_ids list cannot be empty"})
+            
+            # Parse and validate all UUIDs first
+            try:
+                uuid_ids = [UUID(mid) for mid in memory_ids]
+            except ValueError as e:
+                return json.dumps({"error": f"Invalid memory ID format: {str(e)}"})
+            
+            repo = await _get_repository()
+            access_repo = await _get_access_repository()
+            
+            # Get current user context for access control
+            user_id, org_id, user_role = await _get_current_user_context()
+            
+            memories = []
+            not_found = []
+            
+            for uuid_id, original_id in zip(uuid_ids, memory_ids):
+                if user_id is not None and org_id is not None:
+                    result = await repo.get_accessible(uuid_id, user_id, org_id)
+                else:
+                    result = await repo.get(uuid_id)
+                
+                if result is None:
+                    not_found.append(original_id)
+                else:
+                    memories.append(_serialize_memory(result))
+                    # Log access
+                    try:
+                        await access_repo.log_access(
+                            memory_id=uuid_id,
+                            access_type="view",
+                            user_id=user_id,
+                            organization_id=org_id,
+                        )
+                    except Exception:
+                        pass
+            
+            return json.dumps({
+                "memories": memories,
+                "not_found": not_found,
+                "total_requested": len(memory_ids),
+                "total_found": len(memories),
+            }, indent=2)
+            
+        except Exception as e:
+            return json.dumps({"error": f"Failed to retrieve memories: {str(e)}"})
 
     @mcp.tool()
     async def search_memories(
