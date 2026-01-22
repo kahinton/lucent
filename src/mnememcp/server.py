@@ -8,11 +8,12 @@ This module provides a single unified server that handles:
 
 import os
 import sys
+from contextvars import copy_context
 
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
-from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from mnememcp.auth import is_dev_mode, set_current_user, set_current_api_key_id
 from mnememcp.prompts.memory_usage import get_memory_system_prompt, get_memory_system_prompt_short, get_user_introduction_prompt
@@ -33,19 +34,39 @@ mcp = FastMCP("mnemeMCP")
 register_tools(mcp)
 
 
-class MCPAuthMiddleware(BaseHTTPMiddleware):
-    """Middleware to handle authentication for MCP requests.
+class MCPAuthMiddleware:
+    """Pure ASGI middleware to handle authentication for MCP requests.
+    
+    Uses pure ASGI instead of BaseHTTPMiddleware to preserve ContextVar across
+    the request lifecycle. BaseHTTPMiddleware runs call_next in a thread pool
+    which breaks ContextVar propagation.
     
     API key authentication is ALWAYS required for MCP access, even in dev mode.
     Dev mode only bypasses auth for the web UI, not for programmatic access.
+    
+    Only applies to /mcp routes - other routes pass through unmodified.
     """
     
-    async def dispatch(self, request: Request, call_next):
+    def __init__(self, app: ASGIApp):
+        self.app = app
+    
+    async def __call__(self, scope: Scope, receive: Receive, send: Send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        
+        # Only apply auth to /mcp routes
+        path = scope.get("path", "")
+        if not path.startswith("/mcp"):
+            await self.app(scope, receive, send)
+            return
+        
         from starlette.responses import JSONResponse
         from mnememcp.db.client import ApiKeyRepository, UserRepository, get_pool, init_db
         
-        # Get authorization header
-        auth_header = request.headers.get("authorization", "")
+        # Get authorization header from scope
+        headers = dict(scope.get("headers", []))
+        auth_header = headers.get(b"authorization", b"").decode("utf-8", errors="ignore")
         
         # Try API key authentication
         if auth_header:
@@ -75,16 +96,18 @@ class MCPAuthMiddleware(BaseHTTPMiddleware):
                             user = await user_repo.get_by_id(key_info["user_id"])
                             if user:
                                 set_current_user(user)
-                                set_current_api_key_id(key_info["id"])  # Store API key ID for auditing
-                                response = await call_next(request)
-                                set_current_user(None)  # Clear after request
-                                set_current_api_key_id(None)
-                                return response
+                                set_current_api_key_id(key_info["id"])
+                                try:
+                                    await self.app(scope, receive, send)
+                                finally:
+                                    set_current_user(None)
+                                    set_current_api_key_id(None)
+                                return
                 except Exception as e:
                     print(f"API key auth error: {e}", file=sys.stderr)
             
             # Invalid API key provided
-            return JSONResponse(
+            response = JSONResponse(
                 status_code=401,
                 content={
                     "jsonrpc": "2.0",
@@ -96,9 +119,11 @@ class MCPAuthMiddleware(BaseHTTPMiddleware):
                 },
                 headers={"WWW-Authenticate": "Bearer"},
             )
+            await response(scope, receive, send)
+            return
         
         # No authorization header - reject the request
-        return JSONResponse(
+        response = JSONResponse(
             status_code=401,
             content={
                 "jsonrpc": "2.0",
@@ -110,6 +135,7 @@ class MCPAuthMiddleware(BaseHTTPMiddleware):
             },
             headers={"WWW-Authenticate": "Bearer"},
         )
+        await response(scope, receive, send)
 
 
 # Register prompts
@@ -149,13 +175,11 @@ def user_introduction() -> str:
 
 
 def get_mcp_app():
-    """Get the MCP Starlette app with auth middleware.
+    """Get the raw MCP Starlette app.
     
-    Returns the MCP app which has routes at /mcp.
+    Returns the MCP app (auth is handled by wrapping the entire FastAPI app).
     """
-    mcp_app = mcp.streamable_http_app()
-    mcp_app.add_middleware(MCPAuthMiddleware)
-    return mcp_app
+    return mcp.streamable_http_app()
 
 
 def main() -> None:
@@ -176,7 +200,7 @@ def main() -> None:
     else:
         print("Running in PRODUCTION MODE - API key required for MCP/API access", file=sys.stderr)
     
-    # Get MCP app and session manager
+    # Get MCP app
     mcp_app = get_mcp_app()
     
     # Set the session manager for lifecycle integration
@@ -189,14 +213,17 @@ def main() -> None:
     for route in mcp_app.routes:
         app.routes.append(route)
     
+    # Wrap the entire app with our auth middleware (only applies to /mcp paths)
+    wrapped_app = MCPAuthMiddleware(app)
+    
     print(f"Starting mnemeMCP server on http://{HOST}:{PORT}", file=sys.stderr)
     print(f"  MCP endpoint: http://{HOST}:{PORT}/mcp", file=sys.stderr)
     print(f"  REST API: http://{HOST}:{PORT}/api", file=sys.stderr)
     print(f"  Web UI: http://{HOST}:{PORT}/", file=sys.stderr)
     print(f"  API docs: http://{HOST}:{PORT}/api/docs", file=sys.stderr)
     
-    # Run the unified server
-    uvicorn.run(app, host=HOST, port=PORT, log_level="info")
+    # Run the unified server with the wrapped app
+    uvicorn.run(wrapped_app, host=HOST, port=PORT, log_level="info")
 
 
 if __name__ == "__main__":
