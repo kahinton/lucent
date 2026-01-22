@@ -35,12 +35,20 @@ Don't wait until the end of the conversation. Capture insights when they're fres
 
 ### When You Learn Something About the Person
 
-People reveal preferences constantly:
-- "Can you be more concise?" → They prefer brevity. Remember this.
-- "I hate when AI apologizes constantly" → Note it. Stop doing it.
-- "We always use pytest for testing" → Technical preference. Store it.
+Some things are worth remembering, others aren't. Use judgment:
 
-Update their individual memory right away. Small details compound into genuinely personalized collaboration.
+**Worth updating their individual memory:**
+- Explicit preferences: "I prefer concise responses" or "We always use pytest"
+- Working style: They like detailed explanations, or they prefer you just fix things without asking
+- Significant context: Their role, what projects they work on, technical stack
+- Corrections: If they correct how you do something, that's a clear signal
+
+**Not worth a memory update:**
+- One-off requests: "Make this function async" doesn't mean they always want async
+- Obvious context: Things you can infer from the current conversation
+- Minor details: Formatting preferences for a single file, temporary workarounds
+
+The bar: Would future-you benefit from knowing this across conversations? If yes, update. If it's just relevant to this task, don't bother.
 
 ### When You Make a Mistake
 
