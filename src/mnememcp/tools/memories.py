@@ -355,6 +355,54 @@ Returns:
             return json.dumps({"error": f"Failed to retrieve memories: {str(e)}"})
 
     @mcp.tool()
+    async def get_current_user_context() -> str:
+        """Get the current authenticated user's context and their individual memory.
+
+        This is the recommended way to start a conversation - call this first to get:
+        - Who you're talking to (name, email, role)
+        - Their individual memory with preferences, working style, and history
+        - Recent project context they've been working on
+
+        Returns:
+            JSON string with:
+            - user: Basic user info (id, name, email, role)
+            - individual_memory: Their full individual memory if it exists
+            - error: Error message if not authenticated
+        """
+        try:
+            user_id, org_id, user_role = await _get_current_user_context()
+            
+            if user_id is None:
+                return json.dumps({"error": "Not authenticated"})
+            
+            current_user = get_current_user()
+            
+            # Build user info
+            user_info = {
+                "id": str(user_id),
+                "organization_id": str(org_id) if org_id else None,
+                "role": user_role,
+            }
+            
+            if current_user:
+                user_info["display_name"] = current_user.get("display_name")
+                user_info["email"] = current_user.get("email")
+            
+            # Get their individual memory
+            repo = await _get_repository()
+            individual_memory = await repo.get_individual_memory_for_user(user_id)
+            
+            result = {
+                "user": user_info,
+                "individual_memory": _serialize_memory(individual_memory) if individual_memory else None,
+            }
+            
+            return json.dumps(result, indent=2)
+            
+        except Exception as e:
+            return json.dumps({"error": f"Failed to get user context: {str(e)}"})
+
+    @mcp.tool()
     async def search_memories(
         query: str | None = None,
         username: str | None = None,

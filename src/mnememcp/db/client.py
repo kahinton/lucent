@@ -230,6 +230,32 @@ class MemoryRepository:
         
         return self._row_to_dict(row)
     
+    async def get_individual_memory_for_user(self, user_id: UUID) -> dict[str, Any] | None:
+        """Get the individual memory associated with a user.
+        
+        Args:
+            user_id: The user's UUID.
+            
+        Returns:
+            The memory record, or None if not found.
+        """
+        query = """
+            SELECT id, username, type, content, tags, importance, related_memory_ids, metadata,
+                   created_at, updated_at, deleted_at, user_id, organization_id, shared, last_accessed_at
+            FROM memories
+            WHERE type = 'individual' 
+              AND deleted_at IS NULL
+              AND user_id = $1
+        """
+        
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(query, str(user_id))
+        
+        if row is None:
+            return None
+        
+        return self._row_to_dict(row)
+    
     async def set_shared(
         self,
         memory_id: UUID,
@@ -1067,7 +1093,7 @@ class UserRepository:
             FROM memories
             WHERE type = 'individual' 
               AND deleted_at IS NULL
-              AND metadata->>'user_id' = $1
+              AND user_id = $1
         """
         
         async with self.pool.acquire() as conn:
@@ -1077,6 +1103,17 @@ class UserRepository:
             return None
         
         return dict(row)
+    
+    async def get_individual_memory_for_user(self, user_id: UUID) -> dict[str, Any] | None:
+        """Public method to get the individual memory associated with a user.
+        
+        Args:
+            user_id: The user's UUID.
+            
+        Returns:
+            The memory record, or None if not found.
+        """
+        return await self._get_individual_memory_for_user(user_id)
     
     async def _soft_delete_individual_memory_for_user(self, user_id: UUID) -> bool:
         """Soft delete the individual memory associated with a user.
@@ -1092,7 +1129,7 @@ class UserRepository:
             SET deleted_at = NOW()
             WHERE type = 'individual' 
               AND deleted_at IS NULL
-              AND metadata->>'user_id' = $1
+              AND user_id = $1
             RETURNING id
         """
         
