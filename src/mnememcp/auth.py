@@ -7,6 +7,20 @@ gets isolated context without interference from other requests.
 Important: When setting context vars in middleware (like MCPAuthMiddleware),
 use try/finally to ensure cleanup happens even on errors. For FastAPI
 dependencies, context is naturally scoped to the request lifecycle.
+
+Impersonation Feature:
+    Allows admins/owners to view the system as another user for debugging
+    and support purposes. Impersonation is cookie-based (mnememcp_impersonate)
+    and is only available through the web UI.
+    
+    Rules:
+    - Owners can impersonate anyone except other owners
+    - Admins can only impersonate members
+    - Impersonation is logged and tracked via impersonator_id in CurrentUser
+    - The original user is stored in _impersonating_user context var
+    
+    See: web/routes.py for /users/{id}/impersonate and /users/stop-impersonation
+    See: api/deps.py for get_current_user_for_web impersonation handling
 """
 
 import os

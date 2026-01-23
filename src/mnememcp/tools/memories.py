@@ -19,6 +19,30 @@ from mnememcp.models.memory import (
 from mnememcp.models.validation import validate_metadata, METADATA_DOCS
 
 
+def _error_response(message: str) -> str:
+    """Create a consistent JSON error response for MCP tools.
+    
+    Args:
+        message: The error message to include.
+        
+    Returns:
+        JSON string with {"error": message} format.
+    """
+    return json.dumps({"error": message})
+
+
+def _success_response(result: Any) -> str:
+    """Create a consistent JSON success response for MCP tools.
+    
+    Args:
+        result: The result data to serialize.
+        
+    Returns:
+        JSON string with {"result": data} format.
+    """
+    return json.dumps({"result": result}, default=str)
+
+
 async def _get_current_user_id() -> UUID | None:
     """Get the current user ID, creating dev user if in dev mode."""
     # Check if we have a user in context (set by auth middleware)
@@ -218,9 +242,9 @@ Returns:
             return json.dumps(_serialize_memory(result), indent=2)
             
         except ValueError as e:
-            return json.dumps({"error": str(e)})
+            return _error_response(str(e))
         except Exception as e:
-            return json.dumps({"error": f"Failed to create memory: {str(e)}"})
+            return _error_response(f"Failed to create memory: {e}")
 
     @mcp.tool()
     async def get_memory(memory_id: str) -> str:
@@ -252,7 +276,7 @@ Returns:
                 result = await repo.get(uuid_id)
             
             if result is None:
-                return json.dumps({"error": f"Memory not found or not accessible: {memory_id}"})
+                return _error_response(f"Memory not found or not accessible: {memory_id}")
             
             # Log the access
             try:
@@ -269,9 +293,9 @@ Returns:
             return json.dumps(_serialize_memory(result), indent=2)
             
         except ValueError as e:
-            return json.dumps({"error": f"Invalid memory ID format: {str(e)}"})
+            return _error_response(f"Invalid memory ID format: {e}")
         except Exception as e:
-            return json.dumps({"error": f"Failed to retrieve memory: {str(e)}"})
+            return _error_response(f"Failed to retrieve memory: {e}")
 
     @mcp.tool()
     async def get_memories(memory_ids: list[str]) -> str:
@@ -293,13 +317,13 @@ Returns:
         """
         try:
             if not memory_ids:
-                return json.dumps({"error": "memory_ids list cannot be empty"})
+                return _error_response("memory_ids list cannot be empty")
             
             # Parse and validate all UUIDs first
             try:
                 uuid_ids = [UUID(mid) for mid in memory_ids]
             except ValueError as e:
-                return json.dumps({"error": f"Invalid memory ID format: {str(e)}"})
+                return _error_response(f"Invalid memory ID format: {e}")
             
             repo = await _get_repository()
             access_repo = await _get_access_repository()
