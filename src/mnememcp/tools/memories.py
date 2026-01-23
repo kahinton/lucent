@@ -31,18 +31,6 @@ def _error_response(message: str) -> str:
     return json.dumps({"error": message})
 
 
-def _success_response(result: Any) -> str:
-    """Create a consistent JSON success response for MCP tools.
-    
-    Args:
-        result: The result data to serialize.
-        
-    Returns:
-        JSON string with {"result": data} format.
-    """
-    return json.dumps({"result": result}, default=str)
-
-
 async def _get_current_user_id() -> UUID | None:
     """Get the current user ID, creating dev user if in dev mode."""
     # Check if we have a user in context (set by auth middleware)
@@ -184,9 +172,9 @@ Returns:
             
             # Individual memories cannot be created via MCP - they are auto-created when users are added
             if memory_type == MemoryType.INDIVIDUAL:
-                return json.dumps({
-                    "error": "Individual memories cannot be created directly. They are automatically created when users are added to the system."
-                })
+                return _error_response(
+                    "Individual memories cannot be created directly. They are automatically created when users are added to the system."
+                )
             
             # Validate and normalize metadata for the memory type
             validated_metadata = validate_metadata(memory_type, metadata)
@@ -363,7 +351,7 @@ Returns:
             }, indent=2)
             
         except Exception as e:
-            return json.dumps({"error": f"Failed to retrieve memories: {str(e)}"})
+            return _error_response(f"Failed to retrieve memories: {str(e)}")
 
     @mcp.tool()
     async def get_current_user_context() -> str:
@@ -384,7 +372,7 @@ Returns:
             user_id, org_id, user_role = await _get_current_user_context()
             
             if user_id is None:
-                return json.dumps({"error": "Not authenticated"})
+                return _error_response("Not authenticated")
             
             current_user = get_current_user()
             
@@ -411,7 +399,7 @@ Returns:
             return json.dumps(result, indent=2)
             
         except Exception as e:
-            return json.dumps({"error": f"Failed to get user context: {str(e)}"})
+            return _error_response(f"Failed to get user context: {str(e)}")
 
     @mcp.tool()
     async def search_memories(
@@ -526,9 +514,9 @@ Returns:
             return json.dumps(serialized, indent=2)
             
         except ValueError as e:
-            return json.dumps({"error": f"Invalid input: {str(e)}"})
+            return _error_response(f"Invalid input: {str(e)}")
         except Exception as e:
-            return json.dumps({"error": f"Search failed: {str(e)}"})
+            return _error_response(f"Search failed: {str(e)}")
 
     @mcp.tool()
     async def search_memories_full(
@@ -565,7 +553,7 @@ Returns:
         """
         try:
             if not query or not query.strip():
-                return json.dumps({"error": "Query is required for full search"})
+                return _error_response("Query is required for full search")
             
             memory_type = MemoryType(type) if type else None
             
@@ -616,9 +604,9 @@ Returns:
             return json.dumps(serialized, indent=2)
             
         except ValueError as e:
-            return json.dumps({"error": f"Invalid input: {str(e)}"})
+            return _error_response(f"Invalid input: {str(e)}")
         except Exception as e:
-            return json.dumps({"error": f"Full search failed: {str(e)}"})
+            return _error_response(f"Full search failed: {str(e)}")
 
     @mcp.tool()
     async def update_memory(
@@ -652,17 +640,17 @@ Returns:
             user_id, org_id, user_role = await _get_current_user_context()
             
             if user_id is None:
-                return json.dumps({"error": "Authentication required to update memories"})
+                return _error_response("Authentication required to update memories")
             
             # Get old values before update for audit (also needed for metadata validation)
             # Use get_accessible to ensure user can at least see this memory
             old_memory = await repo.get_accessible(uuid_id, user_id, org_id)
             if old_memory is None:
-                return json.dumps({"error": f"Memory not found or not accessible: {memory_id}"})
+                return _error_response(f"Memory not found or not accessible: {memory_id}")
             
             # Check ownership - only the owner can update a memory
             if old_memory.get("user_id") != user_id:
-                return json.dumps({"error": "Permission denied: only the owner can update this memory"})
+                return _error_response("Permission denied: only the owner can update this memory")
             
             # Validate metadata if provided
             validated_metadata = metadata
@@ -687,7 +675,7 @@ Returns:
             )
             
             if result is None:
-                return json.dumps({"error": f"Memory not found: {memory_id}"})
+                return _error_response(f"Memory not found: {memory_id}")
             
             # Build audit log entry
             changed_fields = []
@@ -739,9 +727,9 @@ Returns:
             return json.dumps(_serialize_memory(result), indent=2)
             
         except ValueError as e:
-            return json.dumps({"error": f"Invalid input: {str(e)}"})
+            return _error_response(f"Invalid input: {str(e)}")
         except Exception as e:
-            return json.dumps({"error": f"Failed to update memory: {str(e)}"})
+            return _error_response(f"Failed to update memory: {str(e)}")
 
     @mcp.tool()
     async def delete_memory(memory_id: str) -> str:
@@ -765,28 +753,28 @@ Returns:
             user_id, org_id, user_role = await _get_current_user_context()
             
             if user_id is None:
-                return json.dumps({"error": "Authentication required to delete memories"})
+                return _error_response("Authentication required to delete memories")
             
             # Get memory info before deletion for audit
             # Use get_accessible to ensure user can at least see this memory
             old_memory = await repo.get_accessible(uuid_id, user_id, org_id)
             if old_memory is None:
-                return json.dumps({"error": f"Memory not found or not accessible: {memory_id}"})
+                return _error_response(f"Memory not found or not accessible: {memory_id}")
             
             # Check ownership - only the owner can delete a memory
             if old_memory.get("user_id") != user_id:
-                return json.dumps({"error": "Permission denied: only the owner can delete this memory"})
+                return _error_response("Permission denied: only the owner can delete this memory")
             
             # Individual memories cannot be deleted via MCP - they are deleted when users are removed
             if old_memory.get("type") == "individual":
-                return json.dumps({
-                    "error": "Individual memories cannot be deleted directly. They are automatically deleted when users are removed from the system."
-                })
+                return _error_response(
+                    "Individual memories cannot be deleted directly. They are automatically deleted when users are removed from the system."
+                )
             
             success = await repo.delete(uuid_id)
             
             if not success:
-                return json.dumps({"error": f"Memory not found: {memory_id}"})
+                return _error_response(f"Memory not found: {memory_id}")
             
             # Log the deletion
             user_id, org_id, user_role = await _get_current_user_context()
@@ -810,9 +798,9 @@ Returns:
             })
             
         except ValueError as e:
-            return json.dumps({"error": f"Invalid memory ID format: {str(e)}"})
+            return _error_response(f"Invalid memory ID format: {str(e)}")
         except Exception as e:
-            return json.dumps({"error": f"Failed to delete memory: {str(e)}"})
+            return _error_response(f"Failed to delete memory: {str(e)}")
 
     @mcp.tool()
     async def get_existing_tags(
@@ -853,7 +841,7 @@ Returns:
             }, indent=2)
             
         except Exception as e:
-            return json.dumps({"error": f"Failed to get tags: {str(e)}"})
+            return _error_response(f"Failed to get tags: {str(e)}")
 
     @mcp.tool()
     async def get_tag_suggestions(
@@ -876,7 +864,7 @@ Returns:
         """
         try:
             if not query or not query.strip():
-                return json.dumps({"error": "Query is required"})
+                return _error_response("Query is required")
             
             repo = await _get_repository()
             
@@ -898,7 +886,7 @@ Returns:
             }, indent=2)
             
         except Exception as e:
-            return json.dumps({"error": f"Failed to get tag suggestions: {str(e)}"})
+            return _error_response(f"Failed to get tag suggestions: {str(e)}")
 
     @mcp.tool()
     async def share_memory(memory_id: str) -> str:
@@ -919,7 +907,7 @@ Returns:
             user_id, org_id, user_role = await _get_current_user_context()
             
             if user_id is None:
-                return json.dumps({"error": "Authentication required to share memories"})
+                return _error_response("Authentication required to share memories")
             
             repo = await _get_repository()
             
@@ -930,9 +918,9 @@ Returns:
             )
             
             if result is None:
-                return json.dumps({
-                    "error": "Memory not found or you are not the owner. Only the owner can share a memory."
-                })
+                return _error_response(
+                    "Memory not found or you are not the owner. Only the owner can share a memory."
+                )
             
             # Log the share action
             audit_repo = await _get_audit_repository()
@@ -950,9 +938,9 @@ Returns:
             return json.dumps(_serialize_memory(result), indent=2)
             
         except ValueError as e:
-            return json.dumps({"error": f"Invalid memory_id: {str(e)}"})
+            return _error_response(f"Invalid memory_id: {str(e)}")
         except Exception as e:
-            return json.dumps({"error": f"Failed to share memory: {str(e)}"})
+            return _error_response(f"Failed to share memory: {str(e)}")
 
     @mcp.tool()
     async def unshare_memory(memory_id: str) -> str:
@@ -972,7 +960,7 @@ Returns:
             user_id, org_id, user_role = await _get_current_user_context()
             
             if user_id is None:
-                return json.dumps({"error": "Authentication required to unshare memories"})
+                return _error_response("Authentication required to unshare memories")
             
             repo = await _get_repository()
             
@@ -983,9 +971,9 @@ Returns:
             )
             
             if result is None:
-                return json.dumps({
-                    "error": "Memory not found or you are not the owner. Only the owner can unshare a memory."
-                })
+                return _error_response(
+                    "Memory not found or you are not the owner. Only the owner can unshare a memory."
+                )
             
             # Log the unshare action
             audit_repo = await _get_audit_repository()
@@ -1003,9 +991,9 @@ Returns:
             return json.dumps(_serialize_memory(result), indent=2)
             
         except ValueError as e:
-            return json.dumps({"error": f"Invalid memory_id: {str(e)}"})
+            return _error_response(f"Invalid memory_id: {str(e)}")
         except Exception as e:
-            return json.dumps({"error": f"Failed to unshare memory: {str(e)}"})
+            return _error_response(f"Failed to unshare memory: {str(e)}")
 
 
 def _serialize_memory(memory: dict[str, Any]) -> dict[str, Any]:

@@ -3,6 +3,7 @@
 This module provides the database layer for mnemeMCP, including:
 - Connection pool management (pool.py)
 - Repository classes for each entity type
+- TypedDict definitions for repository return values
 
 Repositories:
 - MemoryRepository: Memory CRUD and search operations
@@ -24,6 +25,25 @@ from mnememcp.db.organization import OrganizationRepository
 from mnememcp.db.audit import AuditRepository
 from mnememcp.db.access import AccessRepository
 
+# TypedDict definitions for repository return values
+from mnememcp.db.types import (
+    MemoryRecord,
+    MemorySearchRecord,
+    MemorySearchResult,
+    TagCount,
+    TagSuggestion,
+    UserRecord,
+    ApiKeyRecord,
+    ApiKeyVerifyRecord,
+    OrganizationRecord,
+    OrganizationListResult,
+    AuditLogRecord,
+    AuditLogResult,
+    AccessLogRecord,
+    AccessLogResult,
+    MostAccessedRecord,
+)
+
 __all__ = [
     # Pool management
     "get_pool",
@@ -36,4 +56,20 @@ __all__ = [
     "OrganizationRepository",
     "AuditRepository",
     "AccessRepository",
+    # TypedDict definitions
+    "MemoryRecord",
+    "MemorySearchRecord",
+    "MemorySearchResult",
+    "TagCount",
+    "TagSuggestion",
+    "UserRecord",
+    "ApiKeyRecord",
+    "ApiKeyVerifyRecord",
+    "OrganizationRecord",
+    "OrganizationListResult",
+    "AuditLogRecord",
+    "AuditLogResult",
+    "AccessLogRecord",
+    "AccessLogResult",
+    "MostAccessedRecord",
 ]

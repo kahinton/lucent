@@ -1,0 +1,215 @@
+"""Rate limiting for API key authentication.
+
+This module provides a simple in-memory rate limiter using a sliding window algorithm.
+Default: 100 requests per minute per API key, configurable via MNEMEMCP_RATE_LIMIT_PER_MINUTE.
+
+TODO: For distributed deployments, upgrade to Redis-based rate limiting.
+      This in-memory implementation only works for single-instance deployments.
+"""
+
+import os
+import time
+from collections import defaultdict
+from dataclasses import dataclass, field
+from threading import Lock
+from typing import NamedTuple
+from uuid import UUID
+
+
+class RateLimitResult(NamedTuple):
+    """Result of a rate limit check."""
+    allowed: bool
+    headers: dict[str, str]
+
+
+@dataclass
+class RateLimitBucket:
+    """Sliding window rate limit bucket for a single API key."""
+    
+    requests: list[float] = field(default_factory=list)
+    lock: Lock = field(default_factory=Lock)
+    
+    def check_and_record(self, limit: int, window_seconds: int) -> tuple[bool, int, int]:
+        """Check if request is allowed and record it if so.
+        
+        Args:
+            limit: Maximum requests allowed in the window.
+            window_seconds: Size of the sliding window in seconds.
+            
+        Returns:
+            Tuple of (allowed, remaining, reset_timestamp).
+        """
+        now = time.time()
+        window_start = now - window_seconds
+        
+        with self.lock:
+            # Remove expired requests (outside the window)
+            self.requests = [t for t in self.requests if t > window_start]
+            
+            current_count = len(self.requests)
+            remaining = max(0, limit - current_count)
+            
+            # Calculate when the oldest request in window will expire
+            if self.requests:
+                reset_at = int(self.requests[0] + window_seconds)
+            else:
+                reset_at = int(now + window_seconds)
+            
+            if current_count >= limit:
+                # Rate limited
+                return False, 0, reset_at
+            
+            # Request allowed - record it
+            self.requests.append(now)
+            return True, remaining - 1, reset_at
+
+
+class RateLimiter:
+    """In-memory rate limiter using sliding window algorithm.
+    
+    Thread-safe implementation suitable for single-instance deployments.
+    For distributed deployments, consider upgrading to Redis.
+    
+    Usage:
+        limiter = RateLimiter()
+        allowed, headers = limiter.check_rate_limit(api_key_id)
+        if not allowed:
+            return Response(status_code=429, headers=headers)
+    """
+    
+    def __init__(
+        self,
+        requests_per_minute: int | None = None,
+        window_seconds: int = 60,
+    ):
+        """Initialize the rate limiter.
+        
+        Args:
+            requests_per_minute: Max requests per minute. Defaults to MNEMEMCP_RATE_LIMIT_PER_MINUTE
+                                 env var or 100.
+            window_seconds: Sliding window size in seconds. Default 60.
+        """
+        if requests_per_minute is None:
+            requests_per_minute = int(os.environ.get("MNEMEMCP_RATE_LIMIT_PER_MINUTE", "100"))
+        
+        self.limit = requests_per_minute
+        self.window_seconds = window_seconds
+        self._buckets: dict[UUID, RateLimitBucket] = defaultdict(RateLimitBucket)
+        self._buckets_lock = Lock()
+    
+    def check_rate_limit(self, api_key_id: UUID) -> RateLimitResult:
+        """Check if a request from an API key is allowed.
+        
+        Args:
+            api_key_id: The UUID of the API key making the request.
+            
+        Returns:
+            RateLimitResult with allowed status and headers to include in response.
+        """
+        # Get or create bucket for this API key
+        with self._buckets_lock:
+            bucket = self._buckets[api_key_id]
+        
+        allowed, remaining, reset_at = bucket.check_and_record(
+            self.limit, self.window_seconds
+        )
+        
+        headers = {
+            "X-RateLimit-Limit": str(self.limit),
+            "X-RateLimit-Remaining": str(remaining),
+            "X-RateLimit-Reset": str(reset_at),
+        }
+        
+        if not allowed:
+            # Add Retry-After header for 429 responses
+            retry_after = max(1, reset_at - int(time.time()))
+            headers["Retry-After"] = str(retry_after)
+        
+        return RateLimitResult(allowed=allowed, headers=headers)
+    
+    def cleanup_expired(self) -> int:
+        """Remove expired buckets that have no recent requests.
+        
+        Call this periodically to prevent memory growth.
+        Returns the number of buckets removed.
+        
+        Returns:
+            Number of buckets cleaned up.
+        """
+        now = time.time()
+        window_start = now - self.window_seconds
+        removed = 0
+        
+        with self._buckets_lock:
+            keys_to_remove = []
+            for key, bucket in self._buckets.items():
+                with bucket.lock:
+                    # Remove if no requests in the window
+                    bucket.requests = [t for t in bucket.requests if t > window_start]
+                    if not bucket.requests:
+                        keys_to_remove.append(key)
+            
+            for key in keys_to_remove:
+                del self._buckets[key]
+                removed += 1
+        
+        return removed
+    
+    def reset(self, api_key_id: UUID) -> None:
+        """Reset rate limit for a specific API key.
+        
+        Useful for testing or manual intervention.
+        
+        Args:
+            api_key_id: The API key to reset.
+        """
+        with self._buckets_lock:
+            if api_key_id in self._buckets:
+                del self._buckets[api_key_id]
+    
+    def get_usage(self, api_key_id: UUID) -> dict[str, int]:
+        """Get current usage stats for an API key.
+        
+        Args:
+            api_key_id: The API key to check.
+            
+        Returns:
+            Dict with 'used', 'limit', and 'remaining' counts.
+        """
+        now = time.time()
+        window_start = now - self.window_seconds
+        
+        with self._buckets_lock:
+            if api_key_id not in self._buckets:
+                return {"used": 0, "limit": self.limit, "remaining": self.limit}
+            bucket = self._buckets[api_key_id]
+        
+        with bucket.lock:
+            current = len([t for t in bucket.requests if t > window_start])
+        
+        return {
+            "used": current,
+            "limit": self.limit,
+            "remaining": max(0, self.limit - current),
+        }
+
+
+# Global rate limiter instance
+_rate_limiter: RateLimiter | None = None
+
+
+def get_rate_limiter() -> RateLimiter:
+    """Get the global rate limiter instance.
+    
+    Creates one if it doesn't exist.
+    """
+    global _rate_limiter
+    if _rate_limiter is None:
+        _rate_limiter = RateLimiter()
+    return _rate_limiter
+
+
+def reset_rate_limiter() -> None:
+    """Reset the global rate limiter (useful for testing)."""
+    global _rate_limiter
+    _rate_limiter = None

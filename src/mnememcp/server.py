@@ -11,12 +11,15 @@ import sys
 from contextvars import copy_context
 
 from dotenv import load_dotenv
+
+from mnememcp.logging import configure_logging, get_logger
 from mcp.server.fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from mnememcp.auth import is_dev_mode, set_current_user, set_current_api_key_id
 from mnememcp.prompts.memory_usage import get_memory_system_prompt, get_memory_system_prompt_short, get_user_introduction_prompt
+from mnememcp.rate_limit import get_rate_limiter
 from mnememcp.tools.memories import register_tools
 
 
@@ -32,6 +35,9 @@ mcp = FastMCP("mnemeMCP")
 
 # Register all memory tools
 register_tools(mcp)
+
+# Get logger for this module
+logger = get_logger("server")
 
 
 class MCPAuthMiddleware:
@@ -91,20 +97,53 @@ class MCPAuthMiddleware:
                         key_info = await api_key_repo.verify(api_key)
                         
                         if key_info:
+                            # Check rate limit before proceeding
+                            rate_limiter = get_rate_limiter()
+                            rate_result = rate_limiter.check_rate_limit(key_info["id"])
+                            
+                            if not rate_result.allowed:
+                                # Rate limited - return 429
+                                response = JSONResponse(
+                                    status_code=429,
+                                    content={
+                                        "jsonrpc": "2.0",
+                                        "error": {
+                                            "code": -32000,
+                                            "message": "Rate limit exceeded. Please slow down your requests.",
+                                        },
+                                        "id": None,
+                                    },
+                                    headers=rate_result.headers,
+                                )
+                                await response(scope, receive, send)
+                                return
+                            
                             # Get full user record and set context
                             user_repo = UserRepository(pool)
                             user = await user_repo.get_by_id(key_info["user_id"])
                             if user:
                                 set_current_user(user)
                                 set_current_api_key_id(key_info["id"])
+                                
+                                # Wrap send to inject rate limit headers
+                                rate_headers = rate_result.headers
+                                
+                                async def send_with_headers(message):
+                                    if message["type"] == "http.response.start":
+                                        headers = list(message.get("headers", []))
+                                        for name, value in rate_headers.items():
+                                            headers.append((name.lower().encode(), value.encode()))
+                                        message = {**message, "headers": headers}
+                                    await send(message)
+                                
                                 try:
-                                    await self.app(scope, receive, send)
+                                    await self.app(scope, receive, send_with_headers)
                                 finally:
                                     set_current_user(None)
                                     set_current_api_key_id(None)
                                 return
                 except Exception as e:
-                    print(f"API key auth error: {e}", file=sys.stderr)
+                    logger.error("API key auth error", exc_info=e)
             
             # Invalid API key provided
             response = JSONResponse(
@@ -187,18 +226,21 @@ def main() -> None:
     import uvicorn
     from mnememcp.api.app import create_app, set_mcp_session_manager
     
+    # Configure logging first
+    configure_logging()
+    
     # Validate DATABASE_URL is set
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
-        print("ERROR: DATABASE_URL environment variable is required.", file=sys.stderr)
-        print("Example: postgresql://user:password@localhost:5432/mnememcp", file=sys.stderr)
+        logger.error("DATABASE_URL environment variable is required")
+        logger.error("Example: postgresql://user:password@localhost:5432/mnememcp")
         sys.exit(1)
     
     # Show dev mode status
     if is_dev_mode():
-        print("Running in DEVELOPMENT MODE - authentication bypassed for web UI", file=sys.stderr)
+        logger.info("Running in DEVELOPMENT MODE - authentication bypassed for web UI")
     else:
-        print("Running in PRODUCTION MODE - API key required for MCP/API access", file=sys.stderr)
+        logger.info("Running in PRODUCTION MODE - API key required for MCP/API access")
     
     # Get MCP app
     mcp_app = get_mcp_app()
@@ -216,11 +258,11 @@ def main() -> None:
     # Wrap the entire app with our auth middleware (only applies to /mcp paths)
     wrapped_app = MCPAuthMiddleware(app)
     
-    print(f"Starting mnemeMCP server on http://{HOST}:{PORT}", file=sys.stderr)
-    print(f"  MCP endpoint: http://{HOST}:{PORT}/mcp", file=sys.stderr)
-    print(f"  REST API: http://{HOST}:{PORT}/api", file=sys.stderr)
-    print(f"  Web UI: http://{HOST}:{PORT}/", file=sys.stderr)
-    print(f"  API docs: http://{HOST}:{PORT}/api/docs", file=sys.stderr)
+    logger.info(f"Starting mnemeMCP server on http://{HOST}:{PORT}")
+    logger.info(f"  MCP endpoint: http://{HOST}:{PORT}/mcp")
+    logger.info(f"  REST API: http://{HOST}:{PORT}/api")
+    logger.info(f"  Web UI: http://{HOST}:{PORT}/")
+    logger.info(f"  API docs: http://{HOST}:{PORT}/api/docs")
     
     # Run the unified server with the wrapped app
     uvicorn.run(wrapped_app, host=HOST, port=PORT, log_level="info")

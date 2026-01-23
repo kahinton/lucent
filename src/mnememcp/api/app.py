@@ -18,6 +18,10 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from mnememcp.api.routers import memories, search, audit, access, users, organizations
+from mnememcp.logging import get_logger
+
+# Get logger for this module
+logger = get_logger("api.app")
 from mnememcp.web.routes import router as web_router
 from mnememcp.db import init_db, close_db
 
@@ -98,8 +102,8 @@ def create_app() -> FastAPI:
     @app.exception_handler(Exception)
     async def global_exception_handler(request: Request, exc: Exception):
         """Handle unhandled exceptions with detailed logging."""
+        logger.error(f"Unhandled exception on {request.method} {request.url.path}", exc_info=exc)
         error_detail = traceback.format_exc()
-        print(f"Unhandled exception: {error_detail}")
         return JSONResponse(
             status_code=500,
             content={"error": str(exc), "detail": error_detail},
