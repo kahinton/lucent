@@ -12,7 +12,7 @@ from mnememcp.api.models import (
     AuditLogResponse,
     ErrorResponse,
 )
-from mnememcp.db.client import AuditRepository, get_pool
+from mnememcp.db import AuditRepository, get_pool
 from mnememcp.rbac import Permission
 
 

@@ -14,7 +14,7 @@ from mnememcp.api.models import (
     ErrorResponse,
     SuccessResponse,
 )
-from mnememcp.db.client import OrganizationRepository, UserRepository, get_pool
+from mnememcp.db import OrganizationRepository, UserRepository, get_pool
 from mnememcp.rbac import Permission
 
 

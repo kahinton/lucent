@@ -1,11 +1,20 @@
-"""Authentication and user context management for mnemeMCP."""
+"""Authentication and user context management for mnemeMCP.
+
+This module uses ContextVars to store request-scoped user context.
+ContextVars are automatically scoped per asyncio task, so each request
+gets isolated context without interference from other requests.
+
+Important: When setting context vars in middleware (like MCPAuthMiddleware),
+use try/finally to ensure cleanup happens even on errors. For FastAPI
+dependencies, context is naturally scoped to the request lifecycle.
+"""
 
 import os
 from contextvars import ContextVar
 from typing import Any
 from uuid import UUID
 
-from mnememcp.db.client import OrganizationRepository, UserRepository, get_pool, init_db
+from mnememcp.db import OrganizationRepository, UserRepository, get_pool, init_db
 
 # Context variable to store the current user for the request
 _current_user: ContextVar[dict[str, Any] | None] = ContextVar("current_user", default=None)

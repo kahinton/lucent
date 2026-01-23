@@ -17,7 +17,7 @@ from mnememcp.api.models import (
     TagSuggestionsResponse,
     TagSuggestion,
 )
-from mnememcp.db.client import MemoryRepository, AuditRepository, AccessRepository, get_pool
+from mnememcp.db import MemoryRepository, AuditRepository, AccessRepository, get_pool
 from mnememcp.models.validation import validate_metadata
 from mnememcp.rbac import Permission
 

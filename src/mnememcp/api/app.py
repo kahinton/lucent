@@ -19,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 
 from mnememcp.api.routers import memories, search, audit, access, users, organizations
 from mnememcp.web.routes import router as web_router
-from mnememcp.db.client import init_db, close_db
+from mnememcp.db import init_db, close_db
 
 # Path to static files directory
 STATIC_DIR = Path(__file__).parent.parent / "web" / "static"

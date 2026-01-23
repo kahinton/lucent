@@ -12,7 +12,7 @@ from mnememcp.api.models import (
     SearchResponse,
     SearchResultMemory,
 )
-from mnememcp.db.client import MemoryRepository, AccessRepository, get_pool
+from mnememcp.db import MemoryRepository, AccessRepository, get_pool
 from mnememcp.rbac import Permission
 
 

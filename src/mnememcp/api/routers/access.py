@@ -12,7 +12,7 @@ from mnememcp.api.models import (
     AccessLogResponse,
     MostAccessedItem,
 )
-from mnememcp.db.client import AccessRepository, get_pool
+from mnememcp.db import AccessRepository, get_pool
 from mnememcp.rbac import Permission
 
 

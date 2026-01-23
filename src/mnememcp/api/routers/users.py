@@ -15,7 +15,7 @@ from mnememcp.api.models import (
     ErrorResponse,
     SuccessResponse,
 )
-from mnememcp.db.client import UserRepository, get_pool
+from mnememcp.db import UserRepository, get_pool
 from mnememcp.rbac import Role, can_manage_user, can_assign_role, Permission
 
 

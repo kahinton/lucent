@@ -9,7 +9,7 @@ from uuid import UUID
 from mcp.server.fastmcp import FastMCP
 
 from mnememcp.auth import ensure_dev_user, get_current_user, is_dev_mode, get_current_api_key_id
-from mnememcp.db.client import AccessRepository, AuditRepository, MemoryRepository, get_pool, init_db
+from mnememcp.db import AccessRepository, AuditRepository, MemoryRepository, get_pool, init_db
 from mnememcp.models.memory import (
     CreateMemoryInput,
     MemoryType,

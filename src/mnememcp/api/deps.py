@@ -14,7 +14,7 @@ from mnememcp.auth import (
     set_impersonating_user,
     is_impersonating,
 )
-from mnememcp.db.client import UserRepository, ApiKeyRepository, get_pool
+from mnememcp.db import UserRepository, ApiKeyRepository, get_pool
 from mnememcp.rbac import Permission, Role, has_permission, PermissionError as RBACPermissionError
 
 

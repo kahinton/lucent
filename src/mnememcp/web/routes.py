@@ -10,7 +10,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from mnememcp.api.deps import get_current_user_for_web, CurrentUser
-from mnememcp.db.client import (
+from mnememcp.db import (
     MemoryRepository, 
     AuditRepository, 
     AccessRepository,

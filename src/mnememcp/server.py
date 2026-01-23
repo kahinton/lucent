@@ -62,7 +62,7 @@ class MCPAuthMiddleware:
             return
         
         from starlette.responses import JSONResponse
-        from mnememcp.db.client import ApiKeyRepository, UserRepository, get_pool, init_db
+        from mnememcp.db import ApiKeyRepository, UserRepository, get_pool, init_db
         
         # Get authorization header from scope
         headers = dict(scope.get("headers", []))
