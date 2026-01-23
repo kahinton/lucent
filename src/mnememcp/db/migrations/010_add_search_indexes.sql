@@ -1,11 +1,11 @@
 -- Migration: Add performance indexes for search operations
 -- Addresses potential performance issues with fuzzy search across fields
 
--- Add trigram index on tags array (cast to text for similarity search)
--- This helps search_full queries that use similarity() on tags
-CREATE INDEX IF NOT EXISTS idx_memories_tags_trgm 
-ON memories USING GIN ((array_to_string(tags, ' ')) gin_trgm_ops)
-WHERE deleted_at IS NULL;
+-- Note: We cannot add a trigram index on array_to_string(tags) because
+-- array_to_string is not marked IMMUTABLE in PostgreSQL. The existing
+-- GIN index on tags (for array containment) will be used instead.
+-- For fuzzy tag search, the query will scan matching rows after other
+-- filters (access control, deleted_at) have narrowed the result set.
 
 -- Add composite index for access control pattern (very common query pattern)
 -- Optimizes: (user_id = X OR (organization_id = Y AND shared = true))
@@ -24,7 +24,6 @@ ON memories (last_accessed_at DESC)
 WHERE deleted_at IS NULL AND last_accessed_at IS NOT NULL;
 
 -- Comments
-COMMENT ON INDEX idx_memories_tags_trgm IS 'Trigram index for fuzzy tag search in search_full';
 COMMENT ON INDEX idx_memories_user_id_active IS 'Optimizes access control queries by user ownership';
 COMMENT ON INDEX idx_memories_org_shared_active IS 'Optimizes access control queries for shared memories';
 COMMENT ON INDEX idx_memories_last_accessed IS 'Supports access analytics and recently-used queries';
