@@ -19,19 +19,6 @@ from mnememcp.models.memory import (
 from mnememcp.models.validation import validate_metadata, METADATA_DOCS
 
 
-async def _get_repository() -> MemoryRepository:
-    """Get a memory repository, initializing the database if needed."""
-    try:
-        pool = await get_pool()
-    except RuntimeError:
-        # Pool not initialized yet, initialize it now
-        database_url = os.environ.get("DATABASE_URL")
-        if not database_url:
-            raise RuntimeError("DATABASE_URL environment variable is required")
-        pool = await init_db(database_url)
-    return MemoryRepository(pool)
-
-
 async def _get_current_user_id() -> UUID | None:
     """Get the current user ID, creating dev user if in dev mode."""
     # Check if we have a user in context (set by auth middleware)
