@@ -1,38 +1,38 @@
 services:
   postgres:
     image: postgres:16-alpine
-    container_name: mnememcp-db
+    container_name: lucent-db
     environment:
-      POSTGRES_DB: mnememcp
-      POSTGRES_USER: mnememcp
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mnememcp_dev_password}
+      POSTGRES_DB: lucent
+      POSTGRES_USER: lucent
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lucent_dev_password}
     volumes:
-      - mnememcp_data:/var/lib/postgresql/data
+      - lucent_data:/var/lib/postgresql/data
       - ./docker/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     ports:
       - "5433:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U mnememcp -d mnememcp"]
+      test: ["CMD-SHELL", "pg_isready -U lucent -d lucent"]
       interval: 5s
       timeout: 5s
       retries: 5
       start_period: 10s
     restart: unless-stopped
 
-  mnememcp:
+  lucent:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: mnememcp-server
+    container_name: lucent-server
     depends_on:
       postgres:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgresql://mnememcp:${POSTGRES_PASSWORD:-mnememcp_dev_password}@postgres:5432/mnememcp
+      DATABASE_URL: postgresql://lucent:${POSTGRES_PASSWORD:-lucent_dev_password}@postgres:5432/lucent
     stdin_open: true
     tty: true
     restart: unless-stopped
 
 volumes:
-  mnememcp_data:
+  lucent_data:
     driver: local

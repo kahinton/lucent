@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+
+{% block title %}Memories - Lucent{% endblock %}
+
+{% block content %}
+<!-- Page Header -->
+<div class="flex items-center justify-between mb-8">
+    <div>
+        <h1 class="text-2xl font-bold text-gray-900">Memories</h1>
+        <p class="mt-1 text-sm text-gray-500">Search and manage your memory collection</p>
+    </div>
+    <a href="/memories/new" class="inline-flex items-center gap-2 px-4 py-2.5 bg-primary-600 text-white rounded-lg font-medium text-sm hover:bg-primary-700 transition-colors shadow-sm">
+        <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+        </svg>
+        New Memory
+    </a>
+</div>
+
+<!-- Search and Filters -->
+<div class="bg-white rounded-xl border border-gray-200 p-4 mb-6 shadow-sm">
+    <form class="flex flex-wrap gap-4" method="get" action="/memories"
+          hx-get="/memories" 
+          hx-trigger="submit, input delay:300ms from:input[name='q'], change from:select"
+          hx-target="#memory-results"
+          hx-push-url="true">
+        <div class="flex-1 min-w-[200px]">
+            <div class="relative">
+                <svg class="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
+                </svg>
+                <input 
+                    type="search" 
+                    name="q" 
+                    placeholder="Search memories..." 
+                    value="{{ query or '' }}"
+                    class="w-full pl-10 pr-4 py-2.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none transition-shadow"
+                >
+            </div>
+        </div>
+        <select 
+            name="type" 
+            class="px-4 py-2.5 border border-gray-300 rounded-lg text-sm bg-white focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none"
+        >
+            <option value="">All Types</option>
+            {% for t in memory_types %}
+            <option value="{{ t }}" {% if type_filter == t %}selected{% endif %}>{{ t | capitalize }}</option>
+            {% endfor %}
+        </select>
+        <select 
+            name="tag" 
+            class="px-4 py-2.5 border border-gray-300 rounded-lg text-sm bg-white focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none"
+        >
+            <option value="">All Tags</option>
+            {% for t in tags %}
+            <option value="{{ t.tag }}" {% if tag_filter == t.tag %}selected{% endif %}>{{ t.tag }} ({{ t.count }})</option>
+            {% endfor %}
+        </select>
+        <button type="submit" class="px-4 py-2.5 bg-primary-600 text-white rounded-lg font-medium text-sm hover:bg-primary-700 transition-colors shadow-sm">
+            <span class="htmx-indicator">
+                <svg class="animate-spin h-4 w-4 inline mr-1" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+            </span>
+            Search
+        </button>
+    </form>
+</div>
+
+<!-- Results -->
+<div id="memory-results">
+    {% include "partials/memory_list.html" %}
+</div>
+{% endblock %}

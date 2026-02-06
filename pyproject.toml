@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "mnememcp"
+name = "lucent"
 version = "0.1.0"
 description = "MCP server providing memory functionality for LLMs"
 readme = "README.md"
@@ -32,10 +32,10 @@ dev = [
 ]
 
 [project.scripts]
-mnememcp = "mnememcp.server:main"
+lucent = "lucent.server:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/mnememcp"]
+packages = ["src/lucent"]
 
 [tool.ruff]
 target-version = "py312"

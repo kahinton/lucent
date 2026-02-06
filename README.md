@@ -1,4 +1,4 @@
-# mnemeMCP
+# Lucent
 
 An MCP (Model Context Protocol) server providing persistent memory functionality for LLMs. Store, search, and retrieve memories across conversations to enhance AI assistant capabilities.
 
@@ -35,7 +35,7 @@ An MCP (Model Context Protocol) server providing persistent memory functionality
 
 ```bash
 # Clone and enter the repository
-cd mnememcp
+cd lucent
 
 # Start PostgreSQL with Docker
 docker compose up -d postgres
@@ -65,11 +65,11 @@ cp .env.example .env
 
 ```bash
 # Set database URL and enable dev mode
-export DATABASE_URL="postgresql://mnememcp:mnememcp_dev_password@localhost:5433/mnememcp"
-export MNEMEMCP_DEV_MODE=true
+export DATABASE_URL="postgresql://lucent:lucent_dev_password@localhost:5433/lucent"
+export LUCENT_DEV_MODE=true
 
 # Run the MCP server
-mnememcp
+lucent
 ```
 
 ### 5. Configure Your MCP Client
@@ -79,7 +79,7 @@ For VS Code with the MCP extension, add to `.vscode/mcp.json`:
 ```json
 {
   "servers": {
-    "mnememcp": {
+    "lucent": {
       "url": "http://localhost:8766/mcp",
       "type": "http",
       "headers": {
@@ -97,11 +97,11 @@ For Claude Desktop, add to your `claude_desktop_config.json`:
 ```json
 {
   "mcpServers": {
-    "mnememcp": {
-      "command": "mnememcp",
+    "lucent": {
+      "command": "lucent",
       "env": {
-        "DATABASE_URL": "postgresql://mnememcp:mnememcp_dev_password@localhost:5433/mnememcp",
-        "MNEMEMCP_DEV_MODE": "true"
+        "DATABASE_URL": "postgresql://lucent:lucent_dev_password@localhost:5433/lucent",
+        "LUCENT_DEV_MODE": "true"
       }
     }
   }
@@ -115,7 +115,7 @@ For Claude Desktop, add to your `claude_desktop_config.json`:
 For local development and testing, enable dev mode to bypass authentication:
 
 ```bash
-export MNEMEMCP_DEV_MODE=true
+export LUCENT_DEV_MODE=true
 ```
 
 This creates a local "dev-user" that all memories are associated with.
@@ -125,7 +125,7 @@ This creates a local "dev-user" that all memories are associated with.
 In production, disable dev mode and configure OAuth or SAML:
 
 ```bash
-export MNEMEMCP_DEV_MODE=false
+export LUCENT_DEV_MODE=false
 # Configure your OAuth provider(s)
 ```
 
@@ -191,7 +191,7 @@ Arguments:
 
 ## System Prompts
 
-mnemeMCP provides prompt templates to help LLMs use the memory system effectively:
+Lucent provides prompt templates to help LLMs use the memory system effectively:
 
 - **memory_usage_guide**: Comprehensive guidance on memory types, importance ratings, and best practices
 - **memory_usage_guide_short**: Condensed version for limited prompt space
@@ -216,7 +216,7 @@ Run both PostgreSQL and the MCP server in containers:
 docker compose up -d
 
 # View logs
-docker compose logs -f mnememcp
+docker compose logs -f lucent
 ```
 
 ### Database Only
@@ -229,10 +229,10 @@ docker compose up -d postgres
 
 ### Persistent Storage
 
-Data is stored in a Docker volume (`mnememcp_data`). To backup:
+Data is stored in a Docker volume (`lucent_data`). To backup:
 
 ```bash
-docker compose exec postgres pg_dump -U mnememcp mnememcp > backup.sql
+docker compose exec postgres pg_dump -U lucent lucent > backup.sql
 ```
 
 ## Development
@@ -259,7 +259,7 @@ ruff format src/
 ## Architecture
 
 ```
-src/mnememcp/
+src/lucent/
 ├── server.py          # Unified server entry point (MCP + API + Web)
 ├── api/
 │   ├── app.py         # FastAPI application

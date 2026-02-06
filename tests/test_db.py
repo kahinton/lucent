@@ -4,7 +4,7 @@ import pytest
 from uuid import UUID, uuid4
 from datetime import datetime, timezone
 
-from mnememcp.db import (
+from lucent.db import (
     MemoryRepository,
     UserRepository,
     OrganizationRepository,
@@ -429,7 +429,7 @@ class TestAccessRepository:
         )
         
         # Verify last_accessed_at was updated
-        from mnememcp.db import MemoryRepository
+        from lucent.db import MemoryRepository
         mem_repo = MemoryRepository(db_pool)
         memory = await mem_repo.get(test_memory["id"])
         

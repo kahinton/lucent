@@ -20,8 +20,8 @@ async def db_pool():
     
     Uses the main hindsight database for tests since we clean up after ourselves.
     """
-    from mnememcp.db.pool import init_db, close_db, _pool
-    import mnememcp.db.pool as pool_module
+    from lucent.db.pool import init_db, close_db, _pool
+    import lucent.db.pool as pool_module
     
     # Reset the global pool to None to ensure fresh connection
     pool_module._pool = None
@@ -73,7 +73,7 @@ async def clean_test_data(db_pool):
 @pytest_asyncio.fixture
 async def test_organization(db_pool, clean_test_data):
     """Create a test organization."""
-    from mnememcp.db import OrganizationRepository
+    from lucent.db import OrganizationRepository
     
     prefix = clean_test_data
     repo = OrganizationRepository(db_pool)
@@ -84,7 +84,7 @@ async def test_organization(db_pool, clean_test_data):
 @pytest_asyncio.fixture
 async def test_user(db_pool, test_organization, clean_test_data):
     """Create a test user with an organization."""
-    from mnememcp.db import UserRepository
+    from lucent.db import UserRepository
     
     prefix = clean_test_data
     repo = UserRepository(db_pool)
@@ -101,7 +101,7 @@ async def test_user(db_pool, test_organization, clean_test_data):
 @pytest_asyncio.fixture
 async def test_memory(db_pool, test_user, clean_test_data):
     """Create a test memory."""
-    from mnememcp.db import MemoryRepository
+    from lucent.db import MemoryRepository
     
     prefix = clean_test_data
     repo = MemoryRepository(db_pool)

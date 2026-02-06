@@ -4,7 +4,7 @@ import pytest
 from uuid import UUID
 from datetime import datetime
 
-from mnememcp.models.memory import (
+from lucent.models.memory import (
     Memory,
     MemoryType,
     GoalStatus,
