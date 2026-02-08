@@ -19,6 +19,7 @@ from lucent.db import (
     ApiKeyRepository,
     get_pool,
 )
+from lucent.mode import is_team_mode
 
 
 # Set up templates
@@ -46,6 +47,9 @@ def truncate(value: str, length: int = 100) -> str:
 # Register filters
 templates.env.filters["datetime"] = format_datetime
 templates.env.filters["truncate"] = truncate
+
+# Make deployment mode available to all templates
+templates.env.globals["team_mode"] = is_team_mode
 
 
 async def get_user_context(request: Request) -> CurrentUser:
@@ -78,7 +82,6 @@ async def dashboard(request: Request):
     
     # Get stats
     memory_repo = MemoryRepository(pool)
-    access_repo = AccessRepository(pool)
     
     # Recent memories
     recent = await memory_repo.search(
@@ -87,11 +90,14 @@ async def dashboard(request: Request):
         requesting_org_id=user.organization_id,
     )
     
-    # Most accessed
-    most_accessed = await access_repo.get_most_accessed(
-        user_id=user.id,
-        limit=5,
-    )
+    # Most accessed (team mode only)
+    most_accessed = []
+    if is_team_mode():
+        access_repo = AccessRepository(pool)
+        most_accessed = await access_repo.get_most_accessed(
+            user_id=user.id,
+            limit=5,
+        )
     
     # Get tag stats (with access control)
     tags = await memory_repo.get_existing_tags(
@@ -667,7 +673,9 @@ async def memory_edit_submit(
 
 @router.post("/memories/{memory_id}/share", response_class=HTMLResponse)
 async def memory_share(request: Request, memory_id: UUID):
-    """Toggle memory sharing."""
+    """Toggle memory sharing (team mode only)."""
+    if not is_team_mode():
+        raise HTTPException(status_code=404, detail="Sharing requires team mode")
     user = await get_user_context(request)
     pool = await get_pool()
     
@@ -757,7 +765,9 @@ async def audit_logs(
     page: int = 1,
     action_type: str | None = None,
 ):
-    """View audit logs."""
+    """View audit logs (team mode only)."""
+    if not is_team_mode():
+        raise HTTPException(status_code=404, detail="Audit logs require team mode")
     user = await get_user_context(request)
     pool = await get_pool()
     audit_repo = AuditRepository(pool)
@@ -795,7 +805,9 @@ async def audit_logs(
 
 @router.get("/users", response_class=HTMLResponse)
 async def users_list(request: Request):
-    """List organization users."""
+    """List organization users (team mode only)."""
+    if not is_team_mode():
+        raise HTTPException(status_code=404, detail="User management requires team mode")
     user = await get_user_context(request)
     pool = await get_pool()
     user_repo = UserRepository(pool)
@@ -825,7 +837,9 @@ async def create_user(
     email: str = Form(...),
     role: str = Form("member"),
 ):
-    """Create a new user in the organization."""
+    """Create a new user in the organization (team mode only)."""
+    if not is_team_mode():
+        raise HTTPException(status_code=404, detail="User management requires team mode")
     user = await get_user_context(request)
     
     # Check permission
@@ -879,7 +893,9 @@ async def create_user(
 
 @router.post("/users/{user_id}/impersonate")
 async def start_impersonation(request: Request, user_id: UUID):
-    """Start impersonating a user."""
+    """Start impersonating a user (team mode only)."""
+    if not is_team_mode():
+        raise HTTPException(status_code=404, detail="Impersonation requires team mode")
     user = await get_user_context(request)
     
     # Only owners can impersonate (admins have limited impersonation in the dep)
@@ -923,7 +939,9 @@ async def start_impersonation(request: Request, user_id: UUID):
 
 @router.post("/users/stop-impersonation")
 async def stop_impersonation(request: Request):
-    """Stop impersonating and return to original user."""
+    """Stop impersonating and return to original user (team mode only)."""
+    if not is_team_mode():
+        raise HTTPException(status_code=404, detail="Impersonation requires team mode")
     response = RedirectResponse(url="/users", status_code=303)
     response.delete_cookie(key="lucent_impersonate")
     return response

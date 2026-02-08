@@ -17,8 +17,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from lucent.api.routers import memories, search, audit, access, users, organizations
+from lucent.api.routers import memories, search
 from lucent.logging import get_logger
+from lucent.mode import is_team_mode
 
 # Get logger for this module
 logger = get_logger("api.app")
@@ -79,13 +80,17 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     
-    # Include API routers
+    # Include core API routers
     app.include_router(memories.router, prefix="/api/memories", tags=["Memories"])
     app.include_router(search.router, prefix="/api/search", tags=["Search"])
-    app.include_router(audit.router, prefix="/api/audit", tags=["Audit"])
-    app.include_router(access.router, prefix="/api/access", tags=["Access"])
-    app.include_router(users.router, prefix="/api/users", tags=["Users"])
-    app.include_router(organizations.router, prefix="/api/organizations", tags=["Organizations"])
+    
+    # Include team-only API routers
+    if is_team_mode():
+        from lucent.api.routers import audit, access, users, organizations
+        app.include_router(audit.router, prefix="/api/audit", tags=["Audit"])
+        app.include_router(access.router, prefix="/api/access", tags=["Access"])
+        app.include_router(users.router, prefix="/api/users", tags=["Users"])
+        app.include_router(organizations.router, prefix="/api/organizations", tags=["Organizations"])
     
     # Include web interface routes (excluded from API docs)
     app.include_router(web_router, include_in_schema=False)

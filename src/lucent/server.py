@@ -242,6 +242,11 @@ def main() -> None:
     else:
         logger.info("Running in PRODUCTION MODE - API key required for MCP/API access")
     
+    # Show deployment mode
+    from lucent.mode import get_mode
+    mode = get_mode()
+    logger.info(f"Deployment mode: {mode.value}")
+    
     # Get MCP app
     mcp_app = get_mcp_app()
     

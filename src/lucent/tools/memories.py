@@ -10,6 +10,7 @@ from mcp.server.fastmcp import FastMCP
 
 from lucent.auth import ensure_dev_user, get_current_user, is_dev_mode, get_current_api_key_id
 from lucent.db import AccessRepository, AuditRepository, MemoryRepository, get_pool, init_db
+from lucent.mode import is_team_mode
 from lucent.models.memory import (
     CreateMemoryInput,
     MemoryType,
@@ -209,23 +210,24 @@ Returns:
                 organization_id=org_id,
             )
             
-            # Log the creation in audit log
-            audit_repo = await _get_audit_repository()
-            await audit_repo.log(
-                memory_id=result["id"],
-                action_type="create",
-                user_id=user_id,
-                organization_id=org_id,
-                new_values={
-                    "username": input_data.username,
-                    "type": input_data.type.value,
-                    "content": input_data.content,
-                    "tags": input_data.tags,
-                    "importance": input_data.importance,
-                    "metadata": input_data.metadata,
-                },
-                context=_get_audit_context(),
-            )
+            # Log the creation in audit log (team mode only)
+            if is_team_mode():
+                audit_repo = await _get_audit_repository()
+                await audit_repo.log(
+                    memory_id=result["id"],
+                    action_type="create",
+                    user_id=user_id,
+                    organization_id=org_id,
+                    new_values={
+                        "username": input_data.username,
+                        "type": input_data.type.value,
+                        "content": input_data.content,
+                        "tags": input_data.tags,
+                        "importance": input_data.importance,
+                        "metadata": input_data.metadata,
+                    },
+                    context=_get_audit_context(),
+                )
             
             return json.dumps(_serialize_memory(result), indent=2)
             
@@ -266,17 +268,18 @@ Returns:
             if result is None:
                 return _error_response(f"Memory not found or not accessible: {memory_id}")
             
-            # Log the access
-            try:
-                access_repo = await _get_access_repository()
-                await access_repo.log_access(
-                    memory_id=uuid_id,
-                    access_type="view",
-                    user_id=user_id,
-                    organization_id=org_id,
-                )
-            except Exception:
-                pass  # Don't fail the request if access logging fails
+            # Log the access (team mode only)
+            if is_team_mode():
+                try:
+                    access_repo = await _get_access_repository()
+                    await access_repo.log_access(
+                        memory_id=uuid_id,
+                        access_type="view",
+                        user_id=user_id,
+                        organization_id=org_id,
+                    )
+                except Exception:
+                    pass  # Don't fail the request if access logging fails
             
             return json.dumps(_serialize_memory(result), indent=2)
             
@@ -332,16 +335,17 @@ Returns:
                     not_found.append(original_id)
                 else:
                     memories.append(_serialize_memory(result))
-                    # Log access
-                    try:
-                        await access_repo.log_access(
-                            memory_id=uuid_id,
-                            access_type="view",
-                            user_id=user_id,
-                            organization_id=org_id,
-                        )
-                    except Exception:
-                        pass
+                    # Log access (team mode only)
+                    if is_team_mode():
+                        try:
+                            await access_repo.log_access(
+                                memory_id=uuid_id,
+                                access_type="view",
+                                user_id=user_id,
+                                organization_id=org_id,
+                            )
+                        except Exception:
+                            pass
             
             return json.dumps({
                 "memories": memories,
@@ -483,8 +487,8 @@ Returns:
                 requesting_org_id=org_id,
             )
             
-            # Log access for returned memories
-            if result["memories"]:
+            # Log access for returned memories (team mode only)
+            if result["memories"] and is_team_mode():
                 try:
                     access_repo = await _get_access_repository()
                     memory_ids_accessed = [m["id"] for m in result["memories"]]
@@ -574,8 +578,8 @@ Returns:
                 requesting_org_id=org_id,
             )
             
-            # Log access for returned memories
-            if result["memories"]:
+            # Log access for returned memories (team mode only)
+            if result["memories"] and is_team_mode():
                 try:
                     access_repo = await _get_access_repository()
                     memory_ids_accessed = [m["id"] for m in result["memories"]]
@@ -709,8 +713,8 @@ Returns:
                     old_values["related_memory_ids"] = old_related
                     new_values["related_memory_ids"] = related_memory_ids
             
-            # Log the update if anything changed
-            if changed_fields:
+            # Log the update if anything changed (team mode only)
+            if changed_fields and is_team_mode():
                 user_id, org_id, user_role = await _get_current_user_context()
                 audit_repo = await _get_audit_repository()
                 await audit_repo.log(
@@ -776,21 +780,22 @@ Returns:
             if not success:
                 return _error_response(f"Memory not found: {memory_id}")
             
-            # Log the deletion
-            user_id, org_id, user_role = await _get_current_user_context()
-            audit_repo = await _get_audit_repository()
-            await audit_repo.log(
-                memory_id=uuid_id,
-                action_type="delete",
-                user_id=user_id,
-                organization_id=org_id,
-                old_values={
-                    "content": old_memory["content"],
-                    "tags": old_memory["tags"],
-                    "importance": old_memory["importance"],
-                },
-                context=_get_audit_context(),
-            )
+            # Log the deletion (team mode only)
+            if is_team_mode():
+                user_id, org_id, user_role = await _get_current_user_context()
+                audit_repo = await _get_audit_repository()
+                await audit_repo.log(
+                    memory_id=uuid_id,
+                    action_type="delete",
+                    user_id=user_id,
+                    organization_id=org_id,
+                    old_values={
+                        "content": old_memory["content"],
+                        "tags": old_memory["tags"],
+                        "importance": old_memory["importance"],
+                    },
+                    context=_get_audit_context(),
+                )
             
             return json.dumps({
                 "success": True,
@@ -888,112 +893,114 @@ Returns:
         except Exception as e:
             return _error_response(f"Failed to get tag suggestions: {str(e)}")
 
-    @mcp.tool()
-    async def share_memory(memory_id: str) -> str:
-        """Share a memory with other users in your organization.
+    # Team-only tools: sharing
+    if is_team_mode():
+        @mcp.tool()
+        async def share_memory(memory_id: str) -> str:
+            """Share a memory with other users in your organization.
 
-        Only the owner of the memory can share it. Once shared, other users
-        in the same organization will be able to see this memory in their
-        search results.
+            Only the owner of the memory can share it. Once shared, other users
+            in the same organization will be able to see this memory in their
+            search results.
 
-        Args:
-            memory_id: The UUID of the memory to share.
+            Args:
+                memory_id: The UUID of the memory to share.
 
-        Returns:
-            JSON string with the updated memory showing shared=true, or an error.
-        """
-        try:
-            # Get current user context
-            user_id, org_id, user_role = await _get_current_user_context()
-            
-            if user_id is None:
-                return _error_response("Authentication required to share memories")
-            
-            repo = await _get_repository()
-            
-            result = await repo.set_shared(
-                memory_id=UUID(memory_id),
-                user_id=user_id,
-                shared=True,
-            )
-            
-            if result is None:
-                return _error_response(
-                    "Memory not found or you are not the owner. Only the owner can share a memory."
+            Returns:
+                JSON string with the updated memory showing shared=true, or an error.
+            """
+            try:
+                # Get current user context
+                user_id, org_id, user_role = await _get_current_user_context()
+                
+                if user_id is None:
+                    return _error_response("Authentication required to share memories")
+                
+                repo = await _get_repository()
+                
+                result = await repo.set_shared(
+                    memory_id=UUID(memory_id),
+                    user_id=user_id,
+                    shared=True,
                 )
-            
-            # Log the share action
-            audit_repo = await _get_audit_repository()
-            await audit_repo.log(
-                memory_id=UUID(memory_id),
-                action_type="share",
-                user_id=user_id,
-                organization_id=org_id,
-                changed_fields=["shared"],
-                old_values={"shared": False},
-                new_values={"shared": True},
-                context=_get_audit_context(),
-            )
-            
-            return json.dumps(_serialize_memory(result), indent=2)
-            
-        except ValueError as e:
-            return _error_response(f"Invalid memory_id: {str(e)}")
-        except Exception as e:
-            return _error_response(f"Failed to share memory: {str(e)}")
-
-    @mcp.tool()
-    async def unshare_memory(memory_id: str) -> str:
-        """Stop sharing a memory with your organization.
-
-        Only the owner of the memory can unshare it. Once unshared, the memory
-        will only be visible to the owner.
-
-        Args:
-            memory_id: The UUID of the memory to unshare.
-
-        Returns:
-            JSON string with the updated memory showing shared=false, or an error.
-        """
-        try:
-            # Get current user context
-            user_id, org_id, user_role = await _get_current_user_context()
-            
-            if user_id is None:
-                return _error_response("Authentication required to unshare memories")
-            
-            repo = await _get_repository()
-            
-            result = await repo.set_shared(
-                memory_id=UUID(memory_id),
-                user_id=user_id,
-                shared=False,
-            )
-            
-            if result is None:
-                return _error_response(
-                    "Memory not found or you are not the owner. Only the owner can unshare a memory."
+                
+                if result is None:
+                    return _error_response(
+                        "Memory not found or you are not the owner. Only the owner can share a memory."
+                    )
+                
+                # Log the share action
+                audit_repo = await _get_audit_repository()
+                await audit_repo.log(
+                    memory_id=UUID(memory_id),
+                    action_type="share",
+                    user_id=user_id,
+                    organization_id=org_id,
+                    changed_fields=["shared"],
+                    old_values={"shared": False},
+                    new_values={"shared": True},
+                    context=_get_audit_context(),
                 )
-            
-            # Log the unshare action
-            audit_repo = await _get_audit_repository()
-            await audit_repo.log(
-                memory_id=UUID(memory_id),
-                action_type="unshare",
-                user_id=user_id,
-                organization_id=org_id,
-                changed_fields=["shared"],
-                old_values={"shared": True},
-                new_values={"shared": False},
-                context=_get_audit_context(),
-            )
-            
-            return json.dumps(_serialize_memory(result), indent=2)
-            
-        except ValueError as e:
-            return _error_response(f"Invalid memory_id: {str(e)}")
-        except Exception as e:
-            return _error_response(f"Failed to unshare memory: {str(e)}")
+                
+                return json.dumps(_serialize_memory(result), indent=2)
+                
+            except ValueError as e:
+                return _error_response(f"Invalid memory_id: {str(e)}")
+            except Exception as e:
+                return _error_response(f"Failed to share memory: {str(e)}")
+
+        @mcp.tool()
+        async def unshare_memory(memory_id: str) -> str:
+            """Stop sharing a memory with your organization.
+
+            Only the owner of the memory can unshare it. Once unshared, the memory
+            will only be visible to the owner.
+
+            Args:
+                memory_id: The UUID of the memory to unshare.
+
+            Returns:
+                JSON string with the updated memory showing shared=false, or an error.
+            """
+            try:
+                # Get current user context
+                user_id, org_id, user_role = await _get_current_user_context()
+                
+                if user_id is None:
+                    return _error_response("Authentication required to unshare memories")
+                
+                repo = await _get_repository()
+                
+                result = await repo.set_shared(
+                    memory_id=UUID(memory_id),
+                    user_id=user_id,
+                    shared=False,
+                )
+                
+                if result is None:
+                    return _error_response(
+                        "Memory not found or you are not the owner. Only the owner can unshare a memory."
+                    )
+                
+                # Log the unshare action
+                audit_repo = await _get_audit_repository()
+                await audit_repo.log(
+                    memory_id=UUID(memory_id),
+                    action_type="unshare",
+                    user_id=user_id,
+                    organization_id=org_id,
+                    changed_fields=["shared"],
+                    old_values={"shared": True},
+                    new_values={"shared": False},
+                    context=_get_audit_context(),
+                )
+                
+                return json.dumps(_serialize_memory(result), indent=2)
+                
+            except ValueError as e:
+                return _error_response(f"Invalid memory_id: {str(e)}")
+            except Exception as e:
+                return _error_response(f"Failed to unshare memory: {str(e)}")
 
 
 def _serialize_memory(memory: dict[str, Any]) -> dict[str, Any]:
