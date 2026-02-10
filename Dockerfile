@@ -29,11 +29,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy installed packages from builder
 COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
-COPY --from=builder /usr/local/bin/hindsight /usr/local/bin/hindsight
+COPY --from=builder /usr/local/bin/lucent /usr/local/bin/lucent
 
 # Create non-root user
-RUN useradd --create-home --shell /bin/bash hindsight
-USER hindsight
+RUN useradd --create-home --shell /bin/bash lucent
+USER lucent
 
-# Run the MCP server
-CMD ["hindsight"]
+# Default port
+EXPOSE 8766
+
+# Run the server
+CMD ["lucent"]

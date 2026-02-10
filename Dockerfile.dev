@@ -1,0 +1,20 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# Install runtime + build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy project files for initial install
+COPY pyproject.toml README.md ./
+COPY src/ src/
+
+# Install in editable mode so volume-mounted source changes are live
+RUN pip install --no-cache-dir -e ".[dev]" 2>/dev/null || pip install --no-cache-dir -e .
+
+EXPOSE 8766
+
+CMD ["lucent"]

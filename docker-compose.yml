@@ -10,7 +10,7 @@ services:
       - lucent_data:/var/lib/postgresql/data
       - ./docker/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     ports:
-      - "5433:5432"
+      - "${LUCENT_DB_PORT:-5433}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U lucent -d lucent"]
       interval: 5s
@@ -22,13 +22,20 @@ services:
   lucent:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.dev
     container_name: lucent-server
     depends_on:
       postgres:
         condition: service_healthy
     environment:
       DATABASE_URL: postgresql://lucent:${POSTGRES_PASSWORD:-lucent_dev_password}@postgres:5432/lucent
+      LUCENT_MODE: ${LUCENT_MODE:-personal}
+      LUCENT_LICENSE_KEY: ${LUCENT_LICENSE_KEY:-}
+    volumes:
+      - ./src:/app/src:cached
+      - ./pyproject.toml:/app/pyproject.toml:ro
+    ports:
+      - "${LUCENT_PORT:-8766}:8766"
     stdin_open: true
     tty: true
     restart: unless-stopped

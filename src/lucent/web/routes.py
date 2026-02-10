@@ -9,7 +9,18 @@ from fastapi import APIRouter, Request, Form, Query, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from lucent.api.deps import get_current_user_for_web, CurrentUser
+from lucent.api.deps import CurrentUser
+from lucent.auth import set_current_user
+from lucent.auth_providers import (
+    SESSION_COOKIE_NAME,
+    create_session,
+    validate_session,
+    destroy_session,
+    get_auth_provider,
+    is_first_run,
+    create_initial_user,
+    set_user_password,
+)
 from lucent.db import (
     MemoryRepository, 
     AuditRepository, 
@@ -20,6 +31,7 @@ from lucent.db import (
     get_pool,
 )
 from lucent.mode import is_team_mode
+from lucent.rbac import Role
 
 
 # Set up templates
@@ -53,21 +65,234 @@ templates.env.globals["team_mode"] = is_team_mode
 
 
 async def get_user_context(request: Request) -> CurrentUser:
-    """Get the current user for web routes.
+    """Get the current user for web routes via session cookie.
     
-    Uses get_current_user_for_web which allows dev mode fallback for browser access.
-    Also handles impersonation via cookie.
+    Validates the session cookie and returns a CurrentUser.
+    Raises HTTPException(303) to redirect to login if not authenticated.
+    Also handles impersonation via cookie (team mode only).
     """
-    # Extract headers and cookies manually since we're not using DI
-    authorization = request.headers.get("authorization")
-    x_user_id = request.headers.get("x-user-id")
-    impersonate_cookie = request.cookies.get("lucent_impersonate")
+    pool = await get_pool()
     
-    return await get_current_user_for_web(
-        authorization=authorization,
-        x_user_id=x_user_id,
-        impersonate_user_id=impersonate_cookie,
+    # Check session cookie
+    session_token = request.cookies.get(SESSION_COOKIE_NAME)
+    if not session_token:
+        raise HTTPException(status_code=303, headers={"Location": "/login"})
+    
+    user = await validate_session(pool, session_token)
+    if user is None:
+        raise HTTPException(status_code=303, headers={"Location": "/login"})
+    
+    # Set context var for downstream code
+    set_current_user(user)
+    
+    # Build CurrentUser
+    current_user = CurrentUser(
+        id=user["id"],
+        organization_id=user.get("organization_id"),
+        role=user.get("role", "member"),
+        email=user.get("email"),
+        display_name=user.get("display_name"),
+        auth_method="session",
     )
+    
+    # Handle impersonation (team mode only)
+    impersonate_cookie = request.cookies.get("lucent_impersonate")
+    if impersonate_cookie and is_team_mode():
+        from lucent.auth import set_impersonating_user
+        
+        if current_user.role in (Role.ADMIN, Role.OWNER):
+            try:
+                target_user_id = UUID(impersonate_cookie)
+                if target_user_id != current_user.id:
+                    user_repo = UserRepository(pool)
+                    target_user = await user_repo.get_by_id(target_user_id)
+                    
+                    if target_user and target_user.get("organization_id") == current_user.organization_id:
+                        target_role = target_user.get("role", "member")
+                        can_impersonate = (
+                            (current_user.role == Role.ADMIN and target_role == "member") or
+                            (current_user.role == Role.OWNER and target_role != "owner")
+                        )
+                        
+                        if can_impersonate:
+                            set_current_user(target_user)
+                            set_impersonating_user({
+                                "id": current_user.id,
+                                "display_name": current_user.display_name,
+                                "role": current_user.role.value,
+                            })
+                            return CurrentUser(
+                                id=target_user["id"],
+                                organization_id=target_user.get("organization_id"),
+                                role=target_user.get("role", "member"),
+                                email=target_user.get("email"),
+                                display_name=target_user.get("display_name"),
+                                auth_method="impersonation",
+                                impersonator_id=current_user.id,
+                                impersonator_display_name=current_user.display_name,
+                            )
+            except (ValueError, Exception):
+                pass  # Invalid UUID or other error, skip impersonation
+    
+    return current_user
+
+
+# =============================================================================
+# Authentication Routes (unauthenticated)
+# =============================================================================
+
+
+@router.get("/login", response_class=HTMLResponse)
+async def login_page(request: Request, error: str | None = None):
+    """Show the login page."""
+    pool = await get_pool()
+    
+    # If first run, redirect to setup
+    if await is_first_run(pool):
+        return RedirectResponse("/setup", status_code=303)
+    
+    # If already logged in, redirect to dashboard
+    session_token = request.cookies.get(SESSION_COOKIE_NAME)
+    if session_token:
+        user = await validate_session(pool, session_token)
+        if user:
+            return RedirectResponse("/", status_code=303)
+    
+    provider = await get_auth_provider()
+    return templates.TemplateResponse(
+        "login.html",
+        {"request": request, "fields": provider.get_login_fields(), "error": error},
+    )
+
+
+@router.post("/login")
+async def login_submit(request: Request):
+    """Handle login form submission."""
+    pool = await get_pool()
+    form = await request.form()
+    credentials = {key: str(value) for key, value in form.items()}
+    
+    provider = await get_auth_provider()
+    user = await provider.authenticate(credentials)
+    
+    if user is None:
+        return templates.TemplateResponse(
+            "login.html",
+            {
+                "request": request,
+                "fields": provider.get_login_fields(),
+                "error": "Invalid credentials. Please try again.",
+            },
+            status_code=401,
+        )
+    
+    # Create session
+    token = await create_session(pool, user["id"])
+    
+    response = RedirectResponse("/", status_code=303)
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=token,
+        httponly=True,
+        samesite="lax",
+        max_age=72 * 3600,  # Match SESSION_TTL_HOURS default
+        path="/",
+    )
+    return response
+
+
+@router.get("/logout")
+async def logout(request: Request):
+    """Log the user out."""
+    pool = await get_pool()
+    
+    session_token = request.cookies.get(SESSION_COOKIE_NAME)
+    if session_token:
+        user = await validate_session(pool, session_token)
+        if user:
+            await destroy_session(pool, user["id"])
+    
+    response = RedirectResponse("/login", status_code=303)
+    response.delete_cookie(key=SESSION_COOKIE_NAME, path="/")
+    response.delete_cookie(key="lucent_impersonate", path="/")
+    return response
+
+
+@router.get("/setup", response_class=HTMLResponse)
+async def setup_page(request: Request, error: str | None = None):
+    """Show the first-run setup page."""
+    pool = await get_pool()
+    
+    if not await is_first_run(pool):
+        return RedirectResponse("/login", status_code=303)
+    
+    return templates.TemplateResponse(
+        "setup.html",
+        {"request": request, "error": error},
+    )
+
+
+@router.post("/setup")
+async def setup_submit(request: Request):
+    """Handle first-run setup form submission."""
+    pool = await get_pool()
+    
+    if not await is_first_run(pool):
+        return RedirectResponse("/login", status_code=303)
+    
+    form = await request.form()
+    display_name = str(form.get("display_name", "")).strip()
+    email = str(form.get("email", "")).strip() or None
+    password = str(form.get("password", ""))
+    password_confirm = str(form.get("password_confirm", ""))
+    
+    # Validate
+    if not display_name:
+        return templates.TemplateResponse(
+            "setup.html",
+            {"request": request, "error": "Display name is required."},
+            status_code=400,
+        )
+    
+    if len(password) < 8:
+        return templates.TemplateResponse(
+            "setup.html",
+            {"request": request, "error": "Password must be at least 8 characters."},
+            status_code=400,
+        )
+    
+    if password != password_confirm:
+        return templates.TemplateResponse(
+            "setup.html",
+            {"request": request, "error": "Passwords do not match."},
+            status_code=400,
+        )
+    
+    try:
+        user, api_key = await create_initial_user(pool, display_name, email, password)
+    except Exception as e:
+        return templates.TemplateResponse(
+            "setup.html",
+            {"request": request, "error": f"Setup failed: {e}"},
+            status_code=500,
+        )
+    
+    # Create session and log the user in
+    token = await create_session(pool, user["id"])
+    
+    response = templates.TemplateResponse(
+        "setup_complete.html",
+        {"request": request, "display_name": display_name, "api_key": api_key},
+    )
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=token,
+        httponly=True,
+        samesite="lax",
+        max_age=72 * 3600,
+        path="/",
+    )
+    return response
 
 
 # =============================================================================

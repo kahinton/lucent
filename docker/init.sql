@@ -6,4 +6,4 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS "pg_trgm";
 
 -- Set default similarity threshold for fuzzy matching
-ALTER DATABASE hindsight SET pg_trgm.similarity_threshold = 0.3;
+ALTER DATABASE lucent SET pg_trgm.similarity_threshold = 0.3;
