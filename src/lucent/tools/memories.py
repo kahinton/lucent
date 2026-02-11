@@ -8,7 +8,7 @@ from uuid import UUID
 
 from mcp.server.fastmcp import FastMCP
 
-from lucent.auth import ensure_dev_user, get_current_user, is_dev_mode, get_current_api_key_id
+from lucent.auth import get_current_user, get_current_api_key_id
 from lucent.db import AccessRepository, AuditRepository, MemoryRepository, get_pool, init_db
 from lucent.mode import is_team_mode
 from lucent.models.memory import (
@@ -33,18 +33,10 @@ def _error_response(message: str) -> str:
 
 
 async def _get_current_user_id() -> UUID | None:
-    """Get the current user ID, creating dev user if in dev mode."""
-    # Check if we have a user in context (set by auth middleware)
+    """Get the current user ID from auth context."""
     current_user = get_current_user()
     if current_user:
         return current_user["id"]
-    
-    # In dev mode, ensure dev user exists and use it
-    if is_dev_mode():
-        dev_user = await ensure_dev_user()
-        return dev_user["id"]
-    
-    # No user context and not in dev mode
     return None
 
 
@@ -54,17 +46,9 @@ async def _get_current_user_context() -> tuple[UUID | None, UUID | None, str | N
     Returns:
         Tuple of (user_id, organization_id, role), any may be None.
     """
-    # Check if we have a user in context (set by auth middleware)
     current_user = get_current_user()
     if current_user:
         return current_user["id"], current_user.get("organization_id"), current_user.get("role", "member")
-    
-    # In dev mode, ensure dev user exists and use it
-    if is_dev_mode():
-        dev_user = await ensure_dev_user()
-        return dev_user["id"], dev_user.get("organization_id"), dev_user.get("role", "member")
-    
-    # No user context and not in dev mode
     return None, None, None
 
 

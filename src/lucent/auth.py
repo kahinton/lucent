@@ -11,7 +11,7 @@ dependencies, context is naturally scoped to the request lifecycle.
 Impersonation Feature:
     Allows admins/owners to view the system as another user for debugging
     and support purposes. Impersonation is cookie-based (lucent_impersonate)
-    and is only available through the web UI.
+    and is only available through the web UI (team mode only).
     
     Rules:
     - Owners can impersonate anyone except other owners
@@ -20,7 +20,6 @@ Impersonation Feature:
     - The original user is stored in _impersonating_user context var
     
     See: web/routes.py for /users/{id}/impersonate and /users/stop-impersonation
-    See: api/deps.py for get_current_user_for_web impersonation handling
 """
 
 import os
@@ -38,12 +37,6 @@ _current_api_key_id: ContextVar[UUID | None] = ContextVar("current_api_key_id", 
 
 # Context variable to store impersonation info (original user when impersonating)
 _impersonating_user: ContextVar[dict[str, Any] | None] = ContextVar("impersonating_user", default=None)
-
-# Development mode settings
-DEV_MODE = os.environ.get("LUCENT_DEV_MODE", "false").lower() in ("true", "1", "yes")
-DEV_USER_ID = os.environ.get("LUCENT_DEV_USER_ID", "dev-user")
-DEV_USER_NAME = os.environ.get("LUCENT_DEV_USER_NAME", "Development User")
-DEV_ORG_NAME = os.environ.get("LUCENT_DEV_ORG_NAME", "Development Organization")
 
 
 async def _ensure_pool():
@@ -133,63 +126,6 @@ def get_current_user_id() -> UUID | None:
     return None
 
 
-async def ensure_dev_organization() -> dict[str, Any]:
-    """Ensure the development organization exists and return it.
-    
-    Returns:
-        The development organization record.
-    """
-    pool = await _ensure_pool()
-    org_repo = OrganizationRepository(pool)
-    
-    org, created = await org_repo.get_or_create(name=DEV_ORG_NAME)
-    
-    if created:
-        print(f"Created development organization: {org['id']}")
-    
-    return org
-
-
-async def ensure_dev_user() -> dict[str, Any]:
-    """Ensure the development user exists and return it.
-    
-    This is used in DEV_MODE to create/get a local user for testing
-    without requiring external authentication.
-    
-    Returns:
-        The development user record.
-    """
-    # First ensure the dev organization exists
-    dev_org = await ensure_dev_organization()
-    
-    pool = await _ensure_pool()
-    user_repo = UserRepository(pool)
-    
-    user, created = await user_repo.get_or_create(
-        external_id=DEV_USER_ID,
-        provider="local",
-        organization_id=dev_org["id"],
-        email="dev@localhost",
-        display_name=DEV_USER_NAME,
-        provider_metadata={"dev_mode": True},
-    )
-    
-    if created:
-        print(f"Created development user: {user['id']}")
-    elif user.get("organization_id") is None:
-        # Update existing user to have organization_id if missing
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE users SET organization_id = $1 WHERE id = $2",
-                str(dev_org["id"]),
-                str(user["id"]),
-            )
-        user["organization_id"] = dev_org["id"]
-        print(f"Updated development user with organization: {dev_org['id']}")
-    
-    return user
-
-
 async def get_or_create_user_from_oauth(
     provider: str,
     external_id: str,
@@ -238,12 +174,3 @@ async def get_or_create_user_from_oauth(
         await user_repo.update_last_login(user["id"])
     
     return user
-
-
-def is_dev_mode() -> bool:
-    """Check if running in development mode.
-    
-    Returns:
-        True if LUCENT_DEV_MODE is enabled.
-    """
-    return DEV_MODE

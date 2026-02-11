@@ -17,7 +17,7 @@ from mcp.server.fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from lucent.auth import is_dev_mode, set_current_user, set_current_api_key_id
+from lucent.auth import set_current_user, set_current_api_key_id
 from lucent.prompts.memory_usage import get_memory_system_prompt, get_memory_system_prompt_short, get_user_introduction_prompt
 from lucent.rate_limit import get_rate_limiter
 from lucent.tools.memories import register_tools
@@ -235,12 +235,6 @@ def main() -> None:
         logger.error("DATABASE_URL environment variable is required")
         logger.error("Example: postgresql://user:password@localhost:5432/lucent")
         sys.exit(1)
-    
-    # Show dev mode status
-    if is_dev_mode():
-        logger.info("Running in DEVELOPMENT MODE - authentication bypassed for web UI")
-    else:
-        logger.info("Running in PRODUCTION MODE - API key required for MCP/API access")
     
     # Show deployment mode
     from lucent.mode import get_mode

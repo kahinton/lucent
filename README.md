@@ -64,15 +64,22 @@ cp .env.example .env
 ### 4. Run the Server
 
 ```bash
-# Set database URL and enable dev mode
-export DATABASE_URL="postgresql://lucent:lucent_dev_password@localhost:5433/lucent"
-export LUCENT_DEV_MODE=true
+# Using Docker Compose (recommended — runs both DB and server)
+docker compose up -d
 
-# Run the MCP server
+# Or run the server directly (if you started the DB separately)
+export DATABASE_URL="postgresql://lucent:lucent_dev_password@localhost:5433/lucent"
 lucent
 ```
 
-### 5. Configure Your MCP Client
+### 5. First-Time Setup
+
+Open http://localhost:8766 in your browser. On first run, you'll see a setup page where you:
+
+1. Create your user account (username, password)
+2. Receive your MCP API key (shown once — copy it!)
+
+### 6. Configure Your MCP Client
 
 For VS Code with the MCP extension, add to `.vscode/mcp.json`:
 
@@ -90,7 +97,7 @@ For VS Code with the MCP extension, add to `.vscode/mcp.json`:
 }
 ```
 
-Generate an API key at http://localhost:8766/settings after starting the server.
+Replace `mcp_your_api_key_here` with the API key from the setup page. You can also generate additional keys at http://localhost:8766/settings.
 
 For Claude Desktop, add to your `claude_desktop_config.json`:
 
@@ -98,10 +105,9 @@ For Claude Desktop, add to your `claude_desktop_config.json`:
 {
   "mcpServers": {
     "lucent": {
-      "command": "lucent",
-      "env": {
-        "DATABASE_URL": "postgresql://lucent:lucent_dev_password@localhost:5433/lucent",
-        "LUCENT_DEV_MODE": "true"
+      "url": "http://localhost:8766/mcp",
+      "headers": {
+        "Authorization": "Bearer mcp_your_api_key_here"
       }
     }
   }
@@ -110,31 +116,27 @@ For Claude Desktop, add to your `claude_desktop_config.json`:
 
 ## Authentication
 
-### Development Mode
+Lucent uses a pluggable authentication system configured via `LUCENT_AUTH_PROVIDER`.
 
-For local development and testing, enable dev mode to bypass authentication:
+### Basic Auth (default)
+
+Username/password authentication with bcrypt hashing. Configured automatically during first-run setup.
+
+- Web UI: Session cookie (72-hour TTL)
+- MCP/API: API key (`Authorization: Bearer mcp_...`)
+
+### API Key Auth
+
+For simpler setups, authenticate the web UI with an API key instead of username/password:
 
 ```bash
-export LUCENT_DEV_MODE=true
+export LUCENT_AUTH_PROVIDER=api_key
 ```
 
-This creates a local "dev-user" that all memories are associated with.
+### Future Providers
 
-### Production Mode
-
-In production, disable dev mode and configure OAuth or SAML:
-
-```bash
-export LUCENT_DEV_MODE=false
-# Configure your OAuth provider(s)
-```
-
-Supported providers:
-- **Google OAuth**
-- **GitHub OAuth**
-- **SAML** (for enterprise SSO)
-
-Each user gets a unique user_id, and all memories are linked to their user account via foreign key.
+- **OAuth**: GitHub/Google authentication
+- **SAML/SCIM**: Enterprise SSO (team mode)
 
 ## Available Tools
 
@@ -292,4 +294,4 @@ All services run on a single port (default 8766):
 
 ## License
 
-MIT
+Business Source License 1.1

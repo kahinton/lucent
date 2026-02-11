@@ -129,14 +129,9 @@ def configure_logging() -> None:
     log_level = level_map.get(log_level_str, logging.INFO)
 
     # Determine format based on environment
-    is_dev_mode = os.environ.get("LUCENT_DEV_MODE", "false").lower() in (
-        "true",
-        "1",
-        "yes",
-    )
-
+    # Default to human-readable format unless explicitly set to json
     if not log_format:
-        log_format = "human" if is_dev_mode else "json"
+        log_format = os.environ.get("LUCENT_LOG_FORMAT", "human")
 
     # Create handler
     handler = logging.StreamHandler(sys.stderr)
