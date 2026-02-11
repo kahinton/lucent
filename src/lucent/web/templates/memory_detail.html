@@ -129,6 +129,10 @@
                 <span class="text-xs text-gray-500">Memory ID</span>
                 <code class="text-xs font-mono text-gray-600 bg-gray-100 px-2 py-1 rounded">{{ memory.id }}</code>
             </div>
+            <div class="flex items-center justify-between mt-2">
+                <span class="text-xs text-gray-500">Version</span>
+                <span class="text-xs font-medium text-gray-600 bg-gray-100 px-2 py-1 rounded">v{{ memory.version | default(1) }}</span>
+            </div>
         </div>
         
         <!-- Type-Specific Metadata -->
@@ -515,6 +519,66 @@
 
 <!-- History Section -->
 <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-6">
+    <!-- Version History -->
+    <div class="bg-white rounded-xl border border-gray-200 shadow-sm">
+        <div class="px-6 py-4 border-b border-gray-100">
+            <div class="flex items-center gap-2">
+                <svg class="w-4 h-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182M2.985 19.644l3.181-3.182" />
+                </svg>
+                <h3 class="text-sm font-semibold text-gray-900">Version History</h3>
+                <span class="text-xs text-gray-400 ml-auto">Current: v{{ memory.version | default(1) }}</span>
+            </div>
+        </div>
+        <div class="p-4">
+            {% if version_entries %}
+            <div class="space-y-3">
+                {% for entry in version_entries %}
+                <div class="flex items-start gap-3 p-3 rounded-lg {% if entry.version == memory.version %}bg-primary-50 border border-primary-200{% else %}bg-gray-50{% endif %}">
+                    <div class="shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold
+                        {% if entry.action_type == 'create' %}bg-emerald-100 text-emerald-700
+                        {% elif entry.action_type == 'restore' %}bg-purple-100 text-purple-700
+                        {% elif entry.version == memory.version %}bg-primary-100 text-primary-700
+                        {% else %}bg-gray-100 text-gray-600{% endif %}">
+                        v{{ entry.version }}
+                    </div>
+                    <div class="flex-1 min-w-0">
+                        <div class="flex items-center gap-2">
+                            <p class="text-sm font-medium text-gray-900 capitalize">{{ entry.action_type }}</p>
+                            {% if entry.version == memory.version %}
+                            <span class="text-xs px-1.5 py-0.5 bg-primary-100 text-primary-700 rounded font-medium">current</span>
+                            {% endif %}
+                        </div>
+                        {% if entry.changed_fields %}
+                        <p class="text-xs text-gray-500 mt-0.5">Changed: {{ entry.changed_fields | join(', ') }}</p>
+                        {% endif %}
+                        {% if entry.notes %}
+                        <p class="text-xs text-gray-500 mt-0.5 italic">{{ entry.notes }}</p>
+                        {% endif %}
+                        <p class="text-xs text-gray-400 mt-1">{{ entry.created_at | datetime }}</p>
+                    </div>
+                    {% if is_owner and entry.version != memory.version and entry.snapshot is not none %}
+                    <form method="post" action="/memories/{{ memory.id }}/restore/{{ entry.version }}" class="shrink-0">
+                        <button type="submit"
+                            onclick="return confirm('Restore this memory to version {{ entry.version }}? This will create a new version with the old content.')"
+                            class="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium text-gray-600 bg-white border border-gray-200 rounded-md hover:bg-gray-50 hover:text-primary-600 hover:border-primary-200 transition-colors"
+                            title="Restore to this version">
+                            <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M9 15L3 9m0 0l6-6M3 9h12a6 6 0 010 12h-3" />
+                            </svg>
+                            Restore
+                        </button>
+                    </form>
+                    {% endif %}
+                </div>
+                {% endfor %}
+            </div>
+            {% else %}
+            <p class="text-sm text-gray-500 text-center py-6">No version history available</p>
+            {% endif %}
+        </div>
+    </div>
+    
     <!-- Audit History -->
     <div class="bg-white rounded-xl border border-gray-200 shadow-sm">
         <div class="px-6 py-4 border-b border-gray-100">
@@ -529,6 +593,7 @@
                         {% if entry.action_type == 'create' %}bg-emerald-100 text-emerald-600
                         {% elif entry.action_type == 'update' %}bg-blue-100 text-blue-600
                         {% elif entry.action_type == 'delete' %}bg-red-100 text-red-600
+                        {% elif entry.action_type == 'restore' %}bg-purple-100 text-purple-600
                         {% elif entry.action_type == 'share' %}bg-amber-100 text-amber-600
                         {% else %}bg-gray-100 text-gray-600{% endif %}">
                         {% if entry.action_type == 'create' %}
@@ -543,6 +608,10 @@
                         <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
                             <path stroke-linecap="round" stroke-linejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" />
                         </svg>
+                        {% elif entry.action_type == 'restore' %}
+                        <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M9 15L3 9m0 0l6-6M3 9h12a6 6 0 010 12h-3" />
+                        </svg>
                         {% else %}
                         <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
                             <path stroke-linecap="round" stroke-linejoin="round" d="M7.217 10.907a2.25 2.25 0 100 2.186m0-2.186c.18.324.283.696.283 1.093s-.103.77-.283 1.093m0-2.186l9.566-5.314m-9.566 7.5l9.566 5.314m0 0a2.25 2.25 0 103.935 2.186 2.25 2.25 0 00-3.935-2.186zm0-12.814a2.25 2.25 0 103.933-2.185 2.25 2.25 0 00-3.933 2.185z" />
@@ -554,6 +623,9 @@
                         {% if entry.changed_fields %}
                         <p class="text-xs text-gray-500 mt-0.5">Changed: {{ entry.changed_fields | join(', ') }}</p>
                         {% endif %}
+                        {% if entry.notes %}
+                        <p class="text-xs text-gray-500 mt-0.5 italic">{{ entry.notes }}</p>
+                        {% endif %}
                         <p class="text-xs text-gray-400 mt-1">{{ entry.created_at | datetime }}</p>
                     </div>
                 </div>
@@ -561,35 +633,6 @@
             </div>
             {% else %}
             <p class="text-sm text-gray-500 text-center py-6">No audit history available</p>
-            {% endif %}
-        </div>
-    </div>
-    
-    <!-- Access History -->
-    <div class="bg-white rounded-xl border border-gray-200 shadow-sm">
-        <div class="px-6 py-4 border-b border-gray-100">
-            <h3 class="text-sm font-semibold text-gray-900">Access History</h3>
-        </div>
-        <div class="p-4">
-            {% if access_entries %}
-            <div class="space-y-2">
-                {% for entry in access_entries %}
-                <div class="flex items-center justify-between p-3 rounded-lg bg-gray-50">
-                    <div class="flex items-center gap-3">
-                        <div class="w-8 h-8 rounded-full bg-gray-100 flex items-center justify-center">
-                            <svg class="w-4 h-4 text-gray-500" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-                                <path stroke-linecap="round" stroke-linejoin="round" d="M2.036 12.322a1.012 1.012 0 010-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178z" />
-                                <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                            </svg>
-                        </div>
-                        <span class="text-sm text-gray-700 capitalize">{{ entry.access_type }}</span>
-                    </div>
-                    <span class="text-xs text-gray-500">{{ entry.accessed_at | datetime }}</span>
-                </div>
-                {% endfor %}
-            </div>
-            {% else %}
-            <p class="text-sm text-gray-500 text-center py-6">No access history available</p>
             {% endif %}
         </div>
     </div>

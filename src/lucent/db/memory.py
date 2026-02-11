@@ -55,7 +55,7 @@ class MemoryRepository:
             INSERT INTO memories (username, type, content, tags, importance, related_memory_ids, metadata, user_id, organization_id, shared)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, false)
             RETURNING id, username, type, content, tags, importance, related_memory_ids, metadata, 
-                      created_at, updated_at, deleted_at, user_id, organization_id, shared, last_accessed_at
+                      created_at, updated_at, deleted_at, user_id, organization_id, shared, last_accessed_at, version
         """
         
         async with self.pool.acquire() as conn:
@@ -85,7 +85,7 @@ class MemoryRepository:
         """
         query = """
             SELECT id, username, type, content, tags, importance, related_memory_ids, metadata,
-                   created_at, updated_at, deleted_at, user_id, organization_id, shared, last_accessed_at
+                   created_at, updated_at, deleted_at, user_id, organization_id, shared, last_accessed_at, version
             FROM memories
             WHERE id = $1 AND deleted_at IS NULL
         """
@@ -120,7 +120,7 @@ class MemoryRepository:
         """
         query = """
             SELECT id, username, type, content, tags, importance, related_memory_ids, metadata,
-                   created_at, updated_at, deleted_at, user_id, organization_id, shared, last_accessed_at
+                   created_at, updated_at, deleted_at, user_id, organization_id, shared, last_accessed_at, version
             FROM memories
             WHERE id = $1 
               AND deleted_at IS NULL
@@ -149,7 +149,7 @@ class MemoryRepository:
         """
         query = """
             SELECT id, username, type, content, tags, importance, related_memory_ids, metadata,
-                   created_at, updated_at, deleted_at, user_id, organization_id, shared, last_accessed_at
+                   created_at, updated_at, deleted_at, user_id, organization_id, shared, last_accessed_at, version
             FROM memories
             WHERE type = 'individual' 
               AND deleted_at IS NULL
@@ -187,7 +187,7 @@ class MemoryRepository:
             SET shared = $1
             WHERE id = $2 AND user_id = $3 AND deleted_at IS NULL
             RETURNING id, username, type, content, tags, importance, related_memory_ids, metadata,
-                      created_at, updated_at, deleted_at, user_id, organization_id, shared, last_accessed_at
+                      created_at, updated_at, deleted_at, user_id, organization_id, shared, last_accessed_at, version
         """
         
         async with self.pool.acquire() as conn:
@@ -262,6 +262,9 @@ class MemoryRepository:
         if not updates:
             return existing
         
+        # Always increment version on update
+        updates.append(f"version = version + 1")
+        
         params.append(str(memory_id))
         
         query = f"""
@@ -269,7 +272,7 @@ class MemoryRepository:
             SET {", ".join(updates)}
             WHERE id = ${param_idx} AND deleted_at IS NULL
             RETURNING id, username, type, content, tags, importance, related_memory_ids, metadata,
-                      created_at, updated_at, deleted_at, user_id, organization_id, shared, last_accessed_at
+                      created_at, updated_at, deleted_at, user_id, organization_id, shared, last_accessed_at, version
         """
         
         async with self.pool.acquire() as conn:
@@ -868,4 +871,5 @@ class MemoryRepository:
             "organization_id": org_id,
             "shared": shared,
             "last_accessed_at": last_accessed_at,
+            "version": row["version"] if "version" in row.keys() else 1,
         }

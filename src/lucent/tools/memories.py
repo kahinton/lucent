@@ -79,6 +79,27 @@ def _get_audit_context() -> dict[str, Any]:
     return {"auth_method": "session"}
 
 
+def _build_snapshot(memory: dict[str, Any]) -> dict[str, Any]:
+    """Build a full snapshot of a memory's state for versioning.
+    
+    Captures all mutable fields so the memory can be restored to this exact state.
+    
+    Args:
+        memory: The memory dict to snapshot.
+        
+    Returns:
+        A JSON-serializable snapshot dict.
+    """
+    return {
+        "content": memory["content"],
+        "tags": memory["tags"],
+        "importance": memory["importance"],
+        "metadata": memory["metadata"],
+        "related_memory_ids": [str(uid) for uid in memory.get("related_memory_ids", [])],
+        "shared": memory.get("shared", False),
+    }
+
+
 async def _get_repository() -> MemoryRepository:
     """Get a memory repository, initializing the database if needed."""
     try:
@@ -194,24 +215,25 @@ Returns:
                 organization_id=org_id,
             )
             
-            # Log the creation in audit log (team mode only)
-            if is_team_mode():
-                audit_repo = await _get_audit_repository()
-                await audit_repo.log(
-                    memory_id=result["id"],
-                    action_type="create",
-                    user_id=user_id,
-                    organization_id=org_id,
-                    new_values={
-                        "username": input_data.username,
-                        "type": input_data.type.value,
-                        "content": input_data.content,
-                        "tags": input_data.tags,
-                        "importance": input_data.importance,
-                        "metadata": input_data.metadata,
-                    },
-                    context=_get_audit_context(),
-                )
+            # Log the creation in audit log with version snapshot
+            audit_repo = await _get_audit_repository()
+            await audit_repo.log(
+                memory_id=result["id"],
+                action_type="create",
+                user_id=user_id,
+                organization_id=org_id,
+                new_values={
+                    "username": input_data.username,
+                    "type": input_data.type.value,
+                    "content": input_data.content,
+                    "tags": input_data.tags,
+                    "importance": input_data.importance,
+                    "metadata": input_data.metadata,
+                },
+                context=_get_audit_context(),
+                version=1,
+                snapshot=_build_snapshot(result),
+            )
             
             return json.dumps(_serialize_memory(result), indent=2)
             
@@ -697,8 +719,8 @@ Returns:
                     old_values["related_memory_ids"] = old_related
                     new_values["related_memory_ids"] = related_memory_ids
             
-            # Log the update if anything changed (team mode only)
-            if changed_fields and is_team_mode():
+            # Log the update with version snapshot
+            if changed_fields:
                 user_id, org_id, user_role = await _get_current_user_context()
                 audit_repo = await _get_audit_repository()
                 await audit_repo.log(
@@ -710,6 +732,8 @@ Returns:
                     old_values=old_values,
                     new_values=new_values,
                     context=_get_audit_context(),
+                    version=result["version"],
+                    snapshot=_build_snapshot(result),
                 )
             
             return json.dumps(_serialize_memory(result), indent=2)
@@ -764,22 +788,21 @@ Returns:
             if not success:
                 return _error_response(f"Memory not found: {memory_id}")
             
-            # Log the deletion (team mode only)
-            if is_team_mode():
-                user_id, org_id, user_role = await _get_current_user_context()
-                audit_repo = await _get_audit_repository()
-                await audit_repo.log(
-                    memory_id=uuid_id,
-                    action_type="delete",
-                    user_id=user_id,
-                    organization_id=org_id,
-                    old_values={
-                        "content": old_memory["content"],
-                        "tags": old_memory["tags"],
-                        "importance": old_memory["importance"],
-                    },
-                    context=_get_audit_context(),
-                )
+            # Log the deletion with final snapshot
+            audit_repo = await _get_audit_repository()
+            await audit_repo.log(
+                memory_id=uuid_id,
+                action_type="delete",
+                user_id=user_id,
+                organization_id=org_id,
+                old_values={
+                    "content": old_memory["content"],
+                    "tags": old_memory["tags"],
+                    "importance": old_memory["importance"],
+                },
+                context=_get_audit_context(),
+                snapshot=_build_snapshot(old_memory),
+            )
             
             return json.dumps({
                 "success": True,
@@ -876,6 +899,169 @@ Returns:
             
         except Exception as e:
             return _error_response(f"Failed to get tag suggestions: {str(e)}")
+
+    @mcp.tool()
+    async def get_memory_versions(
+        memory_id: str,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> str:
+        """Get the version history for a memory.
+
+        Returns a list of all versions with timestamps, who made each change,
+        what fields were changed, and whether a restorable snapshot exists.
+        Use this to review the history of changes to a memory or to find
+        a specific version to restore.
+
+        Args:
+            memory_id: The UUID of the memory to get versions for.
+            limit: Maximum number of versions to return (default 20, max 50).
+            offset: Pagination offset (default 0).
+
+        Returns:
+            JSON string with:
+            - versions: List of version entries with version number, action, timestamp, changes
+            - current_version: The memory's current version number
+            - total_count: Total number of versions
+            - has_more: Whether more versions are available
+        """
+        try:
+            uuid_id = UUID(memory_id)
+            repo = await _get_repository()
+            audit_repo = await _get_audit_repository()
+
+            # Verify the user can access this memory
+            user_id, org_id, user_role = await _get_current_user_context()
+            if user_id is None:
+                return _error_response("Authentication required")
+
+            memory = await repo.get_accessible(uuid_id, user_id, org_id)
+            if memory is None:
+                return _error_response(f"Memory not found or not accessible: {memory_id}")
+
+            result = await audit_repo.get_versions(
+                memory_id=uuid_id,
+                limit=min(limit, 50),
+                offset=offset,
+            )
+
+            versions = []
+            for entry in result["versions"]:
+                versions.append({
+                    "version": entry["version"],
+                    "action_type": entry["action_type"],
+                    "created_at": entry["created_at"].isoformat() if entry["created_at"] else None,
+                    "changed_fields": entry["changed_fields"],
+                    "has_snapshot": entry.get("snapshot") is not None,
+                    "user_id": str(entry["user_id"]) if entry.get("user_id") else None,
+                    "notes": entry.get("notes"),
+                })
+
+            return json.dumps({
+                "memory_id": memory_id,
+                "current_version": memory["version"],
+                "versions": versions,
+                "total_count": result["total_count"],
+                "offset": result["offset"],
+                "limit": result["limit"],
+                "has_more": result["has_more"],
+            }, indent=2)
+
+        except ValueError as e:
+            return _error_response(f"Invalid memory ID format: {e}")
+        except Exception as e:
+            return _error_response(f"Failed to get memory versions: {e}")
+
+    @mcp.tool()
+    async def restore_memory_version(
+        memory_id: str,
+        version: int,
+    ) -> str:
+        """Restore a memory to a previous version.
+
+        This creates a new version with the content from the specified historical
+        version. The restore is logged as a new audit entry so version history
+        is never lost.
+
+        Only the owner of the memory can restore versions.
+
+        Args:
+            memory_id: The UUID of the memory to restore.
+            version: The version number to restore to.
+
+        Returns:
+            JSON string with the restored memory, or an error if the version
+            doesn't exist or doesn't have a snapshot.
+        """
+        try:
+            uuid_id = UUID(memory_id)
+            repo = await _get_repository()
+            audit_repo = await _get_audit_repository()
+
+            # Verify ownership
+            user_id, org_id, user_role = await _get_current_user_context()
+            if user_id is None:
+                return _error_response("Authentication required to restore memories")
+
+            memory = await repo.get_accessible(uuid_id, user_id, org_id)
+            if memory is None:
+                return _error_response(f"Memory not found or not accessible: {memory_id}")
+
+            if memory.get("user_id") != user_id:
+                return _error_response("Permission denied: only the owner can restore versions")
+
+            if memory["version"] == version:
+                return _error_response(f"Memory is already at version {version}")
+
+            # Get the target version's snapshot
+            version_entry = await audit_repo.get_version_snapshot(uuid_id, version)
+            if version_entry is None:
+                return _error_response(f"Version {version} not found for this memory")
+
+            snapshot = version_entry.get("snapshot")
+            if snapshot is None:
+                return _error_response(
+                    f"Version {version} does not have a restorable snapshot. "
+                    "Snapshots are only available for versions created after versioning was enabled."
+                )
+
+            # Apply the snapshot
+            result = await repo.update(
+                memory_id=uuid_id,
+                content=snapshot.get("content"),
+                tags=snapshot.get("tags"),
+                importance=snapshot.get("importance"),
+                metadata=snapshot.get("metadata"),
+                related_memory_ids=[UUID(uid) for uid in snapshot.get("related_memory_ids", [])],
+            )
+
+            if result is None:
+                return _error_response("Failed to apply restore")
+
+            # Log the restore as a new version
+            await audit_repo.log(
+                memory_id=uuid_id,
+                action_type="restore",
+                user_id=user_id,
+                organization_id=org_id,
+                old_values=_build_snapshot(memory),
+                new_values=snapshot,
+                context=_get_audit_context(),
+                notes=f"Restored to version {version}",
+                version=result["version"],
+                snapshot=_build_snapshot(result),
+            )
+
+            return json.dumps({
+                **_serialize_memory(result),
+                "restored_from_version": version,
+                "message": f"Memory restored to version {version} (now at version {result['version']})",
+            }, indent=2)
+
+        except ValueError as e:
+            return _error_response(f"Invalid input: {e}")
+        except Exception as e:
+            return _error_response(f"Failed to restore memory version: {e}")
 
     # Team-only tools: sharing
     if is_team_mode():
@@ -998,6 +1184,7 @@ def _serialize_memory(memory: dict[str, Any]) -> dict[str, Any]:
         "importance": memory["importance"],
         "related_memory_ids": [str(uid) for uid in memory["related_memory_ids"]],
         "metadata": memory["metadata"],
+        "version": memory.get("version", 1),
         "created_at": memory["created_at"].isoformat() if memory["created_at"] else None,
         "updated_at": memory["updated_at"].isoformat() if memory["updated_at"] else None,
         "deleted_at": memory["deleted_at"].isoformat() if memory.get("deleted_at") else None,

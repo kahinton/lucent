@@ -664,6 +664,9 @@ async def memory_detail(request: Request, memory_id: UUID):
     # Get audit history
     audit = await audit_repo.get_by_memory_id(memory_id, limit=10)
     
+    # Get version history
+    versions = await audit_repo.get_versions(memory_id, limit=20)
+    
     # Get access history
     access = await access_repo.get_access_history(memory_id, limit=10)
     
@@ -676,6 +679,7 @@ async def memory_detail(request: Request, memory_id: UUID):
             "user": user,
             "memory": memory,
             "audit_entries": audit["entries"],
+            "version_entries": versions["versions"],
             "access_entries": access["entries"],
             "is_owner": is_owner,
         },
@@ -872,7 +876,7 @@ async def memory_edit_submit(
         metadata=metadata if metadata else None,
     )
     
-    # Log the update
+    # Log the update with version snapshot
     await audit_repo.log(
         memory_id=memory_id,
         action_type="update",
@@ -891,6 +895,15 @@ async def memory_edit_submit(
             "importance": importance,
             "metadata": metadata,
         },
+        version=result["version"] if result else None,
+        snapshot={
+            "content": result["content"],
+            "tags": result["tags"],
+            "importance": result["importance"],
+            "metadata": result["metadata"],
+            "related_memory_ids": [str(uid) for uid in result.get("related_memory_ids", [])],
+            "shared": result.get("shared", False),
+        } if result else None,
     )
     
     return RedirectResponse(f"/memories/{memory_id}", status_code=303)
@@ -975,9 +988,94 @@ async def memory_delete(request: Request, memory_id: UUID):
             "content": memory["content"],
             "tags": memory["tags"],
         },
+        snapshot={
+            "content": memory["content"],
+            "tags": memory["tags"],
+            "importance": memory["importance"],
+            "metadata": memory["metadata"],
+            "related_memory_ids": [str(uid) for uid in memory.get("related_memory_ids", [])],
+            "shared": memory.get("shared", False),
+        },
     )
     
     return RedirectResponse("/memories", status_code=303)
+
+
+@router.post("/memories/{memory_id}/restore/{version}", response_class=HTMLResponse)
+async def memory_restore(request: Request, memory_id: UUID, version: int):
+    """Restore a memory to a previous version."""
+    user = await get_user_context(request)
+    pool = await get_pool()
+    
+    repo = MemoryRepository(pool)
+    audit_repo = AuditRepository(pool)
+    
+    memory = await repo.get_accessible(memory_id, user.id, user.organization_id)
+    if memory is None:
+        raise HTTPException(status_code=404, detail="Memory not found")
+    
+    if memory.get("user_id") != user.id:
+        raise HTTPException(status_code=403, detail="You can only restore your own memories")
+    
+    if memory["version"] == version:
+        return RedirectResponse(f"/memories/{memory_id}", status_code=303)
+    
+    # Get the snapshot for the target version
+    version_entry = await audit_repo.get_version_snapshot(memory_id, version)
+    if version_entry is None:
+        raise HTTPException(status_code=404, detail=f"Version {version} not found")
+    
+    snapshot = version_entry.get("snapshot")
+    if snapshot is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Version {version} does not have a restorable snapshot",
+        )
+    
+    # Build old snapshot for audit
+    old_snapshot = {
+        "content": memory["content"],
+        "tags": memory["tags"],
+        "importance": memory["importance"],
+        "metadata": memory["metadata"],
+        "related_memory_ids": [str(uid) for uid in memory.get("related_memory_ids", [])],
+        "shared": memory.get("shared", False),
+    }
+    
+    # Apply the restore
+    result = await repo.update(
+        memory_id=memory_id,
+        content=snapshot.get("content"),
+        tags=snapshot.get("tags"),
+        importance=snapshot.get("importance"),
+        metadata=snapshot.get("metadata"),
+        related_memory_ids=[UUID(uid) for uid in snapshot.get("related_memory_ids", [])],
+    )
+    
+    if result is None:
+        raise HTTPException(status_code=500, detail="Failed to apply restore")
+    
+    # Log the restore
+    await audit_repo.log(
+        memory_id=memory_id,
+        action_type="restore",
+        user_id=user.id,
+        organization_id=user.organization_id,
+        old_values=old_snapshot,
+        new_values=snapshot,
+        notes=f"Restored to version {version}",
+        version=result["version"],
+        snapshot={
+            "content": result["content"],
+            "tags": result["tags"],
+            "importance": result["importance"],
+            "metadata": result["metadata"],
+            "related_memory_ids": [str(uid) for uid in result.get("related_memory_ids", [])],
+            "shared": result.get("shared", False),
+        },
+    )
+    
+    return RedirectResponse(f"/memories/{memory_id}", status_code=303)
 
 
 # =============================================================================

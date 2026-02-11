@@ -28,6 +28,8 @@ class AuditRepository:
         new_values: dict[str, Any] | None = None,
         context: dict[str, Any] | None = None,
         notes: str | None = None,
+        version: int | None = None,
+        snapshot: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Create an audit log entry.
         
@@ -41,6 +43,8 @@ class AuditRepository:
             new_values: New values after the change.
             context: Additional context (IP, user agent, etc.).
             notes: Optional notes about the action.
+            version: The version number this entry represents.
+            snapshot: Full memory state at this version (for point-in-time restore).
             
         Returns:
             The created audit log entry.
@@ -48,10 +52,12 @@ class AuditRepository:
         query = """
             INSERT INTO memory_audit_log 
                 (memory_id, user_id, organization_id, action_type, 
-                 changed_fields, old_values, new_values, context, notes)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                 changed_fields, old_values, new_values, context, notes,
+                 version, snapshot)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             RETURNING id, memory_id, user_id, organization_id, action_type,
-                      created_at, changed_fields, old_values, new_values, context, notes
+                      created_at, changed_fields, old_values, new_values, context, notes,
+                      version, snapshot
         """
         
         async with self.pool.acquire() as conn:
@@ -66,6 +72,8 @@ class AuditRepository:
                 new_values,
                 context or {},
                 notes,
+                version,
+                snapshot,
             )
         
         return self._row_to_dict(row)
@@ -307,6 +315,86 @@ class AuditRepository:
         
         return [self._row_to_dict(row) for row in rows]
     
+    async def get_versions(
+        self,
+        memory_id: UUID,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """Get version history for a specific memory.
+        
+        Returns audit entries that have a version number, ordered by
+        version descending (newest first).
+        
+        Args:
+            memory_id: The UUID of the memory.
+            limit: Maximum entries to return.
+            offset: Pagination offset.
+            
+        Returns:
+            Dict with versions list and pagination info.
+        """
+        query = """
+            SELECT id, memory_id, user_id, organization_id, action_type,
+                   created_at, changed_fields, old_values, new_values, context, notes,
+                   version, snapshot
+            FROM memory_audit_log
+            WHERE memory_id = $1 AND version IS NOT NULL
+            ORDER BY version DESC
+            LIMIT $2 OFFSET $3
+        """
+        
+        count_query = """
+            SELECT COUNT(*) as total
+            FROM memory_audit_log
+            WHERE memory_id = $1 AND version IS NOT NULL
+        """
+        
+        async with self.pool.acquire() as conn:
+            count_row = await conn.fetchrow(count_query, str(memory_id))
+            total_count = count_row["total"] if count_row else 0
+            
+            rows = await conn.fetch(query, str(memory_id), limit, offset)
+        
+        return {
+            "versions": [self._row_to_dict(row) for row in rows],
+            "total_count": total_count,
+            "offset": offset,
+            "limit": limit,
+            "has_more": offset + len(rows) < total_count,
+        }
+    
+    async def get_version_snapshot(
+        self,
+        memory_id: UUID,
+        version: int,
+    ) -> dict[str, Any] | None:
+        """Get the snapshot for a specific version of a memory.
+        
+        Args:
+            memory_id: The UUID of the memory.
+            version: The version number to retrieve.
+            
+        Returns:
+            The audit entry with snapshot, or None if not found.
+        """
+        query = """
+            SELECT id, memory_id, user_id, organization_id, action_type,
+                   created_at, changed_fields, old_values, new_values, context, notes,
+                   version, snapshot
+            FROM memory_audit_log
+            WHERE memory_id = $1 AND version = $2
+            LIMIT 1
+        """
+        
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(query, str(memory_id), version)
+        
+        if row is None:
+            return None
+        
+        return self._row_to_dict(row)
+
     def _row_to_dict(self, row: asyncpg.Record) -> dict[str, Any]:
         """Convert a database row to a dictionary."""
         # Handle UUIDs
@@ -320,7 +408,7 @@ class AuditRepository:
         
         memory_id = row["memory_id"] if isinstance(row["memory_id"], UUID) else UUID(row["memory_id"])
         
-        return {
+        result = {
             "id": row["id"],
             "memory_id": memory_id,
             "user_id": user_id,
@@ -333,3 +421,11 @@ class AuditRepository:
             "context": row["context"],
             "notes": row["notes"],
         }
+        
+        # Include version and snapshot if present in the row
+        if "version" in row.keys():
+            result["version"] = row["version"]
+        if "snapshot" in row.keys():
+            result["snapshot"] = row["snapshot"]
+        
+        return result
