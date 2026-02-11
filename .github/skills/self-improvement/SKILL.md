@@ -27,9 +27,6 @@ This skill enables the agent to evolve by analyzing its own performance and upda
 - Missing guidance for common scenarios
 - Examples that would clarify usage
 
-### Custom Instructions (`.github/copilot-instructions.md`)
-- General guidance that applies across all agents
-
 ## Analysis Process
 
 1. **Identify the pattern** - What keeps going wrong or could be better?
