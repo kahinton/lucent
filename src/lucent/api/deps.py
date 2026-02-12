@@ -144,11 +144,10 @@ async def get_current_user(
 
 async def get_optional_user(
     authorization: Annotated[str | None, Header()] = None,
-    x_user_id: Annotated[str | None, Header(alias="X-User-ID")] = None,
 ) -> CurrentUser | None:
     """Get the current user if authenticated, or None."""
     try:
-        return await get_current_user(authorization, x_user_id)
+        return await get_current_user(authorization)
     except HTTPException:
         return None
 

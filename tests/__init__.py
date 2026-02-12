@@ -1,1 +1,1 @@
-"""Tests package for Hindsight."""
+"""Tests package for Lucent."""

@@ -7,7 +7,7 @@ This module provides:
 The API and web interface run alongside the MCP server.
 """
 
-import traceback
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -71,11 +71,12 @@ def create_app() -> FastAPI:
         openapi_url="/api/openapi.json",
     )
     
-    # Configure CORS for web dashboard
+    # Configure CORS
+    allowed_origins = os.environ.get("LUCENT_CORS_ORIGINS", "*").split(",")
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],  # Configure appropriately for production
-        allow_credentials=True,
+        allow_origins=allowed_origins,
+        allow_credentials=allowed_origins != ["*"],
         allow_methods=["*"],
         allow_headers=["*"],
     )
@@ -106,12 +107,11 @@ def create_app() -> FastAPI:
     
     @app.exception_handler(Exception)
     async def global_exception_handler(request: Request, exc: Exception):
-        """Handle unhandled exceptions with detailed logging."""
+        """Handle unhandled exceptions — log detail, return generic error."""
         logger.error(f"Unhandled exception on {request.method} {request.url.path}", exc_info=exc)
-        error_detail = traceback.format_exc()
         return JSONResponse(
             status_code=500,
-            content={"error": str(exc), "detail": error_detail},
+            content={"error": "Internal server error"},
         )
     
     return app

@@ -104,11 +104,11 @@ async def update_current_organization(
 )
 async def create_organization(
     data: OrganizationCreate,
+    user: OwnerUser,
 ) -> OrganizationResponse:
     """Create a new organization.
     
-    This is typically used during signup to create a new organization.
-    The creating user should be made the owner.
+    Requires owner role.
     """
     pool = await get_pool()
     org_repo = OrganizationRepository(pool)
@@ -162,13 +162,13 @@ async def get_organization(
     response_model=OrganizationListResponse,
 )
 async def list_organizations(
+    user: OwnerUser,
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=20, ge=1, le=100),
 ) -> OrganizationListResponse:
     """List all organizations.
     
-    This endpoint is intended for super-admin use and should be
-    protected appropriately in production.
+    Requires owner role.
     """
     pool = await get_pool()
     org_repo = OrganizationRepository(pool)

@@ -1,4 +1,4 @@
-"""Test configuration and fixtures for Hindsight."""
+"""Test configuration and fixtures for Lucent."""
 
 import os
 import pytest
@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 # Set test database URL before importing any db modules
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL",
-    "postgresql://hindsight:hindsight_dev_password@localhost:5433/hindsight"
+    "postgresql://lucent:lucent_dev_password@localhost:5433/lucent"
 )
 os.environ["DATABASE_URL"] = TEST_DATABASE_URL
 
@@ -18,7 +18,7 @@ os.environ["DATABASE_URL"] = TEST_DATABASE_URL
 async def db_pool():
     """Create a database pool for each test function.
     
-    Uses the main hindsight database for tests since we clean up after ourselves.
+    Uses the lucent database for tests since we clean up after ourselves.
     """
     from lucent.db.pool import init_db, close_db, _pool
     import lucent.db.pool as pool_module
@@ -28,7 +28,7 @@ async def db_pool():
     
     database_url = os.environ.get(
         "DATABASE_URL",
-        "postgresql://hindsight:hindsight_dev_password@localhost:5433/hindsight"
+        "postgresql://lucent:lucent_dev_password@localhost:5433/lucent"
     )
     pool = await init_db(database_url)
     yield pool
