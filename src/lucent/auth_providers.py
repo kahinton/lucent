@@ -16,6 +16,7 @@ Future providers:
 """
 
 import os
+import hmac
 import secrets
 import hashlib
 from abc import ABC, abstractmethod
@@ -34,6 +35,95 @@ logger = get_logger("auth.providers")
 # Session configuration
 SESSION_COOKIE_NAME = "lucent_session"
 SESSION_TTL_HOURS = int(os.environ.get("LUCENT_SESSION_TTL_HOURS", "72"))
+SECURE_COOKIES = os.environ.get("LUCENT_SECURE_COOKIES", "false").lower() in ("true", "1", "yes")
+
+# CSRF configuration
+CSRF_COOKIE_NAME = "lucent_csrf"
+CSRF_FIELD_NAME = "csrf_token"
+CSRF_SECRET = os.environ.get("LUCENT_CSRF_SECRET", secrets.token_urlsafe(32))
+
+
+def get_cookie_params() -> dict:
+    """Get common cookie security parameters.
+    
+    Returns:
+        Dict with httponly, samesite, secure, path keys.
+    """
+    return {
+        "httponly": True,
+        "samesite": "lax",
+        "secure": SECURE_COOKIES,
+        "path": "/",
+    }
+
+
+def generate_csrf_token() -> str:
+    """Generate a CSRF token using HMAC.
+    
+    Returns:
+        A signed token string: {random}.{signature}
+    """
+    random_part = secrets.token_urlsafe(32)
+    signature = hmac.new(
+        CSRF_SECRET.encode(), random_part.encode(), hashlib.sha256
+    ).hexdigest()[:32]
+    return f"{random_part}.{signature}"
+
+
+def validate_csrf_token(token: str | None) -> bool:
+    """Validate a CSRF token's signature.
+    
+    Args:
+        token: The token string to validate ({random}.{signature}).
+        
+    Returns:
+        True if the token is valid.
+    """
+    if not token or "." not in token:
+        return False
+    random_part, signature = token.rsplit(".", 1)
+    expected = hmac.new(
+        CSRF_SECRET.encode(), random_part.encode(), hashlib.sha256
+    ).hexdigest()[:32]
+    return hmac.compare_digest(signature, expected)
+
+
+def sign_value(value: str) -> str:
+    """Sign a value with HMAC for tamper detection.
+    
+    Used for the impersonation cookie to prevent forgery.
+    
+    Args:
+        value: The plaintext value to sign.
+        
+    Returns:
+        Signed string: {value}.{signature}
+    """
+    signature = hmac.new(
+        CSRF_SECRET.encode(), value.encode(), hashlib.sha256
+    ).hexdigest()[:32]
+    return f"{value}.{signature}"
+
+
+def verify_signed_value(signed: str | None) -> str | None:
+    """Verify and extract a signed value.
+    
+    Args:
+        signed: The signed string ({value}.{signature}).
+        
+    Returns:
+        The original value if signature is valid, None otherwise.
+    """
+    if not signed or "." not in signed:
+        return None
+    # Value could contain dots (e.g. UUIDs don't, but be safe)
+    value, signature = signed.rsplit(".", 1)
+    expected = hmac.new(
+        CSRF_SECRET.encode(), value.encode(), hashlib.sha256
+    ).hexdigest()[:32]
+    if hmac.compare_digest(signature, expected):
+        return value
+    return None
 
 
 class AuthProvider(ABC):

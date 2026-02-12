@@ -13,6 +13,9 @@ from lucent.api.deps import CurrentUser
 from lucent.auth import set_current_user
 from lucent.auth_providers import (
     SESSION_COOKIE_NAME,
+    SESSION_TTL_HOURS,
+    CSRF_COOKIE_NAME,
+    CSRF_FIELD_NAME,
     create_session,
     validate_session,
     destroy_session,
@@ -20,6 +23,11 @@ from lucent.auth_providers import (
     is_first_run,
     create_initial_user,
     set_user_password,
+    get_cookie_params,
+    generate_csrf_token,
+    validate_csrf_token,
+    sign_value,
+    verify_signed_value,
 )
 from lucent.db import (
     MemoryRepository, 
@@ -60,8 +68,56 @@ def truncate(value: str, length: int = 100) -> str:
 templates.env.filters["datetime"] = format_datetime
 templates.env.filters["truncate"] = truncate
 
-# Make deployment mode available to all templates
+# Make deployment mode and CSRF available to all templates
 templates.env.globals["team_mode"] = is_team_mode
+templates.env.globals["csrf_field_name"] = CSRF_FIELD_NAME
+
+
+def _get_csrf_for_request(request: Request) -> str:
+    """Get or generate a CSRF token for a request.
+    
+    Reuses the token from the cookie if valid, otherwise generates a new one.
+    """
+    existing = request.cookies.get(CSRF_COOKIE_NAME)
+    if existing and validate_csrf_token(existing):
+        return existing
+    return generate_csrf_token()
+
+
+def _set_csrf_cookie(response, token: str) -> None:
+    """Set the CSRF cookie on a response."""
+    params = get_cookie_params()
+    response.set_cookie(
+        key=CSRF_COOKIE_NAME,
+        value=token,
+        httponly=False,  # Must be readable by JS for dynamic forms
+        samesite=params["samesite"],
+        secure=params["secure"],
+        path=params["path"],
+        max_age=SESSION_TTL_HOURS * 3600,
+    )
+
+
+async def _check_csrf(request: Request, form_token: str | None = None) -> None:
+    """Verify CSRF token: form field must match cookie and be validly signed.
+    
+    Args:
+        request: The incoming request (to read the cookie).
+        form_token: The csrf_token value from the form submission.
+                    If None, reads from request.form().
+    
+    Raises HTTPException(403) if validation fails.
+    """
+    cookie_token = request.cookies.get(CSRF_COOKIE_NAME)
+    if not cookie_token or not validate_csrf_token(cookie_token):
+        raise HTTPException(status_code=403, detail="CSRF validation failed")
+    
+    if form_token is None:
+        form = await request.form()
+        form_token = str(form.get(CSRF_FIELD_NAME, ""))
+    
+    if not form_token or form_token != cookie_token:
+        raise HTTPException(status_code=403, detail="CSRF validation failed")
 
 
 async def get_user_context(request: Request) -> CurrentUser:
@@ -100,9 +156,11 @@ async def get_user_context(request: Request) -> CurrentUser:
     if impersonate_cookie and is_team_mode():
         from lucent.auth import set_impersonating_user
         
-        if current_user.role in (Role.ADMIN, Role.OWNER):
+        # Verify the cookie signature
+        impersonate_user_id_str = verify_signed_value(impersonate_cookie)
+        if impersonate_user_id_str and current_user.role in (Role.ADMIN, Role.OWNER):
             try:
-                target_user_id = UUID(impersonate_cookie)
+                target_user_id = UUID(impersonate_user_id_str)
                 if target_user_id != current_user.id:
                     user_repo = UserRepository(pool)
                     target_user = await user_repo.get_by_id(target_user_id)
@@ -159,15 +217,19 @@ async def login_page(request: Request, error: str | None = None):
             return RedirectResponse("/", status_code=303)
     
     provider = await get_auth_provider()
-    return templates.TemplateResponse(
+    csrf_token = generate_csrf_token()
+    response = templates.TemplateResponse(
         "login.html",
-        {"request": request, "fields": provider.get_login_fields(), "error": error},
+        {"request": request, "fields": provider.get_login_fields(), "error": error, "csrf_token": csrf_token},
     )
+    _set_csrf_cookie(response, csrf_token)
+    return response
 
 
 @router.post("/login")
 async def login_submit(request: Request):
     """Handle login form submission."""
+    await _check_csrf(request)
     pool = await get_pool()
     form = await request.form()
     credentials = {key: str(value) for key, value in form.items()}
@@ -189,15 +251,16 @@ async def login_submit(request: Request):
     # Create session
     token = await create_session(pool, user["id"])
     
+    params = get_cookie_params()
     response = RedirectResponse("/", status_code=303)
     response.set_cookie(
         key=SESSION_COOKIE_NAME,
         value=token,
-        httponly=True,
-        samesite="lax",
-        max_age=72 * 3600,  # Match SESSION_TTL_HOURS default
-        path="/",
+        max_age=SESSION_TTL_HOURS * 3600,
+        **params,
     )
+    # Set CSRF cookie for authenticated pages
+    _set_csrf_cookie(response, generate_csrf_token())
     return response
 
 
@@ -215,6 +278,7 @@ async def logout(request: Request):
     response = RedirectResponse("/login", status_code=303)
     response.delete_cookie(key=SESSION_COOKIE_NAME, path="/")
     response.delete_cookie(key="lucent_impersonate", path="/")
+    response.delete_cookie(key=CSRF_COOKIE_NAME, path="/")
     return response
 
 
@@ -226,15 +290,19 @@ async def setup_page(request: Request, error: str | None = None):
     if not await is_first_run(pool):
         return RedirectResponse("/login", status_code=303)
     
-    return templates.TemplateResponse(
+    csrf_token = generate_csrf_token()
+    response = templates.TemplateResponse(
         "setup.html",
-        {"request": request, "error": error},
+        {"request": request, "error": error, "csrf_token": csrf_token},
     )
+    _set_csrf_cookie(response, csrf_token)
+    return response
 
 
 @router.post("/setup")
 async def setup_submit(request: Request):
     """Handle first-run setup form submission."""
+    await _check_csrf(request)
     pool = await get_pool()
     
     if not await is_first_run(pool):
@@ -284,14 +352,14 @@ async def setup_submit(request: Request):
         "setup_complete.html",
         {"request": request, "display_name": display_name, "api_key": api_key},
     )
+    params = get_cookie_params()
     response.set_cookie(
         key=SESSION_COOKIE_NAME,
         value=token,
-        httponly=True,
-        samesite="lax",
-        max_age=72 * 3600,
-        path="/",
+        max_age=SESSION_TTL_HOURS * 3600,
+        **params,
     )
+    _set_csrf_cookie(response, generate_csrf_token())
     return response
 
 
@@ -761,6 +829,7 @@ async def memory_edit_submit(
     meta_preferences: str = Form(""),
 ):
     """Handle memory edit form submission."""
+    await _check_csrf(request)
     user = await get_user_context(request)
     pool = await get_pool()
     
@@ -957,6 +1026,7 @@ async def memory_share(request: Request, memory_id: UUID):
 @router.post("/memories/{memory_id}/delete", response_class=HTMLResponse)
 async def memory_delete(request: Request, memory_id: UUID):
     """Delete a memory."""
+    await _check_csrf(request)
     user = await get_user_context(request)
     pool = await get_pool()
     
@@ -1248,14 +1318,14 @@ async def start_impersonation(request: Request, user_id: UUID):
     if user_role_value == "owner" and target_role == "owner":
         return RedirectResponse(url="/users?error=Cannot+impersonate+other+owners", status_code=303)
     
-    # Set impersonation cookie and redirect to dashboard
+    # Set signed impersonation cookie and redirect to dashboard
     response = RedirectResponse(url="/?impersonating=true", status_code=303)
+    params = get_cookie_params()
     response.set_cookie(
         key="lucent_impersonate",
-        value=str(user_id),
-        httponly=True,
-        samesite="lax",
+        value=sign_value(str(user_id)),
         max_age=3600,  # 1 hour max
+        **params,
     )
     return response
 
@@ -1361,6 +1431,7 @@ async def settings(
 @router.post("/settings/password")
 async def change_password(request: Request):
     """Change the current user's password."""
+    await _check_csrf(request)
     user = await get_user_context(request)
     pool = await get_pool()
     form = await request.form()

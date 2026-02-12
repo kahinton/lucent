@@ -39,6 +39,7 @@
             {% endif %}
 
             <form method="POST" action="/login" class="space-y-4">
+                <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
                 {% for field in fields %}
                 <div>
                     <label for="{{ field.name }}" class="block text-sm font-medium text-gray-700 mb-1">

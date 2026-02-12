@@ -40,6 +40,7 @@
             {% endif %}
 
             <form method="POST" action="/setup" class="space-y-4">
+                <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
                 <div>
                     <label for="display_name" class="block text-sm font-medium text-gray-700 mb-1">
                         Display Name

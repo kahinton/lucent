@@ -159,5 +159,24 @@
     </div>
     
     {% block extra_scripts %}{% endblock %}
+    
+    <!-- Auto-inject CSRF tokens into all forms -->
+    <script>
+    document.addEventListener('DOMContentLoaded', function() {
+        const csrfCookie = document.cookie.split('; ')
+            .find(c => c.startsWith('lucent_csrf='));
+        if (!csrfCookie) return;
+        const csrfToken = csrfCookie.split('=')[1];
+        document.querySelectorAll('form[method="post"], form[method="POST"]').forEach(function(form) {
+            if (!form.querySelector('input[name="csrf_token"]')) {
+                const input = document.createElement('input');
+                input.type = 'hidden';
+                input.name = 'csrf_token';
+                input.value = csrfToken;
+                form.appendChild(input);
+            }
+        });
+    });
+    </script>
 </body>
 </html>
