@@ -91,9 +91,9 @@ def require_team_mode(feature_name: str) -> None:
 def _validate_license(license_key: str) -> bool:
     """Validate a license key.
     
-    TODO: Implement proper license validation.
-    For now, accepts any non-empty key to allow development/testing.
-    This will be replaced with cryptographic validation.
+    NOTE: License validation is not yet implemented. Any non-empty key
+    is accepted. This placeholder will be replaced with cryptographic
+    validation before the team tier is officially available.
     
     Args:
         license_key: The license key to validate.

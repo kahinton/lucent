@@ -142,6 +142,8 @@ async def list_tags(
         username=username,
         type=type,
         limit=min(limit, 100),
+        requesting_user_id=user.id,
+        requesting_org_id=user.organization_id,
     )
     
     return TagListResponse(

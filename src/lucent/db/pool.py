@@ -67,7 +67,12 @@ async def _init_connection(conn: Connection) -> None:
 
 
 async def _run_migrations(pool: Pool) -> None:
-    """Run SQL migration files in order."""
+    """Run SQL migration files in order, tracking which have been applied.
+    
+    Uses a `_migrations` table to record applied migrations and skip
+    previously-run files. This prevents re-executing non-idempotent
+    statements on every startup.
+    """
     migrations_dir = Path(__file__).parent / "migrations"
     
     if not migrations_dir.exists():
@@ -77,9 +82,31 @@ async def _run_migrations(pool: Pool) -> None:
     migration_files = sorted(migrations_dir.glob("*.sql"))
     
     async with pool.acquire() as conn:
+        # Create tracking table if it doesn't exist
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS _migrations (
+                name TEXT PRIMARY KEY,
+                applied_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            )
+        """)
+        
+        # Get already-applied migrations
+        applied = set()
+        rows = await conn.fetch("SELECT name FROM _migrations")
+        for row in rows:
+            applied.add(row["name"])
+        
+        # Apply new migrations
         for migration_file in migration_files:
+            if migration_file.name in applied:
+                continue
+            
             sql = migration_file.read_text()
             await conn.execute(sql)
+            await conn.execute(
+                "INSERT INTO _migrations (name) VALUES ($1)",
+                migration_file.name,
+            )
 
 
 async def get_pool() -> Pool:

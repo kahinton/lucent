@@ -117,5 +117,5 @@ def create_app() -> FastAPI:
     return app
 
 
-# Create the app instance
-app = create_app()
+# Note: app instance is created by server.py main() via create_app().
+# Do NOT create a module-level app instance here to avoid double initialization.

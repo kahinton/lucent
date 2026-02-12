@@ -650,30 +650,7 @@ async def memory_new_submit(
                 for m in meta_milestones.split(",") if m.strip()
             ]
     
-    elif type == "individual":
-        if meta_user_id:
-            metadata["user_id"] = meta_user_id
-        if meta_name:
-            metadata["name"] = meta_name
-        if meta_relationship:
-            metadata["relationship"] = meta_relationship
-        if meta_organization:
-            metadata["organization"] = meta_organization
-        if meta_role:
-            metadata["role"] = meta_role
-        contact_info = {}
-        if meta_email:
-            contact_info["email"] = meta_email
-        if meta_phone:
-            contact_info["phone"] = meta_phone
-        if meta_linkedin:
-            contact_info["linkedin"] = meta_linkedin
-        if meta_github:
-            contact_info["github"] = meta_github
-        if contact_info:
-            metadata["contact_info"] = contact_info
-        if meta_preferences:
-            metadata["preferences"] = [p.strip() for p in meta_preferences.split(",") if p.strip()]
+    # Note: individual type is blocked earlier in this function
     
     # Create memory
     result = await repo.create(
@@ -837,7 +814,7 @@ async def memory_edit_submit(
     audit_repo = AuditRepository(pool)
     
     # Get existing to check ownership
-    existing = await repo.get(memory_id)
+    existing = await repo.get_accessible(memory_id, user.id, user.organization_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="Memory not found")
     
@@ -989,7 +966,7 @@ async def memory_share(request: Request, memory_id: UUID):
     repo = MemoryRepository(pool)
     audit_repo = AuditRepository(pool)
     
-    memory = await repo.get(memory_id)
+    memory = await repo.get_accessible(memory_id, user.id, user.organization_id)
     if memory is None:
         raise HTTPException(status_code=404, detail="Memory not found")
     
@@ -1033,7 +1010,7 @@ async def memory_delete(request: Request, memory_id: UUID):
     repo = MemoryRepository(pool)
     audit_repo = AuditRepository(pool)
     
-    memory = await repo.get(memory_id)
+    memory = await repo.get_accessible(memory_id, user.id, user.organization_id)
     if memory is None:
         raise HTTPException(status_code=404, detail="Memory not found")
     

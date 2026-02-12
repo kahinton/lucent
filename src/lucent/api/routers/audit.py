@@ -76,7 +76,7 @@ async def get_memory_audit_log(
         total_count=len(entries),
         offset=offset,
         limit=limit,
-        has_more=result["has_more"],
+        has_more=len(entries) == limit,
     )
 
 

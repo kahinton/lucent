@@ -208,13 +208,9 @@ async def get_organization_access_activity(
     pool = await get_pool()
     access_repo = AccessRepository(pool)
     
-    # Get most accessed as a proxy for activity (we'd need a new method for full org activity)
-    result = await access_repo.get_most_accessed(
-        organization_id=user.organization_id,
-        since=since,
-        limit=limit,
+    # TODO: Implement proper organization activity feed
+    # For now, this endpoint is not available
+    raise HTTPException(
+        status_code=status.HTTP_501_NOT_IMPLEMENTED,
+        detail="Organization activity feed is not yet implemented",
     )
-    
-    # For now, return as most accessed items
-    # TODO: Add a proper get_organization_activity method
-    return []

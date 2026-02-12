@@ -9,7 +9,7 @@ An MCP (Model Context Protocol) server providing persistent memory functionality
 - **Dual Search Modes**: Content-only search (`search_memories`) or full-field search (`search_memories_full`)
 - **Tag Management**: Built-in tools to promote tag consistency across memories
 - **Memory Linking**: Connect related memories for contextual retrieval
-- **User Management**: OAuth support (Google, GitHub) and SAML for enterprises
+- **User Management**: Pluggable authentication (basic auth, API key), session management, RBAC roles
 - **Soft Delete**: Recoverable deletions with future hard-delete cleanup planned
 - **Docker Ready**: PostgreSQL with persistent storage out of the box
 
@@ -270,7 +270,10 @@ src/lucent/
 │   ├── routes.py      # Web UI routes
 │   └── templates/     # Jinja2 templates
 ├── db/
-│   ├── client.py      # asyncpg connection pool & repositories
+│   ├── pool.py        # asyncpg connection pool management
+│   ├── memory.py      # Memory repository (CRUD + search)
+│   ├── user.py        # User repository
+│   ├── audit.py       # Audit log repository
 │   └── migrations/    # SQL migration files
 ├── models/
 │   └── memory.py      # Pydantic models for all memory types
