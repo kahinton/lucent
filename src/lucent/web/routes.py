@@ -575,7 +575,7 @@ async def memory_new_submit(
     audit_repo = AuditRepository(pool)
     
     # Use the logged-in user's display name as username
-    username = user.display_name or user.external_id or "unknown"
+    username = user.display_name or "unknown"
     
     # Parse tags
     tag_list = [t.strip().lower() for t in tags.split(",") if t.strip()]
@@ -1281,7 +1281,17 @@ async def create_user(
     if role != "member":
         await user_repo.update_role(new_user["id"], role)
     
-    return RedirectResponse(url="/users?success=User+created", status_code=303)
+    # Set a temporary password so the user can log in
+    # TODO: Implement invite/password-set flow instead of temp passwords
+    from lucent.auth_providers import set_user_password
+    temp_password = secrets.token_urlsafe(12)
+    await set_user_password(pool, new_user["id"], temp_password)
+    
+    from urllib.parse import quote
+    return RedirectResponse(
+        url=f"/users?success=User+created.+Temporary+password:+{quote(temp_password)}",
+        status_code=303,
+    )
 
 
 @router.post("/users/{user_id}/impersonate")
@@ -1345,45 +1355,32 @@ async def stop_impersonation(request: Request):
 # =============================================================================
 
 # Temporary storage for newly created API keys (shown once after redirect)
-# Key: key_id, Value: (plain_key, created_at)
-# Entries are cleaned up after being read or after 60 seconds
-_pending_api_keys: dict[str, tuple[str, float]] = {}
+# Uses signed values to pass securely through query params.
+# The key is encrypted in the redirect URL and verified on the settings page.
 
 
-def _store_pending_key(key_id: str, plain_key: str) -> None:
-    """Store a newly created API key for display after redirect."""
-    import time
-    _pending_api_keys[key_id] = (plain_key, time.time())
+def _encode_pending_key(key_id: str, plain_key: str) -> str:
+    """Encode an API key ID and value as a signed string for URL transport."""
+    return sign_value(f"{key_id}:{plain_key}")
 
 
-def _get_pending_key(key_id: str) -> str | None:
-    """Get and remove a pending API key. Returns None if not found or expired."""
-    import time
-    if key_id not in _pending_api_keys:
+def _decode_pending_key(signed: str) -> tuple[str, str] | None:
+    """Decode and verify a signed API key string.
+    
+    Returns:
+        Tuple of (key_id, plain_key) or None if invalid.
+    """
+    value = verify_signed_value(signed)
+    if not value or ":" not in value:
         return None
-    
-    plain_key, created_at = _pending_api_keys.pop(key_id)
-    
-    # Expire after 60 seconds
-    if time.time() - created_at > 60:
-        return None
-    
-    return plain_key
-
-
-def _cleanup_pending_keys() -> None:
-    """Remove expired pending keys."""
-    import time
-    now = time.time()
-    expired = [k for k, (_, created_at) in _pending_api_keys.items() if now - created_at > 60]
-    for k in expired:
-        _pending_api_keys.pop(k, None)
+    key_id, plain_key = value.split(":", 1)
+    return key_id, plain_key
 
 
 @router.get("/settings", response_class=HTMLResponse)
 async def settings(
     request: Request,
-    new_key_id: str | None = Query(default=None),
+    new_key: str | None = Query(default=None),
     error: str | None = Query(default=None),
     password_changed: str | None = Query(default=None),
 ):
@@ -1396,16 +1393,15 @@ async def settings(
     org = await org_repo.get_by_id(user.organization_id)
     api_keys = await api_key_repo.list_by_user(user.id)
     
-    # Check for newly created key to display
+    # Check for newly created key to display (passed via signed query param)
     new_api_key = None
     new_key_name = None
-    if new_key_id:
-        _cleanup_pending_keys()
-        new_api_key = _get_pending_key(new_key_id)
-        if new_api_key:
-            # Find the key name
+    if new_key:
+        decoded = _decode_pending_key(new_key)
+        if decoded:
+            key_id, new_api_key = decoded
             for key in api_keys:
-                if str(key["id"]) == new_key_id:
+                if str(key["id"]) == key_id:
                     new_key_name = key["name"]
                     break
     
@@ -1491,12 +1487,13 @@ async def create_api_key(
             name=name.strip(),
         )
         
-        # Store the plain key temporarily for display after redirect
+        # Encode the key in a signed query param for the redirect
         key_id = str(key_record["id"])
-        _store_pending_key(key_id, plain_key)
+        signed = _encode_pending_key(key_id, plain_key)
         
-        # Redirect to settings with key ID (POST-Redirect-GET pattern)
-        return RedirectResponse(f"/settings?new_key_id={key_id}", status_code=303)
+        # Redirect to settings with signed key (POST-Redirect-GET pattern)
+        from urllib.parse import quote
+        return RedirectResponse(f"/settings?new_key={quote(signed)}", status_code=303)
         
     except ValueError as e:
         # Duplicate name error

@@ -116,7 +116,7 @@ class ApiKeyRepository:
         
         key_prefix = plain_key[:12]
         
-        # Find the key by prefix
+        # Find all active keys with this prefix (prefix collisions are possible)
         query = """
             SELECT ak.id, ak.user_id, ak.organization_id, ak.name, ak.key_prefix, 
                    ak.key_hash, ak.scopes, ak.last_used_at, ak.use_count, 
@@ -131,17 +131,23 @@ class ApiKeyRepository:
         """
         
         async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(query, key_prefix)
+            rows = await conn.fetch(query, key_prefix)
         
-        if row is None:
+        if not rows:
             return None
         
-        # Verify the hash
-        if not bcrypt.checkpw(plain_key.encode(), row["key_hash"].encode()):
+        # Check each matching key's hash (handles prefix collisions)
+        matched_row = None
+        for row in rows:
+            if bcrypt.checkpw(plain_key.encode(), row["key_hash"].encode()):
+                matched_row = row
+                break
+        
+        if matched_row is None:
             return None
         
         # Check expiration
-        if row["expires_at"] and row["expires_at"] < datetime.now(timezone.utc):
+        if matched_row["expires_at"] and matched_row["expires_at"] < datetime.now(timezone.utc):
             return None
         
         # Update last used timestamp and count
@@ -151,12 +157,12 @@ class ApiKeyRepository:
             WHERE id = $1
         """
         async with self.pool.acquire() as conn:
-            await conn.execute(update_query, row["id"])
+            await conn.execute(update_query, matched_row["id"])
         
-        result = self._row_to_dict(row)
-        result["user_email"] = row["user_email"]
-        result["user_display_name"] = row["user_display_name"]
-        result["user_role"] = row["user_role"]
+        result = self._row_to_dict(matched_row)
+        result["user_email"] = matched_row["user_email"]
+        result["user_display_name"] = matched_row["user_display_name"]
+        result["user_role"] = matched_row["user_role"]
         return result
     
     async def list_by_user(self, user_id: UUID) -> list[dict[str, Any]]:

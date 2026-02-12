@@ -16,6 +16,10 @@ from uuid import UUID
 import asyncpg
 from asyncpg import Pool
 
+from lucent.logging import get_logger
+
+logger = get_logger("db.user")
+
 
 class UserRepository:
     """Repository for user CRUD operations."""
@@ -128,7 +132,7 @@ class UserRepository:
                 return dict(row)
         except Exception as e:
             # Log but don't fail user creation if memory creation fails
-            print(f"Warning: Failed to create individual memory for user {user['id']}: {e}")
+            logger.warning(f"Failed to create individual memory for user {user['id']}", exc_info=e)
         
         return None
     
@@ -413,7 +417,7 @@ class UserRepository:
                     str(individual_memory["id"]),
                 )
         except Exception as e:
-            print(f"Warning: Failed to sync individual memory for user {user['id']}: {e}")
+            logger.warning(f"Failed to sync individual memory for user {user['id']}", exc_info=e)
     
     async def update_last_login(self, user_id: UUID) -> None:
         """Update the last login timestamp for a user.
