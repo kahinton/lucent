@@ -34,21 +34,29 @@ class Role(str, Enum):
     
     def __ge__(self, other: "Role") -> bool:
         """Check if this role has >= privileges than another."""
+        if not isinstance(other, Role):
+            return NotImplemented
         order = {Role.MEMBER: 0, Role.ADMIN: 1, Role.OWNER: 2}
         return order[self] >= order[other]
     
     def __gt__(self, other: "Role") -> bool:
         """Check if this role has > privileges than another."""
+        if not isinstance(other, Role):
+            return NotImplemented
         order = {Role.MEMBER: 0, Role.ADMIN: 1, Role.OWNER: 2}
         return order[self] > order[other]
     
     def __le__(self, other: "Role") -> bool:
         """Check if this role has <= privileges than another."""
+        if not isinstance(other, Role):
+            return NotImplemented
         order = {Role.MEMBER: 0, Role.ADMIN: 1, Role.OWNER: 2}
         return order[self] <= order[other]
     
     def __lt__(self, other: "Role") -> bool:
         """Check if this role has < privileges than another."""
+        if not isinstance(other, Role):
+            return NotImplemented
         order = {Role.MEMBER: 0, Role.ADMIN: 1, Role.OWNER: 2}
         return order[self] < order[other]
 
@@ -236,7 +244,7 @@ def can_assign_role(assigner_role: Role | str, new_role: Role | str) -> bool:
     return False
 
 
-class PermissionError(Exception):
+class RBACPermissionError(Exception):
     """Raised when a user doesn't have permission for an action."""
     
     def __init__(self, permission: Permission, role: Role | None = None):
@@ -250,20 +258,20 @@ class PermissionError(Exception):
 
 
 def require_permission(role: Role | str, permission: Permission) -> None:
-    """Raise PermissionError if the role doesn't have the permission.
+    """Raise RBACPermissionError if the role doesn't have the permission.
     
     Args:
         role: The user's role.
         permission: The required permission.
         
     Raises:
-        PermissionError: If the role doesn't have the permission.
+        RBACPermissionError: If the role doesn't have the permission.
     """
     if isinstance(role, str):
         role = Role.from_string(role)
     
     if not has_permission(role, permission):
-        raise PermissionError(permission, role)
+        raise RBACPermissionError(permission, role)
 
 
 def get_user_permissions(role: Role | str) -> set[Permission]:

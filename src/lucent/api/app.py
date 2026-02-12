@@ -10,7 +10,6 @@ The API and web interface run alongside the MCP server.
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware

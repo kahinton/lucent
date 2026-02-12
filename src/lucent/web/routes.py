@@ -2,8 +2,10 @@
 
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from urllib.parse import quote
 from uuid import UUID
+
+import bcrypt
 
 from fastapi import APIRouter, Request, Form, Query, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -1415,25 +1417,20 @@ async def change_password(request: Request):
 
     # Validate new password
     if len(new_password) < 8:
-        from urllib.parse import quote
         return RedirectResponse(f"/settings?error={quote('New password must be at least 8 characters.')}", status_code=303)
 
     if new_password != confirm_password:
-        from urllib.parse import quote
         return RedirectResponse(f"/settings?error={quote('New passwords do not match.')}", status_code=303)
 
     # Verify current password
-    import bcrypt
     query = "SELECT password_hash FROM users WHERE id = $1"
     async with pool.acquire() as conn:
         row = await conn.fetchrow(query, str(user.id))
 
     if not row or not row["password_hash"]:
-        from urllib.parse import quote
         return RedirectResponse(f"/settings?error={quote('No password set on this account.')}", status_code=303)
 
     if not bcrypt.checkpw(current_password.encode("utf-8"), row["password_hash"].encode("utf-8")):
-        from urllib.parse import quote
         return RedirectResponse(f"/settings?error={quote('Current password is incorrect.')}", status_code=303)
 
     # Set new password

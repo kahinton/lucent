@@ -27,7 +27,7 @@ from contextvars import ContextVar
 from typing import Any
 from uuid import UUID
 
-from lucent.db import OrganizationRepository, UserRepository, get_pool, init_db
+from lucent.db import UserRepository, get_pool, init_db
 
 # Context variable to store the current user for the request
 _current_user: ContextVar[dict[str, Any] | None] = ContextVar("current_user", default=None)

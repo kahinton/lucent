@@ -8,13 +8,11 @@ This module provides a single unified server that handles:
 
 import os
 import sys
-from contextvars import copy_context
 
 from dotenv import load_dotenv
 
 from lucent.logging import configure_logging, get_logger
 from mcp.server.fastmcp import FastMCP
-from starlette.requests import Request
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from lucent.auth import set_current_user, set_current_api_key_id

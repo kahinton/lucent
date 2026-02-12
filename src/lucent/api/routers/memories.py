@@ -5,7 +5,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, status
 
-from lucent.api.deps import AuthenticatedUser, AdminUser
+from lucent.api.deps import AuthenticatedUser
 from lucent.api.models import (
     MemoryCreate,
     MemoryUpdate, 

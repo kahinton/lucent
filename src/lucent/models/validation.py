@@ -11,13 +11,7 @@ from lucent.models.memory import (
     TechnicalMetadata,
     ProceduralMetadata,
     GoalMetadata,
-    GoalStatus,
     IndividualMetadata,
-    ProceduralStep,
-    Milestone,
-    ProgressNote,
-    ContactInfo,
-    InteractionRecord,
 )
 
 

@@ -1,19 +1,15 @@
 """Authentication and authorization dependencies for API endpoints."""
 
-import os
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import Depends, HTTPException, Header, Cookie, Request, status
+from fastapi import Depends, HTTPException, Header, status
 
 from lucent.auth import (
     set_current_user,
-    get_impersonating_user,
-    set_impersonating_user,
-    is_impersonating,
 )
 from lucent.db import UserRepository, ApiKeyRepository, get_pool
-from lucent.rbac import Permission, Role, has_permission, PermissionError as RBACPermissionError
+from lucent.rbac import Permission, Role, has_permission
 
 
 class CurrentUser:

@@ -36,6 +36,12 @@ services:
       - ./pyproject.toml:/app/pyproject.toml:ro
     ports:
       - "${LUCENT_PORT:-8766}:8766"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8766/api/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     stdin_open: true
     tty: true
     restart: unless-stopped
