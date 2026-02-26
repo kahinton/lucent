@@ -12,12 +12,6 @@ license = {text = "Business Source License 1.1"}
 authors = [
     { name = "kahinton" }
 ]
-
-[project.urls]
-Homepage = "https://github.com/kahinton/hindsight"
-Repository = "https://github.com/kahinton/hindsight"
-Issues = "https://github.com/kahinton/hindsight/issues"
-
 dependencies = [
     "mcp[cli]>=1.0.0",
     "asyncpg>=0.29.0",
@@ -29,6 +23,11 @@ dependencies = [
     "python-multipart>=0.0.9",
     "bcrypt>=4.0.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/kahinton/hindsight"
+Repository = "https://github.com/kahinton/hindsight"
+Issues = "https://github.com/kahinton/hindsight/issues"
 
 [project.optional-dependencies]
 dev = [
