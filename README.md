@@ -27,15 +27,15 @@ An MCP (Model Context Protocol) server providing persistent memory functionality
 
 ### Prerequisites
 
-- Python 3.12+
 - Docker and Docker Compose
-- An MCP-compatible client (e.g., Claude Desktop)
+- An MCP-compatible client (e.g., VS Code, Claude Desktop)
+- Python 3.12+ (only if running outside Docker)
 
 ### 1. Start the Database
 
 ```bash
 # Clone and enter the repository
-cd lucent
+cd hindsight
 
 # Start PostgreSQL with Docker
 docker compose up -d postgres
@@ -146,8 +146,15 @@ export LUCENT_AUTH_PROVIDER=api_key
 |------|---------|
 | `create_memory` | Create a new memory with type, content, tags, importance, and metadata |
 | `get_memory` | Retrieve a full memory by its UUID |
+| `get_memories` | Retrieve multiple memories by ID in a single call |
 | `update_memory` | Update an existing memory |
 | `delete_memory` | Soft delete a memory (can be recovered) |
+
+### User Context
+
+| Tool | Purpose |
+|------|--------|
+| `get_current_user_context` | Get the current user's info and individual memory — recommended first call in every conversation |
 
 ### Search Tools
 
@@ -163,13 +170,20 @@ export LUCENT_AUTH_PROVIDER=api_key
 | `get_existing_tags` | List all tags with usage counts - use before creating memories! |
 | `get_tag_suggestions` | Fuzzy search for similar existing tags |
 
+### Memory Versioning
+
+| Tool | Purpose |
+|------|--------|
+| `get_memory_versions` | Browse version history for a memory |
+| `restore_memory_version` | Restore a memory to a previous version |
+
 ### Tool Parameters
 
 #### create_memory
 
 ```
 Arguments:
-- type (required): experience | technical | procedural | goal
+- type (required): experience | technical | procedural | goal | individual
 - content (required): Main content of the memory
 - tags: List of categorization tags
 - importance: Rating 1-10 (default: 5)
@@ -197,6 +211,7 @@ Lucent provides prompt templates to help LLMs use the memory system effectively:
 
 - **memory_usage_guide**: Comprehensive guidance on memory types, importance ratings, and best practices
 - **memory_usage_guide_short**: Condensed version for limited prompt space
+- **user_introduction**: Guidance for greeting users and personalizing interactions based on their individual memory
 
 ## Importance Scale
 
@@ -262,23 +277,35 @@ ruff format src/
 
 ```
 src/lucent/
-├── server.py          # Unified server entry point (MCP + API + Web)
+├── server.py           # Unified server entry point (MCP + API + Web)
+├── auth.py             # User context management (ContextVars)
+├── auth_providers.py   # Pluggable auth backends + session management
+├── mode.py             # Deployment mode (personal/team)
+├── rate_limit.py       # API key rate limiting
+├── rbac.py             # Role-based access control
+├── logging.py          # Structured logging configuration
 ├── api/
-│   ├── app.py         # FastAPI application
-│   └── routers/       # REST API endpoints
+│   ├── app.py          # FastAPI application
+│   ├── deps.py         # Authentication dependencies
+│   ├── models.py       # API request/response models
+│   └── routers/        # REST API endpoints
 ├── web/
-│   ├── routes.py      # Web UI routes
-│   └── templates/     # Jinja2 templates
+│   ├── routes.py       # Web UI routes
+│   └── templates/      # Jinja2 templates
 ├── db/
-│   ├── pool.py        # asyncpg connection pool management
-│   ├── memory.py      # Memory repository (CRUD + search)
-│   ├── user.py        # User repository
-│   ├── audit.py       # Audit log repository
-│   └── migrations/    # SQL migration files
+│   ├── pool.py         # Connection pool + migration runner
+│   ├── memory.py       # Memory repository (CRUD + search)
+│   ├── user.py         # User repository
+│   ├── audit.py        # Audit log + versioning repository
+│   ├── api_key.py      # API key repository
+│   ├── access.py       # Access tracking repository
+│   ├── organization.py # Organization repository
+│   └── migrations/     # SQL migration files
 ├── models/
-│   └── memory.py      # Pydantic models for all memory types
+│   ├── memory.py       # Pydantic models for memory types
+│   └── validation.py   # Metadata validation
 ├── tools/
-│   └── memories.py    # MCP tool implementations
+│   └── memories.py     # MCP tool implementations
 └── prompts/
     └── memory_usage.py # System prompt templates
 ```
@@ -293,7 +320,10 @@ All services run on a single port (default 8766):
 | `/api/*` | REST API (requires API key) |
 | `/api/docs` | OpenAPI documentation |
 | `/` | Web dashboard |
-| `/settings` | API key management |
+| `/login` | Authentication |
+| `/setup` | First-run account creation |
+| `/memories` | Memory management UI |
+| `/settings` | API keys, password, profile |
 
 ## License
 

@@ -100,6 +100,138 @@ def _set_csrf_cookie(response, token: str) -> None:
     )
 
 
+def _build_metadata_from_form(
+    memory_type: str,
+    *,
+    meta_context: str = "",
+    meta_outcome: str = "",
+    meta_lessons_learned: str = "",
+    meta_related_entities: str = "",
+    meta_category: str = "",
+    meta_language: str = "",
+    meta_version_info: str = "",
+    meta_repo: str = "",
+    meta_filename: str = "",
+    meta_code_snippet: str = "",
+    meta_references: str = "",
+    meta_estimated_time: str = "",
+    meta_success_criteria: str = "",
+    meta_prerequisites: str = "",
+    meta_common_pitfalls: str = "",
+    meta_steps: str = "",
+    meta_status: str = "active",
+    meta_priority: int = 3,
+    meta_deadline: str = "",
+    meta_blockers: str = "",
+    meta_milestones: str = "",
+    meta_user_id: str = "",
+    meta_name: str = "",
+    meta_relationship: str = "",
+    meta_organization: str = "",
+    meta_role: str = "",
+    meta_email: str = "",
+    meta_phone: str = "",
+    meta_linkedin: str = "",
+    meta_github: str = "",
+    meta_preferences: str = "",
+) -> dict:
+    """Build and validate type-specific metadata from web form fields."""
+    from lucent.models.validation import validate_metadata
+
+    metadata: dict = {}
+
+    if memory_type == "experience":
+        if meta_context:
+            metadata["context"] = meta_context
+        if meta_outcome:
+            metadata["outcome"] = meta_outcome
+        if meta_lessons_learned:
+            metadata["lessons_learned"] = [l.strip() for l in meta_lessons_learned.split(",") if l.strip()]
+        if meta_related_entities:
+            metadata["related_entities"] = [e.strip() for e in meta_related_entities.split(",") if e.strip()]
+
+    elif memory_type == "technical":
+        if meta_category:
+            metadata["category"] = meta_category
+        if meta_language:
+            metadata["language"] = meta_language
+        if meta_version_info:
+            metadata["version_info"] = meta_version_info
+        if meta_repo:
+            metadata["repo"] = meta_repo
+        if meta_filename:
+            metadata["filename"] = meta_filename
+        if meta_code_snippet:
+            metadata["code_snippet"] = meta_code_snippet
+        if meta_references:
+            metadata["references"] = [r.strip() for r in meta_references.split(",") if r.strip()]
+
+    elif memory_type == "procedural":
+        if meta_estimated_time:
+            metadata["estimated_time"] = meta_estimated_time
+        if meta_success_criteria:
+            metadata["success_criteria"] = meta_success_criteria
+        if meta_prerequisites:
+            metadata["prerequisites"] = [p.strip() for p in meta_prerequisites.split(",") if p.strip()]
+        if meta_common_pitfalls:
+            metadata["common_pitfalls"] = [p.strip() for p in meta_common_pitfalls.split(",") if p.strip()]
+        if meta_steps:
+            steps = []
+            for i, line in enumerate(meta_steps.strip().split("\n"), 1):
+                if line.strip():
+                    parts = line.split("|", 1)
+                    step = {"order": i, "description": parts[0].strip()}
+                    if len(parts) > 1 and parts[1].strip():
+                        step["notes"] = parts[1].strip()
+                    steps.append(step)
+            if steps:
+                metadata["steps"] = steps
+
+    elif memory_type == "goal":
+        metadata["status"] = meta_status
+        metadata["priority"] = meta_priority
+        if meta_deadline:
+            metadata["deadline"] = meta_deadline
+        if meta_blockers:
+            metadata["blockers"] = [b.strip() for b in meta_blockers.split(",") if b.strip()]
+        if meta_milestones:
+            metadata["milestones"] = [
+                {"description": m.strip(), "status": "active"}
+                for m in meta_milestones.split(",") if m.strip()
+            ]
+
+    elif memory_type == "individual":
+        if meta_user_id:
+            metadata["user_id"] = meta_user_id
+        if meta_name:
+            metadata["name"] = meta_name
+        if meta_relationship:
+            metadata["relationship"] = meta_relationship
+        if meta_organization:
+            metadata["organization"] = meta_organization
+        if meta_role:
+            metadata["role"] = meta_role
+        contact_info = {}
+        if meta_email:
+            contact_info["email"] = meta_email
+        if meta_phone:
+            contact_info["phone"] = meta_phone
+        if meta_linkedin:
+            contact_info["linkedin"] = meta_linkedin
+        if meta_github:
+            contact_info["github"] = meta_github
+        if contact_info:
+            metadata["contact_info"] = contact_info
+        if meta_preferences:
+            metadata["preferences"] = [p.strip() for p in meta_preferences.split(",") if p.strip()]
+
+    # Validate against the Pydantic model
+    try:
+        return validate_metadata(memory_type, metadata)
+    except ValueError:
+        return metadata  # Return unvalidated if validation fails (graceful degradation)
+
+
 async def _check_csrf(request: Request, form_token: str | None = None) -> None:
     """Verify CSRF token: form field must match cookie and be validly signed.
     
@@ -590,69 +722,20 @@ async def memory_new_submit(
         )
     
     # Build type-specific metadata
-    metadata: dict = {}
-    
-    if type == "experience":
-        if meta_context:
-            metadata["context"] = meta_context
-        if meta_outcome:
-            metadata["outcome"] = meta_outcome
-        if meta_lessons_learned:
-            metadata["lessons_learned"] = [l.strip() for l in meta_lessons_learned.split(",") if l.strip()]
-        if meta_related_entities:
-            metadata["related_entities"] = [e.strip() for e in meta_related_entities.split(",") if e.strip()]
-    
-    elif type == "technical":
-        if meta_category:
-            metadata["category"] = meta_category
-        if meta_language:
-            metadata["language"] = meta_language
-        if meta_version_info:
-            metadata["version_info"] = meta_version_info
-        if meta_repo:
-            metadata["repo"] = meta_repo
-        if meta_filename:
-            metadata["filename"] = meta_filename
-        if meta_code_snippet:
-            metadata["code_snippet"] = meta_code_snippet
-        if meta_references:
-            metadata["references"] = [r.strip() for r in meta_references.split(",") if r.strip()]
-    
-    elif type == "procedural":
-        if meta_estimated_time:
-            metadata["estimated_time"] = meta_estimated_time
-        if meta_success_criteria:
-            metadata["success_criteria"] = meta_success_criteria
-        if meta_prerequisites:
-            metadata["prerequisites"] = [p.strip() for p in meta_prerequisites.split(",") if p.strip()]
-        if meta_common_pitfalls:
-            metadata["common_pitfalls"] = [p.strip() for p in meta_common_pitfalls.split(",") if p.strip()]
-        if meta_steps:
-            steps = []
-            for i, line in enumerate(meta_steps.strip().split("\n"), 1):
-                if line.strip():
-                    parts = line.split("|", 1)
-                    step = {"order": i, "description": parts[0].strip()}
-                    if len(parts) > 1 and parts[1].strip():
-                        step["notes"] = parts[1].strip()
-                    steps.append(step)
-            if steps:
-                metadata["steps"] = steps
-    
-    elif type == "goal":
-        metadata["status"] = meta_status
-        metadata["priority"] = meta_priority
-        if meta_deadline:
-            metadata["deadline"] = meta_deadline
-        if meta_blockers:
-            metadata["blockers"] = [b.strip() for b in meta_blockers.split(",") if b.strip()]
-        if meta_milestones:
-            metadata["milestones"] = [
-                {"description": m.strip(), "status": "active"} 
-                for m in meta_milestones.split(",") if m.strip()
-            ]
-    
-    # Note: individual type is blocked earlier in this function
+    metadata = _build_metadata_from_form(
+        type,
+        meta_context=meta_context, meta_outcome=meta_outcome,
+        meta_lessons_learned=meta_lessons_learned, meta_related_entities=meta_related_entities,
+        meta_category=meta_category, meta_language=meta_language,
+        meta_version_info=meta_version_info, meta_repo=meta_repo,
+        meta_filename=meta_filename, meta_code_snippet=meta_code_snippet,
+        meta_references=meta_references, meta_estimated_time=meta_estimated_time,
+        meta_success_criteria=meta_success_criteria, meta_prerequisites=meta_prerequisites,
+        meta_common_pitfalls=meta_common_pitfalls, meta_steps=meta_steps,
+        meta_status=meta_status, meta_priority=meta_priority,
+        meta_deadline=meta_deadline, meta_blockers=meta_blockers,
+        meta_milestones=meta_milestones,
+    )
     
     # Create memory
     result = await repo.create(
@@ -828,92 +911,25 @@ async def memory_edit_submit(
     
     # Build type-specific metadata based on the memory's type
     memory_type = existing.get("type")
-    metadata: dict = {}
-    
-    if memory_type == "experience":
-        if meta_context:
-            metadata["context"] = meta_context
-        if meta_outcome:
-            metadata["outcome"] = meta_outcome
-        if meta_lessons_learned:
-            metadata["lessons_learned"] = [l.strip() for l in meta_lessons_learned.split(",") if l.strip()]
-        if meta_related_entities:
-            metadata["related_entities"] = [e.strip() for e in meta_related_entities.split(",") if e.strip()]
-    
-    elif memory_type == "technical":
-        if meta_category:
-            metadata["category"] = meta_category
-        if meta_language:
-            metadata["language"] = meta_language
-        if meta_version_info:
-            metadata["version_info"] = meta_version_info
-        if meta_repo:
-            metadata["repo"] = meta_repo
-        if meta_filename:
-            metadata["filename"] = meta_filename
-        if meta_code_snippet:
-            metadata["code_snippet"] = meta_code_snippet
-        if meta_references:
-            metadata["references"] = [r.strip() for r in meta_references.split(",") if r.strip()]
-    
-    elif memory_type == "procedural":
-        if meta_estimated_time:
-            metadata["estimated_time"] = meta_estimated_time
-        if meta_success_criteria:
-            metadata["success_criteria"] = meta_success_criteria
-        if meta_prerequisites:
-            metadata["prerequisites"] = [p.strip() for p in meta_prerequisites.split(",") if p.strip()]
-        if meta_common_pitfalls:
-            metadata["common_pitfalls"] = [p.strip() for p in meta_common_pitfalls.split(",") if p.strip()]
-        if meta_steps:
-            steps = []
-            for i, line in enumerate(meta_steps.strip().split("\n"), 1):
-                if line.strip():
-                    parts = line.split("|", 1)
-                    step = {"order": i, "description": parts[0].strip()}
-                    if len(parts) > 1 and parts[1].strip():
-                        step["notes"] = parts[1].strip()
-                    steps.append(step)
-            if steps:
-                metadata["steps"] = steps
-    
-    elif memory_type == "goal":
-        metadata["status"] = meta_status
-        metadata["priority"] = meta_priority
-        if meta_deadline:
-            metadata["deadline"] = meta_deadline
-        if meta_blockers:
-            metadata["blockers"] = [b.strip() for b in meta_blockers.split(",") if b.strip()]
-        if meta_milestones:
-            metadata["milestones"] = [
-                {"description": m.strip(), "status": "active"} 
-                for m in meta_milestones.split(",") if m.strip()
-            ]
-    
-    elif memory_type == "individual":
-        if meta_user_id:
-            metadata["user_id"] = meta_user_id
-        if meta_name:
-            metadata["name"] = meta_name
-        if meta_relationship:
-            metadata["relationship"] = meta_relationship
-        if meta_organization:
-            metadata["organization"] = meta_organization
-        if meta_role:
-            metadata["role"] = meta_role
-        contact_info = {}
-        if meta_email:
-            contact_info["email"] = meta_email
-        if meta_phone:
-            contact_info["phone"] = meta_phone
-        if meta_linkedin:
-            contact_info["linkedin"] = meta_linkedin
-        if meta_github:
-            contact_info["github"] = meta_github
-        if contact_info:
-            metadata["contact_info"] = contact_info
-        if meta_preferences:
-            metadata["preferences"] = [p.strip() for p in meta_preferences.split(",") if p.strip()]
+    metadata = _build_metadata_from_form(
+        memory_type,
+        meta_context=meta_context, meta_outcome=meta_outcome,
+        meta_lessons_learned=meta_lessons_learned, meta_related_entities=meta_related_entities,
+        meta_category=meta_category, meta_language=meta_language,
+        meta_version_info=meta_version_info, meta_repo=meta_repo,
+        meta_filename=meta_filename, meta_code_snippet=meta_code_snippet,
+        meta_references=meta_references, meta_estimated_time=meta_estimated_time,
+        meta_success_criteria=meta_success_criteria, meta_prerequisites=meta_prerequisites,
+        meta_common_pitfalls=meta_common_pitfalls, meta_steps=meta_steps,
+        meta_status=meta_status, meta_priority=meta_priority,
+        meta_deadline=meta_deadline, meta_blockers=meta_blockers,
+        meta_milestones=meta_milestones, meta_user_id=meta_user_id,
+        meta_name=meta_name, meta_relationship=meta_relationship,
+        meta_organization=meta_organization, meta_role=meta_role,
+        meta_email=meta_email, meta_phone=meta_phone,
+        meta_linkedin=meta_linkedin, meta_github=meta_github,
+        meta_preferences=meta_preferences,
+    )
     
     # Update
     result = await repo.update(
