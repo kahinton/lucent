@@ -31,55 +31,25 @@ An MCP (Model Context Protocol) server providing persistent memory functionality
 - An MCP-compatible client (e.g., VS Code, Claude Desktop)
 - Python 3.12+ (only if running outside Docker)
 
-### 1. Start the Database
+### 1. Clone and Start
 
 ```bash
-# Clone and enter the repository
+# Clone the repository
+git clone https://github.com/kahinton/lucent.git
 cd lucent
 
-# Start PostgreSQL with Docker
-docker compose up -d postgres
-```
-
-### 2. Install the Package
-
-```bash
-# Create virtual environment (recommended)
-python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-
-# Install the package
-pip install -e .
-```
-
-### 3. Configure Environment
-
-```bash
-# Copy example environment file
-cp .env.example .env
-
-# Edit .env with your settings (defaults work for local development)
-```
-
-### 4. Run the Server
-
-```bash
-# Using Docker Compose (recommended — runs both DB and server)
+# Start everything with Docker Compose
 docker compose up -d
-
-# Or run the server directly (if you started the DB separately)
-export DATABASE_URL="postgresql://lucent:lucent_dev_password@localhost:5433/lucent"
-lucent
 ```
 
-### 5. First-Time Setup
+### 2. First-Time Setup
 
 Open http://localhost:8766 in your browser. On first run, you'll see a setup page where you:
 
 1. Create your user account (username, password)
 2. Receive your MCP API key (shown once — copy it!)
 
-### 6. Configure Your MCP Client
+### 3. Configure Your MCP Client
 
 For VS Code with the MCP extension, add to `.vscode/mcp.json`:
 
@@ -254,10 +224,27 @@ docker compose exec postgres pg_dump -U lucent lucent > backup.sql
 
 ## Development
 
-### Install Development Dependencies
+### Local Setup (without Docker for the server)
+
+If you prefer running the server directly instead of in a container:
 
 ```bash
+# Start just the database
+docker compose up -d postgres
+
+# Create virtual environment
+python -m venv .venv
+source .venv/bin/activate
+
+# Install the package with dev dependencies
 pip install -e ".[dev]"
+
+# Copy and configure environment
+cp .env.example .env
+
+# Run the server
+export DATABASE_URL="postgresql://lucent:lucent_dev_password@localhost:5433/lucent"
+lucent
 ```
 
 ### Run Tests
