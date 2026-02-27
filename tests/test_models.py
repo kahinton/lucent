@@ -1,4 +1,4 @@
-"""Tests for Hindsight memory models."""
+"""Tests for Lucent memory models."""
 
 import pytest
 from uuid import UUID
@@ -145,12 +145,12 @@ class TestMetadataModels:
     def test_technical_metadata(self):
         metadata = TechnicalMetadata(
             language="python",
-            repo="hindsight",
+            repo="lucent",
             filename="server.py",
             code_snippet="def hello(): pass",
         )
         assert metadata.language == "python"
-        assert metadata.repo == "hindsight"
+        assert metadata.repo == "lucent"
         assert metadata.filename == "server.py"
 
     def test_procedural_metadata(self):

@@ -143,7 +143,7 @@ Default to 5-6 for most things. Reserve high importance for things that would be
 
 ### Tag Conventions
 
-- Project tags: `hindsight`, `project-name`
+- Project tags: `lucent`, `project-name`
 - Type indicators: `bug-fix`, `feature`, `decision`, `preference`
 - Tech stack: `python`, `fastapi`, `postgresql`
 

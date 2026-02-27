@@ -35,7 +35,7 @@ An MCP (Model Context Protocol) server providing persistent memory functionality
 
 ```bash
 # Clone and enter the repository
-cd hindsight
+cd lucent
 
 # Start PostgreSQL with Docker
 docker compose up -d postgres

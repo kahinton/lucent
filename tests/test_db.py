@@ -50,13 +50,13 @@ class TestMemoryRepository:
             username=f"{prefix}user",
             type="technical",
             content="Code pattern example",
-            metadata={"language": "python", "repo": "hindsight"},
+            metadata={"language": "python", "repo": "lucent"},
             user_id=test_user["id"],
             organization_id=test_user["organization_id"],
         )
         
         assert memory["metadata"]["language"] == "python"
-        assert memory["metadata"]["repo"] == "hindsight"
+        assert memory["metadata"]["repo"] == "lucent"
     
     async def test_get_memory(self, db_pool, test_memory):
         """Test retrieving a memory by ID."""

@@ -23,7 +23,7 @@ description: Maintain memory quality by updating, consolidating, and organizing.
 Check `get_existing_tags()` before creating new tags.
 
 Format: lowercase, hyphenated
-- Project: `hindsight`, `project-name`
+- Project: `lucent`, `project-name`
 - Type: `bug-fix`, `feature`, `decision`, `preference`
 - Tech: `python`, `fastapi`, `postgresql`
 
