@@ -314,4 +314,4 @@ All services run on a single port (default 8766):
 
 ## License
 
-Business Source License 1.1
+Lucent Source Available License 1.0 — free for non-commercial use. Commercial use requires a separate license. Converts to Apache 2.0 on March 3, 2028. See [LICENSE](LICENSE) for full terms.

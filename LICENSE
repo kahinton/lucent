@@ -1,0 +1,96 @@
+Lucent Source Available License
+Version 1.0, March 2026
+
+Copyright (c) 2026 Kyle Hinton. All rights reserved.
+
+TERMS AND CONDITIONS
+
+1. Definitions
+
+   "Software" means the Lucent software and associated documentation files
+   made available under this license.
+
+   "Licensor" means Kyle Hinton, the copyright holder and creator of the
+   Software.
+
+   "You" means the individual or entity exercising the rights granted under
+   this license.
+
+   "Non-Commercial Use" means use of the Software by individuals for
+   personal projects, education, research, evaluation, or any other
+   purpose that does not involve generating revenue, commercial advantage,
+   or monetary compensation. Use by or on behalf of a commercial entity,
+   including internal tooling, is considered Commercial Use.
+
+   "Commercial Use" means any use of the Software by or on behalf of a
+   company, organization, or other commercial entity, whether for internal
+   or external purposes, as well as any use by an individual that involves
+   generating revenue, commercial advantage, or monetary compensation.
+
+2. Grant of Rights for Non-Commercial Use
+
+   Subject to the terms of this license, the Licensor grants You a
+   worldwide, royalty-free, non-exclusive, non-transferable right to:
+
+   a. Use the Software for any Non-Commercial purpose.
+   b. Copy and distribute the Software, provided this license is included
+      with all copies or substantial portions of the Software.
+   c. Modify the Software and distribute modified versions, provided that:
+      i.   This license is included with all distributions.
+      ii.  Modified files carry prominent notices stating that You changed
+           the files and the date of any change.
+      iii. Modified versions are clearly marked as such and not
+           misrepresented as the original Software.
+
+3. Commercial Use Requires a Separate License
+
+   Commercial Use of the Software requires a separate commercial license
+   obtained directly from the Licensor. Contact the Licensor through the
+   Software's official repository for commercial licensing inquiries.
+
+   Using the Software commercially without a valid commercial license is a
+   violation of this license and applicable copyright law.
+
+4. Open Source Conversion
+
+   Each official major release of the Software (as designated by the
+   Licensor) automatically converts to the Apache License, Version 2.0
+   two (2) years after its initial release date (the "Change Date").
+   From the Change Date forward, that version of the Software is
+   available under the terms of the Apache License 2.0, which permits
+   both commercial and non-commercial use.
+
+   This conversion applies only to the specific version that has reached
+   its Change Date. Newer versions released after that date remain
+   subject to this license until their own Change Date.
+
+5. Contributions
+
+   By submitting contributions to the Software (via pull request, patch,
+   or any other means), You agree to license your contributions under the
+   same terms as this license and assign the Licensor the right to
+   relicense your contributions under any future license terms, including
+   commercial licenses.
+
+6. No Trademark Rights
+
+   This license does not grant You any rights to use the Licensor's name,
+   trademarks, service marks, or product names, except as required for
+   reasonable and customary use in describing the origin of the Software.
+
+7. No Warranty
+
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+   OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT.
+   IN NO EVENT SHALL THE LICENSOR BE LIABLE FOR ANY CLAIM, DAMAGES, OR
+   OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE,
+   ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+   OTHER DEALINGS IN THE SOFTWARE.
+
+8. Termination
+
+   This license and the rights granted hereunder will terminate
+   automatically if You fail to comply with any of its terms. Upon
+   termination, You must cease all use and distribution of the Software.
+   Sections 3, 6, and 7 survive termination.
