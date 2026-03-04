@@ -69,6 +69,14 @@ For VS Code with the MCP extension, add to `.vscode/mcp.json`:
 
 Replace `mcp_your_api_key_here` with the API key from the setup page. You can also generate additional keys at http://localhost:8766/settings.
 
+For **GitHub Copilot CLI**, install Lucent as a plugin:
+
+```bash
+copilot plugin install kahinton/lucent
+```
+
+Then update `.mcp.json` in the installed plugin with your API key.
+
 For Claude Desktop, add to your `claude_desktop_config.json`:
 
 ```json

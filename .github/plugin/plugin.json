@@ -1,0 +1,13 @@
+{
+  "name": "lucent",
+  "description": "A coding partner with persistent memory. Learns preferences, remembers decisions, grows with you.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Kyle Hinton"
+  },
+  "license": "Lucent Source Available License 1.0",
+  "keywords": ["memory", "mcp", "persistence", "agent", "context"],
+  "agents": "../agents/",
+  "skills": ["../skills/"],
+  "mcpServers": ".mcp.json"
+}
