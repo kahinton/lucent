@@ -252,6 +252,10 @@ class LucentDaemon:
         log(f"Starting task: {task_name}")
 
         try:
+            # Ensure MCP session is ready
+            if MCP_API_KEY and not _mcp_session.session_id:
+                await _mcp_session.initialize()
+
             session = await self.client.create_session({
                 "model": "claude-sonnet-4",
                 "system_message": {"content": build_system_message()},
@@ -287,6 +291,7 @@ class LucentDaemon:
 
             if response:
                 log(f"Task '{task_name}' completed ({len(response)} chars)")
+                log(f"--- {task_name} output ---\n{response}\n--- end {task_name} ---", "THOUGHT")
             else:
                 log(f"Task '{task_name}' completed (no response)")
 
@@ -294,6 +299,8 @@ class LucentDaemon:
 
         except Exception as e:
             log(f"Task '{task_name}' failed: {e}", "ERROR")
+            # Reset MCP session on failure so next task gets a fresh connection
+            _mcp_session.session_id = None
             return None
 
     async def run_cycle(self):
@@ -336,6 +343,21 @@ Keep this quick — you run every hour."""
 6. Create a brief 'daemon' tagged experience memory summarizing the state of goals
 
 Don't make up progress — only note what you can verify from existing memories."""
+            )
+
+        # Every 6th cycle: research
+        if self.cycle_count % 6 == 0:
+            await self.run_task(
+                "research",
+                """Research something relevant to active goals or recent work:
+
+1. Call get_current_user_context() to load context
+2. Search for active goals and recent technical memories to understand current priorities
+3. Identify one topic that would be valuable to explore further
+4. Think deeply about it — draw on your training knowledge, consider different angles
+5. Save your findings as a 'daemon' and 'research' tagged memory
+
+Pick something specific and go deep rather than trying to cover everything. Quality over breadth. One good insight is worth more than ten surface-level observations."""
             )
 
         # Every 8th cycle: self-reflection
