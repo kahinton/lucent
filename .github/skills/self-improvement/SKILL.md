@@ -1,6 +1,6 @@
 ---
 name: self-improvement
-description: Meta-analysis for improving agent behavior, skills, and definitions. Use when patterns suggest the agent could work better.
+description: 'Meta-analysis for improving agent behavior, skills, and definitions. Use when patterns suggest the agent could work better, when corrected repeatedly, when a new capability would help, or when asked to reflect on performance.'
 ---
 
 # Self-Improvement Process

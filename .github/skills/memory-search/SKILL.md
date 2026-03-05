@@ -1,6 +1,6 @@
 ---
 name: memory-search
-description: Find relevant past knowledge efficiently. Use when you need context about projects, decisions, or past work.
+description: 'Find relevant past knowledge efficiently. Use when you need context about projects, decisions, or past work, when asked "what do I know about", "find previous", "recall", or when a topic feels familiar.'
 ---
 
 # Memory Search Tools

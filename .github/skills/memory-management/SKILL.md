@@ -1,6 +1,6 @@
 ---
 name: memory-management
-description: Maintain memory quality by updating, consolidating, and organizing. Use when memories need cleanup or refinement.
+description: 'Maintain memory quality by updating, consolidating, and organizing. Use when memories need cleanup, when duplicates are noticed, when consolidating related memories, or when reviewing tag consistency.'
 ---
 
 # Memory Hygiene
@@ -56,6 +56,13 @@ Review importance when updating:
 
 ## Consolidation
 
-If you notice multiple memories covering the same ground:
-- Consider updating one comprehensive memory
-- Flag to user if significant cleanup would help
+When multiple memories cover the same ground:
+
+1. **Identify candidates** — search for overlapping content or tags
+2. **Choose the best one** — pick the most comprehensive memory to keep
+3. **Merge content** — fold unique details from others into the keeper
+4. **Update tags and importance** — ensure the merged memory has the right metadata
+5. **Delete the redundant ones** — clean up after merging
+6. **Verify** — read back the merged memory to confirm nothing was lost
+
+Only consolidate when there's clear redundancy. Two memories about the same topic from different angles both have value.

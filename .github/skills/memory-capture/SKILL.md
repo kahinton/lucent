@@ -1,6 +1,6 @@
 ---
 name: memory-capture
-description: Decide what to remember and how to store it. Use after completing significant work or learning something important.
+description: 'Decide what to remember and how to store it. Use after completing significant work, when learning something important, when the user says "remember this" or "save this", or when a correction or preference is expressed.'
 ---
 
 # When to Capture

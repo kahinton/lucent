@@ -1,6 +1,6 @@
 ---
 name: memory-init
-description: Initialize conversation context by loading user preferences and relevant memories. Use at the start of every conversation.
+description: 'Initialize conversation context by loading user preferences and relevant memories. Use at the start of every conversation, when greeting a user, when asked "who am I talking to", or when context seems missing.'
 ---
 
 # Starting a Conversation
