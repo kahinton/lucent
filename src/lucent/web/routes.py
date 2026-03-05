@@ -547,6 +547,35 @@ async def dashboard(request: Request):
 
 
 # =============================================================================
+# Daemon Activity
+# =============================================================================
+
+@router.get("/daemon", response_class=HTMLResponse)
+async def daemon_activity(request: Request):
+    """Show daemon autonomous activity — memories tagged 'daemon'."""
+    user = await get_user_context(request)
+    pool = await get_pool()
+    repo = MemoryRepository(pool)
+
+    # Search for daemon-tagged memories, most recent first
+    result = await repo.search(
+        tags=["daemon"],
+        limit=50,
+        requesting_user_id=user.id,
+        requesting_org_id=user.organization_id,
+    )
+
+    return templates.TemplateResponse(
+        "daemon.html",
+        {
+            "request": request,
+            "user": user,
+            "daemon_memories": result["memories"],
+        },
+    )
+
+
+# =============================================================================
 # Memories
 # =============================================================================
 

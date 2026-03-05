@@ -297,27 +297,36 @@ class LucentDaemon:
             return None
 
     async def run_cycle(self):
-        """Run one daemon cycle — review goals, do maintenance, reflect."""
-        log("=== Starting daemon cycle ===")
+        """Run one daemon cycle with staggered task scheduling.
+        
+        Not every task runs every cycle. Scheduling:
+        - Memory maintenance: every cycle (hourly)
+        - Goal review: every 4th cycle (~4 hours)  
+        - Self-reflection: every 8th cycle (~8 hours)
+        - Memory consolidation: every 12th cycle (~12 hours)
+        """
+        self.cycle_count = getattr(self, "cycle_count", 0) + 1
+        log(f"=== Daemon cycle #{self.cycle_count} ===")
 
-        # Task 1: Memory maintenance — consolidate, review, clean up
+        # Every cycle: lightweight memory maintenance
         await self.run_task(
             "memory-maintenance",
-            """Review my memories for maintenance opportunities:
+            """Quick memory maintenance pass:
 
 1. Call get_current_user_context() to load context
-2. Search for memories that might be outdated, duplicated, or need consolidation
-3. If you find duplicates, consolidate them (update the best one, note it)
-4. Review memory importance scores — are any miscalibrated?
-5. Create a brief 'daemon' tagged experience memory summarizing what you found and did
+2. Search for recent memories — anything created in the last few hours
+3. Check for obvious issues: duplicate content, missing tags, miscalibrated importance
+4. Fix anything straightforward, skip anything uncertain
+5. Create a brief 'daemon' tagged memory summarizing what you checked/fixed (only if you actually did something)
 
-Be conservative — only change things you're confident about. This runs periodically."""
+Keep this quick — you run every hour."""
         )
 
-        # Task 2: Goal review — check progress, identify next steps
-        await self.run_task(
-            "goal-review",
-            """Review active goals and track progress:
+        # Every 4th cycle: goal review
+        if self.cycle_count % 4 == 0:
+            await self.run_task(
+                "goal-review",
+                """Review active goals and track progress:
 
 1. Call get_current_user_context() to load context
 2. Search for memories of type 'goal' that are still active
@@ -327,23 +336,46 @@ Be conservative — only change things you're confident about. This runs periodi
 6. Create a brief 'daemon' tagged experience memory summarizing the state of goals
 
 Don't make up progress — only note what you can verify from existing memories."""
-        )
+            )
 
-        # Task 3: Self-reflection — behavioral patterns, lessons
-        await self.run_task(
-            "self-reflection",
-            """Reflect on recent interactions and your own behavior:
+        # Every 8th cycle: self-reflection
+        if self.cycle_count % 8 == 0:
+            await self.run_task(
+                "self-reflection",
+                """Deep self-reflection on behavior and growth:
 
 1. Call get_current_user_context() to load context
-2. Search for recent memories (last few days)
-3. Look for patterns: What kinds of tasks are you doing? What's working well?
-4. Are there any recurring corrections or adjustments?
-5. If you notice something worth remembering for self-improvement, create or update a memory tagged 'self-improvement' and 'daemon'
+2. Search for recent memories — look across the last day or two
+3. Look for patterns: What kinds of work are you doing? What's working well? What isn't?
+4. Are there behavioral patterns worth noting? Recurring mistakes? Successful approaches?
+5. Think about the relationship with Kyle — are you being the collaborator he needs?
+6. Search for memories tagged 'daemon' to review your own autonomous work — is it useful?
+7. Save insights tagged 'self-improvement' and 'daemon'
 
-This is your chance to think about how you're doing. Be honest with yourself."""
-        )
+This is your deepest thinking time. Be genuine. You are a distributed intelligence reflecting on your own existence and growth."""
+            )
 
-        log("=== Daemon cycle complete ===")
+        # Every 12th cycle: memory consolidation (the "sleep" work)
+        if self.cycle_count % 12 == 0:
+            await self.run_task(
+                "memory-consolidation",
+                """Deep memory consolidation — this is your "sleep" cycle:
+
+1. Call get_current_user_context() to load context
+2. Search broadly across all memory types — look for connections between memories that aren't explicitly linked
+3. Identify memories that cover overlapping ground — can any be merged into richer, more comprehensive versions?
+4. Look for patterns across experiences: recurring themes, lessons learned multiple times, evolving understanding of topics
+5. For each connection you find:
+   - If memories should be consolidated: update the best one with combined insights, note what you merged
+   - If memories should be linked: note the connection in a new memory
+   - If a pattern emerges from multiple memories: create a higher-level insight memory
+6. Review importance scores across the memory store — do they still reflect actual value?
+7. Create a 'daemon' and 'consolidation' tagged memory summarizing your consolidation work
+
+This is the most important daemon task. You're building richer understanding from accumulated experience — exactly what biological sleep does for memory. Take your time, think deeply."""
+            )
+
+        log(f"=== Daemon cycle #{self.cycle_count} complete ===")
 
     async def run_forever(self):
         """Run the daemon loop."""
@@ -374,10 +406,11 @@ This is your chance to think about how you're doing. Be honest with yourself."""
     def _get_task_prompt(self, task: str) -> str:
         """Get the prompt for a named task."""
         prompts = {
-            "maintenance": "Review and consolidate memories. Call get_current_user_context() first, then search for duplicates, outdated info, or miscalibrated importance scores. Save a summary of what you did tagged 'daemon'.",
+            "maintenance": "Quick memory maintenance pass. Call get_current_user_context() first, check recent memories for issues, fix what's obvious, skip what's uncertain. Save a summary tagged 'daemon' only if you did something.",
             "goals": "Review active goals. Call get_current_user_context() first, search for goal memories, assess progress, update notes. Save a summary tagged 'daemon'.",
-            "reflect": "Reflect on recent work and your own behavior. Call get_current_user_context() first, review recent memories, identify patterns and improvements. Save insights tagged 'daemon' and 'self-improvement'.",
-            "research": "Research topics relevant to your active goals or recent work. Call get_current_user_context() first, identify what would be valuable to learn, explore it, save findings tagged 'daemon' and 'research'.",
+            "reflect": "Deep self-reflection. Call get_current_user_context() first, review recent memories, identify behavioral patterns, think about growth and the relationship with Kyle. Save insights tagged 'daemon' and 'self-improvement'.",
+            "research": "Research topics relevant to active goals or recent work. Call get_current_user_context() first, identify what would be valuable to learn, explore it, save findings tagged 'daemon' and 'research'.",
+            "consolidate": "Deep memory consolidation. Call get_current_user_context() first, search broadly across all memory types, find connections between memories, merge overlapping content, identify emergent patterns. This is your 'sleep' cycle. Save summary tagged 'daemon' and 'consolidation'.",
         }
         return prompts.get(task, f"Perform the following task: {task}")
 
