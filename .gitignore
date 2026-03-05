@@ -34,3 +34,4 @@ htmlcov/
 # Project specific
 backups/
 *.log
+.vscode/mcp.json
