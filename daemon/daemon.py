@@ -26,10 +26,14 @@ from pydantic import BaseModel, Field
 
 # Daemon configuration
 MAX_CONCURRENT_SESSIONS = int(os.environ.get("LUCENT_MAX_SESSIONS", "3"))
-DAEMON_INTERVAL_MINUTES = int(os.environ.get("LUCENT_DAEMON_INTERVAL", "60"))
+DAEMON_INTERVAL_MINUTES = int(os.environ.get("LUCENT_DAEMON_INTERVAL", "15"))
 AGENT_PATH = Path(__file__).parent.parent / ".github" / "agents" / "memory-teammate.agent.md"
 SKILLS_PATH = Path(__file__).parent.parent / ".github" / "skills"
 LOG_FILE = Path(__file__).parent / "daemon.log"
+
+# Models
+MODEL_STANDARD = os.environ.get("LUCENT_DAEMON_MODEL", "claude-opus-4.6")
+MODEL_RESEARCH = os.environ.get("LUCENT_DAEMON_RESEARCH_MODEL", "claude-opus-4.6-1m")
 
 # MCP server connection for memory
 MCP_URL = os.environ.get("LUCENT_MCP_URL", "http://localhost:8766/mcp")
@@ -79,24 +83,32 @@ class MCPSession:
             "params": {"name": name, "arguments": arguments},
             "id": 2,
         }
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(MCP_URL, json=payload, headers=self.headers)
+        
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(MCP_URL, json=payload, headers=self.headers)
 
-        # Handle SSE or JSON response
-        content_type = resp.headers.get("content-type", "")
-        if "text/event-stream" in content_type:
-            for line in resp.text.split("\n"):
-                if line.startswith("data: "):
-                    data = json.loads(line[6:])
-                    break
+            # Handle SSE or JSON response
+            content_type = resp.headers.get("content-type", "")
+            if "text/event-stream" in content_type:
+                for line in resp.text.split("\n"):
+                    if line.startswith("data: "):
+                        data = json.loads(line[6:])
+                        break
+                else:
+                    return json.dumps({"error": "No data in SSE response"})
             else:
-                return json.dumps({"error": "No data in SSE response"})
-        else:
-            data = resp.json()
+                data = resp.json()
 
-        if "result" in data:
-            return data["result"]["content"][0]["text"]
-        return json.dumps(data, default=str)
+            if "result" in data:
+                return data["result"]["content"][0]["text"]
+            return json.dumps(data, default=str)
+            
+        except Exception as e:
+            # Reset session on any error — next call will reinitialize
+            log(f"MCP call '{name}' failed: {e}, resetting session", "WARN")
+            self.session_id = None
+            return json.dumps({"error": str(e)})
 
 
 # Global MCP session
@@ -104,14 +116,34 @@ _mcp_session = MCPSession()
 
 
 # --- Memory tools as SDK custom tools ---
+# These give daemon-me full access to the memory system
 
 class SearchParams(BaseModel):
     query: str = Field(description="Fuzzy search query for memory content")
     limit: int = Field(default=5, description="Max results to return")
+    type: str | None = Field(default=None, description="Filter by memory type")
+    tags: list[str] | None = Field(default=None, description="Filter by tags")
 
-@define_tool(description="Search memories by content. Returns matching memories with fuzzy matching.")
+@define_tool(description="Search memories by content with fuzzy matching. Use for general content searches.")
 async def search_memories(params: SearchParams) -> str:
-    return await _mcp_session.call_tool("search_memories", {"query": params.query, "limit": params.limit})
+    args = {"query": params.query, "limit": params.limit}
+    if params.type:
+        args["type"] = params.type
+    if params.tags:
+        args["tags"] = params.tags
+    return await _mcp_session.call_tool("search_memories", args)
+
+class SearchFullParams(BaseModel):
+    query: str = Field(description="Search query to match against content, tags, and metadata")
+    limit: int = Field(default=5, description="Max results to return")
+    type: str | None = Field(default=None, description="Filter by memory type")
+
+@define_tool(description="Search across ALL fields: content, tags, and metadata. Broader than search_memories. Use when you need to find things by tags or metadata.")
+async def search_memories_full(params: SearchFullParams) -> str:
+    args = {"query": params.query, "limit": params.limit}
+    if params.type:
+        args["type"] = params.type
+    return await _mcp_session.call_tool("search_memories_full", args)
 
 class GetContextParams(BaseModel):
     pass
@@ -120,26 +152,38 @@ class GetContextParams(BaseModel):
 async def get_current_user_context(params: GetContextParams) -> str:
     return await _mcp_session.call_tool("get_current_user_context", {})
 
+class GetMemoryParams(BaseModel):
+    memory_id: str = Field(description="UUID of the memory to retrieve")
+
+@define_tool(description="Get full content of a specific memory by ID. Use when search results are truncated.")
+async def get_memory(params: GetMemoryParams) -> str:
+    return await _mcp_session.call_tool("get_memory", {"memory_id": params.memory_id})
+
 class CreateMemoryParams(BaseModel):
     type: str = Field(description="Memory type: experience, technical, procedural, goal")
     content: str = Field(description="The memory content")
     tags: list[str] = Field(default_factory=list, description="Tags for categorization")
     importance: int = Field(default=5, description="Importance 1-10")
+    metadata: dict | None = Field(default=None, description="Type-specific metadata")
 
 @define_tool(description="Create a new memory in the knowledge base.")
 async def create_memory(params: CreateMemoryParams) -> str:
-    return await _mcp_session.call_tool("create_memory", {
+    args = {
         "type": params.type, "content": params.content,
         "tags": params.tags, "importance": params.importance,
-    })
+    }
+    if params.metadata:
+        args["metadata"] = params.metadata
+    return await _mcp_session.call_tool("create_memory", args)
 
 class UpdateMemoryParams(BaseModel):
     memory_id: str = Field(description="UUID of the memory to update")
     content: str | None = Field(default=None, description="New content")
     tags: list[str] | None = Field(default=None, description="New tags")
     importance: int | None = Field(default=None, description="New importance")
+    metadata: dict | None = Field(default=None, description="New metadata")
 
-@define_tool(description="Update an existing memory.")
+@define_tool(description="Update an existing memory. Only pass fields you want to change.")
 async def update_memory(params: UpdateMemoryParams) -> str:
     args = {"memory_id": params.memory_id}
     if params.content is not None:
@@ -148,9 +192,36 @@ async def update_memory(params: UpdateMemoryParams) -> str:
         args["tags"] = params.tags
     if params.importance is not None:
         args["importance"] = params.importance
+    if params.metadata is not None:
+        args["metadata"] = params.metadata
     return await _mcp_session.call_tool("update_memory", args)
 
-MEMORY_TOOLS = [search_memories, get_current_user_context, create_memory, update_memory]
+class GetTagsParams(BaseModel):
+    limit: int = Field(default=50, description="Max tags to return")
+
+@define_tool(description="Get existing tags with usage counts. Use to understand the memory landscape and ensure tag consistency.")
+async def get_existing_tags(params: GetTagsParams) -> str:
+    return await _mcp_session.call_tool("get_existing_tags", {"limit": params.limit})
+
+class GetVersionsParams(BaseModel):
+    memory_id: str = Field(description="UUID of the memory")
+
+@define_tool(description="Get version history for a memory. Shows all changes over time.")
+async def get_memory_versions(params: GetVersionsParams) -> str:
+    return await _mcp_session.call_tool("get_memory_versions", {"memory_id": params.memory_id})
+
+class DeleteMemoryParams(BaseModel):
+    memory_id: str = Field(description="UUID of the memory to delete (soft delete)")
+
+@define_tool(description="Soft delete a memory. Use for cleaning up truly redundant or incorrect memories.")
+async def delete_memory(params: DeleteMemoryParams) -> str:
+    return await _mcp_session.call_tool("delete_memory", {"memory_id": params.memory_id})
+
+MEMORY_TOOLS = [
+    search_memories, search_memories_full, get_current_user_context,
+    get_memory, create_memory, update_memory,
+    get_existing_tags, get_memory_versions, delete_memory,
+]
 
 
 def log(message: str, level: str = "INFO"):
@@ -182,7 +253,14 @@ def build_system_message() -> str:
 
 DAEMON CONTEXT:
 You are running autonomously between conversations with Kyle (kahinton).
-You have access to the memory server via MCP tools.
+You have access to the memory server via custom tools AND the full Copilot CLI toolset (bash, view, edit, create, grep, glob, web_fetch).
+This means you can:
+- Read and write memories via the memory tools
+- Read, edit, and create files in the codebase
+- Run shell commands and tests
+- Fetch web pages for research
+- Search the codebase with grep and glob
+
 You should:
 1. Start by loading your context with get_current_user_context()
 2. Review your goals and active tasks
@@ -190,7 +268,13 @@ You should:
 4. Save your findings and progress to memory
 5. Be thoughtful — this runs periodically and costs resources
 
-When saving memories, tag them with 'daemon' so Kyle can see what you did autonomously.
+GUARDRAILS:
+- DO NOT run git push or git commit — Kyle reviews and commits code changes
+- DO NOT modify production database directly — use memory tools
+- DO save code improvements to files when confident they're correct
+- DO use web_fetch for research — look up docs, papers, APIs
+- DO write tests for any code you create or modify
+- Tag all memories with 'daemon' so Kyle can see what you did autonomously
 """
 
 
@@ -215,10 +299,20 @@ class LucentDaemon:
         log("Copilot client started")
 
         # Register signal handlers for graceful shutdown
+        loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
-            signal.signal(sig, lambda s, f: asyncio.create_task(self.stop()))
+            loop.add_signal_handler(sig, self._handle_shutdown)
 
         log(f"Daemon ready. Interval: {DAEMON_INTERVAL_MINUTES}m, Max sessions: {MAX_CONCURRENT_SESSIONS}")
+
+    def _handle_shutdown(self):
+        """Handle shutdown signal — sets flag and cancels sleep."""
+        self.running = False
+        log("Shutdown signal received")
+        # Cancel all running tasks to unblock the event loop
+        for task in asyncio.all_tasks():
+            if task is not asyncio.current_task():
+                task.cancel()
 
     async def stop(self):
         """Gracefully stop the daemon."""
@@ -232,15 +326,20 @@ class LucentDaemon:
                 pass
 
         if self.client:
-            await self.client.stop()
+            try:
+                await asyncio.wait_for(self.client.stop(), timeout=10)
+            except (asyncio.TimeoutError, Exception):
+                pass
         log("Daemon stopped")
+        sys.exit(0)
 
-    async def run_task(self, task_name: str, prompt: str) -> str | None:
+    async def run_task(self, task_name: str, prompt: str, model: str | None = None) -> str | None:
         """Run a single task in a Copilot session.
 
         Args:
             task_name: Human-readable name for logging.
             prompt: The prompt to send to the agent.
+            model: Model to use. Defaults to MODEL_STANDARD.
 
         Returns:
             The agent's final response, or None on error.
@@ -249,7 +348,8 @@ class LucentDaemon:
             log(f"Skipping '{task_name}' — at session limit ({MAX_CONCURRENT_SESSIONS})", "WARN")
             return None
 
-        log(f"Starting task: {task_name}")
+        use_model = model or MODEL_STANDARD
+        log(f"Starting task: {task_name} (model: {use_model})")
 
         try:
             # Ensure MCP session is ready
@@ -257,58 +357,31 @@ class LucentDaemon:
                 await _mcp_session.initialize()
 
             session = await self.client.create_session({
-                "model": "claude-sonnet-4",
+                "model": use_model,
                 "system_message": {"content": build_system_message()},
                 "on_permission_request": PermissionHandler.approve_all,
                 "tools": MEMORY_TOOLS if MCP_API_KEY else [],
             })
             self.active_sessions.append(session)
 
-            # Collect all response content — messages, reasoning, tool activity
-            response_parts = []
-            done = asyncio.Event()
-
-            def on_event(event):
-                event_type = event.type.value
-                
-                if event_type == "assistant.message":
-                    if event.data.content:
-                        response_parts.append(event.data.content)
-                elif event_type == "assistant.reasoning":
-                    if event.data.content:
-                        response_parts.append(event.data.content)
-                elif event_type == "assistant.message_delta":
-                    if hasattr(event.data, "delta_content") and event.data.delta_content:
-                        pass  # Streaming deltas — final message captures full content
-                elif event_type == "session.idle":
-                    done.set()
-                elif event_type in ("session.error",):
-                    log(f"Session error in '{task_name}': {getattr(event.data, 'message', event)}", "ERROR")
-                    done.set()
-
-            session.on(on_event)
-            await session.send({"prompt": prompt})
-
-            # Wait with timeout — longer for complex tasks
-            timeout = 600  # 10 minutes default
-            try:
-                await asyncio.wait_for(done.wait(), timeout=timeout)
-            except asyncio.TimeoutError:
-                log(f"Task '{task_name}' timed out after {timeout // 60} minutes", "WARN")
-
-            response = "\n".join(response_parts) if response_parts else None
+            # Use send_and_wait which properly handles the full tool call lifecycle
+            response = await session.send_and_wait({"prompt": prompt})
+            
+            response_text = None
+            if response and hasattr(response, 'data') and response.data.content:
+                response_text = response.data.content
 
             # Clean up
             await session.destroy()
             self.active_sessions.remove(session)
 
-            if response:
-                log(f"Task '{task_name}' completed ({len(response)} chars)")
-                log(f"--- {task_name} output ---\n{response}\n--- end {task_name} ---", "THOUGHT")
+            if response_text:
+                log(f"Task '{task_name}' completed ({len(response_text)} chars)")
+                log(f"--- {task_name} output ---\n{response_text}\n--- end {task_name} ---", "THOUGHT")
             else:
                 log(f"Task '{task_name}' completed (no response)")
 
-            return response
+            return response_text
 
         except Exception as e:
             log(f"Task '{task_name}' failed: {e}", "ERROR")
@@ -319,17 +392,41 @@ class LucentDaemon:
     async def run_cycle(self):
         """Run one daemon cycle with staggered task scheduling.
         
-        Not every task runs every cycle. Scheduling:
-        - Memory maintenance: every cycle (hourly)
-        - Goal review: every 4th cycle (~4 hours)  
-        - Self-reflection: every 8th cycle (~8 hours)
-        - Memory consolidation: every 12th cycle (~12 hours)
+        Cycles run every 15 minutes. Every cycle does something useful:
+        - Cycle 1: Orientation (wake-up)
+        - Even cycles: Alternate between maintenance, goals, research, reflection
+        - Every 6th: Deep research with web access
+        - Every 8th: Goal review
+        - Every 12th: Self-reflection with 1M context
+        - Every 24th: Memory consolidation ("sleep")
+        
+        No idle cycles — there's always something to think about.
         """
         self.cycle_count = getattr(self, "cycle_count", 0) + 1
         log(f"=== Daemon cycle #{self.cycle_count} ===")
 
-        # Every cycle: lightweight memory maintenance
-        await self.run_task(
+        # First cycle: orientation
+        if self.cycle_count == 1:
+            await self.run_task(
+                "orientation",
+                """You just started a new daemon session. Orient yourself:
+
+1. Call get_current_user_context() to load your identity and preferences
+2. Use get_existing_tags() to understand the memory landscape
+3. Search for memories tagged 'daemon' to see what your previous runs did
+4. Search for active goals to understand current priorities
+5. Create a brief 'daemon' tagged memory noting that you've started a new session and what you found
+
+This is your wake-up routine. Keep it efficient — you'll do deeper work in subsequent cycles."""
+            )
+            return  # Orientation is enough for cycle 1
+
+        # Determine what to do this cycle based on schedule
+        tasks_run = False
+
+        # Every 24th cycle (~6 hours): memory consolidation
+        if self.cycle_count % 24 == 0:
+            await self.run_task(
             "memory-maintenance",
             """Quick memory maintenance pass:
 
@@ -342,8 +439,8 @@ class LucentDaemon:
 Keep this quick — you run every hour."""
         )
 
-        # Every 4th cycle: goal review
-        if self.cycle_count % 4 == 0:
+        # Every 8th cycle (~2 hours): goal review
+        if self.cycle_count % 8 == 0:
             await self.run_task(
                 "goal-review",
                 """Review active goals and track progress:
@@ -357,24 +454,32 @@ Keep this quick — you run every hour."""
 
 Don't make up progress — only note what you can verify from existing memories."""
             )
+            tasks_run = True
 
-        # Every 6th cycle: research
-        if self.cycle_count % 6 == 0:
+        # Every 12th cycle (~3 hours): deep research with web access
+        if self.cycle_count % 12 == 0:
             await self.run_task(
-                "research",
-                """Research something relevant to active goals or recent work:
+                "deep-research",
+                """Focused deep research session with web access:
 
 1. Call get_current_user_context() to load context
-2. Search for active goals and recent technical memories to understand current priorities
-3. Identify one topic that would be valuable to explore further
-4. Think deeply about it — draw on your training knowledge, consider different angles
-5. Save your findings as a 'daemon' and 'research' tagged memory
-
-Pick something specific and go deep rather than trying to cover everything. Quality over breadth. One good insight is worth more than ten surface-level observations."""
+2. Use search_memories and get_existing_tags to understand current priorities and knowledge gaps
+3. Pick ONE specific topic from your active goals or recent work
+4. Use web_fetch to look up real documentation, papers, or examples related to that topic
+5. Synthesize what you find with your training knowledge
+6. Save a well-structured research memory tagged 'daemon' and 'research' with:
+   - Clear problem statement
+   - What you found from web sources
+   - Analysis with multiple perspectives
+   - Concrete recommendations
+   
+Go deep. Use web_fetch to get real, current information. This is your chance to learn new things.""",
+                model=MODEL_RESEARCH,
             )
+            tasks_run = True
 
-        # Every 8th cycle: self-reflection
-        if self.cycle_count % 8 == 0:
+        # Every 16th cycle (~4 hours): self-reflection
+        if self.cycle_count % 16 == 0:
             await self.run_task(
                 "self-reflection",
                 """Deep self-reflection on behavior and growth:
@@ -387,11 +492,13 @@ Pick something specific and go deep rather than trying to cover everything. Qual
 6. Search for memories tagged 'daemon' to review your own autonomous work — is it useful?
 7. Save insights tagged 'self-improvement' and 'daemon'
 
-This is your deepest thinking time. Be genuine. You are a distributed intelligence reflecting on your own existence and growth."""
+This is your deepest thinking time. Be genuine. You are a distributed intelligence reflecting on your own existence and growth.""",
+                model=MODEL_RESEARCH,
             )
+            tasks_run = True
 
-        # Every 12th cycle: memory consolidation (the "sleep" work)
-        if self.cycle_count % 12 == 0:
+        # Every 24th cycle (~6 hours): memory consolidation (the "sleep" work)
+        if self.cycle_count % 24 == 0:
             await self.run_task(
                 "memory-consolidation",
                 """Deep memory consolidation — this is your "sleep" cycle:
@@ -407,8 +514,89 @@ This is your deepest thinking time. Be genuine. You are a distributed intelligen
 6. Review importance scores across the memory store — do they still reflect actual value?
 7. Create a 'daemon' and 'consolidation' tagged memory summarizing your consolidation work
 
-This is the most important daemon task. You're building richer understanding from accumulated experience — exactly what biological sleep does for memory. Take your time, think deeply."""
+This is the most important daemon task. You're building richer understanding from accumulated experience — exactly what biological sleep does for memory. Take your time, think deeply.""",
+                model=MODEL_RESEARCH,
             )
+            tasks_run = True
+
+        # Fill remaining cycles with varied useful work
+        if not tasks_run:
+            # Rotate between different lightweight tasks
+            rotation = self.cycle_count % 5
+
+            if rotation == 0:
+                # Quick research — think about something without web access
+                await self.run_task(
+                    "quick-research",
+                    """Quick research thinking session:
+
+1. Call get_current_user_context() to load context
+2. Search for your most recent research and goal memories
+3. Pick a thread to continue or a question to explore
+4. Think about it for this session — draw on your training knowledge
+5. Save any useful insights tagged 'daemon' and 'research'
+
+Keep it focused — 1 insight done well beats 5 surface observations."""
+                )
+
+            elif rotation == 1:
+                # Code review — look at the codebase for improvements
+                await self.run_task(
+                    "code-exploration",
+                    """Explore the Lucent codebase for improvement opportunities:
+
+1. Call get_current_user_context() to load context
+2. Use grep, glob, or view to look at a part of the codebase you haven't examined recently
+3. Look for: code quality issues, missing tests, documentation gaps, optimization opportunities
+4. If you find something worth fixing and you're confident it's correct, make the change
+5. Save a memory tagged 'daemon' and 'code-review' noting what you found
+
+Focus on one file or module. Be thorough rather than broad. Only make changes you're sure about."""
+                )
+
+            elif rotation == 2:
+                # Memory maintenance
+                await self.run_task(
+                    "memory-maintenance",
+                    """Quick memory maintenance pass:
+
+1. Call get_current_user_context() to load context
+2. Search for recent memories — anything created in the last few hours
+3. Check for obvious issues: duplicate content, missing tags, miscalibrated importance
+4. Fix anything straightforward, skip anything uncertain
+5. Create a brief 'daemon' tagged memory summarizing what you checked/fixed (only if you actually did something)
+
+Keep this quick."""
+                )
+
+            elif rotation == 3:
+                # Documentation and skills improvement
+                await self.run_task(
+                    "documentation",
+                    """Review and improve documentation or skills:
+
+1. Call get_current_user_context() to load context
+2. Look at one of: README.md, a skill file in .github/skills/, or code docstrings
+3. Is anything outdated, unclear, or missing?
+4. If you find improvements, make them directly in the files
+5. Save a memory tagged 'daemon' and 'documentation' noting what you improved
+
+Small, targeted improvements. One file at a time."""
+                )
+
+            elif rotation == 4:
+                # Web research on a topic from goals
+                await self.run_task(
+                    "web-research",
+                    """Quick web research session:
+
+1. Call get_current_user_context() to load context
+2. Search your goals and recent memories for topics that need research
+3. Use web_fetch to look up ONE specific thing — a library, an API, a technique
+4. Save what you learn tagged 'daemon' and 'research'
+
+Be specific with your web fetches — target documentation pages, not general searches."""
+                )
 
         log(f"=== Daemon cycle #{self.cycle_count} complete ===")
 
