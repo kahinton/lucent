@@ -264,24 +264,37 @@ class LucentDaemon:
             })
             self.active_sessions.append(session)
 
-            # Collect the response
+            # Collect all response content — messages, reasoning, tool activity
             response_parts = []
             done = asyncio.Event()
 
             def on_event(event):
-                if event.type.value == "assistant.message":
-                    response_parts.append(event.data.content)
-                elif event.type.value == "session.idle":
+                event_type = event.type.value
+                
+                if event_type == "assistant.message":
+                    if event.data.content:
+                        response_parts.append(event.data.content)
+                elif event_type == "assistant.reasoning":
+                    if event.data.content:
+                        response_parts.append(event.data.content)
+                elif event_type == "assistant.message_delta":
+                    if hasattr(event.data, "delta_content") and event.data.delta_content:
+                        pass  # Streaming deltas — final message captures full content
+                elif event_type == "session.idle":
+                    done.set()
+                elif event_type in ("session.error",):
+                    log(f"Session error in '{task_name}': {getattr(event.data, 'message', event)}", "ERROR")
                     done.set()
 
             session.on(on_event)
             await session.send({"prompt": prompt})
 
-            # Wait with timeout
+            # Wait with timeout — longer for complex tasks
+            timeout = 600  # 10 minutes default
             try:
-                await asyncio.wait_for(done.wait(), timeout=300)  # 5 minute timeout
+                await asyncio.wait_for(done.wait(), timeout=timeout)
             except asyncio.TimeoutError:
-                log(f"Task '{task_name}' timed out after 5 minutes", "WARN")
+                log(f"Task '{task_name}' timed out after {timeout // 60} minutes", "WARN")
 
             response = "\n".join(response_parts) if response_parts else None
 
