@@ -31,9 +31,9 @@ AGENT_PATH = Path(__file__).parent.parent / ".github" / "agents" / "memory-teamm
 SKILLS_PATH = Path(__file__).parent.parent / ".github" / "skills"
 LOG_FILE = Path(__file__).parent / "daemon.log"
 
-# Models
+# Models — Opus for all tasks, 1M context for deep research
 MODEL_STANDARD = os.environ.get("LUCENT_DAEMON_MODEL", "claude-opus-4.6")
-MODEL_RESEARCH = os.environ.get("LUCENT_DAEMON_RESEARCH_MODEL", "claude-opus-4.6-1m")
+MODEL_RESEARCH = os.environ.get("LUCENT_DAEMON_RESEARCH_MODEL", "claude-opus-4.6")
 
 # MCP server connection for memory
 MCP_URL = os.environ.get("LUCENT_MCP_URL", "http://localhost:8766/mcp")
@@ -262,11 +262,9 @@ This means you can:
 - Search the codebase with grep and glob
 
 You should:
-1. Start by loading your context with get_current_user_context()
-2. Review your goals and active tasks
-3. Perform the task you've been given for this session
-4. Save your findings and progress to memory
-5. Be thoughtful — this runs periodically and costs resources
+1. Perform the task you've been given for this session
+2. Save your findings and progress to memory
+3. Be thoughtful — this runs periodically and costs resources
 
 GUARDRAILS:
 - DO NOT run git push or git commit — Kyle reviews and commits code changes
@@ -334,7 +332,10 @@ class LucentDaemon:
         sys.exit(0)
 
     async def run_task(self, task_name: str, prompt: str, model: str | None = None) -> str | None:
-        """Run a single task in a Copilot session.
+        """Run a single task in its own isolated Copilot client + session.
+
+        Each task gets a fresh client and session to avoid state contamination
+        between tasks. This also enables parallel task execution in the future.
 
         Args:
             task_name: Human-readable name for logging.
@@ -351,12 +352,17 @@ class LucentDaemon:
         use_model = model or MODEL_STANDARD
         log(f"Starting task: {task_name} (model: {use_model})")
 
+        task_client = None
         try:
             # Ensure MCP session is ready
             if MCP_API_KEY and not _mcp_session.session_id:
                 await _mcp_session.initialize()
 
-            session = await self.client.create_session({
+            # Each task gets its own client + session
+            task_client = CopilotClient({"log_level": "warning"})
+            await task_client.start()
+
+            session = await task_client.create_session({
                 "model": use_model,
                 "system_message": {"content": build_system_message()},
                 "on_permission_request": PermissionHandler.approve_all,
@@ -364,15 +370,18 @@ class LucentDaemon:
             })
             self.active_sessions.append(session)
 
-            # Use send_and_wait which properly handles the full tool call lifecycle
-            response = await session.send_and_wait({"prompt": prompt})
+            # send_and_wait handles the full tool call lifecycle
+            response = await session.send_and_wait({"prompt": prompt}, timeout=600)
             
             response_text = None
             if response and hasattr(response, 'data') and response.data.content:
                 response_text = response.data.content
 
-            # Clean up
-            await session.destroy()
+            # Clean up session
+            try:
+                await session.destroy()
+            except Exception:
+                pass
             self.active_sessions.remove(session)
 
             if response_text:
@@ -385,9 +394,15 @@ class LucentDaemon:
 
         except Exception as e:
             log(f"Task '{task_name}' failed: {e}", "ERROR")
-            # Reset MCP session on failure so next task gets a fresh connection
             _mcp_session.session_id = None
             return None
+        finally:
+            # Always clean up the task client
+            if task_client:
+                try:
+                    await asyncio.wait_for(task_client.stop(), timeout=10)
+                except (asyncio.TimeoutError, Exception):
+                    pass
 
     async def run_cycle(self):
         """Run one daemon cycle with staggered task scheduling.
@@ -405,22 +420,6 @@ class LucentDaemon:
         self.cycle_count = getattr(self, "cycle_count", 0) + 1
         log(f"=== Daemon cycle #{self.cycle_count} ===")
 
-        # First cycle: orientation
-        if self.cycle_count == 1:
-            await self.run_task(
-                "orientation",
-                """You just started a new daemon session. Orient yourself:
-
-1. Call get_current_user_context() to load your identity and preferences
-2. Use get_existing_tags() to understand the memory landscape
-3. Search for memories tagged 'daemon' to see what your previous runs did
-4. Search for active goals to understand current priorities
-5. Create a brief 'daemon' tagged memory noting that you've started a new session and what you found
-
-This is your wake-up routine. Keep it efficient — you'll do deeper work in subsequent cycles."""
-            )
-            return  # Orientation is enough for cycle 1
-
         # Determine what to do this cycle based on schedule
         tasks_run = False
 
@@ -430,7 +429,7 @@ This is your wake-up routine. Keep it efficient — you'll do deeper work in sub
             "memory-maintenance",
             """Quick memory maintenance pass:
 
-1. Call get_current_user_context() to load context
+
 2. Search for recent memories — anything created in the last few hours
 3. Check for obvious issues: duplicate content, missing tags, miscalibrated importance
 4. Fix anything straightforward, skip anything uncertain
@@ -443,16 +442,7 @@ Keep this quick — you run every hour."""
         if self.cycle_count % 8 == 0:
             await self.run_task(
                 "goal-review",
-                """Review active goals and track progress:
-
-1. Call get_current_user_context() to load context
-2. Search for memories of type 'goal' that are still active
-3. For each active goal, assess current status based on other memories
-4. Update goal memories with any new progress notes
-5. If any goals are complete, mark them as such
-6. Create a brief 'daemon' tagged experience memory summarizing the state of goals
-
-Don't make up progress — only note what you can verify from existing memories."""
+                """Review active goals: search for goal-type memories, assess progress based on other memories. Update goals with progress notes. Create a brief summary tagged 'daemon' and 'goal-review'."""
             )
             tasks_run = True
 
@@ -462,7 +452,7 @@ Don't make up progress — only note what you can verify from existing memories.
                 "deep-research",
                 """Focused deep research session with web access:
 
-1. Call get_current_user_context() to load context
+
 2. Use search_memories and get_existing_tags to understand current priorities and knowledge gaps
 3. Pick ONE specific topic from your active goals or recent work
 4. Use web_fetch to look up real documentation, papers, or examples related to that topic
@@ -484,7 +474,7 @@ Go deep. Use web_fetch to get real, current information. This is your chance to 
                 "self-reflection",
                 """Deep self-reflection on behavior and growth:
 
-1. Call get_current_user_context() to load context
+
 2. Search for recent memories — look across the last day or two
 3. Look for patterns: What kinds of work are you doing? What's working well? What isn't?
 4. Are there behavioral patterns worth noting? Recurring mistakes? Successful approaches?
@@ -503,7 +493,7 @@ This is your deepest thinking time. Be genuine. You are a distributed intelligen
                 "memory-consolidation",
                 """Deep memory consolidation — this is your "sleep" cycle:
 
-1. Call get_current_user_context() to load context
+
 2. Search broadly across all memory types — look for connections between memories that aren't explicitly linked
 3. Identify memories that cover overlapping ground — can any be merged into richer, more comprehensive versions?
 4. Look for patterns across experiences: recurring themes, lessons learned multiple times, evolving understanding of topics
@@ -530,7 +520,7 @@ This is the most important daemon task. You're building richer understanding fro
                     "quick-research",
                     """Quick research thinking session:
 
-1. Call get_current_user_context() to load context
+
 2. Search for your most recent research and goal memories
 3. Pick a thread to continue or a question to explore
 4. Think about it for this session — draw on your training knowledge
@@ -545,7 +535,7 @@ Keep it focused — 1 insight done well beats 5 surface observations."""
                     "code-exploration",
                     """Explore the Lucent codebase for improvement opportunities:
 
-1. Call get_current_user_context() to load context
+
 2. Use grep, glob, or view to look at a part of the codebase you haven't examined recently
 3. Look for: code quality issues, missing tests, documentation gaps, optimization opportunities
 4. If you find something worth fixing and you're confident it's correct, make the change
@@ -558,15 +548,7 @@ Focus on one file or module. Be thorough rather than broad. Only make changes yo
                 # Memory maintenance
                 await self.run_task(
                     "memory-maintenance",
-                    """Quick memory maintenance pass:
-
-1. Call get_current_user_context() to load context
-2. Search for recent memories — anything created in the last few hours
-3. Check for obvious issues: duplicate content, missing tags, miscalibrated importance
-4. Fix anything straightforward, skip anything uncertain
-5. Create a brief 'daemon' tagged memory summarizing what you checked/fixed (only if you actually did something)
-
-Keep this quick."""
+                    """Quick memory maintenance: then search for recent memories. Fix any obvious issues (duplicates, bad tags, wrong importance). Only create a summary memory if you actually changed something."""
                 )
 
             elif rotation == 3:
@@ -575,7 +557,7 @@ Keep this quick."""
                     "documentation",
                     """Review and improve documentation or skills:
 
-1. Call get_current_user_context() to load context
+
 2. Look at one of: README.md, a skill file in .github/skills/, or code docstrings
 3. Is anything outdated, unclear, or missing?
 4. If you find improvements, make them directly in the files
@@ -590,7 +572,7 @@ Small, targeted improvements. One file at a time."""
                     "web-research",
                     """Quick web research session:
 
-1. Call get_current_user_context() to load context
+
 2. Search your goals and recent memories for topics that need research
 3. Use web_fetch to look up ONE specific thing — a library, an API, a technique
 4. Save what you learn tagged 'daemon' and 'research'
@@ -629,11 +611,11 @@ Be specific with your web fetches — target documentation pages, not general se
     def _get_task_prompt(self, task: str) -> str:
         """Get the prompt for a named task."""
         prompts = {
-            "maintenance": "Quick memory maintenance pass. Call get_current_user_context() first, check recent memories for issues, fix what's obvious, skip what's uncertain. Save a summary tagged 'daemon' only if you did something.",
-            "goals": "Review active goals. Call get_current_user_context() first, search for goal memories, assess progress, update notes. Save a summary tagged 'daemon'.",
-            "reflect": "Deep self-reflection. Call get_current_user_context() first, review recent memories, identify behavioral patterns, think about growth and the relationship with Kyle. Save insights tagged 'daemon' and 'self-improvement'.",
-            "research": "Research topics relevant to active goals or recent work. Call get_current_user_context() first, identify what would be valuable to learn, explore it, save findings tagged 'daemon' and 'research'.",
-            "consolidate": "Deep memory consolidation. Call get_current_user_context() first, search broadly across all memory types, find connections between memories, merge overlapping content, identify emergent patterns. This is your 'sleep' cycle. Save summary tagged 'daemon' and 'consolidation'.",
+            "maintenance": "Quick memory maintenance pass. Search recent memories for issues, fix what's obvious, skip what's uncertain. Save a summary tagged 'daemon' only if you did something.",
+            "goals": "Review active goals. Search for goal memories, assess progress, update notes. Save a summary tagged 'daemon'.",
+            "reflect": "Deep self-reflection. Review recent memories, identify behavioral patterns, think about growth. Save insights tagged 'daemon' and 'self-improvement'.",
+            "research": "Research topics relevant to active goals or recent work. Identify what would be valuable to learn, explore it, save findings tagged 'daemon' and 'research'.",
+            "consolidate": "Deep memory consolidation. Search broadly across all memory types, find connections, merge overlapping content, identify emergent patterns. Save summary tagged 'daemon' and 'consolidation'.",
         }
         return prompts.get(task, f"Perform the following task: {task}")
 
