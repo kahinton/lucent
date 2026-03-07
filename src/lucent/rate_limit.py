@@ -66,8 +66,9 @@ class RateLimitBucket:
 class RateLimiter:
     """In-memory rate limiter using sliding window algorithm.
     
-    Thread-safe implementation suitable for single-instance deployments.
-    For distributed deployments, consider upgrading to Redis.
+    Coroutine-safe implementation suitable for single-process async deployments.
+    Not thread-safe — relies on the asyncio event loop being single-threaded.
+    For multi-worker or distributed deployments, consider upgrading to Redis.
     
     Usage:
         limiter = RateLimiter()

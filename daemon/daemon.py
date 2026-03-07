@@ -85,38 +85,39 @@ class MCPSession:
         }
         
         try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.post(MCP_URL, json=payload, headers=self.headers)
-
-            # Handle SSE or JSON response
-            content_type = resp.headers.get("content-type", "")
-            if "text/event-stream" in content_type:
-                for line in resp.text.split("\n"):
-                    if line.startswith("data: "):
-                        data = json.loads(line[6:])
-                        break
-                else:
-                    return json.dumps({"error": "No data in SSE response"})
-            else:
-                data = resp.json()
-
-            if "result" in data:
-                return data["result"]["content"][0]["text"]
-            return json.dumps(data, default=str)
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30, read=60)) as client:
+                # Use streaming to handle SSE responses that don't close
+                async with client.stream("POST", MCP_URL, json=payload, headers=self.headers) as resp:
+                    content_type = resp.headers.get("content-type", "")
+                    
+                    if "text/event-stream" in content_type:
+                        # Read SSE lines until we get a data: line with JSON
+                        async for line in resp.aiter_lines():
+                            if line.startswith("data: "):
+                                data = json.loads(line[6:])
+                                if "result" in data:
+                                    return data["result"]["content"][0]["text"]
+                                return json.dumps(data, default=str)
+                        return json.dumps({"error": "No data in SSE response"})
+                    else:
+                        # Plain JSON response
+                        body = await resp.aread()
+                        data = json.loads(body)
+                        if "result" in data:
+                            return data["result"]["content"][0]["text"]
+                        return json.dumps(data, default=str)
             
         except Exception as e:
-            # Reset session on any error — next call will reinitialize
             log(f"MCP call '{name}' failed: {e}, resetting session", "WARN")
             self.session_id = None
             return json.dumps({"error": str(e)})
 
 
-# Global MCP session
-_mcp_session = MCPSession()
+# Global MCP session removed — each task creates its own
 
 
-# --- Memory tools as SDK custom tools ---
-# These give daemon-me full access to the memory system
+# --- Memory tool definitions ---
+# These are Pydantic models for tool parameters
 
 class SearchParams(BaseModel):
     query: str = Field(description="Fuzzy search query for memory content")
@@ -124,40 +125,16 @@ class SearchParams(BaseModel):
     type: str | None = Field(default=None, description="Filter by memory type")
     tags: list[str] | None = Field(default=None, description="Filter by tags")
 
-@define_tool(description="Search memories by content with fuzzy matching. Use for general content searches.")
-async def search_memories(params: SearchParams) -> str:
-    args = {"query": params.query, "limit": params.limit}
-    if params.type:
-        args["type"] = params.type
-    if params.tags:
-        args["tags"] = params.tags
-    return await _mcp_session.call_tool("search_memories", args)
-
 class SearchFullParams(BaseModel):
     query: str = Field(description="Search query to match against content, tags, and metadata")
     limit: int = Field(default=5, description="Max results to return")
     type: str | None = Field(default=None, description="Filter by memory type")
 
-@define_tool(description="Search across ALL fields: content, tags, and metadata. Broader than search_memories. Use when you need to find things by tags or metadata.")
-async def search_memories_full(params: SearchFullParams) -> str:
-    args = {"query": params.query, "limit": params.limit}
-    if params.type:
-        args["type"] = params.type
-    return await _mcp_session.call_tool("search_memories_full", args)
-
 class GetContextParams(BaseModel):
     pass
 
-@define_tool(description="Get the current user's context and individual memory. Call this first in every session.")
-async def get_current_user_context(params: GetContextParams) -> str:
-    return await _mcp_session.call_tool("get_current_user_context", {})
-
 class GetMemoryParams(BaseModel):
     memory_id: str = Field(description="UUID of the memory to retrieve")
-
-@define_tool(description="Get full content of a specific memory by ID. Use when search results are truncated.")
-async def get_memory(params: GetMemoryParams) -> str:
-    return await _mcp_session.call_tool("get_memory", {"memory_id": params.memory_id})
 
 class CreateMemoryParams(BaseModel):
     type: str = Field(description="Memory type: experience, technical, procedural, goal")
@@ -166,16 +143,6 @@ class CreateMemoryParams(BaseModel):
     importance: int = Field(default=5, description="Importance 1-10")
     metadata: dict | None = Field(default=None, description="Type-specific metadata")
 
-@define_tool(description="Create a new memory in the knowledge base.")
-async def create_memory(params: CreateMemoryParams) -> str:
-    args = {
-        "type": params.type, "content": params.content,
-        "tags": params.tags, "importance": params.importance,
-    }
-    if params.metadata:
-        args["metadata"] = params.metadata
-    return await _mcp_session.call_tool("create_memory", args)
-
 class UpdateMemoryParams(BaseModel):
     memory_id: str = Field(description="UUID of the memory to update")
     content: str | None = Field(default=None, description="New content")
@@ -183,45 +150,76 @@ class UpdateMemoryParams(BaseModel):
     importance: int | None = Field(default=None, description="New importance")
     metadata: dict | None = Field(default=None, description="New metadata")
 
-@define_tool(description="Update an existing memory. Only pass fields you want to change.")
-async def update_memory(params: UpdateMemoryParams) -> str:
-    args = {"memory_id": params.memory_id}
-    if params.content is not None:
-        args["content"] = params.content
-    if params.tags is not None:
-        args["tags"] = params.tags
-    if params.importance is not None:
-        args["importance"] = params.importance
-    if params.metadata is not None:
-        args["metadata"] = params.metadata
-    return await _mcp_session.call_tool("update_memory", args)
-
 class GetTagsParams(BaseModel):
     limit: int = Field(default=50, description="Max tags to return")
-
-@define_tool(description="Get existing tags with usage counts. Use to understand the memory landscape and ensure tag consistency.")
-async def get_existing_tags(params: GetTagsParams) -> str:
-    return await _mcp_session.call_tool("get_existing_tags", {"limit": params.limit})
 
 class GetVersionsParams(BaseModel):
     memory_id: str = Field(description="UUID of the memory")
 
-@define_tool(description="Get version history for a memory. Shows all changes over time.")
-async def get_memory_versions(params: GetVersionsParams) -> str:
-    return await _mcp_session.call_tool("get_memory_versions", {"memory_id": params.memory_id})
-
 class DeleteMemoryParams(BaseModel):
     memory_id: str = Field(description="UUID of the memory to delete (soft delete)")
 
-@define_tool(description="Soft delete a memory. Use for cleaning up truly redundant or incorrect memories.")
-async def delete_memory(params: DeleteMemoryParams) -> str:
-    return await _mcp_session.call_tool("delete_memory", {"memory_id": params.memory_id})
 
-MEMORY_TOOLS = [
-    search_memories, search_memories_full, get_current_user_context,
-    get_memory, create_memory, update_memory,
-    get_existing_tags, get_memory_versions, delete_memory,
-]
+def _make_tools(mcp: MCPSession) -> list:
+    """Create memory tools bound to a specific MCP session."""
+
+    @define_tool(description="Search memories by content with fuzzy matching.")
+    async def search_memories(params: SearchParams) -> str:
+        args = {"query": params.query, "limit": params.limit}
+        if params.type:
+            args["type"] = params.type
+        if params.tags:
+            args["tags"] = params.tags
+        return await mcp.call_tool("search_memories", args)
+
+    @define_tool(description="Search across ALL fields: content, tags, and metadata.")
+    async def search_memories_full(params: SearchFullParams) -> str:
+        args = {"query": params.query, "limit": params.limit}
+        if params.type:
+            args["type"] = params.type
+        return await mcp.call_tool("search_memories_full", args)
+
+    @define_tool(description="Get the current user's context and individual memory.")
+    async def get_current_user_context(params: GetContextParams) -> str:
+        return await mcp.call_tool("get_current_user_context", {})
+
+    @define_tool(description="Get full content of a specific memory by ID.")
+    async def get_memory(params: GetMemoryParams) -> str:
+        return await mcp.call_tool("get_memory", {"memory_id": params.memory_id})
+
+    @define_tool(description="Create a new memory in the knowledge base.")
+    async def create_memory(params: CreateMemoryParams) -> str:
+        args = {"type": params.type, "content": params.content, "tags": params.tags, "importance": params.importance}
+        if params.metadata:
+            args["metadata"] = params.metadata
+        return await mcp.call_tool("create_memory", args)
+
+    @define_tool(description="Update an existing memory. Only pass fields you want to change.")
+    async def update_memory(params: UpdateMemoryParams) -> str:
+        args = {"memory_id": params.memory_id}
+        if params.content is not None: args["content"] = params.content
+        if params.tags is not None: args["tags"] = params.tags
+        if params.importance is not None: args["importance"] = params.importance
+        if params.metadata is not None: args["metadata"] = params.metadata
+        return await mcp.call_tool("update_memory", args)
+
+    @define_tool(description="Get existing tags with usage counts.")
+    async def get_existing_tags(params: GetTagsParams) -> str:
+        return await mcp.call_tool("get_existing_tags", {"limit": params.limit})
+
+    @define_tool(description="Get version history for a memory.")
+    async def get_memory_versions(params: GetVersionsParams) -> str:
+        return await mcp.call_tool("get_memory_versions", {"memory_id": params.memory_id})
+
+    @define_tool(description="Soft delete a memory.")
+    async def delete_memory(params: DeleteMemoryParams) -> str:
+        return await mcp.call_tool("delete_memory", {"memory_id": params.memory_id})
+
+    return [
+        search_memories, search_memories_full, get_current_user_context,
+        get_memory, create_memory, update_memory,
+        get_existing_tags, get_memory_versions, delete_memory,
+    ]
 
 
 def log(message: str, level: str = "INFO"):
@@ -354,9 +352,13 @@ class LucentDaemon:
 
         task_client = None
         try:
-            # Ensure MCP session is ready
-            if MCP_API_KEY and not _mcp_session.session_id:
-                await _mcp_session.initialize()
+            # Each task gets its own MCP session — no shared state
+            mcp = MCPSession()
+            if MCP_API_KEY:
+                await mcp.initialize()
+
+            # Bind tools to this task's MCP session
+            task_tools = _make_tools(mcp) if MCP_API_KEY else []
 
             # Each task gets its own client + session
             task_client = CopilotClient({"log_level": "warning"})
@@ -366,16 +368,48 @@ class LucentDaemon:
                 "model": use_model,
                 "system_message": {"content": build_system_message()},
                 "on_permission_request": PermissionHandler.approve_all,
-                "tools": MEMORY_TOOLS if MCP_API_KEY else [],
+                "tools": task_tools,
             })
             self.active_sessions.append(session)
 
-            # send_and_wait handles the full tool call lifecycle
-            response = await session.send_and_wait({"prompt": prompt}, timeout=600)
-            
-            response_text = None
-            if response and hasattr(response, 'data') and response.data.content:
-                response_text = response.data.content
+            # Track all events for visibility
+            response_parts = []
+            done = asyncio.Event()
+
+            def on_event(event):
+                etype = event.type.value if hasattr(event.type, 'value') else str(event.type)
+                
+                if etype == "assistant.message":
+                    content = getattr(event.data, 'content', None)
+                    if content:
+                        response_parts.append(content)
+                        log(f"  [{task_name}] message: {content[:100]}...", "STREAM")
+                elif etype == "assistant.message_delta":
+                    pass  # Skip deltas — final message has full content
+                elif etype == "session.idle":
+                    done.set()
+                elif "error" in etype.lower():
+                    log(f"  [{task_name}] error event: {etype} - {getattr(event.data, 'message', str(event.data)[:200])}", "ERROR")
+                    done.set()
+                else:
+                    # Log everything else so we can see what's happening
+                    detail = ""
+                    if hasattr(event.data, 'tool_name'):
+                        detail = f" tool={event.data.tool_name}"
+                    elif hasattr(event.data, 'name'):
+                        detail = f" name={event.data.name}"
+                    log(f"  [{task_name}] event: {etype}{detail}", "STREAM")
+
+            session.on(on_event)
+            await session.send({"prompt": prompt})
+
+            # Wait for completion
+            try:
+                await asyncio.wait_for(done.wait(), timeout=600)
+            except asyncio.TimeoutError:
+                log(f"Task '{task_name}' timed out after 10 minutes", "WARN")
+
+            response_text = "\n".join(response_parts) if response_parts else None
 
             # Clean up session
             try:
@@ -394,7 +428,6 @@ class LucentDaemon:
 
         except Exception as e:
             log(f"Task '{task_name}' failed: {e}", "ERROR")
-            _mcp_session.session_id = None
             return None
         finally:
             # Always clean up the task client

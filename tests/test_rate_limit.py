@@ -1,5 +1,6 @@
 """Tests for rate limiting module."""
 
+import os
 import time
 from uuid import uuid4
 
@@ -121,6 +122,23 @@ class TestRateLimiter:
         assert removed == 1
         assert len(limiter._buckets) == 0
 
+    def test_cleanup_expired_preserves_active_buckets(self):
+        limiter = RateLimiter(requests_per_minute=10, window_seconds=60)
+        active_key = uuid4()
+        expired_key = uuid4()
+
+        # Both keys make requests
+        limiter.check_rate_limit(active_key)
+        limiter.check_rate_limit(expired_key)
+        assert len(limiter._buckets) == 2
+
+        # Manually expire one bucket's requests
+        limiter._buckets[expired_key].requests = [time.time() - 120]
+        removed = limiter.cleanup_expired()
+        assert removed == 1
+        assert active_key in limiter._buckets
+        assert expired_key not in limiter._buckets
+
     def test_window_expiry_allows_again(self):
         limiter = RateLimiter(requests_per_minute=1, window_seconds=1)
         key = uuid4()
@@ -153,3 +171,15 @@ class TestGlobalRateLimiter:
         reset_rate_limiter()
         limiter2 = get_rate_limiter()
         assert limiter1 is not limiter2
+
+    def test_env_var_configures_limit(self, monkeypatch):
+        reset_rate_limiter()
+        monkeypatch.setenv("LUCENT_RATE_LIMIT_PER_MINUTE", "42")
+        limiter = RateLimiter()
+        assert limiter.limit == 42
+
+    def test_env_var_default_limit(self, monkeypatch):
+        reset_rate_limiter()
+        monkeypatch.delenv("LUCENT_RATE_LIMIT_PER_MINUTE", raising=False)
+        limiter = RateLimiter()
+        assert limiter.limit == 100

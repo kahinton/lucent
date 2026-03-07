@@ -96,17 +96,18 @@ async def _run_migrations(pool: Pool) -> None:
         for row in rows:
             applied.add(row["name"])
         
-        # Apply new migrations
+        # Apply new migrations (each in its own transaction for atomicity)
         for migration_file in migration_files:
             if migration_file.name in applied:
                 continue
             
             sql = migration_file.read_text()
-            await conn.execute(sql)
-            await conn.execute(
-                "INSERT INTO _migrations (name) VALUES ($1)",
-                migration_file.name,
-            )
+            async with conn.transaction():
+                await conn.execute(sql)
+                await conn.execute(
+                    "INSERT INTO _migrations (name) VALUES ($1)",
+                    migration_file.name,
+                )
 
 
 async def get_pool() -> Pool:

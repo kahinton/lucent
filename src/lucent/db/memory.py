@@ -452,49 +452,7 @@ class MemoryRepository:
             # Get results
             rows = await conn.fetch(search_query, *params)
         
-        memories = []
-        for row in rows:
-            content = row["content"]
-            truncated = len(content) > self.TRUNCATE_LENGTH
-            if truncated:
-                content = content[:self.TRUNCATE_LENGTH] + "..."
-            
-            # Handle related_memory_ids which may be strings or UUIDs
-            related_ids = []
-            if row["related_memory_ids"]:
-                for uid in row["related_memory_ids"]:
-                    if isinstance(uid, UUID):
-                        related_ids.append(uid)
-                    else:
-                        related_ids.append(UUID(uid))
-            
-            # Handle user_id
-            user_id = None
-            if row["user_id"]:
-                user_id = row["user_id"] if isinstance(row["user_id"], UUID) else UUID(row["user_id"])
-            
-            # Handle organization_id
-            org_id = None
-            if row["organization_id"]:
-                org_id = row["organization_id"] if isinstance(row["organization_id"], UUID) else UUID(row["organization_id"])
-            
-            memories.append({
-                "id": row["id"],
-                "username": row["username"],
-                "type": row["type"],
-                "content": content,
-                "content_truncated": truncated,
-                "tags": row["tags"],
-                "importance": row["importance"],
-                "related_memory_ids": related_ids,
-                "created_at": row["created_at"],
-                "updated_at": row["updated_at"],
-                "similarity_score": row["sim_score"],
-                "user_id": user_id,
-                "organization_id": org_id,
-                "shared": row["shared"],
-                "last_accessed_at": row["last_accessed_at"],
-            })
+        memories = [self._row_to_search_dict(row) for row in rows]
         
         return {
             "memories": memories,
@@ -618,48 +576,7 @@ class MemoryRepository:
             
             rows = await conn.fetch(search_query, *params)
         
-        memories = []
-        for row in rows:
-            content = row["content"]
-            truncated = len(content) > self.TRUNCATE_LENGTH
-            if truncated:
-                content = content[:self.TRUNCATE_LENGTH] + "..."
-            
-            related_ids = []
-            if row["related_memory_ids"]:
-                for uid in row["related_memory_ids"]:
-                    if isinstance(uid, UUID):
-                        related_ids.append(uid)
-                    else:
-                        related_ids.append(UUID(uid))
-            
-            # Handle user_id
-            user_id = None
-            if row["user_id"]:
-                user_id = row["user_id"] if isinstance(row["user_id"], UUID) else UUID(row["user_id"])
-            
-            # Handle organization_id
-            org_id = None
-            if row["organization_id"]:
-                org_id = row["organization_id"] if isinstance(row["organization_id"], UUID) else UUID(row["organization_id"])
-            
-            memories.append({
-                "id": row["id"],
-                "username": row["username"],
-                "type": row["type"],
-                "content": content,
-                "content_truncated": truncated,
-                "tags": row["tags"],
-                "importance": row["importance"],
-                "related_memory_ids": related_ids,
-                "created_at": row["created_at"],
-                "updated_at": row["updated_at"],
-                "similarity_score": row["sim_score"],
-                "user_id": user_id,
-                "organization_id": org_id,
-                "shared": row["shared"],
-                "last_accessed_at": row["last_accessed_at"],
-            })
+        memories = [self._row_to_search_dict(row) for row in rows]
         
         return {
             "memories": memories,
@@ -827,6 +744,44 @@ class MemoryRepository:
         
         if missing_ids:
             raise ValueError(f"Related memory IDs not found or deleted: {missing_ids}")
+    
+    def _row_to_search_dict(self, row: asyncpg.Record) -> dict[str, Any]:
+        """Convert a search result row to a dictionary with truncation."""
+        content = row["content"]
+        truncated = len(content) > self.TRUNCATE_LENGTH
+        if truncated:
+            content = content[:self.TRUNCATE_LENGTH] + "..."
+        
+        related_ids = []
+        if row["related_memory_ids"]:
+            for uid in row["related_memory_ids"]:
+                related_ids.append(uid if isinstance(uid, UUID) else UUID(uid))
+        
+        user_id = None
+        if row["user_id"]:
+            user_id = row["user_id"] if isinstance(row["user_id"], UUID) else UUID(row["user_id"])
+        
+        org_id = None
+        if row["organization_id"]:
+            org_id = row["organization_id"] if isinstance(row["organization_id"], UUID) else UUID(row["organization_id"])
+        
+        return {
+            "id": row["id"],
+            "username": row["username"],
+            "type": row["type"],
+            "content": content,
+            "content_truncated": truncated,
+            "tags": row["tags"],
+            "importance": row["importance"],
+            "related_memory_ids": related_ids,
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "similarity_score": row["sim_score"],
+            "user_id": user_id,
+            "organization_id": org_id,
+            "shared": row["shared"],
+            "last_accessed_at": row["last_accessed_at"],
+        }
     
     def _row_to_dict(self, row: asyncpg.Record) -> dict[str, Any]:
         """Convert a database row to a dictionary."""

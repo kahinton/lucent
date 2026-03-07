@@ -48,15 +48,16 @@ class AccessRepository:
         """
         
         async with self.pool.acquire() as conn:
-            await conn.execute(
-                log_query,
-                str(memory_id),
-                str(user_id) if user_id else None,
-                str(organization_id) if organization_id else None,
-                access_type,
-                context or {},
-            )
-            await conn.execute(update_query, str(memory_id))
+            async with conn.transaction():
+                await conn.execute(
+                    log_query,
+                    str(memory_id),
+                    str(user_id) if user_id else None,
+                    str(organization_id) if organization_id else None,
+                    access_type,
+                    context or {},
+                )
+                await conn.execute(update_query, str(memory_id))
     
     async def log_batch_access(
         self,
@@ -78,26 +79,25 @@ class AccessRepository:
         if not memory_ids:
             return
         
+        user_id_str = str(user_id) if user_id else None
+        org_id_str = str(organization_id) if organization_id else None
+        ctx = context or {}
+        
         async with self.pool.acquire() as conn:
-            # Batch insert access logs
-            log_query = """
-                INSERT INTO memory_access_log 
-                    (memory_id, user_id, organization_id, access_type, context)
-                VALUES ($1, $2, $3, $4, $5)
-            """
-            
-            for memory_id in memory_ids:
-                await conn.execute(
+            async with conn.transaction():
+                # Batch insert access logs using executemany
+                log_query = """
+                    INSERT INTO memory_access_log 
+                        (memory_id, user_id, organization_id, access_type, context)
+                    VALUES ($1, $2, $3, $4, $5)
+                """
+                
+                await conn.executemany(
                     log_query,
-                    str(memory_id),
-                    str(user_id) if user_id else None,
-                    str(organization_id) if organization_id else None,
-                    access_type,
-                    context or {},
+                    [(str(mid), user_id_str, org_id_str, access_type, ctx) for mid in memory_ids],
                 )
-            
-            # Batch update last_accessed_at
-            if memory_ids:
+                
+                # Batch update last_accessed_at
                 placeholders = ", ".join(f"${i+1}" for i in range(len(memory_ids)))
                 update_query = f"""
                     UPDATE memories

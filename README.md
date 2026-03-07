@@ -155,6 +155,13 @@ export LUCENT_AUTH_PROVIDER=api_key
 | `get_memory_versions` | Browse version history for a memory |
 | `restore_memory_version` | Restore a memory to a previous version |
 
+### Sharing (Team Mode Only)
+
+| Tool | Purpose |
+|------|--------|
+| `share_memory` | Share a memory with other users in your organization |
+| `unshare_memory` | Stop sharing a memory with your organization |
+
 ### Tool Parameters
 
 #### create_memory
@@ -286,6 +293,7 @@ src/lucent/
 │   └── routers/        # REST API endpoints
 ├── web/
 │   ├── routes.py       # Web UI routes
+│   ├── static/         # Favicons and logos
 │   └── templates/      # Jinja2 templates
 ├── db/
 │   ├── pool.py         # Connection pool + migration runner
@@ -295,10 +303,14 @@ src/lucent/
 │   ├── api_key.py      # API key repository
 │   ├── access.py       # Access tracking repository
 │   ├── organization.py # Organization repository
+│   ├── types.py        # TypedDict definitions for repository return values
 │   └── migrations/     # SQL migration files
 ├── models/
 │   ├── memory.py       # Pydantic models for memory types
-│   └── validation.py   # Metadata validation
+│   ├── validation.py   # Metadata validation
+│   ├── audit.py        # Pydantic models for audit logging
+│   ├── user.py         # Pydantic models for user management
+│   └── organization.py # Pydantic models for organizations
 ├── tools/
 │   └── memories.py     # MCP tool implementations
 └── prompts/
