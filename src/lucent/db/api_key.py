@@ -25,7 +25,7 @@ class ApiKeyRepository:
         organization_id: UUID | None,
         name: str,
         scopes: list[str] | None = None,
-        expires_at: Any | None = None,
+        expires_at: datetime | None = None,
     ) -> tuple[dict[str, Any], str]:
         """Create a new API key.
         

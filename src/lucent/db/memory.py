@@ -15,6 +15,16 @@ class MemoryRepository:
     """Repository for memory CRUD operations."""
     
     TRUNCATE_LENGTH = 1000
+
+    # Shared column lists to avoid repetition across queries
+    _FULL_COLUMNS = (
+        "id, username, type, content, tags, importance, related_memory_ids, metadata, "
+        "created_at, updated_at, deleted_at, user_id, organization_id, shared, last_accessed_at, version"
+    )
+    _SEARCH_COLUMNS = (
+        "id, username, type, content, tags, importance, related_memory_ids, "
+        "created_at, updated_at, user_id, organization_id, shared, last_accessed_at"
+    )
     
     def __init__(self, pool: Pool):
         self.pool = pool
@@ -47,18 +57,17 @@ class MemoryRepository:
         Returns:
             The created memory record.
         """
-        # Validate related memory IDs exist and are not deleted
-        if related_memory_ids:
-            await self._validate_related_ids(related_memory_ids)
-        
-        query = """
+        query = f"""
             INSERT INTO memories (username, type, content, tags, importance, related_memory_ids, metadata, user_id, organization_id, shared)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, false)
-            RETURNING id, username, type, content, tags, importance, related_memory_ids, metadata, 
-                      created_at, updated_at, deleted_at, user_id, organization_id, shared, last_accessed_at, version
+            RETURNING {self._FULL_COLUMNS}
         """
         
         async with self.pool.acquire() as conn:
+            # Validate related memory IDs exist and are not deleted
+            if related_memory_ids:
+                await self._validate_related_ids(related_memory_ids, conn=conn)
+            
             row = await conn.fetchrow(
                 query,
                 username,
@@ -83,9 +92,8 @@ class MemoryRepository:
         Returns:
             The memory record, or None if not found or deleted.
         """
-        query = """
-            SELECT id, username, type, content, tags, importance, related_memory_ids, metadata,
-                   created_at, updated_at, deleted_at, user_id, organization_id, shared, last_accessed_at, version
+        query = f"""
+            SELECT {self._FULL_COLUMNS}
             FROM memories
             WHERE id = $1 AND deleted_at IS NULL
         """
@@ -118,9 +126,8 @@ class MemoryRepository:
         Returns:
             The memory record, or None if not found, deleted, or not accessible.
         """
-        query = """
-            SELECT id, username, type, content, tags, importance, related_memory_ids, metadata,
-                   created_at, updated_at, deleted_at, user_id, organization_id, shared, last_accessed_at, version
+        query = f"""
+            SELECT {self._FULL_COLUMNS}
             FROM memories
             WHERE id = $1 
               AND deleted_at IS NULL
@@ -147,9 +154,8 @@ class MemoryRepository:
         Returns:
             The memory record, or None if not found.
         """
-        query = """
-            SELECT id, username, type, content, tags, importance, related_memory_ids, metadata,
-                   created_at, updated_at, deleted_at, user_id, organization_id, shared, last_accessed_at, version
+        query = f"""
+            SELECT {self._FULL_COLUMNS}
             FROM memories
             WHERE type = 'individual' 
               AND deleted_at IS NULL
@@ -182,12 +188,11 @@ class MemoryRepository:
         Returns:
             The updated memory record, or None if not found or not owned by user.
         """
-        query = """
+        query = f"""
             UPDATE memories
             SET shared = $1
             WHERE id = $2 AND user_id = $3 AND deleted_at IS NULL
-            RETURNING id, username, type, content, tags, importance, related_memory_ids, metadata,
-                      created_at, updated_at, deleted_at, user_id, organization_id, shared, last_accessed_at, version
+            RETURNING {self._FULL_COLUMNS}
         """
         
         async with self.pool.acquire() as conn:
@@ -220,15 +225,6 @@ class MemoryRepository:
         Returns:
             The updated memory record, or None if not found.
         """
-        # Check if memory exists and is not deleted
-        existing = await self.get(memory_id)
-        if existing is None:
-            return None
-        
-        # Validate related memory IDs if provided
-        if related_memory_ids is not None:
-            await self._validate_related_ids(related_memory_ids, exclude_id=memory_id)
-        
         # Build dynamic update query
         updates = []
         params = []
@@ -260,10 +256,10 @@ class MemoryRepository:
             param_idx += 1
         
         if not updates:
-            return existing
+            return await self.get(memory_id)
         
         # Always increment version on update
-        updates.append(f"version = version + 1")
+        updates.append("version = version + 1")
         
         params.append(str(memory_id))
         
@@ -271,11 +267,14 @@ class MemoryRepository:
             UPDATE memories
             SET {", ".join(updates)}
             WHERE id = ${param_idx} AND deleted_at IS NULL
-            RETURNING id, username, type, content, tags, importance, related_memory_ids, metadata,
-                      created_at, updated_at, deleted_at, user_id, organization_id, shared, last_accessed_at, version
+            RETURNING {self._FULL_COLUMNS}
         """
         
+        # Use a single connection for validation and update
         async with self.pool.acquire() as conn:
+            if related_memory_ids is not None:
+                await self._validate_related_ids(related_memory_ids, exclude_id=memory_id, conn=conn)
+            
             row = await conn.fetchrow(query, *params)
         
         if row is None:
@@ -312,8 +311,8 @@ class MemoryRepository:
         tags: list[str] | None = None,
         importance_min: int | None = None,
         importance_max: int | None = None,
-        created_after: Any | None = None,
-        created_before: Any | None = None,
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
         memory_ids: list[UUID] | None = None,
         offset: int = 0,
         limit: int = 5,
@@ -408,8 +407,7 @@ class MemoryRepository:
             param_idx += 1
             
             search_query = f"""
-                SELECT id, username, type, content, tags, importance, related_memory_ids,
-                       created_at, updated_at, user_id, organization_id, shared, last_accessed_at,
+                SELECT {self._SEARCH_COLUMNS},
                        similarity(content, ${similarity_param}) as sim_score
                 FROM memories
                 WHERE {where_clause}
@@ -426,8 +424,7 @@ class MemoryRepository:
             """
         else:
             search_query = f"""
-                SELECT id, username, type, content, tags, importance, related_memory_ids,
-                       created_at, updated_at, user_id, organization_id, shared, last_accessed_at,
+                SELECT {self._SEARCH_COLUMNS},
                        NULL::float as sim_score
                 FROM memories
                 WHERE {where_clause}
@@ -538,8 +535,7 @@ class MemoryRepository:
         
         # Search across content, array_to_string(tags), and metadata::text
         search_query = f"""
-            SELECT id, username, type, content, tags, importance, related_memory_ids,
-                   created_at, updated_at, user_id, organization_id, shared, last_accessed_at,
+            SELECT {self._SEARCH_COLUMNS},
                    GREATEST(
                        similarity(content, ${query_param}),
                        similarity(array_to_string(tags, ' '), ${query_param}),
@@ -710,13 +706,15 @@ class MemoryRepository:
     async def _validate_related_ids(
         self, 
         related_ids: list[UUID], 
-        exclude_id: UUID | None = None
+        exclude_id: UUID | None = None,
+        conn: asyncpg.Connection | None = None,
     ) -> None:
         """Validate that related memory IDs exist and are not deleted.
         
         Args:
             related_ids: List of UUIDs to validate.
             exclude_id: Optional ID to exclude from check (for self-reference prevention).
+            conn: Optional existing connection to reuse (avoids extra pool acquisition).
             
         Raises:
             ValueError: If any IDs are invalid, deleted, or self-referencing.
@@ -734,8 +732,13 @@ class MemoryRepository:
             WHERE id IN ({placeholders}) AND deleted_at IS NULL
         """
         
-        async with self.pool.acquire() as conn:
-            rows = await conn.fetch(query, *[str(uid) for uid in related_ids])
+        str_ids = [str(uid) for uid in related_ids]
+        
+        if conn is not None:
+            rows = await conn.fetch(query, *str_ids)
+        else:
+            async with self.pool.acquire() as pool_conn:
+                rows = await pool_conn.fetch(query, *str_ids)
         
         # Convert found IDs to strings for comparison
         found_ids = {str(row["id"]) for row in rows}

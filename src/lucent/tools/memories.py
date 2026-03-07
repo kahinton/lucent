@@ -721,7 +721,6 @@ Returns:
             
             # Log the update with version snapshot
             if changed_fields:
-                user_id, org_id, user_role = await _get_current_user_context()
                 audit_repo = await _get_audit_repository()
                 await audit_repo.log(
                     memory_id=uuid_id,

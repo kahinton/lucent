@@ -205,6 +205,128 @@ class TestMemoryRepository:
         )
         
         assert all(m["type"] == "technical" for m in result["memories"])
+    
+    async def test_search_full(self, db_pool, test_user, clean_test_data):
+        """Test full-text search across content, tags, and metadata."""
+        prefix = clean_test_data
+        repo = MemoryRepository(db_pool)
+        
+        await repo.create(
+            username=f"{prefix}user",
+            type="technical",
+            content=f"{prefix} Generic content",
+            tags=["unique-tag-xyz"],
+            metadata={"repo": "lucent"},
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
+        )
+        
+        # Search by tag content
+        result = await repo.search_full(
+            query="unique-tag-xyz",
+            requesting_user_id=test_user["id"],
+            requesting_org_id=test_user["organization_id"],
+        )
+        
+        assert result["total_count"] >= 1
+        assert any("unique-tag-xyz" in m["tags"] for m in result["memories"])
+    
+    async def test_get_existing_tags(self, db_pool, test_user, clean_test_data):
+        """Test retrieving existing tags with counts."""
+        prefix = clean_test_data
+        repo = MemoryRepository(db_pool)
+        
+        # Create memories with known tags
+        for i in range(3):
+            await repo.create(
+                username=f"{prefix}user",
+                type="experience",
+                content=f"{prefix} Memory {i}",
+                tags=[f"{prefix}common", f"{prefix}tag{i}"],
+                user_id=test_user["id"],
+                organization_id=test_user["organization_id"],
+            )
+        
+        tags = await repo.get_existing_tags(
+            requesting_user_id=test_user["id"],
+            requesting_org_id=test_user["organization_id"],
+        )
+        
+        tag_names = [t["tag"] for t in tags]
+        assert f"{prefix}common" in tag_names
+        
+        # The common tag should have count 3
+        common_tag = next(t for t in tags if t["tag"] == f"{prefix}common")
+        assert common_tag["count"] == 3
+    
+    async def test_get_individual_memory_for_user(self, db_pool, test_user, test_organization, clean_test_data):
+        """Test retrieving a user's individual memory."""
+        prefix = clean_test_data
+        repo = MemoryRepository(db_pool)
+        
+        # Create an individual memory for the user
+        await repo.create(
+            username=f"{prefix}user",
+            type="individual",
+            content=f"{prefix} Individual memory for user",
+            user_id=test_user["id"],
+            organization_id=test_organization["id"],
+        )
+        
+        result = await repo.get_individual_memory_for_user(test_user["id"])
+        
+        assert result is not None
+        assert result["type"] == "individual"
+        assert result["user_id"] == test_user["id"]
+    
+    async def test_delete_nonexistent_memory(self, db_pool):
+        """Test deleting a memory that doesn't exist returns False."""
+        repo = MemoryRepository(db_pool)
+        
+        result = await repo.delete(uuid4())
+        
+        assert result is False
+    
+    async def test_update_no_changes(self, db_pool, test_memory):
+        """Test update with no fields returns existing memory unchanged."""
+        repo = MemoryRepository(db_pool)
+        
+        result = await repo.update(test_memory["id"])
+        
+        assert result is not None
+        assert result["content"] == test_memory["content"]
+        assert result["importance"] == test_memory["importance"]
+    
+    async def test_update_increments_version(self, db_pool, test_memory):
+        """Test that update increments the version number."""
+        repo = MemoryRepository(db_pool)
+        
+        original_version = test_memory["version"]
+        
+        updated = await repo.update(
+            test_memory["id"],
+            content="Version bump test",
+        )
+        
+        assert updated is not None
+        assert updated["version"] == original_version + 1
+    
+    async def test_get_accessible_denies_other_org(self, db_pool, test_memory, test_user, clean_test_data):
+        """Test that a user in a different org cannot access an unshared memory."""
+        prefix = clean_test_data
+        repo = MemoryRepository(db_pool)
+        
+        # Use a random UUID as the "other org" user — should not match
+        other_user_id = uuid4()
+        other_org_id = uuid4()
+        
+        result = await repo.get_accessible(
+            test_memory["id"],
+            other_user_id,
+            other_org_id,
+        )
+        
+        assert result is None
 
 
 class TestUserRepository:
@@ -411,6 +533,197 @@ class TestAuditRepository:
         assert entry["action_type"] == "update"
         assert entry["memory_id"] == test_memory["id"]
         assert entry["changed_fields"] == ["content"]
+    
+    async def test_get_by_memory_id(self, db_pool, test_memory, test_user):
+        """Test retrieving audit entries by memory ID."""
+        repo = AuditRepository(db_pool)
+        
+        # Create two audit entries for the same memory
+        await repo.log(
+            memory_id=test_memory["id"],
+            action_type="update",
+            user_id=test_user["id"],
+            changed_fields=["content"],
+        )
+        await repo.log(
+            memory_id=test_memory["id"],
+            action_type="update",
+            user_id=test_user["id"],
+            changed_fields=["tags"],
+        )
+        
+        result = await repo.get_by_memory_id(test_memory["id"])
+        
+        assert result["total_count"] >= 2
+        assert len(result["entries"]) >= 2
+        assert result["offset"] == 0
+        assert result["limit"] == 50
+        assert all(e["memory_id"] == test_memory["id"] for e in result["entries"])
+    
+    async def test_get_by_memory_id_pagination(self, db_pool, test_memory, test_user):
+        """Test pagination in get_by_memory_id."""
+        repo = AuditRepository(db_pool)
+        
+        # Create 3 entries
+        for i in range(3):
+            await repo.log(
+                memory_id=test_memory["id"],
+                action_type="update",
+                user_id=test_user["id"],
+                changed_fields=[f"field_{i}"],
+            )
+        
+        result = await repo.get_by_memory_id(test_memory["id"], limit=2, offset=0)
+        
+        assert len(result["entries"]) == 2
+        assert result["has_more"] is True
+    
+    async def test_get_by_user_id(self, db_pool, test_memory, test_user):
+        """Test retrieving audit entries by user ID."""
+        repo = AuditRepository(db_pool)
+        
+        await repo.log(
+            memory_id=test_memory["id"],
+            action_type="create",
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
+        )
+        
+        result = await repo.get_by_user_id(test_user["id"])
+        
+        assert result["total_count"] >= 1
+        assert all(e["user_id"] == test_user["id"] for e in result["entries"])
+    
+    async def test_get_by_user_id_with_action_filter(self, db_pool, test_memory, test_user):
+        """Test filtering audit entries by user ID and action type."""
+        repo = AuditRepository(db_pool)
+        
+        await repo.log(
+            memory_id=test_memory["id"],
+            action_type="create",
+            user_id=test_user["id"],
+        )
+        await repo.log(
+            memory_id=test_memory["id"],
+            action_type="update",
+            user_id=test_user["id"],
+        )
+        
+        result = await repo.get_by_user_id(test_user["id"], action_type="create")
+        
+        assert result["total_count"] >= 1
+        assert all(e["action_type"] == "create" for e in result["entries"])
+    
+    async def test_get_by_organization_id(self, db_pool, test_memory, test_user):
+        """Test retrieving audit entries by organization ID."""
+        repo = AuditRepository(db_pool)
+        
+        await repo.log(
+            memory_id=test_memory["id"],
+            action_type="update",
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
+        )
+        
+        result = await repo.get_by_organization_id(test_user["organization_id"])
+        
+        assert result["total_count"] >= 1
+        assert all(
+            e["organization_id"] == test_user["organization_id"]
+            for e in result["entries"]
+        )
+    
+    async def test_get_recent(self, db_pool, test_memory, test_user):
+        """Test retrieving recent audit entries."""
+        repo = AuditRepository(db_pool)
+        
+        await repo.log(
+            memory_id=test_memory["id"],
+            action_type="update",
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
+        )
+        
+        entries = await repo.get_recent(
+            organization_id=test_user["organization_id"],
+            limit=10,
+        )
+        
+        assert len(entries) >= 1
+        assert entries[0]["action_type"] == "update"
+    
+    async def test_get_recent_with_action_types(self, db_pool, test_memory, test_user):
+        """Test filtering recent audit entries by action types."""
+        repo = AuditRepository(db_pool)
+        
+        await repo.log(
+            memory_id=test_memory["id"],
+            action_type="create",
+            user_id=test_user["id"],
+        )
+        await repo.log(
+            memory_id=test_memory["id"],
+            action_type="delete",
+            user_id=test_user["id"],
+        )
+        
+        entries = await repo.get_recent(action_types=["delete"])
+        
+        assert all(e["action_type"] == "delete" for e in entries)
+    
+    async def test_get_versions(self, db_pool, test_memory, test_user):
+        """Test retrieving version history for a memory."""
+        repo = AuditRepository(db_pool)
+        
+        # Create versioned audit entries
+        await repo.log(
+            memory_id=test_memory["id"],
+            action_type="create",
+            user_id=test_user["id"],
+            version=1,
+            snapshot={"content": "v1"},
+        )
+        await repo.log(
+            memory_id=test_memory["id"],
+            action_type="update",
+            user_id=test_user["id"],
+            version=2,
+            snapshot={"content": "v2"},
+        )
+        
+        result = await repo.get_versions(test_memory["id"])
+        
+        assert result["total_count"] >= 2
+        # Versions should be ordered descending
+        versions = [e["version"] for e in result["versions"]]
+        assert versions == sorted(versions, reverse=True)
+    
+    async def test_get_version_snapshot(self, db_pool, test_memory, test_user):
+        """Test retrieving a specific version snapshot."""
+        repo = AuditRepository(db_pool)
+        
+        snapshot_data = {"content": "snapshot content", "tags": ["test"]}
+        await repo.log(
+            memory_id=test_memory["id"],
+            action_type="update",
+            user_id=test_user["id"],
+            version=1,
+            snapshot=snapshot_data,
+        )
+        
+        result = await repo.get_version_snapshot(test_memory["id"], version=1)
+        
+        assert result is not None
+        assert result["version"] == 1
+        assert result["snapshot"] == snapshot_data
+    
+    async def test_get_version_snapshot_not_found(self, db_pool, test_memory):
+        """Test that missing version returns None."""
+        repo = AuditRepository(db_pool)
+        
+        result = await repo.get_version_snapshot(test_memory["id"], version=9999)
+        
+        assert result is None
 
 
 class TestAccessRepository:
@@ -437,3 +750,170 @@ class TestAccessRepository:
         # In our case, test_memory should still be accessible
         assert memory is not None
         assert memory["last_accessed_at"] is not None
+    
+    async def test_log_batch_access(self, db_pool, test_user, clean_test_data):
+        """Test logging access for multiple memories at once."""
+        prefix = clean_test_data
+        mem_repo = MemoryRepository(db_pool)
+        repo = AccessRepository(db_pool)
+        
+        # Create multiple memories
+        memories = []
+        for i in range(3):
+            m = await mem_repo.create(
+                username=f"{prefix}user",
+                type="experience",
+                content=f"{prefix} Batch memory {i}",
+                user_id=test_user["id"],
+                organization_id=test_user["organization_id"],
+            )
+            memories.append(m)
+        
+        memory_ids = [m["id"] for m in memories]
+        
+        await repo.log_batch_access(
+            memory_ids=memory_ids,
+            access_type="search_result",
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
+            context={"query": "batch test"},
+        )
+        
+        # Verify last_accessed_at was updated on all memories
+        for mid in memory_ids:
+            m = await mem_repo.get(mid)
+            assert m is not None
+            assert m["last_accessed_at"] is not None
+    
+    async def test_log_batch_access_empty(self, db_pool):
+        """Test that log_batch_access with empty list is a no-op."""
+        repo = AccessRepository(db_pool)
+        
+        # Should not raise
+        await repo.log_batch_access(
+            memory_ids=[],
+            access_type="view",
+        )
+    
+    async def test_get_access_history(self, db_pool, test_memory, test_user):
+        """Test retrieving access history for a memory."""
+        repo = AccessRepository(db_pool)
+        
+        # Log multiple accesses
+        for _ in range(3):
+            await repo.log_access(
+                memory_id=test_memory["id"],
+                access_type="view",
+                user_id=test_user["id"],
+                organization_id=test_user["organization_id"],
+            )
+        
+        result = await repo.get_access_history(test_memory["id"])
+        
+        assert result["total_count"] >= 3
+        assert len(result["entries"]) >= 3
+        assert result["offset"] == 0
+        assert result["limit"] == 50
+        assert all(e["memory_id"] == test_memory["id"] for e in result["entries"])
+    
+    async def test_get_access_history_pagination(self, db_pool, test_memory, test_user):
+        """Test pagination in access history."""
+        repo = AccessRepository(db_pool)
+        
+        for _ in range(3):
+            await repo.log_access(
+                memory_id=test_memory["id"],
+                access_type="view",
+                user_id=test_user["id"],
+            )
+        
+        result = await repo.get_access_history(test_memory["id"], limit=2, offset=0)
+        
+        assert len(result["entries"]) == 2
+        assert result["has_more"] is True
+    
+    async def test_get_search_history(self, db_pool, test_memory, test_user):
+        """Test retrieving search queries that returned a memory."""
+        repo = AccessRepository(db_pool)
+        
+        # Log a view and a search_result access
+        await repo.log_access(
+            memory_id=test_memory["id"],
+            access_type="view",
+            user_id=test_user["id"],
+        )
+        await repo.log_access(
+            memory_id=test_memory["id"],
+            access_type="search_result",
+            user_id=test_user["id"],
+            context={"query": "test search"},
+        )
+        
+        results = await repo.get_search_history(test_memory["id"])
+        
+        assert len(results) >= 1
+        # Should only contain search_result entries
+        assert all(e["access_type"] == "search_result" for e in results)
+    
+    async def test_get_user_activity(self, db_pool, test_memory, test_user):
+        """Test retrieving access activity for a user."""
+        repo = AccessRepository(db_pool)
+        
+        await repo.log_access(
+            memory_id=test_memory["id"],
+            access_type="view",
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
+        )
+        
+        results = await repo.get_user_activity(test_user["id"])
+        
+        assert len(results) >= 1
+        assert all(e["user_id"] == test_user["id"] for e in results)
+    
+    async def test_get_most_accessed(self, db_pool, test_user, clean_test_data):
+        """Test retrieving most frequently accessed memories."""
+        prefix = clean_test_data
+        mem_repo = MemoryRepository(db_pool)
+        repo = AccessRepository(db_pool)
+        
+        # Create two memories, access one more than the other
+        m1 = await mem_repo.create(
+            username=f"{prefix}user",
+            type="experience",
+            content=f"{prefix} Popular memory",
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
+        )
+        m2 = await mem_repo.create(
+            username=f"{prefix}user",
+            type="experience",
+            content=f"{prefix} Less popular memory",
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
+        )
+        
+        # Access m1 three times, m2 once
+        for _ in range(3):
+            await repo.log_access(
+                memory_id=m1["id"],
+                access_type="view",
+                user_id=test_user["id"],
+                organization_id=test_user["organization_id"],
+            )
+        await repo.log_access(
+            memory_id=m2["id"],
+            access_type="view",
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
+        )
+        
+        results = await repo.get_most_accessed(
+            user_id=test_user["id"],
+        )
+        
+        assert len(results) >= 2
+        # First result should be the more-accessed memory
+        m1_entry = next(r for r in results if r["memory_id"] == m1["id"])
+        m2_entry = next(r for r in results if r["memory_id"] == m2["id"])
+        assert m1_entry["access_count"] > m2_entry["access_count"]

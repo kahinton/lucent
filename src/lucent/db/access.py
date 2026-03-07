@@ -3,6 +3,7 @@
 Handles memory access logging and analytics.
 """
 
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -183,7 +184,7 @@ class AccessRepository:
         self,
         user_id: UUID,
         limit: int = 100,
-        since: Any | None = None,
+        since: datetime | None = None,
     ) -> list[dict[str, Any]]:
         """Get recent memory access activity for a user.
         
@@ -226,7 +227,7 @@ class AccessRepository:
         self,
         organization_id: UUID | None = None,
         user_id: UUID | None = None,
-        since: Any | None = None,
+        since: datetime | None = None,
         limit: int = 20,
     ) -> list[dict[str, Any]]:
         """Get the most frequently accessed memories.

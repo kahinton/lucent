@@ -7,8 +7,8 @@ description: 'Find relevant past knowledge efficiently. Use when you need contex
 
 | Tool | Use When |
 |------|----------|
-| `search_memories` | General content search - finds memories by what's in them |
-| `search_memories_full` | Need to search tags, metadata, or specific fields |
+| `search_memories` | Content search with optional filters (tags, date range, memory_ids) — query is optional |
+| `search_memories_full` | Broad search across content, tags, and metadata — query is required |
 | `get_memory` | Search results were truncated, need full content |
 
 # Search Strategies
@@ -26,8 +26,8 @@ search_memories("rate limiting")
 
 ## By Decision Type
 ```
-search_memories_full with tags: ["architecture", "decision"]
-search_memories_full with tags: ["api-design"]
+search_memories with tags: ["architecture", "decision"]
+search_memories with tags: ["api-design"]
 ```
 
 ## By Person (for team context)

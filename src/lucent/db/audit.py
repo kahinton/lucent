@@ -123,6 +123,9 @@ class AuditRepository:
             "has_more": offset + len(rows) < total_count,
         }
     
+    # Columns allowed in _get_filtered_entries to prevent SQL injection
+    _FILTERABLE_COLUMNS = frozenset({"user_id", "organization_id"})
+
     async def get_by_user_id(
         self,
         user_id: UUID,
@@ -143,52 +146,9 @@ class AuditRepository:
         Returns:
             Dict with entries list and pagination info.
         """
-        conditions = ["user_id = $1"]
-        params: list[Any] = [str(user_id)]
-        param_idx = 2
-        
-        if action_type:
-            conditions.append(f"action_type = ${param_idx}")
-            params.append(action_type)
-            param_idx += 1
-        
-        if since:
-            conditions.append(f"created_at >= ${param_idx}")
-            params.append(since)
-            param_idx += 1
-        
-        where_clause = " AND ".join(conditions)
-        
-        query = f"""
-            SELECT id, memory_id, user_id, organization_id, action_type,
-                   created_at, changed_fields, old_values, new_values, context, notes
-            FROM memory_audit_log
-            WHERE {where_clause}
-            ORDER BY created_at DESC
-            LIMIT ${param_idx} OFFSET ${param_idx + 1}
-        """
-        
-        count_query = f"""
-            SELECT COUNT(*) as total
-            FROM memory_audit_log
-            WHERE {where_clause}
-        """
-        
-        params.extend([limit, offset])
-        
-        async with self.pool.acquire() as conn:
-            count_row = await conn.fetchrow(count_query, *params[:-2])
-            total_count = count_row["total"] if count_row else 0
-            
-            rows = await conn.fetch(query, *params)
-        
-        return {
-            "entries": [self._row_to_dict(row) for row in rows],
-            "total_count": total_count,
-            "offset": offset,
-            "limit": limit,
-            "has_more": offset + len(rows) < total_count,
-        }
+        return await self._get_filtered_entries(
+            "user_id", user_id, action_type, since, limit, offset
+        )
     
     async def get_by_organization_id(
         self,
@@ -210,8 +170,39 @@ class AuditRepository:
         Returns:
             Dict with entries list and pagination info.
         """
-        conditions = ["organization_id = $1"]
-        params: list[Any] = [str(organization_id)]
+        return await self._get_filtered_entries(
+            "organization_id", organization_id, action_type, since, limit, offset
+        )
+
+    async def _get_filtered_entries(
+        self,
+        filter_column: str,
+        filter_value: UUID,
+        action_type: str | None = None,
+        since: datetime | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """Get paginated audit entries filtered by a primary column.
+        
+        Shared implementation for get_by_user_id and get_by_organization_id.
+        
+        Args:
+            filter_column: Column to filter on (must be in _FILTERABLE_COLUMNS).
+            filter_value: UUID value to match.
+            action_type: Optional filter by action type.
+            since: Optional filter to entries after this time.
+            limit: Maximum entries to return.
+            offset: Pagination offset.
+            
+        Returns:
+            Dict with entries list and pagination info.
+        """
+        if filter_column not in self._FILTERABLE_COLUMNS:
+            raise ValueError(f"Invalid filter column: {filter_column}")
+
+        conditions = [f"{filter_column} = $1"]
+        params: list[Any] = [str(filter_value)]
         param_idx = 2
         
         if action_type:
@@ -261,7 +252,7 @@ class AuditRepository:
         self,
         organization_id: UUID | None = None,
         action_types: list[str] | None = None,
-        since: Any | None = None,
+        since: datetime | None = None,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
         """Get recent audit entries, optionally filtered.

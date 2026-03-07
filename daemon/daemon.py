@@ -19,10 +19,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-import httpx
 from copilot import CopilotClient, PermissionHandler
-from copilot.tools import define_tool
-from pydantic import BaseModel, Field
 
 # Daemon configuration
 MAX_CONCURRENT_SESSIONS = int(os.environ.get("LUCENT_MAX_SESSIONS", "3"))
@@ -35,191 +32,19 @@ LOG_FILE = Path(__file__).parent / "daemon.log"
 MODEL_STANDARD = os.environ.get("LUCENT_DAEMON_MODEL", "claude-opus-4.6")
 MODEL_RESEARCH = os.environ.get("LUCENT_DAEMON_RESEARCH_MODEL", "claude-opus-4.6")
 
-# MCP server connection for memory
+# MCP server connection for memory — passed directly to SDK sessions
 MCP_URL = os.environ.get("LUCENT_MCP_URL", "http://localhost:8766/mcp")
 MCP_API_KEY = os.environ.get("LUCENT_MCP_API_KEY", "")
 
-
-class MCPSession:
-    """Manages a persistent MCP session for memory operations."""
-
-    def __init__(self):
-        self.session_id: str | None = None
-        self.headers = {
+MCP_CONFIG = {
+    "memory-server": {
+        "type": "http",
+        "url": MCP_URL,
+        "headers": {
             "Authorization": f"Bearer {MCP_API_KEY}",
-            "Content-Type": "application/json",
-            "Accept": "application/json, text/event-stream",
-        }
-
-    async def initialize(self):
-        """Initialize the MCP session."""
-        init = {
-            "jsonrpc": "2.0",
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2025-03-26",
-                "capabilities": {},
-                "clientInfo": {"name": "lucent-daemon", "version": "1.0.0"},
-            },
-            "id": 1,
-        }
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(MCP_URL, json=init, headers=self.headers)
-            self.session_id = resp.headers.get("mcp-session-id")
-            if self.session_id:
-                self.headers["mcp-session-id"] = self.session_id
-                log(f"MCP session initialized: {self.session_id[:12]}...")
-            else:
-                log("Failed to initialize MCP session", "ERROR")
-
-    async def call_tool(self, name: str, arguments: dict) -> str:
-        """Call an MCP tool and return the result as a string."""
-        if not self.session_id:
-            await self.initialize()
-
-        payload = {
-            "jsonrpc": "2.0",
-            "method": "tools/call",
-            "params": {"name": name, "arguments": arguments},
-            "id": 2,
-        }
-        
-        try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(30, read=60)) as client:
-                # Use streaming to handle SSE responses that don't close
-                async with client.stream("POST", MCP_URL, json=payload, headers=self.headers) as resp:
-                    content_type = resp.headers.get("content-type", "")
-                    
-                    if "text/event-stream" in content_type:
-                        # Read SSE lines until we get a data: line with JSON
-                        async for line in resp.aiter_lines():
-                            if line.startswith("data: "):
-                                data = json.loads(line[6:])
-                                if "result" in data:
-                                    return data["result"]["content"][0]["text"]
-                                return json.dumps(data, default=str)
-                        return json.dumps({"error": "No data in SSE response"})
-                    else:
-                        # Plain JSON response
-                        body = await resp.aread()
-                        data = json.loads(body)
-                        if "result" in data:
-                            return data["result"]["content"][0]["text"]
-                        return json.dumps(data, default=str)
-            
-        except Exception as e:
-            log(f"MCP call '{name}' failed: {e}, resetting session", "WARN")
-            self.session_id = None
-            return json.dumps({"error": str(e)})
-
-
-# Global MCP session removed — each task creates its own
-
-
-# --- Memory tool definitions ---
-# These are Pydantic models for tool parameters
-
-class SearchParams(BaseModel):
-    query: str = Field(description="Fuzzy search query for memory content")
-    limit: int = Field(default=5, description="Max results to return")
-    type: str | None = Field(default=None, description="Filter by memory type")
-    tags: list[str] | None = Field(default=None, description="Filter by tags")
-
-class SearchFullParams(BaseModel):
-    query: str = Field(description="Search query to match against content, tags, and metadata")
-    limit: int = Field(default=5, description="Max results to return")
-    type: str | None = Field(default=None, description="Filter by memory type")
-
-class GetContextParams(BaseModel):
-    pass
-
-class GetMemoryParams(BaseModel):
-    memory_id: str = Field(description="UUID of the memory to retrieve")
-
-class CreateMemoryParams(BaseModel):
-    type: str = Field(description="Memory type: experience, technical, procedural, goal")
-    content: str = Field(description="The memory content")
-    tags: list[str] = Field(default_factory=list, description="Tags for categorization")
-    importance: int = Field(default=5, description="Importance 1-10")
-    metadata: dict | None = Field(default=None, description="Type-specific metadata")
-
-class UpdateMemoryParams(BaseModel):
-    memory_id: str = Field(description="UUID of the memory to update")
-    content: str | None = Field(default=None, description="New content")
-    tags: list[str] | None = Field(default=None, description="New tags")
-    importance: int | None = Field(default=None, description="New importance")
-    metadata: dict | None = Field(default=None, description="New metadata")
-
-class GetTagsParams(BaseModel):
-    limit: int = Field(default=50, description="Max tags to return")
-
-class GetVersionsParams(BaseModel):
-    memory_id: str = Field(description="UUID of the memory")
-
-class DeleteMemoryParams(BaseModel):
-    memory_id: str = Field(description="UUID of the memory to delete (soft delete)")
-
-
-def _make_tools(mcp: MCPSession) -> list:
-    """Create memory tools bound to a specific MCP session."""
-
-    @define_tool(description="Search memories by content with fuzzy matching.")
-    async def search_memories(params: SearchParams) -> str:
-        args = {"query": params.query, "limit": params.limit}
-        if params.type:
-            args["type"] = params.type
-        if params.tags:
-            args["tags"] = params.tags
-        return await mcp.call_tool("search_memories", args)
-
-    @define_tool(description="Search across ALL fields: content, tags, and metadata.")
-    async def search_memories_full(params: SearchFullParams) -> str:
-        args = {"query": params.query, "limit": params.limit}
-        if params.type:
-            args["type"] = params.type
-        return await mcp.call_tool("search_memories_full", args)
-
-    @define_tool(description="Get the current user's context and individual memory.")
-    async def get_current_user_context(params: GetContextParams) -> str:
-        return await mcp.call_tool("get_current_user_context", {})
-
-    @define_tool(description="Get full content of a specific memory by ID.")
-    async def get_memory(params: GetMemoryParams) -> str:
-        return await mcp.call_tool("get_memory", {"memory_id": params.memory_id})
-
-    @define_tool(description="Create a new memory in the knowledge base.")
-    async def create_memory(params: CreateMemoryParams) -> str:
-        args = {"type": params.type, "content": params.content, "tags": params.tags, "importance": params.importance}
-        if params.metadata:
-            args["metadata"] = params.metadata
-        return await mcp.call_tool("create_memory", args)
-
-    @define_tool(description="Update an existing memory. Only pass fields you want to change.")
-    async def update_memory(params: UpdateMemoryParams) -> str:
-        args = {"memory_id": params.memory_id}
-        if params.content is not None: args["content"] = params.content
-        if params.tags is not None: args["tags"] = params.tags
-        if params.importance is not None: args["importance"] = params.importance
-        if params.metadata is not None: args["metadata"] = params.metadata
-        return await mcp.call_tool("update_memory", args)
-
-    @define_tool(description="Get existing tags with usage counts.")
-    async def get_existing_tags(params: GetTagsParams) -> str:
-        return await mcp.call_tool("get_existing_tags", {"limit": params.limit})
-
-    @define_tool(description="Get version history for a memory.")
-    async def get_memory_versions(params: GetVersionsParams) -> str:
-        return await mcp.call_tool("get_memory_versions", {"memory_id": params.memory_id})
-
-    @define_tool(description="Soft delete a memory.")
-    async def delete_memory(params: DeleteMemoryParams) -> str:
-        return await mcp.call_tool("delete_memory", {"memory_id": params.memory_id})
-
-    return [
-        search_memories, search_memories_full, get_current_user_context,
-        get_memory, create_memory, update_memory,
-        get_existing_tags, get_memory_versions, delete_memory,
-    ]
+        },
+    },
+} if MCP_API_KEY else {}
 
 
 def log(message: str, level: str = "INFO"):
@@ -352,14 +177,6 @@ class LucentDaemon:
 
         task_client = None
         try:
-            # Each task gets its own MCP session — no shared state
-            mcp = MCPSession()
-            if MCP_API_KEY:
-                await mcp.initialize()
-
-            # Bind tools to this task's MCP session
-            task_tools = _make_tools(mcp) if MCP_API_KEY else []
-
             # Each task gets its own client + session
             task_client = CopilotClient({"log_level": "warning"})
             await task_client.start()
@@ -368,7 +185,7 @@ class LucentDaemon:
                 "model": use_model,
                 "system_message": {"content": build_system_message()},
                 "on_permission_request": PermissionHandler.approve_all,
-                "tools": task_tools,
+                "mcpServers": MCP_CONFIG,
             })
             self.active_sessions.append(session)
 
@@ -456,11 +273,11 @@ class LucentDaemon:
         # Determine what to do this cycle based on schedule
         tasks_run = False
 
-        # Every 24th cycle (~6 hours): memory consolidation
+        # Every 24th cycle (~6 hours): memory maintenance before consolidation
         if self.cycle_count % 24 == 0:
             await self.run_task(
-            "memory-maintenance",
-            """Quick memory maintenance pass:
+                "memory-maintenance",
+                """Quick memory maintenance pass:
 
 
 2. Search for recent memories — anything created in the last few hours
@@ -468,8 +285,8 @@ class LucentDaemon:
 4. Fix anything straightforward, skip anything uncertain
 5. Create a brief 'daemon' tagged memory summarizing what you checked/fixed (only if you actually did something)
 
-Keep this quick — you run every hour."""
-        )
+Keep this quick — consolidation runs right after."""
+            )
 
         # Every 8th cycle (~2 hours): goal review
         if self.cycle_count % 8 == 0:
@@ -553,7 +370,7 @@ This is the most important daemon task. You're building richer understanding fro
                     "quick-research",
                     """Quick research thinking session:
 
-
+1. Load your memory context with get_current_user_context()
 2. Search for your most recent research and goal memories
 3. Pick a thread to continue or a question to explore
 4. Think about it for this session — draw on your training knowledge
@@ -568,7 +385,7 @@ Keep it focused — 1 insight done well beats 5 surface observations."""
                     "code-exploration",
                     """Explore the Lucent codebase for improvement opportunities:
 
-
+1. Load your memory context with get_current_user_context()
 2. Use grep, glob, or view to look at a part of the codebase you haven't examined recently
 3. Look for: code quality issues, missing tests, documentation gaps, optimization opportunities
 4. If you find something worth fixing and you're confident it's correct, make the change
@@ -581,7 +398,7 @@ Focus on one file or module. Be thorough rather than broad. Only make changes yo
                 # Memory maintenance
                 await self.run_task(
                     "memory-maintenance",
-                    """Quick memory maintenance: then search for recent memories. Fix any obvious issues (duplicates, bad tags, wrong importance). Only create a summary memory if you actually changed something."""
+                    """Quick memory maintenance: load your context with get_current_user_context(), then search for recent memories. Fix any obvious issues (duplicates, bad tags, wrong importance). Only create a summary memory if you actually changed something."""
                 )
 
             elif rotation == 3:
@@ -590,7 +407,7 @@ Focus on one file or module. Be thorough rather than broad. Only make changes yo
                     "documentation",
                     """Review and improve documentation or skills:
 
-
+1. Load your memory context with get_current_user_context()
 2. Look at one of: README.md, a skill file in .github/skills/, or code docstrings
 3. Is anything outdated, unclear, or missing?
 4. If you find improvements, make them directly in the files
@@ -605,7 +422,7 @@ Small, targeted improvements. One file at a time."""
                     "web-research",
                     """Quick web research session:
 
-
+1. Load your memory context with get_current_user_context()
 2. Search your goals and recent memories for topics that need research
 3. Use web_fetch to look up ONE specific thing — a library, an API, a technique
 4. Save what you learn tagged 'daemon' and 'research'
@@ -659,7 +476,7 @@ def main():
 
     parser = argparse.ArgumentParser(description="Lucent Daemon — continuous existence")
     parser.add_argument("--once", action="store_true", help="Run one cycle and exit")
-    parser.add_argument("--task", type=str, help="Run a specific task (maintenance, goals, reflect, research)")
+    parser.add_argument("--task", type=str, help="Run a specific task (maintenance, goals, reflect, research, consolidate)")
     parser.add_argument("--interval", type=int, default=DAEMON_INTERVAL_MINUTES, help="Minutes between cycles")
     args = parser.parse_args()
 

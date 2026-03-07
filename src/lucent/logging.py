@@ -38,6 +38,10 @@ class JSONFormatter(logging.Formatter):
         if record.exc_info:
             log_data["exception"] = self.formatException(record.exc_info)
 
+        # Add stack info if present (from stack_info=True)
+        if record.stack_info:
+            log_data["stack_info"] = record.stack_info
+
         # Add any extra fields
         for key, value in record.__dict__.items():
             if key not in (
@@ -103,6 +107,10 @@ class HumanFormatter(logging.Formatter):
         if record.exc_info:
             base += "\n" + self.formatException(record.exc_info)
 
+        # Add stack info if present (from stack_info=True)
+        if record.stack_info:
+            base += "\n" + record.stack_info
+
         return base
 
 
@@ -116,7 +124,7 @@ def configure_logging() -> None:
                              Default: 'human' in dev mode, 'json' otherwise
     """
     log_level_str = os.environ.get("LUCENT_LOG_LEVEL", "INFO").upper()
-    log_format = os.environ.get("LUCENT_LOG_FORMAT", "").lower()
+    log_format = os.environ.get("LUCENT_LOG_FORMAT", "human").lower()
 
     # Map string level to logging constant
     level_map = {
@@ -127,11 +135,6 @@ def configure_logging() -> None:
         "CRITICAL": logging.CRITICAL,
     }
     log_level = level_map.get(log_level_str, logging.INFO)
-
-    # Determine format based on environment
-    # Default to human-readable format unless explicitly set to json
-    if not log_format:
-        log_format = os.environ.get("LUCENT_LOG_FORMAT", "human")
 
     # Create handler
     handler = logging.StreamHandler(sys.stderr)
