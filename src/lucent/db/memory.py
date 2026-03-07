@@ -703,6 +703,229 @@ class MemoryRepository:
             for row in rows
         ]
 
+    async def export(
+        self,
+        type: str | None = None,
+        tags: list[str] | None = None,
+        importance_min: int | None = None,
+        importance_max: int | None = None,
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
+        requesting_user_id: UUID | None = None,
+        requesting_org_id: UUID | None = None,
+    ) -> list[dict[str, Any]]:
+        """Export memories with full content and metadata.
+
+        Returns all matching memories without truncation or pagination limits.
+        Access-controlled: only returns memories the user owns or that are
+        shared within their organization.
+
+        Args:
+            type: Optional filter by memory type.
+            tags: Optional filter by tags (any match).
+            importance_min: Optional minimum importance.
+            importance_max: Optional maximum importance.
+            created_after: Filter memories created after this date.
+            created_before: Filter memories created before this date.
+            requesting_user_id: User ID for access control.
+            requesting_org_id: Organization ID for access control.
+
+        Returns:
+            List of full memory records.
+        """
+        conditions = ["deleted_at IS NULL"]
+        params: list[Any] = []
+        param_idx = 1
+
+        if requesting_user_id is not None and requesting_org_id is not None:
+            conditions.append(
+                f"(user_id = ${param_idx} OR (organization_id = ${param_idx + 1} AND shared = true))"
+            )
+            params.append(str(requesting_user_id))
+            params.append(str(requesting_org_id))
+            param_idx += 2
+
+        if type is not None:
+            conditions.append(f"type = ${param_idx}")
+            params.append(type)
+            param_idx += 1
+
+        if tags:
+            conditions.append(f"tags && ${param_idx}")
+            params.append(tags)
+            param_idx += 1
+
+        if importance_min is not None:
+            conditions.append(f"importance >= ${param_idx}")
+            params.append(importance_min)
+            param_idx += 1
+
+        if importance_max is not None:
+            conditions.append(f"importance <= ${param_idx}")
+            params.append(importance_max)
+            param_idx += 1
+
+        if created_after is not None:
+            conditions.append(f"created_at >= ${param_idx}")
+            params.append(created_after)
+            param_idx += 1
+
+        if created_before is not None:
+            conditions.append(f"created_at <= ${param_idx}")
+            params.append(created_before)
+            param_idx += 1
+
+        where_clause = " AND ".join(conditions)
+
+        query = f"""
+            SELECT {self._FULL_COLUMNS}
+            FROM memories
+            WHERE {where_clause}
+            ORDER BY created_at ASC
+        """
+
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(query, *params)
+
+        return [self._row_to_dict(row) for row in rows]
+
+    async def import_memories(
+        self,
+        memories: list[dict[str, Any]],
+        requesting_user_id: UUID,
+        requesting_org_id: UUID | None = None,
+        requesting_username: str | None = None,
+    ) -> dict[str, Any]:
+        """Import memories from an export payload.
+
+        Deduplicates by content hash (content + type + username). Skips
+        memories whose content already exists for this user. Preserves
+        original timestamps when provided.
+
+        Args:
+            memories: List of memory dicts (matching export MemoryResponse format).
+            requesting_user_id: The authenticated user's ID — all imports are owned by this user.
+            requesting_org_id: The authenticated user's organization ID.
+            requesting_username: Fallback username if memory dict lacks one.
+
+        Returns:
+            Dict with imported, skipped, and errors counts plus error details.
+        """
+        import hashlib
+
+        valid_types = {"experience", "technical", "procedural", "goal", "individual"}
+        imported = 0
+        skipped = 0
+        errors: list[dict[str, str]] = []
+
+        async with self.pool.acquire() as conn:
+            # Build set of existing content hashes for this user
+            existing_rows = await conn.fetch(
+                "SELECT md5(content || type || username) AS hash FROM memories "
+                "WHERE user_id = $1 AND deleted_at IS NULL",
+                str(requesting_user_id),
+            )
+            existing_hashes: set[str] = {r["hash"] for r in existing_rows}
+
+            for idx, mem in enumerate(memories):
+                try:
+                    # --- Validate required fields ---
+                    content = mem.get("content")
+                    mem_type = mem.get("type")
+                    if not content or not isinstance(content, str) or not content.strip():
+                        errors.append({"index": str(idx), "error": "Missing or empty content"})
+                        continue
+                    if mem_type not in valid_types:
+                        errors.append({"index": str(idx), "error": f"Invalid type: {mem_type}"})
+                        continue
+
+                    username = mem.get("username") or requesting_username or "imported"
+                    importance = mem.get("importance", 5)
+                    if not isinstance(importance, int) or importance < 1 or importance > 10:
+                        importance = 5
+                    tags = mem.get("tags") or []
+                    if not isinstance(tags, list):
+                        tags = []
+                    tags = [str(t).lower().strip() for t in tags if t]
+                    metadata = mem.get("metadata") or {}
+                    if not isinstance(metadata, dict):
+                        metadata = {}
+                    related_ids = [str(uid) for uid in (mem.get("related_memory_ids") or [])]
+
+                    # --- Dedup check ---
+                    content_hash = hashlib.md5(
+                        (content + mem_type + username).encode()
+                    ).hexdigest()
+                    if content_hash in existing_hashes:
+                        skipped += 1
+                        continue
+
+                    # --- Preserve timestamps if provided ---
+                    created_at = None
+                    updated_at = None
+                    if mem.get("created_at"):
+                        try:
+                            created_at = (
+                                mem["created_at"]
+                                if isinstance(mem["created_at"], datetime)
+                                else datetime.fromisoformat(str(mem["created_at"]))
+                            )
+                        except (ValueError, TypeError):
+                            created_at = None
+                    if mem.get("updated_at"):
+                        try:
+                            updated_at = (
+                                mem["updated_at"]
+                                if isinstance(mem["updated_at"], datetime)
+                                else datetime.fromisoformat(str(mem["updated_at"]))
+                            )
+                        except (ValueError, TypeError):
+                            updated_at = None
+
+                    if created_at and updated_at:
+                        query = f"""
+                            INSERT INTO memories
+                                (username, type, content, tags, importance,
+                                 related_memory_ids, metadata, user_id, organization_id,
+                                 shared, created_at, updated_at)
+                            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,false,$10,$11)
+                            RETURNING {self._FULL_COLUMNS}
+                        """
+                        await conn.fetchrow(
+                            query, username, mem_type, content, tags, importance,
+                            related_ids, metadata,
+                            str(requesting_user_id),
+                            str(requesting_org_id) if requesting_org_id else None,
+                            created_at, updated_at,
+                        )
+                    else:
+                        query = f"""
+                            INSERT INTO memories
+                                (username, type, content, tags, importance,
+                                 related_memory_ids, metadata, user_id, organization_id, shared)
+                            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,false)
+                            RETURNING {self._FULL_COLUMNS}
+                        """
+                        await conn.fetchrow(
+                            query, username, mem_type, content, tags, importance,
+                            related_ids, metadata,
+                            str(requesting_user_id),
+                            str(requesting_org_id) if requesting_org_id else None,
+                        )
+
+                    existing_hashes.add(content_hash)
+                    imported += 1
+
+                except Exception as e:
+                    errors.append({"index": str(idx), "error": str(e)})
+
+        return {
+            "imported": imported,
+            "skipped": skipped,
+            "errors": errors,
+            "total": len(memories),
+        }
+
     async def _validate_related_ids(
         self, 
         related_ids: list[UUID], 

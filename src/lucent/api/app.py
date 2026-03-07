@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from lucent.api.routers import memories, search
+from lucent.api.routers import memories, search, export
 from lucent.logging import get_logger
 from lucent.mode import is_team_mode
 
@@ -81,6 +81,9 @@ def create_app() -> FastAPI:
     )
     
     # Include core API routers
+    # Export router must be registered before memories router to avoid
+    # path conflicts with /{memory_id} routes
+    app.include_router(export.router, prefix="/api/memories/export", tags=["Export"])
     app.include_router(memories.router, prefix="/api/memories", tags=["Memories"])
     app.include_router(search.router, prefix="/api/search", tags=["Search"])
     

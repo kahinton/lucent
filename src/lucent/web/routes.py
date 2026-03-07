@@ -42,6 +42,9 @@ from lucent.db import (
 )
 from lucent.mode import is_team_mode
 from lucent.rbac import Role
+from lucent.logging import get_logger
+
+logger = get_logger("web.routes")
 
 
 # Set up templates
@@ -369,7 +372,20 @@ async def login_submit(request: Request):
     credentials = {key: str(value) for key, value in form.items()}
     
     provider = await get_auth_provider()
-    user = await provider.authenticate(credentials)
+    
+    try:
+        user = await provider.authenticate(credentials)
+    except Exception:
+        logger.exception("Error during authentication")
+        return templates.TemplateResponse(
+            "login.html",
+            {
+                "request": request,
+                "fields": provider.get_login_fields(),
+                "error": "An unexpected error occurred. Please try again later.",
+            },
+            status_code=500,
+        )
     
     if user is None:
         return templates.TemplateResponse(
@@ -383,7 +399,19 @@ async def login_submit(request: Request):
         )
     
     # Create session
-    token = await create_session(pool, user["id"])
+    try:
+        token = await create_session(pool, user["id"])
+    except Exception:
+        logger.exception("Error creating session")
+        return templates.TemplateResponse(
+            "login.html",
+            {
+                "request": request,
+                "fields": provider.get_login_fields(),
+                "error": "An unexpected error occurred. Please try again later.",
+            },
+            status_code=500,
+        )
     
     params = get_cookie_params()
     response = RedirectResponse("/", status_code=303)
@@ -472,15 +500,24 @@ async def setup_submit(request: Request):
     
     try:
         user, api_key = await create_initial_user(pool, display_name, email, password)
-    except Exception as e:
+    except Exception:
+        logger.exception("Error during initial user setup")
         return templates.TemplateResponse(
             "setup.html",
-            {"request": request, "error": f"Setup failed: {e}"},
+            {"request": request, "error": "Setup failed due to an unexpected error. Please try again."},
             status_code=500,
         )
     
     # Create session and log the user in
-    token = await create_session(pool, user["id"])
+    try:
+        token = await create_session(pool, user["id"])
+    except Exception:
+        logger.exception("Error creating session after setup")
+        return templates.TemplateResponse(
+            "setup.html",
+            {"request": request, "error": "Account created but session failed. Please log in manually."},
+            status_code=500,
+        )
     
     response = templates.TemplateResponse(
         "setup_complete.html",

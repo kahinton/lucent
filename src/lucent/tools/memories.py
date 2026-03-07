@@ -1171,6 +1171,133 @@ Returns:
             except Exception as e:
                 return _error_response(f"Failed to unshare memory: {str(e)}")
 
+    @mcp.tool()
+    async def export_memories(
+        type: str | None = None,
+        tags: list[str] | None = None,
+        importance_min: int | None = None,
+        importance_max: int | None = None,
+        created_after: str | None = None,
+        created_before: str | None = None,
+    ) -> str:
+        """Export memories with full, untruncated content.
+
+        Returns all matching memories without content truncation or pagination,
+        suitable for backup or migration. Access-controlled: only returns memories
+        you own or that are shared within your organization.
+
+        Args:
+            type: Filter by memory type (experience, technical, procedural, goal, individual).
+            tags: Filter by tags (returns memories matching any provided tag).
+            importance_min: Minimum importance (1-10).
+            importance_max: Maximum importance (1-10).
+            created_after: ISO 8601 datetime string — only include memories created after this time.
+            created_before: ISO 8601 datetime string — only include memories created before this time.
+
+        Returns:
+            JSON string with export metadata and full memory records.
+        """
+        try:
+            user_id, org_id, user_role = await _get_current_user_context()
+
+            parsed_after = datetime.fromisoformat(created_after) if created_after else None
+            parsed_before = datetime.fromisoformat(created_before) if created_before else None
+
+            repo = await _get_repository()
+            memories = await repo.export(
+                type=type,
+                tags=tags,
+                importance_min=importance_min,
+                importance_max=importance_max,
+                created_after=parsed_after,
+                created_before=parsed_before,
+                requesting_user_id=user_id,
+                requesting_org_id=org_id,
+            )
+
+            serialized = [_serialize_memory(m) for m in memories]
+
+            result = {
+                "metadata": {
+                    "exported_at": datetime.now().isoformat(),
+                    "total_count": len(serialized),
+                    "filters": {
+                        k: v for k, v in {
+                            "type": type,
+                            "tags": tags,
+                            "importance_min": importance_min,
+                            "importance_max": importance_max,
+                            "created_after": created_after,
+                            "created_before": created_before,
+                        }.items() if v is not None
+                    },
+                    "format": "json",
+                },
+                "memories": serialized,
+            }
+            return json.dumps(result, indent=2)
+
+        except ValueError as e:
+            return _error_response(f"Invalid parameter: {str(e)}")
+        except Exception as e:
+            return _error_response(f"Failed to export memories: {str(e)}")
+
+    @mcp.tool()
+    async def import_memories(
+        memories_json: str,
+    ) -> str:
+        """Import memories from a previously exported JSON payload.
+
+        Accepts a JSON string containing a list of memory objects (matching the
+        format returned by export_memories). Deduplicates by content hash —
+        memories with identical content, type, and username already in your
+        account are skipped. All imported memories are owned by the
+        authenticated user.
+
+        Args:
+            memories_json: JSON string — either a list of memory objects, or
+                an export object with a "memories" key containing the list.
+
+        Returns:
+            JSON string with import summary: imported count, skipped count,
+            errors, and total.
+        """
+        try:
+            user_id, org_id, user_role = await _get_current_user_context()
+            username = _get_current_username()
+
+            # Parse input
+            try:
+                data = json.loads(memories_json)
+            except json.JSONDecodeError as e:
+                return _error_response(f"Invalid JSON: {str(e)}")
+
+            # Accept either a raw list or an export object with "memories" key
+            if isinstance(data, dict) and "memories" in data:
+                memory_list = data["memories"]
+            elif isinstance(data, list):
+                memory_list = data
+            else:
+                return _error_response(
+                    "Expected a JSON list of memories or an export object with a 'memories' key"
+                )
+
+            if not isinstance(memory_list, list):
+                return _error_response("'memories' must be a list")
+
+            repo = await _get_repository()
+            result = await repo.import_memories(
+                memories=memory_list,
+                requesting_user_id=user_id,
+                requesting_org_id=org_id,
+                requesting_username=username,
+            )
+
+            return json.dumps(result, indent=2)
+
+        except Exception as e:
+            return _error_response(f"Failed to import memories: {str(e)}")
+
 
 def _serialize_memory(memory: dict[str, Any]) -> dict[str, Any]:
     """Serialize a memory dict for JSON output."""

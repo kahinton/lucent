@@ -274,6 +274,50 @@ class TagSuggestionsResponse(BaseModel):
 
 
 # =============================================================================
+# Export Models
+# =============================================================================
+
+class ExportMetadata(BaseModel):
+    """Metadata about the export."""
+    exported_at: datetime
+    total_count: int
+    filters: dict[str, Any]
+    format: str
+
+
+class ExportResponse(BaseModel):
+    """Response model for memory export."""
+    metadata: ExportMetadata
+    memories: list[MemoryResponse]
+
+
+class ImportMemory(BaseModel):
+    """A single memory in an import request."""
+    type: str = Field(..., description="Type: experience, technical, procedural, goal, individual")
+    content: str = Field(..., min_length=1, description="Main content of the memory")
+    username: str | None = Field(default=None, description="Original username (defaults to authenticated user)")
+    tags: list[str] | None = Field(default=None, description="Tags for categorization")
+    importance: int = Field(default=5, ge=1, le=10, description="Importance rating 1-10")
+    related_memory_ids: list[str] | None = Field(default=None, description="Related memory UUIDs as strings")
+    metadata: dict[str, Any] | None = Field(default=None, description="Type-specific metadata")
+    created_at: datetime | None = Field(default=None, description="Original creation timestamp")
+    updated_at: datetime | None = Field(default=None, description="Original update timestamp")
+
+
+class ImportRequest(BaseModel):
+    """Request model for importing memories."""
+    memories: list[ImportMemory] = Field(..., description="List of memories to import")
+
+
+class ImportResponse(BaseModel):
+    """Response model for memory import."""
+    imported: int = Field(..., description="Number of memories successfully imported")
+    skipped: int = Field(..., description="Number of duplicate memories skipped")
+    errors: list[dict[str, str]] = Field(default_factory=list, description="Errors encountered")
+    total: int = Field(..., description="Total memories in request")
+
+
+# =============================================================================
 # Error Models
 # =============================================================================
 
