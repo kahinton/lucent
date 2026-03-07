@@ -317,13 +317,15 @@ class LucentDaemon:
 
             if result:
                 log(f"--- {agent_type} result ---\n{result}\n--- end {agent_type} ---", "THOUGHT")
-
-            # Mark the task as completed by updating its tags
-            await self.run_session(
-                f"task-complete-{memory_id[:8]}",
-                "You are a helper. Update the specified memory's tags to replace 'pending' with 'completed'. Use update_memory.",
-                f"Update memory {memory_id}: change tag 'pending' to 'completed'."
-            )
+                # Only mark completed if the sub-agent actually produced output
+                await self.run_session(
+                    f"task-complete-{memory_id[:8]}",
+                    "You are a helper. Update the specified memory's tags to replace 'pending' with 'completed'. Use update_memory.",
+                    f"Update memory {memory_id}: change tag 'pending' to 'completed'."
+                )
+                log(f"Task {memory_id[:8]} marked completed")
+            else:
+                log(f"Task {memory_id[:8]} sub-agent returned no output — leaving as pending", "WARN")
 
     # --- Autonomic Layer ---
 
@@ -399,9 +401,6 @@ def main():
     parser.add_argument("--interval", type=int, default=DAEMON_INTERVAL_MINUTES,
                         help="Minutes between cognitive cycles")
     args = parser.parse_args()
-
-    global DAEMON_INTERVAL_MINUTES
-    DAEMON_INTERVAL_MINUTES = args.interval
 
     daemon = LucentDaemon()
 
