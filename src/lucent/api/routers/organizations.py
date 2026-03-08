@@ -15,7 +15,10 @@ from lucent.api.models import (
     SuccessResponse,
 )
 from lucent.db import OrganizationRepository, UserRepository, get_pool
+from lucent.logging import get_logger
 from lucent.rbac import Permission
+
+logger = get_logger(__name__)
 
 
 router = APIRouter()
@@ -121,6 +124,7 @@ async def create_organization(
             detail="Organization with this name already exists",
         )
     
+    logger.info("Organization created: id=%s, name=%s, by=%s", org["id"], data.name, user.id)
     return _org_to_response(org)
 
 
@@ -219,6 +223,7 @@ async def delete_current_organization(
             detail="Organization not found",
         )
     
+    logger.info("Organization deleted: id=%s, by=%s", user.organization_id, user.id)
     return SuccessResponse(
         success=True,
         message=f"Organization {user.organization_id} deleted",
@@ -276,6 +281,7 @@ async def transfer_ownership(
     # Demote current owner to admin
     await user_repo.update_role(user.id, "admin")
     
+    logger.info("Ownership transferred: org=%s, from=%s, to=%s", user.organization_id, user.id, new_owner_id)
     return SuccessResponse(
         success=True,
         message=f"Ownership transferred to user {new_owner_id}",

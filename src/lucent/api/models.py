@@ -318,6 +318,70 @@ class ImportResponse(BaseModel):
 
 
 # =============================================================================
+# Daemon Task Models
+# =============================================================================
+
+class DaemonTaskCreate(BaseModel):
+    """Request model for submitting a daemon task."""
+    description: str = Field(..., min_length=1, description="Task description/instructions")
+    agent_type: str = Field(
+        default="code",
+        description="Agent type: research, code, memory, reflection, documentation, planning",
+    )
+    priority: str = Field(default="medium", description="Priority: low, medium, high")
+    context: str | None = Field(default=None, description="Additional context for the agent")
+    tags: list[str] | None = Field(default=None, description="Extra tags for categorization")
+
+
+class DaemonTaskResponse(BaseModel):
+    """Response model for a daemon task."""
+    id: UUID
+    description: str
+    agent_type: str
+    priority: str
+    status: str  # pending, claimed, completed, failed
+    tags: list[str]
+    created_at: datetime
+    updated_at: datetime
+    result: str | None = None
+    claimed_by: str | None = None
+
+
+class DaemonTaskListResponse(BaseModel):
+    """Response model for a list of daemon tasks."""
+    tasks: list[DaemonTaskResponse]
+    total_count: int
+
+
+# =============================================================================
+# Daemon Message Models
+# =============================================================================
+
+class DaemonMessageCreate(BaseModel):
+    """Request model for sending a daemon message."""
+    content: str = Field(..., min_length=1, description="Message content")
+    in_reply_to: UUID | None = Field(default=None, description="ID of message being replied to")
+
+
+class DaemonMessageResponse(BaseModel):
+    """Response model for a daemon message."""
+    id: UUID
+    content: str
+    sender: str  # "human" or "daemon"
+    acknowledged: bool
+    created_at: datetime
+    updated_at: datetime
+    in_reply_to: UUID | None = None
+    acknowledged_at: str | None = None
+
+
+class DaemonMessageListResponse(BaseModel):
+    """Response model for a list of daemon messages."""
+    messages: list[DaemonMessageResponse]
+    total_count: int
+
+
+# =============================================================================
 # Error Models
 # =============================================================================
 

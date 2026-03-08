@@ -11,6 +11,19 @@ import asyncpg
 from asyncpg import Pool
 
 
+class VersionConflictError(Exception):
+    """Raised when an optimistic locking version check fails."""
+
+    def __init__(self, memory_id: UUID, expected_version: int, actual_version: int):
+        self.memory_id = memory_id
+        self.expected_version = expected_version
+        self.actual_version = actual_version
+        super().__init__(
+            f"Version conflict for memory {memory_id}: "
+            f"expected {expected_version}, actual {actual_version}"
+        )
+
+
 class MemoryRepository:
     """Repository for memory CRUD operations."""
     
@@ -211,6 +224,7 @@ class MemoryRepository:
         importance: int | None = None,
         related_memory_ids: list[UUID] | None = None,
         metadata: dict[str, Any] | None = None,
+        expected_version: int | None = None,
     ) -> dict[str, Any] | None:
         """Update an existing memory.
         
@@ -221,9 +235,14 @@ class MemoryRepository:
             importance: Optional new importance rating.
             related_memory_ids: Optional new related memory IDs.
             metadata: Optional new metadata.
+            expected_version: If provided, the update only succeeds if the memory's
+                current version matches. Raises VersionConflictError on mismatch.
             
         Returns:
             The updated memory record, or None if not found.
+            
+        Raises:
+            VersionConflictError: If expected_version is provided and doesn't match.
         """
         # Build dynamic update query
         updates = []
@@ -261,12 +280,22 @@ class MemoryRepository:
         # Always increment version on update
         updates.append("version = version + 1")
         
+        # Build WHERE clause
+        where_parts = [f"id = ${param_idx}"]
         params.append(str(memory_id))
+        param_idx += 1
+        
+        where_parts.append("deleted_at IS NULL")
+        
+        if expected_version is not None:
+            where_parts.append(f"version = ${param_idx}")
+            params.append(expected_version)
+            param_idx += 1
         
         query = f"""
             UPDATE memories
             SET {", ".join(updates)}
-            WHERE id = ${param_idx} AND deleted_at IS NULL
+            WHERE {" AND ".join(where_parts)}
             RETURNING {self._FULL_COLUMNS}
         """
         
@@ -278,9 +307,153 @@ class MemoryRepository:
             row = await conn.fetchrow(query, *params)
         
         if row is None:
+            # Distinguish between "not found" and "version mismatch"
+            if expected_version is not None:
+                existing = await self.get(memory_id)
+                if existing is not None:
+                    raise VersionConflictError(
+                        memory_id=memory_id,
+                        expected_version=expected_version,
+                        actual_version=existing["version"],
+                    )
             return None
         
         return self._row_to_dict(row)
+
+    async def claim_task(
+        self,
+        memory_id: UUID,
+        instance_id: str,
+    ) -> dict[str, Any] | None:
+        """Atomically claim a pending daemon task for a specific instance.
+        
+        Uses SELECT FOR UPDATE to prevent race conditions between instances.
+        Only succeeds if the memory has a 'pending' tag and no existing claim.
+        Replaces 'pending' with 'claimed-by-{instance_id}' in the tags array.
+        
+        Args:
+            memory_id: The UUID of the task memory to claim.
+            instance_id: The unique identifier of the claiming daemon instance.
+            
+        Returns:
+            The updated memory record if claimed successfully, or None if the
+            task was already claimed or is not in a pending state.
+        """
+        claim_tag = f"claimed-by-{instance_id}"
+        
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                # Lock the row and verify it's still pending
+                row = await conn.fetchrow(
+                    f"""
+                    SELECT {self._FULL_COLUMNS}
+                    FROM memories
+                    WHERE id = $1
+                      AND deleted_at IS NULL
+                      AND 'pending' = ANY(tags)
+                      AND NOT EXISTS (
+                          SELECT 1 FROM unnest(tags) t
+                          WHERE t LIKE 'claimed-by-%'
+                      )
+                    FOR UPDATE SKIP LOCKED
+                    """,
+                    str(memory_id),
+                )
+                
+                if row is None:
+                    return None
+                
+                # Swap 'pending' → claim tag
+                new_tags = [t for t in row["tags"] if t != "pending"]
+                new_tags.append(claim_tag)
+                
+                updated = await conn.fetchrow(
+                    f"""
+                    UPDATE memories
+                    SET tags = $1, version = version + 1
+                    WHERE id = $2
+                    RETURNING {self._FULL_COLUMNS}
+                    """,
+                    new_tags,
+                    str(memory_id),
+                )
+                
+                if updated is None:
+                    return None
+                
+                return self._row_to_dict(updated)
+
+    async def release_claim(
+        self,
+        memory_id: UUID,
+        instance_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Release a claimed task back to pending state.
+        
+        If instance_id is provided, only releases if the task is claimed by that
+        specific instance. If None, releases any claim.
+        
+        Args:
+            memory_id: The UUID of the task memory to release.
+            instance_id: Optional — only release if claimed by this instance.
+            
+        Returns:
+            The updated memory record, or None if not found/not claimed.
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                if instance_id:
+                    claim_tag = f"claimed-by-{instance_id}"
+                    row = await conn.fetchrow(
+                        f"""
+                        SELECT {self._FULL_COLUMNS}
+                        FROM memories
+                        WHERE id = $1
+                          AND deleted_at IS NULL
+                          AND $2 = ANY(tags)
+                        FOR UPDATE
+                        """,
+                        str(memory_id),
+                        claim_tag,
+                    )
+                else:
+                    row = await conn.fetchrow(
+                        f"""
+                        SELECT {self._FULL_COLUMNS}
+                        FROM memories
+                        WHERE id = $1
+                          AND deleted_at IS NULL
+                          AND EXISTS (
+                              SELECT 1 FROM unnest(tags) t
+                              WHERE t LIKE 'claimed-by-%%'
+                          )
+                        FOR UPDATE
+                        """,
+                        str(memory_id),
+                    )
+                
+                if row is None:
+                    return None
+                
+                # Remove claim tag, restore 'pending'
+                new_tags = [t for t in row["tags"] if not t.startswith("claimed-by-")]
+                new_tags.append("pending")
+                
+                updated = await conn.fetchrow(
+                    f"""
+                    UPDATE memories
+                    SET tags = $1, version = version + 1
+                    WHERE id = $2
+                    RETURNING {self._FULL_COLUMNS}
+                    """,
+                    new_tags,
+                    str(memory_id),
+                )
+                
+                if updated is None:
+                    return None
+                
+                return self._row_to_dict(updated)
     
     async def delete(self, memory_id: UUID) -> bool:
         """Soft delete a memory by setting deleted_at timestamp.
@@ -330,7 +503,7 @@ class MemoryRepository:
             query: Optional fuzzy search query for content.
             username: Optional filter by username.
             type: Optional filter by memory type.
-            tags: Optional filter by tags (any match).
+            tags: Optional filter by tags (all must match).
             importance_min: Optional minimum importance.
             importance_max: Optional maximum importance.
             created_after: Optional filter for memories created after this date.
@@ -367,7 +540,7 @@ class MemoryRepository:
             param_idx += 1
         
         if tags:
-            conditions.append(f"tags && ${param_idx}")
+            conditions.append(f"tags @> ${param_idx}")
             params.append(tags)
             param_idx += 1
         
@@ -722,7 +895,7 @@ class MemoryRepository:
 
         Args:
             type: Optional filter by memory type.
-            tags: Optional filter by tags (any match).
+            tags: Optional filter by tags (all must match).
             importance_min: Optional minimum importance.
             importance_max: Optional maximum importance.
             created_after: Filter memories created after this date.
@@ -751,7 +924,7 @@ class MemoryRepository:
             param_idx += 1
 
         if tags:
-            conditions.append(f"tags && ${param_idx}")
+            conditions.append(f"tags @> ${param_idx}")
             params.append(tags)
             param_idx += 1
 

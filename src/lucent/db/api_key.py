@@ -12,6 +12,10 @@ import asyncpg
 import bcrypt
 from asyncpg import Pool
 
+from lucent.logging import get_logger
+
+logger = get_logger(__name__)
+
 
 class ApiKeyRepository:
     """Repository for API key CRUD operations."""
@@ -75,8 +79,10 @@ class ApiKeyRepository:
                 expires_at,
             )
         
-        return self._row_to_dict(row), plain_key
-    
+        result = self._row_to_dict(row), plain_key
+        logger.info("API key created: name=%s, user=%s, prefix=%s", name, user_id, key_prefix)
+        return result
+
     async def get_by_name(self, user_id: UUID, name: str) -> dict[str, Any] | None:
         """Get an active API key by name for a user.
         
@@ -144,10 +150,12 @@ class ApiKeyRepository:
                 break
         
         if matched_row is None:
+            logger.warning("API key verification failed: hash mismatch for prefix=%s", key_prefix)
             return None
         
         # Check expiration
         if matched_row["expires_at"] and matched_row["expires_at"] < datetime.now(timezone.utc):
+            logger.warning("API key verification failed: expired key prefix=%s", key_prefix)
             return None
         
         # Update last used timestamp and count
@@ -232,6 +240,8 @@ class ApiKeyRepository:
         async with self.pool.acquire() as conn:
             result = await conn.fetchrow(query, str(key_id), str(user_id))
         
+        if result is not None:
+            logger.info("API key revoked: id=%s, user=%s", key_id, user_id)
         return result is not None
     
     async def update_name(self, key_id: UUID, user_id: UUID, name: str) -> dict[str, Any] | None:

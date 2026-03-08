@@ -20,6 +20,7 @@ can run simultaneously, contributing to the same intelligence.
 import asyncio
 import json
 import os
+import platform
 import signal
 import sys
 from datetime import datetime, timezone
@@ -34,6 +35,7 @@ from copilot import CopilotClient, PermissionHandler
 MAX_CONCURRENT_SESSIONS = int(os.environ.get("LUCENT_MAX_SESSIONS", "3"))
 DAEMON_INTERVAL_MINUTES = int(os.environ.get("LUCENT_DAEMON_INTERVAL", "15"))
 MODEL = os.environ.get("LUCENT_DAEMON_MODEL", "claude-opus-4.6")
+STALE_HEARTBEAT_MINUTES = int(os.environ.get("LUCENT_STALE_HEARTBEAT_MINUTES", "30"))
 
 # Paths
 DAEMON_DIR = Path(__file__).parent
@@ -59,13 +61,44 @@ MCP_CONFIG = {
 # Logging
 # ============================================================================
 
+def _configure_daemon_logging():
+    """Configure structured logging for the daemon process."""
+    os.environ.setdefault("LUCENT_LOG_FORMAT", "human")
+    os.environ.setdefault("LUCENT_LOG_FILE", str(LOG_FILE))
+    os.environ.setdefault("LUCENT_LOG_FILE_MAX_BYTES", "10485760")  # 10 MB
+    os.environ.setdefault("LUCENT_LOG_FILE_BACKUP_COUNT", "5")
+
+    # Add src to path so lucent package is importable
+    src_dir = str(DAEMON_DIR.parent / "src")
+    if src_dir not in sys.path:
+        sys.path.insert(0, src_dir)
+
+    from lucent.logging import configure_logging, get_logger
+    configure_logging()
+    return get_logger
+
+
+# Lazy-initialized logger — set up in main() after arg parsing
+_logger = None
+
+
 def log(message: str, level: str = "INFO"):
-    """Log to file and stdout."""
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    line = f"[{timestamp}] [{level}] {message}"
-    print(line)
-    with open(LOG_FILE, "a") as f:
-        f.write(line + "\n")
+    """Log via the structured logging module (falls back to print before init)."""
+    if _logger is None:
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{timestamp}] [{level}] {message}")
+        return
+    level_map = {
+        "INFO": _logger.info,
+        "WARN": _logger.warning,
+        "WARNING": _logger.warning,
+        "ERROR": _logger.error,
+        "STREAM": _logger.debug,
+        "THOUGHT": _logger.debug,
+        "DEBUG": _logger.debug,
+    }
+    log_fn = level_map.get(level.upper(), _logger.info)
+    log_fn(message)
 
 
 # ============================================================================
@@ -140,6 +173,9 @@ class LucentDaemon:
         self.active_sessions: list = []
         self.running = False
         self.cycle_count = 0
+        # Unique instance ID for distributed coordination
+        hostname = platform.node() or "unknown"
+        self.instance_id = f"{hostname}-{os.getpid()}-{int(datetime.now(timezone.utc).timestamp())}"
 
     async def start(self):
         """Start the daemon."""
@@ -150,7 +186,7 @@ class LucentDaemon:
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, self._handle_shutdown)
 
-        log(f"Daemon ready. Interval: {DAEMON_INTERVAL_MINUTES}m, "
+        log(f"Daemon ready. Instance: {self.instance_id}, Interval: {DAEMON_INTERVAL_MINUTES}m, "
             f"Max sessions: {MAX_CONCURRENT_SESSIONS}, Model: {MODEL}")
 
     def _handle_shutdown(self):
@@ -162,9 +198,23 @@ class LucentDaemon:
                 task.cancel()
 
     async def stop(self):
-        """Stop the daemon."""
-        log("Stopping daemon...")
+        """Stop the daemon and clean up heartbeat."""
+        log(f"Stopping daemon (instance: {self.instance_id})...")
         self.running = False
+
+        # Release any tasks claimed by this instance
+        try:
+            await self.run_session(
+                "shutdown-release",
+                (
+                    "You are a helper. Search for memories tagged 'daemon-task' that have a tag "
+                    f"'claimed-by-{self.instance_id}'. For each one found, use the release_claim tool "
+                    f"to release it with instance_id '{self.instance_id}'. Output the count released."
+                ),
+                f"Release all tasks claimed by instance {self.instance_id}."
+            )
+        except Exception:
+            pass
 
         for session in self.active_sessions:
             try:
@@ -197,7 +247,7 @@ class LucentDaemon:
                 "model": MODEL,
                 "system_message": {"content": system_message},
                 "on_permission_request": PermissionHandler.approve_all,
-                "mcpServers": MCP_CONFIG,
+                "mcp_servers": MCP_CONFIG,
             })
             self.active_sessions.append(session)
 
@@ -257,7 +307,13 @@ class LucentDaemon:
     async def run_cognitive_cycle(self):
         """Run one cognitive cycle — perceive, reason, decide, act via tools."""
         self.cycle_count += 1
-        log(f"=== Cognitive cycle #{self.cycle_count} ===")
+        log(f"=== Cognitive cycle #{self.cycle_count} (instance: {self.instance_id}) ===")
+
+        # Heartbeat before cognitive work
+        await self._update_heartbeat()
+
+        # Release stale claims from dead instances
+        await self._release_stale_claims()
 
         prompt = build_cognitive_prompt()
         result = await self.run_session(
@@ -272,20 +328,122 @@ class LucentDaemon:
         # After cognitive loop runs, check for pending tasks it created
         await self._dispatch_pending_tasks()
 
+    # --- Distributed Coordination ---
+
+    def _validate_task_result(self, result: str) -> tuple[bool, str]:
+        """Validate whether a sub-agent result indicates actual work was done.
+
+        Returns (success, reason) — success is True only if the result looks
+        like genuine completed work rather than a failure or empty acknowledgment.
+        """
+        if not result:
+            return False, "no output"
+
+        stripped = result.strip()
+
+        if len(stripped) < 100:
+            return False, f"output too short ({len(stripped)} chars)"
+
+        failure_indicators = [
+            "couldn't find", "could not find", "unable to", "failed to",
+            "i don't have", "i do not have", "no context", "not found",
+            "cannot locate", "couldn't locate", "could not locate",
+            "no relevant", "no matching", "i wasn't able", "i was not able",
+            "error occurred", "exception occurred", "task not completed",
+            "cannot complete", "couldn't complete", "could not complete",
+        ]
+
+        result_lower = result.lower()
+        for indicator in failure_indicators:
+            if indicator in result_lower:
+                return False, f"failure indicator found: '{indicator}'"
+
+        return True, "ok"
+
+    async def _update_heartbeat(self):
+        """Write/update this instance's heartbeat memory."""
+        log(f"Updating heartbeat for instance {self.instance_id}")
+        heartbeat_content = json.dumps({
+            "instance_id": self.instance_id,
+            "hostname": platform.node(),
+            "pid": os.getpid(),
+            "cycle_count": self.cycle_count,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "model": MODEL,
+            "max_sessions": MAX_CONCURRENT_SESSIONS,
+        })
+
+        await self.run_session(
+            f"heartbeat-{self.cycle_count}",
+            (
+                "You are a helper. Search for a memory tagged 'daemon-heartbeat' whose content "
+                f"contains the instance_id '{self.instance_id}'. "
+                "If found, update it with the new content provided. "
+                "If not found, create a new memory of type 'technical' with tags "
+                "['daemon-heartbeat', 'daemon'] and importance 3. "
+                "Output ONLY the memory ID."
+            ),
+            f"Heartbeat content:\n{heartbeat_content}"
+        )
+
+    async def _release_stale_claims(self):
+        """Find tasks claimed by instances whose heartbeat is stale and release them."""
+        log("Checking for stale claims...")
+        stale_finder = await self.run_session(
+            f"stale-check-{self.cycle_count}",
+            (
+                "You are a coordination helper. Do the following:\n"
+                "1. Search for all memories tagged 'daemon-heartbeat'.\n"
+                "2. For each heartbeat, parse its JSON content and check the 'timestamp' field.\n"
+                f"3. If the timestamp is older than {STALE_HEARTBEAT_MINUTES} minutes from now "
+                f"({datetime.now(timezone.utc).isoformat()}), note the 'instance_id' as stale.\n"
+                "4. Search for memories tagged 'daemon-task' that have a tag matching 'claimed-by-{{stale_instance_id}}'.\n"
+                "5. For each such task, use the release_claim tool to release it.\n"
+                "6. Output lines in format: RELEASED|memory_id|instance_id for each released task, "
+                "or NONE if no stale claims found."
+            ),
+            "Check for stale heartbeats and release their claimed tasks."
+        )
+
+        if stale_finder:
+            for line in stale_finder.strip().split("\n"):
+                line = line.strip()
+                if line.startswith("RELEASED|"):
+                    parts = line.split("|")
+                    if len(parts) >= 3:
+                        log(f"Released stale claim: task {parts[1][:8]} from instance {parts[2]}")
+
     async def _dispatch_pending_tasks(self):
-        """Find and dispatch any pending daemon-task memories created by the cognitive loop."""
-        # Run a session that searches for pending tasks and executes them
+        """Find and dispatch pending daemon-task memories, claiming them atomically."""
+        # Run a session that searches for pending tasks
         task_finder = await self.run_session(
             "task-finder",
-            "You are a task dispatcher. Search for memories tagged 'daemon-task' and 'pending'. For each one you find, output the memory ID and the agent type tag (research, code, memory, reflection, documentation, or planning). Output ONLY lines in format: TASK|memory_id|agent_type",
-            "Find all pending daemon tasks."
+            (
+                "You are a task dispatcher. Search for memories tagged 'daemon-task' and 'pending'. "
+                "For each one you find, output the memory ID and the agent type tag "
+                "(research, code, memory, reflection, documentation, or planning). "
+                "Also search for memories tagged 'daemon-task' that have a tag starting with "
+                f"'claimed-by-' to see what other instances are working on. "
+                "Output ONLY lines in format:\n"
+                "  TASK|memory_id|agent_type  (for pending tasks)\n"
+                "  CLAIMED|memory_id|claimed_by  (for already-claimed tasks)"
+            ),
+            "Find all pending and claimed daemon tasks."
         )
 
         if not task_finder:
             log("No pending tasks found")
             return
 
-        # Parse the simple line format
+        # Log what other instances are working on
+        for line in task_finder.strip().split("\n"):
+            line = line.strip()
+            if line.startswith("CLAIMED|"):
+                parts = line.split("|")
+                if len(parts) >= 3:
+                    log(f"Task {parts[1][:8]} already claimed by {parts[2]}")
+
+        # Parse and claim pending tasks
         for line in task_finder.strip().split("\n"):
             line = line.strip()
             if not line.startswith("TASK|"):
@@ -295,6 +453,21 @@ class LucentDaemon:
                 continue
             _, memory_id, agent_type = parts[0], parts[1].strip(), parts[2].strip()
 
+            # Atomically claim the task
+            claim_result = await self.run_session(
+                f"task-claim-{memory_id[:8]}",
+                (
+                    "You are a helper. Use the claim_task tool to atomically claim the specified "
+                    "memory for this daemon instance. Output ONLY 'CLAIMED' if successful or "
+                    "'FAILED' if the task was already claimed."
+                ),
+                f"Claim task memory {memory_id} for instance {self.instance_id}."
+            )
+
+            if not claim_result or "CLAIMED" not in claim_result.upper():
+                log(f"Could not claim task {memory_id[:8]} — likely claimed by another instance", "WARN")
+                continue
+
             # Get the task content
             task_content = await self.run_session(
                 f"task-read-{memory_id[:8]}",
@@ -303,6 +476,12 @@ class LucentDaemon:
             )
 
             if not task_content:
+                # Release the claim if we can't read the task
+                await self.run_session(
+                    f"task-release-{memory_id[:8]}",
+                    "You are a helper. Use release_claim to release the specified task.",
+                    f"Release claim on memory {memory_id} for instance {self.instance_id}."
+                )
                 continue
 
             log(f"Dispatching task {memory_id[:8]} to {agent_type}: {task_content[:80]}...")
@@ -317,15 +496,28 @@ class LucentDaemon:
 
             if result:
                 log(f"--- {agent_type} result ---\n{result}\n--- end {agent_type} ---", "THOUGHT")
-                # Only mark completed if the sub-agent actually produced output
+
+            # Validate result before marking complete
+            success, reason = self._validate_task_result(result)
+
+            if success:
                 await self.run_session(
                     f"task-complete-{memory_id[:8]}",
-                    "You are a helper. Update the specified memory's tags to replace 'pending' with 'completed'. Use update_memory.",
-                    f"Update memory {memory_id}: change tag 'pending' to 'completed'."
+                    (
+                        "You are a helper. Update the specified memory's tags: remove "
+                        f"'claimed-by-{self.instance_id}' and add 'completed'. Use update_memory."
+                    ),
+                    f"Update memory {memory_id}: replace claim tag with 'completed'."
                 )
                 log(f"Task {memory_id[:8]} marked completed")
             else:
-                log(f"Task {memory_id[:8]} sub-agent returned no output — leaving as pending", "WARN")
+                # Release the claim so another instance can try
+                await self.run_session(
+                    f"task-release-{memory_id[:8]}",
+                    "You are a helper. Use release_claim to release the specified task back to pending.",
+                    f"Release claim on memory {memory_id} for instance {self.instance_id}."
+                )
+                log(f"Task {memory_id[:8]} NOT complete — {reason}. Released claim.", "WARN")
 
     # --- Autonomic Layer ---
 
@@ -393,6 +585,11 @@ class LucentDaemon:
 def main():
     """Entry point for the daemon."""
     import argparse
+
+    # Initialize structured logging before anything else
+    global _logger
+    get_logger_fn = _configure_daemon_logging()
+    _logger = get_logger_fn("daemon")
 
     parser = argparse.ArgumentParser(description="Lucent Daemon — Cognitive Architecture")
     parser.add_argument("--once", action="store_true", help="Run one cognitive cycle and exit")

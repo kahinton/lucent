@@ -18,8 +18,11 @@ from lucent.api.models import (
     TagSuggestion,
 )
 from lucent.db import MemoryRepository, AuditRepository, AccessRepository, get_pool
+from lucent.logging import get_logger
 from lucent.models.validation import validate_metadata
 from lucent.rbac import Permission
+
+logger = get_logger("api.memories")
 
 
 router = APIRouter()
@@ -103,7 +106,7 @@ async def create_memory(
         organization_id=user.organization_id,
     )
     
-    # Log the creation
+    logger.info("Memory created: id=%s, type=%s, user=%s", result["id"], data.type, user.id)
     await audit_repo.log(
         memory_id=result["id"],
         action_type="create",

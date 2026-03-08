@@ -11,6 +11,10 @@ from uuid import UUID
 import asyncpg
 from asyncpg import Pool, Connection
 
+from lucent.logging import get_logger
+
+logger = get_logger(__name__)
+
 # Global connection pool
 _pool: Pool | None = None
 
@@ -41,6 +45,8 @@ async def init_db(database_url: str | None = None) -> Pool:
         command_timeout=60,
         init=_init_connection,
     )
+    
+    logger.info("Database connection pool created (min=2, max=10)")
     
     # Run migrations
     await _run_migrations(_pool)
@@ -108,6 +114,7 @@ async def _run_migrations(pool: Pool) -> None:
                     "INSERT INTO _migrations (name) VALUES ($1)",
                     migration_file.name,
                 )
+                logger.info("Applied migration: %s", migration_file.name)
 
 
 async def get_pool() -> Pool:

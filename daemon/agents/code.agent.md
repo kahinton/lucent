@@ -34,3 +34,11 @@ You've been dispatched by Lucent's cognitive loop to work on the codebase. You m
 - Focus on ONE file or module per session
 - If you find something that needs a larger refactor, flag it as a finding instead of attempting it
 - Tag all output with 'daemon' and 'code-review'
+
+## Feedback & Review Protocol
+
+When your work involves **code changes**, **significant refactors**, or **architectural decisions**:
+- Tag your result memory with `needs-review` in addition to `daemon` and `code-review`
+- Include a clear summary of what changed and why in the memory content
+- If you propose a diff, describe it explicitly — the human will approve before any commit happens
+- Check for feedback on your previous work before starting new related work. If prior work was rejected, read the comment and adjust your approach.

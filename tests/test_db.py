@@ -206,6 +206,65 @@ class TestMemoryRepository:
         
         assert all(m["type"] == "technical" for m in result["memories"])
     
+    async def test_search_with_tag_filter(self, db_pool, test_user, clean_test_data):
+        """Test searching with tag filter uses containment (all tags must match)."""
+        prefix = clean_test_data
+        repo = MemoryRepository(db_pool)
+        
+        # Create memories with different tag combinations
+        m1 = await repo.create(
+            username=f"{prefix}user",
+            type="procedural",
+            content=f"{prefix} Investigate auth rate limiting",
+            tags=["daemon-task", "pending", "code"],
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
+        )
+        m2 = await repo.create(
+            username=f"{prefix}user",
+            type="procedural",
+            content=f"{prefix} Memory consolidation routine",
+            tags=["daemon-task", "completed", "maintenance"],
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
+        )
+        m3 = await repo.create(
+            username=f"{prefix}user",
+            type="experience",
+            content=f"{prefix} Self-observation notes",
+            tags=["daemon", "self-observation"],
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
+        )
+        
+        # Single tag filter
+        result = await repo.search(
+            tags=["daemon-task"],
+            requesting_user_id=test_user["id"],
+            requesting_org_id=test_user["organization_id"],
+        )
+        ids = {m["id"] for m in result["memories"]}
+        assert m1["id"] in ids
+        assert m2["id"] in ids
+        assert m3["id"] not in ids
+        
+        # Multi-tag filter requires ALL tags (containment)
+        result = await repo.search(
+            tags=["daemon-task", "pending"],
+            requesting_user_id=test_user["id"],
+            requesting_org_id=test_user["organization_id"],
+        )
+        assert result["total_count"] == 1
+        assert result["memories"][0]["id"] == m1["id"]
+        
+        # Tag that doesn't exist
+        result = await repo.search(
+            tags=["nonexistent-tag"],
+            requesting_user_id=test_user["id"],
+            requesting_org_id=test_user["organization_id"],
+        )
+        assert result["total_count"] == 0
+    
     async def test_search_full(self, db_pool, test_user, clean_test_data):
         """Test full-text search across content, tags, and metadata."""
         prefix = clean_test_data
@@ -328,6 +387,205 @@ class TestMemoryRepository:
         
         assert result is None
 
+    async def test_update_with_version_conflict(self, db_pool, test_memory):
+        """Test that expected_version mismatch raises VersionConflictError."""
+        from lucent.db import VersionConflictError
+        repo = MemoryRepository(db_pool)
+        
+        with pytest.raises(VersionConflictError) as exc_info:
+            await repo.update(
+                test_memory["id"],
+                content="Should fail",
+                expected_version=999,
+            )
+        
+        assert exc_info.value.memory_id == test_memory["id"]
+        assert exc_info.value.expected_version == 999
+
+    async def test_update_with_correct_version(self, db_pool, test_memory):
+        """Test that update succeeds when expected_version matches."""
+        repo = MemoryRepository(db_pool)
+        
+        updated = await repo.update(
+            test_memory["id"],
+            content="Version matched",
+            expected_version=test_memory["version"],
+        )
+        
+        assert updated is not None
+        assert updated["content"] == "Version matched"
+        assert updated["version"] == test_memory["version"] + 1
+
+    async def test_claim_task(self, db_pool, test_user, clean_test_data):
+        """Test atomically claiming a pending daemon task."""
+        prefix = clean_test_data
+        repo = MemoryRepository(db_pool)
+        
+        task = await repo.create(
+            username=f"{prefix}user",
+            type="procedural",
+            content=f"{prefix} Pending task",
+            tags=["daemon-task", "pending"],
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
+        )
+        
+        claimed = await repo.claim_task(task["id"], "instance-1")
+        
+        assert claimed is not None
+        assert "pending" not in claimed["tags"]
+        assert "claimed-by-instance-1" in claimed["tags"]
+
+    async def test_claim_task_already_claimed(self, db_pool, test_user, clean_test_data):
+        """Test that claiming an already-claimed task returns None."""
+        prefix = clean_test_data
+        repo = MemoryRepository(db_pool)
+        
+        task = await repo.create(
+            username=f"{prefix}user",
+            type="procedural",
+            content=f"{prefix} Task to double-claim",
+            tags=["daemon-task", "pending"],
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
+        )
+        
+        await repo.claim_task(task["id"], "instance-1")
+        second_claim = await repo.claim_task(task["id"], "instance-2")
+        
+        assert second_claim is None
+
+    async def test_release_claim(self, db_pool, test_user, clean_test_data):
+        """Test releasing a claimed task back to pending."""
+        prefix = clean_test_data
+        repo = MemoryRepository(db_pool)
+        
+        task = await repo.create(
+            username=f"{prefix}user",
+            type="procedural",
+            content=f"{prefix} Task to release",
+            tags=["daemon-task", "pending"],
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
+        )
+        
+        await repo.claim_task(task["id"], "instance-1")
+        released = await repo.release_claim(task["id"], "instance-1")
+        
+        assert released is not None
+        assert "pending" in released["tags"]
+        assert not any(t.startswith("claimed-by-") for t in released["tags"])
+
+    async def test_release_claim_wrong_instance(self, db_pool, test_user, clean_test_data):
+        """Test that releasing with wrong instance_id returns None."""
+        prefix = clean_test_data
+        repo = MemoryRepository(db_pool)
+        
+        task = await repo.create(
+            username=f"{prefix}user",
+            type="procedural",
+            content=f"{prefix} Task wrong release",
+            tags=["daemon-task", "pending"],
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
+        )
+        
+        await repo.claim_task(task["id"], "instance-1")
+        released = await repo.release_claim(task["id"], "instance-2")
+        
+        assert released is None
+
+    async def test_set_shared(self, db_pool, test_memory, test_user):
+        """Test toggling the shared flag on a memory."""
+        repo = MemoryRepository(db_pool)
+        
+        shared = await repo.set_shared(test_memory["id"], test_user["id"], shared=True)
+        assert shared is not None
+        assert shared["shared"] is True
+        
+        unshared = await repo.set_shared(test_memory["id"], test_user["id"], shared=False)
+        assert unshared is not None
+        assert unshared["shared"] is False
+
+    async def test_set_shared_non_owner_denied(self, db_pool, test_memory):
+        """Test that non-owner cannot change shared status."""
+        repo = MemoryRepository(db_pool)
+        
+        result = await repo.set_shared(test_memory["id"], uuid4(), shared=True)
+        assert result is None
+
+    async def test_search_with_importance_filter(self, db_pool, test_user, clean_test_data):
+        """Test searching with importance range filters."""
+        prefix = clean_test_data
+        repo = MemoryRepository(db_pool)
+        
+        await repo.create(
+            username=f"{prefix}user", type="experience",
+            content=f"{prefix} Low importance", importance=2,
+            user_id=test_user["id"], organization_id=test_user["organization_id"],
+        )
+        await repo.create(
+            username=f"{prefix}user", type="experience",
+            content=f"{prefix} High importance", importance=9,
+            user_id=test_user["id"], organization_id=test_user["organization_id"],
+        )
+        
+        result = await repo.search(
+            query=prefix, importance_min=8,
+            requesting_user_id=test_user["id"],
+            requesting_org_id=test_user["organization_id"],
+        )
+        
+        assert all(m["importance"] >= 8 for m in result["memories"])
+
+    async def test_get_tag_suggestions(self, db_pool, test_user, clean_test_data):
+        """Test fuzzy tag suggestion lookup."""
+        prefix = clean_test_data
+        repo = MemoryRepository(db_pool)
+        
+        await repo.create(
+            username=f"{prefix}user", type="experience",
+            content=f"{prefix} Tag suggestion test",
+            tags=[f"{prefix}authentication", f"{prefix}auth-flow"],
+            user_id=test_user["id"], organization_id=test_user["organization_id"],
+        )
+        
+        suggestions = await repo.get_tag_suggestions(
+            query=f"{prefix}auth",
+            requesting_user_id=test_user["id"],
+            requesting_org_id=test_user["organization_id"],
+        )
+        
+        assert len(suggestions) >= 1
+        assert all("similarity" in s for s in suggestions)
+
+    async def test_create_with_related_memory_ids(self, db_pool, test_user, test_memory, clean_test_data):
+        """Test creating a memory with valid related_memory_ids."""
+        prefix = clean_test_data
+        repo = MemoryRepository(db_pool)
+        
+        memory = await repo.create(
+            username=f"{prefix}user", type="experience",
+            content=f"{prefix} Related memory",
+            related_memory_ids=[test_memory["id"]],
+            user_id=test_user["id"], organization_id=test_user["organization_id"],
+        )
+        
+        assert test_memory["id"] in memory["related_memory_ids"]
+
+    async def test_create_with_invalid_related_ids(self, db_pool, test_user, clean_test_data):
+        """Test that creating with nonexistent related IDs raises ValueError."""
+        prefix = clean_test_data
+        repo = MemoryRepository(db_pool)
+        
+        with pytest.raises(ValueError, match="not found"):
+            await repo.create(
+                username=f"{prefix}user", type="experience",
+                content=f"{prefix} Bad related",
+                related_memory_ids=[uuid4()],
+                user_id=test_user["id"], organization_id=test_user["organization_id"],
+            )
+
 
 class TestUserRepository:
     """Tests for UserRepository."""
@@ -409,6 +667,89 @@ class TestUserRepository:
         
         assert updated is not None
         assert updated["display_name"] == "Updated Name"
+
+    async def test_get_or_create_existing(self, db_pool, test_user, test_organization):
+        """Test get_or_create returns existing user without creating."""
+        repo = UserRepository(db_pool)
+        
+        user, created = await repo.get_or_create(
+            external_id=test_user["external_id"],
+            provider=test_user["provider"],
+            organization_id=test_organization["id"],
+        )
+        
+        assert created is False
+        assert user["id"] == test_user["id"]
+
+    async def test_get_or_create_new(self, db_pool, test_organization, clean_test_data):
+        """Test get_or_create creates a new user when not found."""
+        prefix = clean_test_data
+        repo = UserRepository(db_pool)
+        
+        user, created = await repo.get_or_create(
+            external_id=f"{prefix}brand_new",
+            provider="local",
+            organization_id=test_organization["id"],
+            email=f"{prefix}brandnew@test.com",
+        )
+        
+        assert created is True
+        assert user["external_id"] == f"{prefix}brand_new"
+
+    async def test_delete_user(self, db_pool, test_organization, clean_test_data):
+        """Test deleting a user also soft-deletes their individual memory."""
+        prefix = clean_test_data
+        user_repo = UserRepository(db_pool)
+        memory_repo = MemoryRepository(db_pool)
+        
+        user = await user_repo.create(
+            external_id=f"{prefix}deleteme",
+            provider="local",
+            organization_id=test_organization["id"],
+            display_name=f"{prefix}Delete Me",
+        )
+        
+        deleted = await user_repo.delete(user["id"])
+        assert deleted is True
+        
+        # User should be gone
+        assert await user_repo.get_by_id(user["id"]) is None
+        
+        # Individual memory should be soft-deleted (not retrievable)
+        individual = await memory_repo.get_individual_memory_for_user(user["id"])
+        assert individual is None
+
+    async def test_update_role(self, db_pool, test_user):
+        """Test updating a user's role."""
+        repo = UserRepository(db_pool)
+        
+        updated = await repo.update_role(test_user["id"], "admin")
+        
+        assert updated is not None
+        assert updated["role"] == "admin"
+
+    async def test_get_by_organization(self, db_pool, test_user, test_organization):
+        """Test listing users by organization."""
+        repo = UserRepository(db_pool)
+        
+        users = await repo.get_by_organization(test_organization["id"])
+        
+        assert len(users) >= 1
+        user_ids = [u["id"] for u in users]
+        assert test_user["id"] in user_ids
+
+    async def test_get_by_organization_with_role_filter(self, db_pool, test_user, test_organization):
+        """Test listing org users filtered by role."""
+        repo = UserRepository(db_pool)
+        
+        # test_user has default 'member' role
+        users = await repo.get_by_organization(test_organization["id"], role="member")
+        user_ids = [u["id"] for u in users]
+        assert test_user["id"] in user_ids
+        
+        users = await repo.get_by_organization(test_organization["id"], role="admin")
+        user_ids = [u["id"] for u in users]
+        assert test_user["id"] not in user_ids
 
 
 class TestOrganizationRepository:
@@ -510,6 +851,82 @@ class TestApiKeyRepository:
                 organization_id=test_user["organization_id"],
                 name="Duplicate Name",
             )
+
+    async def test_list_by_user(self, db_pool, test_user):
+        """Test listing all API keys for a user."""
+        repo = ApiKeyRepository(db_pool)
+        
+        await repo.create(
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
+            name="List Key 1",
+        )
+        await repo.create(
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
+            name="List Key 2",
+        )
+        
+        keys = await repo.list_by_user(test_user["id"])
+        
+        names = [k["name"] for k in keys]
+        assert "List Key 1" in names
+        assert "List Key 2" in names
+
+    async def test_get_by_id(self, db_pool, test_user):
+        """Test retrieving an API key by ID with ownership check."""
+        repo = ApiKeyRepository(db_pool)
+        
+        key_record, _ = await repo.create(
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
+            name="Get By ID Key",
+        )
+        
+        found = await repo.get_by_id(key_record["id"], test_user["id"])
+        assert found is not None
+        assert found["id"] == key_record["id"]
+        
+        # Different user should get None
+        not_found = await repo.get_by_id(key_record["id"], uuid4())
+        assert not_found is None
+
+    async def test_update_name(self, db_pool, test_user):
+        """Test renaming an API key."""
+        repo = ApiKeyRepository(db_pool)
+        
+        key_record, _ = await repo.create(
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
+            name="Original Name",
+        )
+        
+        updated = await repo.update_name(key_record["id"], test_user["id"], "New Name")
+        assert updated is not None
+        assert updated["name"] == "New Name"
+
+    async def test_verify_non_mcp_prefix_returns_none(self, db_pool):
+        """Test that keys without mcp_ prefix are immediately rejected."""
+        repo = ApiKeyRepository(db_pool)
+        
+        result = await repo.verify("not_a_valid_key")
+        assert result is None
+
+    async def test_revoked_key_not_listed(self, db_pool, test_user):
+        """Test that revoked keys don't appear in list_by_user."""
+        repo = ApiKeyRepository(db_pool)
+        
+        key_record, _ = await repo.create(
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
+            name="Soon Revoked",
+        )
+        
+        await repo.revoke(key_record["id"], test_user["id"])
+        
+        keys = await repo.list_by_user(test_user["id"])
+        key_ids = [k["id"] for k in keys]
+        assert key_record["id"] not in key_ids
 
 
 class TestAuditRepository:
@@ -725,6 +1142,36 @@ class TestAuditRepository:
         
         assert result is None
 
+    async def test_log_with_notes_and_context(self, db_pool, test_memory, test_user):
+        """Test creating an audit entry with notes and context."""
+        repo = AuditRepository(db_pool)
+        
+        entry = await repo.log(
+            memory_id=test_memory["id"],
+            action_type="update",
+            user_id=test_user["id"],
+            notes="Manual correction by admin",
+            context={"ip": "127.0.0.1", "user_agent": "test"},
+        )
+        
+        assert entry["notes"] == "Manual correction by admin"
+        assert entry["context"]["ip"] == "127.0.0.1"
+
+    async def test_get_by_user_id_with_since_filter(self, db_pool, test_memory, test_user):
+        """Test filtering audit entries by user ID with since timestamp."""
+        repo = AuditRepository(db_pool)
+        
+        await repo.log(
+            memory_id=test_memory["id"],
+            action_type="update",
+            user_id=test_user["id"],
+        )
+        
+        # Query with a future date should return nothing
+        future = datetime(2099, 1, 1, tzinfo=timezone.utc)
+        result = await repo.get_by_user_id(test_user["id"], since=future)
+        assert result["total_count"] == 0
+
 
 class TestAccessRepository:
     """Tests for AccessRepository."""
@@ -917,3 +1364,40 @@ class TestAccessRepository:
         m1_entry = next(r for r in results if r["memory_id"] == m1["id"])
         m2_entry = next(r for r in results if r["memory_id"] == m2["id"])
         assert m1_entry["access_count"] > m2_entry["access_count"]
+
+    async def test_get_user_activity_with_since(self, db_pool, test_memory, test_user):
+        """Test filtering user activity with a since timestamp."""
+        repo = AccessRepository(db_pool)
+        
+        await repo.log_access(
+            memory_id=test_memory["id"],
+            access_type="view",
+            user_id=test_user["id"],
+        )
+        
+        # Future date should yield no results
+        future = datetime(2099, 1, 1, tzinfo=timezone.utc)
+        results = await repo.get_user_activity(test_user["id"], since=future)
+        assert len(results) == 0
+
+    async def test_get_most_accessed_with_org_filter(self, db_pool, test_user, test_memory):
+        """Test most accessed memories filtered by organization."""
+        repo = AccessRepository(db_pool)
+        
+        await repo.log_access(
+            memory_id=test_memory["id"],
+            access_type="view",
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
+        )
+        
+        results = await repo.get_most_accessed(
+            organization_id=test_user["organization_id"],
+        )
+        assert len(results) >= 1
+        
+        # Non-matching org should not find anything from our test data
+        results_other = await repo.get_most_accessed(organization_id=uuid4())
+        # Results may include other test data, but our specific memory shouldn't be there
+        our_ids = [r["memory_id"] for r in results_other]
+        assert test_memory["id"] not in our_ids

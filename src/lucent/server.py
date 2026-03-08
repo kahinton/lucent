@@ -101,6 +101,8 @@ class MCPAuthMiddleware:
                             
                             if not rate_result.allowed:
                                 # Rate limited - return 429
+                                logger.warning("Rate limit exceeded: api_key_id=%s, retry_after=%s",
+                                               key_info["id"], rate_result.headers.get("Retry-After"))
                                 response = JSONResponse(
                                     status_code=429,
                                     content={
@@ -144,6 +146,7 @@ class MCPAuthMiddleware:
                     logger.error("API key auth error", exc_info=e)
             
             # Invalid API key provided
+            logger.warning("MCP auth failed: invalid API key on %s", path)
             response = JSONResponse(
                 status_code=401,
                 content={

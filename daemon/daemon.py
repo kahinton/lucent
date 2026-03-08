@@ -47,13 +47,42 @@ MCP_CONFIG = {
 } if MCP_API_KEY else {}
 
 
+def _configure_daemon_logging():
+    """Configure structured logging for the daemon process."""
+    os.environ.setdefault("LUCENT_LOG_FORMAT", "human")
+    os.environ.setdefault("LUCENT_LOG_FILE", str(LOG_FILE))
+    os.environ.setdefault("LUCENT_LOG_FILE_MAX_BYTES", "10485760")
+    os.environ.setdefault("LUCENT_LOG_FILE_BACKUP_COUNT", "5")
+
+    src_dir = str(Path(__file__).parent.parent / "src")
+    if src_dir not in sys.path:
+        sys.path.insert(0, src_dir)
+
+    from lucent.logging import configure_logging, get_logger
+    configure_logging()
+    return get_logger
+
+
+_logger = None
+
+
 def log(message: str, level: str = "INFO"):
-    """Simple logging to file and stdout."""
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    line = f"[{timestamp}] [{level}] {message}"
-    print(line)
-    with open(LOG_FILE, "a") as f:
-        f.write(line + "\n")
+    """Log via the structured logging module (falls back to print before init)."""
+    if _logger is None:
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{timestamp}] [{level}] {message}")
+        return
+    level_map = {
+        "INFO": _logger.info,
+        "WARN": _logger.warning,
+        "WARNING": _logger.warning,
+        "ERROR": _logger.error,
+        "STREAM": _logger.debug,
+        "THOUGHT": _logger.debug,
+        "DEBUG": _logger.debug,
+    }
+    log_fn = level_map.get(level.upper(), _logger.info)
+    log_fn(message)
 
 
 def build_system_message() -> str:
@@ -473,6 +502,10 @@ Be specific with your web fetches — target documentation pages, not general se
 def main():
     """Entry point for the daemon."""
     import argparse
+
+    global _logger
+    get_logger_fn = _configure_daemon_logging()
+    _logger = get_logger_fn("daemon")
 
     parser = argparse.ArgumentParser(description="Lucent Daemon — continuous existence")
     parser.add_argument("--once", action="store_true", help="Run one cycle and exit")

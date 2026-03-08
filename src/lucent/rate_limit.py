@@ -77,6 +77,11 @@ class RateLimiter:
             return Response(status_code=429, headers=headers)
     """
     
+    # Per-scope rate limit overrides (requests per minute)
+    SCOPE_LIMITS: dict[str, int] = {
+        "daemon-tasks": 300,  # Higher limit for agent access patterns
+    }
+    
     def __init__(
         self,
         requests_per_minute: int | None = None,
@@ -96,20 +101,31 @@ class RateLimiter:
         self.window_seconds = window_seconds
         self._buckets: dict[UUID, RateLimitBucket] = defaultdict(RateLimitBucket)
     
-    def check_rate_limit(self, api_key_id: UUID) -> RateLimitResult:
+    def check_rate_limit(
+        self, api_key_id: UUID, scopes: list[str] | None = None,
+    ) -> RateLimitResult:
         """Check if a request from an API key is allowed.
         
         Args:
             api_key_id: The UUID of the API key making the request.
+            scopes: API key scopes, used to determine per-scope rate limits.
             
         Returns:
             RateLimitResult with allowed status and headers to include in response.
         """
+        # Determine effective limit: use highest scope-specific limit if applicable
+        effective_limit = self.limit
+        if scopes:
+            for scope in scopes:
+                scope_limit = self.SCOPE_LIMITS.get(scope)
+                if scope_limit and scope_limit > effective_limit:
+                    effective_limit = scope_limit
+
         # Get or create bucket for this API key
         bucket = self._buckets[api_key_id]
         
         allowed, remaining, reset_at = bucket.check_and_record(
-            self.limit, self.window_seconds
+            effective_limit, self.window_seconds
         )
         
         headers = {

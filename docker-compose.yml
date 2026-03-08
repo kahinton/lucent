@@ -46,6 +46,49 @@ services:
     tty: true
     restart: unless-stopped
 
+  # Multi-instance daemon example (use with: docker compose --profile multi-daemon up)
+  daemon-1:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    profiles: ["multi-daemon"]
+    depends_on:
+      lucent:
+        condition: service_healthy
+    environment:
+      LUCENT_MCP_URL: http://lucent:8766/mcp
+      LUCENT_MCP_API_KEY: ${LUCENT_MCP_API_KEY:-}
+      LUCENT_DAEMON_INTERVAL: ${LUCENT_DAEMON_INTERVAL:-15}
+      LUCENT_DAEMON_MODEL: ${LUCENT_DAEMON_MODEL:-claude-opus-4.6}
+      LUCENT_MAX_SESSIONS: ${LUCENT_MAX_SESSIONS:-3}
+      LUCENT_STALE_HEARTBEAT_MINUTES: ${LUCENT_STALE_HEARTBEAT_MINUTES:-30}
+    volumes:
+      - ./daemon:/app/daemon:cached
+      - ./src:/app/src:cached
+    command: ["python", "-m", "daemon.daemon_v2"]
+    restart: unless-stopped
+
+  daemon-2:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    profiles: ["multi-daemon"]
+    depends_on:
+      lucent:
+        condition: service_healthy
+    environment:
+      LUCENT_MCP_URL: http://lucent:8766/mcp
+      LUCENT_MCP_API_KEY: ${LUCENT_MCP_API_KEY:-}
+      LUCENT_DAEMON_INTERVAL: ${LUCENT_DAEMON_INTERVAL:-15}
+      LUCENT_DAEMON_MODEL: ${LUCENT_DAEMON_MODEL:-claude-opus-4.6}
+      LUCENT_MAX_SESSIONS: ${LUCENT_MAX_SESSIONS:-3}
+      LUCENT_STALE_HEARTBEAT_MINUTES: ${LUCENT_STALE_HEARTBEAT_MINUTES:-30}
+    volumes:
+      - ./daemon:/app/daemon:cached
+      - ./src:/app/src:cached
+    command: ["python", "-m", "daemon.daemon_v2"]
+    restart: unless-stopped
+
 volumes:
   lucent_data:
     driver: local

@@ -9,7 +9,8 @@ from uuid import UUID
 from mcp.server.fastmcp import FastMCP
 
 from lucent.auth import get_current_user, get_current_api_key_id
-from lucent.db import AccessRepository, AuditRepository, MemoryRepository, get_pool, init_db
+from lucent.db import AccessRepository, AuditRepository, MemoryRepository, VersionConflictError, get_pool, init_db
+from lucent.logging import get_logger
 from lucent.mode import is_team_mode
 from lucent.models.memory import (
     CreateMemoryInput,
@@ -18,6 +19,8 @@ from lucent.models.memory import (
     UpdateMemoryInput,
 )
 from lucent.models.validation import validate_metadata, METADATA_DOCS
+
+logger = get_logger("tools.memories")
 
 
 def _error_response(message: str) -> str:
@@ -188,6 +191,8 @@ Returns:
             # Use authenticated user's name if username not provided
             effective_username = username or _get_current_username() or "unknown"
             
+            logger.info("create_memory: type=%s, user=%s, tags=%s", type, effective_username, tags)
+            
             input_data = CreateMemoryInput(
                 username=effective_username,
                 type=memory_type,
@@ -238,8 +243,10 @@ Returns:
             return json.dumps(_serialize_memory(result), indent=2)
             
         except ValueError as e:
+            logger.warning("create_memory validation error: %s", e)
             return _error_response(str(e))
         except Exception as e:
+            logger.error("create_memory failed", exc_info=e)
             return _error_response(f"Failed to create memory: {e}")
 
     @mcp.tool()
@@ -258,6 +265,8 @@ Returns:
         """
         try:
             uuid_id = UUID(memory_id)
+            
+            logger.debug("get_memory: id=%s", memory_id)
             
             repo = await _get_repository()
             
@@ -292,6 +301,7 @@ Returns:
         except ValueError as e:
             return _error_response(f"Invalid memory ID format: {e}")
         except Exception as e:
+            logger.error("get_memory failed: id=%s", memory_id, exc_info=e)
             return _error_response(f"Failed to retrieve memory: {e}")
 
     @mcp.tool()
@@ -434,7 +444,7 @@ Returns:
             query: Optional fuzzy search query to match against memory CONTENT only.
             username: Optional filter to only return memories for a specific user.
             type: Optional filter by memory type (experience, technical, procedural, goal, individual).
-            tags: Optional list of tags to filter by (returns memories matching any tag).
+            tags: Optional list of tags to filter by (memories must have all specified tags).
             importance_min: Optional minimum importance rating (1-10).
             importance_max: Optional maximum importance rating (1-10).
             created_after: Optional ISO datetime string to filter memories created after this date.
@@ -457,6 +467,8 @@ Returns:
             parsed_created_after = datetime.fromisoformat(created_after) if created_after else None
             parsed_created_before = datetime.fromisoformat(created_before) if created_before else None
             parsed_memory_ids = [UUID(uid) for uid in memory_ids] if memory_ids else None
+            
+            logger.info("search_memories: query=%s, type=%s, tags=%s", query, type, tags)
             
             search_input = SearchMemoriesInput(
                 query=query,
@@ -526,6 +538,7 @@ Returns:
         except ValueError as e:
             return _error_response(f"Invalid input: {str(e)}")
         except Exception as e:
+            logger.error("search_memories failed", exc_info=e)
             return _error_response(f"Search failed: {str(e)}")
 
     @mcp.tool()
@@ -564,6 +577,8 @@ Returns:
         try:
             if not query or not query.strip():
                 return _error_response("Query is required for full search")
+            
+            logger.info("search_memories_full: query=%s, type=%s", query, type)
             
             memory_type = MemoryType(type) if type else None
             
@@ -616,6 +631,7 @@ Returns:
         except ValueError as e:
             return _error_response(f"Invalid input: {str(e)}")
         except Exception as e:
+            logger.error("search_memories_full failed", exc_info=e)
             return _error_response(f"Full search failed: {str(e)}")
 
     @mcp.tool()
@@ -626,6 +642,7 @@ Returns:
         importance: int | None = None,
         related_memory_ids: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
+        expected_version: int | None = None,
     ) -> str:
         """Update an existing memory.
 
@@ -637,12 +654,18 @@ Returns:
             related_memory_ids: Optional new list of related memory UUIDs (replaces existing).
             metadata: Optional new metadata (replaces existing). Must match the memory's type schema.
                       See create_memory for the metadata schema for each memory type.
+            expected_version: Optional optimistic lock. If provided, the update only succeeds
+                if the memory's current version matches this value. Use this to prevent
+                concurrent updates from overwriting each other. Get the current version
+                from the memory's "version" field.
 
         Returns:
-            JSON string with the updated memory, or an error if not found.
+            JSON string with the updated memory, or an error if not found or version conflict.
         """
         try:
             uuid_id = UUID(memory_id)
+            
+            logger.info("update_memory: id=%s", memory_id)
             
             repo = await _get_repository()
             
@@ -682,6 +705,7 @@ Returns:
                 importance=update_input.importance,
                 related_memory_ids=update_input.related_memory_ids,
                 metadata=update_input.metadata,
+                expected_version=expected_version,
             )
             
             if result is None:
@@ -737,9 +761,18 @@ Returns:
             
             return json.dumps(_serialize_memory(result), indent=2)
             
+        except VersionConflictError as e:
+            logger.warning("update_memory version conflict: id=%s, expected=%s, actual=%s",
+                           memory_id, e.expected_version, e.actual_version)
+            return _error_response(
+                f"Version conflict: memory was modified by another process. "
+                f"Expected version {e.expected_version}, current version {e.actual_version}. "
+                f"Re-read the memory and retry."
+            )
         except ValueError as e:
             return _error_response(f"Invalid input: {str(e)}")
         except Exception as e:
+            logger.error("update_memory failed: id=%s", memory_id, exc_info=e)
             return _error_response(f"Failed to update memory: {str(e)}")
 
     @mcp.tool()
@@ -757,6 +790,8 @@ Returns:
         """
         try:
             uuid_id = UUID(memory_id)
+            
+            logger.info("delete_memory: id=%s", memory_id)
             
             repo = await _get_repository()
             
@@ -811,6 +846,7 @@ Returns:
         except ValueError as e:
             return _error_response(f"Invalid memory ID format: {str(e)}")
         except Exception as e:
+            logger.error("delete_memory failed: id=%s", memory_id, exc_info=e)
             return _error_response(f"Failed to delete memory: {str(e)}")
 
     @mcp.tool()
@@ -1170,6 +1206,207 @@ Returns:
                 return _error_response(f"Invalid memory_id: {str(e)}")
             except Exception as e:
                 return _error_response(f"Failed to unshare memory: {str(e)}")
+
+    @mcp.tool()
+    async def create_daemon_task(
+        description: str,
+        agent_type: str = "code",
+        priority: str = "medium",
+        context: str | None = None,
+        tags: list[str] | None = None,
+    ) -> str:
+        """Create a new daemon task for autonomous processing.
+
+        Submits a task that will be picked up by the daemon's cognitive cycle.
+        The task is stored as a memory tagged with 'daemon-task' and 'pending'.
+
+        Args:
+            description: What the daemon should do. Be specific and actionable.
+            agent_type: Type of agent to handle the task. One of: research, code,
+                memory, reflection, documentation, planning. Default: code.
+            priority: Task priority. One of: low, medium, high. Default: medium.
+            context: Optional additional context or constraints for the agent.
+            tags: Optional extra tags for categorization.
+
+        Returns:
+            JSON string with the created task including its ID and status.
+        """
+        valid_agent_types = {"research", "code", "memory", "reflection", "documentation", "planning"}
+        valid_priorities = {"low", "medium", "high"}
+
+        if agent_type not in valid_agent_types:
+            return _error_response(
+                f"Invalid agent_type '{agent_type}'. Must be one of: {', '.join(sorted(valid_agent_types))}"
+            )
+        if priority not in valid_priorities:
+            return _error_response(
+                f"Invalid priority '{priority}'. Must be one of: {', '.join(sorted(valid_priorities))}"
+            )
+
+        try:
+            repo = await _get_repository()
+            user_id, org_id, _ = await _get_current_user_context()
+            if user_id is None:
+                return _error_response("Authentication required")
+
+            username = _get_current_username() or "unknown"
+
+            # Build tags
+            memory_tags = ["daemon-task", "daemon", "pending", agent_type, priority]
+            if tags:
+                memory_tags.extend(tags)
+
+            # Build metadata
+            metadata: dict[str, Any] = {"submitted_by": str(user_id), "source": "mcp"}
+            if context:
+                metadata["context"] = context
+
+            result = await repo.create(
+                username=username,
+                type="technical",
+                content=description,
+                tags=memory_tags,
+                importance={"low": 3, "medium": 5, "high": 8}.get(priority, 5),
+                metadata=metadata,
+                user_id=user_id,
+                organization_id=org_id,
+            )
+
+            # Audit
+            audit_repo = await _get_audit_repository()
+            await audit_repo.log(
+                memory_id=result["id"],
+                action_type="create",
+                user_id=user_id,
+                organization_id=org_id,
+                context={**_get_audit_context(), "action": "create_daemon_task"},
+                version=result.get("version", 1),
+                snapshot=_build_snapshot(result),
+            )
+
+            return json.dumps(_serialize_memory(result), indent=2)
+
+        except Exception as e:
+            return _error_response(f"Failed to create daemon task: {str(e)}")
+
+    @mcp.tool()
+    async def claim_task(
+        memory_id: str,
+        instance_id: str,
+    ) -> str:
+        """Atomically claim a pending daemon task for a specific instance.
+
+        Uses database-level locking to prevent race conditions between daemon
+        instances. Only succeeds if the memory has a 'pending' tag and no
+        existing claim. On success, replaces 'pending' with
+        'claimed-by-{instance_id}' in the tags.
+
+        Args:
+            memory_id: The UUID of the task memory to claim.
+            instance_id: The unique identifier of the claiming daemon instance.
+
+        Returns:
+            JSON string with the claimed memory if successful, or an error if
+            the task was already claimed or is not pending.
+        """
+        try:
+            uuid_id = UUID(memory_id)
+            repo = await _get_repository()
+
+            user_id, org_id, _ = await _get_current_user_context()
+            if user_id is None:
+                return _error_response("Authentication required")
+
+            result = await repo.claim_task(
+                memory_id=uuid_id,
+                instance_id=instance_id,
+            )
+
+            if result is None:
+                return _error_response(
+                    f"Could not claim task {memory_id}: "
+                    "either not found, not pending, or already claimed by another instance."
+                )
+
+            # Audit the claim
+            audit_repo = await _get_audit_repository()
+            await audit_repo.log(
+                memory_id=uuid_id,
+                action_type="update",
+                user_id=user_id,
+                organization_id=org_id,
+                changed_fields=["tags"],
+                old_values={"tags": "pending"},
+                new_values={"tags": f"claimed-by-{instance_id}"},
+                context={**_get_audit_context(), "action": "claim_task", "instance_id": instance_id},
+                version=result["version"],
+                snapshot=_build_snapshot(result),
+            )
+
+            return json.dumps(_serialize_memory(result), indent=2)
+
+        except ValueError as e:
+            return _error_response(f"Invalid input: {str(e)}")
+        except Exception as e:
+            return _error_response(f"Failed to claim task: {str(e)}")
+
+    @mcp.tool()
+    async def release_claim(
+        memory_id: str,
+        instance_id: str | None = None,
+    ) -> str:
+        """Release a claimed daemon task back to pending state.
+
+        If instance_id is provided, only releases the task if it was claimed by
+        that specific instance. If not provided, releases any claim.
+
+        Args:
+            memory_id: The UUID of the task memory to release.
+            instance_id: Optional — only release if claimed by this instance.
+
+        Returns:
+            JSON string with the released memory, or an error.
+        """
+        try:
+            uuid_id = UUID(memory_id)
+            repo = await _get_repository()
+
+            user_id, org_id, _ = await _get_current_user_context()
+            if user_id is None:
+                return _error_response("Authentication required")
+
+            result = await repo.release_claim(
+                memory_id=uuid_id,
+                instance_id=instance_id,
+            )
+
+            if result is None:
+                return _error_response(
+                    f"Could not release task {memory_id}: not found or not claimed"
+                    + (f" by {instance_id}" if instance_id else "") + "."
+                )
+
+            # Audit the release
+            audit_repo = await _get_audit_repository()
+            await audit_repo.log(
+                memory_id=uuid_id,
+                action_type="update",
+                user_id=user_id,
+                organization_id=org_id,
+                changed_fields=["tags"],
+                old_values={"tags": f"claimed-by-{instance_id}" if instance_id else "claimed"},
+                new_values={"tags": "pending"},
+                context={**_get_audit_context(), "action": "release_claim", "instance_id": instance_id},
+                version=result["version"],
+                snapshot=_build_snapshot(result),
+            )
+
+            return json.dumps(_serialize_memory(result), indent=2)
+
+        except ValueError as e:
+            return _error_response(f"Invalid input: {str(e)}")
+        except Exception as e:
+            return _error_response(f"Failed to release claim: {str(e)}")
 
     @mcp.tool()
     async def export_memories(

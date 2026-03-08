@@ -1,0 +1,121 @@
+<!-- Feedback actions for daemon memories -->
+<!-- Expects: memory (dict with id, tags, metadata) -->
+<!-- Uses HTMX to POST feedback without full page reload -->
+
+{% set feedback = memory.metadata.feedback if memory.metadata and memory.metadata.feedback else none %}
+{% set feedback_status = feedback.status if feedback else 'pending' %}
+
+<div id="feedback-{{ memory.id }}" class="feedback-actions">
+    {% if feedback_status == 'approved' %}
+    <!-- Approved state -->
+    <div class="flex items-center gap-3 p-3 bg-emerald-50 rounded-lg border border-emerald-200">
+        <svg class="w-5 h-5 text-emerald-600 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+        </svg>
+        <div class="flex-1 min-w-0">
+            <p class="text-sm font-medium text-emerald-800">Approved</p>
+            {% if feedback.comment %}
+            <p class="text-xs text-emerald-600 mt-0.5">{{ feedback.comment }}</p>
+            {% endif %}
+            {% if feedback.reviewed_at %}
+            <p class="text-xs text-emerald-500 mt-0.5">{{ feedback.reviewed_at }}</p>
+            {% endif %}
+        </div>
+        <button 
+            hx-post="/daemon/feedback/{{ memory.id }}" 
+            hx-vals='{"action": "reset"}'
+            hx-target="#feedback-{{ memory.id }}"
+            hx-swap="outerHTML"
+            class="text-xs text-emerald-600 hover:text-emerald-800 underline">
+            Undo
+        </button>
+    </div>
+
+    {% elif feedback_status == 'rejected' %}
+    <!-- Rejected state -->
+    <div class="flex items-center gap-3 p-3 bg-red-50 rounded-lg border border-red-200">
+        <svg class="w-5 h-5 text-red-600 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M9.75 9.75l4.5 4.5m0-4.5l-4.5 4.5M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+        </svg>
+        <div class="flex-1 min-w-0">
+            <p class="text-sm font-medium text-red-800">Rejected</p>
+            {% if feedback.comment %}
+            <p class="text-xs text-red-600 mt-0.5">{{ feedback.comment }}</p>
+            {% endif %}
+            {% if feedback.reviewed_at %}
+            <p class="text-xs text-red-500 mt-0.5">{{ feedback.reviewed_at }}</p>
+            {% endif %}
+        </div>
+        <button 
+            hx-post="/daemon/feedback/{{ memory.id }}" 
+            hx-vals='{"action": "reset"}'
+            hx-target="#feedback-{{ memory.id }}"
+            hx-swap="outerHTML"
+            class="text-xs text-red-600 hover:text-red-800 underline">
+            Undo
+        </button>
+    </div>
+
+    {% else %}
+    <!-- Pending / no feedback — show action buttons -->
+    <div class="flex items-center gap-2 flex-wrap">
+        <button 
+            hx-post="/daemon/feedback/{{ memory.id }}" 
+            hx-vals='{"action": "approve"}'
+            hx-target="#feedback-{{ memory.id }}"
+            hx-swap="outerHTML"
+            class="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-100 text-emerald-700 text-sm font-medium rounded-lg hover:bg-emerald-200 transition-colors">
+            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+            </svg>
+            Approve
+        </button>
+        <button 
+            hx-post="/daemon/feedback/{{ memory.id }}" 
+            hx-vals='{"action": "reject"}'
+            hx-target="#feedback-{{ memory.id }}"
+            hx-swap="outerHTML"
+            hx-confirm="Reject this daemon work?"
+            class="inline-flex items-center gap-1.5 px-3 py-1.5 bg-red-100 text-red-700 text-sm font-medium rounded-lg hover:bg-red-200 transition-colors">
+            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+            </svg>
+            Reject
+        </button>
+        <button 
+            onclick="this.closest('.feedback-actions').querySelector('.comment-form').classList.toggle('hidden')"
+            class="inline-flex items-center gap-1.5 px-3 py-1.5 bg-gray-100 text-gray-700 text-sm font-medium rounded-lg hover:bg-gray-200 transition-colors">
+            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M7.5 8.25h9m-9 3H12m-9.75 1.51c0 1.6 1.123 2.994 2.707 3.227 1.087.16 2.185.283 3.293.369V21l4.076-4.076a1.526 1.526 0 011.037-.443 48.282 48.282 0 005.68-.494c1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0012 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018z" />
+            </svg>
+            Comment
+        </button>
+    </div>
+    
+    <!-- Expandable comment form -->
+    <div class="comment-form hidden mt-3">
+        <form hx-post="/daemon/feedback/{{ memory.id }}" 
+              hx-target="#feedback-{{ memory.id }}" 
+              hx-swap="outerHTML"
+              class="flex gap-2">
+            <input type="hidden" name="action" value="comment">
+            <input type="text" name="comment" placeholder="Add feedback comment..." 
+                   class="flex-1 px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none">
+            <button type="submit" 
+                    class="px-3 py-2 bg-primary-600 text-white text-sm font-medium rounded-lg hover:bg-primary-700 transition-colors">
+                Send
+            </button>
+        </form>
+    </div>
+    
+    {% if feedback and feedback.comment %}
+    <!-- Show existing comment even in pending state -->
+    <div class="mt-2 p-2 bg-gray-50 rounded-lg">
+        <p class="text-xs text-gray-600">💬 {{ feedback.comment }}</p>
+        {% if feedback.reviewed_at %}
+        <p class="text-xs text-gray-400 mt-0.5">{{ feedback.reviewed_at }}</p>
+        {% endif %}
+    </div>
+    {% endif %}
+    {% endif %}
+</div>

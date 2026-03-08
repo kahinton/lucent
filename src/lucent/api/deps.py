@@ -24,6 +24,7 @@ class CurrentUser:
         display_name: str | None,
         auth_method: str = "session",  # "session", "api_key", "oauth"
         api_key_id: UUID | None = None,  # Set when authenticated via API key
+        api_key_scopes: list[str] | None = None,  # Scopes from API key
         impersonator_id: UUID | None = None,  # Set when being impersonated
         impersonator_display_name: str | None = None,  # For UI display
     ):
@@ -34,6 +35,7 @@ class CurrentUser:
         self.display_name = display_name
         self.auth_method = auth_method
         self.api_key_id = api_key_id
+        self.api_key_scopes = api_key_scopes or ["read", "write"]
         self.impersonator_id = impersonator_id
         self.impersonator_display_name = impersonator_display_name
     
@@ -54,11 +56,30 @@ class CurrentUser:
                 detail=f"Permission denied: {permission.value}",
             )
     
+    def has_scope(self, scope: str) -> bool:
+        """Check if the API key has a specific scope.
+        
+        Keys with 'read' + 'write' scopes (the default) have full access.
+        Scoped keys (e.g., 'daemon-tasks') are restricted to those operations.
+        """
+        if "read" in self.api_key_scopes and "write" in self.api_key_scopes:
+            return True
+        return scope in self.api_key_scopes
+
+    def require_scope(self, scope: str) -> None:
+        """Raise HTTPException if the API key doesn't have the required scope."""
+        if not self.has_scope(scope):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"API key does not have required scope: {scope}",
+            )
+
     def get_audit_context(self) -> dict[str, Any]:
         """Get context dict for audit logging."""
         ctx = {"auth_method": self.auth_method}
         if self.api_key_id:
             ctx["api_key_id"] = str(self.api_key_id)
+            ctx["api_key_scopes"] = self.api_key_scopes
         if self.impersonator_id:
             ctx["impersonator_id"] = str(self.impersonator_id)
             ctx["impersonator_display_name"] = self.impersonator_display_name
@@ -104,6 +125,7 @@ async def _authenticate_with_api_key(api_key: str) -> CurrentUser | None:
         display_name=user.get("display_name"),
         auth_method="api_key",
         api_key_id=key_info["id"],  # Include the API key ID for auditing
+        api_key_scopes=key_info.get("scopes", ["read", "write"]),
     )
 
 
@@ -190,8 +212,26 @@ def require_permission_dep(permission: Permission):
     return check_permission
 
 
+def require_scope_dep(scope: str):
+    """Dependency factory that requires a specific API key scope.
+    
+    Usage:
+        @router.post("/tasks")
+        async def create_task(user: CurrentUser = Depends(require_scope_dep("daemon-tasks"))):
+            ...
+    """
+    async def check_scope(
+        user: CurrentUser = Depends(get_current_user),
+    ) -> CurrentUser:
+        user.require_scope(scope)
+        return user
+
+    return check_scope
+
+
 # Type alias for dependency injection
 AuthenticatedUser = Annotated[CurrentUser, Depends(get_current_user)]
 OptionalUser = Annotated[CurrentUser | None, Depends(get_optional_user)]
 AdminUser = Annotated[CurrentUser, Depends(require_role(Role.ADMIN))]
 OwnerUser = Annotated[CurrentUser, Depends(require_role(Role.OWNER))]
+DaemonTaskUser = Annotated[CurrentUser, Depends(require_scope_dep("daemon-tasks"))]

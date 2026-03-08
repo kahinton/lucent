@@ -13,7 +13,10 @@ from lucent.api.models import (
     SearchResultMemory,
 )
 from lucent.db import MemoryRepository, AccessRepository, get_pool
+from lucent.logging import get_logger
 from lucent.rbac import Permission
+
+logger = get_logger("api.search")
 
 
 router = APIRouter()
@@ -53,6 +56,8 @@ async def search_memories(
     pool = await get_pool()
     repo = MemoryRepository(pool)
     access_repo = AccessRepository(pool)
+    
+    logger.info("Search: query=%s, type=%s, tags=%s, user=%s", data.query, data.type, data.tags, user.id)
     
     result = await repo.search(
         query=data.query,

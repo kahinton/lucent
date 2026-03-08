@@ -18,7 +18,7 @@ Repositories:
 from lucent.db.pool import get_pool, init_db, close_db
 
 # Repositories
-from lucent.db.memory import MemoryRepository
+from lucent.db.memory import MemoryRepository, VersionConflictError
 from lucent.db.user import UserRepository
 from lucent.db.api_key import ApiKeyRepository
 from lucent.db.organization import OrganizationRepository
@@ -51,6 +51,7 @@ __all__ = [
     "close_db",
     # Repositories
     "MemoryRepository",
+    "VersionConflictError",
     "UserRepository",
     "ApiKeyRepository",
     "OrganizationRepository",

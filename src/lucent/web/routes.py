@@ -1,6 +1,6 @@
 """Web routes for Lucent admin dashboard using Jinja2 + HTMX."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
 from uuid import UUID
@@ -602,14 +602,393 @@ async def daemon_activity(request: Request):
         requesting_org_id=user.organization_id,
     )
 
+    # Count needs-review items for the badge
+    review_result = await repo.search(
+        tags=["daemon", "needs-review"],
+        limit=1,
+        requesting_user_id=user.id,
+        requesting_org_id=user.organization_id,
+    )
+    needs_review_count = review_result.get("total_count", 0)
+
+    # Fetch daemon messages for the conversation thread
+    messages_result = await repo.search(
+        tags=["daemon-message"],
+        limit=50,
+        requesting_user_id=user.id,
+        requesting_org_id=user.organization_id,
+    )
+    # Build message list with sender info, sorted oldest-first for chat display
+    daemon_messages = []
+    for mem in messages_result.get("memories", []):
+        tags = mem.get("tags") or []
+        metadata = mem.get("metadata") or {}
+        daemon_messages.append({
+            "id": mem["id"],
+            "content": mem["content"],
+            "sender": "daemon" if "from-daemon" in tags else "human",
+            "acknowledged": "acknowledged" in tags,
+            "created_at": mem["created_at"],
+            "in_reply_to": metadata.get("in_reply_to"),
+        })
+    daemon_messages.reverse()  # oldest first for chat order
+
     return templates.TemplateResponse(
         "daemon.html",
         {
             "request": request,
             "user": user,
             "daemon_memories": result["memories"],
+            "needs_review_count": needs_review_count,
+            "daemon_messages": daemon_messages,
         },
     )
+
+
+@router.post("/daemon/messages", response_class=HTMLResponse)
+async def send_daemon_message(request: Request):
+    """Send a message from the human to the daemon."""
+    await _check_csrf(request)
+    user = await get_user_context(request)
+    pool = await get_pool()
+    repo = MemoryRepository(pool)
+
+    form = await request.form()
+    content = form.get("content", "").strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="Message content is required")
+
+    username = user.display_name or user.email or str(user.id)
+    await repo.create(
+        username=username,
+        type="experience",
+        content=content,
+        tags=["daemon-message", "daemon", "from-human", "pending"],
+        importance=5,
+        metadata={"source": "web-ui"},
+        user_id=user.id,
+        organization_id=user.organization_id,
+    )
+
+    # Re-fetch messages and return the partial for HTMX swap
+    messages_result = await repo.search(
+        tags=["daemon-message"],
+        limit=50,
+        requesting_user_id=user.id,
+        requesting_org_id=user.organization_id,
+    )
+    daemon_messages = []
+    for mem in messages_result.get("memories", []):
+        tags = mem.get("tags") or []
+        metadata = mem.get("metadata") or {}
+        daemon_messages.append({
+            "id": mem["id"],
+            "content": mem["content"],
+            "sender": "daemon" if "from-daemon" in tags else "human",
+            "acknowledged": "acknowledged" in tags,
+            "created_at": mem["created_at"],
+            "in_reply_to": metadata.get("in_reply_to"),
+        })
+    daemon_messages.reverse()
+
+    return templates.TemplateResponse(
+        "partials/message_thread.html",
+        {"request": request, "daemon_messages": daemon_messages},
+    )
+
+
+@router.get("/daemon/review", response_class=HTMLResponse)
+async def daemon_review_queue(request: Request):
+    """Show memories tagged 'needs-review' that need human approval."""
+    user = await get_user_context(request)
+    pool = await get_pool()
+    repo = MemoryRepository(pool)
+
+    result = await repo.search(
+        tags=["daemon", "needs-review"],
+        limit=50,
+        requesting_user_id=user.id,
+        requesting_org_id=user.organization_id,
+    )
+
+    return templates.TemplateResponse(
+        "daemon_review.html",
+        {
+            "request": request,
+            "user": user,
+            "review_memories": result["memories"],
+        },
+    )
+
+
+@router.post("/daemon/feedback/{memory_id}", response_class=HTMLResponse)
+async def daemon_feedback(
+    request: Request,
+    memory_id: UUID,
+    action: str = Form(...),
+    comment: str = Form(""),
+):
+    """Handle feedback on daemon work (approve/reject/comment/reset)."""
+    await _check_csrf(request)
+    user = await get_user_context(request)
+    pool = await get_pool()
+
+    repo = MemoryRepository(pool)
+    audit_repo = AuditRepository(pool)
+
+    memory = await repo.get_accessible(memory_id, user.id, user.organization_id)
+    if memory is None:
+        raise HTTPException(status_code=404, detail="Memory not found")
+
+    existing_metadata = memory.get("metadata") or {}
+    existing_feedback = existing_metadata.get("feedback", {})
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    if action == "approve":
+        feedback = {"status": "approved", "reviewed_at": now, "reviewed_by": user.display_name or user.email}
+        if comment:
+            feedback["comment"] = comment
+    elif action == "reject":
+        feedback = {"status": "rejected", "reviewed_at": now, "reviewed_by": user.display_name or user.email}
+        if comment:
+            feedback["comment"] = comment
+    elif action == "comment":
+        feedback = {**existing_feedback, "comment": comment, "reviewed_at": now, "reviewed_by": user.display_name or user.email}
+        if "status" not in feedback:
+            feedback["status"] = "pending"
+    elif action == "reset":
+        feedback = {"status": "pending"}
+    else:
+        raise HTTPException(status_code=400, detail=f"Unknown action: {action}")
+
+    updated_metadata = {**existing_metadata, "feedback": feedback}
+    await repo.update(memory_id=memory_id, metadata=updated_metadata)
+
+    await audit_repo.log(
+        memory_id=memory_id,
+        action_type="update",
+        user_id=user.id,
+        organization_id=user.organization_id,
+        changed_fields=["metadata.feedback"],
+        old_values={"feedback": existing_feedback},
+        new_values={"feedback": feedback},
+        notes=f"feedback:{action}",
+    )
+
+    # Return the partial HTML for HTMX swap
+    # Re-fetch memory to get updated state
+    updated_memory = await repo.get(memory_id)
+    return templates.TemplateResponse(
+        "partials/feedback_actions.html",
+        {"request": request, "memory": updated_memory},
+    )
+
+
+# =============================================================================
+# Daemon Tasks
+# =============================================================================
+
+# Valid values (matching the API router)
+_TASK_AGENT_TYPES = {"research", "code", "memory", "reflection", "documentation", "planning"}
+_TASK_PRIORITIES = {"low", "medium", "high"}
+
+
+def _memory_to_task_view(memory: dict) -> dict:
+    """Convert a daemon-task memory to a view-friendly dict."""
+    tags = memory.get("tags") or []
+    metadata = memory.get("metadata") or {}
+
+    # Derive status
+    if "completed" in tags:
+        status = "completed"
+    elif any(t.startswith("claimed-by-") for t in tags):
+        status = "claimed"
+    elif "pending" in tags:
+        status = "pending"
+    else:
+        status = "unknown"
+
+    # Extract agent type, priority, claimed_by
+    agent_type = next((t for t in tags if t in _TASK_AGENT_TYPES), "unknown")
+    priority = next((t for t in tags if t in _TASK_PRIORITIES), "medium")
+    claimed_by = next((t[len("claimed-by-"):] for t in tags if t.startswith("claimed-by-")), None)
+
+    internal_tags = (
+        {"daemon-task", "pending", "completed", "daemon"} | _TASK_AGENT_TYPES | _TASK_PRIORITIES
+    )
+    display_tags = [t for t in tags if t not in internal_tags and not t.startswith("claimed-by-")]
+
+    return {
+        "id": memory["id"],
+        "description": memory["content"],
+        "agent_type": agent_type,
+        "priority": priority,
+        "status": status,
+        "tags": display_tags,
+        "created_at": memory["created_at"],
+        "updated_at": memory["updated_at"],
+        "result": metadata.get("result"),
+        "claimed_by": claimed_by,
+    }
+
+
+@router.get("/daemon/tasks", response_class=HTMLResponse)
+async def daemon_tasks_list(
+    request: Request,
+    status: str | None = None,
+):
+    """List daemon tasks with optional status filter."""
+    user = await get_user_context(request)
+    pool = await get_pool()
+    repo = MemoryRepository(pool)
+
+    # Fetch all daemon-task memories
+    tags_filter = ["daemon-task"]
+    if status in ("pending", "completed"):
+        tags_filter.append(status)
+
+    result = await repo.search(
+        tags=tags_filter,
+        limit=100,
+        requesting_user_id=user.id,
+        requesting_org_id=user.organization_id,
+    )
+
+    all_tasks = [_memory_to_task_view(m) for m in result["memories"]]
+
+    # Post-filter for "claimed" status (prefix tag)
+    if status == "claimed":
+        all_tasks = [t for t in all_tasks if t["status"] == "claimed"]
+
+    # Compute status counts from unfiltered set
+    all_result = await repo.search(
+        tags=["daemon-task"],
+        limit=100,
+        requesting_user_id=user.id,
+        requesting_org_id=user.organization_id,
+    ) if status else result
+    all_for_counts = [_memory_to_task_view(m) for m in all_result["memories"]] if status else all_tasks
+    status_counts = {}
+    for t in all_for_counts:
+        status_counts[t["status"]] = status_counts.get(t["status"], 0) + 1
+
+    return templates.TemplateResponse(
+        "daemon_tasks.html",
+        {
+            "request": request,
+            "user": user,
+            "tasks": all_tasks,
+            "current_status": status,
+            "total_count": len(all_for_counts),
+            "status_counts": status_counts,
+        },
+    )
+
+
+@router.get("/daemon/tasks/new", response_class=HTMLResponse)
+async def daemon_tasks_new_form(request: Request):
+    """Show the task submission form."""
+    user = await get_user_context(request)
+    return templates.TemplateResponse(
+        "daemon_tasks_new.html",
+        {"request": request, "user": user},
+    )
+
+
+@router.post("/daemon/tasks/new", response_class=HTMLResponse)
+async def daemon_tasks_create(
+    request: Request,
+    description: str = Form(...),
+    agent_type: str = Form("code"),
+    priority: str = Form("medium"),
+    context: str = Form(""),
+    tags: str = Form(""),
+):
+    """Handle task submission form POST."""
+    await _check_csrf(request)
+    user = await get_user_context(request)
+    pool = await get_pool()
+    repo = MemoryRepository(pool)
+
+    if agent_type not in _TASK_AGENT_TYPES:
+        agent_type = "code"
+    if priority not in _TASK_PRIORITIES:
+        priority = "medium"
+
+    # Build tags
+    memory_tags = ["daemon-task", "daemon", "pending", agent_type, priority]
+    if tags.strip():
+        extra = [t.strip() for t in tags.split(",") if t.strip()]
+        memory_tags.extend(extra)
+
+    # Build metadata
+    metadata: dict = {"submitted_by": str(user.id), "source": "web"}
+    if context.strip():
+        metadata["context"] = context.strip()
+
+    username = user.display_name or user.email or str(user.id)
+
+    await repo.create(
+        username=username,
+        type="technical",
+        content=description,
+        tags=memory_tags,
+        importance={"low": 3, "medium": 5, "high": 8}.get(priority, 5),
+        metadata=metadata,
+        user_id=user.id,
+        organization_id=user.organization_id,
+    )
+
+    return RedirectResponse(url="/daemon/tasks", status_code=303)
+
+
+@router.get("/daemon/tasks/{task_id}", response_class=HTMLResponse)
+async def daemon_task_detail(request: Request, task_id: UUID):
+    """Show task detail with execution history."""
+    user = await get_user_context(request)
+    pool = await get_pool()
+    repo = MemoryRepository(pool)
+    audit_repo = AuditRepository(pool)
+
+    memory = await repo.get_accessible(task_id, user.id, user.organization_id)
+    if memory is None or "daemon-task" not in (memory.get("tags") or []):
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    task = _memory_to_task_view(memory)
+
+    # Get version history
+    version_data = await audit_repo.get_versions(task_id, limit=50)
+    versions = version_data.get("versions", [])
+
+    return templates.TemplateResponse(
+        "daemon_task_detail.html",
+        {
+            "request": request,
+            "user": user,
+            "task": task,
+            "versions": versions,
+        },
+    )
+
+
+@router.post("/daemon/tasks/{task_id}/cancel", response_class=HTMLResponse)
+async def daemon_task_cancel(request: Request, task_id: UUID):
+    """Cancel a pending daemon task."""
+    await _check_csrf(request)
+    user = await get_user_context(request)
+    pool = await get_pool()
+    repo = MemoryRepository(pool)
+
+    memory = await repo.get_accessible(task_id, user.id, user.organization_id)
+    if memory is None or "daemon-task" not in (memory.get("tags") or []):
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    tags = memory.get("tags") or []
+    if "pending" not in tags:
+        raise HTTPException(status_code=400, detail="Only pending tasks can be cancelled")
+
+    await repo.delete(task_id)
+    return RedirectResponse(url="/daemon/tasks", status_code=303)
 
 
 # =============================================================================

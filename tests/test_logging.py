@@ -150,6 +150,8 @@ class TestConfigureLogging:
     def test_default_config(self, monkeypatch):
         monkeypatch.delenv("LUCENT_LOG_LEVEL", raising=False)
         monkeypatch.delenv("LUCENT_LOG_FORMAT", raising=False)
+        monkeypatch.delenv("LUCENT_LOG_FILE", raising=False)
+        monkeypatch.delenv("LUCENT_LOG_MODULES", raising=False)
         configure_logging()
         logger = logging.getLogger("lucent")
         assert logger.level == logging.INFO
@@ -159,6 +161,8 @@ class TestConfigureLogging:
 
     def test_json_format(self, monkeypatch):
         monkeypatch.setenv("LUCENT_LOG_FORMAT", "json")
+        monkeypatch.delenv("LUCENT_LOG_FILE", raising=False)
+        monkeypatch.delenv("LUCENT_LOG_MODULES", raising=False)
         configure_logging()
         logger = logging.getLogger("lucent")
         assert isinstance(logger.handlers[0].formatter, JSONFormatter)
@@ -167,6 +171,8 @@ class TestConfigureLogging:
     def test_custom_log_level(self, monkeypatch):
         monkeypatch.setenv("LUCENT_LOG_LEVEL", "DEBUG")
         monkeypatch.delenv("LUCENT_LOG_FORMAT", raising=False)
+        monkeypatch.delenv("LUCENT_LOG_FILE", raising=False)
+        monkeypatch.delenv("LUCENT_LOG_MODULES", raising=False)
         configure_logging()
         logger = logging.getLogger("lucent")
         assert logger.level == logging.DEBUG
@@ -175,6 +181,8 @@ class TestConfigureLogging:
     def test_invalid_level_defaults_to_info(self, monkeypatch):
         monkeypatch.setenv("LUCENT_LOG_LEVEL", "NONSENSE")
         monkeypatch.delenv("LUCENT_LOG_FORMAT", raising=False)
+        monkeypatch.delenv("LUCENT_LOG_FILE", raising=False)
+        monkeypatch.delenv("LUCENT_LOG_MODULES", raising=False)
         configure_logging()
         logger = logging.getLogger("lucent")
         assert logger.level == logging.INFO
@@ -183,6 +191,8 @@ class TestConfigureLogging:
     def test_configures_uvicorn_loggers(self, monkeypatch):
         monkeypatch.delenv("LUCENT_LOG_LEVEL", raising=False)
         monkeypatch.delenv("LUCENT_LOG_FORMAT", raising=False)
+        monkeypatch.delenv("LUCENT_LOG_FILE", raising=False)
+        monkeypatch.delenv("LUCENT_LOG_MODULES", raising=False)
         configure_logging()
         for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
             logger = logging.getLogger(name)
@@ -192,9 +202,56 @@ class TestConfigureLogging:
 
     def test_case_insensitive_format(self, monkeypatch):
         monkeypatch.setenv("LUCENT_LOG_FORMAT", "JSON")
+        monkeypatch.delenv("LUCENT_LOG_FILE", raising=False)
+        monkeypatch.delenv("LUCENT_LOG_MODULES", raising=False)
         configure_logging()
         logger = logging.getLogger("lucent")
         assert isinstance(logger.handlers[0].formatter, JSONFormatter)
+        self._cleanup_loggers()
+
+    def test_file_handler_with_rotation(self, monkeypatch, tmp_path):
+        from logging.handlers import RotatingFileHandler
+        log_file = str(tmp_path / "test.log")
+        monkeypatch.setenv("LUCENT_LOG_FILE", log_file)
+        monkeypatch.setenv("LUCENT_LOG_FILE_MAX_BYTES", "1024")
+        monkeypatch.setenv("LUCENT_LOG_FILE_BACKUP_COUNT", "3")
+        monkeypatch.delenv("LUCENT_LOG_MODULES", raising=False)
+        configure_logging()
+        logger = logging.getLogger("lucent")
+        # Should have both stderr and file handlers
+        assert len(logger.handlers) == 2
+        file_handlers = [h for h in logger.handlers if isinstance(h, RotatingFileHandler)]
+        assert len(file_handlers) == 1
+        assert file_handlers[0].maxBytes == 1024
+        assert file_handlers[0].backupCount == 3
+        self._cleanup_loggers()
+
+    def test_per_module_log_level_overrides(self, monkeypatch):
+        monkeypatch.delenv("LUCENT_LOG_FILE", raising=False)
+        monkeypatch.setenv("LUCENT_LOG_MODULES", "lucent.api:DEBUG,lucent.tools:WARNING")
+        configure_logging()
+        api_logger = logging.getLogger("lucent.api")
+        tools_logger = logging.getLogger("lucent.tools")
+        assert api_logger.level == logging.DEBUG
+        assert tools_logger.level == logging.WARNING
+        self._cleanup_loggers()
+        # Reset module loggers too
+        api_logger.setLevel(logging.NOTSET)
+        tools_logger.setLevel(logging.NOTSET)
+
+    def test_file_handler_writes_logs(self, monkeypatch, tmp_path):
+        log_file = tmp_path / "test.log"
+        monkeypatch.setenv("LUCENT_LOG_FILE", str(log_file))
+        monkeypatch.delenv("LUCENT_LOG_MODULES", raising=False)
+        configure_logging()
+        logger = logging.getLogger("lucent")
+        logger.info("test log message")
+        # Flush handlers
+        for h in logger.handlers:
+            h.flush()
+        assert log_file.exists()
+        content = log_file.read_text()
+        assert "test log message" in content
         self._cleanup_loggers()
 
 
@@ -212,3 +269,93 @@ class TestGetLogger:
     def test_returns_logger_instance(self):
         logger = get_logger("test")
         assert isinstance(logger, logging.Logger)
+
+
+class TestCorrelationId:
+    """Tests for correlation ID support."""
+
+    def test_set_and_get_correlation_id(self):
+        from lucent.logging import set_correlation_id, get_correlation_id, clear_correlation_id
+        cid = set_correlation_id("test-123")
+        assert cid == "test-123"
+        assert get_correlation_id() == "test-123"
+        clear_correlation_id()
+
+    def test_auto_generate_correlation_id(self):
+        from lucent.logging import set_correlation_id, get_correlation_id, clear_correlation_id
+        cid = set_correlation_id()
+        assert cid is not None
+        assert len(cid) == 12
+        assert get_correlation_id() == cid
+        clear_correlation_id()
+
+    def test_correlation_id_in_json_output(self):
+        from lucent.logging import (
+            CorrelationIdFilter,
+            set_correlation_id,
+            clear_correlation_id,
+        )
+        set_correlation_id("req-abc-123")
+        try:
+            formatter = JSONFormatter()
+            filt = CorrelationIdFilter()
+            record = logging.LogRecord(
+                name="lucent.test",
+                level=logging.INFO,
+                pathname="test.py",
+                lineno=1,
+                msg="hello",
+                args=(),
+                exc_info=None,
+            )
+            filt.filter(record)
+            data = json.loads(formatter.format(record))
+            assert data["correlation_id"] == "req-abc-123"
+        finally:
+            clear_correlation_id()
+
+    def test_correlation_id_in_human_output(self):
+        from lucent.logging import (
+            CorrelationIdFilter,
+            set_correlation_id,
+            clear_correlation_id,
+        )
+        set_correlation_id("req-xyz")
+        try:
+            formatter = HumanFormatter(use_colors=False)
+            filt = CorrelationIdFilter()
+            record = logging.LogRecord(
+                name="lucent.test",
+                level=logging.INFO,
+                pathname="test.py",
+                lineno=1,
+                msg="hello",
+                args=(),
+                exc_info=None,
+            )
+            filt.filter(record)
+            output = formatter.format(record)
+            assert "[req-xyz]" in output
+        finally:
+            clear_correlation_id()
+
+    def test_no_correlation_id_when_not_set(self):
+        from lucent.logging import (
+            CorrelationIdFilter,
+            clear_correlation_id,
+        )
+        clear_correlation_id()
+        formatter = JSONFormatter()
+        filt = CorrelationIdFilter()
+        record = logging.LogRecord(
+            name="lucent.test",
+            level=logging.INFO,
+            pathname="test.py",
+            lineno=1,
+            msg="hello",
+            args=(),
+            exc_info=None,
+        )
+        filt.filter(record)
+        data = json.loads(formatter.format(record))
+        assert "correlation_id" not in data

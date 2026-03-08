@@ -16,6 +16,9 @@ from lucent.api.models import (
     MemoryResponse,
 )
 from lucent.db import MemoryRepository, get_pool
+from lucent.logging import get_logger
+
+logger = get_logger("api.export")
 
 
 router = APIRouter()
@@ -108,6 +111,8 @@ async def export_memories(
     )
     responses = [_memory_to_response(m) for m in memories]
 
+    logger.info("Export: count=%d, format=%s, user=%s", len(responses), format, user.id)
+
     if format == "jsonl":
         return _stream_jsonl(responses, filters)
 
@@ -178,5 +183,8 @@ async def import_memories(
         requesting_org_id=user.organization_id,
         requesting_username=user.display_name or user.email or str(user.id),
     )
+
+    logger.info("Import: submitted=%d, imported=%d, user=%s",
+                len(memory_dicts), result.get("imported", 0), user.id)
 
     return ImportResponse(**result)

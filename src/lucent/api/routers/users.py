@@ -16,7 +16,10 @@ from lucent.api.models import (
     SuccessResponse,
 )
 from lucent.db import UserRepository, get_pool
+from lucent.logging import get_logger
 from lucent.rbac import Role, can_manage_user, can_assign_role, Permission
+
+logger = get_logger(__name__)
 
 
 router = APIRouter()
@@ -207,6 +210,7 @@ async def create_user(
     if data.role != "member":
         new_user = await user_repo.update_role(new_user["id"], data.role)
     
+    logger.info("User created: id=%s, role=%s, by=%s", new_user["id"], data.role, user.id)
     return _user_to_response(new_user)
 
 
@@ -334,6 +338,7 @@ async def update_user_role(
             detail="User not found",
         )
     
+    logger.info("User role changed: user=%s, new_role=%s, by=%s", user_id, data.role, user.id)
     return _user_to_response(result)
 
 
@@ -393,4 +398,5 @@ async def delete_user(
             detail="User not found",
         )
     
+    logger.info("User deleted: id=%s, by=%s", user_id, user.id)
     return SuccessResponse(success=True, message=f"User {user_id} deleted")

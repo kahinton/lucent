@@ -36,3 +36,10 @@ Also create an overview memory tagged 'daemon' and 'planning' summarizing the fu
 - Consider what can be parallelized vs. what's sequential
 - Flag anything that needs Kyle's input or decision
 - Tag all output with 'daemon' and 'planning'
+
+## Feedback & Review Protocol
+
+When your plan involves **significant scope**, **architectural changes**, or **multi-step initiatives**:
+- Tag the plan overview memory with `needs-review` so the human can approve the direction before work begins
+- If previous plans were rejected, read the feedback comment and incorporate it into the new plan
+- Don't dispatch execution tasks until the plan has been reviewed (check for feedback on the overview memory)

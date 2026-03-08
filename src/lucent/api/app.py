@@ -16,8 +16,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from lucent.api.routers import daemon_tasks as daemon_tasks_router
+from lucent.api.routers import daemon_messages as daemon_messages_router
 from lucent.api.routers import memories, search, export
-from lucent.logging import get_logger
+from lucent.logging import get_logger, set_correlation_id
 from lucent.mode import is_team_mode
 
 # Get logger for this module
@@ -80,12 +82,34 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     
+    @app.middleware("http")
+    async def correlation_id_middleware(request: Request, call_next):
+        """Generate or propagate a correlation ID for every request."""
+        cid = request.headers.get("X-Request-ID")
+        if cid:
+            set_correlation_id(cid)
+        else:
+            cid = set_correlation_id()
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = cid
+        return response
+    
     # Include core API routers
     # Export router must be registered before memories router to avoid
     # path conflicts with /{memory_id} routes
     app.include_router(export.router, prefix="/api/memories/export", tags=["Export"])
     app.include_router(memories.router, prefix="/api/memories", tags=["Memories"])
     app.include_router(search.router, prefix="/api/search", tags=["Search"])
+    app.include_router(
+        daemon_tasks_router.router,
+        prefix="/api/daemon/tasks",
+        tags=["Daemon Tasks"],
+    )
+    app.include_router(
+        daemon_messages_router.router,
+        prefix="/api/daemon/messages",
+        tags=["Daemon Messages"],
+    )
     
     # Include team-only API routers
     if is_team_mode():
