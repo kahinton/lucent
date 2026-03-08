@@ -65,7 +65,7 @@ services:
     volumes:
       - ./daemon:/app/daemon:cached
       - ./src:/app/src:cached
-    command: ["python", "-m", "daemon.daemon_v2"]
+    command: ["python", "-m", "daemon.daemon"]
     restart: unless-stopped
 
   daemon-2:
@@ -86,7 +86,7 @@ services:
     volumes:
       - ./daemon:/app/daemon:cached
       - ./src:/app/src:cached
-    command: ["python", "-m", "daemon.daemon_v2"]
+    command: ["python", "-m", "daemon.daemon"]
     restart: unless-stopped
 
 volumes:
