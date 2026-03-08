@@ -88,13 +88,15 @@ def log(message: str, level: str = "INFO"):
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         print(f"[{timestamp}] [{level}] {message}")
         return
+
+    from lucent.logging import THOUGHT, STREAM
     level_map = {
         "INFO": _logger.info,
         "WARN": _logger.warning,
         "WARNING": _logger.warning,
         "ERROR": _logger.error,
-        "STREAM": _logger.debug,
-        "THOUGHT": _logger.debug,
+        "STREAM": lambda msg: _logger.log(STREAM, msg),
+        "THOUGHT": lambda msg: _logger.log(THOUGHT, msg),
         "DEBUG": _logger.debug,
     }
     log_fn = level_map.get(level.upper(), _logger.info)
@@ -258,15 +260,34 @@ class LucentDaemon:
 
                 def on_event(event):
                     etype = event.type.value if hasattr(event.type, 'value') else str(event.type)
+
                     if etype == "assistant.message":
                         content = getattr(event.data, 'content', None)
                         if content:
                             response_parts.append(content)
+                            log(f"  [{name}] message: {content[:200]}...", "STREAM")
+                    elif etype == "assistant.message_delta":
+                        pass  # Skip deltas — final message has full content
                     elif etype == "session.idle":
                         done.set()
                     elif "error" in etype.lower():
-                        log(f"  [{name}] error: {getattr(event.data, 'message', str(event.data)[:200])}", "ERROR")
+                        log(f"  [{name}] error event: {etype} - {getattr(event.data, 'message', str(event.data)[:200])}", "ERROR")
                         done.set()
+                    else:
+                        # Log all other events for visibility (tool calls, etc.)
+                        detail = ""
+                        if hasattr(event.data, 'tool_name'):
+                            detail = f" tool={event.data.tool_name}"
+                        elif hasattr(event.data, 'name'):
+                            detail = f" name={event.data.name}"
+                        # Include tool output/result snippets when available
+                        if hasattr(event.data, 'output'):
+                            output = str(event.data.output)[:300]
+                            detail += f" output={output}"
+                        elif hasattr(event.data, 'result'):
+                            result_str = str(event.data.result)[:300]
+                            detail += f" result={result_str}"
+                        log(f"  [{name}] event: {etype}{detail}", "STREAM")
 
                 session.on(on_event)
                 await session.send({"prompt": prompt})
@@ -288,6 +309,7 @@ class LucentDaemon:
             result = "\n".join(response_parts) if response_parts else None
             if result:
                 log(f"Session '{name}' completed ({len(result)} chars)")
+                log(f"--- {name} full output ---\n{result}\n--- end {name} ---", "THOUGHT")
             else:
                 log(f"Session '{name}' completed (no response)")
             return result
@@ -323,7 +345,7 @@ class LucentDaemon:
         )
 
         if result:
-            log(f"--- cognitive output ---\n{result}\n--- end cognitive ---", "THOUGHT")
+            log(f"Cognitive cycle #{self.cycle_count} produced output", "INFO")
 
         # After cognitive loop runs, check for pending tasks it created
         await self._dispatch_pending_tasks()
@@ -495,7 +517,7 @@ class LucentDaemon:
             )
 
             if result:
-                log(f"--- {agent_type} result ---\n{result}\n--- end {agent_type} ---", "THOUGHT")
+                log(f"Sub-agent {agent_type} for task {memory_id[:8]} completed")
 
             # Validate result before marking complete
             success, reason = self._validate_task_result(result)

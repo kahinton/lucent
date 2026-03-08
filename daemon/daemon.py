@@ -72,13 +72,15 @@ def log(message: str, level: str = "INFO"):
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         print(f"[{timestamp}] [{level}] {message}")
         return
+
+    from lucent.logging import THOUGHT, STREAM
     level_map = {
         "INFO": _logger.info,
         "WARN": _logger.warning,
         "WARNING": _logger.warning,
         "ERROR": _logger.error,
-        "STREAM": _logger.debug,
-        "THOUGHT": _logger.debug,
+        "STREAM": lambda msg: _logger.log(STREAM, msg),
+        "THOUGHT": lambda msg: _logger.log(THOUGHT, msg),
         "DEBUG": _logger.debug,
     }
     log_fn = level_map.get(level.upper(), _logger.info)
@@ -214,7 +216,7 @@ class LucentDaemon:
                 "model": use_model,
                 "system_message": {"content": build_system_message()},
                 "on_permission_request": PermissionHandler.approve_all,
-                "mcpServers": MCP_CONFIG,
+                "mcp_servers": MCP_CONFIG,
             })
             self.active_sessions.append(session)
 

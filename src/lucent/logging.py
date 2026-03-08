@@ -17,6 +17,13 @@ from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from typing import Any
 
+# Custom log levels for daemon visibility
+THOUGHT = 15  # Between DEBUG(10) and INFO(20) — full output dumps
+STREAM = 12   # Between DEBUG(10) and THOUGHT(15) — real-time event tracking
+
+logging.addLevelName(THOUGHT, "THOUGHT")
+logging.addLevelName(STREAM, "STREAM")
+
 # Correlation ID context variable — set per-request by middleware
 correlation_id_var: ContextVar[str | None] = ContextVar("correlation_id", default=None)
 
@@ -122,11 +129,13 @@ class HumanFormatter(logging.Formatter):
     """Human-readable log formatter for development."""
 
     COLORS = {
-        "DEBUG": "\033[36m",  # Cyan
-        "INFO": "\033[32m",  # Green
+        "DEBUG": "\033[36m",    # Cyan
+        "STREAM": "\033[90m",   # Bright black (gray) — real-time events
+        "THOUGHT": "\033[94m",  # Bright blue — full output dumps
+        "INFO": "\033[32m",     # Green
         "WARNING": "\033[33m",  # Yellow
-        "ERROR": "\033[31m",  # Red
-        "CRITICAL": "\033[35m",  # Magenta
+        "ERROR": "\033[31m",    # Red
+        "CRITICAL": "\033[35m", # Magenta
     }
     RESET = "\033[0m"
 
@@ -165,6 +174,8 @@ def _parse_level(level_str: str) -> int:
     """Parse a log level string to a logging constant."""
     level_map = {
         "DEBUG": logging.DEBUG,
+        "STREAM": STREAM,
+        "THOUGHT": THOUGHT,
         "INFO": logging.INFO,
         "WARNING": logging.WARNING,
         "ERROR": logging.ERROR,
