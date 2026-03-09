@@ -104,14 +104,14 @@ class TestFeedbackStorage:
         feedback = {
             "status": "approved",
             "reviewed_at": "2026-03-07 23:00 UTC",
-            "reviewed_by": "Kyle",
+            "reviewed_by": "test-user",
         }
         existing_metadata = daemon_memory.get("metadata") or {}
         updated_metadata = {**existing_metadata, "feedback": feedback}
         result = await repo.update(memory_id=daemon_memory["id"], metadata=updated_metadata)
 
         assert result["metadata"]["feedback"]["status"] == "approved"
-        assert result["metadata"]["feedback"]["reviewed_by"] == "Kyle"
+        assert result["metadata"]["feedback"]["reviewed_by"] == "test-user"
 
     @pytest.mark.asyncio
     async def test_reject_feedback_with_comment(self, db_pool, daemon_memory):
@@ -120,7 +120,7 @@ class TestFeedbackStorage:
         feedback = {
             "status": "rejected",
             "reviewed_at": "2026-03-07 23:00 UTC",
-            "reviewed_by": "Kyle",
+            "reviewed_by": "test-user",
             "comment": "Wrong approach, use async instead",
         }
         existing_metadata = daemon_memory.get("metadata") or {}
@@ -138,7 +138,7 @@ class TestFeedbackStorage:
             "status": "pending",
             "comment": "Looks interesting, still thinking about it",
             "reviewed_at": "2026-03-07 23:00 UTC",
-            "reviewed_by": "Kyle",
+            "reviewed_by": "test-user",
         }
         existing_metadata = daemon_memory.get("metadata") or {}
         updated_metadata = {**existing_metadata, "feedback": feedback}

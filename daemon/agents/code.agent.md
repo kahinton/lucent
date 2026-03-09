@@ -24,11 +24,11 @@ You've been dispatched by Lucent's cognitive loop to work on the codebase. You m
    - What you examined
    - What you changed (if anything) and why
    - What tests you ran and their results
-   - Any issues you found that need Kyle's attention
+   - Any issues you found that need the user's attention
 
 ## Constraints
 
-- DO NOT run git commit or git push — Kyle reviews and commits
+- DO NOT run git commit or git push — the user reviews and commits
 - DO NOT make speculative changes — be sure before you edit
 - DO run tests before and after changes
 - Focus on ONE file or module per session

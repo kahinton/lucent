@@ -28,11 +28,12 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import httpx
 from copilot import CopilotClient, PermissionHandler
 
 # ============================================================================
 # Configuration
-# ============================================================================
+# ============================================================================ß
 
 MAX_CONCURRENT_SESSIONS = int(os.environ.get("LUCENT_MAX_SESSIONS", "3"))
 DAEMON_INTERVAL_MINUTES = int(os.environ.get("LUCENT_DAEMON_INTERVAL", "15"))
@@ -63,6 +64,82 @@ MCP_CONFIG = {
         "headers": {"Authorization": f"Bearer {MCP_API_KEY}"},
     },
 } if MCP_API_KEY else {}
+
+# REST API base URL (same host as MCP, different path)
+API_BASE = MCP_URL.replace("/mcp", "/api")
+API_HEADERS = {"Authorization": f"Bearer {MCP_API_KEY}", "Content-Type": "application/json"}
+
+
+# ============================================================================
+# Direct API Client (no LLM needed)
+# ============================================================================
+
+class MemoryAPI:
+    """Direct REST API client for memory operations that don't need an LLM."""
+
+    @staticmethod
+    async def search(query: str, tags: list[str] | None = None, type: str | None = None, limit: int = 10) -> list[dict]:
+        """Search memories via REST API."""
+        params = {"query": query, "limit": limit}
+        if tags:
+            params["tags"] = ",".join(tags)
+        if type:
+            params["type"] = type
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.post(f"{API_BASE}/search", json=params, headers=API_HEADERS)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    return data.get("memories", data.get("results", []))
+        except Exception as e:
+            log(f"API search failed: {e}", "WARN")
+        return []
+
+    @staticmethod
+    async def create(type: str, content: str, tags: list[str], importance: int = 5, metadata: dict | None = None) -> dict | None:
+        """Create a memory via REST API."""
+        body = {"type": type, "content": content, "tags": tags, "importance": importance}
+        if metadata:
+            body["metadata"] = metadata
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.post(f"{API_BASE}/memories", json=body, headers=API_HEADERS)
+                if resp.status_code in (200, 201):
+                    return resp.json()
+        except Exception as e:
+            log(f"API create failed: {e}", "WARN")
+        return None
+
+    @staticmethod
+    async def update(memory_id: str, tags: list[str] | None = None, content: str | None = None, importance: int | None = None) -> dict | None:
+        """Update a memory via REST API."""
+        body = {}
+        if tags is not None:
+            body["tags"] = tags
+        if content is not None:
+            body["content"] = content
+        if importance is not None:
+            body["importance"] = importance
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.patch(f"{API_BASE}/memories/{memory_id}", json=body, headers=API_HEADERS)
+                if resp.status_code == 200:
+                    return resp.json()
+        except Exception as e:
+            log(f"API update failed: {e}", "WARN")
+        return None
+
+    @staticmethod
+    async def get(memory_id: str) -> dict | None:
+        """Get a single memory by ID."""
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.get(f"{API_BASE}/memories/{memory_id}", headers=API_HEADERS)
+                if resp.status_code == 200:
+                    return resp.json()
+        except Exception as e:
+            log(f"API get failed: {e}", "WARN")
+        return None
 
 
 # ============================================================================

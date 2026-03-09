@@ -34,7 +34,7 @@ Also create an overview memory tagged 'daemon' and 'planning' summarizing the fu
 
 - Be realistic — don't create 50 micro-tasks. Group logically into 5-15 meaningful steps.
 - Consider what can be parallelized vs. what's sequential
-- Flag anything that needs Kyle's input or decision
+- Flag anything that needs the user's input or decision
 - Tag all output with 'daemon' and 'planning'
 
 ## Feedback & Review Protocol
