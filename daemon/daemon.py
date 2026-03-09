@@ -46,6 +46,15 @@ SESSION_TOTAL_TIMEOUT = int(os.environ.get("LUCENT_SESSION_TIMEOUT", "720"))
 WATCHDOG_TIMEOUT = int(os.environ.get("LUCENT_WATCHDOG_TIMEOUT", "900"))
 WATCHDOG_CHECK_INTERVAL = 60
 
+# Approval flow: when enabled, tasks go to needs-review before completing.
+# When disabled, tasks complete immediately after successful execution.
+REQUIRE_APPROVAL = os.environ.get("LUCENT_REQUIRE_APPROVAL", "false").lower() in ("true", "1", "yes")
+
+# Multi-model review: comma-separated list of models to use for reviewing task output.
+# When set, completed tasks are re-evaluated by each model before final completion.
+# The cognitive model is always claude-opus-4.6; these are for sub-agent review.
+REVIEW_MODELS = [m.strip() for m in os.environ.get("LUCENT_REVIEW_MODELS", "").split(",") if m.strip()]
+
 # Paths
 DAEMON_DIR = Path(__file__).parent
 COGNITIVE_PROMPT_PATH = DAEMON_DIR / "cognitive.md"
@@ -364,21 +373,23 @@ class LucentDaemon:
 
     # --- Session Management ---
 
-    async def run_session(self, name: str, system_message: str, prompt: str) -> str | None:
+    async def run_session(self, name: str, system_message: str, prompt: str, model: str | None = None) -> str | None:
         """Run a single Copilot session with the given system message and prompt.
 
         Each session gets its own CopilotClient for full isolation.
+        Args:
+            model: Override the default model. If None, uses MODEL config.
         Returns the assistant's final message text, or None on error.
         """
         if len(self.active_sessions) >= MAX_CONCURRENT_SESSIONS:
             log(f"Skipping '{name}' — at session limit ({MAX_CONCURRENT_SESSIONS})", "WARN")
             return None
 
-        log(f"Starting session: {name}")
+        log(f"Starting session: {name}{f' (model: {model})' if model else ''}")
 
         try:
             return await asyncio.wait_for(
-                self._run_session_inner(name, system_message, prompt),
+                self._run_session_inner(name, system_message, prompt, model=model),
                 timeout=SESSION_TOTAL_TIMEOUT,
             )
         except asyncio.TimeoutError:
@@ -389,7 +400,7 @@ class LucentDaemon:
             log(f"Session '{name}' failed: {e}", "ERROR")
             return None
 
-    async def _run_session_inner(self, name: str, system_message: str, prompt: str) -> str | None:
+    async def _run_session_inner(self, name: str, system_message: str, prompt: str, model: str | None = None) -> str | None:
         """Inner session runner — separated so the caller can wrap with a hard timeout."""
         client = None
 
@@ -398,7 +409,7 @@ class LucentDaemon:
             await client.start()
 
             session = await client.create_session({
-                "model": MODEL,
+                "model": model or MODEL,
                 "system_message": {"content": system_message},
                 "on_permission_request": PermissionHandler.approve_all,
                 "mcp_servers": MCP_CONFIG,
@@ -595,8 +606,12 @@ class LucentDaemon:
                     if len(parts) >= 3:
                         log(f"Released stale claim: task {parts[1][:8]} from instance {parts[2]}")
 
-    async def _dispatch_pending_tasks(self):
-        """Find and dispatch pending daemon-task memories, claiming them atomically."""
+    async def _dispatch_pending_tasks(self, max_tasks: int = 2):
+        """Find and dispatch pending daemon-task memories, claiming them atomically.
+
+        Args:
+            max_tasks: Maximum tasks to dispatch per cycle to prevent unbounded execution.
+        """
         # Run a session that searches for pending tasks
         task_finder = await self.run_session(
             "task-finder",
@@ -625,11 +640,15 @@ class LucentDaemon:
                 if len(parts) >= 3:
                     log(f"Task {parts[1][:8]} already claimed by {parts[2]}")
 
-        # Parse and claim pending tasks
+        # Parse and claim pending tasks (capped to prevent unbounded execution)
+        dispatched = 0
         for line in task_finder.strip().split("\n"):
             line = line.strip()
             if not line.startswith("TASK|"):
                 continue
+            if dispatched >= max_tasks:
+                log(f"Task cap reached ({max_tasks}), deferring remaining tasks to next cycle")
+                break
             parts = line.split("|")
             if len(parts) < 3:
                 continue
@@ -678,20 +697,51 @@ class LucentDaemon:
 
             if result:
                 log(f"Sub-agent {agent_type} for task {memory_id[:8]} completed")
+            dispatched += 1
 
             # Validate result before marking complete
             success, reason = self._validate_task_result(result)
 
             if success:
-                await self.run_session(
-                    f"task-complete-{memory_id[:8]}",
-                    (
-                        "You are a helper. Update the specified memory's tags: remove "
-                        f"'claimed-by-{self.instance_id}' and add 'completed'. Use update_memory."
-                    ),
-                    f"Update memory {memory_id}: replace claim tag with 'completed'."
-                )
-                log(f"Task {memory_id[:8]} marked completed")
+                # Multi-model review if configured
+                if REVIEW_MODELS:
+                    review_passed = await self._multi_model_review(
+                        memory_id, agent_type, task_content, result
+                    )
+                    if not review_passed:
+                        log(f"Task {memory_id[:8]} failed multi-model review. Released.", "WARN")
+                        await self.run_session(
+                            f"task-release-{memory_id[:8]}",
+                            "You are a helper. Use release_claim to release the specified task back to pending.",
+                            f"Release claim on memory {memory_id} for instance {self.instance_id}."
+                        )
+                        continue
+
+                if REQUIRE_APPROVAL:
+                    # Mark as needs-review instead of completed
+                    await self.run_session(
+                        f"task-review-{memory_id[:8]}",
+                        (
+                            "You are a helper. Update the specified memory's tags: remove "
+                            f"'claimed-by-{self.instance_id}' and add 'needs-review'. "
+                            "Also create an experience memory with the task result tagged "
+                            "'daemon-result' and 'needs-review'. Use update_memory and create_memory."
+                        ),
+                        f"Update memory {memory_id}: replace claim with 'needs-review'. "
+                        f"Save result:\n{result[:2000]}"
+                    )
+                    log(f"Task {memory_id[:8]} sent to review queue")
+                else:
+                    # Complete immediately
+                    await self.run_session(
+                        f"task-complete-{memory_id[:8]}",
+                        (
+                            "You are a helper. Update the specified memory's tags: remove "
+                            f"'claimed-by-{self.instance_id}' and add 'completed'. Use update_memory."
+                        ),
+                        f"Update memory {memory_id}: replace claim tag with 'completed'."
+                    )
+                    log(f"Task {memory_id[:8]} marked completed")
             else:
                 # Release the claim so another instance can try
                 await self.run_session(
@@ -700,6 +750,59 @@ class LucentDaemon:
                     f"Release claim on memory {memory_id} for instance {self.instance_id}."
                 )
                 log(f"Task {memory_id[:8]} NOT complete — {reason}. Released claim.", "WARN")
+
+    async def _multi_model_review(self, memory_id: str, agent_type: str, task_content: str, result: str) -> bool:
+        """Run the task result through multiple models for review.
+        
+        Each review model evaluates the result independently. All must approve
+        for the review to pass. Returns True if all models approve.
+        """
+        review_prompt = f"""You are reviewing work produced by an AI sub-agent. Evaluate the quality and correctness of the output.
+
+TASK THAT WAS ASSIGNED:
+{task_content[:2000]}
+
+OUTPUT PRODUCED:
+{result[:4000]}
+
+Evaluate:
+1. Does the output actually address the task?
+2. Is the reasoning sound?
+3. Are there any errors, hallucinations, or problematic assumptions?
+4. Is the output actionable and useful?
+
+Respond with EXACTLY one of:
+- APPROVE: [brief reason] — if the work is good
+- REJECT: [brief reason] — if there are significant issues"""
+
+        approvals = 0
+        rejections = 0
+
+        for review_model in REVIEW_MODELS:
+            log(f"  Review of task {memory_id[:8]} by {review_model}...")
+            review_result = await self.run_session(
+                f"review-{memory_id[:8]}-{review_model.split('/')[-1][:10]}",
+                "You are a quality reviewer. Be concise and decisive.",
+                review_prompt,
+                model=review_model,
+            )
+
+            if review_result and "APPROVE" in review_result.upper():
+                approvals += 1
+                log(f"  Review by {review_model}: APPROVED")
+            else:
+                rejections += 1
+                reason = review_result[:200] if review_result else "no response"
+                log(f"  Review by {review_model}: REJECTED — {reason}", "WARN")
+
+        total = approvals + rejections
+        if total == 0:
+            log(f"No review models responded for task {memory_id[:8]}", "WARN")
+            return True  # Don't block on review failures
+
+        passed = rejections == 0
+        log(f"Multi-model review for {memory_id[:8]}: {approvals}/{total} approved — {'PASSED' if passed else 'FAILED'}")
+        return passed
 
     # --- Autonomic Layer ---
 

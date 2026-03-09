@@ -83,6 +83,7 @@ Gather information about the current state of your world:
    - These are blocking on input from someone. Do NOT dispatch follow-up work that depends on unreviewed results.
    - Don't pile more `needs-review` work on top if the queue is deep — let reviewers catch up.
    - Count the queue depth. If 3+ items are waiting for review, focus on non-review work until the queue drains.
+   - Note: The approval requirement is configurable. When disabled, completed tasks may have already been validated through automated multi-model review (multiple LLMs independently verify the output). When enabled, tasks go to the review queue for human approval.
 
 ### Phase 3: Reason
 
