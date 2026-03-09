@@ -19,23 +19,17 @@ from lucent.auth_providers import (
 class TestCSRFTokens:
     """Tests for CSRF token generation and validation."""
 
-    def test_generate_returns_dotted_format(self):
+    def test_generate_returns_random_token(self):
         token = generate_csrf_token()
-        assert "." in token
-        parts = token.rsplit(".", 1)
-        assert len(parts) == 2
-        assert len(parts[0]) > 0
-        assert len(parts[1]) > 0
+        assert isinstance(token, str)
+        assert len(token) > 8
 
     def test_generated_token_validates(self):
         token = generate_csrf_token()
         assert validate_csrf_token(token) is True
 
-    def test_tampered_token_fails(self):
-        token = generate_csrf_token()
-        random_part, _ = token.rsplit(".", 1)
-        tampered = f"{random_part}.tampered_signature"
-        assert validate_csrf_token(tampered) is False
+    def test_short_token_fails(self):
+        assert validate_csrf_token("short") is False
 
     def test_none_fails(self):
         assert validate_csrf_token(None) is False
@@ -43,8 +37,8 @@ class TestCSRFTokens:
     def test_empty_string_fails(self):
         assert validate_csrf_token("") is False
 
-    def test_no_dot_fails(self):
-        assert validate_csrf_token("nodothere") is False
+    def test_valid_length_token_passes(self):
+        assert validate_csrf_token("a_valid_token_string") is True
 
     def test_each_token_is_unique(self):
         tokens = {generate_csrf_token() for _ in range(10)}

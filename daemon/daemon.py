@@ -23,6 +23,8 @@ import os
 import platform
 import signal
 import sys
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -36,6 +38,12 @@ MAX_CONCURRENT_SESSIONS = int(os.environ.get("LUCENT_MAX_SESSIONS", "3"))
 DAEMON_INTERVAL_MINUTES = int(os.environ.get("LUCENT_DAEMON_INTERVAL", "15"))
 MODEL = os.environ.get("LUCENT_DAEMON_MODEL", "claude-opus-4.6")
 STALE_HEARTBEAT_MINUTES = int(os.environ.get("LUCENT_STALE_HEARTBEAT_MINUTES", "30"))
+# Overall timeout for an entire run_session call (client start + create + response)
+SESSION_TOTAL_TIMEOUT = int(os.environ.get("LUCENT_SESSION_TIMEOUT", "720"))
+# Watchdog: kill process if no log activity for this many seconds.
+# CopilotClient can block the event loop, defeating asyncio timeouts.
+WATCHDOG_TIMEOUT = int(os.environ.get("LUCENT_WATCHDOG_TIMEOUT", "900"))
+WATCHDOG_CHECK_INTERVAL = 60
 
 # Paths
 DAEMON_DIR = Path(__file__).parent
@@ -81,9 +89,42 @@ def _configure_daemon_logging():
 # Lazy-initialized logger — set up in main() after arg parsing
 _logger = None
 
+# Monotonic timestamp of last log() call — used by the watchdog thread
+_last_activity = time.monotonic()
+_last_activity_lock = threading.Lock()
+
+
+def _touch_activity():
+    """Update the last-activity timestamp (called from log())."""
+    global _last_activity
+    with _last_activity_lock:
+        _last_activity = time.monotonic()
+
+
+def _watchdog_loop():
+    """Watchdog thread: kill the process if no log activity for WATCHDOG_TIMEOUT seconds.
+
+    Runs as a daemon thread. This exists because CopilotClient can block the
+    asyncio event loop with synchronous IO, defeating asyncio.wait_for() timeouts.
+    A separate OS thread is the only reliable way to detect this.
+    """
+    while True:
+        time.sleep(WATCHDOG_CHECK_INTERVAL)
+        with _last_activity_lock:
+            idle = time.monotonic() - _last_activity
+        if idle > WATCHDOG_TIMEOUT:
+            # Use stderr since logging may itself be blocked
+            sys.stderr.write(
+                f"[WATCHDOG] No activity for {idle:.0f}s (limit {WATCHDOG_TIMEOUT}s). "
+                f"Killing process.\n"
+            )
+            sys.stderr.flush()
+            os._exit(1)
+
 
 def log(message: str, level: str = "INFO"):
     """Log via the structured logging module (falls back to print before init)."""
+    _touch_activity()
     if _logger is None:
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         print(f"[{timestamp}] [{level}] {message}")
@@ -184,6 +225,11 @@ class LucentDaemon:
         log("Lucent daemon starting...")
         self.running = True
 
+        # Start the watchdog thread — detects event loop freezes
+        watchdog = threading.Thread(target=_watchdog_loop, daemon=True, name="watchdog")
+        watchdog.start()
+        log(f"Watchdog started (timeout={WATCHDOG_TIMEOUT}s, check={WATCHDOG_CHECK_INTERVAL}s)")
+
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, self._handle_shutdown)
@@ -239,6 +285,22 @@ class LucentDaemon:
             return None
 
         log(f"Starting session: {name}")
+
+        try:
+            return await asyncio.wait_for(
+                self._run_session_inner(name, system_message, prompt),
+                timeout=SESSION_TOTAL_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            log(f"Session '{name}' HARD TIMEOUT after {SESSION_TOTAL_TIMEOUT}s — "
+                "session lifecycle hung (likely during client.start or create_session)", "ERROR")
+            return None
+        except Exception as e:
+            log(f"Session '{name}' failed: {e}", "ERROR")
+            return None
+
+    async def _run_session_inner(self, name: str, system_message: str, prompt: str) -> str | None:
+        """Inner session runner — separated so the caller can wrap with a hard timeout."""
         client = None
 
         try:
@@ -318,11 +380,19 @@ class LucentDaemon:
             log(f"Session '{name}' failed: {e}", "ERROR")
             return None
         finally:
-            if client:
-                try:
-                    await asyncio.wait_for(client.stop(), timeout=10)
-                except (asyncio.TimeoutError, Exception):
-                    pass
+            await self._force_cleanup_client(client)
+
+    async def _force_cleanup_client(self, client):
+        """Clean up a CopilotClient, using force_stop as fallback."""
+        if not client:
+            return
+        try:
+            await asyncio.wait_for(client.stop(), timeout=10)
+        except (asyncio.TimeoutError, Exception):
+            try:
+                await client.force_stop()
+            except Exception:
+                pass
 
     # --- Cognitive Loop ---
 

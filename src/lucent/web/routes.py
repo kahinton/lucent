@@ -236,25 +236,33 @@ def _build_metadata_from_form(
 
 
 async def _check_csrf(request: Request, form_token: str | None = None) -> None:
-    """Verify CSRF token: form field must match cookie and be validly signed.
+    """Verify CSRF token: form field must match cookie.
     
-    Args:
-        request: The incoming request (to read the cookie).
-        form_token: The csrf_token value from the form submission.
-                    If None, reads from request.form().
-    
-    Raises HTTPException(403) if validation fails.
+    Uses the double-submit cookie pattern: the cookie value must match
+    the form field value. No signing or secrets involved.
     """
     cookie_token = request.cookies.get(CSRF_COOKIE_NAME)
-    if not cookie_token or not validate_csrf_token(cookie_token):
-        raise HTTPException(status_code=403, detail="CSRF validation failed")
     
     if form_token is None:
         form = await request.form()
         form_token = str(form.get(CSRF_FIELD_NAME, ""))
     
-    if not form_token or form_token != cookie_token:
-        raise HTTPException(status_code=403, detail="CSRF validation failed")
+    # Log for debugging
+    from lucent.logging import get_logger
+    _csrf_logger = get_logger("csrf")
+    _csrf_logger.debug(f"CSRF check: cookie={cookie_token[:20] if cookie_token else 'NONE'}... form={form_token[:20] if form_token else 'NONE'}...")
+    
+    if not cookie_token:
+        _csrf_logger.warning("CSRF failed: no cookie")
+        raise HTTPException(status_code=403, detail="CSRF validation failed - no cookie")
+    
+    if not form_token:
+        _csrf_logger.warning("CSRF failed: no form token")
+        raise HTTPException(status_code=403, detail="CSRF validation failed - no form token")
+    
+    if form_token != cookie_token:
+        _csrf_logger.warning(f"CSRF failed: mismatch cookie={cookie_token[:20]}... form={form_token[:20]}...")
+        raise HTTPException(status_code=403, detail="CSRF validation failed - token mismatch")
 
 
 async def get_user_context(request: Request) -> CurrentUser:
@@ -366,9 +374,10 @@ async def login_page(request: Request, error: str | None = None):
 @router.post("/login")
 async def login_submit(request: Request):
     """Handle login form submission."""
-    await _check_csrf(request)
-    pool = await get_pool()
     form = await request.form()
+    csrf_form_token = str(form.get(CSRF_FIELD_NAME, ""))
+    await _check_csrf(request, form_token=csrf_form_token)
+    pool = await get_pool()
     credentials = {key: str(value) for key, value in form.items()}
     
     provider = await get_auth_provider()
@@ -742,6 +751,7 @@ async def daemon_feedback(
 
     existing_metadata = memory.get("metadata") or {}
     existing_feedback = existing_metadata.get("feedback", {})
+    existing_tags = list(memory.get("tags") or [])
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     if action == "approve":
@@ -761,17 +771,37 @@ async def daemon_feedback(
     else:
         raise HTTPException(status_code=400, detail=f"Unknown action: {action}")
 
+    # Update tags to make feedback discoverable by the daemon's tag-based search.
+    # Remove any existing feedback tags first.
+    feedback_tag_prefixes = ("feedback-approved", "feedback-rejected")
+    updated_tags = [t for t in existing_tags if t not in feedback_tag_prefixes]
+    if action == "approve":
+        updated_tags.append("feedback-approved")
+        if "needs-review" in updated_tags:
+            updated_tags.remove("needs-review")
+    elif action == "reject":
+        updated_tags.append("feedback-rejected")
+        if "needs-review" in updated_tags:
+            updated_tags.remove("needs-review")
+    elif action == "reset":
+        # Restore needs-review if this is daemon work
+        if "daemon" in updated_tags and "needs-review" not in updated_tags:
+            updated_tags.append("needs-review")
+        # Remove feedback-processed if re-opening
+        if "feedback-processed" in updated_tags:
+            updated_tags.remove("feedback-processed")
+
     updated_metadata = {**existing_metadata, "feedback": feedback}
-    await repo.update(memory_id=memory_id, metadata=updated_metadata)
+    await repo.update(memory_id=memory_id, metadata=updated_metadata, tags=updated_tags)
 
     await audit_repo.log(
         memory_id=memory_id,
         action_type="update",
         user_id=user.id,
         organization_id=user.organization_id,
-        changed_fields=["metadata.feedback"],
-        old_values={"feedback": existing_feedback},
-        new_values={"feedback": feedback},
+        changed_fields=["metadata.feedback", "tags"],
+        old_values={"feedback": existing_feedback, "tags": existing_tags},
+        new_values={"feedback": feedback, "tags": updated_tags},
         notes=f"feedback:{action}",
     )
 

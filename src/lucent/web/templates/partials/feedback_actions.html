@@ -71,11 +71,7 @@
             Approve
         </button>
         <button 
-            hx-post="/daemon/feedback/{{ memory.id }}" 
-            hx-vals='{"action": "reject"}'
-            hx-target="#feedback-{{ memory.id }}"
-            hx-swap="outerHTML"
-            hx-confirm="Reject this daemon work?"
+            onclick="this.closest('.feedback-actions').querySelector('.reject-form').classList.remove('hidden'); this.closest('.feedback-actions').querySelector('.reject-form input[name=comment]').focus();"
             class="inline-flex items-center gap-1.5 px-3 py-1.5 bg-red-100 text-red-700 text-sm font-medium rounded-lg hover:bg-red-200 transition-colors">
             <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
@@ -92,6 +88,27 @@
         </button>
     </div>
     
+    <!-- Expandable reject form (reason required) -->
+    <div class="reject-form hidden mt-3">
+        <form hx-post="/daemon/feedback/{{ memory.id }}" 
+              hx-target="#feedback-{{ memory.id }}" 
+              hx-swap="outerHTML"
+              class="flex gap-2">
+            <input type="hidden" name="action" value="reject">
+            <input type="text" name="comment" placeholder="Why is this being rejected? (required)" required
+                   class="flex-1 px-3 py-2 text-sm border border-red-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-red-500 outline-none bg-red-50">
+            <button type="submit" 
+                    class="px-3 py-2 bg-red-600 text-white text-sm font-medium rounded-lg hover:bg-red-700 transition-colors">
+                Reject
+            </button>
+            <button type="button" 
+                    onclick="this.closest('.reject-form').classList.add('hidden')"
+                    class="px-3 py-2 bg-gray-100 text-gray-600 text-sm font-medium rounded-lg hover:bg-gray-200 transition-colors">
+                Cancel
+            </button>
+        </form>
+    </div>
+
     <!-- Expandable comment form -->
     <div class="comment-form hidden mt-3">
         <form hx-post="/daemon/feedback/{{ memory.id }}" 

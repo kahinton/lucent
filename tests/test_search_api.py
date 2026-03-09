@@ -603,10 +603,9 @@ class TestSearchAccessControl:
         memories = await _seed_memories(db_pool, srch_user, srch_prefix)
 
         # Share the first memory
-        await repo.update(
+        await repo.set_shared(
             memory_id=memories[0]["id"],
             user_id=srch_user["id"],
-            organization_id=srch_user["organization_id"],
             shared=True,
         )
 
@@ -644,7 +643,7 @@ class TestSearchAccessLogging:
             # Check that access was logged
             access_repo = AccessRepository(db_pool)
             memory_id = UUID(data["memories"][0]["id"])
-            access_log = await access_repo.get_by_memory_id(
+            access_log = await access_repo.get_access_history(
                 memory_id=memory_id,
                 limit=10,
             )
@@ -670,7 +669,7 @@ class TestSearchAccessLogging:
         if data["memories"]:
             access_repo = AccessRepository(db_pool)
             memory_id = UUID(data["memories"][0]["id"])
-            access_log = await access_repo.get_by_memory_id(
+            access_log = await access_repo.get_access_history(
                 memory_id=memory_id,
                 limit=10,
             )
