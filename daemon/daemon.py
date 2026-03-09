@@ -271,9 +271,22 @@ def build_subagent_prompt(agent_type: str, task_description: str, task_context: 
 
 {f"--- ADDITIONAL CONTEXT ---" + chr(10) + task_context if task_context else ""}
 
+--- USING MEMORY ---
+Before starting work, search for relevant memories:
+- Look for previous approaches to similar tasks (search by keywords from your task description)
+- Check for validated patterns (tagged 'validated') and rejection lessons (tagged 'rejection-lesson')
+- Reference procedural memories for proven workflows
+- Build on existing knowledge rather than starting from scratch
+
+After completing work, save what you learned:
+- Not just what you did, but what approach you took and why
+- What worked vs. what didn't
+- What you'd do differently next time
+- Connections to existing knowledge
+
 --- GUARDRAILS ---
 - DO NOT run git push or git commit
-- DO NOT modify production database directly — use memory tools
+- DO NOT take irreversible actions without approval
 - Tag all memories with 'daemon' so activity is visible
 - Write concise, actionable output
 
