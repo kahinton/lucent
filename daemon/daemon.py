@@ -120,7 +120,7 @@ class MemoryAPI:
         return None
 
     @staticmethod
-    async def update(memory_id: str, tags: list[str] | None = None, content: str | None = None, importance: int | None = None) -> dict | None:
+    async def update(memory_id: str, tags: list[str] | None = None, content: str | None = None, importance: int | None = None, metadata: dict | None = None) -> dict | None:
         """Update a memory via REST API."""
         body = {}
         if tags is not None:
@@ -129,6 +129,8 @@ class MemoryAPI:
             body["content"] = content
         if importance is not None:
             body["importance"] = importance
+        if metadata is not None:
+            body["metadata"] = metadata
         try:
             async with httpx.AsyncClient(timeout=15) as client:
                 resp = await client.patch(f"{API_BASE}/memories/{memory_id}", json=body, headers=API_HEADERS)
@@ -657,35 +659,28 @@ class LucentDaemon:
                 continue
             _, memory_id, agent_type = parts[0], parts[1].strip(), parts[2].strip()
 
-            # Claim the task by updating its tags
-            claim_result = await self.run_session(
-                f"task-claim-{memory_id[:8]}",
-                (
-                    "You are a helper. Use update_memory to update the specified memory's tags. "
-                    "Replace 'pending' with 'in-progress' in the tags array. "
-                    "Output 'CLAIMED' if successful or 'FAILED' if something went wrong."
-                ),
-                f"Claim task memory {memory_id}: replace tag 'pending' with 'in-progress'."
-            )
-
-            if not claim_result or "CLAIMED" not in claim_result.upper():
-                log(f"Could not claim task {memory_id[:8]} — likely claimed by another instance", "WARN")
+            # Claim the task via direct API (no LLM session needed)
+            task_memory = await MemoryAPI.get(memory_id)
+            if not task_memory:
+                log(f"Could not read task {memory_id[:8]}", "WARN")
                 continue
 
-            # Get the task content
-            task_content = await self.run_session(
-                f"task-read-{memory_id[:8]}",
-                "You are a helper. Use get_memory to read the specified memory and output ONLY its content field, nothing else.",
-                f"Read memory {memory_id} and output its content."
-            )
+            current_tags = task_memory.get("tags", [])
+            if "pending" not in current_tags:
+                log(f"Task {memory_id[:8]} no longer pending — likely claimed by another instance", "WARN")
+                continue
 
+            claim_tags = [t for t in current_tags if t != "pending"] + ["in-progress"]
+            claim_result = await MemoryAPI.update(memory_id, tags=claim_tags)
+            if not claim_result:
+                log(f"Could not claim task {memory_id[:8]}", "WARN")
+                continue
+
+            task_content = task_memory.get("content", "")
             if not task_content:
-                # Release the claim if we can't read the task
-                await self.run_session(
-                    f"task-release-{memory_id[:8]}",
-                    "You are a helper. Use update_memory to change the task's tags: remove 'in-progress' and add back 'pending'.",
-                    f"Release claim on memory {memory_id} for instance {self.instance_id}."
-                )
+                # Release the claim if task has no content
+                release_tags = [t for t in claim_tags if t != "in-progress"] + ["pending"]
+                await MemoryAPI.update(memory_id, tags=release_tags)
                 continue
 
             log(f"Dispatching task {memory_id[:8]} to {agent_type}: {task_content[:80]}...")
@@ -713,45 +708,44 @@ class LucentDaemon:
                     )
                     if not review_passed:
                         log(f"Task {memory_id[:8]} failed multi-model review. Released.", "WARN")
-                        await self.run_session(
-                            f"task-release-{memory_id[:8]}",
-                            "You are a helper. Use update_memory to change the task's tags: remove 'in-progress' and add back 'pending'.",
-                            f"Release claim on memory {memory_id} for instance {self.instance_id}."
-                        )
+                        release_tags = [t for t in claim_tags if t != "in-progress"] + ["pending"]
+                        await MemoryAPI.update(memory_id, tags=release_tags)
                         continue
 
+                # Get current tags to transform
+                current = await MemoryAPI.get(memory_id)
+                cur_tags = current.get("tags", claim_tags) if current else claim_tags
+
                 if REQUIRE_APPROVAL:
-                    # Mark as needs-review instead of completed
-                    await self.run_session(
-                        f"task-review-{memory_id[:8]}",
-                        (
-                            "You are a helper. Update the specified memory's tags: remove "
-                            f"'in-progress' and add 'needs-review'. "
-                            "Also create an experience memory with the task result tagged "
-                            "'daemon-result' and 'needs-review'. Use update_memory and create_memory."
-                        ),
-                        f"Update memory {memory_id}: replace claim with 'needs-review'. "
-                        f"Save result:\n{result[:2000]}"
+                    # Mark as needs-review
+                    review_tags = [t for t in cur_tags if t != "in-progress"] + ["needs-review"]
+                    await MemoryAPI.update(
+                        memory_id,
+                        tags=review_tags,
+                        metadata={"result": result[:8000]} if result else None,
+                    )
+                    # Also create a daemon-result memory for discoverability
+                    await MemoryAPI.create(
+                        type="experience",
+                        content=result[:8000] if result else "Task completed (no output)",
+                        tags=["daemon-result", "needs-review", agent_type],
+                        importance=6,
+                        metadata={"task_id": memory_id, "agent_type": agent_type},
                     )
                     log(f"Task {memory_id[:8]} sent to review queue")
                 else:
-                    # Complete immediately
-                    await self.run_session(
-                        f"task-complete-{memory_id[:8]}",
-                        (
-                            "You are a helper. Update the specified memory's tags: remove "
-                            f"'in-progress' and add 'completed'. Use update_memory."
-                        ),
-                        f"Update memory {memory_id}: replace claim tag with 'completed'."
+                    # Complete immediately — persist result in metadata
+                    done_tags = [t for t in cur_tags if t != "in-progress"] + ["completed"]
+                    await MemoryAPI.update(
+                        memory_id,
+                        tags=done_tags,
+                        metadata={"result": result[:8000]} if result else None,
                     )
-                    log(f"Task {memory_id[:8]} marked completed")
+                    log(f"Task {memory_id[:8]} marked completed (result: {len(result) if result else 0} chars)")
             else:
                 # Release the claim so another instance can try
-                await self.run_session(
-                    f"task-release-{memory_id[:8]}",
-                    "You are a helper. Use update_memory to change the task's tags: remove 'in-progress' and add back 'pending'.",
-                    f"Release claim on memory {memory_id} for instance {self.instance_id}."
-                )
+                release_tags = [t for t in claim_tags if t != "in-progress"] + ["pending"]
+                await MemoryAPI.update(memory_id, tags=release_tags)
                 log(f"Task {memory_id[:8]} NOT complete — {reason}. Released claim.", "WARN")
 
     async def _multi_model_review(self, memory_id: str, agent_type: str, task_content: str, result: str) -> bool:
