@@ -249,7 +249,7 @@ async def _check_csrf(request: Request, form_token: str | None = None) -> None:
     # Log for debugging
     from lucent.logging import get_logger
     _csrf_logger = get_logger("csrf")
-    _csrf_logger.debug(f"CSRF check: cookie={cookie_token[:20] if cookie_token else 'NONE'}... form={form_token[:20] if form_token else 'NONE'}...")
+    _csrf_logger.debug("CSRF check: cookie=%s form=%s", "present" if cookie_token else "NONE", "present" if form_token else "NONE")
 
     if not cookie_token:
         _csrf_logger.warning("CSRF failed: no cookie")
@@ -260,7 +260,7 @@ async def _check_csrf(request: Request, form_token: str | None = None) -> None:
         raise HTTPException(status_code=403, detail="CSRF validation failed - no form token")
 
     if form_token != cookie_token:
-        _csrf_logger.warning(f"CSRF failed: mismatch cookie={cookie_token[:20]}... form={form_token[:20]}...")
+        _csrf_logger.warning("CSRF failed: token mismatch")
         raise HTTPException(status_code=403, detail="CSRF validation failed - token mismatch")
 
 
@@ -446,9 +446,10 @@ async def logout(request: Request):
             await destroy_session(pool, user["id"])
 
     response = RedirectResponse("/login", status_code=303)
-    response.delete_cookie(key=SESSION_COOKIE_NAME, path="/")
-    response.delete_cookie(key="lucent_impersonate", path="/")
-    response.delete_cookie(key=CSRF_COOKIE_NAME, path="/")
+    params = get_cookie_params()
+    response.delete_cookie(key=SESSION_COOKIE_NAME, **params)
+    response.delete_cookie(key="lucent_impersonate", **params)
+    response.delete_cookie(key=CSRF_COOKIE_NAME, **params)
     return response
 
 
@@ -1797,9 +1798,22 @@ async def start_impersonation(request: Request, user_id: UUID):
     if user_role_value == "owner" and target_role == "owner":
         return RedirectResponse(url="/users?error=Cannot+impersonate+other+owners", status_code=303)
 
-    # Set signed impersonation cookie and redirect to dashboard
+    # Regenerate session to prevent session fixation during impersonation
+    try:
+        new_token = await create_session(pool, user.id)
+    except Exception:
+        logger.exception("Error regenerating session for impersonation")
+        raise HTTPException(status_code=500, detail="Failed to start impersonation")
+
+    # Set signed impersonation cookie and new session cookie, then redirect
     response = RedirectResponse(url="/?impersonating=true", status_code=303)
     params = get_cookie_params()
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=new_token,
+        max_age=SESSION_TTL_HOURS * 3600,
+        **params,
+    )
     response.set_cookie(
         key="lucent_impersonate",
         value=sign_value(str(user_id)),
@@ -1815,7 +1829,8 @@ async def stop_impersonation(request: Request):
     if not is_team_mode():
         raise HTTPException(status_code=404, detail="Impersonation requires team mode")
     response = RedirectResponse(url="/users", status_code=303)
-    response.delete_cookie(key="lucent_impersonate")
+    params = get_cookie_params()
+    response.delete_cookie(key="lucent_impersonate", **params)
     return response
 
 

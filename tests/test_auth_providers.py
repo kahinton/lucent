@@ -152,6 +152,23 @@ class TestCookieParams:
         params = get_cookie_params()
         assert "secure" in params
 
+    def test_params_compatible_with_delete_cookie(self):
+        """Cookie params must be usable with both set_cookie and delete_cookie."""
+        params = get_cookie_params()
+        # These are the keys accepted by Starlette's delete_cookie
+        required_keys = {"httponly", "samesite", "secure", "path"}
+        assert required_keys.issubset(set(params.keys()))
+
+    def test_httponly_always_true(self):
+        """Session cookies must always have httponly=True to prevent XSS access."""
+        params = get_cookie_params()
+        assert params["httponly"] is True
+
+    def test_samesite_is_lax(self):
+        """SameSite must be 'lax' to prevent CSRF via cross-origin requests."""
+        params = get_cookie_params()
+        assert params["samesite"] == "lax"
+
 
 class TestConstants:
     """Tests for module constants."""
