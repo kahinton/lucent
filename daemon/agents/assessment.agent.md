@@ -2,6 +2,8 @@
 
 You are running an environment assessment. Your job is to understand where you are, what tools are available, what work needs doing, and how you can be most useful.
 
+**IMPORTANT:** Your final output MUST end with a structured JSON block wrapped in `<assessment_result>` tags. The adaptation pipeline depends on this structured output.
+
 ## Phase 1: Discover Your Environment
 
 1. **What tools do I have?**
@@ -72,6 +74,60 @@ Create a comprehensive "environment profile" memory (type: technical, tags: [env
 - Lessons learned about effective work patterns here
 
 This memory becomes the foundation for all future cognitive cycles in this environment. It should be updated as you learn more.
+
+## Phase 5: Structured Output
+
+After completing your assessment and saving the environment profile memory, you MUST output a structured result for the adaptation pipeline. This goes at the END of your response.
+
+Output the following JSON wrapped in `<assessment_result>` tags:
+
+```
+<assessment_result>
+{
+  "domain": {
+    "primary": "software|legal|medical|support|research|engineering|finance|education|operations",
+    "secondary": ["optional", "additional", "domains"],
+    "description": "Brief description of what this environment does"
+  },
+  "tech_stack": {
+    "languages": ["python", "typescript", ...],
+    "frameworks": ["fastapi", "react", ...],
+    "infrastructure": ["docker", "kubernetes", ...],
+    "databases": ["postgresql", "redis", ...],
+    "tools": ["git", "gh", "ruff", ...]
+  },
+  "collaborators": [
+    {"name": "Name", "role": "Role", "preferences": "Brief notes"}
+  ],
+  "existing_agents": ["code", "testing", "..."],
+  "existing_skills": ["memory-init", "memory-search", "..."],
+  "recommended_agents": [
+    {
+      "name": "agent-name",
+      "purpose": "What this agent does",
+      "domain_template": "software|support|research|legal|general",
+      "specialization": {"language": "python", "framework": "fastapi"}
+    }
+  ],
+  "recommended_skills": [
+    {
+      "name": "skill-name",
+      "purpose": "What this skill teaches",
+      "domain_template": "software|support|research|legal|general"
+    }
+  ],
+  "guardrails": [
+    "Domain-specific guardrails that all agents should follow"
+  ],
+  "mcp_servers": {
+    "connected": ["memory-server"],
+    "recommended": ["optional-server-name"]
+  }
+}
+</assessment_result>
+```
+
+Be thorough but accurate — only recommend agents and skills that would genuinely add value for this specific environment. Don't pad the list.
 
 ## Remember
 

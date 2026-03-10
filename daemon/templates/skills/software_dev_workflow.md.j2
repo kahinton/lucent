@@ -1,0 +1,93 @@
+---
+name: {{ skill_name }}
+description: '{{ description }}'
+---
+
+# {{ title }}
+
+Workflow skill for {{ language }}{% if framework %}/{{ framework }}{% endif %} development.
+
+## When to Use
+
+- Starting a new feature or bug fix
+- Running the development cycle (code → test → review)
+- Setting up the development environment
+- Debugging test failures
+
+## Development Workflow
+
+### Step 1: Understand the Task
+
+1. Read the task description or issue
+2. Search memories for related past work
+3. Identify affected files and modules
+4. Check for existing tests that cover this area
+
+### Step 2: Set Up
+
+{% if language == "python" %}
+1. Ensure virtual environment is active
+2. Run `pip install -e ".[dev]"` if dependencies changed
+3. Verify `ruff` and `pytest` are available
+{% elif language == "typescript" or language == "javascript" %}
+1. Run `npm install` or `yarn install` if dependencies changed
+2. Check `tsconfig.json` for compiler settings
+3. Verify test runner is configured
+{% elif language == "go" %}
+1. Run `go mod tidy` if dependencies changed
+2. Verify `go vet` runs clean
+{% elif language == "rust" %}
+1. Run `cargo build` to check compilation
+2. Run `cargo clippy` for early warnings
+{% else %}
+1. Check for dependency management tool and ensure deps are installed
+2. Verify build and test tools are available
+{% endif %}
+
+### Step 3: Implement
+
+1. Make minimal, focused changes
+2. Follow existing code patterns and conventions
+3. Add type annotations/hints where expected
+4. Write clear commit-worthy code (no TODOs left behind)
+
+### Step 4: Test
+
+{% if language == "python" %}
+1. Run `pytest` for the affected test files
+2. Run `pytest --tb=short` for a quick overview
+3. Run `ruff check .` for linting
+{% elif language == "typescript" or language == "javascript" %}
+1. Run the project's test command
+2. Run the linter
+3. Check for TypeScript errors
+{% elif language == "go" %}
+1. Run `go test ./...`
+2. Run `go vet ./...`
+{% elif language == "rust" %}
+1. Run `cargo test`
+2. Run `cargo clippy`
+{% else %}
+1. Run the project's test suite
+2. Run available linters
+{% endif %}
+
+### Step 5: Document
+
+1. Update relevant documentation if behavior changed
+2. Add inline comments only where logic is non-obvious
+3. Save a memory of what you learned
+
+## Environment Maintenance
+
+- Keep dependencies up to date
+- Watch for deprecation warnings
+- Monitor test execution time
+- Clean up temporary files
+
+## Tips
+
+- Run tests frequently — catch issues early
+- Read test failures carefully before changing code
+- Check git diff before finishing — review your own changes
+- Search for similar patterns in the codebase before inventing new ones

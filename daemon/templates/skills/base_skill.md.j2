@@ -1,0 +1,46 @@
+---
+name: {{ skill_name }}
+description: '{{ description }}'
+---
+
+# {{ title }}
+
+{{ overview }}
+
+## When to Use
+
+{% for trigger in triggers %}
+- {{ trigger }}
+{% endfor %}
+
+## Process
+
+{% for step in steps %}
+### Step {{ loop.index }}: {{ step.name }}
+
+{{ step.description }}
+
+{% if step.substeps %}
+{% for substep in step.substeps %}
+{{ loop.index }}. {{ substep }}
+{% endfor %}
+{% endif %}
+{% endfor %}
+
+## Best Practices
+
+{% for practice in best_practices %}
+- {{ practice }}
+{% endfor %}
+
+## Common Pitfalls
+
+{% for pitfall in pitfalls %}
+- **{{ pitfall.name }}**: {{ pitfall.description }}
+{% endfor %}
+
+## Tips
+
+{% for tip in tips %}
+- {{ tip }}
+{% endfor %}

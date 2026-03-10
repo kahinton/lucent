@@ -31,6 +31,8 @@ from pathlib import Path
 import httpx
 from copilot import CopilotClient, PermissionHandler
 
+from adaptation import AdaptationPipeline, parse_assessment_output
+
 # ============================================================================
 # Configuration
 # ============================================================================ß
@@ -499,6 +501,58 @@ class LucentDaemon:
 
     # --- Cognitive Loop ---
 
+    async def _check_environment_adaptation(self):
+        """Check if environment has been assessed. If not, run assessment + adaptation.
+
+        This is the entry point for the adaptation pipeline. On first boot or
+        in a new environment, it runs the assessment agent, parses structured
+        output, and generates domain-specific agents and skills.
+        """
+        # Check if an environment memory already exists
+        env_memories = await MemoryAPI.search(
+            "environment", tags=["environment"], limit=1
+        )
+        if env_memories:
+            log("Environment profile found — skipping adaptation")
+            return
+
+        log("No environment profile found — running adaptation pipeline")
+
+        # Run the assessment agent
+        system_message = build_subagent_prompt(
+            "assessment",
+            "Perform a full environment assessment. Discover tools, domain, "
+            "collaborators, and goals. Produce structured output for the "
+            "adaptation pipeline.",
+        )
+        assessment_output = await self.run_session(
+            "adaptation-assessment",
+            system_message,
+            "Run a complete environment assessment. At the end of your response, "
+            "include the structured <assessment_result> JSON block as described "
+            "in your instructions. This is critical — the adaptation pipeline "
+            "depends on it.",
+        )
+
+        if not assessment_output:
+            log("Assessment agent produced no output", "WARN")
+            return
+
+        # Parse and run adaptation pipeline
+        assessment = parse_assessment_output(assessment_output)
+        if assessment is None:
+            log("Could not parse structured assessment output — "
+                "the assessment agent may not have included <assessment_result> tags", "WARN")
+            return
+
+        pipeline = AdaptationPipeline(assessment)
+        summary = await pipeline.run(memory_api=MemoryAPI)
+
+        agents_created = len(summary.get("agents_created", []))
+        skills_created = len(summary.get("skills_created", []))
+        log(f"Adaptation complete: {agents_created} agents, {skills_created} skills created "
+            f"for domain '{summary.get('domain', 'unknown')}'")
+
     async def run_cognitive_cycle(self):
         """Run one cognitive cycle — perceive, reason, decide, act via tools."""
         self.cycle_count += 1
@@ -509,6 +563,10 @@ class LucentDaemon:
 
         # Release stale claims from dead instances
         await self._release_stale_claims()
+
+        # On first cycle, check if environment adaptation is needed
+        if self.cycle_count == 1:
+            await self._check_environment_adaptation()
 
         prompt = build_cognitive_prompt()
         result = await self.run_session(
