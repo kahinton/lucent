@@ -275,14 +275,14 @@ class TestCorrelationId:
     """Tests for correlation ID support."""
 
     def test_set_and_get_correlation_id(self):
-        from lucent.logging import set_correlation_id, get_correlation_id, clear_correlation_id
+        from lucent.logging import clear_correlation_id, get_correlation_id, set_correlation_id
         cid = set_correlation_id("test-123")
         assert cid == "test-123"
         assert get_correlation_id() == "test-123"
         clear_correlation_id()
 
     def test_auto_generate_correlation_id(self):
-        from lucent.logging import set_correlation_id, get_correlation_id, clear_correlation_id
+        from lucent.logging import clear_correlation_id, get_correlation_id, set_correlation_id
         cid = set_correlation_id()
         assert cid is not None
         assert len(cid) == 12
@@ -292,8 +292,8 @@ class TestCorrelationId:
     def test_correlation_id_in_json_output(self):
         from lucent.logging import (
             CorrelationIdFilter,
-            set_correlation_id,
             clear_correlation_id,
+            set_correlation_id,
         )
         set_correlation_id("req-abc-123")
         try:
@@ -317,8 +317,8 @@ class TestCorrelationId:
     def test_correlation_id_in_human_output(self):
         from lucent.logging import (
             CorrelationIdFilter,
-            set_correlation_id,
             clear_correlation_id,
+            set_correlation_id,
         )
         set_correlation_id("req-xyz")
         try:

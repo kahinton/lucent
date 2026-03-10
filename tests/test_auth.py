@@ -8,15 +8,15 @@ Tests cover:
 - Pool initialization error handling
 """
 
-import os
-import pytest
-import pytest_asyncio
+from unittest.mock import patch
 from uuid import UUID, uuid4
-from unittest.mock import AsyncMock, patch
+
+import pytest
 
 from lucent.auth import (
     _current_api_key_id,
     _current_user,
+    _ensure_pool,
     _impersonating_user,
     get_current_api_key_id,
     get_current_user,
@@ -27,9 +27,7 @@ from lucent.auth import (
     set_current_api_key_id,
     set_current_user,
     set_impersonating_user,
-    _ensure_pool,
 )
-
 
 # ============================================================================
 # Fixture to reset ContextVars between tests

@@ -6,14 +6,13 @@ from pydantic import ValidationError
 from pydantic.fields import FieldInfo
 
 from lucent.models.memory import (
-    MemoryType,
     ExperienceMetadata,
-    TechnicalMetadata,
-    ProceduralMetadata,
     GoalMetadata,
     IndividualMetadata,
+    MemoryType,
+    ProceduralMetadata,
+    TechnicalMetadata,
 )
-
 
 # Mapping of memory types to their metadata models
 METADATA_MODELS = {
@@ -50,18 +49,18 @@ def validate_metadata(memory_type: str | MemoryType, metadata: dict[str, Any] | 
     # Handle empty/None metadata - return empty dict
     if not metadata:
         return {}
-    
+
     # Normalize memory type to string
     if isinstance(memory_type, MemoryType):
         type_str = memory_type.value
     else:
         type_str = memory_type.lower()
-    
+
     # Get the appropriate metadata model
     metadata_model = METADATA_MODELS_BY_STR.get(type_str)
     if metadata_model is None:
         raise ValueError(f"Invalid memory type: {memory_type}")
-    
+
     # Validate metadata against the model
     try:
         validated = metadata_model.model_validate(metadata)
@@ -75,7 +74,7 @@ def validate_metadata(memory_type: str | MemoryType, metadata: dict[str, Any] | 
             loc = ".".join(str(l) for l in error["loc"])
             msg = error["msg"]
             errors.append(f"  - {loc}: {msg}")
-        
+
         error_msg = f"Invalid metadata for {type_str} memory:\n" + "\n".join(errors)
         raise ValueError(error_msg) from e
 
@@ -99,11 +98,11 @@ def get_metadata_schema(memory_type: str | MemoryType) -> dict[str, Any]:
         type_str = memory_type.value
     else:
         type_str = memory_type.lower()
-    
+
     metadata_model = METADATA_MODELS_BY_STR.get(type_str)
     if metadata_model is None:
         raise ValueError(f"Invalid memory type: {memory_type}")
-    
+
     return metadata_model.model_json_schema()
 
 
@@ -126,15 +125,15 @@ def get_metadata_field_descriptions(memory_type: str | MemoryType) -> dict[str, 
         type_str = memory_type.value
     else:
         type_str = memory_type.lower()
-    
+
     metadata_model = METADATA_MODELS_BY_STR.get(type_str)
     if metadata_model is None:
         raise ValueError(f"Invalid memory type: {memory_type}")
-    
+
     descriptions = {}
     for name, field in metadata_model.model_fields.items():
         descriptions[name] = field.description or ""
-    
+
     return descriptions
 
 
@@ -142,38 +141,38 @@ def _format_type_for_docs(field_info: FieldInfo, annotation: Any) -> str:
     """Format a field's type annotation for documentation."""
     origin = get_origin(annotation)
     args = get_args(annotation)
-    
+
     # Handle Optional (Union with None)
     if origin is type(None) or annotation is type(None):
         return "null"
-    
+
     # Handle Union types (e.g., str | None)
     if origin is type(str | int):  # UnionType
         non_none_args = [a for a in args if a is not type(None)]
         if len(non_none_args) == 1:
             return _format_type_for_docs(field_info, non_none_args[0])
         return " | ".join(_format_type_for_docs(field_info, a) for a in non_none_args)
-    
+
     # Handle list types
     if origin is list:
         if args:
             inner = _format_type_for_docs(field_info, args[0])
             return f"[{inner}, ...]"
         return "[...]"
-    
+
     # Handle dict types
     if origin is dict:
         return "{...}"
-    
+
     # Handle enums
     if hasattr(annotation, "__members__"):
         values = [f'"{v.value}"' for v in annotation]
         return " | ".join(values)
-    
+
     # Handle Pydantic models (nested objects)
     if hasattr(annotation, "model_fields"):
         return "{" + ", ".join(annotation.model_fields.keys()) + "}"
-    
+
     # Basic types
     if annotation is str:
         return "string"
@@ -183,11 +182,11 @@ def _format_type_for_docs(field_info: FieldInfo, annotation: Any) -> str:
         return "number"
     if annotation is bool:
         return "boolean"
-    
+
     # datetime
     if hasattr(annotation, "__name__") and annotation.__name__ == "datetime":
         return "ISO datetime string"
-    
+
     return str(annotation.__name__) if hasattr(annotation, "__name__") else str(annotation)
 
 
@@ -208,18 +207,18 @@ def generate_metadata_docs_for_type(memory_type: str) -> str:
     metadata_model = METADATA_MODELS_BY_STR.get(memory_type)
     if metadata_model is None:
         return f"Unknown type: {memory_type}"
-    
+
     lines = ["{"]
-    
+
     for name, field_info in metadata_model.model_fields.items():
         annotation = metadata_model.__annotations__.get(name)
         type_str = _format_type_for_docs(field_info, annotation)
         desc = field_info.description or ""
         required = _is_field_required(field_info)
         req_marker = " (REQUIRED)" if required else ""
-        
+
         lines.append(f'    "{name}": {type_str}{req_marker} - {desc},')
-    
+
     lines.append("}")
     return "\n".join(lines)
 
@@ -234,7 +233,7 @@ def generate_all_metadata_docs() -> str:
         Complete documentation string for the create_memory tool.
     """
     docs = []
-    
+
     type_descriptions = {
         "experience": "events, decisions, lessons learned",
         "technical": "code, solutions, patterns, technical knowledge",
@@ -242,12 +241,12 @@ def generate_all_metadata_docs() -> str:
         "goal": "objectives, milestones, progress tracking",
         "individual": "information about people",
     }
-    
+
     for type_name, description in type_descriptions.items():
         docs.append(f'FOR type="{type_name}" ({description}):')
         docs.append(generate_metadata_docs_for_type(type_name))
         docs.append("")
-    
+
     return "\n".join(docs)
 
 

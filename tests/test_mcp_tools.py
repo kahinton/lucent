@@ -8,16 +8,14 @@ Tests the MCP tool layer that wraps the DB layer, verifying:
 """
 
 import json
-import pytest
-import pytest_asyncio
-from uuid import uuid4, UUID
+from uuid import uuid4
 
+import pytest_asyncio
 from mcp.server.fastmcp import FastMCP
 
 from lucent.auth import set_current_user
 from lucent.db import MemoryRepository
 from lucent.tools.memories import register_tools
-
 
 # ============================================================================
 # Fixtures
@@ -900,7 +898,7 @@ class TestClaimTask:
         })
 
         assert "id" in result
-        assert f"claimed-by-test-instance-1" in result["tags"]
+        assert "claimed-by-test-instance-1" in result["tags"]
         assert "pending" not in result["tags"]
 
     async def test_claim_already_claimed(self, mcp_tools, auth_user, clean_test_data):

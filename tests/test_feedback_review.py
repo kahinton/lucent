@@ -6,11 +6,12 @@ Covers:
 3. Daemon message lifecycle (send → list → acknowledge)
 """
 
-import pytest
-import pytest_asyncio
 from uuid import uuid4
 
-from lucent.db import MemoryRepository, AuditRepository
+import pytest
+import pytest_asyncio
+
+from lucent.db import AuditRepository, MemoryRepository
 
 
 @pytest_asyncio.fixture

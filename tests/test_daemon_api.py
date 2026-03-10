@@ -8,18 +8,16 @@ Existing test_coordination.py and test_feedback_review.py cover the DB/repositor
 layer; these tests verify the HTTP endpoints, serialization, and auth gating.
 """
 
-import pytest
-import pytest_asyncio
-from datetime import datetime, timezone, timedelta
-from uuid import uuid4, UUID
+from datetime import datetime, timedelta, timezone
+from uuid import UUID, uuid4
 
 import httpx
+import pytest_asyncio
 from httpx import ASGITransport
 
 from lucent.api.app import create_app
 from lucent.api.deps import CurrentUser, get_current_user
 from lucent.db import MemoryRepository, OrganizationRepository, UserRepository
-
 
 # ============================================================================
 # Fixtures

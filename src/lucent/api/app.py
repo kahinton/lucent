@@ -16,16 +16,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from lucent.api.routers import daemon_tasks as daemon_tasks_router
 from lucent.api.routers import daemon_messages as daemon_messages_router
-from lucent.api.routers import memories, search, export
+from lucent.api.routers import daemon_tasks as daemon_tasks_router
+from lucent.api.routers import export, memories, search
 from lucent.logging import get_logger, set_correlation_id
 from lucent.mode import is_team_mode
 
 # Get logger for this module
 logger = get_logger("api.app")
+from lucent.db import close_db, init_db
 from lucent.web.routes import router as web_router
-from lucent.db import init_db, close_db
 
 # Path to static files directory
 STATIC_DIR = Path(__file__).parent.parent / "web" / "static"
@@ -48,14 +48,14 @@ async def lifespan(app: FastAPI):
     database_url = os.environ.get("DATABASE_URL")
     if database_url:
         await init_db(database_url)
-    
+
     # Start MCP session manager if configured
     if _mcp_session_manager:
         async with _mcp_session_manager.run():
             yield
     else:
         yield
-    
+
     # Shutdown: Close database pool
     await close_db()
 
@@ -71,7 +71,7 @@ def create_app() -> FastAPI:
         redoc_url="/api/redoc",
         openapi_url="/api/openapi.json",
     )
-    
+
     # Configure CORS
     allowed_origins = os.environ.get("LUCENT_CORS_ORIGINS", "*").split(",")
     app.add_middleware(
@@ -81,7 +81,7 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    
+
     @app.middleware("http")
     async def correlation_id_middleware(request: Request, call_next):
         """Generate or propagate a correlation ID for every request."""
@@ -93,7 +93,7 @@ def create_app() -> FastAPI:
         response = await call_next(request)
         response.headers["X-Request-ID"] = cid
         return response
-    
+
     # Include core API routers
     # Export router must be registered before memories router to avoid
     # path conflicts with /{memory_id} routes
@@ -110,27 +110,27 @@ def create_app() -> FastAPI:
         prefix="/api/daemon/messages",
         tags=["Daemon Messages"],
     )
-    
+
     # Include team-only API routers
     if is_team_mode():
-        from lucent.api.routers import audit, access, users, organizations
+        from lucent.api.routers import access, audit, organizations, users
         app.include_router(audit.router, prefix="/api/audit", tags=["Audit"])
         app.include_router(access.router, prefix="/api/access", tags=["Access"])
         app.include_router(users.router, prefix="/api/users", tags=["Users"])
         app.include_router(organizations.router, prefix="/api/organizations", tags=["Organizations"])
-    
+
     # Include web interface routes (excluded from API docs)
     app.include_router(web_router, include_in_schema=False)
-    
+
     # Mount static files (logo, images, etc.)
     if STATIC_DIR.exists():
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
-    
+
     @app.get("/api/health", include_in_schema=False)
     async def health_check() -> dict[str, str]:
         """Health check endpoint."""
         return {"status": "healthy"}
-    
+
     @app.exception_handler(Exception)
     async def global_exception_handler(request: Request, exc: Exception):
         """Handle unhandled exceptions — log detail, return generic error."""
@@ -139,7 +139,7 @@ def create_app() -> FastAPI:
             status_code=500,
             content={"error": "Internal server error"},
         )
-    
+
     return app
 
 

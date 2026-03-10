@@ -23,10 +23,10 @@ logger = get_logger("db.user")
 
 class UserRepository:
     """Repository for user CRUD operations."""
-    
+
     def __init__(self, pool: Pool):
         self.pool = pool
-    
+
     async def create(
         self,
         external_id: str,
@@ -57,7 +57,7 @@ class UserRepository:
             RETURNING id, external_id, provider, organization_id, email, display_name, avatar_url, 
                       provider_metadata, is_active, created_at, updated_at, last_login_at, role
         """
-        
+
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 query,
@@ -69,14 +69,14 @@ class UserRepository:
                 avatar_url,
                 provider_metadata or {},
             )
-        
+
         user = self._row_to_dict(row)
-        
+
         # Auto-create an individual memory for this user
         await self._create_individual_memory_for_user(user)
-        
+
         return user
-    
+
     async def _create_individual_memory_for_user(self, user: dict[str, Any]) -> dict[str, Any] | None:
         """Create an individual memory record for a user.
         
@@ -89,22 +89,22 @@ class UserRepository:
             The created memory record, or None if creation failed.
         """
         name = user.get("display_name") or user.get("email") or user.get("external_id") or "Unknown User"
-        
+
         # Build the individual memory content
         content = f"Individual memory for {name}."
         if user.get("email"):
             content += f" Contact: {user['email']}."
-        
+
         # Build metadata (user_id is already tracked at the memory level, no need to duplicate)
         metadata = {
             "name": name,
             "role": user.get("role", "member"),
             "contact_info": {},
         }
-        
+
         if user.get("email"):
             metadata["contact_info"]["email"] = user["email"]
-        
+
         # Create the individual memory
         query = """
             INSERT INTO memories (username, type, content, tags, importance, related_memory_ids, metadata, user_id, organization_id, shared)
@@ -112,7 +112,7 @@ class UserRepository:
             RETURNING id, username, type, content, tags, importance, related_memory_ids, metadata, 
                       created_at, updated_at, deleted_at, user_id, organization_id, shared, last_accessed_at
         """
-        
+
         try:
             async with self.pool.acquire() as conn:
                 row = await conn.fetchrow(
@@ -127,15 +127,15 @@ class UserRepository:
                     str(user["id"]),  # user_id (owner is the user themselves)
                     str(user["organization_id"]) if user.get("organization_id") else None,
                 )
-            
+
             if row:
                 return dict(row)
         except Exception as e:
             # Log but don't fail user creation if memory creation fails
             logger.warning(f"Failed to create individual memory for user {user['id']}", exc_info=e)
-        
+
         return None
-    
+
     async def _get_individual_memory_for_user(self, user_id: UUID) -> dict[str, Any] | None:
         """Get the individual memory associated with a user.
         
@@ -153,15 +153,15 @@ class UserRepository:
               AND deleted_at IS NULL
               AND user_id = $1
         """
-        
+
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(query, str(user_id))
-        
+
         if row is None:
             return None
-        
+
         return dict(row)
-    
+
     async def get_individual_memory_for_user(self, user_id: UUID) -> dict[str, Any] | None:
         """Public method to get the individual memory associated with a user.
         
@@ -172,7 +172,7 @@ class UserRepository:
             The memory record, or None if not found.
         """
         return await self._get_individual_memory_for_user(user_id)
-    
+
     async def _soft_delete_individual_memory_for_user(self, user_id: UUID) -> bool:
         """Soft delete the individual memory associated with a user.
         
@@ -190,10 +190,10 @@ class UserRepository:
               AND user_id = $1
             RETURNING id
         """
-        
+
         async with self.pool.acquire() as conn:
             result = await conn.fetchrow(query, str(user_id))
-        
+
         return result is not None
 
     async def get_by_id(self, user_id: UUID) -> dict[str, Any] | None:
@@ -211,18 +211,18 @@ class UserRepository:
             FROM users
             WHERE id = $1
         """
-        
+
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(query, str(user_id))
-        
+
         if row is None:
             return None
-        
+
         return self._row_to_dict(row)
-    
+
     async def get_by_external_id(
-        self, 
-        external_id: str, 
+        self,
+        external_id: str,
         provider: str
     ) -> dict[str, Any] | None:
         """Get a user by their external ID and provider.
@@ -240,15 +240,15 @@ class UserRepository:
             FROM users
             WHERE external_id = $1 AND provider = $2
         """
-        
+
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(query, external_id, provider)
-        
+
         if row is None:
             return None
-        
+
         return self._row_to_dict(row)
-    
+
     async def get_or_create(
         self,
         external_id: str,
@@ -280,7 +280,7 @@ class UserRepository:
             if not individual_memory:
                 await self._create_individual_memory_for_user(existing)
             return existing, False
-        
+
         new_user = await self.create(
             external_id=external_id,
             provider=provider,
@@ -291,7 +291,7 @@ class UserRepository:
             provider_metadata=provider_metadata,
         )
         return new_user, True
-    
+
     async def update(
         self,
         user_id: UUID,
@@ -317,37 +317,37 @@ class UserRepository:
         updates = []
         params = []
         param_idx = 1
-        
+
         if email is not None:
             updates.append(f"email = ${param_idx}")
             params.append(email)
             param_idx += 1
-        
+
         if display_name is not None:
             updates.append(f"display_name = ${param_idx}")
             params.append(display_name)
             param_idx += 1
-        
+
         if avatar_url is not None:
             updates.append(f"avatar_url = ${param_idx}")
             params.append(avatar_url)
             param_idx += 1
-        
+
         if provider_metadata is not None:
             updates.append(f"provider_metadata = ${param_idx}")
             params.append(provider_metadata)
             param_idx += 1
-        
+
         if is_active is not None:
             updates.append(f"is_active = ${param_idx}")
             params.append(is_active)
             param_idx += 1
-        
+
         if not updates:
             return await self.get_by_id(user_id)
-        
+
         params.append(str(user_id))
-        
+
         query = f"""
             UPDATE users
             SET {", ".join(updates)}
@@ -355,20 +355,20 @@ class UserRepository:
             RETURNING id, external_id, provider, organization_id, email, display_name, avatar_url,
                       provider_metadata, is_active, created_at, updated_at, last_login_at, role
         """
-        
+
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(query, *params)
-        
+
         if row is None:
             return None
-        
+
         user = self._row_to_dict(row)
-        
+
         # Sync the individual memory with updated user info
         await self._sync_individual_memory_for_user(user)
-        
+
         return user
-    
+
     async def _sync_individual_memory_for_user(self, user: dict[str, Any]) -> None:
         """Sync the individual memory with updated user information.
         
@@ -382,31 +382,31 @@ class UserRepository:
             # If no individual memory exists, create one
             await self._create_individual_memory_for_user(user)
             return
-        
+
         # Update the metadata with current user info
         name = user.get("display_name") or user.get("email") or user.get("external_id") or "Unknown User"
-        
+
         current_metadata = individual_memory.get("metadata") or {}
         current_metadata["name"] = name
         current_metadata["role"] = user.get("role", "member")
-        
+
         if "contact_info" not in current_metadata:
             current_metadata["contact_info"] = {}
-        
+
         if user.get("email"):
             current_metadata["contact_info"]["email"] = user["email"]
-        
+
         # Update the memory
         content = f"Individual memory for {name}."
         if user.get("email"):
             content += f" Contact: {user['email']}."
-        
+
         query = """
             UPDATE memories
             SET content = $1, metadata = $2, username = $3, updated_at = NOW()
             WHERE id = $4
         """
-        
+
         try:
             async with self.pool.acquire() as conn:
                 await conn.execute(
@@ -418,7 +418,7 @@ class UserRepository:
                 )
         except Exception as e:
             logger.warning(f"Failed to sync individual memory for user {user['id']}", exc_info=e)
-    
+
     async def update_last_login(self, user_id: UUID) -> None:
         """Update the last login timestamp for a user.
         
@@ -430,10 +430,10 @@ class UserRepository:
             SET last_login_at = NOW()
             WHERE id = $1
         """
-        
+
         async with self.pool.acquire() as conn:
             await conn.execute(query, str(user_id))
-    
+
     async def update_role(
         self,
         user_id: UUID,
@@ -455,20 +455,20 @@ class UserRepository:
             RETURNING id, external_id, provider, organization_id, email, display_name, avatar_url,
                       provider_metadata, is_active, created_at, updated_at, last_login_at, role
         """
-        
+
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(query, new_role, str(user_id))
-        
+
         if row is None:
             return None
-        
+
         user = self._row_to_dict(row)
-        
+
         # Sync the individual memory with updated role
         await self._sync_individual_memory_for_user(user)
-        
+
         return user
-    
+
     async def get_by_organization(
         self,
         organization_id: UUID,
@@ -503,9 +503,9 @@ class UserRepository:
             """
             async with self.pool.acquire() as conn:
                 rows = await conn.fetch(query, str(organization_id))
-        
+
         return [self._row_to_dict(row) for row in rows]
-    
+
     async def delete(self, user_id: UUID) -> bool:
         """Permanently delete a user.
         
@@ -520,25 +520,25 @@ class UserRepository:
         """
         # First, soft-delete the associated individual memory
         await self._soft_delete_individual_memory_for_user(user_id)
-        
+
         query = """
             DELETE FROM users
             WHERE id = $1
             RETURNING id
         """
-        
+
         async with self.pool.acquire() as conn:
             result = await conn.fetchrow(query, str(user_id))
-        
+
         return result is not None
-    
+
     def _row_to_dict(self, row: asyncpg.Record) -> dict[str, Any]:
         """Convert a database row to a dictionary."""
         # Handle organization_id which may be a string or UUID
         org_id = None
         if "organization_id" in row.keys() and row["organization_id"]:
             org_id = row["organization_id"] if isinstance(row["organization_id"], UUID) else UUID(row["organization_id"])
-        
+
         return {
             "id": row["id"],
             "external_id": row["external_id"],

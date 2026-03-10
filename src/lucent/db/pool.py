@@ -9,7 +9,7 @@ from pathlib import Path
 from uuid import UUID
 
 import asyncpg
-from asyncpg import Pool, Connection
+from asyncpg import Connection, Pool
 
 from lucent.logging import get_logger
 
@@ -29,14 +29,14 @@ async def init_db(database_url: str | None = None) -> Pool:
         The initialized connection pool.
     """
     global _pool
-    
+
     if _pool is not None:
         return _pool
-    
+
     url = database_url or os.environ.get("DATABASE_URL")
     if not url:
         raise ValueError("DATABASE_URL environment variable is required")
-    
+
     # Create the connection pool
     _pool = await asyncpg.create_pool(
         url,
@@ -45,12 +45,12 @@ async def init_db(database_url: str | None = None) -> Pool:
         command_timeout=60,
         init=_init_connection,
     )
-    
+
     logger.info("Database connection pool created (min=2, max=10)")
-    
+
     # Run migrations
     await _run_migrations(_pool)
-    
+
     return _pool
 
 
@@ -80,13 +80,13 @@ async def _run_migrations(pool: Pool) -> None:
     statements on every startup.
     """
     migrations_dir = Path(__file__).parent / "migrations"
-    
+
     if not migrations_dir.exists():
         return
-    
+
     # Get all SQL files sorted by name
     migration_files = sorted(migrations_dir.glob("*.sql"))
-    
+
     async with pool.acquire() as conn:
         # Create tracking table if it doesn't exist
         await conn.execute("""
@@ -95,18 +95,18 @@ async def _run_migrations(pool: Pool) -> None:
                 applied_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
             )
         """)
-        
+
         # Get already-applied migrations
         applied = set()
         rows = await conn.fetch("SELECT name FROM _migrations")
         for row in rows:
             applied.add(row["name"])
-        
+
         # Apply new migrations (each in its own transaction for atomicity)
         for migration_file in migration_files:
             if migration_file.name in applied:
                 continue
-            
+
             sql = migration_file.read_text()
             async with conn.transaction():
                 await conn.execute(sql)

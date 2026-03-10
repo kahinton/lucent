@@ -4,14 +4,13 @@ Tests the CurrentUser class, scope/permission checking, impersonation,
 audit context, and dependency factory functions.
 """
 
-import pytest
-from uuid import uuid4, UUID
+from uuid import uuid4
 
+import pytest
 from fastapi import HTTPException
 
 from lucent.api.deps import CurrentUser
-from lucent.rbac import Role, Permission
-
+from lucent.rbac import Permission, Role
 
 # =============================================================================
 # CurrentUser Construction

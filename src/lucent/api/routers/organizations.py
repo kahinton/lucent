@@ -5,13 +5,13 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, status
 
-from lucent.api.deps import AuthenticatedUser, AdminUser, OwnerUser
+from lucent.api.deps import AuthenticatedUser, OwnerUser
 from lucent.api.models import (
-    OrganizationCreate,
-    OrganizationUpdate,
-    OrganizationResponse,
-    OrganizationListResponse,
     ErrorResponse,
+    OrganizationCreate,
+    OrganizationListResponse,
+    OrganizationResponse,
+    OrganizationUpdate,
     SuccessResponse,
 )
 from lucent.db import OrganizationRepository, UserRepository, get_pool
@@ -43,23 +43,23 @@ async def get_current_organization(
 ) -> OrganizationResponse:
     """Get the current user's organization."""
     user.require_permission(Permission.ORG_VIEW)
-    
+
     if not user.organization_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="User is not part of an organization",
         )
-    
+
     pool = await get_pool()
     org_repo = OrganizationRepository(pool)
-    
+
     org = await org_repo.get_by_id(user.organization_id)
     if org is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Organization not found",
         )
-    
+
     return _org_to_response(org)
 
 
@@ -76,27 +76,27 @@ async def update_current_organization(
     Requires owner role.
     """
     user.require_permission(Permission.ORG_UPDATE)
-    
+
     if not user.organization_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="User is not part of an organization",
         )
-    
+
     pool = await get_pool()
     org_repo = OrganizationRepository(pool)
-    
+
     result = await org_repo.update(
         organization_id=user.organization_id,
         name=data.name,
     )
-    
+
     if result is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Organization not found",
         )
-    
+
     return _org_to_response(result)
 
 
@@ -115,15 +115,15 @@ async def create_organization(
     """
     pool = await get_pool()
     org_repo = OrganizationRepository(pool)
-    
+
     org, created = await org_repo.get_or_create(name=data.name)
-    
+
     if not created:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Organization with this name already exists",
         )
-    
+
     logger.info("Organization created: id=%s, name=%s, by=%s", org["id"], data.name, user.id)
     return _org_to_response(org)
 
@@ -147,17 +147,17 @@ async def get_organization(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You can only view your own organization",
         )
-    
+
     pool = await get_pool()
     org_repo = OrganizationRepository(pool)
-    
+
     org = await org_repo.get_by_id(organization_id)
     if org is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Organization not found",
         )
-    
+
     return _org_to_response(org)
 
 
@@ -176,9 +176,9 @@ async def list_organizations(
     """
     pool = await get_pool()
     org_repo = OrganizationRepository(pool)
-    
+
     result = await org_repo.list(offset=offset, limit=limit)
-    
+
     return OrganizationListResponse(
         organizations=[_org_to_response(o) for o in result["organizations"]],
         total_count=result["total_count"],
@@ -205,24 +205,24 @@ async def delete_current_organization(
     This action cannot be undone.
     """
     user.require_permission(Permission.ORG_DELETE)
-    
+
     if not user.organization_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="User is not part of an organization",
         )
-    
+
     pool = await get_pool()
     org_repo = OrganizationRepository(pool)
-    
+
     success = await org_repo.delete(user.organization_id)
-    
+
     if not success:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Organization not found",
         )
-    
+
     logger.info("Organization deleted: id=%s, by=%s", user.organization_id, user.id)
     return SuccessResponse(
         success=True,
@@ -244,22 +244,22 @@ async def transfer_ownership(
     The current owner will be demoted to admin.
     """
     user.require_permission(Permission.ORG_TRANSFER)
-    
+
     if not user.organization_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="User is not part of an organization",
         )
-    
+
     if new_owner_id == user.id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="You are already the owner",
         )
-    
+
     pool = await get_pool()
     user_repo = UserRepository(pool)
-    
+
     # Get new owner
     new_owner = await user_repo.get_by_id(new_owner_id)
     if new_owner is None:
@@ -267,20 +267,20 @@ async def transfer_ownership(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found",
         )
-    
+
     # Check same organization
     if new_owner.get("organization_id") != user.organization_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="User is not part of your organization",
         )
-    
+
     # Promote new owner
     await user_repo.update_role(new_owner_id, "owner")
-    
+
     # Demote current owner to admin
     await user_repo.update_role(user.id, "admin")
-    
+
     logger.info("Ownership transferred: org=%s, from=%s, to=%s", user.organization_id, user.id, new_owner_id)
     return SuccessResponse(
         success=True,

@@ -11,7 +11,7 @@ from uuid import UUID
 
 class MemoryRecord(TypedDict):
     """Record returned by MemoryRepository methods."""
-    
+
     id: UUID
     username: str
     type: str
@@ -31,7 +31,7 @@ class MemoryRecord(TypedDict):
 
 class MemorySearchRecord(TypedDict):
     """Record returned in memory search results (includes similarity score)."""
-    
+
     id: UUID
     username: str
     type: str
@@ -51,7 +51,7 @@ class MemorySearchRecord(TypedDict):
 
 class MemorySearchResult(TypedDict):
     """Result returned by MemoryRepository.search() and search_full()."""
-    
+
     memories: list[MemorySearchRecord]
     total_count: int
     offset: int
@@ -61,14 +61,14 @@ class MemorySearchResult(TypedDict):
 
 class TagCount(TypedDict):
     """Tag with usage count returned by get_existing_tags()."""
-    
+
     tag: str
     count: int
 
 
 class TagSuggestion(TypedDict):
     """Tag suggestion with similarity returned by get_tag_suggestions()."""
-    
+
     tag: str
     count: int
     similarity: float
@@ -76,7 +76,7 @@ class TagSuggestion(TypedDict):
 
 class UserRecord(TypedDict):
     """Record returned by UserRepository methods."""
-    
+
     id: UUID
     external_id: str
     provider: str
@@ -94,7 +94,7 @@ class UserRecord(TypedDict):
 
 class ApiKeyRecord(TypedDict):
     """Record returned by ApiKeyRepository methods."""
-    
+
     id: UUID
     user_id: UUID
     organization_id: UUID | None
@@ -111,7 +111,7 @@ class ApiKeyRecord(TypedDict):
 
 class ApiKeyVerifyRecord(TypedDict):
     """Record returned by ApiKeyRepository.verify() (includes user info)."""
-    
+
     id: UUID
     user_id: UUID
     organization_id: UUID | None
@@ -131,7 +131,7 @@ class ApiKeyVerifyRecord(TypedDict):
 
 class OrganizationRecord(TypedDict):
     """Record returned by OrganizationRepository methods."""
-    
+
     id: UUID
     name: str
     created_at: datetime
@@ -140,7 +140,7 @@ class OrganizationRecord(TypedDict):
 
 class OrganizationListResult(TypedDict):
     """Result returned by OrganizationRepository.list()."""
-    
+
     organizations: list[OrganizationRecord]
     total_count: int
     offset: int
@@ -150,7 +150,7 @@ class OrganizationListResult(TypedDict):
 
 class AuditLogRecord(TypedDict):
     """Record returned by AuditRepository methods."""
-    
+
     id: UUID
     memory_id: UUID
     user_id: UUID | None
@@ -166,7 +166,7 @@ class AuditLogRecord(TypedDict):
 
 class AuditLogResult(TypedDict):
     """Result returned by AuditRepository query methods."""
-    
+
     entries: list[AuditLogRecord]
     total_count: int
     offset: int
@@ -176,7 +176,7 @@ class AuditLogResult(TypedDict):
 
 class AccessLogRecord(TypedDict):
     """Record returned by AccessRepository methods."""
-    
+
     id: UUID
     memory_id: UUID
     user_id: UUID | None
@@ -188,7 +188,7 @@ class AccessLogRecord(TypedDict):
 
 class AccessLogResult(TypedDict):
     """Result returned by AccessRepository.get_access_history()."""
-    
+
     entries: list[AccessLogRecord]
     total_count: int
     offset: int
@@ -198,7 +198,7 @@ class AccessLogResult(TypedDict):
 
 class MostAccessedRecord(TypedDict):
     """Record returned by AccessRepository.get_most_accessed()."""
-    
+
     memory_id: UUID
     access_count: int
     last_accessed: datetime

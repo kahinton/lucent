@@ -151,7 +151,7 @@ async def get_or_create_user_from_oauth(
     """
     pool = await _ensure_pool()
     user_repo = UserRepository(pool)
-    
+
     user, created = await user_repo.get_or_create(
         external_id=external_id,
         provider=provider,
@@ -161,7 +161,7 @@ async def get_or_create_user_from_oauth(
         avatar_url=avatar_url,
         provider_metadata=provider_metadata,
     )
-    
+
     if not created:
         # Update user info from provider on each login
         user = await user_repo.update(
@@ -172,5 +172,5 @@ async def get_or_create_user_from_oauth(
             provider_metadata=provider_metadata,
         )
         await user_repo.update_last_login(user["id"])
-    
+
     return user

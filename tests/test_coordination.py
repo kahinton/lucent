@@ -1,10 +1,10 @@
 """Tests for distributed coordination — atomic claiming and optimistic locking."""
 
 import asyncio
-import os
+from uuid import uuid4
+
 import pytest
 import pytest_asyncio
-from uuid import uuid4
 
 from lucent.db import MemoryRepository, VersionConflictError
 

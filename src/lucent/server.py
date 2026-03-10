@@ -10,16 +10,18 @@ import os
 import sys
 
 from dotenv import load_dotenv
-
-from lucent.logging import configure_logging, get_logger
 from mcp.server.fastmcp import FastMCP
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from lucent.auth import set_current_user, set_current_api_key_id
-from lucent.prompts.memory_usage import get_memory_system_prompt, get_memory_system_prompt_short, get_user_introduction_prompt
+from lucent.auth import set_current_api_key_id, set_current_user
+from lucent.logging import configure_logging, get_logger
+from lucent.prompts.memory_usage import (
+    get_memory_system_prompt,
+    get_memory_system_prompt_short,
+    get_user_introduction_prompt,
+)
 from lucent.rate_limit import get_rate_limiter
 from lucent.tools.memories import register_tools
-
 
 # Load environment variables
 load_dotenv()
@@ -50,34 +52,35 @@ class MCPAuthMiddleware:
     
     Only applies to /mcp routes - other routes pass through unmodified.
     """
-    
+
     def __init__(self, app: ASGIApp):
         self.app = app
-    
+
     async def __call__(self, scope: Scope, receive: Receive, send: Send):
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
-        
+
         # Only apply auth to /mcp routes
         path = scope.get("path", "")
         if not path.startswith("/mcp"):
             await self.app(scope, receive, send)
             return
-        
+
         from starlette.responses import JSONResponse
+
         from lucent.db import ApiKeyRepository, UserRepository, get_pool, init_db
-        
+
         # Get authorization header from scope
         headers = dict(scope.get("headers", []))
         auth_header = headers.get(b"authorization", b"").decode("utf-8", errors="ignore")
-        
+
         # Try API key authentication
         if auth_header:
             api_key = auth_header
             if api_key.startswith("Bearer "):
                 api_key = api_key[7:]
-            
+
             if api_key.startswith("mcp_"):
                 try:
                     # Ensure pool is initialized
@@ -89,16 +92,16 @@ class MCPAuthMiddleware:
                             pool = await init_db(database_url)
                         else:
                             pool = None
-                    
+
                     if pool:
                         api_key_repo = ApiKeyRepository(pool)
                         key_info = await api_key_repo.verify(api_key)
-                        
+
                         if key_info:
                             # Check rate limit before proceeding
                             rate_limiter = get_rate_limiter()
                             rate_result = rate_limiter.check_rate_limit(key_info["id"])
-                            
+
                             if not rate_result.allowed:
                                 # Rate limited - return 429
                                 logger.warning("Rate limit exceeded: api_key_id=%s, retry_after=%s",
@@ -117,17 +120,17 @@ class MCPAuthMiddleware:
                                 )
                                 await response(scope, receive, send)
                                 return
-                            
+
                             # Get full user record and set context
                             user_repo = UserRepository(pool)
                             user = await user_repo.get_by_id(key_info["user_id"])
                             if user:
                                 set_current_user(user)
                                 set_current_api_key_id(key_info["id"])
-                                
+
                                 # Wrap send to inject rate limit headers
                                 rate_headers = rate_result.headers
-                                
+
                                 async def send_with_headers(message):
                                     if message["type"] == "http.response.start":
                                         headers = list(message.get("headers", []))
@@ -135,7 +138,7 @@ class MCPAuthMiddleware:
                                             headers.append((name.lower().encode(), value.encode()))
                                         message = {**message, "headers": headers}
                                     await send(message)
-                                
+
                                 try:
                                     await self.app(scope, receive, send_with_headers)
                                 finally:
@@ -144,7 +147,7 @@ class MCPAuthMiddleware:
                                 return
                 except Exception as e:
                     logger.error("API key auth error", exc_info=e)
-            
+
             # Invalid API key provided
             logger.warning("MCP auth failed: invalid API key on %s", path)
             response = JSONResponse(
@@ -161,7 +164,7 @@ class MCPAuthMiddleware:
             )
             await response(scope, receive, send)
             return
-        
+
         # No authorization header - reject the request
         response = JSONResponse(
             status_code=401,
@@ -225,45 +228,46 @@ def get_mcp_app():
 def main() -> None:
     """Main entry point for the unified Lucent server."""
     import uvicorn
+
     from lucent.api.app import create_app, set_mcp_session_manager
-    
+
     # Configure logging first
     configure_logging()
-    
+
     # Validate DATABASE_URL is set
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
         logger.error("DATABASE_URL environment variable is required")
         logger.error("Example: postgresql://user:password@localhost:5432/lucent")
         sys.exit(1)
-    
+
     # Show deployment mode
     from lucent.mode import get_mode
     mode = get_mode()
     logger.info(f"Deployment mode: {mode.value}")
-    
+
     # Get MCP app
     mcp_app = get_mcp_app()
-    
+
     # Set the session manager for lifecycle integration
     set_mcp_session_manager(mcp.session_manager)
-    
+
     # Create the unified FastAPI app (after setting session manager)
     app = create_app()
-    
+
     # Add MCP routes directly (MCP SDK creates route at /mcp)
     for route in mcp_app.routes:
         app.routes.append(route)
-    
+
     # Wrap the entire app with our auth middleware (only applies to /mcp paths)
     wrapped_app = MCPAuthMiddleware(app)
-    
+
     logger.info(f"Starting Lucent server on http://{HOST}:{PORT}")
     logger.info(f"  MCP endpoint: http://{HOST}:{PORT}/mcp")
     logger.info(f"  REST API: http://{HOST}:{PORT}/api")
     logger.info(f"  Web UI: http://{HOST}:{PORT}/")
     logger.info(f"  API docs: http://{HOST}:{PORT}/api/docs")
-    
+
     # Run the unified server with the wrapped app
     uvicorn.run(wrapped_app, host=HOST, port=PORT, log_level="info")
 

@@ -4,13 +4,11 @@ Tests server configuration, tool registration, prompt registration,
 ASGI app creation, and auth middleware behavior.
 """
 
-import json
 import os
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from mcp.server.fastmcp import FastMCP
-
 
 # ============================================================================
 # Server Configuration
@@ -26,6 +24,7 @@ class TestServerConfig:
             os.environ.pop("LUCENT_HOST", None)
             # Re-import to pick up env
             import importlib
+
             import lucent.server as srv
             importlib.reload(srv)
             assert srv.HOST == "0.0.0.0"
@@ -35,6 +34,7 @@ class TestServerConfig:
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("LUCENT_PORT", None)
             import importlib
+
             import lucent.server as srv
             importlib.reload(srv)
             assert srv.PORT == 8766
@@ -43,6 +43,7 @@ class TestServerConfig:
         """Test that LUCENT_HOST env var overrides default."""
         with patch.dict(os.environ, {"LUCENT_HOST": "127.0.0.1"}):
             import importlib
+
             import lucent.server as srv
             importlib.reload(srv)
             assert srv.HOST == "127.0.0.1"
@@ -51,6 +52,7 @@ class TestServerConfig:
         """Test that LUCENT_PORT env var overrides default."""
         with patch.dict(os.environ, {"LUCENT_PORT": "9999"}):
             import importlib
+
             import lucent.server as srv
             importlib.reload(srv)
             assert srv.PORT == 9999

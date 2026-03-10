@@ -2,16 +2,16 @@
 
 import pytest
 
-from lucent.models.memory import MemoryType, GoalStatus
+from lucent.models.memory import MemoryType
 from lucent.models.validation import (
-    validate_metadata,
-    get_metadata_schema,
-    get_metadata_field_descriptions,
-    generate_metadata_docs_for_type,
-    generate_all_metadata_docs,
     METADATA_DOCS,
     METADATA_MODELS,
     METADATA_MODELS_BY_STR,
+    generate_all_metadata_docs,
+    generate_metadata_docs_for_type,
+    get_metadata_field_descriptions,
+    get_metadata_schema,
+    validate_metadata,
 )
 
 

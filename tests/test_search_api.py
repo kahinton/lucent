@@ -6,17 +6,15 @@ Tests /api/search endpoints:
 - POST /api/search/full (search across all fields)
 """
 
-import pytest
-import pytest_asyncio
-from uuid import uuid4, UUID
+from uuid import UUID, uuid4
 
 import httpx
+import pytest_asyncio
 from httpx import ASGITransport
 
 from lucent.api.app import create_app
 from lucent.api.deps import CurrentUser, get_current_user
 from lucent.db import MemoryRepository
-
 
 # ============================================================================
 # Fixtures

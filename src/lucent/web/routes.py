@@ -6,43 +6,42 @@ from urllib.parse import quote
 from uuid import UUID
 
 import bcrypt
-
-from fastapi import APIRouter, Request, Form, Query, HTTPException
+from fastapi import APIRouter, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from lucent.api.deps import CurrentUser
 from lucent.auth import set_current_user
 from lucent.auth_providers import (
-    SESSION_COOKIE_NAME,
-    SESSION_TTL_HOURS,
     CSRF_COOKIE_NAME,
     CSRF_FIELD_NAME,
-    create_session,
-    validate_session,
-    destroy_session,
-    get_auth_provider,
-    is_first_run,
+    SESSION_COOKIE_NAME,
+    SESSION_TTL_HOURS,
     create_initial_user,
-    set_user_password,
-    get_cookie_params,
+    create_session,
+    destroy_session,
     generate_csrf_token,
-    validate_csrf_token,
+    get_auth_provider,
+    get_cookie_params,
+    is_first_run,
+    set_user_password,
     sign_value,
+    validate_csrf_token,
+    validate_session,
     verify_signed_value,
 )
 from lucent.db import (
-    MemoryRepository, 
-    AuditRepository, 
     AccessRepository,
-    UserRepository,
-    OrganizationRepository,
     ApiKeyRepository,
+    AuditRepository,
+    MemoryRepository,
+    OrganizationRepository,
+    UserRepository,
     get_pool,
 )
+from lucent.logging import get_logger
 from lucent.mode import is_team_mode
 from lucent.rbac import Role
-from lucent.logging import get_logger
 
 logger = get_logger("web.routes")
 
@@ -242,24 +241,24 @@ async def _check_csrf(request: Request, form_token: str | None = None) -> None:
     the form field value. No signing or secrets involved.
     """
     cookie_token = request.cookies.get(CSRF_COOKIE_NAME)
-    
+
     if form_token is None:
         form = await request.form()
         form_token = str(form.get(CSRF_FIELD_NAME, ""))
-    
+
     # Log for debugging
     from lucent.logging import get_logger
     _csrf_logger = get_logger("csrf")
     _csrf_logger.debug(f"CSRF check: cookie={cookie_token[:20] if cookie_token else 'NONE'}... form={form_token[:20] if form_token else 'NONE'}...")
-    
+
     if not cookie_token:
         _csrf_logger.warning("CSRF failed: no cookie")
         raise HTTPException(status_code=403, detail="CSRF validation failed - no cookie")
-    
+
     if not form_token:
         _csrf_logger.warning("CSRF failed: no form token")
         raise HTTPException(status_code=403, detail="CSRF validation failed - no form token")
-    
+
     if form_token != cookie_token:
         _csrf_logger.warning(f"CSRF failed: mismatch cookie={cookie_token[:20]}... form={form_token[:20]}...")
         raise HTTPException(status_code=403, detail="CSRF validation failed - token mismatch")
@@ -273,19 +272,19 @@ async def get_user_context(request: Request) -> CurrentUser:
     Also handles impersonation via cookie (team mode only).
     """
     pool = await get_pool()
-    
+
     # Check session cookie
     session_token = request.cookies.get(SESSION_COOKIE_NAME)
     if not session_token:
         raise HTTPException(status_code=303, headers={"Location": "/login"})
-    
+
     user = await validate_session(pool, session_token)
     if user is None:
         raise HTTPException(status_code=303, headers={"Location": "/login"})
-    
+
     # Set context var for downstream code
     set_current_user(user)
-    
+
     # Build CurrentUser
     current_user = CurrentUser(
         id=user["id"],
@@ -295,12 +294,12 @@ async def get_user_context(request: Request) -> CurrentUser:
         display_name=user.get("display_name"),
         auth_method="session",
     )
-    
+
     # Handle impersonation (team mode only)
     impersonate_cookie = request.cookies.get("lucent_impersonate")
     if impersonate_cookie and is_team_mode():
         from lucent.auth import set_impersonating_user
-        
+
         # Verify the cookie signature
         impersonate_user_id_str = verify_signed_value(impersonate_cookie)
         if impersonate_user_id_str and current_user.role in (Role.ADMIN, Role.OWNER):
@@ -309,14 +308,14 @@ async def get_user_context(request: Request) -> CurrentUser:
                 if target_user_id != current_user.id:
                     user_repo = UserRepository(pool)
                     target_user = await user_repo.get_by_id(target_user_id)
-                    
+
                     if target_user and target_user.get("organization_id") == current_user.organization_id:
                         target_role = target_user.get("role", "member")
                         can_impersonate = (
                             (current_user.role == Role.ADMIN and target_role == "member") or
                             (current_user.role == Role.OWNER and target_role != "owner")
                         )
-                        
+
                         if can_impersonate:
                             set_current_user(target_user)
                             set_impersonating_user({
@@ -336,7 +335,7 @@ async def get_user_context(request: Request) -> CurrentUser:
                             )
             except (ValueError, Exception):
                 pass  # Invalid UUID or other error, skip impersonation
-    
+
     return current_user
 
 
@@ -349,18 +348,18 @@ async def get_user_context(request: Request) -> CurrentUser:
 async def login_page(request: Request, error: str | None = None):
     """Show the login page."""
     pool = await get_pool()
-    
+
     # If first run, redirect to setup
     if await is_first_run(pool):
         return RedirectResponse("/setup", status_code=303)
-    
+
     # If already logged in, redirect to dashboard
     session_token = request.cookies.get(SESSION_COOKIE_NAME)
     if session_token:
         user = await validate_session(pool, session_token)
         if user:
             return RedirectResponse("/", status_code=303)
-    
+
     provider = await get_auth_provider()
     csrf_token = generate_csrf_token()
     response = templates.TemplateResponse(
@@ -379,9 +378,9 @@ async def login_submit(request: Request):
     await _check_csrf(request, form_token=csrf_form_token)
     pool = await get_pool()
     credentials = {key: str(value) for key, value in form.items()}
-    
+
     provider = await get_auth_provider()
-    
+
     try:
         user = await provider.authenticate(credentials)
     except Exception:
@@ -395,7 +394,7 @@ async def login_submit(request: Request):
             },
             status_code=500,
         )
-    
+
     if user is None:
         return templates.TemplateResponse(
             "login.html",
@@ -406,7 +405,7 @@ async def login_submit(request: Request):
             },
             status_code=401,
         )
-    
+
     # Create session
     try:
         token = await create_session(pool, user["id"])
@@ -421,7 +420,7 @@ async def login_submit(request: Request):
             },
             status_code=500,
         )
-    
+
     params = get_cookie_params()
     response = RedirectResponse("/", status_code=303)
     response.set_cookie(
@@ -439,13 +438,13 @@ async def login_submit(request: Request):
 async def logout(request: Request):
     """Log the user out."""
     pool = await get_pool()
-    
+
     session_token = request.cookies.get(SESSION_COOKIE_NAME)
     if session_token:
         user = await validate_session(pool, session_token)
         if user:
             await destroy_session(pool, user["id"])
-    
+
     response = RedirectResponse("/login", status_code=303)
     response.delete_cookie(key=SESSION_COOKIE_NAME, path="/")
     response.delete_cookie(key="lucent_impersonate", path="/")
@@ -457,10 +456,10 @@ async def logout(request: Request):
 async def setup_page(request: Request, error: str | None = None):
     """Show the first-run setup page."""
     pool = await get_pool()
-    
+
     if not await is_first_run(pool):
         return RedirectResponse("/login", status_code=303)
-    
+
     csrf_token = generate_csrf_token()
     response = templates.TemplateResponse(
         "setup.html",
@@ -475,16 +474,16 @@ async def setup_submit(request: Request):
     """Handle first-run setup form submission."""
     await _check_csrf(request)
     pool = await get_pool()
-    
+
     if not await is_first_run(pool):
         return RedirectResponse("/login", status_code=303)
-    
+
     form = await request.form()
     display_name = str(form.get("display_name", "")).strip()
     email = str(form.get("email", "")).strip() or None
     password = str(form.get("password", ""))
     password_confirm = str(form.get("password_confirm", ""))
-    
+
     # Validate
     if not display_name:
         return templates.TemplateResponse(
@@ -492,21 +491,21 @@ async def setup_submit(request: Request):
             {"request": request, "error": "Display name is required."},
             status_code=400,
         )
-    
+
     if len(password) < 8:
         return templates.TemplateResponse(
             "setup.html",
             {"request": request, "error": "Password must be at least 8 characters."},
             status_code=400,
         )
-    
+
     if password != password_confirm:
         return templates.TemplateResponse(
             "setup.html",
             {"request": request, "error": "Passwords do not match."},
             status_code=400,
         )
-    
+
     try:
         user, api_key = await create_initial_user(pool, display_name, email, password)
     except Exception:
@@ -516,7 +515,7 @@ async def setup_submit(request: Request):
             {"request": request, "error": "Setup failed due to an unexpected error. Please try again."},
             status_code=500,
         )
-    
+
     # Create session and log the user in
     try:
         token = await create_session(pool, user["id"])
@@ -527,7 +526,7 @@ async def setup_submit(request: Request):
             {"request": request, "error": "Account created but session failed. Please log in manually."},
             status_code=500,
         )
-    
+
     response = templates.TemplateResponse(
         "setup_complete.html",
         {"request": request, "display_name": display_name, "api_key": api_key},
@@ -552,17 +551,17 @@ async def dashboard(request: Request):
     """Main dashboard page."""
     user = await get_user_context(request)
     pool = await get_pool()
-    
+
     # Get stats
     memory_repo = MemoryRepository(pool)
-    
+
     # Recent memories
     recent = await memory_repo.search(
         limit=5,
         requesting_user_id=user.id,
         requesting_org_id=user.organization_id,
     )
-    
+
     # Most accessed (team mode only)
     most_accessed = []
     if is_team_mode():
@@ -571,14 +570,14 @@ async def dashboard(request: Request):
             user_id=user.id,
             limit=5,
         )
-    
+
     # Get tag stats (with access control)
     tags = await memory_repo.get_existing_tags(
         limit=10,
         requesting_user_id=user.id,
         requesting_org_id=user.organization_id,
     )
-    
+
     return templates.TemplateResponse(
         "dashboard.html",
         {
@@ -1037,18 +1036,18 @@ async def memories_list(
     user = await get_user_context(request)
     pool = await get_pool()
     repo = MemoryRepository(pool)
-    
+
     # Treat empty strings as None
     q = q if q else None
     type = type if type else None
     tag = tag if tag else None
-    
+
     # Convert single tag to list for the search
     tag_list = [tag] if tag else None
-    
+
     limit = 20
     offset = (page - 1) * limit
-    
+
     result = await repo.search(
         query=q,
         type=type,
@@ -1058,16 +1057,16 @@ async def memories_list(
         requesting_user_id=user.id,
         requesting_org_id=user.organization_id,
     )
-    
+
     # Get tags for filter (with access control)
     tags = await repo.get_existing_tags(
         limit=20,
         requesting_user_id=user.id,
         requesting_org_id=user.organization_id,
     )
-    
+
     total_pages = (result["total_count"] + limit - 1) // limit
-    
+
     # For HTMX partial updates
     if request.headers.get("HX-Request"):
         return templates.TemplateResponse(
@@ -1083,7 +1082,7 @@ async def memories_list(
                 "tag_filter": tag,
             },
         )
-    
+
     return templates.TemplateResponse(
         "memories.html",
         {
@@ -1110,16 +1109,16 @@ async def memory_new_form(request: Request):
     pool = await get_pool()
     repo = MemoryRepository(pool)
     user_repo = UserRepository(pool)
-    
+
     tags = await repo.get_existing_tags(
         limit=30,
         requesting_user_id=user.id,
         requesting_org_id=user.organization_id,
     )
-    
+
     # Get users in the organization for linking individual memories
     org_users = await user_repo.get_by_organization(user.organization_id) if user.organization_id else []
-    
+
     return templates.TemplateResponse(
         "memory_new.html",
         {
@@ -1179,23 +1178,23 @@ async def memory_new_submit(
     """Handle new memory form submission."""
     user = await get_user_context(request)
     pool = await get_pool()
-    
+
     repo = MemoryRepository(pool)
     audit_repo = AuditRepository(pool)
-    
+
     # Use the logged-in user's display name as username
     username = user.display_name or "unknown"
-    
+
     # Parse tags
     tag_list = [t.strip().lower() for t in tags.split(",") if t.strip()]
-    
+
     # Individual memories cannot be created via web interface - they are auto-created when users join
     if type == "individual":
         raise HTTPException(
             status_code=400,
             detail="Individual memories cannot be created directly. They are automatically created when users are added to the system.",
         )
-    
+
     # Build type-specific metadata
     metadata = _build_metadata_from_form(
         type,
@@ -1211,7 +1210,7 @@ async def memory_new_submit(
         meta_deadline=meta_deadline, meta_blockers=meta_blockers,
         meta_milestones=meta_milestones,
     )
-    
+
     # Create memory
     result = await repo.create(
         username=username,
@@ -1223,7 +1222,7 @@ async def memory_new_submit(
         user_id=user.id,
         organization_id=user.organization_id,
     )
-    
+
     # Log creation
     await audit_repo.log(
         memory_id=result["id"],
@@ -1239,7 +1238,7 @@ async def memory_new_submit(
             "metadata": metadata,
         },
     )
-    
+
     return RedirectResponse(f"/memories/{result['id']}", status_code=303)
 
 
@@ -1249,15 +1248,15 @@ async def memory_detail(request: Request, memory_id: UUID):
     """View memory details."""
     user = await get_user_context(request)
     pool = await get_pool()
-    
+
     repo = MemoryRepository(pool)
     audit_repo = AuditRepository(pool)
     access_repo = AccessRepository(pool)
-    
+
     memory = await repo.get_accessible(memory_id, user.id, user.organization_id)
     if memory is None:
         raise HTTPException(status_code=404, detail="Memory not found")
-    
+
     # Log access
     await access_repo.log_access(
         memory_id=memory_id,
@@ -1265,18 +1264,18 @@ async def memory_detail(request: Request, memory_id: UUID):
         user_id=user.id,
         organization_id=user.organization_id,
     )
-    
+
     # Get audit history
     audit = await audit_repo.get_by_memory_id(memory_id, limit=10)
-    
+
     # Get version history
     versions = await audit_repo.get_versions(memory_id, limit=20)
-    
+
     # Get access history
     access = await access_repo.get_access_history(memory_id, limit=10)
-    
+
     is_owner = memory.get("user_id") == user.id
-    
+
     return templates.TemplateResponse(
         "memory_detail.html",
         {
@@ -1298,17 +1297,17 @@ async def memory_edit_form(request: Request, memory_id: UUID):
     pool = await get_pool()
     repo = MemoryRepository(pool)
     user_repo = UserRepository(pool)
-    
+
     memory = await repo.get_accessible(memory_id, user.id, user.organization_id)
     if memory is None:
         raise HTTPException(status_code=404, detail="Memory not found")
-    
+
     if memory.get("user_id") != user.id:
         raise HTTPException(status_code=403, detail="You can only edit your own memories")
-    
+
     # Get users in the organization for linking individual memories
     org_users = await user_repo.get_by_organization(user.organization_id) if user.organization_id else []
-    
+
     return templates.TemplateResponse(
         "memory_edit.html",
         {
@@ -1369,21 +1368,21 @@ async def memory_edit_submit(
     await _check_csrf(request)
     user = await get_user_context(request)
     pool = await get_pool()
-    
+
     repo = MemoryRepository(pool)
     audit_repo = AuditRepository(pool)
-    
+
     # Get existing to check ownership
     existing = await repo.get_accessible(memory_id, user.id, user.organization_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="Memory not found")
-    
+
     if existing.get("user_id") != user.id:
         raise HTTPException(status_code=403, detail="You can only edit your own memories")
-    
+
     # Parse tags
     tag_list = [t.strip().lower() for t in tags.split(",") if t.strip()]
-    
+
     # Build type-specific metadata based on the memory's type
     memory_type = existing.get("type")
     metadata = _build_metadata_from_form(
@@ -1405,7 +1404,7 @@ async def memory_edit_submit(
         meta_linkedin=meta_linkedin, meta_github=meta_github,
         meta_preferences=meta_preferences,
     )
-    
+
     # Update
     result = await repo.update(
         memory_id=memory_id,
@@ -1414,7 +1413,7 @@ async def memory_edit_submit(
         importance=importance,
         metadata=metadata if metadata else None,
     )
-    
+
     # Log the update with version snapshot
     await audit_repo.log(
         memory_id=memory_id,
@@ -1444,7 +1443,7 @@ async def memory_edit_submit(
             "shared": result.get("shared", False),
         } if result else None,
     )
-    
+
     return RedirectResponse(f"/memories/{memory_id}", status_code=303)
 
 
@@ -1455,20 +1454,20 @@ async def memory_share(request: Request, memory_id: UUID):
         raise HTTPException(status_code=404, detail="Sharing requires team mode")
     user = await get_user_context(request)
     pool = await get_pool()
-    
+
     repo = MemoryRepository(pool)
     audit_repo = AuditRepository(pool)
-    
+
     memory = await repo.get_accessible(memory_id, user.id, user.organization_id)
     if memory is None:
         raise HTTPException(status_code=404, detail="Memory not found")
-    
+
     if memory.get("user_id") != user.id:
         raise HTTPException(status_code=403, detail="You can only share your own memories")
-    
+
     new_shared = not memory.get("shared", False)
     await repo.set_shared(memory_id, user.id, new_shared)
-    
+
     await audit_repo.log(
         memory_id=memory_id,
         action_type="share" if new_shared else "unshare",
@@ -1478,7 +1477,7 @@ async def memory_share(request: Request, memory_id: UUID):
         old_values={"shared": not new_shared},
         new_values={"shared": new_shared},
     )
-    
+
     # Return updated button for HTMX
     if request.headers.get("HX-Request"):
         return HTMLResponse(
@@ -1489,7 +1488,7 @@ async def memory_share(request: Request, memory_id: UUID):
                 {'Unshare' if new_shared else 'Share'}
             </button>'''
         )
-    
+
     return RedirectResponse(f"/memories/{memory_id}", status_code=303)
 
 
@@ -1499,26 +1498,26 @@ async def memory_delete(request: Request, memory_id: UUID):
     await _check_csrf(request)
     user = await get_user_context(request)
     pool = await get_pool()
-    
+
     repo = MemoryRepository(pool)
     audit_repo = AuditRepository(pool)
-    
+
     memory = await repo.get_accessible(memory_id, user.id, user.organization_id)
     if memory is None:
         raise HTTPException(status_code=404, detail="Memory not found")
-    
+
     # Individual memories cannot be deleted via web interface - they are deleted when users are removed
     if memory.get("type") == "individual":
         raise HTTPException(
             status_code=400,
             detail="Individual memories cannot be deleted directly. They are automatically deleted when users are removed from the system.",
         )
-    
+
     if memory.get("user_id") != user.id:
         raise HTTPException(status_code=403, detail="You can only delete your own memories")
-    
+
     await repo.delete(memory_id)
-    
+
     await audit_repo.log(
         memory_id=memory_id,
         action_type="delete",
@@ -1537,7 +1536,7 @@ async def memory_delete(request: Request, memory_id: UUID):
             "shared": memory.get("shared", False),
         },
     )
-    
+
     return RedirectResponse("/memories", status_code=303)
 
 
@@ -1546,32 +1545,32 @@ async def memory_restore(request: Request, memory_id: UUID, version: int):
     """Restore a memory to a previous version."""
     user = await get_user_context(request)
     pool = await get_pool()
-    
+
     repo = MemoryRepository(pool)
     audit_repo = AuditRepository(pool)
-    
+
     memory = await repo.get_accessible(memory_id, user.id, user.organization_id)
     if memory is None:
         raise HTTPException(status_code=404, detail="Memory not found")
-    
+
     if memory.get("user_id") != user.id:
         raise HTTPException(status_code=403, detail="You can only restore your own memories")
-    
+
     if memory["version"] == version:
         return RedirectResponse(f"/memories/{memory_id}", status_code=303)
-    
+
     # Get the snapshot for the target version
     version_entry = await audit_repo.get_version_snapshot(memory_id, version)
     if version_entry is None:
         raise HTTPException(status_code=404, detail=f"Version {version} not found")
-    
+
     snapshot = version_entry.get("snapshot")
     if snapshot is None:
         raise HTTPException(
             status_code=400,
             detail=f"Version {version} does not have a restorable snapshot",
         )
-    
+
     # Build old snapshot for audit
     old_snapshot = {
         "content": memory["content"],
@@ -1581,7 +1580,7 @@ async def memory_restore(request: Request, memory_id: UUID, version: int):
         "related_memory_ids": [str(uid) for uid in memory.get("related_memory_ids", [])],
         "shared": memory.get("shared", False),
     }
-    
+
     # Apply the restore
     result = await repo.update(
         memory_id=memory_id,
@@ -1591,10 +1590,10 @@ async def memory_restore(request: Request, memory_id: UUID, version: int):
         metadata=snapshot.get("metadata"),
         related_memory_ids=[UUID(uid) for uid in snapshot.get("related_memory_ids", [])],
     )
-    
+
     if result is None:
         raise HTTPException(status_code=500, detail="Failed to apply restore")
-    
+
     # Log the restore
     await audit_repo.log(
         memory_id=memory_id,
@@ -1614,7 +1613,7 @@ async def memory_restore(request: Request, memory_id: UUID, version: int):
             "shared": result.get("shared", False),
         },
     )
-    
+
     return RedirectResponse(f"/memories/{memory_id}", status_code=303)
 
 
@@ -1634,19 +1633,19 @@ async def audit_logs(
     user = await get_user_context(request)
     pool = await get_pool()
     audit_repo = AuditRepository(pool)
-    
+
     limit = 50
     offset = (page - 1) * limit
-    
+
     result = await audit_repo.get_by_organization_id(
         organization_id=user.organization_id,
         action_type=action_type,
         offset=offset,
         limit=limit,
     )
-    
+
     total_pages = (result["total_count"] + limit - 1) // limit
-    
+
     return templates.TemplateResponse(
         "audit.html",
         {
@@ -1674,13 +1673,13 @@ async def users_list(request: Request):
     user = await get_user_context(request)
     pool = await get_pool()
     user_repo = UserRepository(pool)
-    
+
     users = await user_repo.get_by_organization(user.organization_id)
-    
+
     # Check if user can manage users (admin or owner)
     can_manage = user.role in ("admin", "owner") if hasattr(user, "role") and isinstance(user.role, str) else user.role.value in ("admin", "owner")
     can_impersonate = user.role == "owner" if isinstance(user.role, str) else user.role.value == "owner"
-    
+
     return templates.TemplateResponse(
         "users.html",
         {
@@ -1704,30 +1703,30 @@ async def create_user(
     if not is_team_mode():
         raise HTTPException(status_code=404, detail="User management requires team mode")
     user = await get_user_context(request)
-    
+
     # Check permission
     if not (hasattr(user, "role") and (
         (isinstance(user.role, str) and user.role in ("admin", "owner")) or
         (hasattr(user.role, "value") and user.role.value in ("admin", "owner"))
     )):
         raise HTTPException(status_code=403, detail="Permission denied")
-    
+
     pool = await get_pool()
     user_repo = UserRepository(pool)
-    
+
     # Generate a unique external_id for local users
     import secrets
     external_id = f"local_{secrets.token_hex(8)}"
-    
+
     # Validate role
     valid_roles = ["member", "admin"]
     user_role_value = user.role if isinstance(user.role, str) else user.role.value
     if user_role_value == "owner":
         valid_roles.append("owner")
-    
+
     if role not in valid_roles:
         role = "member"
-    
+
     # Check if user with this email already exists
     users = await user_repo.get_by_organization(user.organization_id)
     for u in users:
@@ -1737,7 +1736,7 @@ async def create_user(
                 url=f"/users?error=User+with+email+{email}+already+exists",
                 status_code=303,
             )
-    
+
     # Create the user
     new_user = await user_repo.create(
         external_id=external_id,
@@ -1746,17 +1745,17 @@ async def create_user(
         email=email,
         display_name=display_name,
     )
-    
+
     # Update role if not member
     if role != "member":
         await user_repo.update_role(new_user["id"], role)
-    
+
     # Set a temporary password so the user can log in
     # TODO: Implement invite/password-set flow instead of temp passwords
     from lucent.auth_providers import set_user_password
     temp_password = secrets.token_urlsafe(12)
     await set_user_password(pool, new_user["id"], temp_password)
-    
+
     from urllib.parse import quote
     return RedirectResponse(
         url=f"/users?success=User+created.+Temporary+password:+{quote(temp_password)}",
@@ -1770,34 +1769,34 @@ async def start_impersonation(request: Request, user_id: UUID):
     if not is_team_mode():
         raise HTTPException(status_code=404, detail="Impersonation requires team mode")
     user = await get_user_context(request)
-    
+
     # Only owners can impersonate (admins have limited impersonation in the dep)
     user_role_value = user.role if isinstance(user.role, str) else user.role.value
     if user_role_value not in ("admin", "owner"):
         raise HTTPException(status_code=403, detail="Permission denied")
-    
+
     # Can't impersonate yourself
     if user_id == user.id:
         return RedirectResponse(url="/users?error=Cannot+impersonate+yourself", status_code=303)
-    
+
     pool = await get_pool()
     user_repo = UserRepository(pool)
-    
+
     target = await user_repo.get_by_id(user_id)
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
-    
+
     # Check same org
     if target.get("organization_id") != user.organization_id:
         raise HTTPException(status_code=404, detail="User not found")
-    
+
     # Check role restrictions
     target_role = target.get("role", "member")
     if user_role_value == "admin" and target_role != "member":
         return RedirectResponse(url="/users?error=Admins+can+only+impersonate+members", status_code=303)
     if user_role_value == "owner" and target_role == "owner":
         return RedirectResponse(url="/users?error=Cannot+impersonate+other+owners", status_code=303)
-    
+
     # Set signed impersonation cookie and redirect to dashboard
     response = RedirectResponse(url="/?impersonating=true", status_code=303)
     params = get_cookie_params()
@@ -1859,10 +1858,10 @@ async def settings(
     pool = await get_pool()
     org_repo = OrganizationRepository(pool)
     api_key_repo = ApiKeyRepository(pool)
-    
+
     org = await org_repo.get_by_id(user.organization_id)
     api_keys = await api_key_repo.list_by_user(user.id)
-    
+
     # Check for newly created key to display (passed via signed query param)
     new_api_key = None
     new_key_name = None
@@ -1874,7 +1873,7 @@ async def settings(
                 if str(key["id"]) == key_id:
                     new_key_name = key["name"]
                     break
-    
+
     return templates.TemplateResponse(
         "settings.html",
         {
@@ -1943,7 +1942,7 @@ async def create_api_key(
     user = await get_user_context(request)
     pool = await get_pool()
     api_key_repo = ApiKeyRepository(pool)
-    
+
     try:
         # Create the new key
         key_record, plain_key = await api_key_repo.create(
@@ -1951,15 +1950,15 @@ async def create_api_key(
             organization_id=user.organization_id,
             name=name.strip(),
         )
-        
+
         # Encode the key in a signed query param for the redirect
         key_id = str(key_record["id"])
         signed = _encode_pending_key(key_id, plain_key)
-        
+
         # Redirect to settings with signed key (POST-Redirect-GET pattern)
         from urllib.parse import quote
         return RedirectResponse(f"/settings?new_key={quote(signed)}", status_code=303)
-        
+
     except ValueError as e:
         # Duplicate name error
         from urllib.parse import quote
@@ -1972,10 +1971,10 @@ async def revoke_api_key(request: Request, key_id: UUID):
     user = await get_user_context(request)
     pool = await get_pool()
     api_key_repo = ApiKeyRepository(pool)
-    
+
     success = await api_key_repo.revoke(key_id, user.id)
-    
+
     if not success:
         raise HTTPException(status_code=404, detail="API key not found")
-    
+
     return RedirectResponse("/settings", status_code=303)

@@ -14,7 +14,6 @@ Permission checking is designed to be:
 """
 
 from enum import Enum
-from typing import Any
 from uuid import UUID
 
 
@@ -23,7 +22,7 @@ class Role(str, Enum):
     MEMBER = "member"
     ADMIN = "admin"
     OWNER = "owner"
-    
+
     @classmethod
     def from_string(cls, value: str) -> "Role":
         """Convert string to Role, defaulting to MEMBER for invalid values."""
@@ -31,28 +30,28 @@ class Role(str, Enum):
             return cls(value.lower())
         except ValueError:
             return cls.MEMBER
-    
+
     def __ge__(self, other: "Role") -> bool:
         """Check if this role has >= privileges than another."""
         if not isinstance(other, Role):
             return NotImplemented
         order = {Role.MEMBER: 0, Role.ADMIN: 1, Role.OWNER: 2}
         return order[self] >= order[other]
-    
+
     def __gt__(self, other: "Role") -> bool:
         """Check if this role has > privileges than another."""
         if not isinstance(other, Role):
             return NotImplemented
         order = {Role.MEMBER: 0, Role.ADMIN: 1, Role.OWNER: 2}
         return order[self] > order[other]
-    
+
     def __le__(self, other: "Role") -> bool:
         """Check if this role has <= privileges than another."""
         if not isinstance(other, Role):
             return NotImplemented
         order = {Role.MEMBER: 0, Role.ADMIN: 1, Role.OWNER: 2}
         return order[self] <= order[other]
-    
+
     def __lt__(self, other: "Role") -> bool:
         """Check if this role has < privileges than another."""
         if not isinstance(other, Role):
@@ -72,18 +71,18 @@ class Permission(str, Enum):
     MEMORY_DELETE_OWN = "memory.delete.own"
     MEMORY_DELETE_ANY = "memory.delete.any"  # Owner only
     MEMORY_SHARE = "memory.share"
-    
+
     # Audit & analytics permissions
     AUDIT_VIEW_OWN = "audit.view.own"
     AUDIT_VIEW_ORG = "audit.view.org"
     ACCESS_VIEW_OWN = "access.view.own"
     ACCESS_VIEW_ORG = "access.view.org"
-    
+
     # User management permissions
     USERS_VIEW = "users.view"
     USERS_INVITE = "users.invite"
     USERS_MANAGE = "users.manage"  # Change roles, remove users
-    
+
     # Organization permissions
     ORG_VIEW = "org.view"
     ORG_UPDATE = "org.update"
@@ -170,7 +169,7 @@ def has_permission(role: Role | str, permission: Permission) -> bool:
     """
     if isinstance(role, str):
         role = Role.from_string(role)
-    
+
     return permission in ROLE_PERMISSIONS.get(role, set())
 
 
@@ -193,19 +192,19 @@ def can_manage_user(manager_role: Role | str, target_role: Role | str) -> bool:
         manager_role = Role.from_string(manager_role)
     if isinstance(target_role, str):
         target_role = Role.from_string(target_role)
-    
+
     # Must have user management permission
     if not has_permission(manager_role, Permission.USERS_MANAGE):
         return False
-    
+
     # Owner can manage anyone
     if manager_role == Role.OWNER:
         return True
-    
+
     # Admin can only manage members
     if manager_role == Role.ADMIN:
         return target_role == Role.MEMBER
-    
+
     return False
 
 
@@ -228,25 +227,25 @@ def can_assign_role(assigner_role: Role | str, new_role: Role | str) -> bool:
         assigner_role = Role.from_string(assigner_role)
     if isinstance(new_role, str):
         new_role = Role.from_string(new_role)
-    
+
     # Must have user management permission
     if not has_permission(assigner_role, Permission.USERS_MANAGE):
         return False
-    
+
     # Owner can assign any role
     if assigner_role == Role.OWNER:
         return True
-    
+
     # Admin can only assign member role (can't promote to admin/owner)
     if assigner_role == Role.ADMIN:
         return new_role == Role.MEMBER
-    
+
     return False
 
 
 class RBACPermissionError(Exception):
     """Raised when a user doesn't have permission for an action."""
-    
+
     def __init__(self, permission: Permission, role: Role | None = None):
         self.permission = permission
         self.role = role
@@ -269,7 +268,7 @@ def require_permission(role: Role | str, permission: Permission) -> None:
     """
     if isinstance(role, str):
         role = Role.from_string(role)
-    
+
     if not has_permission(role, permission):
         raise RBACPermissionError(permission, role)
 
@@ -285,7 +284,7 @@ def get_user_permissions(role: Role | str) -> set[Permission]:
     """
     if isinstance(role, str):
         role = Role.from_string(role)
-    
+
     return ROLE_PERMISSIONS.get(role, set()).copy()
 
 
@@ -312,18 +311,18 @@ def check_memory_access(
     """
     if isinstance(user_role, str):
         user_role = Role.from_string(user_role)
-    
+
     # User owns the memory
     if memory_owner_id and user_id == memory_owner_id:
         return True
-    
+
     # Memory is shared and user is in the same org
     if memory_shared and memory_org_id and user_org_id == memory_org_id:
         return True
-    
+
     # Admin/owner can see all memories in their org
     if has_permission(user_role, Permission.MEMORY_READ_ALL):
         if memory_org_id and user_org_id == memory_org_id:
             return True
-    
+
     return False

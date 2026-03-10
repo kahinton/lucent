@@ -1,10 +1,9 @@
 """Test configuration and fixtures for Lucent."""
 
 import os
-import pytest
+from uuid import uuid4
+
 import pytest_asyncio
-import asyncio
-from uuid import UUID, uuid4
 
 # Set test database URL before importing any db modules
 TEST_DATABASE_URL = os.environ.get(
@@ -20,12 +19,12 @@ async def db_pool():
     
     Uses the lucent database for tests since we clean up after ourselves.
     """
-    from lucent.db.pool import init_db, close_db, _pool
     import lucent.db.pool as pool_module
-    
+    from lucent.db.pool import close_db, init_db
+
     # Reset the global pool to None to ensure fresh connection
     pool_module._pool = None
-    
+
     database_url = os.environ.get(
         "DATABASE_URL",
         "postgresql://lucent:lucent_dev_password@localhost:5433/lucent"
@@ -43,9 +42,9 @@ async def clean_test_data(db_pool):
     """
     test_id = str(uuid4())[:8]
     prefix = f"test_{test_id}_"
-    
+
     yield prefix
-    
+
     # Cleanup: Delete test data in correct order (respect foreign keys)
     async with db_pool.acquire() as conn:
         # Delete access and audit logs for test memories first
@@ -83,7 +82,7 @@ async def clean_test_data(db_pool):
 async def test_organization(db_pool, clean_test_data):
     """Create a test organization."""
     from lucent.db import OrganizationRepository
-    
+
     prefix = clean_test_data
     repo = OrganizationRepository(db_pool)
     org = await repo.create(name=f"{prefix}org")
@@ -94,7 +93,7 @@ async def test_organization(db_pool, clean_test_data):
 async def test_user(db_pool, test_organization, clean_test_data):
     """Create a test user with an organization."""
     from lucent.db import UserRepository
-    
+
     prefix = clean_test_data
     repo = UserRepository(db_pool)
     user = await repo.create(
@@ -111,7 +110,7 @@ async def test_user(db_pool, test_organization, clean_test_data):
 async def test_memory(db_pool, test_user, clean_test_data):
     """Create a test memory."""
     from lucent.db import MemoryRepository
-    
+
     prefix = clean_test_data
     repo = MemoryRepository(db_pool)
     memory = await repo.create(

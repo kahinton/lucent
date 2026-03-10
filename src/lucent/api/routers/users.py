@@ -5,19 +5,19 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, status
 
-from lucent.api.deps import AuthenticatedUser, AdminUser, OwnerUser
+from lucent.api.deps import AdminUser, AuthenticatedUser
 from lucent.api.models import (
-    UserCreate,
-    UserUpdate,
-    UserRoleUpdate,
-    UserResponse,
-    UserListResponse,
     ErrorResponse,
     SuccessResponse,
+    UserCreate,
+    UserListResponse,
+    UserResponse,
+    UserRoleUpdate,
+    UserUpdate,
 )
 from lucent.db import UserRepository, get_pool
 from lucent.logging import get_logger
-from lucent.rbac import Role, can_manage_user, can_assign_role, Permission
+from lucent.rbac import Permission, can_assign_role, can_manage_user
 
 logger = get_logger(__name__)
 
@@ -53,14 +53,14 @@ async def get_current_user_info(
     """Get the current authenticated user's information."""
     pool = await get_pool()
     user_repo = UserRepository(pool)
-    
+
     db_user = await user_repo.get_by_id(user.id)
     if db_user is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found",
         )
-    
+
     return _user_to_response(db_user)
 
 
@@ -75,20 +75,20 @@ async def update_current_user(
     """Update the current user's profile."""
     pool = await get_pool()
     user_repo = UserRepository(pool)
-    
+
     result = await user_repo.update(
         user_id=user.id,
         email=data.email,
         display_name=data.display_name,
         avatar_url=data.avatar_url,
     )
-    
+
     if result is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found",
         )
-    
+
     return _user_to_response(result)
 
 
@@ -102,21 +102,21 @@ async def list_organization_users(
 ) -> UserListResponse:
     """List all users in the current user's organization."""
     user.require_permission(Permission.USERS_VIEW)
-    
+
     if not user.organization_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="User is not part of an organization",
         )
-    
+
     pool = await get_pool()
     user_repo = UserRepository(pool)
-    
+
     users = await user_repo.get_by_organization(
         organization_id=user.organization_id,
         role=role,
     )
-    
+
     return UserListResponse(
         users=[_user_to_response(u) for u in users],
         total_count=len(users),
@@ -137,24 +137,24 @@ async def get_user(
     Users can view others in their organization.
     """
     user.require_permission(Permission.USERS_VIEW)
-    
+
     pool = await get_pool()
     user_repo = UserRepository(pool)
-    
+
     db_user = await user_repo.get_by_id(user_id)
     if db_user is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found",
         )
-    
+
     # Check same organization
     if db_user.get("organization_id") != user.organization_id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found",
         )
-    
+
     return _user_to_response(db_user)
 
 
@@ -172,23 +172,23 @@ async def create_user(
     Requires admin or owner role.
     """
     user.require_permission(Permission.USERS_INVITE)
-    
+
     if not user.organization_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="User is not part of an organization",
         )
-    
+
     # Check if the admin can assign this role
     if not can_assign_role(user.role, data.role):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"You cannot assign the '{data.role}' role",
         )
-    
+
     pool = await get_pool()
     user_repo = UserRepository(pool)
-    
+
     # Check if user already exists
     existing = await user_repo.get_by_external_id(data.external_id, data.provider)
     if existing:
@@ -196,7 +196,7 @@ async def create_user(
             status_code=status.HTTP_409_CONFLICT,
             detail="User with this external ID already exists",
         )
-    
+
     new_user = await user_repo.create(
         external_id=data.external_id,
         provider=data.provider,
@@ -205,11 +205,11 @@ async def create_user(
         display_name=data.display_name,
         avatar_url=data.avatar_url,
     )
-    
+
     # Update role if not member
     if data.role != "member":
         new_user = await user_repo.update_role(new_user["id"], data.role)
-    
+
     logger.info("User created: id=%s, role=%s, by=%s", new_user["id"], data.role, user.id)
     return _user_to_response(new_user)
 
@@ -229,10 +229,10 @@ async def update_user(
     Requires admin or owner role.
     """
     user.require_permission(Permission.USERS_MANAGE)
-    
+
     pool = await get_pool()
     user_repo = UserRepository(pool)
-    
+
     # Get target user
     target = await user_repo.get_by_id(user_id)
     if target is None:
@@ -240,21 +240,21 @@ async def update_user(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found",
         )
-    
+
     # Check same organization
     if target.get("organization_id") != user.organization_id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found",
         )
-    
+
     # Check if admin can manage this user
     if not can_manage_user(user.role, target.get("role", "member")):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You cannot manage this user",
         )
-    
+
     result = await user_repo.update(
         user_id=user_id,
         email=data.email,
@@ -262,13 +262,13 @@ async def update_user(
         avatar_url=data.avatar_url,
         is_active=data.is_active,
     )
-    
+
     if result is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found",
         )
-    
+
     return _user_to_response(result)
 
 
@@ -289,10 +289,10 @@ async def update_user_role(
     Owners can set any role.
     """
     user.require_permission(Permission.USERS_MANAGE)
-    
+
     pool = await get_pool()
     user_repo = UserRepository(pool)
-    
+
     # Get target user
     target = await user_repo.get_by_id(user_id)
     if target is None:
@@ -300,28 +300,28 @@ async def update_user_role(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found",
         )
-    
+
     # Check same organization
     if target.get("organization_id") != user.organization_id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found",
         )
-    
+
     # Check if admin can manage this user
     if not can_manage_user(user.role, target.get("role", "member")):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You cannot manage this user",
         )
-    
+
     # Check if admin can assign this role
     if not can_assign_role(user.role, data.role):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"You cannot assign the '{data.role}' role",
         )
-    
+
     # Validate role value
     valid_roles = ["member", "admin", "owner"]
     if data.role not in valid_roles:
@@ -329,15 +329,15 @@ async def update_user_role(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid role. Must be one of: {', '.join(valid_roles)}",
         )
-    
+
     result = await user_repo.update_role(user_id, data.role)
-    
+
     if result is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found",
         )
-    
+
     logger.info("User role changed: user=%s, new_role=%s, by=%s", user_id, data.role, user.id)
     return _user_to_response(result)
 
@@ -357,17 +357,17 @@ async def delete_user(
     This will also delete all of the user's memories.
     """
     user.require_permission(Permission.USERS_MANAGE)
-    
+
     # Prevent self-deletion
     if user_id == user.id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="You cannot delete yourself",
         )
-    
+
     pool = await get_pool()
     user_repo = UserRepository(pool)
-    
+
     # Get target user
     target = await user_repo.get_by_id(user_id)
     if target is None:
@@ -375,28 +375,28 @@ async def delete_user(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found",
         )
-    
+
     # Check same organization
     if target.get("organization_id") != user.organization_id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found",
         )
-    
+
     # Check if admin can manage this user
     if not can_manage_user(user.role, target.get("role", "member")):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You cannot delete this user",
         )
-    
+
     success = await user_repo.delete(user_id)
-    
+
     if not success:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found",
         )
-    
+
     logger.info("User deleted: id=%s, by=%s", user_id, user.id)
     return SuccessResponse(success=True, message=f"User {user_id} deleted")

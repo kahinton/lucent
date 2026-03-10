@@ -26,7 +26,7 @@ class VersionConflictError(Exception):
 
 class MemoryRepository:
     """Repository for memory CRUD operations."""
-    
+
     TRUNCATE_LENGTH = 1000
 
     # Shared column lists to avoid repetition across queries
@@ -38,10 +38,10 @@ class MemoryRepository:
         "id, username, type, content, tags, importance, related_memory_ids, "
         "created_at, updated_at, user_id, organization_id, shared, last_accessed_at"
     )
-    
+
     def __init__(self, pool: Pool):
         self.pool = pool
-    
+
     async def create(
         self,
         username: str,
@@ -75,12 +75,12 @@ class MemoryRepository:
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, false)
             RETURNING {self._FULL_COLUMNS}
         """
-        
+
         async with self.pool.acquire() as conn:
             # Validate related memory IDs exist and are not deleted
             if related_memory_ids:
                 await self._validate_related_ids(related_memory_ids, conn=conn)
-            
+
             row = await conn.fetchrow(
                 query,
                 username,
@@ -93,9 +93,9 @@ class MemoryRepository:
                 str(user_id) if user_id else None,
                 str(organization_id) if organization_id else None,
             )
-        
+
         return self._row_to_dict(row)
-    
+
     async def get(self, memory_id: UUID) -> dict[str, Any] | None:
         """Get a memory by ID (no access control).
         
@@ -110,15 +110,15 @@ class MemoryRepository:
             FROM memories
             WHERE id = $1 AND deleted_at IS NULL
         """
-        
+
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(query, str(memory_id))
-        
+
         if row is None:
             return None
-        
+
         return self._row_to_dict(row)
-    
+
     async def get_accessible(
         self,
         memory_id: UUID,
@@ -149,15 +149,15 @@ class MemoryRepository:
                   OR (organization_id = $3 AND shared = true)
               )
         """
-        
+
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(query, str(memory_id), str(user_id), str(organization_id))
-        
+
         if row is None:
             return None
-        
+
         return self._row_to_dict(row)
-    
+
     async def get_individual_memory_for_user(self, user_id: UUID) -> dict[str, Any] | None:
         """Get the individual memory associated with a user.
         
@@ -174,15 +174,15 @@ class MemoryRepository:
               AND deleted_at IS NULL
               AND user_id = $1
         """
-        
+
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(query, str(user_id))
-        
+
         if row is None:
             return None
-        
+
         return self._row_to_dict(row)
-    
+
     async def set_shared(
         self,
         memory_id: UUID,
@@ -207,15 +207,15 @@ class MemoryRepository:
             WHERE id = $2 AND user_id = $3 AND deleted_at IS NULL
             RETURNING {self._FULL_COLUMNS}
         """
-        
+
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(query, shared, str(memory_id), str(user_id))
-        
+
         if row is None:
             return None
-        
+
         return self._row_to_dict(row)
-    
+
     async def update(
         self,
         memory_id: UUID,
@@ -248,64 +248,64 @@ class MemoryRepository:
         updates = []
         params = []
         param_idx = 1
-        
+
         if content is not None:
             updates.append(f"content = ${param_idx}")
             params.append(content)
             param_idx += 1
-        
+
         if tags is not None:
             updates.append(f"tags = ${param_idx}")
             params.append(tags)
             param_idx += 1
-        
+
         if importance is not None:
             updates.append(f"importance = ${param_idx}")
             params.append(importance)
             param_idx += 1
-        
+
         if related_memory_ids is not None:
             updates.append(f"related_memory_ids = ${param_idx}")
             params.append([str(uid) for uid in related_memory_ids])
             param_idx += 1
-        
+
         if metadata is not None:
             updates.append(f"metadata = ${param_idx}")
             params.append(metadata)
             param_idx += 1
-        
+
         if not updates:
             return await self.get(memory_id)
-        
+
         # Always increment version on update
         updates.append("version = version + 1")
-        
+
         # Build WHERE clause
         where_parts = [f"id = ${param_idx}"]
         params.append(str(memory_id))
         param_idx += 1
-        
+
         where_parts.append("deleted_at IS NULL")
-        
+
         if expected_version is not None:
             where_parts.append(f"version = ${param_idx}")
             params.append(expected_version)
             param_idx += 1
-        
+
         query = f"""
             UPDATE memories
             SET {", ".join(updates)}
             WHERE {" AND ".join(where_parts)}
             RETURNING {self._FULL_COLUMNS}
         """
-        
+
         # Use a single connection for validation and update
         async with self.pool.acquire() as conn:
             if related_memory_ids is not None:
                 await self._validate_related_ids(related_memory_ids, exclude_id=memory_id, conn=conn)
-            
+
             row = await conn.fetchrow(query, *params)
-        
+
         if row is None:
             # Distinguish between "not found" and "version mismatch"
             if expected_version is not None:
@@ -317,7 +317,7 @@ class MemoryRepository:
                         actual_version=existing["version"],
                     )
             return None
-        
+
         return self._row_to_dict(row)
 
     async def claim_task(
@@ -340,7 +340,7 @@ class MemoryRepository:
             task was already claimed or is not in a pending state.
         """
         claim_tag = f"claimed-by-{instance_id}"
-        
+
         async with self.pool.acquire() as conn:
             async with conn.transaction():
                 # Lock the row and verify it's still pending
@@ -359,14 +359,14 @@ class MemoryRepository:
                     """,
                     str(memory_id),
                 )
-                
+
                 if row is None:
                     return None
-                
+
                 # Swap 'pending' → claim tag
                 new_tags = [t for t in row["tags"] if t != "pending"]
                 new_tags.append(claim_tag)
-                
+
                 updated = await conn.fetchrow(
                     f"""
                     UPDATE memories
@@ -377,10 +377,10 @@ class MemoryRepository:
                     new_tags,
                     str(memory_id),
                 )
-                
+
                 if updated is None:
                     return None
-                
+
                 return self._row_to_dict(updated)
 
     async def release_claim(
@@ -431,14 +431,14 @@ class MemoryRepository:
                         """,
                         str(memory_id),
                     )
-                
+
                 if row is None:
                     return None
-                
+
                 # Remove claim tag, restore 'pending'
                 new_tags = [t for t in row["tags"] if not t.startswith("claimed-by-")]
                 new_tags.append("pending")
-                
+
                 updated = await conn.fetchrow(
                     f"""
                     UPDATE memories
@@ -449,12 +449,12 @@ class MemoryRepository:
                     new_tags,
                     str(memory_id),
                 )
-                
+
                 if updated is None:
                     return None
-                
+
                 return self._row_to_dict(updated)
-    
+
     async def delete(self, memory_id: UUID) -> bool:
         """Soft delete a memory by setting deleted_at timestamp.
         
@@ -470,12 +470,12 @@ class MemoryRepository:
             WHERE id = $1 AND deleted_at IS NULL
             RETURNING id
         """
-        
+
         async with self.pool.acquire() as conn:
             result = await conn.fetchrow(query, str(memory_id))
-        
+
         return result is not None
-    
+
     async def search(
         self,
         query: str | None = None,
@@ -520,65 +520,65 @@ class MemoryRepository:
         conditions = ["deleted_at IS NULL"]
         params: list[Any] = []
         param_idx = 1
-        
+
         # Add access control condition if user context is provided
         if requesting_user_id is not None and requesting_org_id is not None:
             conditions.append(f"(user_id = ${param_idx} OR (organization_id = ${param_idx + 1} AND shared = true))")
             params.append(str(requesting_user_id))
             params.append(str(requesting_org_id))
             param_idx += 2
-        
+
         # Build WHERE conditions
         if username is not None:
             conditions.append(f"username = ${param_idx}")
             params.append(username)
             param_idx += 1
-        
+
         if type is not None:
             conditions.append(f"type = ${param_idx}")
             params.append(type)
             param_idx += 1
-        
+
         if tags:
             conditions.append(f"tags @> ${param_idx}")
             params.append(tags)
             param_idx += 1
-        
+
         if importance_min is not None:
             conditions.append(f"importance >= ${param_idx}")
             params.append(importance_min)
             param_idx += 1
-        
+
         if importance_max is not None:
             conditions.append(f"importance <= ${param_idx}")
             params.append(importance_max)
             param_idx += 1
-        
+
         if created_after is not None:
             conditions.append(f"created_at >= ${param_idx}")
             params.append(created_after)
             param_idx += 1
-        
+
         if created_before is not None:
             conditions.append(f"created_at <= ${param_idx}")
             params.append(created_before)
             param_idx += 1
-        
+
         if memory_ids:
             placeholders = ", ".join(f"${i}" for i in range(param_idx, param_idx + len(memory_ids)))
             conditions.append(f"id IN ({placeholders})")
             params.extend(str(uid) for uid in memory_ids)
             param_idx += len(memory_ids)
-        
+
         where_clause = " AND ".join(conditions)
-        
+
         # Build the query with optional fuzzy matching
         if query:
             # Use pg_trgm similarity for fuzzy search
             similarity_param = param_idx
             params.append(query)
             param_idx += 1
-            
+
             search_query = f"""
                 SELECT {self._SEARCH_COLUMNS},
                        similarity(content, ${similarity_param}) as sim_score
@@ -588,7 +588,7 @@ class MemoryRepository:
                 ORDER BY sim_score DESC, importance DESC, created_at DESC
                 LIMIT ${param_idx} OFFSET ${param_idx + 1}
             """
-            
+
             count_query = f"""
                 SELECT COUNT(*) as total
                 FROM memories
@@ -604,26 +604,26 @@ class MemoryRepository:
                 ORDER BY importance DESC, created_at DESC
                 LIMIT ${param_idx} OFFSET ${param_idx + 1}
             """
-            
+
             count_query = f"""
                 SELECT COUNT(*) as total
                 FROM memories
                 WHERE {where_clause}
             """
-        
+
         params.extend([limit, offset])
-        
+
         async with self.pool.acquire() as conn:
             # Get total count
             count_params = params[:-2]  # Exclude limit and offset
             count_row = await conn.fetchrow(count_query, *count_params)
             total_count = count_row["total"] if count_row else 0
-            
+
             # Get results
             rows = await conn.fetch(search_query, *params)
-        
+
         memories = [self._row_to_search_dict(row) for row in rows]
-        
+
         return {
             "memories": memories,
             "total_count": total_count,
@@ -631,7 +631,7 @@ class MemoryRepository:
             "limit": limit,
             "has_more": offset + len(memories) < total_count,
         }
-    
+
     async def search_full(
         self,
         query: str,
@@ -671,41 +671,41 @@ class MemoryRepository:
         conditions = ["deleted_at IS NULL"]
         params: list[Any] = []
         param_idx = 1
-        
+
         # Add access control condition if user context is provided
         if requesting_user_id is not None and requesting_org_id is not None:
             conditions.append(f"(user_id = ${param_idx} OR (organization_id = ${param_idx + 1} AND shared = true))")
             params.append(str(requesting_user_id))
             params.append(str(requesting_org_id))
             param_idx += 2
-        
+
         if username is not None:
             conditions.append(f"username = ${param_idx}")
             params.append(username)
             param_idx += 1
-        
+
         if type is not None:
             conditions.append(f"type = ${param_idx}")
             params.append(type)
             param_idx += 1
-        
+
         if importance_min is not None:
             conditions.append(f"importance >= ${param_idx}")
             params.append(importance_min)
             param_idx += 1
-        
+
         if importance_max is not None:
             conditions.append(f"importance <= ${param_idx}")
             params.append(importance_max)
             param_idx += 1
-        
+
         where_clause = " AND ".join(conditions)
-        
+
         # Build a combined text field for searching: content + tags + metadata
         query_param = param_idx
         params.append(query)
         param_idx += 1
-        
+
         # Search across content, array_to_string(tags), and metadata::text
         search_query = f"""
             SELECT {self._SEARCH_COLUMNS},
@@ -724,7 +724,7 @@ class MemoryRepository:
             ORDER BY sim_score DESC, importance DESC, created_at DESC
             LIMIT ${param_idx} OFFSET ${param_idx + 1}
         """
-        
+
         count_query = f"""
             SELECT COUNT(*) as total
             FROM memories
@@ -735,18 +735,18 @@ class MemoryRepository:
                   OR metadata::text % ${query_param} OR metadata::text ILIKE '%' || ${query_param} || '%'
               )
         """
-        
+
         params.extend([limit, offset])
-        
+
         async with self.pool.acquire() as conn:
             count_params = params[:-2]
             count_row = await conn.fetchrow(count_query, *count_params)
             total_count = count_row["total"] if count_row else 0
-            
+
             rows = await conn.fetch(search_query, *params)
-        
+
         memories = [self._row_to_search_dict(row) for row in rows]
-        
+
         return {
             "memories": memories,
             "total_count": total_count,
@@ -779,26 +779,26 @@ class MemoryRepository:
         conditions = ["deleted_at IS NULL"]
         params: list[Any] = []
         param_idx = 1
-        
+
         # Add access control condition if user context is provided
         if requesting_user_id is not None and requesting_org_id is not None:
             conditions.append(f"(user_id = ${param_idx} OR (organization_id = ${param_idx + 1} AND shared = true))")
             params.append(str(requesting_user_id))
             params.append(str(requesting_org_id))
             param_idx += 2
-        
+
         if username is not None:
             conditions.append(f"username = ${param_idx}")
             params.append(username)
             param_idx += 1
-        
+
         if type is not None:
             conditions.append(f"type = ${param_idx}")
             params.append(type)
             param_idx += 1
-        
+
         where_clause = " AND ".join(conditions)
-        
+
         query = f"""
             SELECT tag, COUNT(*) as count
             FROM memories, UNNEST(tags) as tag
@@ -808,12 +808,12 @@ class MemoryRepository:
             LIMIT ${param_idx}
         """
         params.append(limit)
-        
+
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(query, *params)
-        
+
         return [{"tag": row["tag"], "count": row["count"]} for row in rows]
-    
+
     async def get_tag_suggestions(
         self,
         query: str,
@@ -838,24 +838,24 @@ class MemoryRepository:
         conditions = ["deleted_at IS NULL"]
         params: list[Any] = []
         param_idx = 1
-        
+
         # Add access control condition if user context is provided
         if requesting_user_id is not None and requesting_org_id is not None:
             conditions.append(f"(user_id = ${param_idx} OR (organization_id = ${param_idx + 1} AND shared = true))")
             params.append(str(requesting_user_id))
             params.append(str(requesting_org_id))
             param_idx += 2
-        
+
         if username is not None:
             conditions.append(f"username = ${param_idx}")
             params.append(username)
             param_idx += 1
-        
+
         where_clause = " AND ".join(conditions)
         query_param = param_idx
         params.append(query.lower())
         param_idx += 1
-        
+
         # Use trigram similarity for fuzzy matching on tags
         sql = f"""
             SELECT tag, COUNT(*) as count, similarity(tag, ${query_param}) as sim
@@ -867,10 +867,10 @@ class MemoryRepository:
             LIMIT ${param_idx}
         """
         params.append(limit)
-        
+
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(sql, *params)
-        
+
         return [
             {"tag": row["tag"], "count": row["count"], "similarity": row["sim"]}
             for row in rows
@@ -1100,8 +1100,8 @@ class MemoryRepository:
         }
 
     async def _validate_related_ids(
-        self, 
-        related_ids: list[UUID], 
+        self,
+        related_ids: list[UUID],
         exclude_id: UUID | None = None,
         conn: asyncpg.Connection | None = None,
     ) -> None:
@@ -1117,53 +1117,53 @@ class MemoryRepository:
         """
         if not related_ids:
             return
-        
+
         # Check for self-reference
         if exclude_id and exclude_id in related_ids:
             raise ValueError("A memory cannot reference itself")
-        
+
         placeholders = ", ".join(f"${i+1}" for i in range(len(related_ids)))
         query = f"""
             SELECT id FROM memories
             WHERE id IN ({placeholders}) AND deleted_at IS NULL
         """
-        
+
         str_ids = [str(uid) for uid in related_ids]
-        
+
         if conn is not None:
             rows = await conn.fetch(query, *str_ids)
         else:
             async with self.pool.acquire() as pool_conn:
                 rows = await pool_conn.fetch(query, *str_ids)
-        
+
         # Convert found IDs to strings for comparison
         found_ids = {str(row["id"]) for row in rows}
         requested_ids = {str(uid) for uid in related_ids}
         missing_ids = requested_ids - found_ids
-        
+
         if missing_ids:
             raise ValueError(f"Related memory IDs not found or deleted: {missing_ids}")
-    
+
     def _row_to_search_dict(self, row: asyncpg.Record) -> dict[str, Any]:
         """Convert a search result row to a dictionary with truncation."""
         content = row["content"]
         truncated = len(content) > self.TRUNCATE_LENGTH
         if truncated:
             content = content[:self.TRUNCATE_LENGTH] + "..."
-        
+
         related_ids = []
         if row["related_memory_ids"]:
             for uid in row["related_memory_ids"]:
                 related_ids.append(uid if isinstance(uid, UUID) else UUID(uid))
-        
+
         user_id = None
         if row["user_id"]:
             user_id = row["user_id"] if isinstance(row["user_id"], UUID) else UUID(row["user_id"])
-        
+
         org_id = None
         if row["organization_id"]:
             org_id = row["organization_id"] if isinstance(row["organization_id"], UUID) else UUID(row["organization_id"])
-        
+
         return {
             "id": row["id"],
             "username": row["username"],
@@ -1181,7 +1181,7 @@ class MemoryRepository:
             "shared": row["shared"],
             "last_accessed_at": row["last_accessed_at"],
         }
-    
+
     def _row_to_dict(self, row: asyncpg.Record) -> dict[str, Any]:
         """Convert a database row to a dictionary."""
         # Handle related_memory_ids which may be strings or UUIDs
@@ -1192,23 +1192,23 @@ class MemoryRepository:
                     related_ids.append(uid)
                 else:
                     related_ids.append(UUID(uid))
-        
+
         # Handle user_id which may not be present in all queries
         user_id = None
         if "user_id" in row.keys() and row["user_id"]:
             user_id = row["user_id"] if isinstance(row["user_id"], UUID) else UUID(row["user_id"])
-        
+
         # Handle organization_id which may not be present in all queries
         org_id = None
         if "organization_id" in row.keys() and row["organization_id"]:
             org_id = row["organization_id"] if isinstance(row["organization_id"], UUID) else UUID(row["organization_id"])
-        
+
         # Handle shared flag
         shared = row["shared"] if "shared" in row.keys() else False
-        
+
         # Handle last_accessed_at
         last_accessed_at = row["last_accessed_at"] if "last_accessed_at" in row.keys() else None
-        
+
         return {
             "id": row["id"],
             "username": row["username"],

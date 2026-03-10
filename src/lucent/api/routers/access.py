@@ -4,9 +4,9 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Query, HTTPException, status
+from fastapi import APIRouter, HTTPException, Query, status
 
-from lucent.api.deps import AuthenticatedUser, AdminUser
+from lucent.api.deps import AdminUser, AuthenticatedUser
 from lucent.api.models import (
     AccessLogEntry,
     AccessLogResponse,
@@ -14,7 +14,6 @@ from lucent.api.models import (
 )
 from lucent.db import AccessRepository, get_pool
 from lucent.rbac import Permission
-
 
 router = APIRouter()
 
@@ -49,13 +48,13 @@ async def get_memory_access_history(
     """
     pool = await get_pool()
     access_repo = AccessRepository(pool)
-    
+
     result = await access_repo.get_access_history(
         memory_id=memory_id,
         offset=offset,
         limit=limit,
     )
-    
+
     # Filter based on permissions
     entries = result["entries"]
     if not user.has_permission(Permission.ACCESS_VIEW_ORG):
@@ -64,7 +63,7 @@ async def get_memory_access_history(
     else:
         # Admin: filter to same org
         entries = [e for e in entries if e.get("organization_id") == user.organization_id]
-    
+
     return AccessLogResponse(
         entries=[_entry_to_response(e) for e in entries],
         total_count=len(entries),
@@ -89,18 +88,18 @@ async def get_memory_search_history(
     """
     pool = await get_pool()
     access_repo = AccessRepository(pool)
-    
+
     entries = await access_repo.get_search_history(
         memory_id=memory_id,
         limit=limit,
     )
-    
+
     # Filter based on permissions
     if not user.has_permission(Permission.ACCESS_VIEW_ORG):
         entries = [e for e in entries if e.get("user_id") == user.id]
     else:
         entries = [e for e in entries if e.get("organization_id") == user.organization_id]
-    
+
     return [_entry_to_response(e) for e in entries]
 
 
@@ -126,16 +125,16 @@ async def get_user_access_activity(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="You can only view your own access activity",
             )
-    
+
     pool = await get_pool()
     access_repo = AccessRepository(pool)
-    
+
     entries = await access_repo.get_user_activity(
         user_id=user_id,
         since=since,
         limit=limit,
     )
-    
+
     return [_entry_to_response(e) for e in entries]
 
 
@@ -156,7 +155,7 @@ async def get_most_accessed_memories(
     """
     pool = await get_pool()
     access_repo = AccessRepository(pool)
-    
+
     if organization_wide:
         if not user.has_permission(Permission.ACCESS_VIEW_ORG):
             raise HTTPException(
@@ -174,7 +173,7 @@ async def get_most_accessed_memories(
             since=since,
             limit=limit,
         )
-    
+
     return [
         MostAccessedItem(
             memory_id=r["memory_id"],
@@ -204,10 +203,10 @@ async def get_organization_access_activity(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="User is not part of an organization",
         )
-    
+
     pool = await get_pool()
     access_repo = AccessRepository(pool)
-    
+
     # TODO: Implement proper organization activity feed
     # For now, this endpoint is not available
     raise HTTPException(

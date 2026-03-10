@@ -11,17 +11,14 @@ Tests /api/memories endpoints:
 - GET /api/memories/tags/suggest (suggest tags)
 """
 
-import pytest
-import pytest_asyncio
-from uuid import uuid4, UUID
+from uuid import uuid4
 
 import httpx
+import pytest_asyncio
 from httpx import ASGITransport
 
 from lucent.api.app import create_app
 from lucent.api.deps import CurrentUser, get_current_user
-from lucent.db import MemoryRepository
-
 
 # ============================================================================
 # Fixtures

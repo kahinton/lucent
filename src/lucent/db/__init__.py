@@ -15,39 +15,39 @@ Repositories:
 """
 
 # Pool management
-from lucent.db.pool import get_pool, init_db, close_db
+from lucent.db.access import AccessRepository
+from lucent.db.api_key import ApiKeyRepository
+from lucent.db.audit import AuditRepository
 
 # Repositories
 from lucent.db.memory import MemoryRepository, VersionConflictError
-from lucent.db.user import UserRepository
-from lucent.db.api_key import ApiKeyRepository
 from lucent.db.organization import OrganizationRepository
-from lucent.db.audit import AuditRepository
-from lucent.db.access import AccessRepository
+from lucent.db.pool import close_db, get_pool, init_db
 
 # TypedDict definitions for repository return values
 from lucent.db.types import (
+    AccessLogRecord,
+    AccessLogResult,
+    ApiKeyRecord,
+    ApiKeyVerifyRecord,
+    AuditLogRecord,
+    AuditLogResult,
     MemoryRecord,
     MemorySearchRecord,
     MemorySearchResult,
+    MostAccessedRecord,
+    OrganizationListResult,
+    OrganizationRecord,
     TagCount,
     TagSuggestion,
     UserRecord,
-    ApiKeyRecord,
-    ApiKeyVerifyRecord,
-    OrganizationRecord,
-    OrganizationListResult,
-    AuditLogRecord,
-    AuditLogResult,
-    AccessLogRecord,
-    AccessLogResult,
-    MostAccessedRecord,
 )
+from lucent.db.user import UserRepository
 
 __all__ = [
     # Pool management
     "get_pool",
-    "init_db", 
+    "init_db",
     "close_db",
     # Repositories
     "MemoryRepository",

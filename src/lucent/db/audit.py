@@ -13,10 +13,10 @@ from asyncpg import Pool
 
 class AuditRepository:
     """Repository for audit log operations."""
-    
+
     def __init__(self, pool: Pool):
         self.pool = pool
-    
+
     async def log(
         self,
         memory_id: UUID,
@@ -59,7 +59,7 @@ class AuditRepository:
                       created_at, changed_fields, old_values, new_values, context, notes,
                       version, snapshot
         """
-        
+
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 query,
@@ -75,9 +75,9 @@ class AuditRepository:
                 version,
                 snapshot,
             )
-        
+
         return self._row_to_dict(row)
-    
+
     async def get_by_memory_id(
         self,
         memory_id: UUID,
@@ -102,19 +102,19 @@ class AuditRepository:
             ORDER BY created_at DESC
             LIMIT $2 OFFSET $3
         """
-        
+
         count_query = """
             SELECT COUNT(*) as total
             FROM memory_audit_log
             WHERE memory_id = $1
         """
-        
+
         async with self.pool.acquire() as conn:
             count_row = await conn.fetchrow(count_query, str(memory_id))
             total_count = count_row["total"] if count_row else 0
-            
+
             rows = await conn.fetch(query, str(memory_id), limit, offset)
-        
+
         return {
             "entries": [self._row_to_dict(row) for row in rows],
             "total_count": total_count,
@@ -122,7 +122,7 @@ class AuditRepository:
             "limit": limit,
             "has_more": offset + len(rows) < total_count,
         }
-    
+
     # Columns allowed in _get_filtered_entries to prevent SQL injection
     _FILTERABLE_COLUMNS = frozenset({"user_id", "organization_id"})
 
@@ -149,7 +149,7 @@ class AuditRepository:
         return await self._get_filtered_entries(
             "user_id", user_id, action_type, since, limit, offset
         )
-    
+
     async def get_by_organization_id(
         self,
         organization_id: UUID,
@@ -204,19 +204,19 @@ class AuditRepository:
         conditions = [f"{filter_column} = $1"]
         params: list[Any] = [str(filter_value)]
         param_idx = 2
-        
+
         if action_type:
             conditions.append(f"action_type = ${param_idx}")
             params.append(action_type)
             param_idx += 1
-        
+
         if since:
             conditions.append(f"created_at >= ${param_idx}")
             params.append(since)
             param_idx += 1
-        
+
         where_clause = " AND ".join(conditions)
-        
+
         query = f"""
             SELECT id, memory_id, user_id, organization_id, action_type,
                    created_at, changed_fields, old_values, new_values, context, notes
@@ -225,21 +225,21 @@ class AuditRepository:
             ORDER BY created_at DESC
             LIMIT ${param_idx} OFFSET ${param_idx + 1}
         """
-        
+
         count_query = f"""
             SELECT COUNT(*) as total
             FROM memory_audit_log
             WHERE {where_clause}
         """
-        
+
         params.extend([limit, offset])
-        
+
         async with self.pool.acquire() as conn:
             count_row = await conn.fetchrow(count_query, *params[:-2])
             total_count = count_row["total"] if count_row else 0
-            
+
             rows = await conn.fetch(query, *params)
-        
+
         return {
             "entries": [self._row_to_dict(row) for row in rows],
             "total_count": total_count,
@@ -247,7 +247,7 @@ class AuditRepository:
             "limit": limit,
             "has_more": offset + len(rows) < total_count,
         }
-    
+
     async def get_recent(
         self,
         organization_id: UUID | None = None,
@@ -271,25 +271,25 @@ class AuditRepository:
         conditions = []
         params: list[Any] = []
         param_idx = 1
-        
+
         if organization_id:
             conditions.append(f"organization_id = ${param_idx}")
             params.append(str(organization_id))
             param_idx += 1
-        
+
         if action_types:
             placeholders = ", ".join(f"${i}" for i in range(param_idx, param_idx + len(action_types)))
             conditions.append(f"action_type IN ({placeholders})")
             params.extend(action_types)
             param_idx += len(action_types)
-        
+
         if since:
             conditions.append(f"created_at >= ${param_idx}")
             params.append(since)
             param_idx += 1
-        
+
         where_clause = " AND ".join(conditions) if conditions else "TRUE"
-        
+
         query = f"""
             SELECT id, memory_id, user_id, organization_id, action_type,
                    created_at, changed_fields, old_values, new_values, context, notes
@@ -298,14 +298,14 @@ class AuditRepository:
             ORDER BY created_at DESC
             LIMIT ${param_idx}
         """
-        
+
         params.append(limit)
-        
+
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(query, *params)
-        
+
         return [self._row_to_dict(row) for row in rows]
-    
+
     async def get_versions(
         self,
         memory_id: UUID,
@@ -334,19 +334,19 @@ class AuditRepository:
             ORDER BY version DESC
             LIMIT $2 OFFSET $3
         """
-        
+
         count_query = """
             SELECT COUNT(*) as total
             FROM memory_audit_log
             WHERE memory_id = $1 AND version IS NOT NULL
         """
-        
+
         async with self.pool.acquire() as conn:
             count_row = await conn.fetchrow(count_query, str(memory_id))
             total_count = count_row["total"] if count_row else 0
-            
+
             rows = await conn.fetch(query, str(memory_id), limit, offset)
-        
+
         return {
             "versions": [self._row_to_dict(row) for row in rows],
             "total_count": total_count,
@@ -354,7 +354,7 @@ class AuditRepository:
             "limit": limit,
             "has_more": offset + len(rows) < total_count,
         }
-    
+
     async def get_version_snapshot(
         self,
         memory_id: UUID,
@@ -377,13 +377,13 @@ class AuditRepository:
             WHERE memory_id = $1 AND version = $2
             LIMIT 1
         """
-        
+
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(query, str(memory_id), version)
-        
+
         if row is None:
             return None
-        
+
         return self._row_to_dict(row)
 
     def _row_to_dict(self, row: asyncpg.Record) -> dict[str, Any]:
@@ -392,13 +392,13 @@ class AuditRepository:
         user_id = None
         if row["user_id"]:
             user_id = row["user_id"] if isinstance(row["user_id"], UUID) else UUID(row["user_id"])
-        
+
         org_id = None
         if row["organization_id"]:
             org_id = row["organization_id"] if isinstance(row["organization_id"], UUID) else UUID(row["organization_id"])
-        
+
         memory_id = row["memory_id"] if isinstance(row["memory_id"], UUID) else UUID(row["memory_id"])
-        
+
         result = {
             "id": row["id"],
             "memory_id": memory_id,
@@ -412,11 +412,11 @@ class AuditRepository:
             "context": row["context"],
             "notes": row["notes"],
         }
-        
+
         # Include version and snapshot if present in the row
         if "version" in row.keys():
             result["version"] = row["version"]
         if "snapshot" in row.keys():
             result["snapshot"] = row["snapshot"]
-        
+
         return result

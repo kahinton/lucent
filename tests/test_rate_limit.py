@@ -1,12 +1,11 @@
 """Tests for rate limiting module."""
 
-import os
 import time
 from uuid import uuid4
 
 from lucent.rate_limit import (
-    RateLimiter,
     RateLimitBucket,
+    RateLimiter,
     get_rate_limiter,
     reset_rate_limiter,
 )

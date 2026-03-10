@@ -1,18 +1,19 @@
 """Tests for RBAC (role-based access control) module."""
 
-import pytest
 from uuid import uuid4
 
+import pytest
+
 from lucent.rbac import (
-    Role,
     Permission,
     RBACPermissionError,
-    has_permission,
-    can_manage_user,
+    Role,
     can_assign_role,
-    require_permission,
+    can_manage_user,
     check_memory_access,
     get_user_permissions,
+    has_permission,
+    require_permission,
 )
 
 

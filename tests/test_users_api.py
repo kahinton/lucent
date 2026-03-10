@@ -11,16 +11,14 @@ Tests /api/users endpoints (team-mode only):
 - DELETE /api/users/{user_id} (delete user — admin)
 """
 
-import pytest
-import pytest_asyncio
 from unittest.mock import patch
-from uuid import uuid4, UUID
+from uuid import uuid4
 
 import httpx
+import pytest_asyncio
 from httpx import ASGITransport
 
 from lucent.api.deps import CurrentUser, get_current_user
-
 
 # ============================================================================
 # Fixtures

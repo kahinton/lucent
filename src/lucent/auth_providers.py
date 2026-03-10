@@ -15,10 +15,10 @@ Future providers:
 - saml: Enterprise SAML/SCIM
 """
 
-import os
-import hmac
-import secrets
 import hashlib
+import hmac
+import os
+import secrets
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -27,7 +27,7 @@ from uuid import UUID
 import bcrypt
 from asyncpg import Pool
 
-from lucent.db import UserRepository, ApiKeyRepository, get_pool
+from lucent.db import ApiKeyRepository, UserRepository, get_pool
 from lucent.logging import get_logger
 
 logger = get_logger("auth.providers")
@@ -433,7 +433,7 @@ async def create_initial_user(
     Returns:
         Tuple of (user record, api_key string).
     """
-    from lucent.db import OrganizationRepository, ApiKeyRepository
+    from lucent.db import ApiKeyRepository, OrganizationRepository
 
     # Create organization
     org_repo = OrganizationRepository(pool)

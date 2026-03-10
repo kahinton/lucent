@@ -8,17 +8,15 @@ Tests /api/access endpoints (team-mode only):
 - GET /api/access/organization/activity (org activity — 501)
 """
 
-import pytest
-import pytest_asyncio
 from unittest.mock import patch
-from uuid import uuid4, UUID
+from uuid import uuid4
 
 import httpx
+import pytest_asyncio
 from httpx import ASGITransport
 
 from lucent.api.deps import CurrentUser, get_current_user
-from lucent.db import MemoryRepository, AccessRepository
-
+from lucent.db import AccessRepository, MemoryRepository
 
 # ============================================================================
 # Fixtures

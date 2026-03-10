@@ -3,18 +3,18 @@
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import Depends, HTTPException, Header, status
+from fastapi import Depends, Header, HTTPException, status
 
 from lucent.auth import (
     set_current_user,
 )
-from lucent.db import UserRepository, ApiKeyRepository, get_pool
+from lucent.db import ApiKeyRepository, UserRepository, get_pool
 from lucent.rbac import Permission, Role, has_permission
 
 
 class CurrentUser:
     """Dependency that provides the current authenticated user."""
-    
+
     def __init__(
         self,
         id: UUID,
@@ -38,16 +38,16 @@ class CurrentUser:
         self.api_key_scopes = api_key_scopes or ["read", "write"]
         self.impersonator_id = impersonator_id
         self.impersonator_display_name = impersonator_display_name
-    
+
     @property
     def is_impersonated(self) -> bool:
         """Check if this user is being impersonated by another user."""
         return self.impersonator_id is not None
-    
+
     def has_permission(self, permission: Permission) -> bool:
         """Check if this user has a specific permission."""
         return has_permission(self.role, permission)
-    
+
     def require_permission(self, permission: Permission) -> None:
         """Raise HTTPException if user doesn't have permission."""
         if not self.has_permission(permission):
@@ -55,7 +55,7 @@ class CurrentUser:
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"Permission denied: {permission.value}",
             )
-    
+
     def has_scope(self, scope: str) -> bool:
         """Check if the API key has a specific scope.
         
@@ -99,23 +99,23 @@ async def _authenticate_with_api_key(api_key: str) -> CurrentUser | None:
     # Strip 'Bearer ' prefix if present
     if api_key.startswith("Bearer "):
         api_key = api_key[7:]
-    
+
     if not api_key.startswith("mcp_"):
         return None
-    
+
     pool = await get_pool()
     api_key_repo = ApiKeyRepository(pool)
-    
+
     key_info = await api_key_repo.verify(api_key)
     if not key_info:
         return None
-    
+
     # Get the full user record
     user_repo = UserRepository(pool)
     user = await user_repo.get_by_id(key_info["user_id"])
     if not user:
         return None
-    
+
     set_current_user(user)
     return CurrentUser(
         id=user["id"],
@@ -144,14 +144,14 @@ async def get_current_user(
         user = await _authenticate_with_api_key(authorization)
         if user:
             return user
-        
+
         # Invalid API key
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired API key",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
+
     # No authorization header - always reject for API routes
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -187,7 +187,7 @@ def require_role(minimum_role: Role):
                 detail=f"Requires {minimum_role.value} role or higher",
             )
         return user
-    
+
     return check_role
 
 
@@ -208,7 +208,7 @@ def require_permission_dep(permission: Permission):
                 detail=f"Permission denied: {permission.value}",
             )
         return user
-    
+
     return check_permission
 
 

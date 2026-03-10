@@ -30,7 +30,7 @@ def get_mode() -> DeploymentMode:
         The configured DeploymentMode, defaulting to PERSONAL.
     """
     mode_str = os.environ.get("LUCENT_MODE", "personal").lower().strip()
-    
+
     try:
         mode = DeploymentMode(mode_str)
     except ValueError:
@@ -39,7 +39,7 @@ def get_mode() -> DeploymentMode:
             f"Valid modes: {', '.join(m.value for m in DeploymentMode)}"
         )
         mode = DeploymentMode.PERSONAL
-    
+
     # Team mode requires a license key
     if mode == DeploymentMode.TEAM:
         license_key = os.environ.get("LUCENT_LICENSE_KEY", "").strip()
@@ -49,16 +49,16 @@ def get_mode() -> DeploymentMode:
                 "Falling back to personal mode."
             )
             return DeploymentMode.PERSONAL
-        
+
         if not _validate_license(license_key):
             logger.error(
                 "Invalid LUCENT_LICENSE_KEY. "
                 "Falling back to personal mode."
             )
             return DeploymentMode.PERSONAL
-        
+
         logger.info("Team mode enabled with valid license")
-    
+
     return mode
 
 

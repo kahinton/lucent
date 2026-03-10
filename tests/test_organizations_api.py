@@ -10,16 +10,15 @@ Tests /api/organizations endpoints (team-mode only):
 - POST /api/organizations/current/transfer (transfer ownership — owner)
 """
 
-import pytest
-import pytest_asyncio
 from unittest.mock import patch
-from uuid import uuid4, UUID
+from uuid import uuid4
 
 import httpx
+import pytest
+import pytest_asyncio
 from httpx import ASGITransport
 
 from lucent.api.deps import CurrentUser, get_current_user
-
 
 # ============================================================================
 # Fixtures
@@ -187,7 +186,7 @@ class TestGetCurrentOrganization:
 
     async def test_get_current_org_no_org(self, db_pool, org_prefix):
         """User without organization gets 400."""
-        from lucent.db import UserRepository, OrganizationRepository
+        from lucent.db import OrganizationRepository, UserRepository
         # Create a user with no org
         org_repo = OrganizationRepository(db_pool)
         temp_org = await org_repo.create(name=f"{org_prefix}temp_org")
@@ -249,7 +248,7 @@ class TestUpdateCurrentOrganization:
 
     async def test_update_org_no_org(self, db_pool, org_prefix):
         """Owner without org_id gets 400."""
-        from lucent.db import UserRepository, OrganizationRepository
+        from lucent.db import OrganizationRepository, UserRepository
         org_repo = OrganizationRepository(db_pool)
         temp_org = await org_repo.create(name=f"{org_prefix}temp_upd_org")
         user_repo = UserRepository(db_pool)
@@ -431,7 +430,7 @@ class TestDeleteCurrentOrganization:
 
     async def test_delete_org_no_org(self, db_pool, org_prefix):
         """Owner without org_id gets 400."""
-        from lucent.db import UserRepository, OrganizationRepository
+        from lucent.db import OrganizationRepository, UserRepository
         org_repo = OrganizationRepository(db_pool)
         temp_org = await org_repo.create(name=f"{org_prefix}temp_del_org")
         user_repo = UserRepository(db_pool)
@@ -564,7 +563,7 @@ class TestTransferOwnership:
 
     async def test_transfer_no_org(self, db_pool, org_prefix):
         """Owner without org_id gets 400."""
-        from lucent.db import UserRepository, OrganizationRepository
+        from lucent.db import OrganizationRepository, UserRepository
         org_repo = OrganizationRepository(db_pool)
         temp_org = await org_repo.create(name=f"{org_prefix}temp_xfer_org")
         user_repo = UserRepository(db_pool)

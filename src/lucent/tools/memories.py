@@ -8,8 +8,15 @@ from uuid import UUID
 
 from mcp.server.fastmcp import FastMCP
 
-from lucent.auth import get_current_user, get_current_api_key_id
-from lucent.db import AccessRepository, AuditRepository, MemoryRepository, VersionConflictError, get_pool, init_db
+from lucent.auth import get_current_api_key_id, get_current_user
+from lucent.db import (
+    AccessRepository,
+    AuditRepository,
+    MemoryRepository,
+    VersionConflictError,
+    get_pool,
+    init_db,
+)
 from lucent.logging import get_logger
 from lucent.mode import is_team_mode
 from lucent.models.memory import (
@@ -18,7 +25,7 @@ from lucent.models.memory import (
     SearchMemoriesInput,
     UpdateMemoryInput,
 )
-from lucent.models.validation import validate_metadata, METADATA_DOCS
+from lucent.models.validation import validate_metadata
 
 logger = get_logger("tools.memories")
 
@@ -178,21 +185,21 @@ Returns:
         try:
             # Validate input
             memory_type = MemoryType(type)
-            
+
             # Individual memories cannot be created via MCP - they are auto-created when users are added
             if memory_type == MemoryType.INDIVIDUAL:
                 return _error_response(
                     "Individual memories cannot be created directly. They are automatically created when users are added to the system."
                 )
-            
+
             # Validate and normalize metadata for the memory type
             validated_metadata = validate_metadata(memory_type, metadata)
-            
+
             # Use authenticated user's name if username not provided
             effective_username = username or _get_current_username() or "unknown"
-            
+
             logger.info("create_memory: type=%s, user=%s, tags=%s", type, effective_username, tags)
-            
+
             input_data = CreateMemoryInput(
                 username=effective_username,
                 type=memory_type,
@@ -202,12 +209,12 @@ Returns:
                 related_memory_ids=[UUID(uid) for uid in (related_memory_ids or [])],
                 metadata=validated_metadata,
             )
-            
+
             # Get current user context (from auth context or dev mode)
             user_id, org_id, user_role = await _get_current_user_context()
-            
+
             repo = await _get_repository()
-            
+
             result = await repo.create(
                 username=effective_username,
                 type=input_data.type.value,
@@ -219,7 +226,7 @@ Returns:
                 user_id=user_id,
                 organization_id=org_id,
             )
-            
+
             # Log the creation in audit log with version snapshot
             audit_repo = await _get_audit_repository()
             await audit_repo.log(
@@ -239,9 +246,9 @@ Returns:
                 version=1,
                 snapshot=_build_snapshot(result),
             )
-            
+
             return json.dumps(_serialize_memory(result), indent=2)
-            
+
         except ValueError as e:
             logger.warning("create_memory validation error: %s", e)
             return _error_response(str(e))
@@ -265,24 +272,24 @@ Returns:
         """
         try:
             uuid_id = UUID(memory_id)
-            
+
             logger.debug("get_memory: id=%s", memory_id)
-            
+
             repo = await _get_repository()
-            
+
             # Get current user context for access control
             user_id, org_id, user_role = await _get_current_user_context()
-            
+
             if user_id is not None and org_id is not None:
                 # Use access-controlled get
                 result = await repo.get_accessible(uuid_id, user_id, org_id)
             else:
                 # No auth context, use basic get (for backward compatibility)
                 result = await repo.get(uuid_id)
-            
+
             if result is None:
                 return _error_response(f"Memory not found or not accessible: {memory_id}")
-            
+
             # Log the access (team mode only)
             if is_team_mode():
                 try:
@@ -295,9 +302,9 @@ Returns:
                     )
                 except Exception:
                     pass  # Don't fail the request if access logging fails
-            
+
             return json.dumps(_serialize_memory(result), indent=2)
-            
+
         except ValueError as e:
             return _error_response(f"Invalid memory ID format: {e}")
         except Exception as e:
@@ -325,28 +332,28 @@ Returns:
         try:
             if not memory_ids:
                 return _error_response("memory_ids list cannot be empty")
-            
+
             # Parse and validate all UUIDs first
             try:
                 uuid_ids = [UUID(mid) for mid in memory_ids]
             except ValueError as e:
                 return _error_response(f"Invalid memory ID format: {e}")
-            
+
             repo = await _get_repository()
             access_repo = await _get_access_repository()
-            
+
             # Get current user context for access control
             user_id, org_id, user_role = await _get_current_user_context()
-            
+
             memories = []
             not_found = []
-            
+
             for uuid_id, original_id in zip(uuid_ids, memory_ids):
                 if user_id is not None and org_id is not None:
                     result = await repo.get_accessible(uuid_id, user_id, org_id)
                 else:
                     result = await repo.get(uuid_id)
-                
+
                 if result is None:
                     not_found.append(original_id)
                 else:
@@ -362,14 +369,14 @@ Returns:
                             )
                         except Exception:
                             pass
-            
+
             return json.dumps({
                 "memories": memories,
                 "not_found": not_found,
                 "total_requested": len(memory_ids),
                 "total_found": len(memories),
             }, indent=2)
-            
+
         except Exception as e:
             return _error_response(f"Failed to retrieve memories: {str(e)}")
 
@@ -390,34 +397,34 @@ Returns:
         """
         try:
             user_id, org_id, user_role = await _get_current_user_context()
-            
+
             if user_id is None:
                 return _error_response("Not authenticated")
-            
+
             current_user = get_current_user()
-            
+
             # Build user info
             user_info = {
                 "id": str(user_id),
                 "organization_id": str(org_id) if org_id else None,
                 "role": user_role,
             }
-            
+
             if current_user:
                 user_info["display_name"] = current_user.get("display_name")
                 user_info["email"] = current_user.get("email")
-            
+
             # Get their individual memory
             repo = await _get_repository()
             individual_memory = await repo.get_individual_memory_for_user(user_id)
-            
+
             result = {
                 "user": user_info,
                 "individual_memory": _serialize_memory(individual_memory) if individual_memory else None,
             }
-            
+
             return json.dumps(result, indent=2)
-            
+
         except Exception as e:
             return _error_response(f"Failed to get user context: {str(e)}")
 
@@ -467,9 +474,9 @@ Returns:
             parsed_created_after = datetime.fromisoformat(created_after) if created_after else None
             parsed_created_before = datetime.fromisoformat(created_before) if created_before else None
             parsed_memory_ids = [UUID(uid) for uid in memory_ids] if memory_ids else None
-            
+
             logger.info("search_memories: query=%s, type=%s, tags=%s", query, type, tags)
-            
+
             search_input = SearchMemoriesInput(
                 query=query,
                 username=username,
@@ -483,12 +490,12 @@ Returns:
                 offset=offset,
                 limit=min(limit, 50),
             )
-            
+
             repo = await _get_repository()
-            
+
             # Get current user context for access control
             user_id, org_id, user_role = await _get_current_user_context()
-            
+
             result = await repo.search(
                 query=search_input.query,
                 username=search_input.username,
@@ -504,7 +511,7 @@ Returns:
                 requesting_user_id=user_id,
                 requesting_org_id=org_id,
             )
-            
+
             # Log access for returned memories (team mode only)
             if result["memories"] and is_team_mode():
                 try:
@@ -523,7 +530,7 @@ Returns:
                     )
                 except Exception:
                     pass  # Don't fail the request if access logging fails
-            
+
             # Serialize the results
             serialized = {
                 "memories": [_serialize_truncated_memory(m) for m in result["memories"]],
@@ -532,9 +539,9 @@ Returns:
                 "limit": result["limit"],
                 "has_more": result["has_more"],
             }
-            
+
             return json.dumps(serialized, indent=2)
-            
+
         except ValueError as e:
             return _error_response(f"Invalid input: {str(e)}")
         except Exception as e:
@@ -577,16 +584,16 @@ Returns:
         try:
             if not query or not query.strip():
                 return _error_response("Query is required for full search")
-            
+
             logger.info("search_memories_full: query=%s, type=%s", query, type)
-            
+
             memory_type = MemoryType(type) if type else None
-            
+
             repo = await _get_repository()
-            
+
             # Get current user context for access control
             user_id, org_id, user_role = await _get_current_user_context()
-            
+
             result = await repo.search_full(
                 query=query.strip(),
                 username=username,
@@ -598,7 +605,7 @@ Returns:
                 requesting_user_id=user_id,
                 requesting_org_id=org_id,
             )
-            
+
             # Log access for returned memories (team mode only)
             if result["memories"] and is_team_mode():
                 try:
@@ -617,7 +624,7 @@ Returns:
                     )
                 except Exception:
                     pass  # Don't fail the request if access logging fails
-            
+
             serialized = {
                 "memories": [_serialize_truncated_memory(m) for m in result["memories"]],
                 "total_count": result["total_count"],
@@ -625,9 +632,9 @@ Returns:
                 "limit": result["limit"],
                 "has_more": result["has_more"],
             }
-            
+
             return json.dumps(serialized, indent=2)
-            
+
         except ValueError as e:
             return _error_response(f"Invalid input: {str(e)}")
         except Exception as e:
@@ -664,32 +671,32 @@ Returns:
         """
         try:
             uuid_id = UUID(memory_id)
-            
+
             logger.info("update_memory: id=%s", memory_id)
-            
+
             repo = await _get_repository()
-            
+
             # Get current user context for ownership check
             user_id, org_id, user_role = await _get_current_user_context()
-            
+
             if user_id is None:
                 return _error_response("Authentication required to update memories")
-            
+
             # Get old values before update for audit (also needed for metadata validation)
             # Use get_accessible to ensure user can at least see this memory
             old_memory = await repo.get_accessible(uuid_id, user_id, org_id)
             if old_memory is None:
                 return _error_response(f"Memory not found or not accessible: {memory_id}")
-            
+
             # Check ownership - only the owner can update a memory
             if old_memory.get("user_id") != user_id:
                 return _error_response("Permission denied: only the owner can update this memory")
-            
+
             # Validate metadata if provided
             validated_metadata = metadata
             if metadata is not None:
                 validated_metadata = validate_metadata(old_memory["type"], metadata)
-            
+
             update_input = UpdateMemoryInput(
                 content=content,
                 tags=tags,
@@ -697,7 +704,7 @@ Returns:
                 related_memory_ids=[UUID(uid) for uid in related_memory_ids] if related_memory_ids else None,
                 metadata=validated_metadata,
             )
-            
+
             result = await repo.update(
                 memory_id=uuid_id,
                 content=update_input.content,
@@ -707,42 +714,42 @@ Returns:
                 metadata=update_input.metadata,
                 expected_version=expected_version,
             )
-            
+
             if result is None:
                 return _error_response(f"Memory not found: {memory_id}")
-            
+
             # Build audit log entry
             changed_fields = []
             old_values = {}
             new_values = {}
-            
+
             if content is not None and old_memory["content"] != content:
                 changed_fields.append("content")
                 old_values["content"] = old_memory["content"]
                 new_values["content"] = content
-            
+
             if tags is not None and old_memory["tags"] != tags:
                 changed_fields.append("tags")
                 old_values["tags"] = old_memory["tags"]
                 new_values["tags"] = tags
-            
+
             if importance is not None and old_memory["importance"] != importance:
                 changed_fields.append("importance")
                 old_values["importance"] = old_memory["importance"]
                 new_values["importance"] = importance
-            
+
             if metadata is not None and old_memory["metadata"] != metadata:
                 changed_fields.append("metadata")
                 old_values["metadata"] = old_memory["metadata"]
                 new_values["metadata"] = metadata
-            
+
             if related_memory_ids is not None:
                 old_related = [str(uid) for uid in old_memory["related_memory_ids"]]
                 if old_related != related_memory_ids:
                     changed_fields.append("related_memory_ids")
                     old_values["related_memory_ids"] = old_related
                     new_values["related_memory_ids"] = related_memory_ids
-            
+
             # Log the update with version snapshot
             if changed_fields:
                 audit_repo = await _get_audit_repository()
@@ -758,9 +765,9 @@ Returns:
                     version=result["version"],
                     snapshot=_build_snapshot(result),
                 )
-            
+
             return json.dumps(_serialize_memory(result), indent=2)
-            
+
         except VersionConflictError as e:
             logger.warning("update_memory version conflict: id=%s, expected=%s, actual=%s",
                            memory_id, e.expected_version, e.actual_version)
@@ -790,38 +797,38 @@ Returns:
         """
         try:
             uuid_id = UUID(memory_id)
-            
+
             logger.info("delete_memory: id=%s", memory_id)
-            
+
             repo = await _get_repository()
-            
+
             # Get current user context for ownership check
             user_id, org_id, user_role = await _get_current_user_context()
-            
+
             if user_id is None:
                 return _error_response("Authentication required to delete memories")
-            
+
             # Get memory info before deletion for audit
             # Use get_accessible to ensure user can at least see this memory
             old_memory = await repo.get_accessible(uuid_id, user_id, org_id)
             if old_memory is None:
                 return _error_response(f"Memory not found or not accessible: {memory_id}")
-            
+
             # Check ownership - only the owner can delete a memory
             if old_memory.get("user_id") != user_id:
                 return _error_response("Permission denied: only the owner can delete this memory")
-            
+
             # Individual memories cannot be deleted via MCP - they are deleted when users are removed
             if old_memory.get("type") == "individual":
                 return _error_response(
                     "Individual memories cannot be deleted directly. They are automatically deleted when users are removed from the system."
                 )
-            
+
             success = await repo.delete(uuid_id)
-            
+
             if not success:
                 return _error_response(f"Memory not found: {memory_id}")
-            
+
             # Log the deletion with final snapshot
             audit_repo = await _get_audit_repository()
             await audit_repo.log(
@@ -837,12 +844,12 @@ Returns:
                 context=_get_audit_context(),
                 snapshot=_build_snapshot(old_memory),
             )
-            
+
             return json.dumps({
                 "success": True,
                 "message": f"Memory {memory_id} has been deleted",
             })
-            
+
         except ValueError as e:
             return _error_response(f"Invalid memory ID format: {str(e)}")
         except Exception as e:
@@ -870,10 +877,10 @@ Returns:
         """
         try:
             repo = await _get_repository()
-            
+
             # Get current user context for access control
             user_id, org_id, user_role = await _get_current_user_context()
-            
+
             result = await repo.get_existing_tags(
                 username=username,
                 type=type,
@@ -881,12 +888,12 @@ Returns:
                 requesting_user_id=user_id,
                 requesting_org_id=org_id,
             )
-            
+
             return json.dumps({
                 "tags": result,
                 "total_returned": len(result),
             }, indent=2)
-            
+
         except Exception as e:
             return _error_response(f"Failed to get tags: {str(e)}")
 
@@ -912,12 +919,12 @@ Returns:
         try:
             if not query or not query.strip():
                 return _error_response("Query is required")
-            
+
             repo = await _get_repository()
-            
+
             # Get current user context for access control
             user_id, org_id, user_role = await _get_current_user_context()
-            
+
             result = await repo.get_tag_suggestions(
                 query=query.strip(),
                 username=username,
@@ -925,13 +932,13 @@ Returns:
                 requesting_user_id=user_id,
                 requesting_org_id=org_id,
             )
-            
+
             return json.dumps({
                 "suggestions": result,
                 "query": query.strip(),
                 "total_returned": len(result),
             }, indent=2)
-            
+
         except Exception as e:
             return _error_response(f"Failed to get tag suggestions: {str(e)}")
 
@@ -1117,23 +1124,23 @@ Returns:
             try:
                 # Get current user context
                 user_id, org_id, user_role = await _get_current_user_context()
-                
+
                 if user_id is None:
                     return _error_response("Authentication required to share memories")
-                
+
                 repo = await _get_repository()
-                
+
                 result = await repo.set_shared(
                     memory_id=UUID(memory_id),
                     user_id=user_id,
                     shared=True,
                 )
-                
+
                 if result is None:
                     return _error_response(
                         "Memory not found or you are not the owner. Only the owner can share a memory."
                     )
-                
+
                 # Log the share action
                 audit_repo = await _get_audit_repository()
                 await audit_repo.log(
@@ -1146,9 +1153,9 @@ Returns:
                     new_values={"shared": True},
                     context=_get_audit_context(),
                 )
-                
+
                 return json.dumps(_serialize_memory(result), indent=2)
-                
+
             except ValueError as e:
                 return _error_response(f"Invalid memory_id: {str(e)}")
             except Exception as e:
@@ -1170,23 +1177,23 @@ Returns:
             try:
                 # Get current user context
                 user_id, org_id, user_role = await _get_current_user_context()
-                
+
                 if user_id is None:
                     return _error_response("Authentication required to unshare memories")
-                
+
                 repo = await _get_repository()
-                
+
                 result = await repo.set_shared(
                     memory_id=UUID(memory_id),
                     user_id=user_id,
                     shared=False,
                 )
-                
+
                 if result is None:
                     return _error_response(
                         "Memory not found or you are not the owner. Only the owner can unshare a memory."
                     )
-                
+
                 # Log the unshare action
                 audit_repo = await _get_audit_repository()
                 await audit_repo.log(
@@ -1199,9 +1206,9 @@ Returns:
                     new_values={"shared": False},
                     context=_get_audit_context(),
                 )
-                
+
                 return json.dumps(_serialize_memory(result), indent=2)
-                
+
             except ValueError as e:
                 return _error_response(f"Invalid memory_id: {str(e)}")
             except Exception as e:
