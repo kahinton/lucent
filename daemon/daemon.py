@@ -49,6 +49,8 @@ WATCHDOG_TIMEOUT = int(os.environ.get("LUCENT_WATCHDOG_TIMEOUT", "900"))
 WATCHDOG_CHECK_INTERVAL = 60
 # How many cognitive cycles between autonomic maintenance runs
 AUTONOMIC_INTERVAL = int(os.environ.get("LUCENT_AUTONOMIC_INTERVAL", "8"))
+# How many cognitive cycles between learning extraction runs
+LEARNING_INTERVAL = int(os.environ.get("LUCENT_LEARNING_INTERVAL", str(AUTONOMIC_INTERVAL * 2)))
 # Maximum characters stored from sub-agent results
 MAX_RESULT_LENGTH = int(os.environ.get("LUCENT_MAX_RESULT_LENGTH", "8000"))
 
@@ -884,6 +886,31 @@ Respond with EXACTLY one of:
             "Quick maintenance scan. Search recent memories for duplicates, missing tags, or miscalibrated importance. Fix obvious issues. Only save a summary if you actually changed something."
         )
 
+    async def run_learning_extraction(self):
+        """Run autonomic learning extraction — process recent results into reusable lessons.
+        
+        Runs every LEARNING_INTERVAL cycles without cognitive involvement.
+        """
+        log("Running autonomic: learning extraction")
+        system_message = build_subagent_prompt(
+            "reflection",
+            "Learning extraction pass — process recent daemon-results and feedback into reusable lessons.",
+            "This is an autonomic background task. Follow the learning-extraction skill instructions."
+        )
+        await self.run_session(
+            "autonomic-learning",
+            system_message,
+            (
+                "Run the learning extraction pipeline from the learning-extraction skill. "
+                "1. Search for memories tagged 'daemon-result' or 'rejection-lesson' or 'validated' that do NOT have the 'lesson-extracted' tag. "
+                "2. For each candidate, classify the experience type and extract a transferable principle. "
+                "3. Compare against existing 'lesson' tagged procedural memories — update if reinforcing/refining, create new if novel. "
+                "4. Tag processed memories with 'lesson-extracted'. "
+                "5. Save a brief summary of what was extracted. "
+                "Only process the most recent 10 unprocessed memories per run. Skip trivial results."
+            )
+        )
+
     # --- Main Loops ---
 
     async def run_forever(self):
@@ -898,6 +925,8 @@ Respond with EXACTLY one of:
                 # Autonomic layer — runs independently from cognitive decisions
                 if self.cycle_count % AUTONOMIC_INTERVAL == 0:
                     await self.run_autonomic()
+                if self.cycle_count % LEARNING_INTERVAL == 0:
+                    await self.run_learning_extraction()
 
                 log(f"Next cycle in {DAEMON_INTERVAL_MINUTES} minutes")
                 await asyncio.sleep(DAEMON_INTERVAL_MINUTES * 60)
