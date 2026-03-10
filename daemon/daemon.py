@@ -25,7 +25,7 @@ import signal
 import sys
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
@@ -35,7 +35,7 @@ from adaptation import AdaptationPipeline, parse_assessment_output
 
 # ============================================================================
 # Configuration
-# ============================================================================ß
+# ============================================================================
 
 MAX_CONCURRENT_SESSIONS = int(os.environ.get("LUCENT_MAX_SESSIONS", "3"))
 DAEMON_INTERVAL_MINUTES = int(os.environ.get("LUCENT_DAEMON_INTERVAL", "15"))
@@ -47,6 +47,10 @@ SESSION_TOTAL_TIMEOUT = int(os.environ.get("LUCENT_SESSION_TIMEOUT", "720"))
 # CopilotClient can block the event loop, defeating asyncio timeouts.
 WATCHDOG_TIMEOUT = int(os.environ.get("LUCENT_WATCHDOG_TIMEOUT", "900"))
 WATCHDOG_CHECK_INTERVAL = 60
+# How many cognitive cycles between autonomic maintenance runs
+AUTONOMIC_INTERVAL = int(os.environ.get("LUCENT_AUTONOMIC_INTERVAL", "8"))
+# Maximum characters stored from sub-agent results
+MAX_RESULT_LENGTH = int(os.environ.get("LUCENT_MAX_RESULT_LENGTH", "8000"))
 
 # Approval flow: when enabled, tasks go to needs-review before completing.
 # When disabled, tasks complete immediately after successful execution.
@@ -88,6 +92,8 @@ API_HEADERS = {"Authorization": f"Bearer {MCP_API_KEY}", "Content-Type": "applic
 class MemoryAPI:
     """Direct REST API client for memory operations that don't need an LLM."""
 
+    API_TIMEOUT = 15  # seconds for individual HTTP requests
+
     @staticmethod
     async def search(query: str, tags: list[str] | None = None, type: str | None = None, limit: int = 10) -> list[dict]:
         """Search memories via REST API."""
@@ -97,7 +103,7 @@ class MemoryAPI:
         if type:
             params["type"] = type
         try:
-            async with httpx.AsyncClient(timeout=15) as client:
+            async with httpx.AsyncClient(timeout=MemoryAPI.API_TIMEOUT) as client:
                 resp = await client.post(f"{API_BASE}/search", json=params, headers=API_HEADERS)
                 if resp.status_code == 200:
                     data = resp.json()
@@ -113,7 +119,7 @@ class MemoryAPI:
         if metadata:
             body["metadata"] = metadata
         try:
-            async with httpx.AsyncClient(timeout=15) as client:
+            async with httpx.AsyncClient(timeout=MemoryAPI.API_TIMEOUT) as client:
                 resp = await client.post(f"{API_BASE}/memories", json=body, headers=API_HEADERS)
                 if resp.status_code in (200, 201):
                     return resp.json()
@@ -134,7 +140,7 @@ class MemoryAPI:
         if metadata is not None:
             body["metadata"] = metadata
         try:
-            async with httpx.AsyncClient(timeout=15) as client:
+            async with httpx.AsyncClient(timeout=MemoryAPI.API_TIMEOUT) as client:
                 resp = await client.patch(f"{API_BASE}/memories/{memory_id}", json=body, headers=API_HEADERS)
                 if resp.status_code == 200:
                     return resp.json()
@@ -146,7 +152,7 @@ class MemoryAPI:
     async def get(memory_id: str) -> dict | None:
         """Get a single memory by ID."""
         try:
-            async with httpx.AsyncClient(timeout=15) as client:
+            async with httpx.AsyncClient(timeout=MemoryAPI.API_TIMEOUT) as client:
                 resp = await client.get(f"{API_BASE}/memories/{memory_id}", headers=API_HEADERS)
                 if resp.status_code == 200:
                     return resp.json()
@@ -780,12 +786,12 @@ class LucentDaemon:
                     await MemoryAPI.update(
                         memory_id,
                         tags=review_tags,
-                        metadata={"result": result[:8000]} if result else None,
+                        metadata={"result": result[:MAX_RESULT_LENGTH]} if result else None,
                     )
                     # Also create a daemon-result memory for discoverability
                     await MemoryAPI.create(
                         type="experience",
-                        content=result[:8000] if result else "Task completed (no output)",
+                        content=result[:MAX_RESULT_LENGTH] if result else "Task completed (no output)",
                         tags=["daemon-result", "needs-review", agent_type],
                         importance=6,
                         metadata={"task_id": memory_id, "agent_type": agent_type},
@@ -797,7 +803,7 @@ class LucentDaemon:
                     await MemoryAPI.update(
                         memory_id,
                         tags=done_tags,
-                        metadata={"result": result[:8000]} if result else None,
+                        metadata={"result": result[:MAX_RESULT_LENGTH]} if result else None,
                     )
                     log(f"Task {memory_id[:8]} marked completed (result: {len(result) if result else 0} chars)")
             else:
@@ -884,16 +890,13 @@ Respond with EXACTLY one of:
         """Run the daemon loop."""
         await self.start()
 
-        # Autonomic maintenance interval (every 8 cognitive cycles)
-        autonomic_interval = 8
-
         try:
             while self.running:
                 # Cognitive cycle
                 await self.run_cognitive_cycle()
 
                 # Autonomic layer — runs independently from cognitive decisions
-                if self.cycle_count % autonomic_interval == 0:
+                if self.cycle_count % AUTONOMIC_INTERVAL == 0:
                     await self.run_autonomic()
 
                 log(f"Next cycle in {DAEMON_INTERVAL_MINUTES} minutes")
