@@ -412,7 +412,7 @@ class LucentDaemon:
                 "model": model or MODEL,
                 "system_message": {"content": system_message},
                 "on_permission_request": PermissionHandler.approve_all,
-                "mcp_servers": MCP_CONFIG,
+                "mcpServers": MCP_CONFIG,
             })
             self.active_sessions.append(session)
 
