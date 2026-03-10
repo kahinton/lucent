@@ -238,7 +238,7 @@ def main() -> None:
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
         logger.error("DATABASE_URL environment variable is required")
-        logger.error("Example: postgresql://user:password@localhost:5432/lucent")
+        logger.error("Set DATABASE_URL, e.g.: postgresql://user:password@host:5432/dbname")
         sys.exit(1)
 
     # Show deployment mode
