@@ -78,7 +78,7 @@ def sign_value(value: str) -> str:
     """
     signature = hmac.new(
         SIGNING_SECRET.encode(), value.encode(), hashlib.sha256
-    ).hexdigest()[:32]
+    ).hexdigest()
     return f"{value}.{signature}"
 
 
@@ -89,7 +89,7 @@ def verify_signed_value(signed: str | None) -> str | None:
     value, signature = signed.rsplit(".", 1)
     expected = hmac.new(
         SIGNING_SECRET.encode(), value.encode(), hashlib.sha256
-    ).hexdigest()[:32]
+    ).hexdigest()
     if hmac.compare_digest(signature, expected):
         return value
     return None
