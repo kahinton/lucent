@@ -27,6 +27,7 @@ from lucent.auth_providers import (
     set_user_password,
     sign_value,
     validate_csrf_token,
+    hash_session_token,
     validate_session,
     verify_signed_value,
 )
@@ -301,40 +302,46 @@ async def get_user_context(request: Request) -> CurrentUser:
         from lucent.auth import set_impersonating_user
 
         # Verify the cookie signature
-        impersonate_user_id_str = verify_signed_value(impersonate_cookie)
-        if impersonate_user_id_str and current_user.role in (Role.ADMIN, Role.OWNER):
-            try:
-                target_user_id = UUID(impersonate_user_id_str)
-                if target_user_id != current_user.id:
-                    user_repo = UserRepository(pool)
-                    target_user = await user_repo.get_by_id(target_user_id)
+        impersonate_value = verify_signed_value(impersonate_cookie)
+        if impersonate_value and ":" in impersonate_value and current_user.role in (Role.ADMIN, Role.OWNER):
+            impersonate_user_id_str, cookie_session_hash = impersonate_value.split(":", 1)
+            # Verify the impersonation cookie is bound to this session
+            current_session_hash = hash_session_token(session_token)
+            if cookie_session_hash != current_session_hash:
+                pass  # Session mismatch — impersonation cookie not valid for this session
+            else:
+                try:
+                    target_user_id = UUID(impersonate_user_id_str)
+                    if target_user_id != current_user.id:
+                        user_repo = UserRepository(pool)
+                        target_user = await user_repo.get_by_id(target_user_id)
 
-                    if target_user and target_user.get("organization_id") == current_user.organization_id:
-                        target_role = target_user.get("role", "member")
-                        can_impersonate = (
-                            (current_user.role == Role.ADMIN and target_role == "member") or
-                            (current_user.role == Role.OWNER and target_role != "owner")
-                        )
-
-                        if can_impersonate:
-                            set_current_user(target_user)
-                            set_impersonating_user({
-                                "id": current_user.id,
-                                "display_name": current_user.display_name,
-                                "role": current_user.role.value,
-                            })
-                            return CurrentUser(
-                                id=target_user["id"],
-                                organization_id=target_user.get("organization_id"),
-                                role=target_user.get("role", "member"),
-                                email=target_user.get("email"),
-                                display_name=target_user.get("display_name"),
-                                auth_method="impersonation",
-                                impersonator_id=current_user.id,
-                                impersonator_display_name=current_user.display_name,
+                        if target_user and target_user.get("organization_id") == current_user.organization_id:
+                            target_role = target_user.get("role", "member")
+                            can_impersonate = (
+                                (current_user.role == Role.ADMIN and target_role == "member") or
+                                (current_user.role == Role.OWNER and target_role != "owner")
                             )
-            except (ValueError, Exception):
-                pass  # Invalid UUID or other error, skip impersonation
+
+                            if can_impersonate:
+                                set_current_user(target_user)
+                                set_impersonating_user({
+                                    "id": current_user.id,
+                                    "display_name": current_user.display_name,
+                                    "role": current_user.role.value,
+                                })
+                                return CurrentUser(
+                                    id=target_user["id"],
+                                    organization_id=target_user.get("organization_id"),
+                                    role=target_user.get("role", "member"),
+                                    email=target_user.get("email"),
+                                    display_name=target_user.get("display_name"),
+                                    auth_method="impersonation",
+                                    impersonator_id=current_user.id,
+                                    impersonator_display_name=current_user.display_name,
+                                )
+                except (ValueError, Exception):
+                    pass  # Invalid UUID or other error, skip impersonation
 
     return current_user
 
@@ -1806,6 +1813,8 @@ async def start_impersonation(request: Request, user_id: UUID):
         raise HTTPException(status_code=500, detail="Failed to start impersonation")
 
     # Set signed impersonation cookie and new session cookie, then redirect
+    # Bind the impersonation cookie to this session to prevent cookie theft
+    session_hash = hash_session_token(new_token)
     response = RedirectResponse(url="/?impersonating=true", status_code=303)
     params = get_cookie_params()
     response.set_cookie(
@@ -1816,7 +1825,7 @@ async def start_impersonation(request: Request, user_id: UUID):
     )
     response.set_cookie(
         key="lucent_impersonate",
-        value=sign_value(str(user_id)),
+        value=sign_value(f"{user_id}:{session_hash}"),
         max_age=3600,  # 1 hour max
         **params,
     )

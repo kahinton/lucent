@@ -100,7 +100,7 @@ async def _authenticate_with_api_key(api_key: str) -> CurrentUser | None:
     if api_key.startswith("Bearer "):
         api_key = api_key[7:]
 
-    if not api_key.startswith("mcp_"):
+    if not api_key.startswith("hs_"):
         return None
 
     pool = await get_pool()
@@ -137,7 +137,7 @@ async def get_current_user(
     API key authentication is always required.
     
     Headers:
-        Authorization: Bearer mcp_... (API key required)
+        Authorization: Bearer hs_... (API key required)
     """
     # Try API key authentication
     if authorization:
@@ -155,7 +155,7 @@ async def get_current_user(
     # No authorization header - always reject for API routes
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="API key required. Use Authorization: Bearer mcp_your_key_here",
+        detail="API key required. Use Authorization: Bearer hs_your_key_here",
         headers={"WWW-Authenticate": "Bearer"},
     )
 

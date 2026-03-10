@@ -5,7 +5,7 @@ import httpx
 
 async def test_mcp():
     url = "http://localhost:8766/mcp"
-    key = "mcp_Vzwb0Lk88Eelu9OlYhZMpzqY-KKJbnRFSDZvlR7EQGo"
+    key = "hs_Vzwb0Lk88Eelu9OlYhZMpzqY-KKJbnRFSDZvlR7EQGo"
     headers = {
         "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",

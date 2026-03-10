@@ -34,7 +34,7 @@ def _make_mock_row(overrides=None):
         "user_id": uid,
         "organization_id": None,
         "name": "test-key",
-        "key_prefix": "mcp_abcdefgh",
+        "key_prefix": "hs_abcdefgh",
         "key_hash": "$2b$12$fakehashvalue",
         "scopes": ["read", "write"],
         "last_used_at": None,
@@ -131,8 +131,8 @@ class TestRowToDict:
 class TestVerifyEdgeCases:
     """Edge case tests for ApiKeyRepository.verify()."""
 
-    async def test_rejects_non_mcp_prefix(self):
-        """Test that keys not starting with 'mcp_' are rejected immediately."""
+    async def test_rejects_non_hs_prefix(self):
+        """Test that keys not starting with 'hs_' are rejected immediately."""
         pool = _make_mock_pool()
         repo = ApiKeyRepository(pool)
 
@@ -158,7 +158,7 @@ class TestVerifyEdgeCases:
         pool = _make_mock_pool(mock_conn)
 
         repo = ApiKeyRepository(pool)
-        result = await repo.verify("mcp_nonexistent_key_value")
+        result = await repo.verify("hs_nonexistent_key_value")
 
         assert result is None
 
@@ -172,7 +172,7 @@ class TestVerifyEdgeCases:
 
         repo = ApiKeyRepository(pool)
         with patch("lucent.db.api_key.bcrypt.checkpw", return_value=False):
-            result = await repo.verify("mcp_test_key_value_here")
+            result = await repo.verify("hs_test_key_value_here")
 
         assert result is None
 
@@ -192,23 +192,23 @@ class TestVerifyEdgeCases:
 
         repo = ApiKeyRepository(pool)
         with patch("lucent.db.api_key.bcrypt.checkpw", return_value=True):
-            result = await repo.verify("mcp_test_key_value_here")
+            result = await repo.verify("hs_test_key_value_here")
 
         assert result is None
 
     async def test_extracts_correct_prefix(self):
-        """Test that the first 12 characters are used as prefix."""
+        """Test that the first 11 characters are used as prefix."""
         mock_conn = AsyncMock()
         mock_conn.fetch.return_value = []
 
         pool = _make_mock_pool(mock_conn)
 
         repo = ApiKeyRepository(pool)
-        await repo.verify("mcp_abcdefgh_rest_of_key")
+        await repo.verify("hs_abcdefgh_rest_of_key")
 
-        # The prefix used in the query should be first 12 chars
+        # The prefix used in the query should be first 11 chars
         query_args = mock_conn.fetch.call_args
-        assert query_args[0][1] == "mcp_abcdefgh"
+        assert query_args[0][1] == "hs_abcdefgh"
 
 
 class TestCreateEdgeCases:
@@ -234,7 +234,7 @@ class TestCreateEdgeCases:
                 name="test-key",
             )
 
-        assert plain_key.startswith("mcp_")
+        assert plain_key.startswith("hs_")
         # Check that scopes were passed as ["read", "write"]
         insert_args = mock_conn.fetchrow.call_args[0]
         assert insert_args[6] == ["read", "write"]
@@ -275,7 +275,7 @@ class TestCreateEdgeCases:
             )
 
     async def test_plain_key_format(self):
-        """Test that generated plain key has mcp_ prefix and sufficient length."""
+        """Test that generated plain key has hs_ prefix and sufficient length."""
         row, _ = _make_mock_row()
         mock_conn = AsyncMock()
         mock_conn.fetchrow.return_value = row
@@ -292,8 +292,8 @@ class TestCreateEdgeCases:
                 name="test-key",
             )
 
-        assert plain_key.startswith("mcp_")
-        # token_urlsafe(32) produces ~43 chars, plus "mcp_" = ~47
+        assert plain_key.startswith("hs_")
+        # token_urlsafe(32) produces ~43 chars, plus "hs_" = ~46
         assert len(plain_key) > 40
 
 

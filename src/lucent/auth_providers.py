@@ -232,7 +232,7 @@ class ApiKeyAuthProvider(AuthProvider):
                 "name": "api_key",
                 "label": "API Key",
                 "type": "password",
-                "placeholder": "Enter your API key (mcp_...)",
+                "placeholder": "Enter your API key (hs_...)",
             },
         ]
 

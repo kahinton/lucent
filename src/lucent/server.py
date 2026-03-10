@@ -81,7 +81,7 @@ class MCPAuthMiddleware:
             if api_key.startswith("Bearer "):
                 api_key = api_key[7:]
 
-            if api_key.startswith("mcp_"):
+            if api_key.startswith("hs_"):
                 try:
                     # Ensure pool is initialized
                     try:
@@ -172,7 +172,7 @@ class MCPAuthMiddleware:
                 "jsonrpc": "2.0",
                 "error": {
                     "code": -32001,
-                    "message": "Unauthorized: API key required. Use Authorization: Bearer mcp_your_key_here",
+                    "message": "Unauthorized: API key required. Use Authorization: Bearer hs_your_key_here",
                 },
                 "id": None,
             },

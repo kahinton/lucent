@@ -3,7 +3,7 @@ import asyncio
 import os
 import time
 
-os.environ["LUCENT_MCP_API_KEY"] = "mcp_Vzwb0Lk88Eelu9OlYhZMpzqY-KKJbnRFSDZvlR7EQGo"
+os.environ["LUCENT_MCP_API_KEY"] = "hs_Vzwb0Lk88Eelu9OlYhZMpzqY-KKJbnRFSDZvlR7EQGo"
 
 from copilot import CopilotClient, PermissionHandler
 import sys

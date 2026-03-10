@@ -23,7 +23,7 @@ POST /api/keys
 All requests must include the key in the `Authorization` header:
 
 ```
-Authorization: Bearer mcp_your_key_here
+Authorization: Bearer hs_your_key_here
 ```
 
 ### Scope Behavior
@@ -193,7 +193,7 @@ Quick version:
 import httpx, time
 
 API = "http://localhost:8766/api/daemon/tasks"
-HEADERS = {"Authorization": "Bearer mcp_your_key"}
+HEADERS = {"Authorization": "Bearer hs_your_key"}
 
 # Submit
 task = httpx.post(API, headers=HEADERS, json={

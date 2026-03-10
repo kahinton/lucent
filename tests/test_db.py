@@ -791,8 +791,8 @@ class TestApiKeyRepository:
 
         assert key_record["id"] is not None
         assert key_record["name"] == "Test Key"
-        assert plain_key.startswith("mcp_")
-        assert key_record["key_prefix"] == plain_key[:12]
+        assert plain_key.startswith("hs_")
+        assert key_record["key_prefix"] == plain_key[:11]
 
     async def test_verify_valid_api_key(self, db_pool, test_user):
         """Test verifying a valid API key."""
@@ -814,7 +814,7 @@ class TestApiKeyRepository:
         """Test verifying an invalid API key."""
         repo = ApiKeyRepository(db_pool)
 
-        verified = await repo.verify("mcp_invalid_key_12345")
+        verified = await repo.verify("hs_invalid_key_12345")
 
         assert verified is None
 
@@ -906,8 +906,8 @@ class TestApiKeyRepository:
         assert updated is not None
         assert updated["name"] == "New Name"
 
-    async def test_verify_non_mcp_prefix_returns_none(self, db_pool):
-        """Test that keys without mcp_ prefix are immediately rejected."""
+    async def test_verify_non_hs_prefix_returns_none(self, db_pool):
+        """Test that keys without hs_ prefix are immediately rejected."""
         repo = ApiKeyRepository(db_pool)
 
         result = await repo.verify("not_a_valid_key")

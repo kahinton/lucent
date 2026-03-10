@@ -60,14 +60,14 @@ For VS Code with the MCP extension, add to `.vscode/mcp.json`:
       "url": "http://localhost:8766/mcp",
       "type": "http",
       "headers": {
-        "Authorization": "Bearer mcp_your_api_key_here"
+        "Authorization": "Bearer hs_your_api_key_here"
       }
     }
   }
 }
 ```
 
-Replace `mcp_your_api_key_here` with the API key from the setup page. You can also generate additional keys at http://localhost:8766/settings.
+Replace `hs_your_api_key_here` with the API key from the setup page. You can also generate additional keys at http://localhost:8766/settings.
 
 For **GitHub Copilot CLI**, add to your `.mcp.json` in your project root:
 
@@ -78,7 +78,7 @@ For **GitHub Copilot CLI**, add to your `.mcp.json` in your project root:
       "url": "http://localhost:8766/mcp",
       "type": "http",
       "headers": {
-        "Authorization": "Bearer mcp_your_api_key_here"
+        "Authorization": "Bearer hs_your_api_key_here"
       }
     }
   }
@@ -93,7 +93,7 @@ For Claude Desktop, add to your `claude_desktop_config.json`:
     "lucent": {
       "url": "http://localhost:8766/mcp",
       "headers": {
-        "Authorization": "Bearer mcp_your_api_key_here"
+        "Authorization": "Bearer hs_your_api_key_here"
       }
     }
   }
@@ -109,7 +109,7 @@ Lucent uses a pluggable authentication system configured via `LUCENT_AUTH_PROVID
 Username/password authentication with bcrypt hashing. Configured automatically during first-run setup.
 
 - Web UI: Session cookie (72-hour TTL)
-- MCP/API: API key (`Authorization: Bearer mcp_...`)
+- MCP/API: API key (`Authorization: Bearer hs_...`)
 
 ### API Key Auth
 

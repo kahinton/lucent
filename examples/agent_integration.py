@@ -6,7 +6,7 @@ interacting with Lucent's daemon task API.
 
 Usage:
     export LUCENT_URL="http://localhost:8766"
-    export LUCENT_API_KEY="mcp_your_daemon_tasks_key"
+    export LUCENT_API_KEY="hs_your_daemon_tasks_key"
     python examples/agent_integration.py
 
 Prerequisites:

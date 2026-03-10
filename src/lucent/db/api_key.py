@@ -54,8 +54,8 @@ class ApiKeyRepository:
 
         # Generate a secure random key with prefix
         raw_key = secrets.token_urlsafe(32)
-        plain_key = f"mcp_{raw_key}"
-        key_prefix = plain_key[:12]  # "mcp_" + first 8 chars
+        plain_key = f"hs_{raw_key}"
+        key_prefix = plain_key[:11]  # "hs_" + first 8 chars
 
         # Hash the key for storage
         key_hash = bcrypt.hashpw(plain_key.encode(), bcrypt.gensalt()).decode()
@@ -117,10 +117,10 @@ class ApiKeyRepository:
         Returns:
             The API key record with user info if valid, None otherwise.
         """
-        if not plain_key.startswith("mcp_"):
+        if not plain_key.startswith("hs_"):
             return None
 
-        key_prefix = plain_key[:12]
+        key_prefix = plain_key[:11]
 
         # Find all active keys with this prefix (prefix collisions are possible)
         query = """

@@ -8,6 +8,7 @@ Tests the MCP tool layer that wraps the DB layer, verifying:
 """
 
 import json
+import os
 from uuid import uuid4
 
 import pytest_asyncio
@@ -1145,4 +1146,133 @@ class TestImportMemories:
             "memories_json": _json.dumps({"wrong": "structure"}),
         })
 
+        assert "error" in result
+
+
+# ============================================================================
+# Team-mode fixtures and tests for share_memory / unshare_memory
+# ============================================================================
+
+
+@pytest_asyncio.fixture
+async def team_mcp_tools(db_pool):
+    """Create a FastMCP instance with team mode enabled (registers share/unshare tools)."""
+    import lucent.mode as mode_module
+
+    old_mode = os.environ.get("LUCENT_MODE")
+    old_license = os.environ.get("LUCENT_LICENSE_KEY")
+    os.environ["LUCENT_MODE"] = "team"
+    os.environ["LUCENT_LICENSE_KEY"] = "test-license-key"
+    mode_module.get_mode.cache_clear()
+
+    mcp = FastMCP("test-team")
+    register_tools(mcp)
+
+    yield mcp
+
+    # Restore original env
+    if old_mode is None:
+        os.environ.pop("LUCENT_MODE", None)
+    else:
+        os.environ["LUCENT_MODE"] = old_mode
+    if old_license is None:
+        os.environ.pop("LUCENT_LICENSE_KEY", None)
+    else:
+        os.environ["LUCENT_LICENSE_KEY"] = old_license
+    mode_module.get_mode.cache_clear()
+
+
+class TestShareMemory:
+    """Tests for the share_memory MCP tool (team mode only)."""
+
+    async def test_share_memory_success(self, team_mcp_tools, auth_user, clean_test_data):
+        """Test sharing a memory sets shared=true."""
+        prefix = clean_test_data
+        created = await _call(team_mcp_tools, "create_memory", {
+            "type": "experience",
+            "content": f"{prefix} shareable memory",
+            "username": f"{prefix}user",
+            "tags": ["test"],
+        })
+        assert "id" in created
+
+        result = await _call(team_mcp_tools, "share_memory", {
+            "memory_id": created["id"],
+        })
+
+        assert "error" not in result
+        assert result.get("shared") is True
+
+    async def test_share_memory_requires_auth(self, team_mcp_tools, test_memory):
+        """Test that share_memory requires authentication."""
+        set_current_user(None)
+        result = await _call(team_mcp_tools, "share_memory", {
+            "memory_id": str(test_memory["id"]),
+        })
+        assert "error" in result
+        assert "Authentication required" in result["error"]
+
+    async def test_share_memory_nonexistent(self, team_mcp_tools, auth_user):
+        """Test sharing a nonexistent memory returns error."""
+        result = await _call(team_mcp_tools, "share_memory", {
+            "memory_id": str(uuid4()),
+        })
+        assert "error" in result
+        assert "not found" in result["error"].lower() or "not the owner" in result["error"].lower()
+
+    async def test_share_memory_invalid_uuid(self, team_mcp_tools, auth_user):
+        """Test sharing with invalid UUID returns error."""
+        result = await _call(team_mcp_tools, "share_memory", {
+            "memory_id": "not-a-uuid",
+        })
+        assert "error" in result
+
+
+class TestUnshareMemory:
+    """Tests for the unshare_memory MCP tool (team mode only)."""
+
+    async def test_unshare_memory_success(self, team_mcp_tools, auth_user, clean_test_data):
+        """Test unsharing a shared memory sets shared=false."""
+        prefix = clean_test_data
+        created = await _call(team_mcp_tools, "create_memory", {
+            "type": "experience",
+            "content": f"{prefix} unshareable memory",
+            "username": f"{prefix}user",
+            "tags": ["test"],
+        })
+
+        # Share first
+        await _call(team_mcp_tools, "share_memory", {
+            "memory_id": created["id"],
+        })
+
+        # Then unshare
+        result = await _call(team_mcp_tools, "unshare_memory", {
+            "memory_id": created["id"],
+        })
+
+        assert "error" not in result
+        assert result.get("shared") is False
+
+    async def test_unshare_memory_requires_auth(self, team_mcp_tools, test_memory):
+        """Test that unshare_memory requires authentication."""
+        set_current_user(None)
+        result = await _call(team_mcp_tools, "unshare_memory", {
+            "memory_id": str(test_memory["id"]),
+        })
+        assert "error" in result
+        assert "Authentication required" in result["error"]
+
+    async def test_unshare_memory_nonexistent(self, team_mcp_tools, auth_user):
+        """Test unsharing a nonexistent memory returns error."""
+        result = await _call(team_mcp_tools, "unshare_memory", {
+            "memory_id": str(uuid4()),
+        })
+        assert "error" in result
+
+    async def test_unshare_memory_invalid_uuid(self, team_mcp_tools, auth_user):
+        """Test unsharing with invalid UUID returns error."""
+        result = await _call(team_mcp_tools, "unshare_memory", {
+            "memory_id": "not-a-uuid",
+        })
         assert "error" in result

@@ -242,7 +242,7 @@ class TestMCPAuthMiddleware:
         assert start_msg["status"] == 401
 
     async def test_mcp_invalid_api_key_returns_401(self):
-        """Test that /mcp with a non-mcp_ prefixed key gets 401."""
+        """Test that /mcp with a non-hs_ prefixed key gets 401."""
         from lucent.server import MCPAuthMiddleware
 
         inner = AsyncMock()
