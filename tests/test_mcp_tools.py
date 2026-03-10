@@ -808,6 +808,40 @@ class TestRestoreMemoryVersion:
         assert "error" in result
         assert "already at version" in result["error"].lower()
 
+    async def test_restore_to_previous_version(self, mcp_tools, auth_user, clean_test_data):
+        """Test successfully restoring a memory to a previous version."""
+        prefix = clean_test_data
+        # Create via MCP so audit log/snapshot exists for version 1
+        created = await _call(mcp_tools, "create_memory", {
+            "type": "experience",
+            "content": f"{prefix} Original content for restore test",
+            "username": f"{prefix}user",
+        })
+        memory_id = created["id"]
+        original_content = created["content"]
+
+        # Update the memory to create version 2
+        await _call(mcp_tools, "update_memory", {
+            "memory_id": memory_id,
+            "content": "Version 2 content",
+        })
+
+        # Verify it was updated
+        updated = await _call(mcp_tools, "get_memory", {"memory_id": memory_id})
+        assert updated["content"] == "Version 2 content"
+        assert updated["version"] == 2
+
+        # Restore to version 1
+        result = await _call(mcp_tools, "restore_memory_version", {
+            "memory_id": memory_id,
+            "version": 1,
+        })
+
+        assert "error" not in result
+        assert result["content"] == original_content
+        assert result["version"] == 3  # restore creates a new version
+        assert result["restored_from_version"] == 1
+
 
 # ============================================================================
 # create_daemon_task

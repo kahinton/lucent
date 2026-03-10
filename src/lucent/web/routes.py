@@ -1776,6 +1776,7 @@ async def start_impersonation(request: Request, user_id: UUID):
     """Start impersonating a user (team mode only)."""
     if not is_team_mode():
         raise HTTPException(status_code=404, detail="Impersonation requires team mode")
+    await _check_csrf(request)
     user = await get_user_context(request)
 
     # Only owners can impersonate (admins have limited impersonation in the dep)
@@ -1837,6 +1838,7 @@ async def stop_impersonation(request: Request):
     """Stop impersonating and return to original user (team mode only)."""
     if not is_team_mode():
         raise HTTPException(status_code=404, detail="Impersonation requires team mode")
+    await _check_csrf(request)
     response = RedirectResponse(url="/users", status_code=303)
     params = get_cookie_params()
     response.delete_cookie(key="lucent_impersonate", **params)
