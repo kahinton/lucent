@@ -355,7 +355,7 @@ class LucentDaemon:
                 "shutdown-release",
                 (
                     "You are a helper. Search for memories tagged 'daemon-task' that have a tag "
-                    f"'claimed-by-{self.instance_id}'. For each one found, use the release_claim tool "
+                    f"'in-progress'. For each one found, use update_memory "
                     f"to release it with instance_id '{self.instance_id}'. Output the count released."
                 ),
                 f"Release all tasks claimed by instance {self.instance_id}."
@@ -580,31 +580,34 @@ class LucentDaemon:
         )
 
     async def _release_stale_claims(self):
-        """Find tasks claimed by instances whose heartbeat is stale and release them."""
-        log("Checking for stale claims...")
-        stale_finder = await self.run_session(
-            f"stale-check-{self.cycle_count}",
-            (
-                "You are a coordination helper. Do the following:\n"
-                "1. Search for all memories tagged 'daemon-heartbeat'.\n"
-                "2. For each heartbeat, parse its JSON content and check the 'timestamp' field.\n"
-                f"3. If the timestamp is older than {STALE_HEARTBEAT_MINUTES} minutes from now "
-                f"({datetime.now(timezone.utc).isoformat()}), note the 'instance_id' as stale.\n"
-                "4. Search for memories tagged 'daemon-task' that have a tag matching 'claimed-by-{{stale_instance_id}}'.\n"
-                "5. For each such task, use the release_claim tool to release it.\n"
-                "6. Output lines in format: RELEASED|memory_id|instance_id for each released task, "
-                "or NONE if no stale claims found."
-            ),
-            "Check for stale heartbeats and release their claimed tasks."
-        )
+        """Find tasks stuck in 'in-progress' for too long and release them back to pending."""
+        log("Checking for stuck tasks...")
+        # Use direct API to find in-progress tasks
+        results = await MemoryAPI.search("in-progress daemon-task", tags=["daemon-task", "in-progress"], limit=20)
+        if not results:
+            return
 
-        if stale_finder:
-            for line in stale_finder.strip().split("\n"):
-                line = line.strip()
-                if line.startswith("RELEASED|"):
-                    parts = line.split("|")
-                    if len(parts) >= 3:
-                        log(f"Released stale claim: task {parts[1][:8]} from instance {parts[2]}")
+        now = datetime.now(timezone.utc)
+        released = 0
+        for memory in results:
+            # If task has been in-progress for more than STALE_HEARTBEAT_MINUTES, release it
+            updated = memory.get("updated_at", "")
+            if updated:
+                try:
+                    updated_dt = datetime.fromisoformat(updated.replace("Z", "+00:00"))
+                    if (now - updated_dt) > timedelta(minutes=STALE_HEARTBEAT_MINUTES):
+                        mid = memory.get("id", "")
+                        current_tags = memory.get("tags", [])
+                        new_tags = [t for t in current_tags if t != "in-progress"] + ["pending"]
+                        await MemoryAPI.update(mid, tags=new_tags)
+                        log(f"Released stuck task {mid[:8]} (in-progress for {int((now - updated_dt).total_seconds() / 60)}m)")
+                        released += 1
+                except (ValueError, TypeError):
+                    pass
+
+        if released:
+            log(f"Released {released} stuck task(s)")
+
 
     async def _dispatch_pending_tasks(self, max_tasks: int = 2):
         """Find and dispatch pending daemon-task memories, claiming them atomically.
@@ -620,7 +623,7 @@ class LucentDaemon:
                 "For each one you find, output the memory ID and the agent type tag "
                 "(research, code, memory, reflection, documentation, or planning). "
                 "Also search for memories tagged 'daemon-task' that have a tag starting with "
-                f"'claimed-by-' to see what other instances are working on. "
+                f"'in-progress' to see what is currently being worked on. "
                 "Output ONLY lines in format:\n"
                 "  TASK|memory_id|agent_type  (for pending tasks)\n"
                 "  CLAIMED|memory_id|claimed_by  (for already-claimed tasks)"
@@ -654,15 +657,15 @@ class LucentDaemon:
                 continue
             _, memory_id, agent_type = parts[0], parts[1].strip(), parts[2].strip()
 
-            # Atomically claim the task
+            # Claim the task by updating its tags
             claim_result = await self.run_session(
                 f"task-claim-{memory_id[:8]}",
                 (
-                    "You are a helper. Use the claim_task tool to atomically claim the specified "
-                    "memory for this daemon instance. Output ONLY 'CLAIMED' if successful or "
-                    "'FAILED' if the task was already claimed."
+                    "You are a helper. Use update_memory to update the specified memory's tags. "
+                    "Replace 'pending' with 'in-progress' in the tags array. "
+                    "Output 'CLAIMED' if successful or 'FAILED' if something went wrong."
                 ),
-                f"Claim task memory {memory_id} for instance {self.instance_id}."
+                f"Claim task memory {memory_id}: replace tag 'pending' with 'in-progress'."
             )
 
             if not claim_result or "CLAIMED" not in claim_result.upper():
@@ -680,7 +683,7 @@ class LucentDaemon:
                 # Release the claim if we can't read the task
                 await self.run_session(
                     f"task-release-{memory_id[:8]}",
-                    "You are a helper. Use release_claim to release the specified task.",
+                    "You are a helper. Use update_memory to change the task's tags: remove 'in-progress' and add back 'pending'.",
                     f"Release claim on memory {memory_id} for instance {self.instance_id}."
                 )
                 continue
@@ -712,7 +715,7 @@ class LucentDaemon:
                         log(f"Task {memory_id[:8]} failed multi-model review. Released.", "WARN")
                         await self.run_session(
                             f"task-release-{memory_id[:8]}",
-                            "You are a helper. Use release_claim to release the specified task back to pending.",
+                            "You are a helper. Use update_memory to change the task's tags: remove 'in-progress' and add back 'pending'.",
                             f"Release claim on memory {memory_id} for instance {self.instance_id}."
                         )
                         continue
@@ -723,7 +726,7 @@ class LucentDaemon:
                         f"task-review-{memory_id[:8]}",
                         (
                             "You are a helper. Update the specified memory's tags: remove "
-                            f"'claimed-by-{self.instance_id}' and add 'needs-review'. "
+                            f"'in-progress' and add 'needs-review'. "
                             "Also create an experience memory with the task result tagged "
                             "'daemon-result' and 'needs-review'. Use update_memory and create_memory."
                         ),
@@ -737,7 +740,7 @@ class LucentDaemon:
                         f"task-complete-{memory_id[:8]}",
                         (
                             "You are a helper. Update the specified memory's tags: remove "
-                            f"'claimed-by-{self.instance_id}' and add 'completed'. Use update_memory."
+                            f"'in-progress' and add 'completed'. Use update_memory."
                         ),
                         f"Update memory {memory_id}: replace claim tag with 'completed'."
                     )
@@ -746,7 +749,7 @@ class LucentDaemon:
                 # Release the claim so another instance can try
                 await self.run_session(
                     f"task-release-{memory_id[:8]}",
-                    "You are a helper. Use release_claim to release the specified task back to pending.",
+                    "You are a helper. Use update_memory to change the task's tags: remove 'in-progress' and add back 'pending'.",
                     f"Release claim on memory {memory_id} for instance {self.instance_id}."
                 )
                 log(f"Task {memory_id[:8]} NOT complete — {reason}. Released claim.", "WARN")
