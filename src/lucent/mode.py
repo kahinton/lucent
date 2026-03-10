@@ -11,6 +11,7 @@ import os
 from enum import Enum
 from functools import lru_cache
 
+from lucent.license import LicenseError, validate_license
 from lucent.logging import get_logger
 
 logger = get_logger("mode")
@@ -89,17 +90,18 @@ def require_team_mode(feature_name: str) -> None:
 
 
 def _validate_license(license_key: str) -> bool:
-    """Validate a license key.
-    
-    NOTE: License validation is not yet implemented. Any non-empty key
-    is accepted. This placeholder will be replaced with cryptographic
-    validation before the team tier is officially available.
-    
+    """Validate a license key using Ed25519 signature verification.
+
     Args:
         license_key: The license key to validate.
-        
+
     Returns:
-        True if the license is valid.
+        True if the license is cryptographically valid and not expired.
     """
-    # Placeholder - will be replaced with actual validation
-    return bool(license_key)
+    try:
+        info = validate_license(license_key)
+        logger.info(f"License validated for org '{info.org}', expires {info.expires_at}")
+        return True
+    except LicenseError as e:
+        logger.warning(f"License validation failed: {e}")
+        return False
