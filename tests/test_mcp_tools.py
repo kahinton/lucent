@@ -9,6 +9,7 @@ Tests the MCP tool layer that wraps the DB layer, verifying:
 
 import json
 import os
+from unittest.mock import patch
 from uuid import uuid4
 
 import pytest_asyncio
@@ -1199,8 +1200,10 @@ async def team_mcp_tools(db_pool):
     os.environ["LUCENT_LICENSE_KEY"] = "test-license-key"
     mode_module.get_mode.cache_clear()
 
-    mcp = FastMCP("test-team")
-    register_tools(mcp)
+    with patch("lucent.mode._validate_license", return_value=True):
+        mode_module.get_mode.cache_clear()
+        mcp = FastMCP("test-team")
+        register_tools(mcp)
 
     yield mcp
 
