@@ -649,3 +649,502 @@ class TestGetCurrentUserContext:
 
         assert "error" in result
         assert "Not authenticated" in result["error"]
+
+
+# ============================================================================
+# get_tag_suggestions
+# ============================================================================
+
+
+class TestGetTagSuggestions:
+    """Tests for the get_tag_suggestions MCP tool."""
+
+    async def test_get_suggestions(self, mcp_tools, auth_user, clean_test_data):
+        """Test getting tag suggestions for an existing tag prefix."""
+        prefix = clean_test_data
+        await _call(mcp_tools, "create_memory", {
+            "type": "experience",
+            "content": f"{prefix} Tag suggestion test",
+            "username": f"{prefix}user",
+            "tags": ["suggestion-target-abc"],
+        })
+
+        result = await _call(mcp_tools, "get_tag_suggestions", {
+            "query": "suggestion-target",
+        })
+
+        assert "suggestions" in result
+        assert result["query"] == "suggestion-target"
+        assert "total_returned" in result
+
+    async def test_empty_query_rejected(self, mcp_tools, auth_user):
+        """Test that empty query returns an error."""
+        result = await _call(mcp_tools, "get_tag_suggestions", {
+            "query": "   ",
+        })
+
+        assert "error" in result
+        assert "required" in result["error"].lower()
+
+    async def test_limit_capped(self, mcp_tools, auth_user, clean_test_data):
+        """Test that limit is capped at 25."""
+        prefix = clean_test_data
+        await _call(mcp_tools, "create_memory", {
+            "type": "experience",
+            "content": f"{prefix} Limit cap test",
+            "username": f"{prefix}user",
+            "tags": ["limit-cap-tag"],
+        })
+
+        result = await _call(mcp_tools, "get_tag_suggestions", {
+            "query": "limit",
+            "limit": 100,
+        })
+
+        assert "suggestions" in result
+
+
+# ============================================================================
+# get_memory_versions
+# ============================================================================
+
+
+class TestGetMemoryVersions:
+    """Tests for the get_memory_versions MCP tool."""
+
+    async def test_get_versions_for_updated_memory(self, mcp_tools, auth_user, test_memory):
+        """Test retrieving version history after an update."""
+        memory_id = str(test_memory["id"])
+
+        # Update to create version history
+        await _call(mcp_tools, "update_memory", {
+            "memory_id": memory_id,
+            "content": "Updated for version test",
+        })
+
+        result = await _call(mcp_tools, "get_memory_versions", {
+            "memory_id": memory_id,
+        })
+
+        assert "versions" in result
+        assert result["memory_id"] == memory_id
+        assert "current_version" in result
+        assert "total_count" in result
+        assert "has_more" in result
+
+    async def test_get_versions_nonexistent_memory(self, mcp_tools, auth_user):
+        """Test getting versions for a nonexistent memory."""
+        result = await _call(mcp_tools, "get_memory_versions", {
+            "memory_id": str(uuid4()),
+        })
+
+        assert "error" in result
+        assert "not found" in result["error"].lower() or "not accessible" in result["error"].lower()
+
+    async def test_get_versions_invalid_uuid(self, mcp_tools, auth_user):
+        """Test getting versions with invalid UUID."""
+        result = await _call(mcp_tools, "get_memory_versions", {
+            "memory_id": "bad-uuid",
+        })
+
+        assert "error" in result
+        assert "Invalid" in result["error"]
+
+    async def test_get_versions_requires_auth(self, mcp_tools, test_memory):
+        """Test that getting versions requires authentication."""
+        set_current_user(None)
+        result = await _call(mcp_tools, "get_memory_versions", {
+            "memory_id": str(test_memory["id"]),
+        })
+
+        assert "error" in result
+        assert "Authentication" in result["error"] or "auth" in result["error"].lower()
+
+
+# ============================================================================
+# restore_memory_version
+# ============================================================================
+
+
+class TestRestoreMemoryVersion:
+    """Tests for the restore_memory_version MCP tool."""
+
+    async def test_restore_requires_auth(self, mcp_tools, test_memory):
+        """Test that restore requires authentication."""
+        set_current_user(None)
+        result = await _call(mcp_tools, "restore_memory_version", {
+            "memory_id": str(test_memory["id"]),
+            "version": 1,
+        })
+
+        assert "error" in result
+        assert "Authentication" in result["error"] or "auth" in result["error"].lower()
+
+    async def test_restore_nonexistent_memory(self, mcp_tools, auth_user):
+        """Test restoring a nonexistent memory."""
+        result = await _call(mcp_tools, "restore_memory_version", {
+            "memory_id": str(uuid4()),
+            "version": 1,
+        })
+
+        assert "error" in result
+
+    async def test_restore_invalid_uuid(self, mcp_tools, auth_user):
+        """Test restoring with invalid UUID format."""
+        result = await _call(mcp_tools, "restore_memory_version", {
+            "memory_id": "not-a-uuid",
+            "version": 1,
+        })
+
+        assert "error" in result
+        assert "Invalid" in result["error"]
+
+    async def test_restore_same_version_rejected(self, mcp_tools, auth_user, test_memory):
+        """Test that restoring to the current version is rejected."""
+        result = await _call(mcp_tools, "restore_memory_version", {
+            "memory_id": str(test_memory["id"]),
+            "version": test_memory["version"],
+        })
+
+        assert "error" in result
+        assert "already at version" in result["error"].lower()
+
+
+# ============================================================================
+# create_daemon_task
+# ============================================================================
+
+
+class TestCreateDaemonTask:
+    """Tests for the create_daemon_task MCP tool."""
+
+    async def test_create_basic_task(self, mcp_tools, auth_user, clean_test_data):
+        """Test creating a basic daemon task."""
+        prefix = clean_test_data
+        result = await _call(mcp_tools, "create_daemon_task", {
+            "description": f"{prefix} Review the auth module",
+        })
+
+        assert "id" in result
+        assert "daemon-task" in result["tags"]
+        assert "pending" in result["tags"]
+        assert "code" in result["tags"]  # default agent_type
+        assert "medium" in result["tags"]  # default priority
+
+    async def test_create_task_with_options(self, mcp_tools, auth_user, clean_test_data):
+        """Test creating a daemon task with custom options."""
+        prefix = clean_test_data
+        result = await _call(mcp_tools, "create_daemon_task", {
+            "description": f"{prefix} Research API patterns",
+            "agent_type": "research",
+            "priority": "high",
+            "context": "Focus on REST best practices",
+            "tags": ["api"],
+        })
+
+        assert "id" in result
+        assert "research" in result["tags"]
+        assert "high" in result["tags"]
+        assert "api" in result["tags"]
+        assert result["importance"] == 8  # high priority = 8
+
+    async def test_create_task_invalid_agent_type(self, mcp_tools, auth_user):
+        """Test that invalid agent_type returns an error."""
+        result = await _call(mcp_tools, "create_daemon_task", {
+            "description": "Should fail",
+            "agent_type": "invalid",
+        })
+
+        assert "error" in result
+        assert "agent_type" in result["error"].lower()
+
+    async def test_create_task_invalid_priority(self, mcp_tools, auth_user):
+        """Test that invalid priority returns an error."""
+        result = await _call(mcp_tools, "create_daemon_task", {
+            "description": "Should fail",
+            "priority": "critical",
+        })
+
+        assert "error" in result
+        assert "priority" in result["error"].lower()
+
+    async def test_create_task_requires_auth(self, mcp_tools):
+        """Test that task creation requires authentication."""
+        set_current_user(None)
+        result = await _call(mcp_tools, "create_daemon_task", {
+            "description": "No auth task",
+        })
+
+        assert "error" in result
+        assert "Authentication" in result["error"] or "auth" in result["error"].lower()
+
+
+# ============================================================================
+# claim_task
+# ============================================================================
+
+
+class TestClaimTask:
+    """Tests for the claim_task MCP tool."""
+
+    async def test_claim_pending_task(self, mcp_tools, auth_user, clean_test_data):
+        """Test claiming a pending daemon task."""
+        prefix = clean_test_data
+        task = await _call(mcp_tools, "create_daemon_task", {
+            "description": f"{prefix} Task to claim",
+        })
+
+        result = await _call(mcp_tools, "claim_task", {
+            "memory_id": task["id"],
+            "instance_id": "test-instance-1",
+        })
+
+        assert "id" in result
+        assert f"claimed-by-test-instance-1" in result["tags"]
+        assert "pending" not in result["tags"]
+
+    async def test_claim_already_claimed(self, mcp_tools, auth_user, clean_test_data):
+        """Test claiming a task that is already claimed."""
+        prefix = clean_test_data
+        task = await _call(mcp_tools, "create_daemon_task", {
+            "description": f"{prefix} Task double claim",
+        })
+
+        # First claim succeeds
+        await _call(mcp_tools, "claim_task", {
+            "memory_id": task["id"],
+            "instance_id": "instance-a",
+        })
+
+        # Second claim fails
+        result = await _call(mcp_tools, "claim_task", {
+            "memory_id": task["id"],
+            "instance_id": "instance-b",
+        })
+
+        assert "error" in result
+
+    async def test_claim_invalid_uuid(self, mcp_tools, auth_user):
+        """Test claiming with invalid UUID."""
+        result = await _call(mcp_tools, "claim_task", {
+            "memory_id": "not-a-uuid",
+            "instance_id": "test-instance",
+        })
+
+        assert "error" in result
+
+    async def test_claim_requires_auth(self, mcp_tools):
+        """Test that claiming requires authentication."""
+        set_current_user(None)
+        result = await _call(mcp_tools, "claim_task", {
+            "memory_id": str(uuid4()),
+            "instance_id": "test-instance",
+        })
+
+        assert "error" in result
+
+
+# ============================================================================
+# release_claim
+# ============================================================================
+
+
+class TestReleaseClaim:
+    """Tests for the release_claim MCP tool."""
+
+    async def test_release_claimed_task(self, mcp_tools, auth_user, clean_test_data):
+        """Test releasing a claimed task back to pending."""
+        prefix = clean_test_data
+        task = await _call(mcp_tools, "create_daemon_task", {
+            "description": f"{prefix} Task to release",
+        })
+
+        await _call(mcp_tools, "claim_task", {
+            "memory_id": task["id"],
+            "instance_id": "release-instance",
+        })
+
+        result = await _call(mcp_tools, "release_claim", {
+            "memory_id": task["id"],
+            "instance_id": "release-instance",
+        })
+
+        assert "id" in result
+        assert "pending" in result["tags"]
+
+    async def test_release_unclaimed_task(self, mcp_tools, auth_user, clean_test_data):
+        """Test releasing a task that is not claimed."""
+        prefix = clean_test_data
+        task = await _call(mcp_tools, "create_daemon_task", {
+            "description": f"{prefix} Not claimed task",
+        })
+
+        result = await _call(mcp_tools, "release_claim", {
+            "memory_id": task["id"],
+        })
+
+        assert "error" in result
+
+    async def test_release_requires_auth(self, mcp_tools):
+        """Test that releasing requires authentication."""
+        set_current_user(None)
+        result = await _call(mcp_tools, "release_claim", {
+            "memory_id": str(uuid4()),
+        })
+
+        assert "error" in result
+
+
+# ============================================================================
+# export_memories
+# ============================================================================
+
+
+class TestExportMemories:
+    """Tests for the export_memories MCP tool."""
+
+    async def test_export_all(self, mcp_tools, auth_user, clean_test_data):
+        """Test exporting all memories."""
+        prefix = clean_test_data
+        await _call(mcp_tools, "create_memory", {
+            "type": "experience",
+            "content": f"{prefix} Export test memory",
+            "username": f"{prefix}user",
+            "tags": ["export-test"],
+        })
+
+        result = await _call(mcp_tools, "export_memories", {})
+
+        assert "metadata" in result
+        assert "memories" in result
+        assert result["metadata"]["total_count"] >= 1
+        assert result["metadata"]["format"] == "json"
+        assert "exported_at" in result["metadata"]
+
+    async def test_export_with_type_filter(self, mcp_tools, auth_user, clean_test_data):
+        """Test exporting with type filter."""
+        prefix = clean_test_data
+        await _call(mcp_tools, "create_memory", {
+            "type": "technical",
+            "content": f"{prefix} Technical export test",
+            "username": f"{prefix}user",
+        })
+
+        result = await _call(mcp_tools, "export_memories", {
+            "type": "technical",
+        })
+
+        assert "memories" in result
+        for mem in result["memories"]:
+            assert mem["type"] == "technical"
+        assert result["metadata"]["filters"].get("type") == "technical"
+
+    async def test_export_with_tag_filter(self, mcp_tools, auth_user, clean_test_data):
+        """Test exporting with tag filter."""
+        prefix = clean_test_data
+        await _call(mcp_tools, "create_memory", {
+            "type": "experience",
+            "content": f"{prefix} Tag export test",
+            "username": f"{prefix}user",
+            "tags": ["unique-export-tag-xyz"],
+        })
+
+        result = await _call(mcp_tools, "export_memories", {
+            "tags": ["unique-export-tag-xyz"],
+        })
+
+        assert result["metadata"]["total_count"] >= 1
+
+    async def test_export_with_importance_filter(self, mcp_tools, auth_user, clean_test_data):
+        """Test exporting with importance range filter."""
+        prefix = clean_test_data
+        await _call(mcp_tools, "create_memory", {
+            "type": "experience",
+            "content": f"{prefix} High importance export",
+            "username": f"{prefix}user",
+            "importance": 9,
+            "tags": ["importance-export-test"],
+        })
+
+        result = await _call(mcp_tools, "export_memories", {
+            "importance_min": 8,
+            "importance_max": 10,
+        })
+
+        assert "memories" in result
+        for mem in result["memories"]:
+            assert mem["importance"] >= 8
+
+
+# ============================================================================
+# import_memories
+# ============================================================================
+
+
+class TestImportMemories:
+    """Tests for the import_memories MCP tool."""
+
+    async def test_import_from_list(self, mcp_tools, auth_user, clean_test_data):
+        """Test importing from a JSON list of memories."""
+        import json as _json
+        prefix = clean_test_data
+        memories_data = [
+            {
+                "type": "experience",
+                "content": f"{prefix} Imported memory 1",
+                "tags": ["import-test"],
+                "importance": 5,
+            },
+            {
+                "type": "technical",
+                "content": f"{prefix} Imported memory 2",
+                "tags": ["import-test"],
+                "importance": 6,
+            },
+        ]
+
+        result = await _call(mcp_tools, "import_memories", {
+            "memories_json": _json.dumps(memories_data),
+        })
+
+        assert "imported" in result or "total" in result
+
+    async def test_import_from_export_object(self, mcp_tools, auth_user, clean_test_data):
+        """Test importing from an export-format object with 'memories' key."""
+        import json as _json
+        prefix = clean_test_data
+        export_data = {
+            "metadata": {"format": "json"},
+            "memories": [
+                {
+                    "type": "experience",
+                    "content": f"{prefix} Export-format import",
+                    "tags": ["import-export-test"],
+                    "importance": 5,
+                },
+            ],
+        }
+
+        result = await _call(mcp_tools, "import_memories", {
+            "memories_json": _json.dumps(export_data),
+        })
+
+        assert "error" not in result
+
+    async def test_import_invalid_json(self, mcp_tools, auth_user):
+        """Test importing invalid JSON."""
+        result = await _call(mcp_tools, "import_memories", {
+            "memories_json": "not valid json{{{",
+        })
+
+        assert "error" in result
+        assert "JSON" in result["error"]
+
+    async def test_import_invalid_structure(self, mcp_tools, auth_user):
+        """Test importing with invalid structure (not a list or export object)."""
+        import json as _json
+        result = await _call(mcp_tools, "import_memories", {
+            "memories_json": _json.dumps({"wrong": "structure"}),
+        })
+
+        assert "error" in result
