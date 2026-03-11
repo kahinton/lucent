@@ -71,7 +71,7 @@ def validate_metadata(memory_type: str | MemoryType, metadata: dict[str, Any] | 
         # Format a nice error message
         errors = []
         for error in e.errors():
-            loc = ".".join(str(l) for l in error["loc"])
+            loc = ".".join(str(part) for part in error["loc"])
             msg = error["msg"]
             errors.append(f"  - {loc}: {msg}")
 

@@ -149,7 +149,7 @@ def _build_metadata_from_form(
         if meta_outcome:
             metadata["outcome"] = meta_outcome
         if meta_lessons_learned:
-            metadata["lessons_learned"] = [l.strip() for l in meta_lessons_learned.split(",") if l.strip()]
+            metadata["lessons_learned"] = [item.strip() for item in meta_lessons_learned.split(",") if item.strip()]
         if meta_related_entities:
             metadata["related_entities"] = [e.strip() for e in meta_related_entities.split(",") if e.strip()]
 

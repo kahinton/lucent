@@ -19,13 +19,13 @@ from fastapi.staticfiles import StaticFiles
 from lucent.api.routers import daemon_messages as daemon_messages_router
 from lucent.api.routers import daemon_tasks as daemon_tasks_router
 from lucent.api.routers import export, memories, search
+from lucent.db import close_db, init_db
 from lucent.logging import get_logger, set_correlation_id
 from lucent.mode import is_team_mode
+from lucent.web.routes import router as web_router
 
 # Get logger for this module
 logger = get_logger("api.app")
-from lucent.db import close_db, init_db
-from lucent.web.routes import router as web_router
 
 # Path to static files directory
 STATIC_DIR = Path(__file__).parent.parent / "web" / "static"
