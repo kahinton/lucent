@@ -32,7 +32,8 @@ class MemoryRepository:
     # Shared column lists to avoid repetition across queries
     _FULL_COLUMNS = (
         "id, username, type, content, tags, importance, related_memory_ids, metadata, "
-        "created_at, updated_at, deleted_at, user_id, organization_id, shared, last_accessed_at, version"
+        "created_at, updated_at, deleted_at, user_id, "
+        "organization_id, shared, last_accessed_at, version"
     )
     _SEARCH_COLUMNS = (
         "id, username, type, content, tags, importance, related_memory_ids, "
@@ -71,7 +72,9 @@ class MemoryRepository:
             The created memory record.
         """
         query = f"""
-            INSERT INTO memories (username, type, content, tags, importance, related_memory_ids, metadata, user_id, organization_id, shared)
+            INSERT INTO memories (username, type, content, tags,
+                importance, related_memory_ids, metadata,
+                user_id, organization_id, shared)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, false)
             RETURNING {self._FULL_COLUMNS}
         """
@@ -526,7 +529,8 @@ class MemoryRepository:
         # Add access control condition if user context is provided
         if requesting_user_id is not None and requesting_org_id is not None:
             conditions.append(
-                f"(user_id = ${param_idx} OR (organization_id = ${param_idx + 1} AND shared = true))"
+                f"(user_id = ${param_idx} OR "
+                f"(organization_id = ${param_idx + 1} AND shared = true))"
             )
             params.append(str(requesting_user_id))
             params.append(str(requesting_org_id))
@@ -588,7 +592,8 @@ class MemoryRepository:
                        similarity(content, ${similarity_param}) as sim_score
                 FROM memories
                 WHERE {where_clause}
-                  AND (content % ${similarity_param} OR content ILIKE '%' || ${similarity_param} || '%')
+                  AND (content % ${similarity_param}
+                       OR content ILIKE '%' || ${similarity_param} || '%')
                 ORDER BY sim_score DESC, importance DESC, created_at DESC
                 LIMIT ${param_idx} OFFSET ${param_idx + 1}
             """
@@ -597,7 +602,8 @@ class MemoryRepository:
                 SELECT COUNT(*) as total
                 FROM memories
                 WHERE {where_clause}
-                  AND (content % ${similarity_param} OR content ILIKE '%' || ${similarity_param} || '%')
+                  AND (content % ${similarity_param}
+                       OR content ILIKE '%' || ${similarity_param} || '%')
             """
         else:
             search_query = f"""
@@ -679,7 +685,8 @@ class MemoryRepository:
         # Add access control condition if user context is provided
         if requesting_user_id is not None and requesting_org_id is not None:
             conditions.append(
-                f"(user_id = ${param_idx} OR (organization_id = ${param_idx + 1} AND shared = true))"
+                f"(user_id = ${param_idx} OR "
+                f"(organization_id = ${param_idx + 1} AND shared = true))"
             )
             params.append(str(requesting_user_id))
             params.append(str(requesting_org_id))
@@ -724,8 +731,10 @@ class MemoryRepository:
             WHERE {where_clause}
               AND (
                   content % ${query_param} OR content ILIKE '%' || ${query_param} || '%'
-                  OR array_to_string(tags, ' ') % ${query_param} OR array_to_string(tags, ' ') ILIKE '%' || ${query_param} || '%'
-                  OR metadata::text % ${query_param} OR metadata::text ILIKE '%' || ${query_param} || '%'
+                  OR array_to_string(tags, ' ') % ${query_param}
+                  OR array_to_string(tags, ' ') ILIKE '%' || ${query_param} || '%'
+                  OR metadata::text % ${query_param}
+                  OR metadata::text ILIKE '%' || ${query_param} || '%'
               )
             ORDER BY sim_score DESC, importance DESC, created_at DESC
             LIMIT ${param_idx} OFFSET ${param_idx + 1}
@@ -737,8 +746,10 @@ class MemoryRepository:
             WHERE {where_clause}
               AND (
                   content % ${query_param} OR content ILIKE '%' || ${query_param} || '%'
-                  OR array_to_string(tags, ' ') % ${query_param} OR array_to_string(tags, ' ') ILIKE '%' || ${query_param} || '%'
-                  OR metadata::text % ${query_param} OR metadata::text ILIKE '%' || ${query_param} || '%'
+                  OR array_to_string(tags, ' ') % ${query_param}
+                  OR array_to_string(tags, ' ') ILIKE '%' || ${query_param} || '%'
+                  OR metadata::text % ${query_param}
+                  OR metadata::text ILIKE '%' || ${query_param} || '%'
               )
         """
 
@@ -789,7 +800,8 @@ class MemoryRepository:
         # Add access control condition if user context is provided
         if requesting_user_id is not None and requesting_org_id is not None:
             conditions.append(
-                f"(user_id = ${param_idx} OR (organization_id = ${param_idx + 1} AND shared = true))"
+                f"(user_id = ${param_idx} OR "
+                f"(organization_id = ${param_idx + 1} AND shared = true))"
             )
             params.append(str(requesting_user_id))
             params.append(str(requesting_org_id))
@@ -850,7 +862,8 @@ class MemoryRepository:
         # Add access control condition if user context is provided
         if requesting_user_id is not None and requesting_org_id is not None:
             conditions.append(
-                f"(user_id = ${param_idx} OR (organization_id = ${param_idx + 1} AND shared = true))"
+                f"(user_id = ${param_idx} OR "
+                f"(organization_id = ${param_idx + 1} AND shared = true))"
             )
             params.append(str(requesting_user_id))
             params.append(str(requesting_org_id))
@@ -921,7 +934,8 @@ class MemoryRepository:
 
         if requesting_user_id is not None and requesting_org_id is not None:
             conditions.append(
-                f"(user_id = ${param_idx} OR (organization_id = ${param_idx + 1} AND shared = true))"
+                f"(user_id = ${param_idx} OR "
+                f"(organization_id = ${param_idx + 1} AND shared = true))"
             )
             params.append(str(requesting_user_id))
             params.append(str(requesting_org_id))

@@ -173,9 +173,17 @@ Args:
     metadata: Optional type-specific metadata. Structure depends on memory type:
         - experience: {context, outcome, lessons_learned[], related_entities[]}
         - technical: {category, language, code_snippet, references[], version_info, repo, filename}
-        - procedural: {steps[{order, description, notes}], prerequisites[], estimated_time, success_criteria, common_pitfalls[]}
-        - goal: {status, deadline, milestones[{description, status, completed_at}], blockers[], progress_notes[{date, note}], priority}
-        - individual: {name, relationship, organization, role, contact_info{email, phone, linkedin, github, other}, preferences[], interaction_history[{date, context, notes}], last_interaction}
+        - procedural: {steps[{order, description, notes}],
+          prerequisites[], estimated_time, success_criteria,
+          common_pitfalls[]}
+        - goal: {status, deadline,
+          milestones[{description, status, completed_at}],
+          blockers[], progress_notes[{date, note}], priority}
+        - individual: {name, relationship, organization, role,
+          contact_info{email, phone, linkedin, github, other},
+          preferences[],
+          interaction_history[{date, context, notes}],
+          last_interaction}
 
 Returns:
     JSON string with the created memory including its ID.
@@ -195,10 +203,13 @@ Returns:
             # Validate input
             memory_type = MemoryType(type)
 
-            # Individual memories cannot be created via MCP - they are auto-created when users are added
+            # Individual memories cannot be created via MCP
+            # - they are auto-created when users are added
             if memory_type == MemoryType.INDIVIDUAL:
                 return _error_response(
-                    "Individual memories cannot be created directly. They are automatically created when users are added to the system."
+                    "Individual memories cannot be created directly."
+                    " They are automatically created when users"
+                    " are added to the system."
                 )
 
             # Validate and normalize metadata for the memory type
@@ -464,12 +475,15 @@ Returns:
         Args:
             query: Optional fuzzy search query to match against memory CONTENT only.
             username: Optional filter to only return memories for a specific user.
-            type: Optional filter by memory type (experience, technical, procedural, goal, individual).
-            tags: Optional list of tags to filter by (memories must have all specified tags).
+            type: Optional filter by memory type
+                (experience, technical, procedural, goal, individual).
+            tags: Optional list of tags to filter by
+                (memories must have all specified tags).
             importance_min: Optional minimum importance rating (1-10).
             importance_max: Optional maximum importance rating (1-10).
             created_after: Optional ISO datetime string to filter memories created after this date.
-            created_before: Optional ISO datetime string to filter memories created before this date.
+            created_before: Optional ISO datetime string to filter
+                memories created before this date.
             memory_ids: Optional list of specific memory UUIDs to retrieve.
             offset: Pagination offset (default 0).
             limit: Maximum number of results to return (default 5, max 50).
@@ -583,7 +597,8 @@ Returns:
         Args:
             query: Search query to match against content, tags, and metadata (required).
             username: Optional filter to only return memories for a specific user.
-            type: Optional filter by memory type (experience, technical, procedural, goal, individual).
+            type: Optional filter by memory type
+                (experience, technical, procedural, goal, individual).
             importance_min: Optional minimum importance rating (1-10).
             importance_max: Optional maximum importance rating (1-10).
             offset: Pagination offset (default 0).
@@ -675,7 +690,8 @@ Returns:
             tags: Optional new list of tags (replaces existing tags).
             importance: Optional new importance rating (1-10).
             related_memory_ids: Optional new list of related memory UUIDs (replaces existing).
-            metadata: Optional new metadata (replaces existing). Must match the memory's type schema.
+            metadata: Optional new metadata (replaces existing).
+                Must match the memory's type schema.
                       See create_memory for the metadata schema for each memory type.
             expected_version: Optional optimistic lock. If provided, the update only succeeds
                 if the memory's current version matches this value. Use this to prevent
@@ -840,10 +856,13 @@ Returns:
             if old_memory.get("user_id") != user_id:
                 return _error_response("Permission denied: only the owner can delete this memory")
 
-            # Individual memories cannot be deleted via MCP - they are deleted when users are removed
+            # Individual memories cannot be deleted via MCP
+            # - they are deleted when users are removed
             if old_memory.get("type") == "individual":
                 return _error_response(
-                    "Individual memories cannot be deleted directly. They are automatically deleted when users are removed from the system."
+                    "Individual memories cannot be deleted directly."
+                    " They are automatically deleted when users"
+                    " are removed from the system."
                 )
 
             success = await repo.delete(uuid_id)
@@ -893,7 +912,8 @@ Returns:
 
         Args:
             username: Optional filter to only show tags used by a specific user.
-            type: Optional filter by memory type (experience, technical, procedural, goal, individual).
+            type: Optional filter by memory type
+                (experience, technical, procedural, goal, individual).
             limit: Maximum number of tags to return (default 50, max 100).
 
         Returns:
@@ -1101,7 +1121,8 @@ Returns:
             if snapshot is None:
                 return _error_response(
                     f"Version {version} does not have a restorable snapshot. "
-                    "Snapshots are only available for versions created after versioning was enabled."
+                    "Snapshots are only available for versions "
+                    "created after versioning was enabled."
                 )
 
             # Apply the snapshot
@@ -1135,7 +1156,10 @@ Returns:
                 {
                     **_serialize_memory(result),
                     "restored_from_version": version,
-                    "message": f"Memory restored to version {version} (now at version {result['version']})",
+                    "message": (
+                        f"Memory restored to version {version}"
+                        f" (now at version {result['version']})"
+                    ),
                 },
                 indent=2,
             )
@@ -1179,7 +1203,8 @@ Returns:
 
                 if result is None:
                     return _error_response(
-                        "Memory not found or you are not the owner. Only the owner can share a memory."
+                        "Memory not found or you are not the owner."
+                        " Only the owner can share a memory."
                     )
 
                 # Log the share action
@@ -1232,7 +1257,8 @@ Returns:
 
                 if result is None:
                     return _error_response(
-                        "Memory not found or you are not the owner. Only the owner can unshare a memory."
+                        "Memory not found or you are not the owner."
+                        " Only the owner can unshare a memory."
                     )
 
                 # Log the unshare action
@@ -1291,11 +1317,13 @@ Returns:
 
         if agent_type not in valid_agent_types:
             return _error_response(
-                f"Invalid agent_type '{agent_type}'. Must be one of: {', '.join(sorted(valid_agent_types))}"
+                f"Invalid agent_type '{agent_type}'. Must be one of:"
+                f" {', '.join(sorted(valid_agent_types))}"
             )
         if priority not in valid_priorities:
             return _error_response(
-                f"Invalid priority '{priority}'. Must be one of: {', '.join(sorted(valid_priorities))}"
+                f"Invalid priority '{priority}'. Must be one of:"
+                f" {', '.join(sorted(valid_priorities))}"
             )
 
         try:
@@ -1493,7 +1521,8 @@ Returns:
             importance_min: Minimum importance (1-10).
             importance_max: Maximum importance (1-10).
             created_after: ISO 8601 datetime string — only include memories created after this time.
-            created_before: ISO 8601 datetime string — only include memories created before this time.
+            created_before: ISO 8601 datetime string — only include
+                memories created before this time.
 
         Returns:
             JSON string with export metadata and full memory records.

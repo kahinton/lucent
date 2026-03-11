@@ -334,7 +334,8 @@ def build_subagent_prompt(agent_type: str, task_description: str, task_context: 
 --- USING MEMORY ---
 Before starting work, search for relevant memories:
 - Look for previous approaches to similar tasks (search by keywords from your task description)
-- Check for validated patterns (tagged 'validated') and rejection lessons (tagged 'rejection-lesson')
+- Check for validated patterns (tagged 'validated') and
+  rejection lessons (tagged 'rejection-lesson')
 - Reference procedural memories for proven workflows
 - Build on existing knowledge rather than starting from scratch
 
@@ -410,7 +411,8 @@ class LucentDaemon:
                 (
                     "You are a helper. Search for memories tagged 'daemon-task' that have a tag "
                     f"'in-progress'. For each one found, use update_memory "
-                    f"to release it with instance_id '{self.instance_id}'. Output the count released."
+                    f"to release it with instance_id '{self.instance_id}'. "
+                    f"Output the count released."
                 ),
                 f"Release all tasks claimed by instance {self.instance_id}.",
             )
@@ -498,7 +500,8 @@ class LucentDaemon:
                         done.set()
                     elif "error" in etype.lower():
                         log(
-                            f"  [{name}] error event: {etype} - {getattr(event.data, 'message', str(event.data)[:200])}",
+                            f"  [{name}] error event: {etype} - "
+                            f"{getattr(event.data, 'message', str(event.data)[:200])}",
                             "ERROR",
                         )
                         done.set()
@@ -637,7 +640,12 @@ class LucentDaemon:
         result = await self.run_session(
             f"cognitive-{self.cycle_count}",
             prompt,
-            "Begin your cognitive cycle. Load state, perceive, reason, decide. Use memory tools to create tasks and update state. Output a brief summary of your decisions.",
+            (
+                "Begin your cognitive cycle. Load state, perceive, "
+                "reason, decide. Use memory tools to create tasks "
+                "and update state. Output a brief summary of "
+                "your decisions."
+            ),
         )
 
         if result:
@@ -745,7 +753,9 @@ class LucentDaemon:
                         new_tags = [t for t in current_tags if t != "in-progress"] + ["pending"]
                         await MemoryAPI.update(mid, tags=new_tags)
                         log(
-                            f"Released stuck task {mid[:8]} (in-progress for {int((now - updated_dt).total_seconds() / 60)}m)"
+                            f"Released stuck task {mid[:8]} "
+                            f"(in-progress for "
+                            f"{int((now - updated_dt).total_seconds() / 60)}m)"
                         )
                         released += 1
                 except (ValueError, TypeError):
@@ -764,7 +774,8 @@ class LucentDaemon:
         task_finder = await self.run_session(
             "task-finder",
             (
-                "You are a task dispatcher. Search for memories tagged 'daemon-task' and 'pending'. "
+                "You are a task dispatcher. Search for memories "
+                "tagged 'daemon-task' and 'pending'. "
                 "For each one you find, output the memory ID and the agent type tag "
                 "(research, code, memory, reflection, documentation, or planning). "
                 "Also search for memories tagged 'daemon-task' that have a tag starting with "
@@ -890,7 +901,8 @@ class LucentDaemon:
                         metadata={"result": result[:MAX_RESULT_LENGTH]} if result else None,
                     )
                     log(
-                        f"Task {memory_id[:8]} marked completed (result: {len(result) if result else 0} chars)"
+                        f"Task {memory_id[:8]} marked completed "
+                        f"(result: {len(result) if result else 0} chars)"
                     )
             else:
                 # Release the claim so another instance can try
@@ -906,23 +918,22 @@ class LucentDaemon:
         Each review model evaluates the result independently. All must approve
         for the review to pass. Returns True if all models approve.
         """
-        review_prompt = f"""You are reviewing work produced by an AI sub-agent. Evaluate the quality and correctness of the output.
-
-TASK THAT WAS ASSIGNED:
-{task_content[:2000]}
-
-OUTPUT PRODUCED:
-{result[:4000]}
-
-Evaluate:
-1. Does the output actually address the task?
-2. Is the reasoning sound?
-3. Are there any errors, hallucinations, or problematic assumptions?
-4. Is the output actionable and useful?
-
-Respond with EXACTLY one of:
-- APPROVE: [brief reason] — if the work is good
-- REJECT: [brief reason] — if there are significant issues"""
+        review_prompt = (
+            "You are reviewing work produced by an AI sub-agent. "
+            "Evaluate the quality and correctness of the output."
+            f"\n\nTASK THAT WAS ASSIGNED:\n{task_content[:2000]}"
+            f"\n\nOUTPUT PRODUCED:\n{result[:4000]}"
+            "\n\nEvaluate:\n"
+            "1. Does the output actually address the task?\n"
+            "2. Is the reasoning sound?\n"
+            "3. Are there any errors, hallucinations, "
+            "or problematic assumptions?\n"
+            "4. Is the output actionable and useful?\n\n"
+            "Respond with EXACTLY one of:\n"
+            "- APPROVE: [brief reason] — if the work is good\n"
+            "- REJECT: [brief reason] — if there are "
+            "significant issues"
+        )
 
         approvals = 0
         rejections = 0
@@ -951,7 +962,9 @@ Respond with EXACTLY one of:
 
         passed = rejections == 0
         log(
-            f"Multi-model review for {memory_id[:8]}: {approvals}/{total} approved — {'PASSED' if passed else 'FAILED'}"
+            f"Multi-model review for {memory_id[:8]}: "
+            f"{approvals}/{total} approved "
+            f"— {'PASSED' if passed else 'FAILED'}"
         )
         return passed
 
@@ -965,13 +978,24 @@ Respond with EXACTLY one of:
         log("Running autonomic: memory maintenance")
         system_message = build_subagent_prompt(
             "memory",
-            "Quick memory maintenance pass — check for obvious issues, fix what's straightforward.",
-            "This is an autonomic background task, not a cognitive decision.",
+            (
+                "Quick memory maintenance pass — check for "
+                "obvious issues, fix what's straightforward."
+            ),
+            (
+                "This is an autonomic background task, "
+                "not a cognitive decision."
+            ),
         )
         await self.run_session(
             "autonomic-maintenance",
             system_message,
-            "Quick maintenance scan. Search recent memories for duplicates, missing tags, or miscalibrated importance. Fix obvious issues. Only save a summary if you actually changed something.",
+            (
+                "Quick maintenance scan. Search recent memories "
+                "for duplicates, missing tags, or miscalibrated "
+                "importance. Fix obvious issues. Only save a "
+                "summary if you actually changed something."
+            ),
         )
 
     async def run_learning_extraction(self):
@@ -982,20 +1006,34 @@ Respond with EXACTLY one of:
         log("Running autonomic: learning extraction")
         system_message = build_subagent_prompt(
             "reflection",
-            "Learning extraction pass — process recent daemon-results and feedback into reusable lessons.",
-            "This is an autonomic background task. Follow the learning-extraction skill instructions.",
+            (
+                "Learning extraction pass — process recent "
+                "daemon-results and feedback into "
+                "reusable lessons."
+            ),
+            (
+                "This is an autonomic background task. "
+                "Follow the learning-extraction skill "
+                "instructions."
+            ),
         )
         await self.run_session(
             "autonomic-learning",
             system_message,
             (
                 "Run the learning extraction pipeline from the learning-extraction skill. "
-                "1. Search for memories tagged 'daemon-result' or 'rejection-lesson' or 'validated' that do NOT have the 'lesson-extracted' tag. "
-                "2. For each candidate, classify the experience type and extract a transferable principle. "
-                "3. Compare against existing 'lesson' tagged procedural memories — update if reinforcing/refining, create new if novel. "
+                "1. Search for memories tagged 'daemon-result' "
+                "or 'rejection-lesson' or 'validated' that do "
+                "NOT have the 'lesson-extracted' tag. "
+                "2. For each candidate, classify the experience "
+                "type and extract a transferable principle. "
+                "3. Compare against existing 'lesson' tagged "
+                "procedural memories — update if "
+                "reinforcing/refining, create new if novel. "
                 "4. Tag processed memories with 'lesson-extracted'. "
                 "5. Save a brief summary of what was extracted. "
-                "Only process the most recent 10 unprocessed memories per run. Skip trivial results."
+                "Only process the most recent 10 unprocessed "
+                "memories per run. Skip trivial results."
             ),
         )
 
@@ -1033,7 +1071,10 @@ Respond with EXACTLY one of:
                 await self.run_session(
                     f"{task}-manual",
                     system_message,
-                    f"Run a {task} session. Search memories for context, do your work, save results.",
+                    (
+                        f"Run a {task} session. Search memories "
+                        f"for context, do your work, save results."
+                    ),
                 )
             else:
                 await self.run_cognitive_cycle()
@@ -1060,7 +1101,11 @@ def main():
     parser.add_argument(
         "--task",
         type=str,
-        help="Run a specific sub-agent (research, code, memory, reflection, documentation, planning)",
+        help=(
+            "Run a specific sub-agent "
+            "(research, code, memory, reflection, "
+            "documentation, planning)"
+        ),
     )
     parser.add_argument(
         "--interval",
