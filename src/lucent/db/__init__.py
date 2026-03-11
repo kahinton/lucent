@@ -20,6 +20,7 @@ from lucent.db.api_key import ApiKeyRepository
 from lucent.db.audit import AuditRepository
 
 # Repositories
+from lucent.db.definitions import DefinitionRepository
 from lucent.db.memory import MemoryRepository, VersionConflictError
 from lucent.db.organization import OrganizationRepository
 from lucent.db.pool import close_db, get_pool, init_db
