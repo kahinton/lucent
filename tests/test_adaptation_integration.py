@@ -18,14 +18,11 @@ import pytest
 
 from daemon.adaptation import (
     AdaptationPipeline,
-    AgentRecommendation,
     AssessmentResult,
-    SkillRecommendation,
     parse_assessment_output,
     validate_agent,
     validate_skill,
 )
-
 
 # ============================================================================
 # Realistic Assessment Data — Customer Support Domain

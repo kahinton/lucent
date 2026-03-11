@@ -373,7 +373,7 @@ class TestMemoryRepository:
 
     async def test_get_accessible_denies_other_org(self, db_pool, test_memory, test_user, clean_test_data):
         """Test that a user in a different org cannot access an unshared memory."""
-        prefix = clean_test_data
+        _ = clean_test_data
         repo = MemoryRepository(db_pool)
 
         # Use a random UUID as the "other org" user — should not match

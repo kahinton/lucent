@@ -54,7 +54,7 @@ class TestSignedValues:
         assert verify_signed_value(signed) == value
 
     def test_tampered_value_returns_none(self):
-        signed = sign_value("original")
+        sign_value("original")
         tampered = "original.wrong_signature"
         assert verify_signed_value(tampered) is None
 
@@ -146,8 +146,7 @@ class TestCookieParams:
     def test_secure_defaults_to_false(self, monkeypatch):
         monkeypatch.delenv("LUCENT_SECURE_COOKIES", raising=False)
         # Need to reimport to pick up env change
-        import lucent.auth_providers as ap
-        original = ap.SECURE_COOKIES
+        import lucent.auth_providers as ap  # noqa: F401
         # The module-level constant is already set; just verify the default behavior
         params = get_cookie_params()
         assert "secure" in params

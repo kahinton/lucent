@@ -10,11 +10,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
-
 from starlette.responses import Response
 
 from lucent.auth_providers import (
-    CSRF_COOKIE_NAME,
     SESSION_COOKIE_NAME,
     get_cookie_params,
 )
@@ -106,6 +104,7 @@ class TestCSRFLogSanitization:
     def test_check_csrf_debug_log_no_token_values(self):
         """CSRF debug logging must not include actual token values."""
         import inspect
+
         from lucent.web.routes import _check_csrf
 
         source = inspect.getsource(_check_csrf)
@@ -117,6 +116,7 @@ class TestCSRFLogSanitization:
     def test_check_csrf_source_uses_safe_logging(self):
         """CSRF function should use presence-based logging, not value-based."""
         import inspect
+
         from lucent.web.routes import _check_csrf
 
         source = inspect.getsource(_check_csrf)

@@ -16,7 +16,7 @@ os.environ["DATABASE_URL"] = TEST_DATABASE_URL
 @pytest_asyncio.fixture(scope="function")
 async def db_pool():
     """Create a database pool for each test function.
-    
+
     Uses the lucent database for tests since we clean up after ourselves.
     """
     import lucent.db.pool as pool_module
@@ -37,7 +37,7 @@ async def db_pool():
 @pytest_asyncio.fixture
 async def clean_test_data(db_pool):
     """Fixture that cleans up test data after each test.
-    
+
     Creates a unique test prefix and cleans up memories/users with that prefix.
     """
     test_id = str(uuid4())[:8]
