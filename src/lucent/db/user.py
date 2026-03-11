@@ -36,6 +36,7 @@ class UserRepository:
         display_name: str | None = None,
         avatar_url: str | None = None,
         provider_metadata: dict[str, Any] | None = None,
+        role: str | None = None,
     ) -> dict[str, Any]:
         """Create a new user.
 
@@ -47,29 +48,44 @@ class UserRepository:
             display_name: User's display name.
             avatar_url: URL to user's avatar.
             provider_metadata: Provider-specific metadata.
+            role: User role (member, admin, owner). Defaults to 'member'.
 
         Returns:
             The created user record.
         """
-        query = """
-            INSERT INTO users (external_id, provider, organization_id,
-                email, display_name, avatar_url, provider_metadata)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
-            RETURNING id, external_id, provider, organization_id, email, display_name, avatar_url,
-                      provider_metadata, is_active, created_at, updated_at, last_login_at, role
-        """
+        if role:
+            query = """
+                INSERT INTO users (external_id, provider, organization_id,
+                    email, display_name, avatar_url, provider_metadata, role)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                RETURNING id, external_id, provider, organization_id, email, display_name,
+                          avatar_url, provider_metadata, is_active, created_at, updated_at,
+                          last_login_at, role
+            """
+        else:
+            query = """
+                INSERT INTO users (external_id, provider, organization_id,
+                    email, display_name, avatar_url, provider_metadata)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                RETURNING id, external_id, provider, organization_id, email, display_name,
+                          avatar_url, provider_metadata, is_active, created_at, updated_at,
+                          last_login_at, role
+            """
+
+        params = [
+            external_id,
+            provider,
+            str(organization_id),
+            email,
+            display_name,
+            avatar_url,
+            provider_metadata or {},
+        ]
+        if role:
+            params.append(role)
 
         async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(
-                query,
-                external_id,
-                provider,
-                str(organization_id),
-                email,
-                display_name,
-                avatar_url,
-                provider_metadata or {},
-            )
+            row = await conn.fetchrow(query, *params)
 
         user = self._row_to_dict(row)
 
