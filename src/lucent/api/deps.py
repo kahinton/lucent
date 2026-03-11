@@ -58,7 +58,7 @@ class CurrentUser:
 
     def has_scope(self, scope: str) -> bool:
         """Check if the API key has a specific scope.
-        
+
         Keys with 'read' + 'write' scopes (the default) have full access.
         Scoped keys (e.g., 'daemon-tasks') are restricted to those operations.
         """
@@ -89,10 +89,10 @@ class CurrentUser:
 
 async def _authenticate_with_api_key(api_key: str) -> CurrentUser | None:
     """Authenticate using an API key.
-    
+
     Args:
         api_key: The API key (with or without 'Bearer ' prefix).
-        
+
     Returns:
         CurrentUser if valid, None otherwise.
     """
@@ -133,9 +133,9 @@ async def get_current_user(
     authorization: Annotated[str | None, Header()] = None,
 ) -> CurrentUser:
     """Get the current authenticated user for API routes.
-    
+
     API key authentication is always required.
-    
+
     Headers:
         Authorization: Bearer hs_... (API key required)
     """
@@ -172,7 +172,7 @@ async def get_optional_user(
 
 def require_role(minimum_role: Role):
     """Dependency factory that requires a minimum role level.
-    
+
     Usage:
         @router.get("/admin-only")
         async def admin_endpoint(user: CurrentUser = Depends(require_role(Role.ADMIN))):
@@ -193,7 +193,7 @@ def require_role(minimum_role: Role):
 
 def require_permission_dep(permission: Permission):
     """Dependency factory that requires a specific permission.
-    
+
     Usage:
         @router.get("/audit")
         async def audit_endpoint(user: CurrentUser = Depends(require_permission_dep(Permission.AUDIT_VIEW_ORG))):
@@ -214,7 +214,7 @@ def require_permission_dep(permission: Permission):
 
 def require_scope_dep(scope: str):
     """Dependency factory that requires a specific API key scope.
-    
+
     Usage:
         @router.post("/tasks")
         async def create_task(user: CurrentUser = Depends(require_scope_dep("daemon-tasks"))):

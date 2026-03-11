@@ -55,7 +55,7 @@ class MemoryRepository:
         organization_id: UUID | None = None,
     ) -> dict[str, Any]:
         """Create a new memory.
-        
+
         Args:
             username: The username of the user creating the memory.
             type: The type of memory.
@@ -66,7 +66,7 @@ class MemoryRepository:
             metadata: Optional type-specific metadata.
             user_id: Optional user ID (foreign key to users table).
             organization_id: Optional organization ID (for efficient org-scoped queries).
-            
+
         Returns:
             The created memory record.
         """
@@ -98,10 +98,10 @@ class MemoryRepository:
 
     async def get(self, memory_id: UUID) -> dict[str, Any] | None:
         """Get a memory by ID (no access control).
-        
+
         Args:
             memory_id: The UUID of the memory to retrieve.
-            
+
         Returns:
             The memory record, or None if not found or deleted.
         """
@@ -126,23 +126,23 @@ class MemoryRepository:
         organization_id: UUID,
     ) -> dict[str, Any] | None:
         """Get a memory by ID with access control.
-        
+
         Returns the memory only if:
         - The user owns the memory, OR
         - The memory is shared within the user's organization
-        
+
         Args:
             memory_id: The UUID of the memory to retrieve.
             user_id: The ID of the requesting user.
             organization_id: The organization of the requesting user.
-            
+
         Returns:
             The memory record, or None if not found, deleted, or not accessible.
         """
         query = f"""
             SELECT {self._FULL_COLUMNS}
             FROM memories
-            WHERE id = $1 
+            WHERE id = $1
               AND deleted_at IS NULL
               AND (
                   user_id = $2
@@ -160,17 +160,17 @@ class MemoryRepository:
 
     async def get_individual_memory_for_user(self, user_id: UUID) -> dict[str, Any] | None:
         """Get the individual memory associated with a user.
-        
+
         Args:
             user_id: The user's UUID.
-            
+
         Returns:
             The memory record, or None if not found.
         """
         query = f"""
             SELECT {self._FULL_COLUMNS}
             FROM memories
-            WHERE type = 'individual' 
+            WHERE type = 'individual'
               AND deleted_at IS NULL
               AND user_id = $1
         """
@@ -190,14 +190,14 @@ class MemoryRepository:
         shared: bool,
     ) -> dict[str, Any] | None:
         """Set the shared status of a memory.
-        
+
         Only the owner of the memory can change its shared status.
-        
+
         Args:
             memory_id: The UUID of the memory to update.
             user_id: The ID of the requesting user (must be owner).
             shared: Whether to share (True) or unshare (False) the memory.
-            
+
         Returns:
             The updated memory record, or None if not found or not owned by user.
         """
@@ -227,7 +227,7 @@ class MemoryRepository:
         expected_version: int | None = None,
     ) -> dict[str, Any] | None:
         """Update an existing memory.
-        
+
         Args:
             memory_id: The UUID of the memory to update.
             content: Optional new content.
@@ -237,10 +237,10 @@ class MemoryRepository:
             metadata: Optional new metadata.
             expected_version: If provided, the update only succeeds if the memory's
                 current version matches. Raises VersionConflictError on mismatch.
-            
+
         Returns:
             The updated memory record, or None if not found.
-            
+
         Raises:
             VersionConflictError: If expected_version is provided and doesn't match.
         """
@@ -326,15 +326,15 @@ class MemoryRepository:
         instance_id: str,
     ) -> dict[str, Any] | None:
         """Atomically claim a pending daemon task for a specific instance.
-        
+
         Uses SELECT FOR UPDATE to prevent race conditions between instances.
         Only succeeds if the memory has a 'pending' tag and no existing claim.
         Replaces 'pending' with 'claimed-by-{instance_id}' in the tags array.
-        
+
         Args:
             memory_id: The UUID of the task memory to claim.
             instance_id: The unique identifier of the claiming daemon instance.
-            
+
         Returns:
             The updated memory record if claimed successfully, or None if the
             task was already claimed or is not in a pending state.
@@ -389,14 +389,14 @@ class MemoryRepository:
         instance_id: str | None = None,
     ) -> dict[str, Any] | None:
         """Release a claimed task back to pending state.
-        
+
         If instance_id is provided, only releases if the task is claimed by that
         specific instance. If None, releases any claim.
-        
+
         Args:
             memory_id: The UUID of the task memory to release.
             instance_id: Optional — only release if claimed by this instance.
-            
+
         Returns:
             The updated memory record, or None if not found/not claimed.
         """
@@ -457,10 +457,10 @@ class MemoryRepository:
 
     async def delete(self, memory_id: UUID) -> bool:
         """Soft delete a memory by setting deleted_at timestamp.
-        
+
         Args:
             memory_id: The UUID of the memory to delete.
-            
+
         Returns:
             True if the memory was deleted, False if not found.
         """
@@ -494,11 +494,11 @@ class MemoryRepository:
         requesting_org_id: UUID | None = None,
     ) -> dict[str, Any]:
         """Search for memories with fuzzy matching and filters.
-        
+
         If access control parameters are provided, only returns:
         - Memories owned by the requesting user, OR
         - Memories shared within the requesting user's organization
-        
+
         Args:
             query: Optional fuzzy search query for content.
             username: Optional filter by username.
@@ -513,7 +513,7 @@ class MemoryRepository:
             limit: Maximum results to return.
             requesting_user_id: User ID for access control (if provided, enables access control).
             requesting_org_id: Organization ID for access control.
-            
+
         Returns:
             Search result with memories, total count, and pagination info.
         """
@@ -646,14 +646,14 @@ class MemoryRepository:
         requesting_org_id: UUID | None = None,
     ) -> dict[str, Any]:
         """Search across all text fields: content, tags, and metadata.
-        
+
         This is a broader search that looks at all text in a memory,
         useful when you're not sure which field contains the information.
-        
+
         If access control parameters are provided, only returns:
         - Memories owned by the requesting user, OR
         - Memories shared within the requesting user's organization
-        
+
         Args:
             query: Search query to match against content, tags, and metadata.
             username: Optional filter by username.
@@ -664,7 +664,7 @@ class MemoryRepository:
             limit: Maximum results to return.
             requesting_user_id: User ID for access control (if provided, enables access control).
             requesting_org_id: Organization ID for access control.
-            
+
         Returns:
             Search result with memories, total count, and pagination info.
         """
@@ -765,14 +765,14 @@ class MemoryRepository:
         requesting_org_id: UUID | None = None,
     ) -> list[dict[str, Any]]:
         """Get existing tags with usage counts.
-        
+
         Args:
             username: Optional filter by username.
             type: Optional filter by memory type.
             limit: Maximum number of tags to return (default 50).
             requesting_user_id: User ID for access control (if provided, enables access control).
             requesting_org_id: Organization ID for access control.
-            
+
         Returns:
             List of {tag, count} sorted by count descending.
         """
@@ -824,14 +824,14 @@ class MemoryRepository:
         requesting_org_id: UUID | None = None,
     ) -> list[dict[str, Any]]:
         """Get tag suggestions based on fuzzy matching.
-        
+
         Args:
             query: The partial tag to search for.
             username: Optional filter by username.
             limit: Maximum number of suggestions (default 10).
             requesting_user_id: User ID for access control (if provided, enables access control).
             requesting_org_id: Organization ID for access control.
-            
+
         Returns:
             List of {tag, count, similarity} sorted by similarity descending.
         """
@@ -1106,12 +1106,12 @@ class MemoryRepository:
         conn: asyncpg.Connection | None = None,
     ) -> None:
         """Validate that related memory IDs exist and are not deleted.
-        
+
         Args:
             related_ids: List of UUIDs to validate.
             exclude_id: Optional ID to exclude from check (for self-reference prevention).
             conn: Optional existing connection to reuse (avoids extra pool acquisition).
-            
+
         Raises:
             ValueError: If any IDs are invalid, deleted, or self-referencing.
         """

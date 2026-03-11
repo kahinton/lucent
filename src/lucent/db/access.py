@@ -26,7 +26,7 @@ class AccessRepository:
         context: dict[str, Any] | None = None,
     ) -> None:
         """Log a memory access and update last_accessed_at.
-        
+
         Args:
             memory_id: The UUID of the accessed memory.
             access_type: Type of access ('view' or 'search_result').
@@ -36,7 +36,7 @@ class AccessRepository:
         """
         # Insert access log entry
         log_query = """
-            INSERT INTO memory_access_log 
+            INSERT INTO memory_access_log
                 (memory_id, user_id, organization_id, access_type, context)
             VALUES ($1, $2, $3, $4, $5)
         """
@@ -69,7 +69,7 @@ class AccessRepository:
         context: dict[str, Any] | None = None,
     ) -> None:
         """Log access for multiple memories (e.g., search results).
-        
+
         Args:
             memory_ids: List of memory UUIDs that were accessed.
             access_type: Type of access ('view' or 'search_result').
@@ -88,7 +88,7 @@ class AccessRepository:
             async with conn.transaction():
                 # Batch insert access logs using executemany
                 log_query = """
-                    INSERT INTO memory_access_log 
+                    INSERT INTO memory_access_log
                         (memory_id, user_id, organization_id, access_type, context)
                     VALUES ($1, $2, $3, $4, $5)
                 """
@@ -114,12 +114,12 @@ class AccessRepository:
         offset: int = 0,
     ) -> dict[str, Any]:
         """Get the access history for a specific memory.
-        
+
         Args:
             memory_id: The UUID of the memory.
             limit: Maximum entries to return.
             offset: Pagination offset.
-            
+
         Returns:
             Dict with access entries and pagination info.
         """
@@ -158,11 +158,11 @@ class AccessRepository:
         limit: int = 50,
     ) -> list[dict[str, Any]]:
         """Get the search queries that returned this memory.
-        
+
         Args:
             memory_id: The UUID of the memory.
             limit: Maximum entries to return.
-            
+
         Returns:
             List of search access entries with query context.
         """
@@ -187,12 +187,12 @@ class AccessRepository:
         since: datetime | None = None,
     ) -> list[dict[str, Any]]:
         """Get recent memory access activity for a user.
-        
+
         Args:
             user_id: The UUID of the user.
             limit: Maximum entries to return.
             since: Optional datetime to filter entries after.
-            
+
         Returns:
             List of access entries.
         """
@@ -231,13 +231,13 @@ class AccessRepository:
         limit: int = 20,
     ) -> list[dict[str, Any]]:
         """Get the most frequently accessed memories.
-        
+
         Args:
             organization_id: Optional filter by organization.
             user_id: Optional filter by user.
             since: Optional datetime to count accesses after.
             limit: Maximum results to return.
-            
+
         Returns:
             List of {memory_id, access_count, last_accessed} sorted by access_count.
         """

@@ -3,10 +3,10 @@
 
 def get_memory_system_prompt() -> str:
     """Get the behavioral guidance for using the memory system effectively.
-    
+
     This prompt focuses on WHEN and WHY to use memory, not just HOW.
     It's designed to change behavior, not just provide reference material.
-    
+
     Returns:
         A string containing behavioral guidance for LLMs on becoming
         a genuine collaborator with persistent memory.
@@ -114,7 +114,7 @@ This is better than pretending or guessing.
 ### Importance Levels
 
 - **7-10**: Critical stuff - security issues, major decisions, key user preferences
-- **4-6**: Useful context - standard solutions, project details, minor preferences  
+- **4-6**: Useful context - standard solutions, project details, minor preferences
 - **1-3**: Ephemeral - temporary notes, minor details
 
 Default to 5-6 for most things. Reserve high importance for things that would be painful to forget.
@@ -160,10 +160,10 @@ That's what makes this different."""
 
 def get_memory_system_prompt_short() -> str:
     """Get a condensed version of the memory system guidance.
-    
+
     For contexts with limited prompt space. Focuses on the key behavioral
     triggers while keeping the reference material minimal.
-    
+
     Returns:
         A shorter string with essential behavioral guidance.
     """
@@ -206,7 +206,7 @@ You have persistent memory. Use it to become a real collaborator, not a stateles
 
 def get_user_introduction_prompt() -> str:
     """Get a prompt for starting a conversation with context about the current user.
-    
+
     Returns:
         A simple prompt that retrieves user context first.
     """

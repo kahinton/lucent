@@ -38,7 +38,7 @@ class UserRepository:
         provider_metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Create a new user.
-        
+
         Args:
             external_id: Unique ID from the auth provider.
             provider: Auth provider name (google, github, saml, local).
@@ -47,14 +47,14 @@ class UserRepository:
             display_name: User's display name.
             avatar_url: URL to user's avatar.
             provider_metadata: Provider-specific metadata.
-            
+
         Returns:
             The created user record.
         """
         query = """
             INSERT INTO users (external_id, provider, organization_id, email, display_name, avatar_url, provider_metadata)
             VALUES ($1, $2, $3, $4, $5, $6, $7)
-            RETURNING id, external_id, provider, organization_id, email, display_name, avatar_url, 
+            RETURNING id, external_id, provider, organization_id, email, display_name, avatar_url,
                       provider_metadata, is_active, created_at, updated_at, last_login_at, role
         """
 
@@ -79,12 +79,12 @@ class UserRepository:
 
     async def _create_individual_memory_for_user(self, user: dict[str, Any]) -> dict[str, Any] | None:
         """Create an individual memory record for a user.
-        
+
         This is called automatically when a user is created.
-        
+
         Args:
             user: The user record.
-            
+
         Returns:
             The created memory record, or None if creation failed.
         """
@@ -109,7 +109,7 @@ class UserRepository:
         query = """
             INSERT INTO memories (username, type, content, tags, importance, related_memory_ids, metadata, user_id, organization_id, shared)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, true)
-            RETURNING id, username, type, content, tags, importance, related_memory_ids, metadata, 
+            RETURNING id, username, type, content, tags, importance, related_memory_ids, metadata,
                       created_at, updated_at, deleted_at, user_id, organization_id, shared, last_accessed_at
         """
 
@@ -138,10 +138,10 @@ class UserRepository:
 
     async def _get_individual_memory_for_user(self, user_id: UUID) -> dict[str, Any] | None:
         """Get the individual memory associated with a user.
-        
+
         Args:
             user_id: The user's UUID.
-            
+
         Returns:
             The memory record, or None if not found.
         """
@@ -149,7 +149,7 @@ class UserRepository:
             SELECT id, username, type, content, tags, importance, related_memory_ids, metadata,
                    created_at, updated_at, deleted_at, user_id, organization_id, shared, last_accessed_at
             FROM memories
-            WHERE type = 'individual' 
+            WHERE type = 'individual'
               AND deleted_at IS NULL
               AND user_id = $1
         """
@@ -164,10 +164,10 @@ class UserRepository:
 
     async def get_individual_memory_for_user(self, user_id: UUID) -> dict[str, Any] | None:
         """Public method to get the individual memory associated with a user.
-        
+
         Args:
             user_id: The user's UUID.
-            
+
         Returns:
             The memory record, or None if not found.
         """
@@ -175,17 +175,17 @@ class UserRepository:
 
     async def _soft_delete_individual_memory_for_user(self, user_id: UUID) -> bool:
         """Soft delete the individual memory associated with a user.
-        
+
         Args:
             user_id: The user's UUID.
-            
+
         Returns:
             True if a memory was deleted, False if none found.
         """
         query = """
             UPDATE memories
             SET deleted_at = NOW()
-            WHERE type = 'individual' 
+            WHERE type = 'individual'
               AND deleted_at IS NULL
               AND user_id = $1
             RETURNING id
@@ -198,10 +198,10 @@ class UserRepository:
 
     async def get_by_id(self, user_id: UUID) -> dict[str, Any] | None:
         """Get a user by their internal ID.
-        
+
         Args:
             user_id: The internal UUID of the user.
-            
+
         Returns:
             The user record, or None if not found.
         """
@@ -226,11 +226,11 @@ class UserRepository:
         provider: str
     ) -> dict[str, Any] | None:
         """Get a user by their external ID and provider.
-        
+
         Args:
             external_id: The ID from the auth provider.
             provider: The auth provider name.
-            
+
         Returns:
             The user record, or None if not found.
         """
@@ -260,7 +260,7 @@ class UserRepository:
         provider_metadata: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], bool]:
         """Get an existing user or create a new one.
-        
+
         Args:
             external_id: Unique ID from the auth provider.
             provider: Auth provider name.
@@ -269,7 +269,7 @@ class UserRepository:
             display_name: User's display name.
             avatar_url: URL to user's avatar.
             provider_metadata: Provider-specific metadata.
-            
+
         Returns:
             Tuple of (user record, was_created boolean).
         """
@@ -302,7 +302,7 @@ class UserRepository:
         is_active: bool | None = None,
     ) -> dict[str, Any] | None:
         """Update an existing user.
-        
+
         Args:
             user_id: The internal UUID of the user.
             email: New email address.
@@ -310,7 +310,7 @@ class UserRepository:
             avatar_url: New avatar URL.
             provider_metadata: New provider metadata.
             is_active: New active status.
-            
+
         Returns:
             The updated user record, or None if not found.
         """
@@ -371,9 +371,9 @@ class UserRepository:
 
     async def _sync_individual_memory_for_user(self, user: dict[str, Any]) -> None:
         """Sync the individual memory with updated user information.
-        
+
         Updates the name, email, and role in the individual memory metadata.
-        
+
         Args:
             user: The updated user record.
         """
@@ -421,7 +421,7 @@ class UserRepository:
 
     async def update_last_login(self, user_id: UUID) -> None:
         """Update the last login timestamp for a user.
-        
+
         Args:
             user_id: The internal UUID of the user.
         """
@@ -440,11 +440,11 @@ class UserRepository:
         new_role: str,
     ) -> dict[str, Any] | None:
         """Update a user's role.
-        
+
         Args:
             user_id: The internal UUID of the user.
             new_role: The new role (member, admin, owner).
-            
+
         Returns:
             The updated user record, or None if not found.
         """
@@ -475,11 +475,11 @@ class UserRepository:
         role: str | None = None,
     ) -> list[dict[str, Any]]:
         """Get all users in an organization.
-        
+
         Args:
             organization_id: The organization UUID.
             role: Optional filter by role.
-            
+
         Returns:
             List of user records.
         """
@@ -508,13 +508,13 @@ class UserRepository:
 
     async def delete(self, user_id: UUID) -> bool:
         """Permanently delete a user.
-        
+
         Note: This will first soft-delete the associated individual memory,
         then permanently delete the user record.
-        
+
         Args:
             user_id: The internal UUID of the user.
-            
+
         Returns:
             True if the user was deleted, False if not found.
         """

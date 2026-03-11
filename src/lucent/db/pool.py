@@ -21,10 +21,10 @@ _pool: Pool | None = None
 
 async def init_db(database_url: str | None = None) -> Pool:
     """Initialize the database connection pool and run migrations.
-    
+
     Args:
         database_url: PostgreSQL connection URL. If not provided, uses DATABASE_URL env var.
-        
+
     Returns:
         The initialized connection pool.
     """
@@ -74,7 +74,7 @@ async def _init_connection(conn: Connection) -> None:
 
 async def _run_migrations(pool: Pool) -> None:
     """Run SQL migration files in order, tracking which have been applied.
-    
+
     Uses a `_migrations` table to record applied migrations and skip
     previously-run files. This prevents re-executing non-idempotent
     statements on every startup.
@@ -119,10 +119,10 @@ async def _run_migrations(pool: Pool) -> None:
 
 async def get_pool() -> Pool:
     """Get the database connection pool.
-    
+
     Returns:
         The active connection pool.
-        
+
     Raises:
         RuntimeError: If the pool has not been initialized.
     """

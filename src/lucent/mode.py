@@ -26,7 +26,7 @@ class DeploymentMode(str, Enum):
 @lru_cache(maxsize=1)
 def get_mode() -> DeploymentMode:
     """Get the current deployment mode.
-    
+
     Returns:
         The configured DeploymentMode, defaulting to PERSONAL.
     """
@@ -75,10 +75,10 @@ def is_team_mode() -> bool:
 
 def require_team_mode(feature_name: str) -> None:
     """Raise an error if a team-only feature is accessed in personal mode.
-    
+
     Args:
         feature_name: Name of the feature for the error message.
-        
+
     Raises:
         PermissionError: If not in team mode.
     """

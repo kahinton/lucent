@@ -18,10 +18,10 @@ class OrganizationRepository:
 
     async def create(self, name: str) -> dict[str, Any]:
         """Create a new organization.
-        
+
         Args:
             name: The organization name.
-            
+
         Returns:
             The created organization record.
         """
@@ -38,10 +38,10 @@ class OrganizationRepository:
 
     async def get_by_id(self, org_id: UUID) -> dict[str, Any] | None:
         """Get an organization by ID.
-        
+
         Args:
             org_id: The UUID of the organization.
-            
+
         Returns:
             The organization record, or None if not found.
         """
@@ -61,10 +61,10 @@ class OrganizationRepository:
 
     async def get_by_name(self, name: str) -> dict[str, Any] | None:
         """Get an organization by name.
-        
+
         Args:
             name: The organization name.
-            
+
         Returns:
             The organization record, or None if not found.
         """
@@ -84,10 +84,10 @@ class OrganizationRepository:
 
     async def get_or_create(self, name: str) -> tuple[dict[str, Any], bool]:
         """Get an existing organization or create a new one.
-        
+
         Args:
             name: The organization name.
-            
+
         Returns:
             Tuple of (organization record, was_created boolean).
         """
@@ -100,11 +100,11 @@ class OrganizationRepository:
 
     async def update(self, org_id: UUID, name: str) -> dict[str, Any] | None:
         """Update an organization's name.
-        
+
         Args:
             org_id: The UUID of the organization.
             name: The new name.
-            
+
         Returns:
             The updated organization record, or None if not found.
         """
@@ -125,12 +125,12 @@ class OrganizationRepository:
 
     async def delete(self, org_id: UUID) -> bool:
         """Permanently delete an organization.
-        
+
         Note: This will cascade delete all users and their memories.
-        
+
         Args:
             org_id: The UUID of the organization.
-            
+
         Returns:
             True if deleted, False if not found.
         """
@@ -147,11 +147,11 @@ class OrganizationRepository:
 
     async def list_all(self, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
         """List all organizations.
-        
+
         Args:
             limit: Maximum number to return.
             offset: Pagination offset.
-            
+
         Returns:
             List of organization records.
         """
@@ -173,11 +173,11 @@ class OrganizationRepository:
         limit: int = 20,
     ) -> dict[str, Any]:
         """List all organizations with pagination.
-        
+
         Args:
             offset: Pagination offset.
             limit: Maximum number to return.
-            
+
         Returns:
             Dict with organizations list and pagination info.
         """

@@ -32,10 +32,10 @@ logger = get_logger("tools.memories")
 
 def _error_response(message: str) -> str:
     """Create a consistent JSON error response for MCP tools.
-    
+
     Args:
         message: The error message to include.
-        
+
     Returns:
         JSON string with {"error": message} format.
     """
@@ -52,7 +52,7 @@ async def _get_current_user_id() -> UUID | None:
 
 async def _get_current_user_context() -> tuple[UUID | None, UUID | None, str | None]:
     """Get the current user ID, organization ID, and role.
-    
+
     Returns:
         Tuple of (user_id, organization_id, role), any may be None.
     """
@@ -64,7 +64,7 @@ async def _get_current_user_context() -> tuple[UUID | None, UUID | None, str | N
 
 def _get_current_username() -> str | None:
     """Get the current user's display name or username.
-    
+
     Returns:
         The user's display_name, email, username, or None if not authenticated.
     """
@@ -76,7 +76,7 @@ def _get_current_username() -> str | None:
 
 def _get_audit_context() -> dict[str, Any]:
     """Get the audit context including API key ID if authenticated via API key.
-    
+
     Returns:
         Dict with auth_method and optional api_key_id.
     """
@@ -91,12 +91,12 @@ def _get_audit_context() -> dict[str, Any]:
 
 def _build_snapshot(memory: dict[str, Any]) -> dict[str, Any]:
     """Build a full snapshot of a memory's state for versioning.
-    
+
     Captures all mutable fields so the memory can be restored to this exact state.
-    
+
     Args:
         memory: The memory dict to snapshot.
-        
+
     Returns:
         A JSON-serializable snapshot dict.
     """
@@ -261,7 +261,7 @@ Returns:
         """Retrieve a memory by its ID.
 
         Returns the memory only if you own it or it's shared within your organization.
-        
+
         For retrieving multiple memories at once, use get_memories instead.
 
         Args:

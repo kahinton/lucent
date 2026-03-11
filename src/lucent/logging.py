@@ -38,7 +38,7 @@ _UNSET = object()
 
 def set_correlation_id(cid: str | None = _UNSET) -> str | None:
     """Set a correlation ID in context. Generates one if not provided.
-    
+
     Pass None explicitly to clear the correlation ID.
     """
     if cid is _UNSET:

@@ -133,7 +133,7 @@ async def get_user(
     user: AuthenticatedUser,
 ) -> UserResponse:
     """Get a user by ID.
-    
+
     Users can view others in their organization.
     """
     user.require_permission(Permission.USERS_VIEW)
@@ -168,7 +168,7 @@ async def create_user(
     user: AdminUser,  # Requires admin role
 ) -> UserResponse:
     """Create a new user in the organization.
-    
+
     Requires admin or owner role.
     """
     user.require_permission(Permission.USERS_INVITE)
@@ -225,7 +225,7 @@ async def update_user(
     user: AdminUser,  # Requires admin role
 ) -> UserResponse:
     """Update a user's profile.
-    
+
     Requires admin or owner role.
     """
     user.require_permission(Permission.USERS_MANAGE)
@@ -283,7 +283,7 @@ async def update_user_role(
     user: AdminUser,  # Requires admin role
 ) -> UserResponse:
     """Update a user's role.
-    
+
     Requires admin or owner role.
     Admins can only set member role.
     Owners can set any role.
@@ -352,7 +352,7 @@ async def delete_user(
     user: AdminUser,  # Requires admin role
 ) -> SuccessResponse:
     """Delete a user from the organization.
-    
+
     Requires admin or owner role.
     This will also delete all of the user's memories.
     """

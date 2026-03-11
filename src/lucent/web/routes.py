@@ -80,7 +80,7 @@ templates.env.globals["csrf_field_name"] = CSRF_FIELD_NAME
 
 def _get_csrf_for_request(request: Request) -> str:
     """Get or generate a CSRF token for a request.
-    
+
     Reuses the token from the cookie if valid, otherwise generates a new one.
     """
     existing = request.cookies.get(CSRF_COOKIE_NAME)
@@ -237,7 +237,7 @@ def _build_metadata_from_form(
 
 async def _check_csrf(request: Request, form_token: str | None = None) -> None:
     """Verify CSRF token: form field must match cookie.
-    
+
     Uses the double-submit cookie pattern: the cookie value must match
     the form field value. No signing or secrets involved.
     """
@@ -267,7 +267,7 @@ async def _check_csrf(request: Request, form_token: str | None = None) -> None:
 
 async def get_user_context(request: Request) -> CurrentUser:
     """Get the current user for web routes via session cookie.
-    
+
     Validates the session cookie and returns a CurrentUser.
     Raises HTTPException(303) to redirect to login if not authenticated.
     Also handles impersonation via cookie (team mode only).
@@ -1489,8 +1489,8 @@ async def memory_share(request: Request, memory_id: UUID):
     # Return updated button for HTMX
     if request.headers.get("HX-Request"):
         return HTMLResponse(
-            f'''<button 
-                hx-post="/memories/{memory_id}/share" 
+            f'''<button
+                hx-post="/memories/{memory_id}/share"
                 hx-swap="outerHTML"
                 class="btn {'btn-warning' if new_shared else 'btn-primary'}">
                 {'Unshare' if new_shared else 'Share'}
@@ -1861,7 +1861,7 @@ def _encode_pending_key(key_id: str, plain_key: str) -> str:
 
 def _decode_pending_key(signed: str) -> tuple[str, str] | None:
     """Decode and verify a signed API key string.
-    
+
     Returns:
         Tuple of (key_id, plain_key) or None if invalid.
     """

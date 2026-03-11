@@ -159,11 +159,11 @@ ROLE_PERMISSIONS: dict[Role, set[Permission]] = {
 
 def has_permission(role: Role | str, permission: Permission) -> bool:
     """Check if a role has a specific permission.
-    
+
     Args:
         role: The user's role (Role enum or string).
         permission: The permission to check.
-        
+
     Returns:
         True if the role has the permission, False otherwise.
     """
@@ -175,16 +175,16 @@ def has_permission(role: Role | str, permission: Permission) -> bool:
 
 def can_manage_user(manager_role: Role | str, target_role: Role | str) -> bool:
     """Check if a user with manager_role can manage a user with target_role.
-    
+
     Rules:
     - Owner can manage anyone
     - Admin can manage members but not other admins or owners
     - Member cannot manage anyone
-    
+
     Args:
         manager_role: Role of the user trying to manage.
         target_role: Role of the user being managed.
-        
+
     Returns:
         True if management is allowed, False otherwise.
     """
@@ -210,16 +210,16 @@ def can_manage_user(manager_role: Role | str, target_role: Role | str) -> bool:
 
 def can_assign_role(assigner_role: Role | str, new_role: Role | str) -> bool:
     """Check if a user can assign a specific role to another user.
-    
+
     Rules:
     - Owner can assign any role (including promoting to owner for transfer)
     - Admin can only assign member role
     - Member cannot assign roles
-    
+
     Args:
         assigner_role: Role of the user assigning the role.
         new_role: The role being assigned.
-        
+
     Returns:
         True if role assignment is allowed, False otherwise.
     """
@@ -258,11 +258,11 @@ class RBACPermissionError(Exception):
 
 def require_permission(role: Role | str, permission: Permission) -> None:
     """Raise RBACPermissionError if the role doesn't have the permission.
-    
+
     Args:
         role: The user's role.
         permission: The required permission.
-        
+
     Raises:
         RBACPermissionError: If the role doesn't have the permission.
     """
@@ -275,10 +275,10 @@ def require_permission(role: Role | str, permission: Permission) -> None:
 
 def get_user_permissions(role: Role | str) -> set[Permission]:
     """Get all permissions for a role.
-    
+
     Args:
         role: The user's role.
-        
+
     Returns:
         Set of permissions the role has.
     """
@@ -297,7 +297,7 @@ def check_memory_access(
     memory_shared: bool,
 ) -> bool:
     """Check if a user can access a specific memory.
-    
+
     Args:
         user_id: The user trying to access the memory.
         user_role: The user's role.
@@ -305,7 +305,7 @@ def check_memory_access(
         memory_owner_id: The memory owner's user ID.
         memory_org_id: The memory's organization ID.
         memory_shared: Whether the memory is shared with the org.
-        
+
     Returns:
         True if access is allowed, False otherwise.
     """

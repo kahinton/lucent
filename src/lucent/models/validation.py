@@ -35,14 +35,14 @@ METADATA_MODELS_BY_STR = {
 
 def validate_metadata(memory_type: str | MemoryType, metadata: dict[str, Any] | None) -> dict[str, Any]:
     """Validate and normalize metadata for a given memory type.
-    
+
     Args:
         memory_type: The type of memory (string or MemoryType enum).
         metadata: The metadata dict to validate. Can be None or empty.
-        
+
     Returns:
         Validated and normalized metadata dict.
-        
+
     Raises:
         ValueError: If the memory type is invalid or metadata doesn't match the schema.
     """
@@ -81,15 +81,15 @@ def validate_metadata(memory_type: str | MemoryType, metadata: dict[str, Any] | 
 
 def get_metadata_schema(memory_type: str | MemoryType) -> dict[str, Any]:
     """Get the JSON schema for a memory type's metadata.
-    
+
     Useful for documentation and client-side validation.
-    
+
     Args:
         memory_type: The type of memory.
-        
+
     Returns:
         JSON schema dict for the metadata model.
-        
+
     Raises:
         ValueError: If the memory type is invalid.
     """
@@ -108,15 +108,15 @@ def get_metadata_schema(memory_type: str | MemoryType) -> dict[str, Any]:
 
 def get_metadata_field_descriptions(memory_type: str | MemoryType) -> dict[str, str]:
     """Get field descriptions for a memory type's metadata.
-    
+
     Useful for UI hints and documentation.
-    
+
     Args:
         memory_type: The type of memory.
-        
+
     Returns:
         Dict mapping field names to their descriptions.
-        
+
     Raises:
         ValueError: If the memory type is invalid.
     """
@@ -197,10 +197,10 @@ def _is_field_required(field_info: FieldInfo) -> bool:
 
 def generate_metadata_docs_for_type(memory_type: str) -> str:
     """Generate LLM-friendly documentation for a single memory type's metadata.
-    
+
     Args:
         memory_type: The memory type string.
-        
+
     Returns:
         Formatted documentation string for this type's metadata.
     """
@@ -225,10 +225,10 @@ def generate_metadata_docs_for_type(memory_type: str) -> str:
 
 def generate_all_metadata_docs() -> str:
     """Generate complete metadata documentation for all memory types.
-    
+
     This is auto-generated from the Pydantic models, so it stays in sync
     with the actual validation rules.
-    
+
     Returns:
         Complete documentation string for the create_memory tool.
     """

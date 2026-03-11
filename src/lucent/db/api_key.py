@@ -32,18 +32,18 @@ class ApiKeyRepository:
         expires_at: datetime | None = None,
     ) -> tuple[dict[str, Any], str]:
         """Create a new API key.
-        
+
         Args:
             user_id: The user who owns this key.
             organization_id: The organization the key belongs to.
             name: User-provided name for the key.
             scopes: Permission scopes (default: ['read', 'write']).
             expires_at: Optional expiration datetime.
-            
+
         Returns:
             Tuple of (api_key record, plain_text_key).
             The plain text key is only returned once at creation time.
-            
+
         Raises:
             ValueError: If a key with this name already exists for this user.
         """
@@ -63,7 +63,7 @@ class ApiKeyRepository:
         query = """
             INSERT INTO api_keys (user_id, organization_id, name, key_prefix, key_hash, scopes, expires_at)
             VALUES ($1, $2, $3, $4, $5, $6, $7)
-            RETURNING id, user_id, organization_id, name, key_prefix, scopes, 
+            RETURNING id, user_id, organization_id, name, key_prefix, scopes,
                       last_used_at, use_count, expires_at, is_active, created_at, updated_at
         """
 
@@ -85,11 +85,11 @@ class ApiKeyRepository:
 
     async def get_by_name(self, user_id: UUID, name: str) -> dict[str, Any] | None:
         """Get an active API key by name for a user.
-        
+
         Args:
             user_id: The user ID.
             name: The key name.
-            
+
         Returns:
             The API key record, or None if not found.
         """
@@ -110,10 +110,10 @@ class ApiKeyRepository:
 
     async def verify(self, plain_key: str) -> dict[str, Any] | None:
         """Verify an API key and return the associated record.
-        
+
         Args:
             plain_key: The plain text API key to verify.
-            
+
         Returns:
             The API key record with user info if valid, None otherwise.
         """
@@ -124,13 +124,13 @@ class ApiKeyRepository:
 
         # Find all active keys with this prefix (prefix collisions are possible)
         query = """
-            SELECT ak.id, ak.user_id, ak.organization_id, ak.name, ak.key_prefix, 
-                   ak.key_hash, ak.scopes, ak.last_used_at, ak.use_count, 
+            SELECT ak.id, ak.user_id, ak.organization_id, ak.name, ak.key_prefix,
+                   ak.key_hash, ak.scopes, ak.last_used_at, ak.use_count,
                    ak.expires_at, ak.is_active, ak.created_at, ak.updated_at,
                    u.email as user_email, u.display_name as user_display_name, u.role as user_role
             FROM api_keys ak
             JOIN users u ON ak.user_id = u.id
-            WHERE ak.key_prefix = $1 
+            WHERE ak.key_prefix = $1
               AND ak.is_active = true
               AND ak.revoked_at IS NULL
               AND u.is_active = true
@@ -175,10 +175,10 @@ class ApiKeyRepository:
 
     async def list_by_user(self, user_id: UUID) -> list[dict[str, Any]]:
         """List all API keys for a user.
-        
+
         Args:
             user_id: The user ID.
-            
+
         Returns:
             List of API key records (without hashes).
         """
@@ -197,11 +197,11 @@ class ApiKeyRepository:
 
     async def get_by_id(self, key_id: UUID, user_id: UUID) -> dict[str, Any] | None:
         """Get an API key by ID (must belong to user).
-        
+
         Args:
             key_id: The API key ID.
             user_id: The user ID (for ownership check).
-            
+
         Returns:
             The API key record, or None if not found.
         """
@@ -222,11 +222,11 @@ class ApiKeyRepository:
 
     async def revoke(self, key_id: UUID, user_id: UUID) -> bool:
         """Revoke an API key.
-        
+
         Args:
             key_id: The API key ID.
             user_id: The user ID (for ownership check).
-            
+
         Returns:
             True if revoked, False if not found.
         """
@@ -246,12 +246,12 @@ class ApiKeyRepository:
 
     async def update_name(self, key_id: UUID, user_id: UUID, name: str) -> dict[str, Any] | None:
         """Update an API key's name.
-        
+
         Args:
             key_id: The API key ID.
             user_id: The user ID (for ownership check).
             name: The new name.
-            
+
         Returns:
             The updated API key record, or None if not found.
         """

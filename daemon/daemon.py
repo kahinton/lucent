@@ -823,7 +823,7 @@ class LucentDaemon:
 
     async def _multi_model_review(self, memory_id: str, agent_type: str, task_content: str, result: str) -> bool:
         """Run the task result through multiple models for review.
-        
+
         Each review model evaluates the result independently. All must approve
         for the review to pass. Returns True if all models approve.
         """
@@ -878,7 +878,7 @@ Respond with EXACTLY one of:
 
     async def run_autonomic(self):
         """Run autonomic background task — memory maintenance.
-        
+
         Runs every N cycles without cognitive involvement.
         """
         log("Running autonomic: memory maintenance")
@@ -895,7 +895,7 @@ Respond with EXACTLY one of:
 
     async def run_learning_extraction(self):
         """Run autonomic learning extraction — process recent results into reusable lessons.
-        
+
         Runs every LEARNING_INTERVAL cycles without cognitive involvement.
         """
         log("Running autonomic: learning extraction")

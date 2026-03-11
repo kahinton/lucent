@@ -45,7 +45,7 @@ async def get_memory_audit_log(
     limit: int = Query(default=50, ge=1, le=100),
 ) -> AuditLogResponse:
     """Get audit log for a specific memory.
-    
+
     Users can view audit logs for their own memories.
     Admins can view audit logs for any memory in their organization.
     """
@@ -91,7 +91,7 @@ async def get_user_audit_log(
     limit: int = Query(default=50, ge=1, le=100),
 ) -> AuditLogResponse:
     """Get audit log for a specific user's actions.
-    
+
     Users can view their own audit logs.
     Admins can view audit logs for any user in their organization.
     """
@@ -135,7 +135,7 @@ async def get_organization_audit_log(
     limit: int = Query(default=100, ge=1, le=500),
 ) -> AuditLogResponse:
     """Get audit log for the entire organization.
-    
+
     Requires admin or owner role.
     """
     if not user.organization_id:
@@ -175,7 +175,7 @@ async def get_recent_audit_entries(
     limit: int = Query(default=100, ge=1, le=500),
 ) -> list[AuditLogEntry]:
     """Get recent audit entries for monitoring.
-    
+
     Requires admin or owner role.
     """
     pool = await get_pool()

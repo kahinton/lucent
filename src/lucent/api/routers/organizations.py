@@ -72,7 +72,7 @@ async def update_current_organization(
     user: OwnerUser,  # Requires owner role
 ) -> OrganizationResponse:
     """Update the current organization's settings.
-    
+
     Requires owner role.
     """
     user.require_permission(Permission.ORG_UPDATE)
@@ -110,7 +110,7 @@ async def create_organization(
     user: OwnerUser,
 ) -> OrganizationResponse:
     """Create a new organization.
-    
+
     Requires owner role.
     """
     pool = await get_pool()
@@ -138,7 +138,7 @@ async def get_organization(
     user: AuthenticatedUser,
 ) -> OrganizationResponse:
     """Get an organization by ID.
-    
+
     Users can only view their own organization.
     """
     # Only allow viewing own organization
@@ -171,7 +171,7 @@ async def list_organizations(
     limit: int = Query(default=20, ge=1, le=100),
 ) -> OrganizationListResponse:
     """List all organizations.
-    
+
     Requires owner role.
     """
     pool = await get_pool()
@@ -196,12 +196,12 @@ async def delete_current_organization(
     user: OwnerUser,  # Requires owner role
 ) -> SuccessResponse:
     """Delete the current organization.
-    
+
     Requires owner role. This will delete:
     - All organization memories
     - All organization users
     - The organization itself
-    
+
     This action cannot be undone.
     """
     user.require_permission(Permission.ORG_DELETE)
@@ -239,7 +239,7 @@ async def transfer_ownership(
     user: OwnerUser,  # Requires owner role
 ) -> SuccessResponse:
     """Transfer organization ownership to another user.
-    
+
     Requires owner role. The new owner must be a member of the organization.
     The current owner will be demoted to admin.
     """

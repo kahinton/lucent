@@ -31,11 +31,11 @@ class RateLimitBucket:
 
     def check_and_record(self, limit: int, window_seconds: int) -> tuple[bool, int, int]:
         """Check if request is allowed and record it if so.
-        
+
         Args:
             limit: Maximum requests allowed in the window.
             window_seconds: Size of the sliding window in seconds.
-            
+
         Returns:
             Tuple of (allowed, remaining, reset_timestamp).
         """
@@ -65,11 +65,11 @@ class RateLimitBucket:
 
 class RateLimiter:
     """In-memory rate limiter using sliding window algorithm.
-    
+
     Coroutine-safe implementation suitable for single-process async deployments.
     Not thread-safe — relies on the asyncio event loop being single-threaded.
     For multi-worker or distributed deployments, consider upgrading to Redis.
-    
+
     Usage:
         limiter = RateLimiter()
         allowed, headers = limiter.check_rate_limit(api_key_id)
@@ -88,7 +88,7 @@ class RateLimiter:
         window_seconds: int = 60,
     ):
         """Initialize the rate limiter.
-        
+
         Args:
             requests_per_minute: Max requests per minute. Defaults to LUCENT_RATE_LIMIT_PER_MINUTE
                                  env var or 100.
@@ -105,11 +105,11 @@ class RateLimiter:
         self, api_key_id: UUID, scopes: list[str] | None = None,
     ) -> RateLimitResult:
         """Check if a request from an API key is allowed.
-        
+
         Args:
             api_key_id: The UUID of the API key making the request.
             scopes: API key scopes, used to determine per-scope rate limits.
-            
+
         Returns:
             RateLimitResult with allowed status and headers to include in response.
         """
@@ -143,10 +143,10 @@ class RateLimiter:
 
     def cleanup_expired(self) -> int:
         """Remove expired buckets that have no recent requests.
-        
+
         Call this periodically to prevent memory growth.
         Returns the number of buckets removed.
-        
+
         Returns:
             Number of buckets cleaned up.
         """
@@ -169,9 +169,9 @@ class RateLimiter:
 
     def reset(self, api_key_id: UUID) -> None:
         """Reset rate limit for a specific API key.
-        
+
         Useful for testing or manual intervention.
-        
+
         Args:
             api_key_id: The API key to reset.
         """
@@ -180,10 +180,10 @@ class RateLimiter:
 
     def get_usage(self, api_key_id: UUID) -> dict[str, int]:
         """Get current usage stats for an API key.
-        
+
         Args:
             api_key_id: The API key to check.
-            
+
         Returns:
             Dict with 'used', 'limit', and 'remaining' counts.
         """
@@ -209,7 +209,7 @@ _rate_limiter: RateLimiter | None = None
 
 def get_rate_limiter() -> RateLimiter:
     """Get the global rate limiter instance.
-    
+
     Creates one if it doesn't exist.
     """
     global _rate_limiter

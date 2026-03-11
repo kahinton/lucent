@@ -42,14 +42,14 @@ logger = get_logger("server")
 
 class MCPAuthMiddleware:
     """Pure ASGI middleware to handle authentication for MCP requests.
-    
+
     Uses pure ASGI instead of BaseHTTPMiddleware to preserve ContextVar across
     the request lifecycle. BaseHTTPMiddleware runs call_next in a thread pool
     which breaks ContextVar propagation.
-    
+
     API key authentication is ALWAYS required for MCP access, even in dev mode.
     Dev mode only bypasses auth for the web UI, not for programmatic access.
-    
+
     Only applies to /mcp routes - other routes pass through unmodified.
     """
 
@@ -185,7 +185,7 @@ class MCPAuthMiddleware:
 @mcp.prompt()
 def memory_usage_guide() -> str:
     """Get comprehensive guidance on how to effectively use the memory system.
-    
+
     This prompt provides detailed instructions on memory types, importance ratings,
     best practices for creating and searching memories, and example usage patterns.
     """
@@ -195,7 +195,7 @@ def memory_usage_guide() -> str:
 @mcp.prompt()
 def memory_usage_guide_short() -> str:
     """Get a condensed guide on memory system usage.
-    
+
     A shorter version of the memory usage guide for contexts with limited prompt space.
     """
     return get_memory_system_prompt_short()
@@ -204,13 +204,13 @@ def memory_usage_guide_short() -> str:
 @mcp.prompt()
 def user_introduction() -> str:
     """Get guidance for greeting users and personalizing interactions.
-    
+
     This prompt walks you through:
     1. Checking if the user is new or returning (via individual memories)
     2. Greeting them appropriately - warmly if returning, introductory if new
     3. Learning about their preferences, working style, and communication style
     4. Storing what you learn for personalized future interactions
-    
+
     Use this at the start of conversations to make interactions feel like
     working with an actual teammate who remembers and knows the user.
     """
@@ -219,7 +219,7 @@ def user_introduction() -> str:
 
 def get_mcp_app():
     """Get the raw MCP Starlette app.
-    
+
     Returns the MCP app (auth is handled by wrapping the entire FastAPI app).
     """
     return mcp.streamable_http_app()

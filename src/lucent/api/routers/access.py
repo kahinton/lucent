@@ -42,7 +42,7 @@ async def get_memory_access_history(
     limit: int = Query(default=50, ge=1, le=100),
 ) -> AccessLogResponse:
     """Get access history for a specific memory.
-    
+
     Users can view access history for their own memories.
     Admins can view access history for any memory in their organization.
     """
@@ -83,7 +83,7 @@ async def get_memory_search_history(
     limit: int = Query(default=50, ge=1, le=100),
 ) -> list[AccessLogEntry]:
     """Get search queries that returned a specific memory.
-    
+
     Useful for understanding how memories are being discovered.
     """
     pool = await get_pool()
@@ -114,7 +114,7 @@ async def get_user_access_activity(
     limit: int = Query(default=100, ge=1, le=500),
 ) -> list[AccessLogEntry]:
     """Get memory access activity for a user.
-    
+
     Users can view their own activity.
     Admins can view activity for any user in their organization.
     """
@@ -149,7 +149,7 @@ async def get_most_accessed_memories(
     organization_wide: bool = Query(default=False, description="Include all org members (admin only)"),
 ) -> list[MostAccessedItem]:
     """Get the most frequently accessed memories.
-    
+
     By default, shows only your own accesses.
     Admins can set organization_wide=true to see org-wide stats.
     """
@@ -195,7 +195,7 @@ async def get_organization_access_activity(
     limit: int = Query(default=100, ge=1, le=500),
 ) -> list[AccessLogEntry]:
     """Get recent memory access activity for the organization.
-    
+
     Requires admin or owner role.
     """
     if not user.organization_id:

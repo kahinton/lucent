@@ -48,7 +48,7 @@ SIGNING_SECRET = os.environ.get("LUCENT_SIGNING_SECRET", secrets.token_urlsafe(3
 
 def get_cookie_params() -> dict:
     """Get common cookie security parameters.
-    
+
     Returns:
         Dict with httponly, samesite, secure, path keys.
     """
@@ -73,7 +73,7 @@ def validate_csrf_token(token: str | None) -> bool:
 
 def sign_value(value: str) -> str:
     """Sign a value with HMAC for tamper detection.
-    
+
     Used for the impersonation cookie to prevent forgery.
     """
     signature = hmac.new(

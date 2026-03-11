@@ -32,7 +32,7 @@ class AuditRepository:
         snapshot: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Create an audit log entry.
-        
+
         Args:
             memory_id: The UUID of the affected memory.
             action_type: Type of action (create, update, delete, etc.).
@@ -45,13 +45,13 @@ class AuditRepository:
             notes: Optional notes about the action.
             version: The version number this entry represents.
             snapshot: Full memory state at this version (for point-in-time restore).
-            
+
         Returns:
             The created audit log entry.
         """
         query = """
-            INSERT INTO memory_audit_log 
-                (memory_id, user_id, organization_id, action_type, 
+            INSERT INTO memory_audit_log
+                (memory_id, user_id, organization_id, action_type,
                  changed_fields, old_values, new_values, context, notes,
                  version, snapshot)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
@@ -85,12 +85,12 @@ class AuditRepository:
         offset: int = 0,
     ) -> dict[str, Any]:
         """Get all audit entries for a specific memory.
-        
+
         Args:
             memory_id: The UUID of the memory.
             limit: Maximum entries to return.
             offset: Pagination offset.
-            
+
         Returns:
             Dict with entries list and pagination info.
         """
@@ -135,14 +135,14 @@ class AuditRepository:
         offset: int = 0,
     ) -> dict[str, Any]:
         """Get all audit entries for actions by a specific user.
-        
+
         Args:
             user_id: The UUID of the user.
             action_type: Optional filter by action type.
             since: Optional filter to entries after this time.
             limit: Maximum entries to return.
             offset: Pagination offset.
-            
+
         Returns:
             Dict with entries list and pagination info.
         """
@@ -159,14 +159,14 @@ class AuditRepository:
         offset: int = 0,
     ) -> dict[str, Any]:
         """Get all audit entries for an organization.
-        
+
         Args:
             organization_id: The UUID of the organization.
             action_type: Optional filter by action type.
             since: Optional filter to entries after this time.
             limit: Maximum entries to return.
             offset: Pagination offset.
-            
+
         Returns:
             Dict with entries list and pagination info.
         """
@@ -184,9 +184,9 @@ class AuditRepository:
         offset: int = 0,
     ) -> dict[str, Any]:
         """Get paginated audit entries filtered by a primary column.
-        
+
         Shared implementation for get_by_user_id and get_by_organization_id.
-        
+
         Args:
             filter_column: Column to filter on (must be in _FILTERABLE_COLUMNS).
             filter_value: UUID value to match.
@@ -194,7 +194,7 @@ class AuditRepository:
             since: Optional filter to entries after this time.
             limit: Maximum entries to return.
             offset: Pagination offset.
-            
+
         Returns:
             Dict with entries list and pagination info.
         """
@@ -256,15 +256,15 @@ class AuditRepository:
         limit: int = 100,
     ) -> list[dict[str, Any]]:
         """Get recent audit entries, optionally filtered.
-        
+
         Useful for admin dashboards and monitoring.
-        
+
         Args:
             organization_id: Optional filter by organization.
             action_types: Optional filter by action types.
             since: Optional datetime to get entries after.
             limit: Maximum entries to return.
-            
+
         Returns:
             List of recent audit entries.
         """
@@ -313,15 +313,15 @@ class AuditRepository:
         offset: int = 0,
     ) -> dict[str, Any]:
         """Get version history for a specific memory.
-        
+
         Returns audit entries that have a version number, ordered by
         version descending (newest first).
-        
+
         Args:
             memory_id: The UUID of the memory.
             limit: Maximum entries to return.
             offset: Pagination offset.
-            
+
         Returns:
             Dict with versions list and pagination info.
         """
@@ -361,11 +361,11 @@ class AuditRepository:
         version: int,
     ) -> dict[str, Any] | None:
         """Get the snapshot for a specific version of a memory.
-        
+
         Args:
             memory_id: The UUID of the memory.
             version: The version number to retrieve.
-            
+
         Returns:
             The audit entry with snapshot, or None if not found.
         """
