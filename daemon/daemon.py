@@ -670,28 +670,17 @@ class LucentDaemon:
         if len(stripped) < 100:
             return False, f"output too short ({len(stripped)} chars)"
 
+        # For substantial output (1000+ chars), trust it — the agent did real work
+        # even if it mentioned limitations along the way
+        if len(stripped) >= 1000:
+            return True, "ok"
+
+        # For shorter output, check if it's mostly a failure message
         failure_indicators = [
-            "couldn't find",
-            "could not find",
-            "unable to",
-            "failed to",
-            "i don't have",
-            "i do not have",
-            "no context",
-            "not found",
-            "cannot locate",
-            "couldn't locate",
-            "could not locate",
-            "no relevant",
-            "no matching",
-            "i wasn't able",
-            "i was not able",
-            "error occurred",
-            "exception occurred",
-            "task not completed",
-            "cannot complete",
-            "couldn't complete",
-            "could not complete",
+            "couldn't find", "could not find", "unable to", "failed to",
+            "i don't have", "i do not have", "no context",
+            "cannot complete", "couldn't complete", "could not complete",
+            "task not completed", "error occurred", "exception occurred",
         ]
 
         result_lower = result.lower()
