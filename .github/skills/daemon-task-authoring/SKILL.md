@@ -5,65 +5,106 @@ description: 'Guide creation of well-structured daemon tasks — clear descripti
 
 # Daemon Task Authoring
 
-Code review skill for python/fastapi projects.
+How to create daemon tasks that get picked up, executed successfully, and pass validation.
 
 ## When to Use
 
-- Reviewing pull requests or code changes
-- Evaluating code quality during development
-- Performing security-focused code review
-- Checking for python-specific anti-patterns
+- Creating daemon tasks via API (`POST /api/daemon/tasks`) or memory
+- Reviewing why tasks failed validation or produced poor results
+- Calibrating task priority for the cognitive cycle queue
 
-## Review Process
+## Task Structure
 
-### Step 1: Understand the Change
+A daemon task is a memory with tags `["daemon-task", "pending", "<agent_type>"]` and these fields:
 
-1. Read the PR description or task context
-2. Identify what files changed and why
-3. Check if there are related tests
+| Field | Required | Notes |
+|-------|----------|-------|
+| `description` | Yes | The full instructions for the sub-agent. Must be self-contained. |
+| `agent_type` | Yes | One of: `research`, `code`, `memory`, `reflection`, `documentation`, `planning` |
+| `priority` | Yes | `low`, `medium`, or `high` — affects dispatch order |
+| `context` | No | Additional context (file paths, error messages, prior results) |
+| `tags` | No | Extra tags for categorization beyond the auto-added ones |
 
-### Step 2: Check Correctness
+## Writing Good Descriptions
 
-1. Does the code do what it claims to do?
-2. Are edge cases handled?
-3. Are error paths covered?
-4. Is the logic sound?
+The description is the sub-agent's **entire prompt context** (plus its agent definition). Write it like instructions for a competent engineer who has never seen the codebase.
 
-### Step 3: Check Style & Conventions
+**Good description:**
+> Review the test files in `tests/` and identify which core modules in `src/lucent/db/` lack test coverage. List specific functions/methods that have no corresponding tests. Focus on `memory.py`, `search.py`, and `api_key.py`.
 
-1. Run `ruff check` if available
-2. Verify type hints are present and correct
-3. Check docstrings for public APIs
-4. Ensure imports are organized (stdlib → third-party → local)
-5. Verify `pyproject.toml` conventions are followed
+**Bad description:**
+> Improve test coverage.
 
-### Step 4: Check Security
+### Description Checklist
 
-1. No hardcoded secrets or credentials
-2. Input validation on external data
-3. Proper authentication/authorization checks
-4. SQL injection, XSS, or injection vulnerabilities
-5. Proper error messages (no internal details leaked)
+- [ ] States the objective clearly (what to produce, not just what area)
+- [ ] Names specific files or directories when relevant
+- [ ] Defines success criteria (what does "done" look like?)
+- [ ] Includes constraints (don't modify X, only look at Y)
+- [ ] Self-contained — no references to "the thing we discussed"
 
-### Step 5: Check Performance
+## Agent Type Selection
 
-1. No obvious O(n²) or worse algorithms where O(n) is possible
-2. No unnecessary database queries or API calls
-3. Proper resource management (connections, files, memory)
-4. Caching where appropriate
+| Agent Type | Use For | Tools Available |
+|-----------|---------|-----------------|
+| `code` | File editing, testing, building, linting | All CLI + file tools |
+| `research` | Investigation, web lookups, synthesis | Web + search tools |
+| `memory` | Memory cleanup, consolidation, tagging | Memory tools |
+| `reflection` | Self-analysis, behavioral review, planning | Memory + search |
+| `documentation` | Docs, guides, READMEs | File + search tools |
+| `planning` | Goal decomposition, roadmaps, task breakdown | Memory + search |
 
-### Step 6: Summarize
+**Rule of thumb**: If the task edits files, it's `code`. If it reads and synthesizes, it's `research`. If it touches memories, it's `memory`.
 
-Output a structured review:
-- **Verdict**: approve / request-changes / needs-discussion
-- **Critical issues**: Things that must be fixed
-- **Suggestions**: Things that could be improved
-- **Positive notes**: What was done well
+## Priority Calibration
 
-## Best Practices
+| Priority | When to Use | Dispatch Behavior |
+|----------|------------|-------------------|
+| `high` | Blocking other work, user-requested, bug fixes | Dispatched first |
+| `medium` | Normal development work, improvements | Default queue order |
+| `low` | Nice-to-have, cleanup, exploration | Dispatched when queue is empty |
 
-- Focus on logic and correctness over style (linters handle style)
-- Be specific: "this loop is O(n²) because X" not "performance concern"
-- Suggest alternatives, don't just point out problems
-- Acknowledge good patterns when you see them
-- Check for test coverage on new code paths
+The cognitive cycle dispatches up to 2 tasks per cycle, highest priority first.
+
+## Validation
+
+After a sub-agent completes, the daemon validates the result (`_validate_task_result()`):
+
+- Result must be non-empty (>50 chars)
+- Must not contain only error messages
+- Must reference the task objective
+
+**Tasks fail validation when:**
+1. Description was too vague → agent produced generic output
+2. Task required tools the agent_type doesn't have
+3. Task was too large for a single session (>720s timeout)
+
+## Examples
+
+### Good Task: Code Analysis
+```json
+{
+  "description": "Run `ruff check src/lucent/` and fix any auto-fixable lint errors. Then run `python -m pytest tests/ -x` to verify nothing breaks. Report the number of fixes applied and test results.",
+  "agent_type": "code",
+  "priority": "medium"
+}
+```
+
+### Good Task: Research
+```json
+{
+  "description": "Search the codebase for all places where `asyncpg` pool connections are acquired but not properly released. Check for missing `async with` patterns in `src/lucent/db/`. List any connection leak risks found.",
+  "agent_type": "research",
+  "priority": "high",
+  "context": "We've seen occasional 'too many connections' errors in production logs."
+}
+```
+
+### Good Task: Memory Maintenance
+```json
+{
+  "description": "Search for memories tagged 'daemon-heartbeat' older than 24 hours and delete them. Then search for duplicate memories with the same content (>90% similarity) and consolidate them. Report what was cleaned up.",
+  "agent_type": "memory",
+  "priority": "low"
+}
+```
