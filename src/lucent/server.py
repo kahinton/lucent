@@ -115,7 +115,10 @@ class MCPAuthMiddleware:
                                         "jsonrpc": "2.0",
                                         "error": {
                                             "code": -32000,
-                                            "message": "Rate limit exceeded. Please slow down your requests.",
+                                            "message": (
+                                                "Rate limit exceeded."
+                                                " Please slow down your requests."
+                                            ),
                                         },
                                         "id": None,
                                     },
@@ -175,7 +178,11 @@ class MCPAuthMiddleware:
                 "jsonrpc": "2.0",
                 "error": {
                     "code": -32001,
-                    "message": "Unauthorized: API key required. Use Authorization: Bearer hs_your_key_here",
+                    "message": (
+                        "Unauthorized: API key required."
+                        " Use Authorization: Bearer"
+                        " hs_your_key_here"
+                    ),
                 },
                 "id": None,
             },

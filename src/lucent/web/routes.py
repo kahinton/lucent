@@ -1257,11 +1257,16 @@ async def memory_new_submit(
     # Parse tags
     tag_list = [t.strip().lower() for t in tags.split(",") if t.strip()]
 
-    # Individual memories cannot be created via web interface - they are auto-created when users join
+    # Individual memories cannot be created via web interface
+    # - they are auto-created when users join
     if type == "individual":
         raise HTTPException(
             status_code=400,
-            detail="Individual memories cannot be created directly. They are automatically created when users are added to the system.",
+            detail=(
+                "Individual memories cannot be created directly."
+                " They are automatically created when users are"
+                " added to the system."
+            ),
         )
 
     # Build type-specific metadata
@@ -1604,11 +1609,16 @@ async def memory_delete(request: Request, memory_id: UUID):
     if memory is None:
         raise HTTPException(status_code=404, detail="Memory not found")
 
-    # Individual memories cannot be deleted via web interface - they are deleted when users are removed
+    # Individual memories cannot be deleted via web interface
+    # - they are deleted when users are removed
     if memory.get("type") == "individual":
         raise HTTPException(
             status_code=400,
-            detail="Individual memories cannot be deleted directly. They are automatically deleted when users are removed from the system.",
+            detail=(
+                "Individual memories cannot be deleted directly."
+                " They are automatically deleted when users are"
+                " removed from the system."
+            ),
         )
 
     if memory.get("user_id") != user.id:

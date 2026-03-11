@@ -79,7 +79,11 @@ async def create_memory(
     if data.type == "individual":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Individual memories cannot be created directly. They are automatically created when users are added to the system.",
+            detail=(
+                "Individual memories cannot be created directly."
+                " They are automatically created when users are"
+                " added to the system."
+            ),
         )
 
     # Validate and normalize metadata for the memory type
@@ -357,7 +361,11 @@ async def delete_memory(
     if existing.get("type") == "individual":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Individual memories cannot be deleted directly. They are automatically deleted when users are removed from the system.",
+            detail=(
+                "Individual memories cannot be deleted directly."
+                " They are automatically deleted when users are"
+                " removed from the system."
+            ),
         )
 
     # Check permissions

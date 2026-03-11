@@ -67,13 +67,19 @@ SUPPORT_ASSESSMENT_JSON = {
     "recommended_agents": [
         {
             "name": "triage",
-            "purpose": "Classify incoming support tickets by severity, product area, and route to the right team",
+            "purpose": (
+                "Classify incoming support tickets by severity,"
+                " product area, and route to the right team"
+            ),
             "domain_template": "support",
             "specialization": {},
         },
         {
             "name": "incident-response",
-            "purpose": "Coordinate incident resolution with structured updates and stakeholder communication",
+            "purpose": (
+                "Coordinate incident resolution with structured"
+                " updates and stakeholder communication"
+            ),
             "domain_template": "support",
             "specialization": {},
         },
@@ -147,19 +153,28 @@ LEGAL_ASSESSMENT_JSON = {
     "recommended_agents": [
         {
             "name": "legal-research",
-            "purpose": "Research case law, statutes, and regulatory requirements across jurisdictions",
+            "purpose": (
+                "Research case law, statutes, and regulatory"
+                " requirements across jurisdictions"
+            ),
             "domain_template": "legal",
             "specialization": {},
         },
         {
             "name": "contract-review",
-            "purpose": "Analyze contracts for risks, obligations, indemnification clauses, and key terms",
+            "purpose": (
+                "Analyze contracts for risks, obligations,"
+                " indemnification clauses, and key terms"
+            ),
             "domain_template": "legal",
             "specialization": {},
         },
         {
             "name": "compliance",
-            "purpose": "Monitor regulatory changes and assess compliance posture across jurisdictions",
+            "purpose": (
+                "Monitor regulatory changes and assess"
+                " compliance posture across jurisdictions"
+            ),
             "domain_template": "legal",
             "specialization": {},
         },

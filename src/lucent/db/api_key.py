@@ -61,7 +61,8 @@ class ApiKeyRepository:
         key_hash = bcrypt.hashpw(plain_key.encode(), bcrypt.gensalt()).decode()
 
         query = """
-            INSERT INTO api_keys (user_id, organization_id, name, key_prefix, key_hash, scopes, expires_at)
+            INSERT INTO api_keys (user_id, organization_id, name,
+                key_prefix, key_hash, scopes, expires_at)
             VALUES ($1, $2, $3, $4, $5, $6, $7)
             RETURNING id, user_id, organization_id, name, key_prefix, scopes,
                       last_used_at, use_count, expires_at, is_active, created_at, updated_at

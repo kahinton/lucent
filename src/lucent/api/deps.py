@@ -197,7 +197,9 @@ def require_permission_dep(permission: Permission):
 
     Usage:
         @router.get("/audit")
-        async def audit_endpoint(user: CurrentUser = Depends(require_permission_dep(Permission.AUDIT_VIEW_ORG))):
+        async def audit_endpoint(
+            user: CurrentUser = Depends(require_permission_dep(Permission.AUDIT_VIEW_ORG)),
+        ):
             ...
     """
 

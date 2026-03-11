@@ -52,7 +52,8 @@ class UserRepository:
             The created user record.
         """
         query = """
-            INSERT INTO users (external_id, provider, organization_id, email, display_name, avatar_url, provider_metadata)
+            INSERT INTO users (external_id, provider, organization_id,
+                email, display_name, avatar_url, provider_metadata)
             VALUES ($1, $2, $3, $4, $5, $6, $7)
             RETURNING id, external_id, provider, organization_id, email, display_name, avatar_url,
                       provider_metadata, is_active, created_at, updated_at, last_login_at, role
@@ -114,10 +115,13 @@ class UserRepository:
 
         # Create the individual memory
         query = """
-            INSERT INTO memories (username, type, content, tags, importance, related_memory_ids, metadata, user_id, organization_id, shared)
+            INSERT INTO memories (username, type, content, tags,
+                importance, related_memory_ids, metadata,
+                user_id, organization_id, shared)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, true)
             RETURNING id, username, type, content, tags, importance, related_memory_ids, metadata,
-                      created_at, updated_at, deleted_at, user_id, organization_id, shared, last_accessed_at
+                      created_at, updated_at, deleted_at, user_id,
+                      organization_id, shared, last_accessed_at
         """
 
         try:
@@ -154,7 +158,8 @@ class UserRepository:
         """
         query = """
             SELECT id, username, type, content, tags, importance, related_memory_ids, metadata,
-                   created_at, updated_at, deleted_at, user_id, organization_id, shared, last_accessed_at
+                   created_at, updated_at, deleted_at, user_id,
+                   organization_id, shared, last_accessed_at
             FROM memories
             WHERE type = 'individual'
               AND deleted_at IS NULL
