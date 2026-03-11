@@ -1,8 +1,15 @@
 """Tests for cookie security in web routes.
 
-Verifies that all cookie deletion uses proper security attributes
-and that CSRF logging doesn't leak token values.
+Verifies that all cookie deletion uses proper security attributes,
+that CSRF logging doesn't leak token values, and that session
+regeneration occurs during impersonation to prevent session fixation.
 """
+
+import inspect
+from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
+
+import pytest
 
 from starlette.responses import Response
 
@@ -117,3 +124,113 @@ class TestCSRFLogSanitization:
         # Should use presence indicators, not values
         assert '"present"' in source or "'present'" in source
         assert '"NONE"' in source or "'NONE'" in source
+
+
+class TestImpersonationSessionRegeneration:
+    """Verify session is regenerated when starting impersonation.
+
+    Session fixation prevention: when an admin starts impersonating another
+    user, the old session must be invalidated and a new session token issued.
+    """
+
+    def test_start_impersonation_calls_create_session(self):
+        """The start_impersonation endpoint must call create_session to regenerate."""
+        from lucent.web.routes import start_impersonation
+
+        source = inspect.getsource(start_impersonation)
+
+        # Must call create_session before setting cookies
+        assert "create_session" in source, (
+            "start_impersonation must call create_session to regenerate the session"
+        )
+
+    def test_start_impersonation_sets_new_session_cookie(self):
+        """The response must include a new session cookie after regeneration."""
+        from lucent.web.routes import start_impersonation
+
+        source = inspect.getsource(start_impersonation)
+
+        assert "SESSION_COOKIE_NAME" in source, (
+            "start_impersonation must set a new session cookie"
+        )
+
+    def test_start_impersonation_binds_impersonation_to_session(self):
+        """The impersonation cookie must be bound to the new session hash."""
+        from lucent.web.routes import start_impersonation
+
+        source = inspect.getsource(start_impersonation)
+
+        # Must hash the new token and embed it in the impersonation cookie
+        assert "hash_session_token" in source, (
+            "start_impersonation must bind impersonation cookie to session hash"
+        )
+        assert "session_hash" in source or "new_token" in source, (
+            "start_impersonation must use the new session token for binding"
+        )
+
+    def test_session_regeneration_before_cookie_setting(self):
+        """Session regeneration must happen before setting cookies."""
+        from lucent.web.routes import start_impersonation
+
+        source = inspect.getsource(start_impersonation)
+
+        # create_session must appear before set_cookie
+        create_pos = source.index("create_session")
+        set_cookie_pos = source.index("set_cookie")
+        assert create_pos < set_cookie_pos, (
+            "create_session must be called before setting cookies"
+        )
+
+    @pytest.mark.asyncio
+    async def test_start_impersonation_regenerates_session_token(self):
+        """Integration: verify old session token is replaced on impersonation."""
+        from lucent.web.routes import start_impersonation
+
+        admin_id = uuid4()
+        target_id = uuid4()
+        org_id = uuid4()
+
+        mock_user = MagicMock()
+        mock_user.id = admin_id
+        mock_user.role = "owner"
+        mock_user.organization_id = org_id
+        mock_user.display_name = "Admin"
+
+        mock_target = {
+            "id": target_id,
+            "role": "member",
+            "organization_id": org_id,
+            "email": "target@test.com",
+            "display_name": "Target",
+        }
+
+        mock_pool = AsyncMock()
+        mock_repo = AsyncMock()
+        mock_repo.get_by_id.return_value = mock_target
+
+        new_token = "new_session_token_abc123"
+
+        with (
+            patch("lucent.web.routes.is_team_mode", return_value=True),
+            patch("lucent.web.routes._check_csrf", new_callable=AsyncMock),
+            patch("lucent.web.routes.get_user_context", new_callable=AsyncMock, return_value=mock_user),
+            patch("lucent.web.routes.get_pool", new_callable=AsyncMock, return_value=mock_pool),
+            patch("lucent.web.routes.UserRepository", return_value=mock_repo),
+            patch("lucent.web.routes.create_session", new_callable=AsyncMock, return_value=new_token) as mock_create,
+        ):
+            mock_request = MagicMock()
+            response = await start_impersonation(mock_request, target_id)
+
+            # Verify create_session was called with the admin's user ID
+            mock_create.assert_called_once_with(mock_pool, admin_id)
+
+            # Verify the response sets a new session cookie with the new token
+            set_cookie_headers = [
+                h.decode() for _, h in response.raw_headers
+                if _ == b"set-cookie"
+            ]
+            session_cookies = [h for h in set_cookie_headers if SESSION_COOKIE_NAME in h]
+            assert len(session_cookies) >= 1, "Response must set a new session cookie"
+            assert new_token in session_cookies[0], (
+                "Session cookie must contain the new regenerated token"
+            )
