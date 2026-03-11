@@ -302,7 +302,9 @@ class MemoryRepository:
         # Use a single connection for validation and update
         async with self.pool.acquire() as conn:
             if related_memory_ids is not None:
-                await self._validate_related_ids(related_memory_ids, exclude_id=memory_id, conn=conn)
+                await self._validate_related_ids(
+                    related_memory_ids, exclude_id=memory_id, conn=conn
+                )
 
             row = await conn.fetchrow(query, *params)
 
@@ -523,7 +525,9 @@ class MemoryRepository:
 
         # Add access control condition if user context is provided
         if requesting_user_id is not None and requesting_org_id is not None:
-            conditions.append(f"(user_id = ${param_idx} OR (organization_id = ${param_idx + 1} AND shared = true))")
+            conditions.append(
+                f"(user_id = ${param_idx} OR (organization_id = ${param_idx + 1} AND shared = true))"
+            )
             params.append(str(requesting_user_id))
             params.append(str(requesting_org_id))
             param_idx += 2
@@ -674,7 +678,9 @@ class MemoryRepository:
 
         # Add access control condition if user context is provided
         if requesting_user_id is not None and requesting_org_id is not None:
-            conditions.append(f"(user_id = ${param_idx} OR (organization_id = ${param_idx + 1} AND shared = true))")
+            conditions.append(
+                f"(user_id = ${param_idx} OR (organization_id = ${param_idx + 1} AND shared = true))"
+            )
             params.append(str(requesting_user_id))
             params.append(str(requesting_org_id))
             param_idx += 2
@@ -782,7 +788,9 @@ class MemoryRepository:
 
         # Add access control condition if user context is provided
         if requesting_user_id is not None and requesting_org_id is not None:
-            conditions.append(f"(user_id = ${param_idx} OR (organization_id = ${param_idx + 1} AND shared = true))")
+            conditions.append(
+                f"(user_id = ${param_idx} OR (organization_id = ${param_idx + 1} AND shared = true))"
+            )
             params.append(str(requesting_user_id))
             params.append(str(requesting_org_id))
             param_idx += 2
@@ -841,7 +849,9 @@ class MemoryRepository:
 
         # Add access control condition if user context is provided
         if requesting_user_id is not None and requesting_org_id is not None:
-            conditions.append(f"(user_id = ${param_idx} OR (organization_id = ${param_idx + 1} AND shared = true))")
+            conditions.append(
+                f"(user_id = ${param_idx} OR (organization_id = ${param_idx + 1} AND shared = true))"
+            )
             params.append(str(requesting_user_id))
             params.append(str(requesting_org_id))
             param_idx += 2
@@ -872,8 +882,7 @@ class MemoryRepository:
             rows = await conn.fetch(sql, *params)
 
         return [
-            {"tag": row["tag"], "count": row["count"], "similarity": row["sim"]}
-            for row in rows
+            {"tag": row["tag"], "count": row["count"], "similarity": row["sim"]} for row in rows
         ]
 
     async def export(
@@ -1026,9 +1035,7 @@ class MemoryRepository:
                     related_ids = [str(uid) for uid in (mem.get("related_memory_ids") or [])]
 
                     # --- Dedup check ---
-                    content_hash = hashlib.md5(
-                        (content + mem_type + username).encode()
-                    ).hexdigest()
+                    content_hash = hashlib.md5((content + mem_type + username).encode()).hexdigest()
                     if content_hash in existing_hashes:
                         skipped += 1
                         continue
@@ -1065,11 +1072,18 @@ class MemoryRepository:
                             RETURNING {self._FULL_COLUMNS}
                         """
                         await conn.fetchrow(
-                            query, username, mem_type, content, tags, importance,
-                            related_ids, metadata,
+                            query,
+                            username,
+                            mem_type,
+                            content,
+                            tags,
+                            importance,
+                            related_ids,
+                            metadata,
                             str(requesting_user_id),
                             str(requesting_org_id) if requesting_org_id else None,
-                            created_at, updated_at,
+                            created_at,
+                            updated_at,
                         )
                     else:
                         query = f"""
@@ -1080,8 +1094,14 @@ class MemoryRepository:
                             RETURNING {self._FULL_COLUMNS}
                         """
                         await conn.fetchrow(
-                            query, username, mem_type, content, tags, importance,
-                            related_ids, metadata,
+                            query,
+                            username,
+                            mem_type,
+                            content,
+                            tags,
+                            importance,
+                            related_ids,
+                            metadata,
                             str(requesting_user_id),
                             str(requesting_org_id) if requesting_org_id else None,
                         )
@@ -1122,7 +1142,7 @@ class MemoryRepository:
         if exclude_id and exclude_id in related_ids:
             raise ValueError("A memory cannot reference itself")
 
-        placeholders = ", ".join(f"${i+1}" for i in range(len(related_ids)))
+        placeholders = ", ".join(f"${i + 1}" for i in range(len(related_ids)))
         query = f"""
             SELECT id FROM memories
             WHERE id IN ({placeholders}) AND deleted_at IS NULL
@@ -1149,7 +1169,7 @@ class MemoryRepository:
         content = row["content"]
         truncated = len(content) > self.TRUNCATE_LENGTH
         if truncated:
-            content = content[:self.TRUNCATE_LENGTH] + "..."
+            content = content[: self.TRUNCATE_LENGTH] + "..."
 
         related_ids = []
         if row["related_memory_ids"]:
@@ -1162,7 +1182,11 @@ class MemoryRepository:
 
         org_id = None
         if row["organization_id"]:
-            org_id = row["organization_id"] if isinstance(row["organization_id"], UUID) else UUID(row["organization_id"])
+            org_id = (
+                row["organization_id"]
+                if isinstance(row["organization_id"], UUID)
+                else UUID(row["organization_id"])
+            )
 
         return {
             "id": row["id"],
@@ -1201,7 +1225,11 @@ class MemoryRepository:
         # Handle organization_id which may not be present in all queries
         org_id = None
         if "organization_id" in row.keys() and row["organization_id"]:
-            org_id = row["organization_id"] if isinstance(row["organization_id"], UUID) else UUID(row["organization_id"])
+            org_id = (
+                row["organization_id"]
+                if isinstance(row["organization_id"], UUID)
+                else UUID(row["organization_id"])
+            )
 
         # Handle shared flag
         shared = row["shared"] if "shared" in row.keys() else False

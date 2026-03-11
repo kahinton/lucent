@@ -19,7 +19,7 @@ from typing import Any
 
 # Custom log levels for daemon visibility
 THOUGHT = 15  # Between DEBUG(10) and INFO(20) — full output dumps
-STREAM = 12   # Between DEBUG(10) and THOUGHT(15) — real-time event tracking
+STREAM = 12  # Between DEBUG(10) and THOUGHT(15) — real-time event tracking
 
 logging.addLevelName(THOUGHT, "THOUGHT")
 logging.addLevelName(STREAM, "STREAM")
@@ -129,13 +129,13 @@ class HumanFormatter(logging.Formatter):
     """Human-readable log formatter for development."""
 
     COLORS = {
-        "DEBUG": "\033[36m",    # Cyan
-        "STREAM": "\033[90m",   # Bright black (gray) — real-time events
+        "DEBUG": "\033[36m",  # Cyan
+        "STREAM": "\033[90m",  # Bright black (gray) — real-time events
         "THOUGHT": "\033[94m",  # Bright blue — full output dumps
-        "INFO": "\033[32m",     # Green
+        "INFO": "\033[32m",  # Green
         "WARNING": "\033[33m",  # Yellow
-        "ERROR": "\033[31m",    # Red
-        "CRITICAL": "\033[35m", # Magenta
+        "ERROR": "\033[31m",  # Red
+        "CRITICAL": "\033[35m",  # Magenta
     }
     RESET = "\033[0m"
 
@@ -253,8 +253,11 @@ def configure_logging() -> None:
     # Optionally add rotating file handler
     if log_file:
         file_handler = _make_handler(
-            log_format, log_level, log_file=log_file,
-            max_bytes=max_bytes, backup_count=backup_count,
+            log_format,
+            log_level,
+            log_file=log_file,
+            max_bytes=max_bytes,
+            backup_count=backup_count,
         )
         handlers.append(file_handler)
 

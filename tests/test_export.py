@@ -149,8 +149,7 @@ class TestMemoryExport:
         )
 
         test_memories = [
-            m for m in result
-            if m["username"] == f"{prefix}user" and m["type"] == "technical"
+            m for m in result if m["username"] == f"{prefix}user" and m["type"] == "technical"
         ]
         assert len(test_memories) >= 1
         assert test_memories[0]["metadata"]["category"] == "testing"
@@ -433,16 +432,18 @@ class TestMemoryImport:
         # Import from export data — convert UUIDs/datetimes to strings as export would
         import_data = []
         for m in original_memories:
-            import_data.append({
-                "type": m["type"],
-                "content": m["content"],
-                "username": m["username"],
-                "tags": m["tags"],
-                "importance": m["importance"],
-                "metadata": m["metadata"],
-                "created_at": m["created_at"].isoformat(),
-                "updated_at": m["updated_at"].isoformat(),
-            })
+            import_data.append(
+                {
+                    "type": m["type"],
+                    "content": m["content"],
+                    "username": m["username"],
+                    "tags": m["tags"],
+                    "importance": m["importance"],
+                    "metadata": m["metadata"],
+                    "created_at": m["created_at"].isoformat(),
+                    "updated_at": m["updated_at"].isoformat(),
+                }
+            )
 
         result = await repo.import_memories(
             memories=import_data,

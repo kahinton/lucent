@@ -146,7 +146,9 @@ async def get_most_accessed_memories(
     user: AuthenticatedUser,
     since: datetime | None = Query(default=None, description="Count accesses after this date"),
     limit: int = Query(default=20, ge=1, le=100),
-    organization_wide: bool = Query(default=False, description="Include all org members (admin only)"),
+    organization_wide: bool = Query(
+        default=False, description="Include all org members (admin only)"
+    ),
 ) -> list[MostAccessedItem]:
     """Get the most frequently accessed memories.
 

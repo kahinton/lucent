@@ -194,9 +194,12 @@ class TestSearchPost:
         """Search with a query returns matching memories."""
         await _seed_memories(db_pool, srch_user, srch_prefix)
 
-        resp = await srch_client.post("/api/search", json={
-            "query": "Python debugging",
-        })
+        resp = await srch_client.post(
+            "/api/search",
+            json={
+                "query": "Python debugging",
+            },
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert len(data["memories"]) >= 1
@@ -208,10 +211,13 @@ class TestSearchPost:
         """Search filtered by memory type."""
         await _seed_memories(db_pool, srch_user, srch_prefix)
 
-        resp = await srch_client.post("/api/search", json={
-            "type": "technical",
-            "username": f"{srch_prefix}user",
-        })
+        resp = await srch_client.post(
+            "/api/search",
+            json={
+                "type": "technical",
+                "username": f"{srch_prefix}user",
+            },
+        )
         assert resp.status_code == 200
         data = resp.json()
         for m in data["memories"]:
@@ -221,10 +227,13 @@ class TestSearchPost:
         """Search filtered by tags."""
         await _seed_memories(db_pool, srch_user, srch_prefix)
 
-        resp = await srch_client.post("/api/search", json={
-            "tags": ["python"],
-            "username": f"{srch_prefix}user",
-        })
+        resp = await srch_client.post(
+            "/api/search",
+            json={
+                "tags": ["python"],
+                "username": f"{srch_prefix}user",
+            },
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert len(data["memories"]) >= 1
@@ -235,11 +244,14 @@ class TestSearchPost:
         """Search filtered by importance range."""
         await _seed_memories(db_pool, srch_user, srch_prefix)
 
-        resp = await srch_client.post("/api/search", json={
-            "importance_min": 7,
-            "importance_max": 10,
-            "username": f"{srch_prefix}user",
-        })
+        resp = await srch_client.post(
+            "/api/search",
+            json={
+                "importance_min": 7,
+                "importance_max": 10,
+                "username": f"{srch_prefix}user",
+            },
+        )
         assert resp.status_code == 200
         data = resp.json()
         for m in data["memories"]:
@@ -249,9 +261,12 @@ class TestSearchPost:
         """Search filtered by username."""
         await _seed_memories(db_pool, srch_user, srch_prefix)
 
-        resp = await srch_client.post("/api/search", json={
-            "username": f"{srch_prefix}user",
-        })
+        resp = await srch_client.post(
+            "/api/search",
+            json={
+                "username": f"{srch_prefix}user",
+            },
+        )
         assert resp.status_code == 200
         data = resp.json()
         for m in data["memories"]:
@@ -261,11 +276,14 @@ class TestSearchPost:
         """Search results respect offset and limit."""
         await _seed_memories(db_pool, srch_user, srch_prefix)
 
-        resp = await srch_client.post("/api/search", json={
-            "username": f"{srch_prefix}user",
-            "limit": 1,
-            "offset": 0,
-        })
+        resp = await srch_client.post(
+            "/api/search",
+            json={
+                "username": f"{srch_prefix}user",
+                "limit": 1,
+                "offset": 0,
+            },
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert data["limit"] == 1
@@ -277,17 +295,23 @@ class TestSearchPost:
         await _seed_memories(db_pool, srch_user, srch_prefix)
 
         # Get first page
-        resp1 = await srch_client.post("/api/search", json={
-            "username": f"{srch_prefix}user",
-            "limit": 1,
-            "offset": 0,
-        })
+        resp1 = await srch_client.post(
+            "/api/search",
+            json={
+                "username": f"{srch_prefix}user",
+                "limit": 1,
+                "offset": 0,
+            },
+        )
         # Get second page
-        resp2 = await srch_client.post("/api/search", json={
-            "username": f"{srch_prefix}user",
-            "limit": 1,
-            "offset": 1,
-        })
+        resp2 = await srch_client.post(
+            "/api/search",
+            json={
+                "username": f"{srch_prefix}user",
+                "limit": 1,
+                "offset": 1,
+            },
+        )
         assert resp1.status_code == 200
         assert resp2.status_code == 200
         data1 = resp1.json()
@@ -300,9 +324,12 @@ class TestSearchPost:
         """Search results have the correct field structure."""
         await _seed_memories(db_pool, srch_user, srch_prefix)
 
-        resp = await srch_client.post("/api/search", json={
-            "username": f"{srch_prefix}user",
-        })
+        resp = await srch_client.post(
+            "/api/search",
+            json={
+                "username": f"{srch_prefix}user",
+            },
+        )
         assert resp.status_code == 200
         data = resp.json()
         if data["memories"]:
@@ -323,9 +350,12 @@ class TestSearchPost:
 
     async def test_search_no_results(self, srch_client, srch_prefix):
         """Search for nonexistent content returns empty results."""
-        resp = await srch_client.post("/api/search", json={
-            "query": f"{srch_prefix}completely_nonexistent_zzzzzzz",
-        })
+        resp = await srch_client.post(
+            "/api/search",
+            json={
+                "query": f"{srch_prefix}completely_nonexistent_zzzzzzz",
+            },
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert data["memories"] == []
@@ -335,13 +365,16 @@ class TestSearchPost:
         """Search with multiple filters applied together."""
         await _seed_memories(db_pool, srch_user, srch_prefix)
 
-        resp = await srch_client.post("/api/search", json={
-            "query": "Python",
-            "type": "technical",
-            "tags": ["python"],
-            "username": f"{srch_prefix}user",
-            "importance_min": 5,
-        })
+        resp = await srch_client.post(
+            "/api/search",
+            json={
+                "query": "Python",
+                "type": "technical",
+                "tags": ["python"],
+                "username": f"{srch_prefix}user",
+                "importance_min": 5,
+            },
+        )
         assert resp.status_code == 200
         data = resp.json()
         for m in data["memories"]:
@@ -362,9 +395,12 @@ class TestSearchGet:
         """GET search returns results."""
         await _seed_memories(db_pool, srch_user, srch_prefix)
 
-        resp = await srch_client.get("/api/search", params={
-            "query": "Python",
-        })
+        resp = await srch_client.get(
+            "/api/search",
+            params={
+                "query": "Python",
+            },
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert "memories" in data
@@ -374,12 +410,15 @@ class TestSearchGet:
         """GET search with query parameters."""
         await _seed_memories(db_pool, srch_user, srch_prefix)
 
-        resp = await srch_client.get("/api/search", params={
-            "username": f"{srch_prefix}user",
-            "type": "technical",
-            "importance_min": 5,
-            "limit": 10,
-        })
+        resp = await srch_client.get(
+            "/api/search",
+            params={
+                "username": f"{srch_prefix}user",
+                "type": "technical",
+                "importance_min": 5,
+                "limit": 10,
+            },
+        )
         assert resp.status_code == 200
         data = resp.json()
         for m in data["memories"]:
@@ -389,11 +428,14 @@ class TestSearchGet:
         """GET search with pagination params."""
         await _seed_memories(db_pool, srch_user, srch_prefix)
 
-        resp = await srch_client.get("/api/search", params={
-            "username": f"{srch_prefix}user",
-            "offset": 0,
-            "limit": 2,
-        })
+        resp = await srch_client.get(
+            "/api/search",
+            params={
+                "username": f"{srch_prefix}user",
+                "offset": 0,
+                "limit": 2,
+            },
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert data["offset"] == 0
@@ -404,9 +446,12 @@ class TestSearchGet:
         """GET search without query returns results based on other filters."""
         await _seed_memories(db_pool, srch_user, srch_prefix)
 
-        resp = await srch_client.get("/api/search", params={
-            "username": f"{srch_prefix}user",
-        })
+        resp = await srch_client.get(
+            "/api/search",
+            params={
+                "username": f"{srch_prefix}user",
+            },
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert isinstance(data["memories"], list)
@@ -415,27 +460,38 @@ class TestSearchGet:
         """GET search with tags filter."""
         await _seed_memories(db_pool, srch_user, srch_prefix)
 
-        resp = await srch_client.get("/api/search", params={
-            "tags": ["database"],
-            "username": f"{srch_prefix}user",
-        })
+        resp = await srch_client.get(
+            "/api/search",
+            params={
+                "tags": ["database"],
+                "username": f"{srch_prefix}user",
+            },
+        )
         assert resp.status_code == 200
         data = resp.json()
         for m in data["memories"]:
             assert "database" in m["tags"]
 
-    async def test_search_get_returns_same_as_post(self, srch_client, db_pool, srch_user, srch_prefix):
+    async def test_search_get_returns_same_as_post(
+        self, srch_client, db_pool, srch_user, srch_prefix
+    ):
         """GET and POST variants should return equivalent results for the same parameters."""
         await _seed_memories(db_pool, srch_user, srch_prefix)
 
-        post_resp = await srch_client.post("/api/search", json={
-            "username": f"{srch_prefix}user",
-            "type": "technical",
-        })
-        get_resp = await srch_client.get("/api/search", params={
-            "username": f"{srch_prefix}user",
-            "type": "technical",
-        })
+        post_resp = await srch_client.post(
+            "/api/search",
+            json={
+                "username": f"{srch_prefix}user",
+                "type": "technical",
+            },
+        )
+        get_resp = await srch_client.get(
+            "/api/search",
+            params={
+                "username": f"{srch_prefix}user",
+                "type": "technical",
+            },
+        )
         assert post_resp.status_code == 200
         assert get_resp.status_code == 200
         post_data = post_resp.json()
@@ -456,9 +512,12 @@ class TestSearchFull:
         """Full search matches content text."""
         await _seed_memories(db_pool, srch_user, srch_prefix)
 
-        resp = await srch_client.post("/api/search/full", json={
-            "query": "PostgreSQL optimization",
-        })
+        resp = await srch_client.post(
+            "/api/search/full",
+            json={
+                "query": "PostgreSQL optimization",
+            },
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert len(data["memories"]) >= 1
@@ -483,10 +542,13 @@ class TestSearchFull:
         """Full search with type filter."""
         await _seed_memories(db_pool, srch_user, srch_prefix)
 
-        resp = await srch_client.post("/api/search/full", json={
-            "query": "Python",
-            "type": "technical",
-        })
+        resp = await srch_client.post(
+            "/api/search/full",
+            json={
+                "query": "Python",
+                "type": "technical",
+            },
+        )
         assert resp.status_code == 200
         data = resp.json()
         for m in data["memories"]:
@@ -496,11 +558,14 @@ class TestSearchFull:
         """Full search respects pagination."""
         await _seed_memories(db_pool, srch_user, srch_prefix)
 
-        resp = await srch_client.post("/api/search/full", json={
-            "query": srch_prefix,
-            "limit": 1,
-            "offset": 0,
-        })
+        resp = await srch_client.post(
+            "/api/search/full",
+            json={
+                "query": srch_prefix,
+                "limit": 1,
+                "offset": 0,
+            },
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert data["limit"] == 1
@@ -510,9 +575,12 @@ class TestSearchFull:
         """Full search matches against tag text."""
         await _seed_memories(db_pool, srch_user, srch_prefix)
 
-        resp = await srch_client.post("/api/search/full", json={
-            "query": "debugging",
-        })
+        resp = await srch_client.post(
+            "/api/search/full",
+            json={
+                "query": "debugging",
+            },
+        )
         assert resp.status_code == 200
         data = resp.json()
         # Should find the memory that has 'debugging' either in content or tags
@@ -522,9 +590,12 @@ class TestSearchFull:
         """Full search results have correct structure."""
         await _seed_memories(db_pool, srch_user, srch_prefix)
 
-        resp = await srch_client.post("/api/search/full", json={
-            "query": srch_prefix,
-        })
+        resp = await srch_client.post(
+            "/api/search/full",
+            json={
+                "query": srch_prefix,
+            },
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert "memories" in data
@@ -533,14 +604,19 @@ class TestSearchFull:
         assert "limit" in data
         assert "has_more" in data
 
-    async def test_search_full_with_importance_filter(self, srch_client, db_pool, srch_user, srch_prefix):
+    async def test_search_full_with_importance_filter(
+        self, srch_client, db_pool, srch_user, srch_prefix
+    ):
         """Full search with importance range filter."""
         await _seed_memories(db_pool, srch_user, srch_prefix)
 
-        resp = await srch_client.post("/api/search/full", json={
-            "query": srch_prefix,
-            "importance_min": 8,
-        })
+        resp = await srch_client.post(
+            "/api/search/full",
+            json={
+                "query": srch_prefix,
+                "importance_min": 8,
+            },
+        )
         assert resp.status_code == 200
         data = resp.json()
         for m in data["memories"]:
@@ -548,9 +624,12 @@ class TestSearchFull:
 
     async def test_search_full_no_results(self, srch_client, srch_prefix):
         """Full search for nonexistent content returns empty."""
-        resp = await srch_client.post("/api/search/full", json={
-            "query": f"{srch_prefix}absolutely_nonexistent_xyzzy_99999",
-        })
+        resp = await srch_client.post(
+            "/api/search/full",
+            json={
+                "query": f"{srch_prefix}absolutely_nonexistent_xyzzy_99999",
+            },
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert data["memories"] == []
@@ -569,9 +648,12 @@ class TestSearchAccessControl:
         """User can search and find their own memories."""
         await _seed_memories(db_pool, srch_user, srch_prefix)
 
-        resp = await srch_client.post("/api/search", json={
-            "username": f"{srch_prefix}user",
-        })
+        resp = await srch_client.post(
+            "/api/search",
+            json={
+                "username": f"{srch_prefix}user",
+            },
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert len(data["memories"]) >= 1
@@ -584,18 +666,19 @@ class TestSearchAccessControl:
         """User B cannot see User A's private (unshared) memories."""
         await _seed_memories(db_pool, srch_user, srch_prefix)
 
-        resp = await srch_client_b.post("/api/search", json={
-            "username": f"{srch_prefix}user",
-        })
+        resp = await srch_client_b.post(
+            "/api/search",
+            json={
+                "username": f"{srch_prefix}user",
+            },
+        )
         assert resp.status_code == 200
         data = resp.json()
         # User B should not see User A's unshared memories
         for m in data["memories"]:
             assert m["user_id"] != str(srch_user["id"]) or m["shared"] is True
 
-    async def test_user_sees_shared_memories(
-        self, srch_client_b, db_pool, srch_user, srch_prefix
-    ):
+    async def test_user_sees_shared_memories(self, srch_client_b, db_pool, srch_user, srch_prefix):
         """User B can find User A's shared memories."""
         repo = MemoryRepository(db_pool)
         memories = await _seed_memories(db_pool, srch_user, srch_prefix)
@@ -607,9 +690,12 @@ class TestSearchAccessControl:
             shared=True,
         )
 
-        resp = await srch_client_b.post("/api/search", json={
-            "query": "Python debugging",
-        })
+        resp = await srch_client_b.post(
+            "/api/search",
+            json={
+                "query": "Python debugging",
+            },
+        )
         assert resp.status_code == 200
         data = resp.json()
         shared_ids = [m["id"] for m in data["memories"] if m["shared"]]
@@ -631,9 +717,12 @@ class TestSearchAccessLogging:
         await _seed_memories(db_pool, srch_user, srch_prefix)
 
         # Perform a search
-        resp = await srch_client.post("/api/search", json={
-            "username": f"{srch_prefix}user",
-        })
+        resp = await srch_client.post(
+            "/api/search",
+            json={
+                "username": f"{srch_prefix}user",
+            },
+        )
         assert resp.status_code == 200
         data = resp.json()
 
@@ -647,8 +736,7 @@ class TestSearchAccessLogging:
             )
             # Should have at least one search_result entry
             search_entries = [
-                e for e in access_log["entries"]
-                if e.get("access_type") == "search_result"
+                e for e in access_log["entries"] if e.get("access_type") == "search_result"
             ]
             assert len(search_entries) >= 1
 
@@ -658,9 +746,12 @@ class TestSearchAccessLogging:
 
         await _seed_memories(db_pool, srch_user, srch_prefix)
 
-        resp = await srch_client.post("/api/search/full", json={
-            "query": srch_prefix,
-        })
+        resp = await srch_client.post(
+            "/api/search/full",
+            json={
+                "query": srch_prefix,
+            },
+        )
         assert resp.status_code == 200
         data = resp.json()
 
@@ -672,16 +763,18 @@ class TestSearchAccessLogging:
                 limit=10,
             )
             search_entries = [
-                e for e in access_log["entries"]
-                if e.get("access_type") == "search_result"
+                e for e in access_log["entries"] if e.get("access_type") == "search_result"
             ]
             assert len(search_entries) >= 1
 
     async def test_empty_search_does_not_log(self, srch_client, srch_prefix):
         """Search returning no results does not log any access."""
-        resp = await srch_client.post("/api/search", json={
-            "query": f"{srch_prefix}nonexistent_zzzzz",
-        })
+        resp = await srch_client.post(
+            "/api/search",
+            json={
+                "query": f"{srch_prefix}nonexistent_zzzzz",
+            },
+        )
         assert resp.status_code == 200
         assert resp.json()["memories"] == []
         # No access logged for empty results — verified by the endpoint logic
@@ -697,37 +790,52 @@ class TestSearchEdgeCases:
 
     async def test_search_limit_upper_bound(self, srch_client):
         """Limit above 100 should be rejected."""
-        resp = await srch_client.post("/api/search", json={
-            "limit": 101,
-        })
+        resp = await srch_client.post(
+            "/api/search",
+            json={
+                "limit": 101,
+            },
+        )
         assert resp.status_code == 422
 
     async def test_search_limit_lower_bound(self, srch_client):
         """Limit below 1 should be rejected."""
-        resp = await srch_client.post("/api/search", json={
-            "limit": 0,
-        })
+        resp = await srch_client.post(
+            "/api/search",
+            json={
+                "limit": 0,
+            },
+        )
         assert resp.status_code == 422
 
     async def test_search_negative_offset(self, srch_client):
         """Negative offset should be rejected."""
-        resp = await srch_client.post("/api/search", json={
-            "offset": -1,
-        })
+        resp = await srch_client.post(
+            "/api/search",
+            json={
+                "offset": -1,
+            },
+        )
         assert resp.status_code == 422
 
     async def test_search_importance_min_bounds(self, srch_client):
         """Importance min outside 1-10 should be rejected."""
-        resp = await srch_client.post("/api/search", json={
-            "importance_min": 0,
-        })
+        resp = await srch_client.post(
+            "/api/search",
+            json={
+                "importance_min": 0,
+            },
+        )
         assert resp.status_code == 422
 
     async def test_search_importance_max_bounds(self, srch_client):
         """Importance max outside 1-10 should be rejected."""
-        resp = await srch_client.post("/api/search", json={
-            "importance_max": 11,
-        })
+        resp = await srch_client.post(
+            "/api/search",
+            json={
+                "importance_max": 11,
+            },
+        )
         assert resp.status_code == 422
 
     async def test_search_get_limit_validation(self, srch_client):
@@ -742,8 +850,11 @@ class TestSearchEdgeCases:
 
     async def test_search_full_limit_validation(self, srch_client):
         """Full search validates limit bounds."""
-        resp = await srch_client.post("/api/search/full", json={
-            "query": "test",
-            "limit": 101,
-        })
+        resp = await srch_client.post(
+            "/api/search/full",
+            json={
+                "query": "test",
+                "limit": 101,
+            },
+        )
         assert resp.status_code == 422

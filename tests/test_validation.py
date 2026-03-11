@@ -99,9 +99,12 @@ class TestValidateMetadata:
     def test_invalid_metadata_fields_raises_value_error(self):
         """Procedural steps require 'order' and 'description'."""
         with pytest.raises(ValueError, match="Invalid metadata"):
-            validate_metadata("procedural", {
-                "steps": [{"invalid_field": "bad"}],
-            })
+            validate_metadata(
+                "procedural",
+                {
+                    "steps": [{"invalid_field": "bad"}],
+                },
+            )
 
     def test_goal_priority_out_of_range(self):
         with pytest.raises(ValueError, match="Invalid metadata"):

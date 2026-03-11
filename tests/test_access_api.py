@@ -53,6 +53,7 @@ async def acc_prefix(db_pool):
 @pytest_asyncio.fixture
 async def acc_org(db_pool, acc_prefix):
     from lucent.db import OrganizationRepository
+
     org_repo = OrganizationRepository(db_pool)
     return await org_repo.create(name=f"{acc_prefix}org")
 
@@ -60,6 +61,7 @@ async def acc_org(db_pool, acc_prefix):
 @pytest_asyncio.fixture
 async def acc_admin(db_pool, acc_org, acc_prefix):
     from lucent.db import UserRepository
+
     user_repo = UserRepository(db_pool)
     user = await user_repo.create(
         external_id=f"{acc_prefix}admin",
@@ -75,6 +77,7 @@ async def acc_admin(db_pool, acc_org, acc_prefix):
 @pytest_asyncio.fixture
 async def acc_member(db_pool, acc_org, acc_prefix):
     from lucent.db import UserRepository
+
     user_repo = UserRepository(db_pool)
     return await user_repo.create(
         external_id=f"{acc_prefix}member",
@@ -104,6 +107,7 @@ def _build_app_with_team_mode(user_dict, role="member"):
     """Create app with team mode enabled and auth overridden."""
     with patch("lucent.api.app.is_team_mode", return_value=True):
         from lucent.api.app import create_app
+
         app = create_app()
     fake = CurrentUser(
         id=user_dict["id"],
@@ -146,7 +150,6 @@ async def member_client(db_pool, acc_member):
 
 
 class TestMemoryAccessHistory:
-
     async def test_get_access_history_empty(self, member_client, acc_memory):
         resp = await member_client.get(f"/api/access/memory/{acc_memory['id']}")
         assert resp.status_code == 200
@@ -154,7 +157,9 @@ class TestMemoryAccessHistory:
         assert "entries" in data
         assert "total_count" in data
 
-    async def test_get_access_history_after_view(self, member_client, db_pool, acc_memory, acc_member):
+    async def test_get_access_history_after_view(
+        self, member_client, db_pool, acc_memory, acc_member
+    ):
         """After logging access, it should appear in history."""
         access_repo = AccessRepository(db_pool)
         await access_repo.log_access(
@@ -188,14 +193,15 @@ class TestMemoryAccessHistory:
 
 
 class TestMemorySearchHistory:
-
     async def test_search_history_empty(self, member_client, acc_memory):
         resp = await member_client.get(f"/api/access/memory/{acc_memory['id']}/searches")
         assert resp.status_code == 200
         data = resp.json()
         assert isinstance(data, list)
 
-    async def test_search_history_after_search(self, member_client, db_pool, acc_memory, acc_member):
+    async def test_search_history_after_search(
+        self, member_client, db_pool, acc_memory, acc_member
+    ):
         """After logging a search_result access, it should appear."""
         access_repo = AccessRepository(db_pool)
         await access_repo.log_access(
@@ -219,7 +225,6 @@ class TestMemorySearchHistory:
 
 
 class TestUserAccessActivity:
-
     async def test_get_own_activity(self, member_client, acc_member):
         resp = await member_client.get(f"/api/access/user/{acc_member['id']}")
         assert resp.status_code == 200
@@ -242,7 +247,6 @@ class TestUserAccessActivity:
 
 
 class TestMostAccessed:
-
     async def test_most_accessed_personal(self, member_client):
         resp = await member_client.get("/api/access/most-accessed")
         assert resp.status_code == 200
@@ -263,9 +267,7 @@ class TestMostAccessed:
         assert resp.status_code == 200
 
     async def test_most_accessed_with_limit(self, member_client):
-        resp = await member_client.get(
-            "/api/access/most-accessed", params={"limit": 5}
-        )
+        resp = await member_client.get("/api/access/most-accessed", params={"limit": 5})
         assert resp.status_code == 200
 
 
@@ -275,7 +277,6 @@ class TestMostAccessed:
 
 
 class TestOrgActivity:
-
     async def test_org_activity_returns_501(self, admin_client):
         """Organization activity endpoint is not yet implemented."""
         resp = await admin_client.get("/api/access/organization/activity")

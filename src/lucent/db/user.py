@@ -77,7 +77,9 @@ class UserRepository:
 
         return user
 
-    async def _create_individual_memory_for_user(self, user: dict[str, Any]) -> dict[str, Any] | None:
+    async def _create_individual_memory_for_user(
+        self, user: dict[str, Any]
+    ) -> dict[str, Any] | None:
         """Create an individual memory record for a user.
 
         This is called automatically when a user is created.
@@ -88,7 +90,12 @@ class UserRepository:
         Returns:
             The created memory record, or None if creation failed.
         """
-        name = user.get("display_name") or user.get("email") or user.get("external_id") or "Unknown User"
+        name = (
+            user.get("display_name")
+            or user.get("email")
+            or user.get("external_id")
+            or "Unknown User"
+        )
 
         # Build the individual memory content
         content = f"Individual memory for {name}."
@@ -220,11 +227,7 @@ class UserRepository:
 
         return self._row_to_dict(row)
 
-    async def get_by_external_id(
-        self,
-        external_id: str,
-        provider: str
-    ) -> dict[str, Any] | None:
+    async def get_by_external_id(self, external_id: str, provider: str) -> dict[str, Any] | None:
         """Get a user by their external ID and provider.
 
         Args:
@@ -384,7 +387,12 @@ class UserRepository:
             return
 
         # Update the metadata with current user info
-        name = user.get("display_name") or user.get("email") or user.get("external_id") or "Unknown User"
+        name = (
+            user.get("display_name")
+            or user.get("email")
+            or user.get("external_id")
+            or "Unknown User"
+        )
 
         current_metadata = individual_memory.get("metadata") or {}
         current_metadata["name"] = name
@@ -537,7 +545,11 @@ class UserRepository:
         # Handle organization_id which may be a string or UUID
         org_id = None
         if "organization_id" in row.keys() and row["organization_id"]:
-            org_id = row["organization_id"] if isinstance(row["organization_id"], UUID) else UUID(row["organization_id"])
+            org_id = (
+                row["organization_id"]
+                if isinstance(row["organization_id"], UUID)
+                else UUID(row["organization_id"])
+            )
 
         return {
             "id": row["id"],

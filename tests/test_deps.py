@@ -37,20 +37,28 @@ class TestCurrentUserConstruction:
         assert user.display_name == "Test User"
 
     def test_role_string_converted_to_enum(self):
-        user = CurrentUser(id=uuid4(), organization_id=None, role="admin", email=None, display_name=None)
+        user = CurrentUser(
+            id=uuid4(), organization_id=None, role="admin", email=None, display_name=None
+        )
         assert user.role == Role.ADMIN
         assert isinstance(user.role, Role)
 
     def test_owner_role(self):
-        user = CurrentUser(id=uuid4(), organization_id=None, role="owner", email=None, display_name=None)
+        user = CurrentUser(
+            id=uuid4(), organization_id=None, role="owner", email=None, display_name=None
+        )
         assert user.role == Role.OWNER
 
     def test_invalid_role_defaults_to_member(self):
-        user = CurrentUser(id=uuid4(), organization_id=None, role="superadmin", email=None, display_name=None)
+        user = CurrentUser(
+            id=uuid4(), organization_id=None, role="superadmin", email=None, display_name=None
+        )
         assert user.role == Role.MEMBER
 
     def test_defaults(self):
-        user = CurrentUser(id=uuid4(), organization_id=None, role="member", email=None, display_name=None)
+        user = CurrentUser(
+            id=uuid4(), organization_id=None, role="member", email=None, display_name=None
+        )
         assert user.auth_method == "session"
         assert user.api_key_id is None
         assert user.api_key_scopes == ["read", "write"]
@@ -74,7 +82,9 @@ class TestCurrentUserConstruction:
         assert user.api_key_scopes == ["read"]
 
     def test_none_organization_id(self):
-        user = CurrentUser(id=uuid4(), organization_id=None, role="member", email=None, display_name=None)
+        user = CurrentUser(
+            id=uuid4(), organization_id=None, role="member", email=None, display_name=None
+        )
         assert user.organization_id is None
 
 
@@ -87,43 +97,63 @@ class TestCurrentUserHasPermission:
     """Tests for permission checking on CurrentUser."""
 
     def test_member_can_create_memory(self):
-        user = CurrentUser(id=uuid4(), organization_id=None, role="member", email=None, display_name=None)
+        user = CurrentUser(
+            id=uuid4(), organization_id=None, role="member", email=None, display_name=None
+        )
         assert user.has_permission(Permission.MEMORY_CREATE) is True
 
     def test_member_cannot_read_all(self):
-        user = CurrentUser(id=uuid4(), organization_id=None, role="member", email=None, display_name=None)
+        user = CurrentUser(
+            id=uuid4(), organization_id=None, role="member", email=None, display_name=None
+        )
         assert user.has_permission(Permission.MEMORY_READ_ALL) is False
 
     def test_admin_can_read_all(self):
-        user = CurrentUser(id=uuid4(), organization_id=None, role="admin", email=None, display_name=None)
+        user = CurrentUser(
+            id=uuid4(), organization_id=None, role="admin", email=None, display_name=None
+        )
         assert user.has_permission(Permission.MEMORY_READ_ALL) is True
 
     def test_admin_cannot_delete_org(self):
-        user = CurrentUser(id=uuid4(), organization_id=None, role="admin", email=None, display_name=None)
+        user = CurrentUser(
+            id=uuid4(), organization_id=None, role="admin", email=None, display_name=None
+        )
         assert user.has_permission(Permission.ORG_DELETE) is False
 
     def test_owner_can_delete_org(self):
-        user = CurrentUser(id=uuid4(), organization_id=None, role="owner", email=None, display_name=None)
+        user = CurrentUser(
+            id=uuid4(), organization_id=None, role="owner", email=None, display_name=None
+        )
         assert user.has_permission(Permission.ORG_DELETE) is True
 
     def test_owner_can_delete_any_memory(self):
-        user = CurrentUser(id=uuid4(), organization_id=None, role="owner", email=None, display_name=None)
+        user = CurrentUser(
+            id=uuid4(), organization_id=None, role="owner", email=None, display_name=None
+        )
         assert user.has_permission(Permission.MEMORY_DELETE_ANY) is True
 
     def test_member_cannot_delete_any_memory(self):
-        user = CurrentUser(id=uuid4(), organization_id=None, role="member", email=None, display_name=None)
+        user = CurrentUser(
+            id=uuid4(), organization_id=None, role="member", email=None, display_name=None
+        )
         assert user.has_permission(Permission.MEMORY_DELETE_ANY) is False
 
     def test_member_can_view_own_audit(self):
-        user = CurrentUser(id=uuid4(), organization_id=None, role="member", email=None, display_name=None)
+        user = CurrentUser(
+            id=uuid4(), organization_id=None, role="member", email=None, display_name=None
+        )
         assert user.has_permission(Permission.AUDIT_VIEW_OWN) is True
 
     def test_member_cannot_view_org_audit(self):
-        user = CurrentUser(id=uuid4(), organization_id=None, role="member", email=None, display_name=None)
+        user = CurrentUser(
+            id=uuid4(), organization_id=None, role="member", email=None, display_name=None
+        )
         assert user.has_permission(Permission.AUDIT_VIEW_ORG) is False
 
     def test_admin_can_manage_users(self):
-        user = CurrentUser(id=uuid4(), organization_id=None, role="admin", email=None, display_name=None)
+        user = CurrentUser(
+            id=uuid4(), organization_id=None, role="admin", email=None, display_name=None
+        )
         assert user.has_permission(Permission.USERS_MANAGE) is True
 
 
@@ -136,25 +166,33 @@ class TestCurrentUserRequirePermission:
     """Tests for require_permission raising HTTPException."""
 
     def test_no_exception_when_allowed(self):
-        user = CurrentUser(id=uuid4(), organization_id=None, role="admin", email=None, display_name=None)
+        user = CurrentUser(
+            id=uuid4(), organization_id=None, role="admin", email=None, display_name=None
+        )
         # Should not raise
         user.require_permission(Permission.MEMORY_READ_ALL)
 
     def test_raises_403_when_denied(self):
-        user = CurrentUser(id=uuid4(), organization_id=None, role="member", email=None, display_name=None)
+        user = CurrentUser(
+            id=uuid4(), organization_id=None, role="member", email=None, display_name=None
+        )
         with pytest.raises(HTTPException) as exc_info:
             user.require_permission(Permission.MEMORY_READ_ALL)
         assert exc_info.value.status_code == 403
         assert "memory.read.all" in exc_info.value.detail
 
     def test_member_denied_users_manage(self):
-        user = CurrentUser(id=uuid4(), organization_id=None, role="member", email=None, display_name=None)
+        user = CurrentUser(
+            id=uuid4(), organization_id=None, role="member", email=None, display_name=None
+        )
         with pytest.raises(HTTPException) as exc_info:
             user.require_permission(Permission.USERS_MANAGE)
         assert exc_info.value.status_code == 403
 
     def test_owner_allowed_org_transfer(self):
-        user = CurrentUser(id=uuid4(), organization_id=None, role="owner", email=None, display_name=None)
+        user = CurrentUser(
+            id=uuid4(), organization_id=None, role="owner", email=None, display_name=None
+        )
         user.require_permission(Permission.ORG_TRANSFER)  # Should not raise
 
 
@@ -168,7 +206,9 @@ class TestCurrentUserHasScope:
 
     def test_default_scopes_grant_full_access(self):
         """Default read+write scopes should grant access to everything."""
-        user = CurrentUser(id=uuid4(), organization_id=None, role="member", email=None, display_name=None)
+        user = CurrentUser(
+            id=uuid4(), organization_id=None, role="member", email=None, display_name=None
+        )
         assert user.has_scope("daemon-tasks") is True
         assert user.has_scope("anything") is True
         assert user.has_scope("read") is True
@@ -176,7 +216,11 @@ class TestCurrentUserHasScope:
 
     def test_explicit_read_write_grants_full_access(self):
         user = CurrentUser(
-            id=uuid4(), organization_id=None, role="member", email=None, display_name=None,
+            id=uuid4(),
+            organization_id=None,
+            role="member",
+            email=None,
+            display_name=None,
             api_key_scopes=["read", "write"],
         )
         assert user.has_scope("daemon-tasks") is True
@@ -184,7 +228,11 @@ class TestCurrentUserHasScope:
 
     def test_scoped_key_only_matches_exact_scope(self):
         user = CurrentUser(
-            id=uuid4(), organization_id=None, role="member", email=None, display_name=None,
+            id=uuid4(),
+            organization_id=None,
+            role="member",
+            email=None,
+            display_name=None,
             api_key_scopes=["daemon-tasks"],
         )
         assert user.has_scope("daemon-tasks") is True
@@ -194,7 +242,11 @@ class TestCurrentUserHasScope:
 
     def test_multiple_limited_scopes(self):
         user = CurrentUser(
-            id=uuid4(), organization_id=None, role="member", email=None, display_name=None,
+            id=uuid4(),
+            organization_id=None,
+            role="member",
+            email=None,
+            display_name=None,
             api_key_scopes=["daemon-tasks", "export"],
         )
         assert user.has_scope("daemon-tasks") is True
@@ -204,7 +256,11 @@ class TestCurrentUserHasScope:
     def test_read_only_scope(self):
         """A key with only 'read' (no 'write') should NOT get full access."""
         user = CurrentUser(
-            id=uuid4(), organization_id=None, role="member", email=None, display_name=None,
+            id=uuid4(),
+            organization_id=None,
+            role="member",
+            email=None,
+            display_name=None,
             api_key_scopes=["read"],
         )
         assert user.has_scope("read") is True
@@ -213,7 +269,11 @@ class TestCurrentUserHasScope:
 
     def test_write_only_scope(self):
         user = CurrentUser(
-            id=uuid4(), organization_id=None, role="member", email=None, display_name=None,
+            id=uuid4(),
+            organization_id=None,
+            role="member",
+            email=None,
+            display_name=None,
             api_key_scopes=["write"],
         )
         assert user.has_scope("write") is True
@@ -223,7 +283,11 @@ class TestCurrentUserHasScope:
     def test_empty_scopes_default_to_full_access(self):
         """Empty list is falsy, so it defaults to ['read', 'write'] (full access)."""
         user = CurrentUser(
-            id=uuid4(), organization_id=None, role="member", email=None, display_name=None,
+            id=uuid4(),
+            organization_id=None,
+            role="member",
+            email=None,
+            display_name=None,
             api_key_scopes=[],
         )
         # Empty list triggers `or` default to ["read", "write"]
@@ -241,18 +305,28 @@ class TestCurrentUserRequireScope:
 
     def test_no_exception_when_scope_present(self):
         user = CurrentUser(
-            id=uuid4(), organization_id=None, role="member", email=None, display_name=None,
+            id=uuid4(),
+            organization_id=None,
+            role="member",
+            email=None,
+            display_name=None,
             api_key_scopes=["daemon-tasks"],
         )
         user.require_scope("daemon-tasks")  # Should not raise
 
     def test_no_exception_with_full_access(self):
-        user = CurrentUser(id=uuid4(), organization_id=None, role="member", email=None, display_name=None)
+        user = CurrentUser(
+            id=uuid4(), organization_id=None, role="member", email=None, display_name=None
+        )
         user.require_scope("daemon-tasks")  # Default read+write = full access
 
     def test_raises_403_when_scope_missing(self):
         user = CurrentUser(
-            id=uuid4(), organization_id=None, role="member", email=None, display_name=None,
+            id=uuid4(),
+            organization_id=None,
+            role="member",
+            email=None,
+            display_name=None,
             api_key_scopes=["read"],
         )
         with pytest.raises(HTTPException) as exc_info:
@@ -263,7 +337,11 @@ class TestCurrentUserRequireScope:
     def test_empty_scopes_default_to_full_access(self):
         """Empty list is falsy, so it defaults to ['read', 'write'] (full access)."""
         user = CurrentUser(
-            id=uuid4(), organization_id=None, role="member", email=None, display_name=None,
+            id=uuid4(),
+            organization_id=None,
+            role="member",
+            email=None,
+            display_name=None,
             api_key_scopes=[],
         )
         # Should not raise - empty list defaults to full access
@@ -280,7 +358,9 @@ class TestCurrentUserImpersonation:
     """Tests for impersonation detection."""
 
     def test_not_impersonated_by_default(self):
-        user = CurrentUser(id=uuid4(), organization_id=None, role="member", email=None, display_name=None)
+        user = CurrentUser(
+            id=uuid4(), organization_id=None, role="member", email=None, display_name=None
+        )
         assert user.is_impersonated is False
 
     def test_impersonated_when_impersonator_set(self):
@@ -319,7 +399,9 @@ class TestCurrentUserAuditContext:
     """Tests for audit context generation."""
 
     def test_basic_session_context(self):
-        user = CurrentUser(id=uuid4(), organization_id=None, role="member", email=None, display_name=None)
+        user = CurrentUser(
+            id=uuid4(), organization_id=None, role="member", email=None, display_name=None
+        )
         ctx = user.get_audit_context()
         assert ctx["auth_method"] == "session"
         assert "api_key_id" not in ctx
@@ -476,11 +558,15 @@ class TestCurrentUserEdgeCases:
 
     def test_role_case_insensitive(self):
         """Role.from_string lowercases, so 'Admin' should work."""
-        user = CurrentUser(id=uuid4(), organization_id=None, role="Admin", email=None, display_name=None)
+        user = CurrentUser(
+            id=uuid4(), organization_id=None, role="Admin", email=None, display_name=None
+        )
         assert user.role == Role.ADMIN
 
     def test_role_owner_uppercase(self):
-        user = CurrentUser(id=uuid4(), organization_id=None, role="OWNER", email=None, display_name=None)
+        user = CurrentUser(
+            id=uuid4(), organization_id=None, role="OWNER", email=None, display_name=None
+        )
         assert user.role == Role.OWNER
 
     def test_empty_string_role_defaults_to_member(self):

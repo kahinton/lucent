@@ -76,9 +76,7 @@ def sign_value(value: str) -> str:
 
     Used for the impersonation cookie to prevent forgery.
     """
-    signature = hmac.new(
-        SIGNING_SECRET.encode(), value.encode(), hashlib.sha256
-    ).hexdigest()
+    signature = hmac.new(SIGNING_SECRET.encode(), value.encode(), hashlib.sha256).hexdigest()
     return f"{value}.{signature}"
 
 
@@ -87,9 +85,7 @@ def verify_signed_value(signed: str | None) -> str | None:
     if not signed or "." not in signed:
         return None
     value, signature = signed.rsplit(".", 1)
-    expected = hmac.new(
-        SIGNING_SECRET.encode(), value.encode(), hashlib.sha256
-    ).hexdigest()
+    expected = hmac.new(SIGNING_SECRET.encode(), value.encode(), hashlib.sha256).hexdigest()
     if hmac.compare_digest(signature, expected):
         return value
     return None

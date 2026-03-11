@@ -35,6 +35,7 @@ from copilot import CopilotClient, PermissionHandler
 try:
     sys.path.insert(0, str(Path(__file__).parent))
     from adaptation import AdaptationPipeline, parse_assessment_output
+
     sys.path.pop(0)
 except (ImportError, Exception):
     AdaptationPipeline = None
@@ -63,12 +64,18 @@ MAX_RESULT_LENGTH = int(os.environ.get("LUCENT_MAX_RESULT_LENGTH", "8000"))
 
 # Approval flow: when enabled, tasks go to needs-review before completing.
 # When disabled, tasks complete immediately after successful execution.
-REQUIRE_APPROVAL = os.environ.get("LUCENT_REQUIRE_APPROVAL", "false").lower() in ("true", "1", "yes")
+REQUIRE_APPROVAL = os.environ.get("LUCENT_REQUIRE_APPROVAL", "false").lower() in (
+    "true",
+    "1",
+    "yes",
+)
 
 # Multi-model review: comma-separated list of models to use for reviewing task output.
 # When set, completed tasks are re-evaluated by each model before final completion.
 # The cognitive model is always claude-opus-4.6; these are for sub-agent review.
-REVIEW_MODELS = [m.strip() for m in os.environ.get("LUCENT_REVIEW_MODELS", "").split(",") if m.strip()]
+REVIEW_MODELS = [
+    m.strip() for m in os.environ.get("LUCENT_REVIEW_MODELS", "").split(",") if m.strip()
+]
 
 # Paths
 DAEMON_DIR = Path(__file__).parent
@@ -81,13 +88,17 @@ LOG_FILE = DAEMON_DIR / "daemon.log"
 # MCP configuration — passed to all sessions
 MCP_URL = os.environ.get("LUCENT_MCP_URL", "http://localhost:8766/mcp")
 MCP_API_KEY = os.environ.get("LUCENT_MCP_API_KEY", "")
-MCP_CONFIG = {
-    "memory-server": {
-        "type": "http",
-        "url": MCP_URL,
-        "headers": {"Authorization": f"Bearer {MCP_API_KEY}"},
-    },
-} if MCP_API_KEY else {}
+MCP_CONFIG = (
+    {
+        "memory-server": {
+            "type": "http",
+            "url": MCP_URL,
+            "headers": {"Authorization": f"Bearer {MCP_API_KEY}"},
+        },
+    }
+    if MCP_API_KEY
+    else {}
+)
 
 # REST API base URL (same host as MCP, different path)
 API_BASE = MCP_URL.replace("/mcp", "/api")
@@ -98,13 +109,16 @@ API_HEADERS = {"Authorization": f"Bearer {MCP_API_KEY}", "Content-Type": "applic
 # Direct API Client (no LLM needed)
 # ============================================================================
 
+
 class MemoryAPI:
     """Direct REST API client for memory operations that don't need an LLM."""
 
     API_TIMEOUT = 15  # seconds for individual HTTP requests
 
     @staticmethod
-    async def search(query: str, tags: list[str] | None = None, type: str | None = None, limit: int = 10) -> list[dict]:
+    async def search(
+        query: str, tags: list[str] | None = None, type: str | None = None, limit: int = 10
+    ) -> list[dict]:
         """Search memories via REST API."""
         params = {"query": query, "limit": limit}
         if tags:
@@ -122,7 +136,9 @@ class MemoryAPI:
         return []
 
     @staticmethod
-    async def create(type: str, content: str, tags: list[str], importance: int = 5, metadata: dict | None = None) -> dict | None:
+    async def create(
+        type: str, content: str, tags: list[str], importance: int = 5, metadata: dict | None = None
+    ) -> dict | None:
         """Create a memory via REST API."""
         body = {"type": type, "content": content, "tags": tags, "importance": importance}
         if metadata:
@@ -137,7 +153,13 @@ class MemoryAPI:
         return None
 
     @staticmethod
-    async def update(memory_id: str, tags: list[str] | None = None, content: str | None = None, importance: int | None = None, metadata: dict | None = None) -> dict | None:
+    async def update(
+        memory_id: str,
+        tags: list[str] | None = None,
+        content: str | None = None,
+        importance: int | None = None,
+        metadata: dict | None = None,
+    ) -> dict | None:
         """Update a memory via REST API."""
         body = {}
         if tags is not None:
@@ -150,7 +172,9 @@ class MemoryAPI:
             body["metadata"] = metadata
         try:
             async with httpx.AsyncClient(timeout=MemoryAPI.API_TIMEOUT) as client:
-                resp = await client.patch(f"{API_BASE}/memories/{memory_id}", json=body, headers=API_HEADERS)
+                resp = await client.patch(
+                    f"{API_BASE}/memories/{memory_id}", json=body, headers=API_HEADERS
+                )
                 if resp.status_code == 200:
                     return resp.json()
         except Exception as e:
@@ -174,6 +198,7 @@ class MemoryAPI:
 # Logging
 # ============================================================================
 
+
 def _configure_daemon_logging():
     """Configure structured logging for the daemon process."""
     os.environ.setdefault("LUCENT_LOG_FORMAT", "human")
@@ -187,6 +212,7 @@ def _configure_daemon_logging():
         sys.path.insert(0, src_dir)
 
     from lucent.logging import configure_logging, get_logger
+
     configure_logging()
     return get_logger
 
@@ -236,6 +262,7 @@ def log(message: str, level: str = "INFO"):
         return
 
     from lucent.logging import STREAM, THOUGHT
+
     level_map = {
         "INFO": _logger.info,
         "WARN": _logger.warning,
@@ -252,6 +279,7 @@ def log(message: str, level: str = "INFO"):
 # ============================================================================
 # System Message Builders
 # ============================================================================
+
 
 def build_cognitive_prompt() -> str:
     """Build the system message for the cognitive loop session."""
@@ -272,7 +300,11 @@ def build_cognitive_prompt() -> str:
 def build_subagent_prompt(agent_type: str, task_description: str, task_context: str = "") -> str:
     """Build the system message for a sub-agent session."""
     agent_file = AGENTS_DIR / f"{agent_type}.agent.md"
-    agent_def = agent_file.read_text() if agent_file.exists() else f"You are Lucent's {agent_type} sub-agent."
+    agent_def = (
+        agent_file.read_text()
+        if agent_file.exists()
+        else f"You are Lucent's {agent_type} sub-agent."
+    )
     identity = AGENT_DEF_PATH.read_text() if AGENT_DEF_PATH.exists() else ""
 
     # Load relevant skills
@@ -327,6 +359,7 @@ After completing work, save what you learned:
 # Daemon
 # ============================================================================
 
+
 class LucentDaemon:
     """Orchestrates Lucent's cognitive architecture."""
 
@@ -352,8 +385,10 @@ class LucentDaemon:
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, self._handle_shutdown)
 
-        log(f"Daemon ready. Instance: {self.instance_id}, Interval: {DAEMON_INTERVAL_MINUTES}m, "
-            f"Max sessions: {MAX_CONCURRENT_SESSIONS}, Model: {MODEL}")
+        log(
+            f"Daemon ready. Instance: {self.instance_id}, Interval: {DAEMON_INTERVAL_MINUTES}m, "
+            f"Max sessions: {MAX_CONCURRENT_SESSIONS}, Model: {MODEL}"
+        )
 
     def _handle_shutdown(self):
         """Handle shutdown signal."""
@@ -377,7 +412,7 @@ class LucentDaemon:
                     f"'in-progress'. For each one found, use update_memory "
                     f"to release it with instance_id '{self.instance_id}'. Output the count released."
                 ),
-                f"Release all tasks claimed by instance {self.instance_id}."
+                f"Release all tasks claimed by instance {self.instance_id}.",
             )
         except Exception:
             pass
@@ -392,7 +427,9 @@ class LucentDaemon:
 
     # --- Session Management ---
 
-    async def run_session(self, name: str, system_message: str, prompt: str, model: str | None = None) -> str | None:
+    async def run_session(
+        self, name: str, system_message: str, prompt: str, model: str | None = None
+    ) -> str | None:
         """Run a single Copilot session with the given system message and prompt.
 
         Each session gets its own CopilotClient for full isolation.
@@ -412,14 +449,19 @@ class LucentDaemon:
                 timeout=SESSION_TOTAL_TIMEOUT,
             )
         except asyncio.TimeoutError:
-            log(f"Session '{name}' HARD TIMEOUT after {SESSION_TOTAL_TIMEOUT}s — "
-                "session lifecycle hung (likely during client.start or create_session)", "ERROR")
+            log(
+                f"Session '{name}' HARD TIMEOUT after {SESSION_TOTAL_TIMEOUT}s — "
+                "session lifecycle hung (likely during client.start or create_session)",
+                "ERROR",
+            )
             return None
         except Exception as e:
             log(f"Session '{name}' failed: {e}", "ERROR")
             return None
 
-    async def _run_session_inner(self, name: str, system_message: str, prompt: str, model: str | None = None) -> str | None:
+    async def _run_session_inner(
+        self, name: str, system_message: str, prompt: str, model: str | None = None
+    ) -> str | None:
         """Inner session runner — separated so the caller can wrap with a hard timeout."""
         client = None
 
@@ -427,12 +469,14 @@ class LucentDaemon:
             client = CopilotClient({"log_level": "warning"})
             await client.start()
 
-            session = await client.create_session({
-                "model": model or MODEL,
-                "system_message": {"content": system_message},
-                "on_permission_request": PermissionHandler.approve_all,
-                "mcpServers": MCP_CONFIG,
-            })
+            session = await client.create_session(
+                {
+                    "model": model or MODEL,
+                    "system_message": {"content": system_message},
+                    "on_permission_request": PermissionHandler.approve_all,
+                    "mcpServers": MCP_CONFIG,
+                }
+            )
             self.active_sessions.append(session)
 
             try:
@@ -441,10 +485,10 @@ class LucentDaemon:
                 done = asyncio.Event()
 
                 def on_event(event):
-                    etype = event.type.value if hasattr(event.type, 'value') else str(event.type)
+                    etype = event.type.value if hasattr(event.type, "value") else str(event.type)
 
                     if etype == "assistant.message":
-                        content = getattr(event.data, 'content', None)
+                        content = getattr(event.data, "content", None)
                         if content:
                             response_parts.append(content)
                             log(f"  [{name}] message: {content[:200]}...", "STREAM")
@@ -453,20 +497,23 @@ class LucentDaemon:
                     elif etype == "session.idle":
                         done.set()
                     elif "error" in etype.lower():
-                        log(f"  [{name}] error event: {etype} - {getattr(event.data, 'message', str(event.data)[:200])}", "ERROR")
+                        log(
+                            f"  [{name}] error event: {etype} - {getattr(event.data, 'message', str(event.data)[:200])}",
+                            "ERROR",
+                        )
                         done.set()
                     else:
                         # Log all other events for visibility (tool calls, etc.)
                         detail = ""
-                        if hasattr(event.data, 'tool_name'):
+                        if hasattr(event.data, "tool_name"):
                             detail = f" tool={event.data.tool_name}"
-                        elif hasattr(event.data, 'name'):
+                        elif hasattr(event.data, "name"):
                             detail = f" name={event.data.name}"
                         # Include tool output/result snippets when available
-                        if hasattr(event.data, 'output'):
+                        if hasattr(event.data, "output"):
                             output = str(event.data.output)[:300]
                             detail += f" output={output}"
-                        elif hasattr(event.data, 'result'):
+                        elif hasattr(event.data, "result"):
                             result_str = str(event.data.result)[:300]
                             detail += f" result={result_str}"
                         log(f"  [{name}] event: {etype}{detail}", "STREAM")
@@ -524,9 +571,7 @@ class LucentDaemon:
         output, and generates domain-specific agents and skills.
         """
         # Check if an environment memory already exists
-        env_memories = await MemoryAPI.search(
-            "environment", tags=["environment"], limit=1
-        )
+        env_memories = await MemoryAPI.search("environment", tags=["environment"], limit=1)
         if env_memories:
             log("Environment profile found — skipping adaptation")
             return
@@ -556,8 +601,11 @@ class LucentDaemon:
         # Parse and run adaptation pipeline
         assessment = parse_assessment_output(assessment_output)
         if assessment is None:
-            log("Could not parse structured assessment output — "
-                "the assessment agent may not have included <assessment_result> tags", "WARN")
+            log(
+                "Could not parse structured assessment output — "
+                "the assessment agent may not have included <assessment_result> tags",
+                "WARN",
+            )
             return
 
         pipeline = AdaptationPipeline(assessment)
@@ -565,8 +613,10 @@ class LucentDaemon:
 
         agents_created = len(summary.get("agents_created", []))
         skills_created = len(summary.get("skills_created", []))
-        log(f"Adaptation complete: {agents_created} agents, {skills_created} skills created "
-            f"for domain '{summary.get('domain', 'unknown')}'")
+        log(
+            f"Adaptation complete: {agents_created} agents, {skills_created} skills created "
+            f"for domain '{summary.get('domain', 'unknown')}'"
+        )
 
     async def run_cognitive_cycle(self):
         """Run one cognitive cycle — perceive, reason, decide, act via tools."""
@@ -587,7 +637,7 @@ class LucentDaemon:
         result = await self.run_session(
             f"cognitive-{self.cycle_count}",
             prompt,
-            "Begin your cognitive cycle. Load state, perceive, reason, decide. Use memory tools to create tasks and update state. Output a brief summary of your decisions."
+            "Begin your cognitive cycle. Load state, perceive, reason, decide. Use memory tools to create tasks and update state. Output a brief summary of your decisions.",
         )
 
         if result:
@@ -613,12 +663,27 @@ class LucentDaemon:
             return False, f"output too short ({len(stripped)} chars)"
 
         failure_indicators = [
-            "couldn't find", "could not find", "unable to", "failed to",
-            "i don't have", "i do not have", "no context", "not found",
-            "cannot locate", "couldn't locate", "could not locate",
-            "no relevant", "no matching", "i wasn't able", "i was not able",
-            "error occurred", "exception occurred", "task not completed",
-            "cannot complete", "couldn't complete", "could not complete",
+            "couldn't find",
+            "could not find",
+            "unable to",
+            "failed to",
+            "i don't have",
+            "i do not have",
+            "no context",
+            "not found",
+            "cannot locate",
+            "couldn't locate",
+            "could not locate",
+            "no relevant",
+            "no matching",
+            "i wasn't able",
+            "i was not able",
+            "error occurred",
+            "exception occurred",
+            "task not completed",
+            "cannot complete",
+            "couldn't complete",
+            "could not complete",
         ]
 
         result_lower = result.lower()
@@ -631,15 +696,17 @@ class LucentDaemon:
     async def _update_heartbeat(self):
         """Write/update this instance's heartbeat memory."""
         log(f"Updating heartbeat for instance {self.instance_id}")
-        heartbeat_content = json.dumps({
-            "instance_id": self.instance_id,
-            "hostname": platform.node(),
-            "pid": os.getpid(),
-            "cycle_count": self.cycle_count,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "model": MODEL,
-            "max_sessions": MAX_CONCURRENT_SESSIONS,
-        })
+        heartbeat_content = json.dumps(
+            {
+                "instance_id": self.instance_id,
+                "hostname": platform.node(),
+                "pid": os.getpid(),
+                "cycle_count": self.cycle_count,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "model": MODEL,
+                "max_sessions": MAX_CONCURRENT_SESSIONS,
+            }
+        )
 
         await self.run_session(
             f"heartbeat-{self.cycle_count}",
@@ -651,14 +718,16 @@ class LucentDaemon:
                 "['daemon-heartbeat', 'daemon'] and importance 3. "
                 "Output ONLY the memory ID."
             ),
-            f"Heartbeat content:\n{heartbeat_content}"
+            f"Heartbeat content:\n{heartbeat_content}",
         )
 
     async def _release_stale_claims(self):
         """Find tasks stuck in 'in-progress' for too long and release them back to pending."""
         log("Checking for stuck tasks...")
         # Use direct API to find in-progress tasks
-        results = await MemoryAPI.search("in-progress daemon-task", tags=["daemon-task", "in-progress"], limit=20)
+        results = await MemoryAPI.search(
+            "in-progress daemon-task", tags=["daemon-task", "in-progress"], limit=20
+        )
         if not results:
             return
 
@@ -675,14 +744,15 @@ class LucentDaemon:
                         current_tags = memory.get("tags", [])
                         new_tags = [t for t in current_tags if t != "in-progress"] + ["pending"]
                         await MemoryAPI.update(mid, tags=new_tags)
-                        log(f"Released stuck task {mid[:8]} (in-progress for {int((now - updated_dt).total_seconds() / 60)}m)")
+                        log(
+                            f"Released stuck task {mid[:8]} (in-progress for {int((now - updated_dt).total_seconds() / 60)}m)"
+                        )
                         released += 1
                 except (ValueError, TypeError):
                     pass
 
         if released:
             log(f"Released {released} stuck task(s)")
-
 
     async def _dispatch_pending_tasks(self, max_tasks: int = 2):
         """Find and dispatch pending daemon-task memories, claiming them atomically.
@@ -703,7 +773,7 @@ class LucentDaemon:
                 "  TASK|memory_id|agent_type  (for pending tasks)\n"
                 "  CLAIMED|memory_id|claimed_by  (for already-claimed tasks)"
             ),
-            "Find all pending and claimed daemon tasks."
+            "Find all pending and claimed daemon tasks.",
         )
 
         if not task_finder:
@@ -740,7 +810,10 @@ class LucentDaemon:
 
             current_tags = task_memory.get("tags", [])
             if "pending" not in current_tags:
-                log(f"Task {memory_id[:8]} no longer pending — likely claimed by another instance", "WARN")
+                log(
+                    f"Task {memory_id[:8]} no longer pending — likely claimed by another instance",
+                    "WARN",
+                )
                 continue
 
             claim_tags = [t for t in current_tags if t != "pending"] + ["in-progress"]
@@ -763,7 +836,7 @@ class LucentDaemon:
             result = await self.run_session(
                 f"{agent_type}-{memory_id[:8]}",
                 system_message,
-                f"Execute this task:\n\n{task_content}"
+                f"Execute this task:\n\n{task_content}",
             )
 
             if result:
@@ -800,7 +873,9 @@ class LucentDaemon:
                     # Also create a daemon-result memory for discoverability
                     await MemoryAPI.create(
                         type="experience",
-                        content=result[:MAX_RESULT_LENGTH] if result else "Task completed (no output)",
+                        content=result[:MAX_RESULT_LENGTH]
+                        if result
+                        else "Task completed (no output)",
                         tags=["daemon-result", "needs-review", agent_type],
                         importance=6,
                         metadata={"task_id": memory_id, "agent_type": agent_type},
@@ -814,14 +889,18 @@ class LucentDaemon:
                         tags=done_tags,
                         metadata={"result": result[:MAX_RESULT_LENGTH]} if result else None,
                     )
-                    log(f"Task {memory_id[:8]} marked completed (result: {len(result) if result else 0} chars)")
+                    log(
+                        f"Task {memory_id[:8]} marked completed (result: {len(result) if result else 0} chars)"
+                    )
             else:
                 # Release the claim so another instance can try
                 release_tags = [t for t in claim_tags if t != "in-progress"] + ["pending"]
                 await MemoryAPI.update(memory_id, tags=release_tags)
                 log(f"Task {memory_id[:8]} NOT complete — {reason}. Released claim.", "WARN")
 
-    async def _multi_model_review(self, memory_id: str, agent_type: str, task_content: str, result: str) -> bool:
+    async def _multi_model_review(
+        self, memory_id: str, agent_type: str, task_content: str, result: str
+    ) -> bool:
         """Run the task result through multiple models for review.
 
         Each review model evaluates the result independently. All must approve
@@ -871,7 +950,9 @@ Respond with EXACTLY one of:
             return True  # Don't block on review failures
 
         passed = rejections == 0
-        log(f"Multi-model review for {memory_id[:8]}: {approvals}/{total} approved — {'PASSED' if passed else 'FAILED'}")
+        log(
+            f"Multi-model review for {memory_id[:8]}: {approvals}/{total} approved — {'PASSED' if passed else 'FAILED'}"
+        )
         return passed
 
     # --- Autonomic Layer ---
@@ -885,12 +966,12 @@ Respond with EXACTLY one of:
         system_message = build_subagent_prompt(
             "memory",
             "Quick memory maintenance pass — check for obvious issues, fix what's straightforward.",
-            "This is an autonomic background task, not a cognitive decision."
+            "This is an autonomic background task, not a cognitive decision.",
         )
         await self.run_session(
             "autonomic-maintenance",
             system_message,
-            "Quick maintenance scan. Search recent memories for duplicates, missing tags, or miscalibrated importance. Fix obvious issues. Only save a summary if you actually changed something."
+            "Quick maintenance scan. Search recent memories for duplicates, missing tags, or miscalibrated importance. Fix obvious issues. Only save a summary if you actually changed something.",
         )
 
     async def run_learning_extraction(self):
@@ -902,7 +983,7 @@ Respond with EXACTLY one of:
         system_message = build_subagent_prompt(
             "reflection",
             "Learning extraction pass — process recent daemon-results and feedback into reusable lessons.",
-            "This is an autonomic background task. Follow the learning-extraction skill instructions."
+            "This is an autonomic background task. Follow the learning-extraction skill instructions.",
         )
         await self.run_session(
             "autonomic-learning",
@@ -915,7 +996,7 @@ Respond with EXACTLY one of:
                 "4. Tag processed memories with 'lesson-extracted'. "
                 "5. Save a brief summary of what was extracted. "
                 "Only process the most recent 10 unprocessed memories per run. Skip trivial results."
-            )
+            ),
         )
 
     # --- Main Loops ---
@@ -949,8 +1030,11 @@ Respond with EXACTLY one of:
         try:
             if task:
                 system_message = build_subagent_prompt(task, f"Execute a {task} task.")
-                await self.run_session(f"{task}-manual", system_message,
-                    f"Run a {task} session. Search memories for context, do your work, save results.")
+                await self.run_session(
+                    f"{task}-manual",
+                    system_message,
+                    f"Run a {task} session. Search memories for context, do your work, save results.",
+                )
             else:
                 await self.run_cognitive_cycle()
         finally:
@@ -960,6 +1044,7 @@ Respond with EXACTLY one of:
 # ============================================================================
 # Entry Point
 # ============================================================================
+
 
 def main():
     """Entry point for the daemon."""
@@ -972,10 +1057,17 @@ def main():
 
     parser = argparse.ArgumentParser(description="Lucent Daemon — Cognitive Architecture")
     parser.add_argument("--once", action="store_true", help="Run one cognitive cycle and exit")
-    parser.add_argument("--task", type=str,
-                        help="Run a specific sub-agent (research, code, memory, reflection, documentation, planning)")
-    parser.add_argument("--interval", type=int, default=DAEMON_INTERVAL_MINUTES,
-                        help="Minutes between cognitive cycles")
+    parser.add_argument(
+        "--task",
+        type=str,
+        help="Run a specific sub-agent (research, code, memory, reflection, documentation, planning)",
+    )
+    parser.add_argument(
+        "--interval",
+        type=int,
+        default=DAEMON_INTERVAL_MINUTES,
+        help="Minutes between cognitive cycles",
+    )
     args = parser.parse_args()
 
     daemon = LucentDaemon()

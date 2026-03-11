@@ -179,12 +179,14 @@ class TestVerifyEdgeCases:
     async def test_returns_none_for_expired_key(self):
         """Test that verify returns None for an expired key."""
         expired_time = datetime.now(timezone.utc) - timedelta(days=1)
-        row, _ = _make_mock_row({
-            "expires_at": expired_time,
-            "user_email": "test@example.com",
-            "user_display_name": "Test",
-            "user_role": "member",
-        })
+        row, _ = _make_mock_row(
+            {
+                "expires_at": expired_time,
+                "user_email": "test@example.com",
+                "user_display_name": "Test",
+                "user_role": "member",
+            }
+        )
         mock_conn = AsyncMock()
         mock_conn.fetch.return_value = [row]
 

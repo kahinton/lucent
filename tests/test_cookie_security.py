@@ -27,7 +27,7 @@ class TestCookieDeletionSecurity:
         for header_name, header_value in response.raw_headers:
             if header_name == b"set-cookie":
                 value_str = header_value.decode()
-                if "Max-Age=0" in value_str or 'max-age=0' in value_str:
+                if "Max-Age=0" in value_str or "max-age=0" in value_str:
                     deletions.append(value_str)
         return deletions
 
@@ -77,9 +77,7 @@ class TestCookieDeletionSecurity:
         del_response.delete_cookie(key=SESSION_COOKIE_NAME, **params)
 
         # Extract and compare security attributes
-        set_headers = [
-            h.decode() for _, h in set_response.raw_headers if _ == b"set-cookie"
-        ]
+        set_headers = [h.decode() for _, h in set_response.raw_headers if _ == b"set-cookie"]
         del_headers = self._get_delete_cookie_headers(del_response)
 
         assert len(set_headers) == 1
@@ -150,9 +148,7 @@ class TestImpersonationSessionRegeneration:
 
         source = inspect.getsource(start_impersonation)
 
-        assert "SESSION_COOKIE_NAME" in source, (
-            "start_impersonation must set a new session cookie"
-        )
+        assert "SESSION_COOKIE_NAME" in source, "start_impersonation must set a new session cookie"
 
     def test_start_impersonation_binds_impersonation_to_session(self):
         """The impersonation cookie must be bound to the new session hash."""
@@ -177,9 +173,7 @@ class TestImpersonationSessionRegeneration:
         # create_session must appear before set_cookie
         create_pos = source.index("create_session")
         set_cookie_pos = source.index("set_cookie")
-        assert create_pos < set_cookie_pos, (
-            "create_session must be called before setting cookies"
-        )
+        assert create_pos < set_cookie_pos, "create_session must be called before setting cookies"
 
     @pytest.mark.asyncio
     async def test_start_impersonation_regenerates_session_token(self):
@@ -213,10 +207,14 @@ class TestImpersonationSessionRegeneration:
         with (
             patch("lucent.web.routes.is_team_mode", return_value=True),
             patch("lucent.web.routes._check_csrf", new_callable=AsyncMock),
-            patch("lucent.web.routes.get_user_context", new_callable=AsyncMock, return_value=mock_user),
+            patch(
+                "lucent.web.routes.get_user_context", new_callable=AsyncMock, return_value=mock_user
+            ),
             patch("lucent.web.routes.get_pool", new_callable=AsyncMock, return_value=mock_pool),
             patch("lucent.web.routes.UserRepository", return_value=mock_repo),
-            patch("lucent.web.routes.create_session", new_callable=AsyncMock, return_value=new_token) as mock_create,
+            patch(
+                "lucent.web.routes.create_session", new_callable=AsyncMock, return_value=new_token
+            ) as mock_create,
         ):
             mock_request = MagicMock()
             response = await start_impersonation(mock_request, target_id)
@@ -225,10 +223,7 @@ class TestImpersonationSessionRegeneration:
             mock_create.assert_called_once_with(mock_pool, admin_id)
 
             # Verify the response sets a new session cookie with the new token
-            set_cookie_headers = [
-                h.decode() for _, h in response.raw_headers
-                if _ == b"set-cookie"
-            ]
+            set_cookie_headers = [h.decode() for _, h in response.raw_headers if _ == b"set-cookie"]
             session_cookies = [h for h in set_cookie_headers if SESSION_COOKIE_NAME in h]
             assert len(session_cookies) >= 1, "Response must set a new session cookie"
             assert new_token in session_cookies[0], (

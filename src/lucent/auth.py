@@ -36,7 +36,9 @@ _current_user: ContextVar[dict[str, Any] | None] = ContextVar("current_user", de
 _current_api_key_id: ContextVar[UUID | None] = ContextVar("current_api_key_id", default=None)
 
 # Context variable to store impersonation info (original user when impersonating)
-_impersonating_user: ContextVar[dict[str, Any] | None] = ContextVar("impersonating_user", default=None)
+_impersonating_user: ContextVar[dict[str, Any] | None] = ContextVar(
+    "impersonating_user", default=None
+)
 
 
 async def _ensure_pool():

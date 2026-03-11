@@ -107,7 +107,12 @@ async def export_memories(
     )
 
     filters = _build_filters_dict(
-        type, tags, importance_min, importance_max, created_after, created_before,
+        type,
+        tags,
+        importance_min,
+        importance_max,
+        created_after,
+        created_before,
     )
     responses = [_memory_to_response(m) for m in memories]
 
@@ -184,7 +189,11 @@ async def import_memories(
         requesting_username=user.display_name or user.email or str(user.id),
     )
 
-    logger.info("Import: submitted=%d, imported=%d, user=%s",
-                len(memory_dicts), result.get("imported", 0), user.id)
+    logger.info(
+        "Import: submitted=%d, imported=%d, user=%s",
+        len(memory_dicts),
+        result.get("imported", 0),
+        user.id,
+    )
 
     return ImportResponse(**result)

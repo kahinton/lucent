@@ -147,6 +147,7 @@ class TestCookieParams:
         monkeypatch.delenv("LUCENT_SECURE_COOKIES", raising=False)
         # Need to reimport to pick up env change
         import lucent.auth_providers as ap  # noqa: F401
+
         # The module-level constant is already set; just verify the default behavior
         params = get_cookie_params()
         assert "secure" in params

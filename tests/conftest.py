@@ -7,8 +7,7 @@ import pytest_asyncio
 
 # Set test database URL before importing any db modules
 TEST_DATABASE_URL = os.environ.get(
-    "TEST_DATABASE_URL",
-    "postgresql://lucent:lucent_dev_password@localhost:5433/lucent"
+    "TEST_DATABASE_URL", "postgresql://lucent:lucent_dev_password@localhost:5433/lucent"
 )
 os.environ["DATABASE_URL"] = TEST_DATABASE_URL
 
@@ -26,8 +25,7 @@ async def db_pool():
     pool_module._pool = None
 
     database_url = os.environ.get(
-        "DATABASE_URL",
-        "postgresql://lucent:lucent_dev_password@localhost:5433/lucent"
+        "DATABASE_URL", "postgresql://lucent:lucent_dev_password@localhost:5433/lucent"
     )
     pool = await init_db(database_url)
     yield pool
@@ -50,32 +48,23 @@ async def clean_test_data(db_pool):
         # Delete access and audit logs for test memories first
         await conn.execute(
             "DELETE FROM memory_access_log WHERE memory_id IN (SELECT id FROM memories WHERE username LIKE $1)",
-            f"{prefix}%"
+            f"{prefix}%",
         )
         await conn.execute(
             "DELETE FROM memory_audit_log WHERE memory_id IN (SELECT id FROM memories WHERE username LIKE $1)",
-            f"{prefix}%"
+            f"{prefix}%",
         )
         # Delete API keys
         await conn.execute(
             "DELETE FROM api_keys WHERE user_id IN (SELECT id FROM users WHERE external_id LIKE $1)",
-            f"{prefix}%"
+            f"{prefix}%",
         )
         # Delete memories
-        await conn.execute(
-            "DELETE FROM memories WHERE username LIKE $1",
-            f"{prefix}%"
-        )
+        await conn.execute("DELETE FROM memories WHERE username LIKE $1", f"{prefix}%")
         # Delete test users
-        await conn.execute(
-            "DELETE FROM users WHERE external_id LIKE $1",
-            f"{prefix}%"
-        )
+        await conn.execute("DELETE FROM users WHERE external_id LIKE $1", f"{prefix}%")
         # Delete test organizations
-        await conn.execute(
-            "DELETE FROM organizations WHERE name LIKE $1",
-            f"{prefix}%"
-        )
+        await conn.execute("DELETE FROM organizations WHERE name LIKE $1", f"{prefix}%")
 
 
 @pytest_asyncio.fixture

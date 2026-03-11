@@ -52,6 +52,7 @@ class TestJSONFormatter:
             raise ValueError("boom")
         except ValueError:
             import sys
+
             record = self._make_record(exc_info=sys.exc_info())
         data = json.loads(formatter.format(record))
         assert "exception" in data
@@ -119,6 +120,7 @@ class TestHumanFormatter:
             raise RuntimeError("test error")
         except RuntimeError:
             import sys
+
             record = self._make_record(exc_info=sys.exc_info())
         output = formatter.format(record)
         assert "RuntimeError: test error" in output
@@ -211,6 +213,7 @@ class TestConfigureLogging:
 
     def test_file_handler_with_rotation(self, monkeypatch, tmp_path):
         from logging.handlers import RotatingFileHandler
+
         log_file = str(tmp_path / "test.log")
         monkeypatch.setenv("LUCENT_LOG_FILE", log_file)
         monkeypatch.setenv("LUCENT_LOG_FILE_MAX_BYTES", "1024")
@@ -276,6 +279,7 @@ class TestCorrelationId:
 
     def test_set_and_get_correlation_id(self):
         from lucent.logging import clear_correlation_id, get_correlation_id, set_correlation_id
+
         cid = set_correlation_id("test-123")
         assert cid == "test-123"
         assert get_correlation_id() == "test-123"
@@ -283,6 +287,7 @@ class TestCorrelationId:
 
     def test_auto_generate_correlation_id(self):
         from lucent.logging import clear_correlation_id, get_correlation_id, set_correlation_id
+
         cid = set_correlation_id()
         assert cid is not None
         assert len(cid) == 12
@@ -295,6 +300,7 @@ class TestCorrelationId:
             clear_correlation_id,
             set_correlation_id,
         )
+
         set_correlation_id("req-abc-123")
         try:
             formatter = JSONFormatter()
@@ -320,6 +326,7 @@ class TestCorrelationId:
             clear_correlation_id,
             set_correlation_id,
         )
+
         set_correlation_id("req-xyz")
         try:
             formatter = HumanFormatter(use_colors=False)
@@ -344,6 +351,7 @@ class TestCorrelationId:
             CorrelationIdFilter,
             clear_correlation_id,
         )
+
         clear_correlation_id()
         formatter = JSONFormatter()
         filt = CorrelationIdFilter()

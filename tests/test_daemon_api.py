@@ -105,13 +105,16 @@ class TestDaemonTaskCreate:
     """POST /api/daemon/tasks"""
 
     async def test_create_task(self, client, api_prefix):
-        resp = await client.post("/api/daemon/tasks", json={
-            "description": f"{api_prefix}Review auth module",
-            "agent_type": "code",
-            "priority": "high",
-            "context": "Focus on token refresh logic",
-            "tags": ["auth"],
-        })
+        resp = await client.post(
+            "/api/daemon/tasks",
+            json={
+                "description": f"{api_prefix}Review auth module",
+                "agent_type": "code",
+                "priority": "high",
+                "context": "Focus on token refresh logic",
+                "tags": ["auth"],
+            },
+        )
         assert resp.status_code == 201
         data = resp.json()
         assert data["description"] == f"{api_prefix}Review auth module"
@@ -123,34 +126,46 @@ class TestDaemonTaskCreate:
 
     async def test_create_task_defaults(self, client, api_prefix):
         """Defaults to agent_type=code, priority=medium."""
-        resp = await client.post("/api/daemon/tasks", json={
-            "description": f"{api_prefix}Default task",
-        })
+        resp = await client.post(
+            "/api/daemon/tasks",
+            json={
+                "description": f"{api_prefix}Default task",
+            },
+        )
         assert resp.status_code == 201
         data = resp.json()
         assert data["agent_type"] == "code"
         assert data["priority"] == "medium"
 
     async def test_create_task_invalid_agent_type(self, client, api_prefix):
-        resp = await client.post("/api/daemon/tasks", json={
-            "description": f"{api_prefix}Bad agent",
-            "agent_type": "invalid_type",
-        })
+        resp = await client.post(
+            "/api/daemon/tasks",
+            json={
+                "description": f"{api_prefix}Bad agent",
+                "agent_type": "invalid_type",
+            },
+        )
         assert resp.status_code == 400
         assert "agent_type" in resp.json()["detail"].lower()
 
     async def test_create_task_invalid_priority(self, client, api_prefix):
-        resp = await client.post("/api/daemon/tasks", json={
-            "description": f"{api_prefix}Bad priority",
-            "priority": "urgent",
-        })
+        resp = await client.post(
+            "/api/daemon/tasks",
+            json={
+                "description": f"{api_prefix}Bad priority",
+                "priority": "urgent",
+            },
+        )
         assert resp.status_code == 400
         assert "priority" in resp.json()["detail"].lower()
 
     async def test_create_task_empty_description(self, client):
-        resp = await client.post("/api/daemon/tasks", json={
-            "description": "",
-        })
+        resp = await client.post(
+            "/api/daemon/tasks",
+            json={
+                "description": "",
+            },
+        )
         assert resp.status_code == 422  # pydantic validation
 
 
@@ -159,12 +174,18 @@ class TestDaemonTaskList:
 
     async def test_list_tasks(self, client, api_prefix):
         # Create two tasks
-        await client.post("/api/daemon/tasks", json={
-            "description": f"{api_prefix}Task A",
-        })
-        await client.post("/api/daemon/tasks", json={
-            "description": f"{api_prefix}Task B",
-        })
+        await client.post(
+            "/api/daemon/tasks",
+            json={
+                "description": f"{api_prefix}Task A",
+            },
+        )
+        await client.post(
+            "/api/daemon/tasks",
+            json={
+                "description": f"{api_prefix}Task B",
+            },
+        )
 
         resp = await client.get("/api/daemon/tasks")
         assert resp.status_code == 200
@@ -176,9 +197,12 @@ class TestDaemonTaskList:
         assert f"{api_prefix}Task B" in descs
 
     async def test_list_tasks_filter_pending(self, client, api_prefix):
-        await client.post("/api/daemon/tasks", json={
-            "description": f"{api_prefix}Pending one",
-        })
+        await client.post(
+            "/api/daemon/tasks",
+            json={
+                "description": f"{api_prefix}Pending one",
+            },
+        )
         resp = await client.get("/api/daemon/tasks", params={"status": "pending"})
         assert resp.status_code == 200
         tasks = resp.json()["tasks"]
@@ -187,9 +211,12 @@ class TestDaemonTaskList:
 
     async def test_list_tasks_limit(self, client, api_prefix):
         for i in range(5):
-            await client.post("/api/daemon/tasks", json={
-                "description": f"{api_prefix}Lim task {i}",
-            })
+            await client.post(
+                "/api/daemon/tasks",
+                json={
+                    "description": f"{api_prefix}Lim task {i}",
+                },
+            )
         resp = await client.get("/api/daemon/tasks", params={"limit": 2})
         assert resp.status_code == 200
         assert len(resp.json()["tasks"]) <= 2
@@ -199,9 +226,12 @@ class TestDaemonTaskGetById:
     """GET /api/daemon/tasks/{task_id}"""
 
     async def test_get_task(self, client, api_prefix):
-        create_resp = await client.post("/api/daemon/tasks", json={
-            "description": f"{api_prefix}Get me",
-        })
+        create_resp = await client.post(
+            "/api/daemon/tasks",
+            json={
+                "description": f"{api_prefix}Get me",
+            },
+        )
         task_id = create_resp.json()["id"]
 
         resp = await client.get(f"/api/daemon/tasks/{task_id}")
@@ -219,9 +249,12 @@ class TestDaemonTaskResult:
     """GET /api/daemon/tasks/{task_id}/result"""
 
     async def test_get_result_pending_returns_202(self, client, api_prefix):
-        create_resp = await client.post("/api/daemon/tasks", json={
-            "description": f"{api_prefix}Not done yet",
-        })
+        create_resp = await client.post(
+            "/api/daemon/tasks",
+            json={
+                "description": f"{api_prefix}Not done yet",
+            },
+        )
         task_id = create_resp.json()["id"]
 
         resp = await client.get(f"/api/daemon/tasks/{task_id}/result")
@@ -230,9 +263,12 @@ class TestDaemonTaskResult:
 
     async def test_get_result_completed_returns_200(self, client, db_pool, api_user, api_prefix):
         """Complete a task via DB then check the result endpoint returns 200."""
-        create_resp = await client.post("/api/daemon/tasks", json={
-            "description": f"{api_prefix}Will complete",
-        })
+        create_resp = await client.post(
+            "/api/daemon/tasks",
+            json={
+                "description": f"{api_prefix}Will complete",
+            },
+        )
         task_id = create_resp.json()["id"]
 
         # Complete the task directly via the repository
@@ -259,9 +295,12 @@ class TestDaemonTaskCancel:
     """DELETE /api/daemon/tasks/{task_id}"""
 
     async def test_cancel_pending_task(self, client, api_prefix):
-        create_resp = await client.post("/api/daemon/tasks", json={
-            "description": f"{api_prefix}Cancel me",
-        })
+        create_resp = await client.post(
+            "/api/daemon/tasks",
+            json={
+                "description": f"{api_prefix}Cancel me",
+            },
+        )
         task_id = create_resp.json()["id"]
 
         resp = await client.delete(f"/api/daemon/tasks/{task_id}")
@@ -274,9 +313,12 @@ class TestDaemonTaskCancel:
 
     async def test_cancel_nonpending_task_fails(self, client, db_pool, api_prefix):
         """Cannot cancel a task that is no longer pending (e.g. claimed)."""
-        create_resp = await client.post("/api/daemon/tasks", json={
-            "description": f"{api_prefix}Already claimed",
-        })
+        create_resp = await client.post(
+            "/api/daemon/tasks",
+            json={
+                "description": f"{api_prefix}Already claimed",
+            },
+        )
         task_id = create_resp.json()["id"]
 
         # Claim the task via DB
@@ -302,9 +344,12 @@ class TestDaemonMessageSend:
     """POST /api/daemon/messages"""
 
     async def test_send_message(self, client, api_prefix):
-        resp = await client.post("/api/daemon/messages", json={
-            "content": f"{api_prefix}Hello from daemon",
-        })
+        resp = await client.post(
+            "/api/daemon/messages",
+            json={
+                "content": f"{api_prefix}Hello from daemon",
+            },
+        )
         assert resp.status_code == 201
         data = resp.json()
         assert data["content"] == f"{api_prefix}Hello from daemon"
@@ -314,23 +359,32 @@ class TestDaemonMessageSend:
 
     async def test_send_message_with_reply(self, client, api_prefix):
         # Create a first message
-        first = await client.post("/api/daemon/messages", json={
-            "content": f"{api_prefix}Original message",
-        })
+        first = await client.post(
+            "/api/daemon/messages",
+            json={
+                "content": f"{api_prefix}Original message",
+            },
+        )
         first_id = first.json()["id"]
 
         # Reply to it
-        resp = await client.post("/api/daemon/messages", json={
-            "content": f"{api_prefix}Reply message",
-            "in_reply_to": first_id,
-        })
+        resp = await client.post(
+            "/api/daemon/messages",
+            json={
+                "content": f"{api_prefix}Reply message",
+                "in_reply_to": first_id,
+            },
+        )
         assert resp.status_code == 201
         assert resp.json()["in_reply_to"] == first_id
 
     async def test_send_message_empty_content(self, client):
-        resp = await client.post("/api/daemon/messages", json={
-            "content": "",
-        })
+        resp = await client.post(
+            "/api/daemon/messages",
+            json={
+                "content": "",
+            },
+        )
         assert resp.status_code == 422  # pydantic validation
 
 
@@ -338,12 +392,18 @@ class TestDaemonMessageList:
     """GET /api/daemon/messages"""
 
     async def test_list_messages(self, client, api_prefix):
-        await client.post("/api/daemon/messages", json={
-            "content": f"{api_prefix}Msg 1",
-        })
-        await client.post("/api/daemon/messages", json={
-            "content": f"{api_prefix}Msg 2",
-        })
+        await client.post(
+            "/api/daemon/messages",
+            json={
+                "content": f"{api_prefix}Msg 1",
+            },
+        )
+        await client.post(
+            "/api/daemon/messages",
+            json={
+                "content": f"{api_prefix}Msg 2",
+            },
+        )
 
         resp = await client.get("/api/daemon/messages")
         assert resp.status_code == 200
@@ -369,9 +429,12 @@ class TestDaemonMessageList:
             organization_id=api_user["organization_id"],
         )
         # Create a daemon message via API
-        await client.post("/api/daemon/messages", json={
-            "content": f"{api_prefix}Daemon msg",
-        })
+        await client.post(
+            "/api/daemon/messages",
+            json={
+                "content": f"{api_prefix}Daemon msg",
+            },
+        )
 
         resp = await client.get("/api/daemon/messages", params={"pending_only": "true"})
         assert resp.status_code == 200
@@ -383,9 +446,12 @@ class TestDaemonMessageList:
 
     async def test_list_messages_limit(self, client, api_prefix):
         for i in range(5):
-            await client.post("/api/daemon/messages", json={
-                "content": f"{api_prefix}Lim msg {i}",
-            })
+            await client.post(
+                "/api/daemon/messages",
+                json={
+                    "content": f"{api_prefix}Lim msg {i}",
+                },
+            )
         resp = await client.get("/api/daemon/messages", params={"limit": 2})
         assert resp.status_code == 200
         assert len(resp.json()["messages"]) <= 2
@@ -426,9 +492,12 @@ class TestDaemonMessageAcknowledge:
 
     async def test_acknowledge_daemon_message(self, client, api_prefix):
         """Acknowledging a daemon message (no pending tag) still succeeds."""
-        create_resp = await client.post("/api/daemon/messages", json={
-            "content": f"{api_prefix}Daemon says hi",
-        })
+        create_resp = await client.post(
+            "/api/daemon/messages",
+            json={
+                "content": f"{api_prefix}Daemon says hi",
+            },
+        )
         msg_id = create_resp.json()["id"]
 
         resp = await client.post(f"/api/daemon/messages/{msg_id}/acknowledge")
@@ -489,9 +558,12 @@ class TestDaemonAuthorizationScopes:
         app.dependency_overrides.clear()
 
     async def test_create_task_requires_scope(self, no_scope_client):
-        resp = await no_scope_client.post("/api/daemon/tasks", json={
-            "description": "Should be rejected",
-        })
+        resp = await no_scope_client.post(
+            "/api/daemon/tasks",
+            json={
+                "description": "Should be rejected",
+            },
+        )
         assert resp.status_code == 403
 
     async def test_list_tasks_requires_scope(self, no_scope_client):
@@ -499,9 +571,12 @@ class TestDaemonAuthorizationScopes:
         assert resp.status_code == 403
 
     async def test_send_message_requires_scope(self, no_scope_client):
-        resp = await no_scope_client.post("/api/daemon/messages", json={
-            "content": "Should be rejected",
-        })
+        resp = await no_scope_client.post(
+            "/api/daemon/messages",
+            json={
+                "content": "Should be rejected",
+            },
+        )
         assert resp.status_code == 403
 
     async def test_list_messages_requires_scope(self, no_scope_client):
@@ -519,9 +594,12 @@ class TestDaemonTaskListFiltering:
 
     async def test_list_tasks_filter_completed(self, client, db_pool, api_user, api_prefix):
         """Filter tasks by status=completed."""
-        create_resp = await client.post("/api/daemon/tasks", json={
-            "description": f"{api_prefix}Will be completed",
-        })
+        create_resp = await client.post(
+            "/api/daemon/tasks",
+            json={
+                "description": f"{api_prefix}Will be completed",
+            },
+        )
         task_id = create_resp.json()["id"]
 
         # Mark completed via repo
@@ -541,9 +619,12 @@ class TestDaemonTaskListFiltering:
 
     async def test_list_tasks_filter_claimed(self, client, db_pool, api_prefix):
         """Filter tasks by status=claimed."""
-        create_resp = await client.post("/api/daemon/tasks", json={
-            "description": f"{api_prefix}Will be claimed",
-        })
+        create_resp = await client.post(
+            "/api/daemon/tasks",
+            json={
+                "description": f"{api_prefix}Will be claimed",
+            },
+        )
         task_id = create_resp.json()["id"]
 
         # Claim via repo
@@ -561,9 +642,12 @@ class TestDaemonTaskListFiltering:
     async def test_list_tasks_since_filter(self, client, db_pool, api_user, api_prefix):
         """The `since` parameter filters to tasks updated after the timestamp."""
         # Create a task
-        create_resp = await client.post("/api/daemon/tasks", json={
-            "description": f"{api_prefix}Since filter task",
-        })
+        create_resp = await client.post(
+            "/api/daemon/tasks",
+            json={
+                "description": f"{api_prefix}Since filter task",
+            },
+        )
         task_id = create_resp.json()["id"]
 
         # Use a future timestamp — nothing should be returned
@@ -625,9 +709,12 @@ class TestCrossUserIsolation:
 
     async def test_other_user_cannot_see_task(self, client, other_client, api_prefix):
         """User B cannot retrieve user A's task by ID."""
-        create_resp = await client.post("/api/daemon/tasks", json={
-            "description": f"{api_prefix}Private task",
-        })
+        create_resp = await client.post(
+            "/api/daemon/tasks",
+            json={
+                "description": f"{api_prefix}Private task",
+            },
+        )
         task_id = create_resp.json()["id"]
 
         resp = await other_client.get(f"/api/daemon/tasks/{task_id}")
@@ -635,9 +722,12 @@ class TestCrossUserIsolation:
 
     async def test_other_user_cannot_cancel_task(self, client, other_client, api_prefix):
         """User B cannot cancel user A's task."""
-        create_resp = await client.post("/api/daemon/tasks", json={
-            "description": f"{api_prefix}No cancel for you",
-        })
+        create_resp = await client.post(
+            "/api/daemon/tasks",
+            json={
+                "description": f"{api_prefix}No cancel for you",
+            },
+        )
         task_id = create_resp.json()["id"]
 
         resp = await other_client.delete(f"/api/daemon/tasks/{task_id}")
@@ -645,9 +735,12 @@ class TestCrossUserIsolation:
 
     async def test_other_user_tasks_not_in_list(self, client, other_client, api_prefix):
         """User B's task list does not include user A's tasks."""
-        await client.post("/api/daemon/tasks", json={
-            "description": f"{api_prefix}User A task",
-        })
+        await client.post(
+            "/api/daemon/tasks",
+            json={
+                "description": f"{api_prefix}User A task",
+            },
+        )
 
         resp = await other_client.get("/api/daemon/tasks")
         assert resp.status_code == 200

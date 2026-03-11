@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 
 class AuditActionType(str, Enum):
     """Types of auditable actions on memories."""
+
     CREATE = "create"
     UPDATE = "update"
     DELETE = "delete"
@@ -21,6 +22,7 @@ class AuditActionType(str, Enum):
 
 class CreateAuditLogInput(BaseModel):
     """Input model for creating an audit log entry."""
+
     memory_id: UUID
     user_id: UUID | None = None
     organization_id: UUID | None = None
@@ -34,6 +36,7 @@ class CreateAuditLogInput(BaseModel):
 
 class AuditLogEntry(BaseModel):
     """Full audit log entry returned from database."""
+
     id: UUID
     memory_id: UUID
     user_id: UUID | None
@@ -49,6 +52,7 @@ class AuditLogEntry(BaseModel):
 
 class AuditLogSummary(BaseModel):
     """Summary view of audit log for listings."""
+
     id: UUID
     memory_id: UUID
     user_id: UUID | None

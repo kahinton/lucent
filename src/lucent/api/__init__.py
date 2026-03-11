@@ -9,6 +9,7 @@ __all__ = ["app", "create_app"]
 def __getattr__(name: str):
     if name in ("app", "create_app"):
         from lucent.api.app import app, create_app
+
         globals()["app"] = app
         globals()["create_app"] = create_app
         return globals()[name]

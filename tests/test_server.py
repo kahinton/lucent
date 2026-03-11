@@ -26,6 +26,7 @@ class TestServerConfig:
             import importlib
 
             import lucent.server as srv
+
             importlib.reload(srv)
             assert srv.HOST == "0.0.0.0"
 
@@ -36,6 +37,7 @@ class TestServerConfig:
             import importlib
 
             import lucent.server as srv
+
             importlib.reload(srv)
             assert srv.PORT == 8766
 
@@ -45,6 +47,7 @@ class TestServerConfig:
             import importlib
 
             import lucent.server as srv
+
             importlib.reload(srv)
             assert srv.HOST == "127.0.0.1"
 
@@ -54,6 +57,7 @@ class TestServerConfig:
             import importlib
 
             import lucent.server as srv
+
             importlib.reload(srv)
             assert srv.PORT == 9999
 

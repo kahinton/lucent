@@ -204,10 +204,13 @@ class TestCreateMemory:
 
     async def test_create_defaults_username(self, mem_client, mem_prefix):
         """If username is not provided, should default to user's display name."""
-        resp = await mem_client.post("/api/memories", json={
-            "type": "experience",
-            "content": f"{mem_prefix}No username given",
-        })
+        resp = await mem_client.post(
+            "/api/memories",
+            json={
+                "type": "experience",
+                "content": f"{mem_prefix}No username given",
+            },
+        )
         assert resp.status_code == 201
         # Should use display_name, email, or user ID as fallback
         assert resp.json()["username"] is not None
@@ -261,9 +264,12 @@ class TestUpdateMemory:
         create_resp = await _create_memory(mem_client, mem_prefix)
         memory_id = create_resp.json()["id"]
 
-        resp = await mem_client.patch(f"/api/memories/{memory_id}", json={
-            "content": f"{mem_prefix}Updated content",
-        })
+        resp = await mem_client.patch(
+            f"/api/memories/{memory_id}",
+            json={
+                "content": f"{mem_prefix}Updated content",
+            },
+        )
         assert resp.status_code == 200
         assert resp.json()["content"] == f"{mem_prefix}Updated content"
 
@@ -271,9 +277,12 @@ class TestUpdateMemory:
         create_resp = await _create_memory(mem_client, mem_prefix)
         memory_id = create_resp.json()["id"]
 
-        resp = await mem_client.patch(f"/api/memories/{memory_id}", json={
-            "tags": ["updated", "new-tag"],
-        })
+        resp = await mem_client.patch(
+            f"/api/memories/{memory_id}",
+            json={
+                "tags": ["updated", "new-tag"],
+            },
+        )
         assert resp.status_code == 200
         assert "updated" in resp.json()["tags"]
 
@@ -281,17 +290,23 @@ class TestUpdateMemory:
         create_resp = await _create_memory(mem_client, mem_prefix)
         memory_id = create_resp.json()["id"]
 
-        resp = await mem_client.patch(f"/api/memories/{memory_id}", json={
-            "importance": 9,
-        })
+        resp = await mem_client.patch(
+            f"/api/memories/{memory_id}",
+            json={
+                "importance": 9,
+            },
+        )
         assert resp.status_code == 200
         assert resp.json()["importance"] == 9
 
     async def test_update_not_found(self, mem_client):
         fake_id = str(uuid4())
-        resp = await mem_client.patch(f"/api/memories/{fake_id}", json={
-            "content": "nope",
-        })
+        resp = await mem_client.patch(
+            f"/api/memories/{fake_id}",
+            json={
+                "content": "nope",
+            },
+        )
         assert resp.status_code == 404
 
     async def test_update_other_users_memory_forbidden(self, mem_client, mem_client_b, mem_prefix):
@@ -299,9 +314,12 @@ class TestUpdateMemory:
         create_resp = await _create_memory(mem_client, mem_prefix)
         memory_id = create_resp.json()["id"]
 
-        resp = await mem_client_b.patch(f"/api/memories/{memory_id}", json={
-            "content": "hacked",
-        })
+        resp = await mem_client_b.patch(
+            f"/api/memories/{memory_id}",
+            json={
+                "content": "hacked",
+            },
+        )
         # Should be 403 or 404 (not leaking existence)
         assert resp.status_code in (403, 404)
 

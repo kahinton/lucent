@@ -52,9 +52,7 @@ SAMPLE_ASSESSMENT_JSON = {
         "databases": ["postgresql"],
         "tools": ["git", "ruff", "pytest"],
     },
-    "collaborators": [
-        {"name": "Kyle", "role": "Lead Developer", "preferences": "Concise, direct"}
-    ],
+    "collaborators": [{"name": "Kyle", "role": "Lead Developer", "preferences": "Concise, direct"}],
     "existing_agents": ["code", "testing"],
     "existing_skills": ["memory-init", "memory-search"],
     "recommended_agents": [
@@ -121,6 +119,7 @@ def sample_assessment() -> AssessmentResult:
 # parse_assessment_output
 # ============================================================================
 
+
 class TestParseAssessmentOutput:
     """Tests for extracting JSON from <assessment_result> tags."""
 
@@ -167,7 +166,7 @@ class TestParseAssessmentOutput:
     def test_ignores_text_outside_tags(self):
         raw = (
             "Some preamble text\n"
-            "<assessment_result>{\"domain\": {\"primary\": \"legal\"}}</assessment_result>\n"
+            '<assessment_result>{"domain": {"primary": "legal"}}</assessment_result>\n'
             "Some epilogue text"
         )
         result = parse_assessment_output(raw)
@@ -178,6 +177,7 @@ class TestParseAssessmentOutput:
 # ============================================================================
 # AssessmentResult.from_json
 # ============================================================================
+
 
 class TestAssessmentResultFromJson:
     """Tests for the data model construction."""
@@ -215,11 +215,7 @@ class TestAssessmentResultFromJson:
         assert result.guardrails == []
 
     def test_agent_recommendation_defaults(self):
-        data = {
-            "recommended_agents": [
-                {"name": "test-agent"}
-            ]
-        }
+        data = {"recommended_agents": [{"name": "test-agent"}]}
         result = AssessmentResult.from_json(data)
         agent = result.recommended_agents[0]
         assert agent.name == "test-agent"
@@ -228,11 +224,7 @@ class TestAssessmentResultFromJson:
         assert agent.specialization == {}
 
     def test_skill_recommendation_defaults(self):
-        data = {
-            "recommended_skills": [
-                {"name": "test-skill"}
-            ]
-        }
+        data = {"recommended_skills": [{"name": "test-skill"}]}
         result = AssessmentResult.from_json(data)
         skill = result.recommended_skills[0]
         assert skill.name == "test-skill"
@@ -244,11 +236,14 @@ class TestAssessmentResultFromJson:
 # Template Selection
 # ============================================================================
 
+
 class TestTemplateSelection:
     """Tests for template file selection logic."""
 
     def test_software_agent_template(self):
-        rec = AgentRecommendation(name="code-review", purpose="Review code", domain_template="software")
+        rec = AgentRecommendation(
+            name="code-review", purpose="Review code", domain_template="software"
+        )
         assert _select_agent_template(rec) == "agents/software_agent.md.j2"
 
     def test_support_agent_template(self):
@@ -256,11 +251,15 @@ class TestTemplateSelection:
         assert _select_agent_template(rec) == "agents/support_agent.md.j2"
 
     def test_research_agent_template(self):
-        rec = AgentRecommendation(name="literature", purpose="Literature review", domain_template="research")
+        rec = AgentRecommendation(
+            name="literature", purpose="Literature review", domain_template="research"
+        )
         assert _select_agent_template(rec) == "agents/research_agent.md.j2"
 
     def test_general_agent_template(self):
-        rec = AgentRecommendation(name="generic", purpose="General tasks", domain_template="general")
+        rec = AgentRecommendation(
+            name="generic", purpose="General tasks", domain_template="general"
+        )
         assert _select_agent_template(rec) == "agents/base_agent.md.j2"
 
     def test_unknown_domain_falls_back_to_base(self):
@@ -268,15 +267,21 @@ class TestTemplateSelection:
         assert _select_agent_template(rec) == "agents/base_agent.md.j2"
 
     def test_software_code_review_skill_template(self):
-        rec = SkillRecommendation(name="code-review", purpose="Review code", domain_template="software")
+        rec = SkillRecommendation(
+            name="code-review", purpose="Review code", domain_template="software"
+        )
         assert _select_skill_template(rec) == "skills/software_code_review.md.j2"
 
     def test_software_dev_workflow_skill_template(self):
-        rec = SkillRecommendation(name="dev-workflow", purpose="Dev workflow", domain_template="software")
+        rec = SkillRecommendation(
+            name="dev-workflow", purpose="Dev workflow", domain_template="software"
+        )
         assert _select_skill_template(rec) == "skills/software_dev_workflow.md.j2"
 
     def test_general_skill_template(self):
-        rec = SkillRecommendation(name="unknown-skill", purpose="Something", domain_template="general")
+        rec = SkillRecommendation(
+            name="unknown-skill", purpose="Something", domain_template="general"
+        )
         assert _select_skill_template(rec) == "skills/base_skill.md.j2"
 
     def test_unknown_skill_falls_back_to_base(self):
@@ -285,13 +290,17 @@ class TestTemplateSelection:
 
     def test_legal_agent_template(self):
         rec = AgentRecommendation(
-            name="legal-research", purpose="Legal research", domain_template="legal",
+            name="legal-research",
+            purpose="Legal research",
+            domain_template="legal",
         )
         assert _select_agent_template(rec) == "agents/legal_agent.md.j2"
 
     def test_legal_case_analysis_skill_template(self):
         rec = SkillRecommendation(
-            name="case-analysis", purpose="Case analysis", domain_template="legal",
+            name="case-analysis",
+            purpose="Case analysis",
+            domain_template="legal",
         )
         assert _select_skill_template(rec) == "skills/legal_case_analysis.md.j2"
 
@@ -305,6 +314,7 @@ class TestTemplateSelection:
 # ============================================================================
 # Context Building
 # ============================================================================
+
 
 class TestContextBuilding:
     """Tests for template context construction."""
@@ -365,7 +375,9 @@ class TestContextBuilding:
         assert "Follow established patterns and conventions" in ctx["guardrails"]
 
     def test_skill_context_basic(self, sample_assessment: AssessmentResult):
-        rec = SkillRecommendation(name="code-review", purpose="Review code", domain_template="software")
+        rec = SkillRecommendation(
+            name="code-review", purpose="Review code", domain_template="software"
+        )
         ctx = _build_skill_context(rec, sample_assessment)
         assert ctx["skill_name"] == "code-review"
         assert ctx["title"] == "Code Review"
@@ -378,6 +390,7 @@ class TestContextBuilding:
 # ============================================================================
 # Agent Generation
 # ============================================================================
+
 
 class TestAgentGeneration:
     """Tests for generating agent .md files from templates."""
@@ -418,7 +431,9 @@ class TestAgentGeneration:
 
         assert paths == []
 
-    def test_software_template_includes_language_guidance(self, sample_assessment: AssessmentResult, tmp_path: Path):
+    def test_software_template_includes_language_guidance(
+        self, sample_assessment: AssessmentResult, tmp_path: Path
+    ):
         with patch("daemon.adaptation.AGENTS_DIR", tmp_path):
             pipeline = AdaptationPipeline(sample_assessment)
             paths = pipeline.generate_agents()
@@ -431,6 +446,7 @@ class TestAgentGeneration:
 # ============================================================================
 # Skill Generation
 # ============================================================================
+
 
 class TestSkillGeneration:
     """Tests for generating skill directories with SKILL.md files."""
@@ -476,6 +492,7 @@ class TestSkillGeneration:
 # Pipeline Summary
 # ============================================================================
 
+
 class TestPipelineSummary:
     """Tests for the build_adaptation_summary method."""
 
@@ -505,6 +522,7 @@ class TestPipelineSummary:
 # Agent Registry Metadata
 # ============================================================================
 
+
 class TestAgentRegistryMetadata:
     """Tests for the registry metadata builder."""
 
@@ -524,18 +542,23 @@ class TestAgentRegistryMetadata:
 # End-to-end Pipeline
 # ============================================================================
 
+
 class TestPipelineEndToEnd:
     """Tests for the full pipeline run."""
 
     @pytest.mark.asyncio
-    async def test_run_without_memory_api(self, sample_assessment: AssessmentResult, tmp_path: Path):
+    async def test_run_without_memory_api(
+        self, sample_assessment: AssessmentResult, tmp_path: Path
+    ):
         agents_dir = tmp_path / "agents"
         agents_dir.mkdir()
         skills_dir = tmp_path / "skills"
         skills_dir.mkdir()
 
-        with patch("daemon.adaptation.AGENTS_DIR", agents_dir), \
-             patch("daemon.adaptation.SKILLS_DIR", skills_dir):
+        with (
+            patch("daemon.adaptation.AGENTS_DIR", agents_dir),
+            patch("daemon.adaptation.SKILLS_DIR", skills_dir),
+        ):
             pipeline = AdaptationPipeline(sample_assessment)
             result = await pipeline.run(memory_api=None)
 
@@ -558,8 +581,10 @@ class TestPipelineEndToEnd:
         code_review_dir.mkdir()
         (code_review_dir / "SKILL.md").write_text("existing")
 
-        with patch("daemon.adaptation.AGENTS_DIR", agents_dir), \
-             patch("daemon.adaptation.SKILLS_DIR", skills_dir):
+        with (
+            patch("daemon.adaptation.AGENTS_DIR", agents_dir),
+            patch("daemon.adaptation.SKILLS_DIR", skills_dir),
+        ):
             pipeline = AdaptationPipeline(sample_assessment)
             result = await pipeline.run(memory_api=None)
 
@@ -575,6 +600,7 @@ class TestPipelineEndToEnd:
 # run_adaptation convenience function
 # ============================================================================
 
+
 class TestRunAdaptation:
     """Tests for the run_adaptation convenience function."""
 
@@ -585,8 +611,10 @@ class TestRunAdaptation:
         skills_dir = tmp_path / "skills"
         skills_dir.mkdir()
 
-        with patch("daemon.adaptation.AGENTS_DIR", agents_dir), \
-             patch("daemon.adaptation.SKILLS_DIR", skills_dir):
+        with (
+            patch("daemon.adaptation.AGENTS_DIR", agents_dir),
+            patch("daemon.adaptation.SKILLS_DIR", skills_dir),
+        ):
             result = await run_adaptation(sample_raw_output)
 
         assert result is not None
@@ -608,6 +636,7 @@ class TestRunAdaptation:
 # ============================================================================
 # Domain Signal Parser
 # ============================================================================
+
 
 class TestDomainSignalParser:
     """Tests for extracting and scoring domain signals."""
@@ -692,8 +721,7 @@ class TestDomainSignalParser:
         assessment = AssessmentResult(
             domain_primary="software",
             domain_description=(
-                "A software project with compliance monitoring"
-                " and regulatory checks"
+                "A software project with compliance monitoring and regulatory checks"
             ),
             tech_stack={"languages": ["python"], "tools": ["pytest"]},
             guardrails=["Ensure regulatory compliance"],
@@ -720,6 +748,7 @@ class TestDomainSignalParser:
 # ============================================================================
 # Domain Archetypes
 # ============================================================================
+
 
 class TestDomainArchetypes:
     """Tests for the archetype registry structure."""
@@ -768,6 +797,7 @@ class TestDomainArchetypes:
 # ============================================================================
 # Validation
 # ============================================================================
+
 
 class TestValidation:
     """Tests for agent and skill validation."""
@@ -863,6 +893,7 @@ class TestValidation:
 # Archetype Application
 # ============================================================================
 
+
 class TestArchetypeApplication:
     """Tests for automatic archetype-based recommendations."""
 
@@ -873,8 +904,10 @@ class TestArchetypeApplication:
             domain_description="A Python web app",
             tech_stack={"languages": ["python"]},
         )
-        with patch("daemon.adaptation.AGENTS_DIR", tmp_path), \
-             patch("daemon.adaptation.SKILLS_DIR", tmp_path):
+        with (
+            patch("daemon.adaptation.AGENTS_DIR", tmp_path),
+            patch("daemon.adaptation.SKILLS_DIR", tmp_path),
+        ):
             pipeline = AdaptationPipeline(assessment)
             pipeline.apply_archetypes()
 
@@ -889,8 +922,10 @@ class TestArchetypeApplication:
             domain_primary="legal",
             domain_description="A law firm",
         )
-        with patch("daemon.adaptation.AGENTS_DIR", tmp_path), \
-             patch("daemon.adaptation.SKILLS_DIR", tmp_path):
+        with (
+            patch("daemon.adaptation.AGENTS_DIR", tmp_path),
+            patch("daemon.adaptation.SKILLS_DIR", tmp_path),
+        ):
             pipeline = AdaptationPipeline(assessment)
             pipeline.apply_archetypes()
 
@@ -906,8 +941,10 @@ class TestArchetypeApplication:
             existing_agents=["code-review", "security"],
             existing_skills=["code-review"],
         )
-        with patch("daemon.adaptation.AGENTS_DIR", tmp_path), \
-             patch("daemon.adaptation.SKILLS_DIR", tmp_path):
+        with (
+            patch("daemon.adaptation.AGENTS_DIR", tmp_path),
+            patch("daemon.adaptation.SKILLS_DIR", tmp_path),
+        ):
             pipeline = AdaptationPipeline(assessment)
             pipeline.apply_archetypes()
 
@@ -928,8 +965,10 @@ class TestArchetypeApplication:
                 ),
             ],
         )
-        with patch("daemon.adaptation.AGENTS_DIR", tmp_path), \
-             patch("daemon.adaptation.SKILLS_DIR", tmp_path):
+        with (
+            patch("daemon.adaptation.AGENTS_DIR", tmp_path),
+            patch("daemon.adaptation.SKILLS_DIR", tmp_path),
+        ):
             pipeline = AdaptationPipeline(assessment)
             pipeline.apply_archetypes()
 
@@ -947,8 +986,10 @@ class TestArchetypeApplication:
             tech_stack={"languages": ["python"], "tools": ["pytest"]},
             guardrails=["Ensure regulatory compliance"],
         )
-        with patch("daemon.adaptation.AGENTS_DIR", tmp_path), \
-             patch("daemon.adaptation.SKILLS_DIR", tmp_path):
+        with (
+            patch("daemon.adaptation.AGENTS_DIR", tmp_path),
+            patch("daemon.adaptation.SKILLS_DIR", tmp_path),
+        ):
             pipeline = AdaptationPipeline(assessment)
             pipeline.apply_archetypes()
 
@@ -962,6 +1003,7 @@ class TestArchetypeApplication:
 # ============================================================================
 # Legal Template Generation
 # ============================================================================
+
 
 class TestLegalTemplateGeneration:
     """Tests for legal domain template rendering."""
@@ -1025,6 +1067,7 @@ class TestLegalTemplateGeneration:
 # Pipeline with Archetypes (End-to-End)
 # ============================================================================
 
+
 class TestPipelineWithArchetypes:
     """Tests for the full pipeline including archetype application."""
 
@@ -1040,8 +1083,10 @@ class TestPipelineWithArchetypes:
             domain_description="Corporate law practice with contracts and compliance",
         )
 
-        with patch("daemon.adaptation.AGENTS_DIR", agents_dir), \
-             patch("daemon.adaptation.SKILLS_DIR", skills_dir):
+        with (
+            patch("daemon.adaptation.AGENTS_DIR", agents_dir),
+            patch("daemon.adaptation.SKILLS_DIR", skills_dir),
+        ):
             pipeline = AdaptationPipeline(assessment)
             result = await pipeline.run(memory_api=None)
 
@@ -1063,8 +1108,10 @@ class TestPipelineWithArchetypes:
             domain_description="Customer support team with ticketing",
         )
 
-        with patch("daemon.adaptation.AGENTS_DIR", agents_dir), \
-             patch("daemon.adaptation.SKILLS_DIR", skills_dir):
+        with (
+            patch("daemon.adaptation.AGENTS_DIR", agents_dir),
+            patch("daemon.adaptation.SKILLS_DIR", skills_dir),
+        ):
             pipeline = AdaptationPipeline(assessment)
             result = await pipeline.run(memory_api=None)
 
@@ -1086,8 +1133,10 @@ class TestPipelineWithArchetypes:
             ],
         )
 
-        with patch("daemon.adaptation.AGENTS_DIR", agents_dir), \
-             patch("daemon.adaptation.SKILLS_DIR", skills_dir):
+        with (
+            patch("daemon.adaptation.AGENTS_DIR", agents_dir),
+            patch("daemon.adaptation.SKILLS_DIR", skills_dir),
+        ):
             pipeline = AdaptationPipeline(assessment)
             result = await pipeline.run(memory_api=None)
 
@@ -1107,8 +1156,10 @@ class TestPipelineWithArchetypes:
             tech_stack={"languages": ["python"]},
         )
 
-        with patch("daemon.adaptation.AGENTS_DIR", agents_dir), \
-             patch("daemon.adaptation.SKILLS_DIR", skills_dir):
+        with (
+            patch("daemon.adaptation.AGENTS_DIR", agents_dir),
+            patch("daemon.adaptation.SKILLS_DIR", skills_dir),
+        ):
             pipeline = AdaptationPipeline(assessment)
             await pipeline.run(memory_api=None)
             metadata = pipeline.build_agent_registry_metadata()

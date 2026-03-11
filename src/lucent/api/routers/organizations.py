@@ -281,7 +281,9 @@ async def transfer_ownership(
     # Demote current owner to admin
     await user_repo.update_role(user.id, "admin")
 
-    logger.info("Ownership transferred: org=%s, from=%s, to=%s", user.organization_id, user.id, new_owner_id)
+    logger.info(
+        "Ownership transferred: org=%s, from=%s, to=%s", user.organization_id, user.id, new_owner_id
+    )
     return SuccessResponse(
         success=True,
         message=f"Ownership transferred to user {new_owner_id}",

@@ -149,9 +149,13 @@ def _build_metadata_from_form(
         if meta_outcome:
             metadata["outcome"] = meta_outcome
         if meta_lessons_learned:
-            metadata["lessons_learned"] = [item.strip() for item in meta_lessons_learned.split(",") if item.strip()]
+            metadata["lessons_learned"] = [
+                item.strip() for item in meta_lessons_learned.split(",") if item.strip()
+            ]
         if meta_related_entities:
-            metadata["related_entities"] = [e.strip() for e in meta_related_entities.split(",") if e.strip()]
+            metadata["related_entities"] = [
+                e.strip() for e in meta_related_entities.split(",") if e.strip()
+            ]
 
     elif memory_type == "technical":
         if meta_category:
@@ -175,9 +179,13 @@ def _build_metadata_from_form(
         if meta_success_criteria:
             metadata["success_criteria"] = meta_success_criteria
         if meta_prerequisites:
-            metadata["prerequisites"] = [p.strip() for p in meta_prerequisites.split(",") if p.strip()]
+            metadata["prerequisites"] = [
+                p.strip() for p in meta_prerequisites.split(",") if p.strip()
+            ]
         if meta_common_pitfalls:
-            metadata["common_pitfalls"] = [p.strip() for p in meta_common_pitfalls.split(",") if p.strip()]
+            metadata["common_pitfalls"] = [
+                p.strip() for p in meta_common_pitfalls.split(",") if p.strip()
+            ]
         if meta_steps:
             steps = []
             for i, line in enumerate(meta_steps.strip().split("\n"), 1):
@@ -200,7 +208,8 @@ def _build_metadata_from_form(
         if meta_milestones:
             metadata["milestones"] = [
                 {"description": m.strip(), "status": "active"}
-                for m in meta_milestones.split(",") if m.strip()
+                for m in meta_milestones.split(",")
+                if m.strip()
             ]
 
     elif memory_type == "individual":
@@ -249,8 +258,13 @@ async def _check_csrf(request: Request, form_token: str | None = None) -> None:
 
     # Log for debugging
     from lucent.logging import get_logger
+
     _csrf_logger = get_logger("csrf")
-    _csrf_logger.debug("CSRF check: cookie=%s form=%s", "present" if cookie_token else "NONE", "present" if form_token else "NONE")
+    _csrf_logger.debug(
+        "CSRF check: cookie=%s form=%s",
+        "present" if cookie_token else "NONE",
+        "present" if form_token else "NONE",
+    )
 
     if not cookie_token:
         _csrf_logger.warning("CSRF failed: no cookie")
@@ -303,7 +317,11 @@ async def get_user_context(request: Request) -> CurrentUser:
 
         # Verify the cookie signature
         impersonate_value = verify_signed_value(impersonate_cookie)
-        if impersonate_value and ":" in impersonate_value and current_user.role in (Role.ADMIN, Role.OWNER):
+        if (
+            impersonate_value
+            and ":" in impersonate_value
+            and current_user.role in (Role.ADMIN, Role.OWNER)
+        ):
             impersonate_user_id_str, cookie_session_hash = impersonate_value.split(":", 1)
             # Verify the impersonation cookie is bound to this session
             current_session_hash = hash_session_token(session_token)
@@ -316,20 +334,24 @@ async def get_user_context(request: Request) -> CurrentUser:
                         user_repo = UserRepository(pool)
                         target_user = await user_repo.get_by_id(target_user_id)
 
-                        if target_user and target_user.get("organization_id") == current_user.organization_id:
+                        if (
+                            target_user
+                            and target_user.get("organization_id") == current_user.organization_id
+                        ):
                             target_role = target_user.get("role", "member")
                             can_impersonate = (
-                                (current_user.role == Role.ADMIN and target_role == "member") or
-                                (current_user.role == Role.OWNER and target_role != "owner")
-                            )
+                                current_user.role == Role.ADMIN and target_role == "member"
+                            ) or (current_user.role == Role.OWNER and target_role != "owner")
 
                             if can_impersonate:
                                 set_current_user(target_user)
-                                set_impersonating_user({
-                                    "id": current_user.id,
-                                    "display_name": current_user.display_name,
-                                    "role": current_user.role.value,
-                                })
+                                set_impersonating_user(
+                                    {
+                                        "id": current_user.id,
+                                        "display_name": current_user.display_name,
+                                        "role": current_user.role.value,
+                                    }
+                                )
                                 return CurrentUser(
                                     id=target_user["id"],
                                     organization_id=target_user.get("organization_id"),
@@ -371,7 +393,12 @@ async def login_page(request: Request, error: str | None = None):
     csrf_token = generate_csrf_token()
     response = templates.TemplateResponse(
         "login.html",
-        {"request": request, "fields": provider.get_login_fields(), "error": error, "csrf_token": csrf_token},
+        {
+            "request": request,
+            "fields": provider.get_login_fields(),
+            "error": error,
+            "csrf_token": csrf_token,
+        },
     )
     _set_csrf_cookie(response, csrf_token)
     return response
@@ -520,7 +547,10 @@ async def setup_submit(request: Request):
         logger.exception("Error during initial user setup")
         return templates.TemplateResponse(
             "setup.html",
-            {"request": request, "error": "Setup failed due to an unexpected error. Please try again."},
+            {
+                "request": request,
+                "error": "Setup failed due to an unexpected error. Please try again.",
+            },
             status_code=500,
         )
 
@@ -531,7 +561,10 @@ async def setup_submit(request: Request):
         logger.exception("Error creating session after setup")
         return templates.TemplateResponse(
             "setup.html",
-            {"request": request, "error": "Account created but session failed. Please log in manually."},
+            {
+                "request": request,
+                "error": "Account created but session failed. Please log in manually.",
+            },
             status_code=500,
         )
 
@@ -553,6 +586,7 @@ async def setup_submit(request: Request):
 # =============================================================================
 # Dashboard
 # =============================================================================
+
 
 @router.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
@@ -603,6 +637,7 @@ async def dashboard(request: Request):
 # Daemon Activity
 # =============================================================================
 
+
 @router.get("/daemon", response_class=HTMLResponse)
 async def daemon_activity(request: Request):
     """Show daemon autonomous activity — memories tagged 'daemon'."""
@@ -639,14 +674,16 @@ async def daemon_activity(request: Request):
     for mem in messages_result.get("memories", []):
         tags = mem.get("tags") or []
         metadata = mem.get("metadata") or {}
-        daemon_messages.append({
-            "id": mem["id"],
-            "content": mem["content"],
-            "sender": "daemon" if "from-daemon" in tags else "human",
-            "acknowledged": "acknowledged" in tags,
-            "created_at": mem["created_at"],
-            "in_reply_to": metadata.get("in_reply_to"),
-        })
+        daemon_messages.append(
+            {
+                "id": mem["id"],
+                "content": mem["content"],
+                "sender": "daemon" if "from-daemon" in tags else "human",
+                "acknowledged": "acknowledged" in tags,
+                "created_at": mem["created_at"],
+                "in_reply_to": metadata.get("in_reply_to"),
+            }
+        )
     daemon_messages.reverse()  # oldest first for chat order
 
     return templates.TemplateResponse(
@@ -697,14 +734,16 @@ async def send_daemon_message(request: Request):
     for mem in messages_result.get("memories", []):
         tags = mem.get("tags") or []
         metadata = mem.get("metadata") or {}
-        daemon_messages.append({
-            "id": mem["id"],
-            "content": mem["content"],
-            "sender": "daemon" if "from-daemon" in tags else "human",
-            "acknowledged": "acknowledged" in tags,
-            "created_at": mem["created_at"],
-            "in_reply_to": metadata.get("in_reply_to"),
-        })
+        daemon_messages.append(
+            {
+                "id": mem["id"],
+                "content": mem["content"],
+                "sender": "daemon" if "from-daemon" in tags else "human",
+                "acknowledged": "acknowledged" in tags,
+                "created_at": mem["created_at"],
+                "in_reply_to": metadata.get("in_reply_to"),
+            }
+        )
     daemon_messages.reverse()
 
     return templates.TemplateResponse(
@@ -762,15 +801,28 @@ async def daemon_feedback(
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     if action == "approve":
-        feedback = {"status": "approved", "reviewed_at": now, "reviewed_by": user.display_name or user.email}
+        feedback = {
+            "status": "approved",
+            "reviewed_at": now,
+            "reviewed_by": user.display_name or user.email,
+        }
         if comment:
             feedback["comment"] = comment
     elif action == "reject":
-        feedback = {"status": "rejected", "reviewed_at": now, "reviewed_by": user.display_name or user.email}
+        feedback = {
+            "status": "rejected",
+            "reviewed_at": now,
+            "reviewed_by": user.display_name or user.email,
+        }
         if comment:
             feedback["comment"] = comment
     elif action == "comment":
-        feedback = {**existing_feedback, "comment": comment, "reviewed_at": now, "reviewed_by": user.display_name or user.email}
+        feedback = {
+            **existing_feedback,
+            "comment": comment,
+            "reviewed_at": now,
+            "reviewed_by": user.display_name or user.email,
+        }
         if "status" not in feedback:
             feedback["status"] = "pending"
     elif action == "reset":
@@ -848,7 +900,7 @@ def _memory_to_task_view(memory: dict) -> dict:
     # Extract agent type, priority, claimed_by
     agent_type = next((t for t in tags if t in _TASK_AGENT_TYPES), "unknown")
     priority = next((t for t in tags if t in _TASK_PRIORITIES), "medium")
-    claimed_by = next((t[len("claimed-by-"):] for t in tags if t.startswith("claimed-by-")), None)
+    claimed_by = next((t[len("claimed-by-") :] for t in tags if t.startswith("claimed-by-")), None)
 
     internal_tags = (
         {"daemon-task", "pending", "completed", "daemon"} | _TASK_AGENT_TYPES | _TASK_PRIORITIES
@@ -898,13 +950,19 @@ async def daemon_tasks_list(
         all_tasks = [t for t in all_tasks if t["status"] == "claimed"]
 
     # Compute status counts from unfiltered set
-    all_result = await repo.search(
-        tags=["daemon-task"],
-        limit=100,
-        requesting_user_id=user.id,
-        requesting_org_id=user.organization_id,
-    ) if status else result
-    all_for_counts = [_memory_to_task_view(m) for m in all_result["memories"]] if status else all_tasks
+    all_result = (
+        await repo.search(
+            tags=["daemon-task"],
+            limit=100,
+            requesting_user_id=user.id,
+            requesting_org_id=user.organization_id,
+        )
+        if status
+        else result
+    )
+    all_for_counts = (
+        [_memory_to_task_view(m) for m in all_result["memories"]] if status else all_tasks
+    )
     status_counts = {}
     for t in all_for_counts:
         status_counts[t["status"]] = status_counts.get(t["status"], 0) + 1
@@ -1032,6 +1090,7 @@ async def daemon_task_cancel(request: Request, task_id: UUID):
 # Memories
 # =============================================================================
 
+
 @router.get("/memories", response_class=HTMLResponse)
 async def memories_list(
     request: Request,
@@ -1125,7 +1184,9 @@ async def memory_new_form(request: Request):
     )
 
     # Get users in the organization for linking individual memories
-    org_users = await user_repo.get_by_organization(user.organization_id) if user.organization_id else []
+    org_users = (
+        await user_repo.get_by_organization(user.organization_id) if user.organization_id else []
+    )
 
     return templates.TemplateResponse(
         "memory_new.html",
@@ -1206,16 +1267,26 @@ async def memory_new_submit(
     # Build type-specific metadata
     metadata = _build_metadata_from_form(
         type,
-        meta_context=meta_context, meta_outcome=meta_outcome,
-        meta_lessons_learned=meta_lessons_learned, meta_related_entities=meta_related_entities,
-        meta_category=meta_category, meta_language=meta_language,
-        meta_version_info=meta_version_info, meta_repo=meta_repo,
-        meta_filename=meta_filename, meta_code_snippet=meta_code_snippet,
-        meta_references=meta_references, meta_estimated_time=meta_estimated_time,
-        meta_success_criteria=meta_success_criteria, meta_prerequisites=meta_prerequisites,
-        meta_common_pitfalls=meta_common_pitfalls, meta_steps=meta_steps,
-        meta_status=meta_status, meta_priority=meta_priority,
-        meta_deadline=meta_deadline, meta_blockers=meta_blockers,
+        meta_context=meta_context,
+        meta_outcome=meta_outcome,
+        meta_lessons_learned=meta_lessons_learned,
+        meta_related_entities=meta_related_entities,
+        meta_category=meta_category,
+        meta_language=meta_language,
+        meta_version_info=meta_version_info,
+        meta_repo=meta_repo,
+        meta_filename=meta_filename,
+        meta_code_snippet=meta_code_snippet,
+        meta_references=meta_references,
+        meta_estimated_time=meta_estimated_time,
+        meta_success_criteria=meta_success_criteria,
+        meta_prerequisites=meta_prerequisites,
+        meta_common_pitfalls=meta_common_pitfalls,
+        meta_steps=meta_steps,
+        meta_status=meta_status,
+        meta_priority=meta_priority,
+        meta_deadline=meta_deadline,
+        meta_blockers=meta_blockers,
         meta_milestones=meta_milestones,
     )
 
@@ -1314,7 +1385,9 @@ async def memory_edit_form(request: Request, memory_id: UUID):
         raise HTTPException(status_code=403, detail="You can only edit your own memories")
 
     # Get users in the organization for linking individual memories
-    org_users = await user_repo.get_by_organization(user.organization_id) if user.organization_id else []
+    org_users = (
+        await user_repo.get_by_organization(user.organization_id) if user.organization_id else []
+    )
 
     return templates.TemplateResponse(
         "memory_edit.html",
@@ -1395,21 +1468,36 @@ async def memory_edit_submit(
     memory_type = existing.get("type")
     metadata = _build_metadata_from_form(
         memory_type,
-        meta_context=meta_context, meta_outcome=meta_outcome,
-        meta_lessons_learned=meta_lessons_learned, meta_related_entities=meta_related_entities,
-        meta_category=meta_category, meta_language=meta_language,
-        meta_version_info=meta_version_info, meta_repo=meta_repo,
-        meta_filename=meta_filename, meta_code_snippet=meta_code_snippet,
-        meta_references=meta_references, meta_estimated_time=meta_estimated_time,
-        meta_success_criteria=meta_success_criteria, meta_prerequisites=meta_prerequisites,
-        meta_common_pitfalls=meta_common_pitfalls, meta_steps=meta_steps,
-        meta_status=meta_status, meta_priority=meta_priority,
-        meta_deadline=meta_deadline, meta_blockers=meta_blockers,
-        meta_milestones=meta_milestones, meta_user_id=meta_user_id,
-        meta_name=meta_name, meta_relationship=meta_relationship,
-        meta_organization=meta_organization, meta_role=meta_role,
-        meta_email=meta_email, meta_phone=meta_phone,
-        meta_linkedin=meta_linkedin, meta_github=meta_github,
+        meta_context=meta_context,
+        meta_outcome=meta_outcome,
+        meta_lessons_learned=meta_lessons_learned,
+        meta_related_entities=meta_related_entities,
+        meta_category=meta_category,
+        meta_language=meta_language,
+        meta_version_info=meta_version_info,
+        meta_repo=meta_repo,
+        meta_filename=meta_filename,
+        meta_code_snippet=meta_code_snippet,
+        meta_references=meta_references,
+        meta_estimated_time=meta_estimated_time,
+        meta_success_criteria=meta_success_criteria,
+        meta_prerequisites=meta_prerequisites,
+        meta_common_pitfalls=meta_common_pitfalls,
+        meta_steps=meta_steps,
+        meta_status=meta_status,
+        meta_priority=meta_priority,
+        meta_deadline=meta_deadline,
+        meta_blockers=meta_blockers,
+        meta_milestones=meta_milestones,
+        meta_user_id=meta_user_id,
+        meta_name=meta_name,
+        meta_relationship=meta_relationship,
+        meta_organization=meta_organization,
+        meta_role=meta_role,
+        meta_email=meta_email,
+        meta_phone=meta_phone,
+        meta_linkedin=meta_linkedin,
+        meta_github=meta_github,
         meta_preferences=meta_preferences,
     )
 
@@ -1449,7 +1537,9 @@ async def memory_edit_submit(
             "metadata": result["metadata"],
             "related_memory_ids": [str(uid) for uid in result.get("related_memory_ids", [])],
             "shared": result.get("shared", False),
-        } if result else None,
+        }
+        if result
+        else None,
     )
 
     return RedirectResponse(f"/memories/{memory_id}", status_code=303)
@@ -1489,12 +1579,12 @@ async def memory_share(request: Request, memory_id: UUID):
     # Return updated button for HTMX
     if request.headers.get("HX-Request"):
         return HTMLResponse(
-            f'''<button
+            f"""<button
                 hx-post="/memories/{memory_id}/share"
                 hx-swap="outerHTML"
-                class="btn {'btn-warning' if new_shared else 'btn-primary'}">
-                {'Unshare' if new_shared else 'Share'}
-            </button>'''
+                class="btn {"btn-warning" if new_shared else "btn-primary"}">
+                {"Unshare" if new_shared else "Share"}
+            </button>"""
         )
 
     return RedirectResponse(f"/memories/{memory_id}", status_code=303)
@@ -1629,6 +1719,7 @@ async def memory_restore(request: Request, memory_id: UUID, version: int):
 # Audit Logs
 # =============================================================================
 
+
 @router.get("/audit", response_class=HTMLResponse)
 async def audit_logs(
     request: Request,
@@ -1673,6 +1764,7 @@ async def audit_logs(
 # Users (Admin)
 # =============================================================================
 
+
 @router.get("/users", response_class=HTMLResponse)
 async def users_list(request: Request):
     """List organization users (team mode only)."""
@@ -1685,8 +1777,14 @@ async def users_list(request: Request):
     users = await user_repo.get_by_organization(user.organization_id)
 
     # Check if user can manage users (admin or owner)
-    can_manage = user.role in ("admin", "owner") if hasattr(user, "role") and isinstance(user.role, str) else user.role.value in ("admin", "owner")
-    can_impersonate = user.role == "owner" if isinstance(user.role, str) else user.role.value == "owner"
+    can_manage = (
+        user.role in ("admin", "owner")
+        if hasattr(user, "role") and isinstance(user.role, str)
+        else user.role.value in ("admin", "owner")
+    )
+    can_impersonate = (
+        user.role == "owner" if isinstance(user.role, str) else user.role.value == "owner"
+    )
 
     return templates.TemplateResponse(
         "users.html",
@@ -1713,10 +1811,13 @@ async def create_user(
     user = await get_user_context(request)
 
     # Check permission
-    if not (hasattr(user, "role") and (
-        (isinstance(user.role, str) and user.role in ("admin", "owner")) or
-        (hasattr(user.role, "value") and user.role.value in ("admin", "owner"))
-    )):
+    if not (
+        hasattr(user, "role")
+        and (
+            (isinstance(user.role, str) and user.role in ("admin", "owner"))
+            or (hasattr(user.role, "value") and user.role.value in ("admin", "owner"))
+        )
+    ):
         raise HTTPException(status_code=403, detail="Permission denied")
 
     pool = await get_pool()
@@ -1724,6 +1825,7 @@ async def create_user(
 
     # Generate a unique external_id for local users
     import secrets
+
     external_id = f"local_{secrets.token_hex(8)}"
 
     # Validate role
@@ -1761,10 +1863,12 @@ async def create_user(
     # Set a temporary password so the user can log in
     # TODO: Implement invite/password-set flow instead of temp passwords
     from lucent.auth_providers import set_user_password
+
     temp_password = secrets.token_urlsafe(12)
     await set_user_password(pool, new_user["id"], temp_password)
 
     from urllib.parse import quote
+
     return RedirectResponse(
         url=f"/users?success=User+created.+Temporary+password:+{quote(temp_password)}",
         status_code=303,
@@ -1802,7 +1906,9 @@ async def start_impersonation(request: Request, user_id: UUID):
     # Check role restrictions
     target_role = target.get("role", "member")
     if user_role_value == "admin" and target_role != "member":
-        return RedirectResponse(url="/users?error=Admins+can+only+impersonate+members", status_code=303)
+        return RedirectResponse(
+            url="/users?error=Admins+can+only+impersonate+members", status_code=303
+        )
     if user_role_value == "owner" and target_role == "owner":
         return RedirectResponse(url="/users?error=Cannot+impersonate+other+owners", status_code=303)
 
@@ -1919,6 +2025,7 @@ async def settings(
 # Password Change
 # =============================================================================
 
+
 @router.post("/settings/password")
 async def change_password(request: Request):
     """Change the current user's password."""
@@ -1933,10 +2040,15 @@ async def change_password(request: Request):
 
     # Validate new password
     if len(new_password) < 8:
-        return RedirectResponse(f"/settings?error={quote('New password must be at least 8 characters.')}", status_code=303)
+        return RedirectResponse(
+            f"/settings?error={quote('New password must be at least 8 characters.')}",
+            status_code=303,
+        )
 
     if new_password != confirm_password:
-        return RedirectResponse(f"/settings?error={quote('New passwords do not match.')}", status_code=303)
+        return RedirectResponse(
+            f"/settings?error={quote('New passwords do not match.')}", status_code=303
+        )
 
     # Verify current password
     query = "SELECT password_hash FROM users WHERE id = $1"
@@ -1944,10 +2056,14 @@ async def change_password(request: Request):
         row = await conn.fetchrow(query, str(user.id))
 
     if not row or not row["password_hash"]:
-        return RedirectResponse(f"/settings?error={quote('No password set on this account.')}", status_code=303)
+        return RedirectResponse(
+            f"/settings?error={quote('No password set on this account.')}", status_code=303
+        )
 
     if not bcrypt.checkpw(current_password.encode("utf-8"), row["password_hash"].encode("utf-8")):
-        return RedirectResponse(f"/settings?error={quote('Current password is incorrect.')}", status_code=303)
+        return RedirectResponse(
+            f"/settings?error={quote('Current password is incorrect.')}", status_code=303
+        )
 
     # Set new password
     await set_user_password(pool, user.id, new_password)
@@ -1958,6 +2074,7 @@ async def change_password(request: Request):
 # =============================================================================
 # API Keys
 # =============================================================================
+
 
 @router.post("/settings/api-keys")
 async def create_api_key(
@@ -1983,11 +2100,13 @@ async def create_api_key(
 
         # Redirect to settings with signed key (POST-Redirect-GET pattern)
         from urllib.parse import quote
+
         return RedirectResponse(f"/settings?new_key={quote(signed)}", status_code=303)
 
     except ValueError as e:
         # Duplicate name error
         from urllib.parse import quote
+
         return RedirectResponse(f"/settings?error={quote(str(e))}", status_code=303)
 
 

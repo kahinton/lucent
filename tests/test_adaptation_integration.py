@@ -193,6 +193,7 @@ LEGAL_ASSESSMENT_JSON = {
 # Helper
 # ============================================================================
 
+
 def _wrap_assessment(data: dict) -> str:
     """Wrap assessment JSON in the expected XML tags with surrounding prose."""
     return (
@@ -204,6 +205,7 @@ def _wrap_assessment(data: dict) -> str:
 # ============================================================================
 # Integration Tests — Customer Support Domain
 # ============================================================================
+
 
 class TestSupportDomainIntegration:
     """End-to-end: realistic customer support assessment → generated capabilities."""
@@ -220,8 +222,10 @@ class TestSupportDomainIntegration:
         assessment = parse_assessment_output(raw_output)
         assert assessment is not None, "Failed to parse assessment output"
 
-        with patch("daemon.adaptation.AGENTS_DIR", agents_dir), \
-             patch("daemon.adaptation.SKILLS_DIR", skills_dir):
+        with (
+            patch("daemon.adaptation.AGENTS_DIR", agents_dir),
+            patch("daemon.adaptation.SKILLS_DIR", skills_dir),
+        ):
             pipeline = AdaptationPipeline(assessment)
             result = await pipeline.run(memory_api=None)
 
@@ -253,8 +257,10 @@ class TestSupportDomainIntegration:
 
         assessment = AssessmentResult.from_json(SUPPORT_ASSESSMENT_JSON)
 
-        with patch("daemon.adaptation.AGENTS_DIR", agents_dir), \
-             patch("daemon.adaptation.SKILLS_DIR", skills_dir):
+        with (
+            patch("daemon.adaptation.AGENTS_DIR", agents_dir),
+            patch("daemon.adaptation.SKILLS_DIR", skills_dir),
+        ):
             pipeline = AdaptationPipeline(assessment)
             await pipeline.run(memory_api=None)
 
@@ -280,8 +286,10 @@ class TestSupportDomainIntegration:
 
         assessment = AssessmentResult.from_json(SUPPORT_ASSESSMENT_JSON)
 
-        with patch("daemon.adaptation.AGENTS_DIR", agents_dir), \
-             patch("daemon.adaptation.SKILLS_DIR", skills_dir):
+        with (
+            patch("daemon.adaptation.AGENTS_DIR", agents_dir),
+            patch("daemon.adaptation.SKILLS_DIR", skills_dir),
+        ):
             pipeline = AdaptationPipeline(assessment)
             await pipeline.run(memory_api=None)
 
@@ -308,8 +316,10 @@ class TestSupportDomainIntegration:
 
         assessment = AssessmentResult.from_json(SUPPORT_ASSESSMENT_JSON)
 
-        with patch("daemon.adaptation.AGENTS_DIR", agents_dir), \
-             patch("daemon.adaptation.SKILLS_DIR", skills_dir):
+        with (
+            patch("daemon.adaptation.AGENTS_DIR", agents_dir),
+            patch("daemon.adaptation.SKILLS_DIR", skills_dir),
+        ):
             pipeline = AdaptationPipeline(assessment)
             await pipeline.run(memory_api=None)
 
@@ -334,8 +344,10 @@ class TestSupportDomainIntegration:
 
         assessment = AssessmentResult.from_json(SUPPORT_ASSESSMENT_JSON)
 
-        with patch("daemon.adaptation.AGENTS_DIR", agents_dir), \
-             patch("daemon.adaptation.SKILLS_DIR", skills_dir):
+        with (
+            patch("daemon.adaptation.AGENTS_DIR", agents_dir),
+            patch("daemon.adaptation.SKILLS_DIR", skills_dir),
+        ):
             pipeline = AdaptationPipeline(assessment)
             await pipeline.run(memory_api=None)
             summary = pipeline.build_adaptation_summary()
@@ -354,8 +366,10 @@ class TestSupportDomainIntegration:
 
         assessment = AssessmentResult.from_json(SUPPORT_ASSESSMENT_JSON)
 
-        with patch("daemon.adaptation.AGENTS_DIR", agents_dir), \
-             patch("daemon.adaptation.SKILLS_DIR", skills_dir):
+        with (
+            patch("daemon.adaptation.AGENTS_DIR", agents_dir),
+            patch("daemon.adaptation.SKILLS_DIR", skills_dir),
+        ):
             pipeline = AdaptationPipeline(assessment)
             await pipeline.run(memory_api=None)
             metadata = pipeline.build_agent_registry_metadata()
@@ -373,6 +387,7 @@ class TestSupportDomainIntegration:
 # Integration Tests — Legal Research Domain
 # ============================================================================
 
+
 class TestLegalDomainIntegration:
     """End-to-end: realistic legal research assessment → generated capabilities."""
 
@@ -388,8 +403,10 @@ class TestLegalDomainIntegration:
         assessment = parse_assessment_output(raw_output)
         assert assessment is not None, "Failed to parse assessment output"
 
-        with patch("daemon.adaptation.AGENTS_DIR", agents_dir), \
-             patch("daemon.adaptation.SKILLS_DIR", skills_dir):
+        with (
+            patch("daemon.adaptation.AGENTS_DIR", agents_dir),
+            patch("daemon.adaptation.SKILLS_DIR", skills_dir),
+        ):
             pipeline = AdaptationPipeline(assessment)
             result = await pipeline.run(memory_api=None)
 
@@ -421,8 +438,10 @@ class TestLegalDomainIntegration:
 
         assessment = AssessmentResult.from_json(LEGAL_ASSESSMENT_JSON)
 
-        with patch("daemon.adaptation.AGENTS_DIR", agents_dir), \
-             patch("daemon.adaptation.SKILLS_DIR", skills_dir):
+        with (
+            patch("daemon.adaptation.AGENTS_DIR", agents_dir),
+            patch("daemon.adaptation.SKILLS_DIR", skills_dir),
+        ):
             pipeline = AdaptationPipeline(assessment)
             await pipeline.run(memory_api=None)
 
@@ -450,8 +469,10 @@ class TestLegalDomainIntegration:
 
         assessment = AssessmentResult.from_json(LEGAL_ASSESSMENT_JSON)
 
-        with patch("daemon.adaptation.AGENTS_DIR", agents_dir), \
-             patch("daemon.adaptation.SKILLS_DIR", skills_dir):
+        with (
+            patch("daemon.adaptation.AGENTS_DIR", agents_dir),
+            patch("daemon.adaptation.SKILLS_DIR", skills_dir),
+        ):
             pipeline = AdaptationPipeline(assessment)
             await pipeline.run(memory_api=None)
 
@@ -459,13 +480,12 @@ class TestLegalDomainIntegration:
             content = agent_file.read_text()
             name = agent_file.stem
             # Template-level legal guardrails
-            assert "privilege" in content.lower(), (
-                f"Agent {name} missing privilege guardrail"
-            )
+            assert "privilege" in content.lower(), f"Agent {name} missing privilege guardrail"
             # Assessment-specific guardrails should be rendered
-            assert "attorney-client privilege" in content.lower() or "partner review" in content.lower(), (
-                f"Agent {name} missing custom guardrail from assessment"
-            )
+            assert (
+                "attorney-client privilege" in content.lower()
+                or "partner review" in content.lower()
+            ), f"Agent {name} missing custom guardrail from assessment"
 
     @pytest.mark.asyncio
     async def test_legal_agents_reference_appropriate_tools(self, tmp_path: Path):
@@ -477,8 +497,10 @@ class TestLegalDomainIntegration:
 
         assessment = AssessmentResult.from_json(LEGAL_ASSESSMENT_JSON)
 
-        with patch("daemon.adaptation.AGENTS_DIR", agents_dir), \
-             patch("daemon.adaptation.SKILLS_DIR", skills_dir):
+        with (
+            patch("daemon.adaptation.AGENTS_DIR", agents_dir),
+            patch("daemon.adaptation.SKILLS_DIR", skills_dir),
+        ):
             pipeline = AdaptationPipeline(assessment)
             await pipeline.run(memory_api=None)
 
@@ -497,8 +519,10 @@ class TestLegalDomainIntegration:
 
         assessment = AssessmentResult.from_json(LEGAL_ASSESSMENT_JSON)
 
-        with patch("daemon.adaptation.AGENTS_DIR", agents_dir), \
-             patch("daemon.adaptation.SKILLS_DIR", skills_dir):
+        with (
+            patch("daemon.adaptation.AGENTS_DIR", agents_dir),
+            patch("daemon.adaptation.SKILLS_DIR", skills_dir),
+        ):
             pipeline = AdaptationPipeline(assessment)
             await pipeline.run(memory_api=None)
 
@@ -521,6 +545,7 @@ class TestLegalDomainIntegration:
 # Integration Tests — Archetype-Only Generation (No Explicit Recommendations)
 # ============================================================================
 
+
 class TestArchetypeOnlyIntegration:
     """Pipeline should work with domain-only assessment, filling from archetypes."""
 
@@ -535,15 +560,16 @@ class TestArchetypeOnlyIntegration:
         assessment = AssessmentResult(
             domain_primary="support",
             domain_description=(
-                "Customer support helpdesk handling tickets, escalations, "
-                "and incident management"
+                "Customer support helpdesk handling tickets, escalations, and incident management"
             ),
             tech_stack={"tools": ["zendesk", "pagerduty"]},
             guardrails=["Respect customer data privacy"],
         )
 
-        with patch("daemon.adaptation.AGENTS_DIR", agents_dir), \
-             patch("daemon.adaptation.SKILLS_DIR", skills_dir):
+        with (
+            patch("daemon.adaptation.AGENTS_DIR", agents_dir),
+            patch("daemon.adaptation.SKILLS_DIR", skills_dir),
+        ):
             pipeline = AdaptationPipeline(assessment)
             result = await pipeline.run(memory_api=None)
 
@@ -551,8 +577,12 @@ class TestArchetypeOnlyIntegration:
         # Archetypes should fill in standard support agents
         created_names = {Path(p).stem.replace(".agent", "") for p in result["agents_created"]}
         assert "triage" in created_names, "Archetype should have created triage agent"
-        assert "incident-response" in created_names, "Archetype should have created incident-response agent"
-        assert "knowledge-base" in created_names, "Archetype should have created knowledge-base agent"
+        assert "incident-response" in created_names, (
+            "Archetype should have created incident-response agent"
+        )
+        assert "knowledge-base" in created_names, (
+            "Archetype should have created knowledge-base agent"
+        )
 
         # Should have at least the triage skill
         assert len(result["skills_created"]) >= 1
@@ -575,8 +605,10 @@ class TestArchetypeOnlyIntegration:
             guardrails=["Maintain attorney-client privilege"],
         )
 
-        with patch("daemon.adaptation.AGENTS_DIR", agents_dir), \
-             patch("daemon.adaptation.SKILLS_DIR", skills_dir):
+        with (
+            patch("daemon.adaptation.AGENTS_DIR", agents_dir),
+            patch("daemon.adaptation.SKILLS_DIR", skills_dir),
+        ):
             pipeline = AdaptationPipeline(assessment)
             result = await pipeline.run(memory_api=None)
 
@@ -602,8 +634,10 @@ class TestArchetypeOnlyIntegration:
             tech_stack={"tools": ["jupyter", "r-studio"]},
         )
 
-        with patch("daemon.adaptation.AGENTS_DIR", agents_dir), \
-             patch("daemon.adaptation.SKILLS_DIR", skills_dir):
+        with (
+            patch("daemon.adaptation.AGENTS_DIR", agents_dir),
+            patch("daemon.adaptation.SKILLS_DIR", skills_dir),
+        ):
             pipeline = AdaptationPipeline(assessment)
             result = await pipeline.run(memory_api=None)
 
@@ -617,14 +651,19 @@ class TestArchetypeOnlyIntegration:
 # Integration Tests — Cross-Cutting Concerns
 # ============================================================================
 
+
 class TestCrossCuttingIntegration:
     """Validate properties that should hold across ALL generated domains."""
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("domain_json", [
-        SUPPORT_ASSESSMENT_JSON,
-        LEGAL_ASSESSMENT_JSON,
-    ], ids=["support", "legal"])
+    @pytest.mark.parametrize(
+        "domain_json",
+        [
+            SUPPORT_ASSESSMENT_JSON,
+            LEGAL_ASSESSMENT_JSON,
+        ],
+        ids=["support", "legal"],
+    )
     async def test_all_generated_agents_pass_validation(self, tmp_path: Path, domain_json: dict):
         """Every agent generated by the pipeline passes validate_agent()."""
         agents_dir = tmp_path / "agents"
@@ -634,8 +673,10 @@ class TestCrossCuttingIntegration:
 
         assessment = AssessmentResult.from_json(domain_json)
 
-        with patch("daemon.adaptation.AGENTS_DIR", agents_dir), \
-             patch("daemon.adaptation.SKILLS_DIR", skills_dir):
+        with (
+            patch("daemon.adaptation.AGENTS_DIR", agents_dir),
+            patch("daemon.adaptation.SKILLS_DIR", skills_dir),
+        ):
             pipeline = AdaptationPipeline(assessment)
             await pipeline.run(memory_api=None)
 
@@ -643,13 +684,19 @@ class TestCrossCuttingIntegration:
             content = agent_file.read_text()
             name = agent_file.stem.replace(".agent", "")
             vr = validate_agent(content, name)
-            assert vr.valid, f"Agent {name} in {domain_json['domain']['primary']} failed: {vr.errors}"
+            assert vr.valid, (
+                f"Agent {name} in {domain_json['domain']['primary']} failed: {vr.errors}"
+            )
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("domain_json", [
-        SUPPORT_ASSESSMENT_JSON,
-        LEGAL_ASSESSMENT_JSON,
-    ], ids=["support", "legal"])
+    @pytest.mark.parametrize(
+        "domain_json",
+        [
+            SUPPORT_ASSESSMENT_JSON,
+            LEGAL_ASSESSMENT_JSON,
+        ],
+        ids=["support", "legal"],
+    )
     async def test_all_generated_skills_pass_validation(self, tmp_path: Path, domain_json: dict):
         """Every skill generated by the pipeline passes validate_skill()."""
         agents_dir = tmp_path / "agents"
@@ -659,8 +706,10 @@ class TestCrossCuttingIntegration:
 
         assessment = AssessmentResult.from_json(domain_json)
 
-        with patch("daemon.adaptation.AGENTS_DIR", agents_dir), \
-             patch("daemon.adaptation.SKILLS_DIR", skills_dir):
+        with (
+            patch("daemon.adaptation.AGENTS_DIR", agents_dir),
+            patch("daemon.adaptation.SKILLS_DIR", skills_dir),
+        ):
             pipeline = AdaptationPipeline(assessment)
             await pipeline.run(memory_api=None)
 
@@ -668,13 +717,19 @@ class TestCrossCuttingIntegration:
             content = skill_md.read_text()
             name = skill_md.parent.name
             vr = validate_skill(content, name)
-            assert vr.valid, f"Skill {name} in {domain_json['domain']['primary']} failed: {vr.errors}"
+            assert vr.valid, (
+                f"Skill {name} in {domain_json['domain']['primary']} failed: {vr.errors}"
+            )
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("domain_json", [
-        SUPPORT_ASSESSMENT_JSON,
-        LEGAL_ASSESSMENT_JSON,
-    ], ids=["support", "legal"])
+    @pytest.mark.parametrize(
+        "domain_json",
+        [
+            SUPPORT_ASSESSMENT_JSON,
+            LEGAL_ASSESSMENT_JSON,
+        ],
+        ids=["support", "legal"],
+    )
     async def test_generated_files_are_non_empty(self, tmp_path: Path, domain_json: dict):
         """No generated file should be empty or trivially short."""
         agents_dir = tmp_path / "agents"
@@ -684,8 +739,10 @@ class TestCrossCuttingIntegration:
 
         assessment = AssessmentResult.from_json(domain_json)
 
-        with patch("daemon.adaptation.AGENTS_DIR", agents_dir), \
-             patch("daemon.adaptation.SKILLS_DIR", skills_dir):
+        with (
+            patch("daemon.adaptation.AGENTS_DIR", agents_dir),
+            patch("daemon.adaptation.SKILLS_DIR", skills_dir),
+        ):
             pipeline = AdaptationPipeline(assessment)
             await pipeline.run(memory_api=None)
 
@@ -711,8 +768,10 @@ class TestCrossCuttingIntegration:
 
         assessment = AssessmentResult.from_json(LEGAL_ASSESSMENT_JSON)
 
-        with patch("daemon.adaptation.AGENTS_DIR", agents_dir), \
-             patch("daemon.adaptation.SKILLS_DIR", skills_dir):
+        with (
+            patch("daemon.adaptation.AGENTS_DIR", agents_dir),
+            patch("daemon.adaptation.SKILLS_DIR", skills_dir),
+        ):
             pipeline1 = AdaptationPipeline(assessment)
             result1 = await pipeline1.run(memory_api=None)
 

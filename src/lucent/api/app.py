@@ -45,6 +45,7 @@ async def lifespan(app: FastAPI):
     """Manage application lifespan - startup and shutdown."""
     # Startup: Initialize database pool
     import os
+
     database_url = os.environ.get("DATABASE_URL")
     if database_url:
         await init_db(database_url)
@@ -114,10 +115,13 @@ def create_app() -> FastAPI:
     # Include team-only API routers
     if is_team_mode():
         from lucent.api.routers import access, audit, organizations, users
+
         app.include_router(audit.router, prefix="/api/audit", tags=["Audit"])
         app.include_router(access.router, prefix="/api/access", tags=["Access"])
         app.include_router(users.router, prefix="/api/users", tags=["Users"])
-        app.include_router(organizations.router, prefix="/api/organizations", tags=["Organizations"])
+        app.include_router(
+            organizations.router, prefix="/api/organizations", tags=["Organizations"]
+        )
 
     # Include web interface routes (excluded from API docs)
     app.include_router(web_router, include_in_schema=False)

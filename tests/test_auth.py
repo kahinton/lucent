@@ -349,7 +349,9 @@ class TestGetOrCreateUserFromOAuth:
         assert user["email"] == f"{prefix}new@google.com"
         assert user["display_name"] == f"{prefix}New Name"
 
-    async def test_creates_user_with_minimal_info(self, db_pool, test_organization, clean_test_data):
+    async def test_creates_user_with_minimal_info(
+        self, db_pool, test_organization, clean_test_data
+    ):
         """OAuth login works with just provider, external_id, and org."""
         prefix = clean_test_data
         external_id = f"{prefix}oauth_minimal"
@@ -403,6 +405,7 @@ class TestGetOrCreateUserFromOAuth:
 
         # Verify by reading the user back
         from lucent.db import UserRepository
+
         repo = UserRepository(db_pool)
         stored = await repo.get_by_id(user["id"])
         assert stored is not None
@@ -423,6 +426,7 @@ class TestGetOrCreateUserFromOAuth:
         )
 
         from lucent.db import UserRepository
+
         repo = UserRepository(db_pool)
         stored = await repo.get_by_id(user["id"])
         assert stored is not None

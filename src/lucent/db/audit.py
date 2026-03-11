@@ -278,7 +278,9 @@ class AuditRepository:
             param_idx += 1
 
         if action_types:
-            placeholders = ", ".join(f"${i}" for i in range(param_idx, param_idx + len(action_types)))
+            placeholders = ", ".join(
+                f"${i}" for i in range(param_idx, param_idx + len(action_types))
+            )
             conditions.append(f"action_type IN ({placeholders})")
             params.extend(action_types)
             param_idx += len(action_types)
@@ -395,9 +397,15 @@ class AuditRepository:
 
         org_id = None
         if row["organization_id"]:
-            org_id = row["organization_id"] if isinstance(row["organization_id"], UUID) else UUID(row["organization_id"])
+            org_id = (
+                row["organization_id"]
+                if isinstance(row["organization_id"], UUID)
+                else UUID(row["organization_id"])
+            )
 
-        memory_id = row["memory_id"] if isinstance(row["memory_id"], UUID) else UUID(row["memory_id"])
+        memory_id = (
+            row["memory_id"] if isinstance(row["memory_id"], UUID) else UUID(row["memory_id"])
+        )
 
         result = {
             "id": row["id"],

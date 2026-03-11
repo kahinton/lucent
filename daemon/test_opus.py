@@ -1,4 +1,5 @@
 """Test Opus with tools — timing each step."""
+
 import asyncio
 import os
 import time
@@ -16,16 +17,19 @@ daemon_mod = import_module("daemon")
 MEMORY_TOOLS = daemon_mod.MEMORY_TOOLS
 build_system_message = daemon_mod.build_system_message
 
+
 async def test():
     client = CopilotClient({"log_level": "warning"})
     await client.start()
 
-    session = await client.create_session({
-        "model": "claude-opus-4.6",
-        "system_message": {"content": build_system_message()},
-        "on_permission_request": PermissionHandler.approve_all,
-        "tools": MEMORY_TOOLS,
-    })
+    session = await client.create_session(
+        {
+            "model": "claude-opus-4.6",
+            "system_message": {"content": build_system_message()},
+            "on_permission_request": PermissionHandler.approve_all,
+            "tools": MEMORY_TOOLS,
+        }
+    )
 
     start = time.time()
     response = await session.send_and_wait(
@@ -38,5 +42,6 @@ async def test():
 
     await session.destroy()
     await client.stop()
+
 
 asyncio.run(test())

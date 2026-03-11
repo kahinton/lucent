@@ -54,9 +54,21 @@ class TestMemoryRecord:
         """Test that MemoryRecord has all expected type hints."""
         hints = get_type_hints(MemoryRecord)
         expected = {
-            "id", "username", "type", "content", "tags", "importance",
-            "related_memory_ids", "metadata", "created_at", "updated_at",
-            "deleted_at", "user_id", "organization_id", "shared", "last_accessed_at",
+            "id",
+            "username",
+            "type",
+            "content",
+            "tags",
+            "importance",
+            "related_memory_ids",
+            "metadata",
+            "created_at",
+            "updated_at",
+            "deleted_at",
+            "user_id",
+            "organization_id",
+            "shared",
+            "last_accessed_at",
         }
         assert set(hints.keys()) == expected
 
@@ -157,9 +169,19 @@ class TestUserRecord:
         """Test that UserRecord has all expected fields."""
         hints = get_type_hints(UserRecord)
         expected = {
-            "id", "external_id", "provider", "organization_id", "email",
-            "display_name", "avatar_url", "provider_metadata", "is_active",
-            "created_at", "updated_at", "last_login_at", "role",
+            "id",
+            "external_id",
+            "provider",
+            "organization_id",
+            "email",
+            "display_name",
+            "avatar_url",
+            "provider_metadata",
+            "is_active",
+            "created_at",
+            "updated_at",
+            "last_login_at",
+            "role",
         }
         assert set(hints.keys()) == expected
 
@@ -192,9 +214,18 @@ class TestApiKeyRecord:
         """Test that ApiKeyRecord has all expected fields."""
         hints = get_type_hints(ApiKeyRecord)
         expected = {
-            "id", "user_id", "organization_id", "name", "key_prefix",
-            "scopes", "last_used_at", "use_count", "expires_at",
-            "is_active", "created_at", "updated_at",
+            "id",
+            "user_id",
+            "organization_id",
+            "name",
+            "key_prefix",
+            "scopes",
+            "last_used_at",
+            "use_count",
+            "expires_at",
+            "is_active",
+            "created_at",
+            "updated_at",
         }
         assert set(hints.keys()) == expected
 
@@ -249,9 +280,17 @@ class TestAuditLogRecord:
         """Test AuditLogRecord has all expected fields."""
         hints = get_type_hints(AuditLogRecord)
         expected = {
-            "id", "memory_id", "user_id", "organization_id", "action_type",
-            "created_at", "changed_fields", "old_values", "new_values",
-            "context", "notes",
+            "id",
+            "memory_id",
+            "user_id",
+            "organization_id",
+            "action_type",
+            "created_at",
+            "changed_fields",
+            "old_values",
+            "new_values",
+            "context",
+            "notes",
         }
         assert set(hints.keys()) == expected
 
@@ -276,8 +315,13 @@ class TestAccessLogRecord:
         """Test AccessLogRecord has expected fields."""
         hints = get_type_hints(AccessLogRecord)
         expected = {
-            "id", "memory_id", "user_id", "organization_id",
-            "access_type", "accessed_at", "context",
+            "id",
+            "memory_id",
+            "user_id",
+            "organization_id",
+            "access_type",
+            "accessed_at",
+            "context",
         }
         assert set(hints.keys()) == expected
 
@@ -338,6 +382,4 @@ class TestModuleExports:
         for typed_dict in paginated_types:
             hints = get_type_hints(typed_dict)
             for field in pagination_fields:
-                assert field in hints, (
-                    f"{typed_dict.__name__} missing pagination field '{field}'"
-                )
+                assert field in hints, f"{typed_dict.__name__} missing pagination field '{field}'"

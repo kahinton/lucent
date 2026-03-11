@@ -55,7 +55,9 @@ async def search_memories(
     repo = MemoryRepository(pool)
     access_repo = AccessRepository(pool)
 
-    logger.info("Search: query=%s, type=%s, tags=%s, user=%s", data.query, data.type, data.tags, user.id)
+    logger.info(
+        "Search: query=%s, type=%s, tags=%s, user=%s", data.query, data.type, data.tags, user.id
+    )
 
     result = await repo.search(
         query=data.query,

@@ -58,7 +58,11 @@ async def _get_current_user_context() -> tuple[UUID | None, UUID | None, str | N
     """
     current_user = get_current_user()
     if current_user:
-        return current_user["id"], current_user.get("organization_id"), current_user.get("role", "member")
+        return (
+            current_user["id"],
+            current_user.get("organization_id"),
+            current_user.get("role", "member"),
+        )
     return None, None, None
 
 
@@ -70,7 +74,12 @@ def _get_current_username() -> str | None:
     """
     current_user = get_current_user()
     if current_user:
-        return current_user.get("display_name") or current_user.get("email") or current_user.get("username") or str(current_user["id"])
+        return (
+            current_user.get("display_name")
+            or current_user.get("email")
+            or current_user.get("username")
+            or str(current_user["id"])
+        )
     return None
 
 
@@ -370,12 +379,15 @@ Returns:
                         except Exception:
                             pass
 
-            return json.dumps({
-                "memories": memories,
-                "not_found": not_found,
-                "total_requested": len(memory_ids),
-                "total_found": len(memories),
-            }, indent=2)
+            return json.dumps(
+                {
+                    "memories": memories,
+                    "not_found": not_found,
+                    "total_requested": len(memory_ids),
+                    "total_found": len(memories),
+                },
+                indent=2,
+            )
 
         except Exception as e:
             return _error_response(f"Failed to retrieve memories: {str(e)}")
@@ -420,7 +432,9 @@ Returns:
 
             result = {
                 "user": user_info,
-                "individual_memory": _serialize_memory(individual_memory) if individual_memory else None,
+                "individual_memory": _serialize_memory(individual_memory)
+                if individual_memory
+                else None,
             }
 
             return json.dumps(result, indent=2)
@@ -472,7 +486,9 @@ Returns:
             # Parse and validate input
             memory_type = MemoryType(type) if type else None
             parsed_created_after = datetime.fromisoformat(created_after) if created_after else None
-            parsed_created_before = datetime.fromisoformat(created_before) if created_before else None
+            parsed_created_before = (
+                datetime.fromisoformat(created_before) if created_before else None
+            )
             parsed_memory_ids = [UUID(uid) for uid in memory_ids] if memory_ids else None
 
             logger.info("search_memories: query=%s, type=%s, tags=%s", query, type, tags)
@@ -701,7 +717,9 @@ Returns:
                 content=content,
                 tags=tags,
                 importance=importance,
-                related_memory_ids=[UUID(uid) for uid in related_memory_ids] if related_memory_ids else None,
+                related_memory_ids=[UUID(uid) for uid in related_memory_ids]
+                if related_memory_ids
+                else None,
                 metadata=validated_metadata,
             )
 
@@ -769,8 +787,12 @@ Returns:
             return json.dumps(_serialize_memory(result), indent=2)
 
         except VersionConflictError as e:
-            logger.warning("update_memory version conflict: id=%s, expected=%s, actual=%s",
-                           memory_id, e.expected_version, e.actual_version)
+            logger.warning(
+                "update_memory version conflict: id=%s, expected=%s, actual=%s",
+                memory_id,
+                e.expected_version,
+                e.actual_version,
+            )
             return _error_response(
                 f"Version conflict: memory was modified by another process. "
                 f"Expected version {e.expected_version}, current version {e.actual_version}. "
@@ -845,10 +867,12 @@ Returns:
                 snapshot=_build_snapshot(old_memory),
             )
 
-            return json.dumps({
-                "success": True,
-                "message": f"Memory {memory_id} has been deleted",
-            })
+            return json.dumps(
+                {
+                    "success": True,
+                    "message": f"Memory {memory_id} has been deleted",
+                }
+            )
 
         except ValueError as e:
             return _error_response(f"Invalid memory ID format: {str(e)}")
@@ -889,10 +913,13 @@ Returns:
                 requesting_org_id=org_id,
             )
 
-            return json.dumps({
-                "tags": result,
-                "total_returned": len(result),
-            }, indent=2)
+            return json.dumps(
+                {
+                    "tags": result,
+                    "total_returned": len(result),
+                },
+                indent=2,
+            )
 
         except Exception as e:
             return _error_response(f"Failed to get tags: {str(e)}")
@@ -933,11 +960,14 @@ Returns:
                 requesting_org_id=org_id,
             )
 
-            return json.dumps({
-                "suggestions": result,
-                "query": query.strip(),
-                "total_returned": len(result),
-            }, indent=2)
+            return json.dumps(
+                {
+                    "suggestions": result,
+                    "query": query.strip(),
+                    "total_returned": len(result),
+                },
+                indent=2,
+            )
 
         except Exception as e:
             return _error_response(f"Failed to get tag suggestions: {str(e)}")
@@ -989,25 +1019,32 @@ Returns:
 
             versions = []
             for entry in result["versions"]:
-                versions.append({
-                    "version": entry["version"],
-                    "action_type": entry["action_type"],
-                    "created_at": entry["created_at"].isoformat() if entry["created_at"] else None,
-                    "changed_fields": entry["changed_fields"],
-                    "has_snapshot": entry.get("snapshot") is not None,
-                    "user_id": str(entry["user_id"]) if entry.get("user_id") else None,
-                    "notes": entry.get("notes"),
-                })
+                versions.append(
+                    {
+                        "version": entry["version"],
+                        "action_type": entry["action_type"],
+                        "created_at": entry["created_at"].isoformat()
+                        if entry["created_at"]
+                        else None,
+                        "changed_fields": entry["changed_fields"],
+                        "has_snapshot": entry.get("snapshot") is not None,
+                        "user_id": str(entry["user_id"]) if entry.get("user_id") else None,
+                        "notes": entry.get("notes"),
+                    }
+                )
 
-            return json.dumps({
-                "memory_id": memory_id,
-                "current_version": memory["version"],
-                "versions": versions,
-                "total_count": result["total_count"],
-                "offset": result["offset"],
-                "limit": result["limit"],
-                "has_more": result["has_more"],
-            }, indent=2)
+            return json.dumps(
+                {
+                    "memory_id": memory_id,
+                    "current_version": memory["version"],
+                    "versions": versions,
+                    "total_count": result["total_count"],
+                    "offset": result["offset"],
+                    "limit": result["limit"],
+                    "has_more": result["has_more"],
+                },
+                indent=2,
+            )
 
         except ValueError as e:
             return _error_response(f"Invalid memory ID format: {e}")
@@ -1094,11 +1131,14 @@ Returns:
                 snapshot=_build_snapshot(result),
             )
 
-            return json.dumps({
-                **_serialize_memory(result),
-                "restored_from_version": version,
-                "message": f"Memory restored to version {version} (now at version {result['version']})",
-            }, indent=2)
+            return json.dumps(
+                {
+                    **_serialize_memory(result),
+                    "restored_from_version": version,
+                    "message": f"Memory restored to version {version} (now at version {result['version']})",
+                },
+                indent=2,
+            )
 
         except ValueError as e:
             return _error_response(f"Invalid input: {e}")
@@ -1107,6 +1147,7 @@ Returns:
 
     # Team-only tools: sharing
     if is_team_mode():
+
         @mcp.tool()
         async def share_memory(memory_id: str) -> str:
             """Share a memory with other users in your organization.
@@ -1238,7 +1279,14 @@ Returns:
         Returns:
             JSON string with the created task including its ID and status.
         """
-        valid_agent_types = {"research", "code", "memory", "reflection", "documentation", "planning"}
+        valid_agent_types = {
+            "research",
+            "code",
+            "memory",
+            "reflection",
+            "documentation",
+            "planning",
+        }
         valid_priorities = {"low", "medium", "high"}
 
         if agent_type not in valid_agent_types:
@@ -1345,7 +1393,11 @@ Returns:
                 changed_fields=["tags"],
                 old_values={"tags": "pending"},
                 new_values={"tags": f"claimed-by-{instance_id}"},
-                context={**_get_audit_context(), "action": "claim_task", "instance_id": instance_id},
+                context={
+                    **_get_audit_context(),
+                    "action": "claim_task",
+                    "instance_id": instance_id,
+                },
                 version=result["version"],
                 snapshot=_build_snapshot(result),
             )
@@ -1390,7 +1442,8 @@ Returns:
             if result is None:
                 return _error_response(
                     f"Could not release task {memory_id}: not found or not claimed"
-                    + (f" by {instance_id}" if instance_id else "") + "."
+                    + (f" by {instance_id}" if instance_id else "")
+                    + "."
                 )
 
             # Audit the release
@@ -1403,7 +1456,11 @@ Returns:
                 changed_fields=["tags"],
                 old_values={"tags": f"claimed-by-{instance_id}" if instance_id else "claimed"},
                 new_values={"tags": "pending"},
-                context={**_get_audit_context(), "action": "release_claim", "instance_id": instance_id},
+                context={
+                    **_get_audit_context(),
+                    "action": "release_claim",
+                    "instance_id": instance_id,
+                },
                 version=result["version"],
                 snapshot=_build_snapshot(result),
             )
@@ -1466,14 +1523,16 @@ Returns:
                     "exported_at": datetime.now().isoformat(),
                     "total_count": len(serialized),
                     "filters": {
-                        k: v for k, v in {
+                        k: v
+                        for k, v in {
                             "type": type,
                             "tags": tags,
                             "importance_min": importance_min,
                             "importance_max": importance_max,
                             "created_after": created_after,
                             "created_before": created_before,
-                        }.items() if v is not None
+                        }.items()
+                        if v is not None
                     },
                     "format": "json",
                 },
@@ -1559,9 +1618,13 @@ def _serialize_memory(memory: dict[str, Any]) -> dict[str, Any]:
         "updated_at": memory["updated_at"].isoformat() if memory["updated_at"] else None,
         "deleted_at": memory["deleted_at"].isoformat() if memory.get("deleted_at") else None,
         "user_id": str(memory["user_id"]) if memory.get("user_id") else None,
-        "organization_id": str(memory["organization_id"]) if memory.get("organization_id") else None,
+        "organization_id": str(memory["organization_id"])
+        if memory.get("organization_id")
+        else None,
         "shared": memory.get("shared", False),
-        "last_accessed_at": memory["last_accessed_at"].isoformat() if memory.get("last_accessed_at") else None,
+        "last_accessed_at": memory["last_accessed_at"].isoformat()
+        if memory.get("last_accessed_at")
+        else None,
     }
 
 
@@ -1580,7 +1643,11 @@ def _serialize_truncated_memory(memory: dict[str, Any]) -> dict[str, Any]:
         "updated_at": memory["updated_at"].isoformat() if memory["updated_at"] else None,
         "similarity_score": memory.get("similarity_score"),
         "user_id": str(memory["user_id"]) if memory.get("user_id") else None,
-        "organization_id": str(memory["organization_id"]) if memory.get("organization_id") else None,
+        "organization_id": str(memory["organization_id"])
+        if memory.get("organization_id")
+        else None,
         "shared": memory.get("shared", False),
-        "last_accessed_at": memory["last_accessed_at"].isoformat() if memory.get("last_accessed_at") else None,
+        "last_accessed_at": memory["last_accessed_at"].isoformat()
+        if memory.get("last_accessed_at")
+        else None,
     }

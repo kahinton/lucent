@@ -33,7 +33,9 @@ METADATA_MODELS_BY_STR = {
 }
 
 
-def validate_metadata(memory_type: str | MemoryType, metadata: dict[str, Any] | None) -> dict[str, Any]:
+def validate_metadata(
+    memory_type: str | MemoryType, metadata: dict[str, Any] | None
+) -> dict[str, Any]:
     """Validate and normalize metadata for a given memory type.
 
     Args:
@@ -66,7 +68,7 @@ def validate_metadata(memory_type: str | MemoryType, metadata: dict[str, Any] | 
         validated = metadata_model.model_validate(metadata)
         # Convert back to dict, excluding unset/None values for cleaner storage
         # Use mode='json' to properly serialize enums, datetimes, etc.
-        return validated.model_dump(exclude_none=True, exclude_unset=False, mode='json')
+        return validated.model_dump(exclude_none=True, exclude_unset=False, mode="json")
     except ValidationError as e:
         # Format a nice error message
         errors = []

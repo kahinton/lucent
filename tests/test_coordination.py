@@ -20,18 +20,18 @@ async def coord_prefix(db_pool):
         await conn.execute(
             "DELETE FROM memory_audit_log WHERE memory_id IN "
             "(SELECT id FROM memories WHERE username LIKE $1)",
-            f"{prefix}%"
+            f"{prefix}%",
         )
         await conn.execute(
             "DELETE FROM memory_access_log WHERE memory_id IN "
             "(SELECT id FROM memories WHERE username LIKE $1)",
-            f"{prefix}%"
+            f"{prefix}%",
         )
         await conn.execute("DELETE FROM memories WHERE username LIKE $1", f"{prefix}%")
         await conn.execute(
             "DELETE FROM api_keys WHERE user_id IN "
             "(SELECT id FROM users WHERE external_id LIKE $1)",
-            f"{prefix}%"
+            f"{prefix}%",
         )
         await conn.execute("DELETE FROM users WHERE external_id LIKE $1", f"{prefix}%")
         await conn.execute("DELETE FROM organizations WHERE name LIKE $1", f"{prefix}%")

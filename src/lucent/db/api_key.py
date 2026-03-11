@@ -288,7 +288,11 @@ class ApiKeyRepository:
         }
 
         if "organization_id" in row.keys() and row["organization_id"]:
-            result["organization_id"] = row["organization_id"] if isinstance(row["organization_id"], UUID) else UUID(row["organization_id"])
+            result["organization_id"] = (
+                row["organization_id"]
+                if isinstance(row["organization_id"], UUID)
+                else UUID(row["organization_id"])
+            )
         else:
             result["organization_id"] = None
 

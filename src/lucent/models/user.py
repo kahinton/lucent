@@ -10,6 +10,7 @@ from pydantic import BaseModel, EmailStr, Field
 
 class AuthProvider(str, Enum):
     """Supported authentication providers."""
+
     GOOGLE = "google"
     GITHUB = "github"
     SAML = "saml"
@@ -18,6 +19,7 @@ class AuthProvider(str, Enum):
 
 class CreateUserInput(BaseModel):
     """Input model for creating a new user."""
+
     external_id: str = Field(..., min_length=1, description="Unique ID from auth provider")
     provider: AuthProvider
     organization_id: UUID = Field(..., description="Organization this user belongs to")
@@ -29,6 +31,7 @@ class CreateUserInput(BaseModel):
 
 class UpdateUserInput(BaseModel):
     """Input model for updating a user."""
+
     email: EmailStr | None = None
     display_name: str | None = None
     avatar_url: str | None = None
@@ -38,6 +41,7 @@ class UpdateUserInput(BaseModel):
 
 class User(BaseModel):
     """Full user model returned from database."""
+
     id: UUID
     external_id: str
     provider: AuthProvider
@@ -54,6 +58,7 @@ class User(BaseModel):
 
 class UserSummary(BaseModel):
     """Condensed user info for embedding in responses."""
+
     id: UUID
     organization_id: UUID
     display_name: str | None

@@ -186,9 +186,7 @@ class TestInitConnection:
         mock_conn = AsyncMock()
         await _init_connection(mock_conn)
 
-        jsonb_call = [
-            c for c in mock_conn.set_type_codec.call_args_list if c[0][0] == "jsonb"
-        ][0]
+        jsonb_call = [c for c in mock_conn.set_type_codec.call_args_list if c[0][0] == "jsonb"][0]
         encoder = jsonb_call[1]["encoder"]
 
         assert encoder({"key": "value"}) == json.dumps({"key": "value"})
@@ -198,9 +196,7 @@ class TestInitConnection:
         mock_conn = AsyncMock()
         await _init_connection(mock_conn)
 
-        jsonb_call = [
-            c for c in mock_conn.set_type_codec.call_args_list if c[0][0] == "jsonb"
-        ][0]
+        jsonb_call = [c for c in mock_conn.set_type_codec.call_args_list if c[0][0] == "jsonb"][0]
         decoder = jsonb_call[1]["decoder"]
 
         assert decoder('{"key": "value"}') == {"key": "value"}
@@ -237,9 +233,7 @@ class TestRunMigrations:
         mock_pool = _make_mock_pool(mock_conn)
 
         with patch("lucent.db.pool.Path") as mock_path_cls:
-            mock_path_cls.return_value.parent.__truediv__ = MagicMock(
-                return_value=migrations_dir
-            )
+            mock_path_cls.return_value.parent.__truediv__ = MagicMock(return_value=migrations_dir)
             await _run_migrations(mock_pool)
 
         # Should have created tracking table and executed both migrations
@@ -264,9 +258,7 @@ class TestRunMigrations:
         mock_pool = _make_mock_pool(mock_conn)
 
         with patch("lucent.db.pool.Path") as mock_path_cls:
-            mock_path_cls.return_value.parent.__truediv__ = MagicMock(
-                return_value=migrations_dir
-            )
+            mock_path_cls.return_value.parent.__truediv__ = MagicMock(return_value=migrations_dir)
             await _run_migrations(mock_pool)
 
         # Should only execute the 002 migration SQL (not 001)

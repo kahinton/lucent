@@ -99,7 +99,7 @@ class AccessRepository:
                 )
 
                 # Batch update last_accessed_at
-                placeholders = ", ".join(f"${i+1}" for i in range(len(memory_ids)))
+                placeholders = ", ".join(f"${i + 1}" for i in range(len(memory_ids)))
                 update_query = f"""
                     UPDATE memories
                     SET last_accessed_at = NOW()
@@ -278,7 +278,9 @@ class AccessRepository:
 
         return [
             {
-                "memory_id": row["memory_id"] if isinstance(row["memory_id"], UUID) else UUID(row["memory_id"]),
+                "memory_id": row["memory_id"]
+                if isinstance(row["memory_id"], UUID)
+                else UUID(row["memory_id"]),
                 "access_count": row["access_count"],
                 "last_accessed": row["last_accessed"],
             }
@@ -293,9 +295,15 @@ class AccessRepository:
 
         org_id = None
         if row["organization_id"]:
-            org_id = row["organization_id"] if isinstance(row["organization_id"], UUID) else UUID(row["organization_id"])
+            org_id = (
+                row["organization_id"]
+                if isinstance(row["organization_id"], UUID)
+                else UUID(row["organization_id"])
+            )
 
-        memory_id = row["memory_id"] if isinstance(row["memory_id"], UUID) else UUID(row["memory_id"])
+        memory_id = (
+            row["memory_id"] if isinstance(row["memory_id"], UUID) else UUID(row["memory_id"])
+        )
 
         return {
             "id": row["id"],

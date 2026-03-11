@@ -90,7 +90,9 @@ class TestMemoryRepository:
         assert memory is not None
         assert memory["id"] == test_memory["id"]
 
-    async def test_get_accessible_shared_memory(self, db_pool, test_user, test_organization, clean_test_data):
+    async def test_get_accessible_shared_memory(
+        self, db_pool, test_user, test_organization, clean_test_data
+    ):
         """Test that user can access shared org memories."""
         prefix = clean_test_data
         repo = MemoryRepository(db_pool)
@@ -319,7 +321,9 @@ class TestMemoryRepository:
         common_tag = next(t for t in tags if t["tag"] == f"{prefix}common")
         assert common_tag["count"] == 3
 
-    async def test_get_individual_memory_for_user(self, db_pool, test_user, test_organization, clean_test_data):
+    async def test_get_individual_memory_for_user(
+        self, db_pool, test_user, test_organization, clean_test_data
+    ):
         """Test retrieving a user's individual memory."""
         prefix = clean_test_data
         repo = MemoryRepository(db_pool)
@@ -371,7 +375,9 @@ class TestMemoryRepository:
         assert updated is not None
         assert updated["version"] == original_version + 1
 
-    async def test_get_accessible_denies_other_org(self, db_pool, test_memory, test_user, clean_test_data):
+    async def test_get_accessible_denies_other_org(
+        self, db_pool, test_memory, test_user, clean_test_data
+    ):
         """Test that a user in a different org cannot access an unshared memory."""
         _ = clean_test_data
         repo = MemoryRepository(db_pool)
@@ -391,6 +397,7 @@ class TestMemoryRepository:
     async def test_update_with_version_conflict(self, db_pool, test_memory):
         """Test that expected_version mismatch raises VersionConflictError."""
         from lucent.db import VersionConflictError
+
         repo = MemoryRepository(db_pool)
 
         with pytest.raises(VersionConflictError) as exc_info:
@@ -521,18 +528,25 @@ class TestMemoryRepository:
         repo = MemoryRepository(db_pool)
 
         await repo.create(
-            username=f"{prefix}user", type="experience",
-            content=f"{prefix} Low importance", importance=2,
-            user_id=test_user["id"], organization_id=test_user["organization_id"],
+            username=f"{prefix}user",
+            type="experience",
+            content=f"{prefix} Low importance",
+            importance=2,
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
         )
         await repo.create(
-            username=f"{prefix}user", type="experience",
-            content=f"{prefix} High importance", importance=9,
-            user_id=test_user["id"], organization_id=test_user["organization_id"],
+            username=f"{prefix}user",
+            type="experience",
+            content=f"{prefix} High importance",
+            importance=9,
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
         )
 
         result = await repo.search(
-            query=prefix, importance_min=8,
+            query=prefix,
+            importance_min=8,
             requesting_user_id=test_user["id"],
             requesting_org_id=test_user["organization_id"],
         )
@@ -545,10 +559,12 @@ class TestMemoryRepository:
         repo = MemoryRepository(db_pool)
 
         await repo.create(
-            username=f"{prefix}user", type="experience",
+            username=f"{prefix}user",
+            type="experience",
             content=f"{prefix} Tag suggestion test",
             tags=[f"{prefix}authentication", f"{prefix}auth-flow"],
-            user_id=test_user["id"], organization_id=test_user["organization_id"],
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
         )
 
         suggestions = await repo.get_tag_suggestions(
@@ -560,16 +576,20 @@ class TestMemoryRepository:
         assert len(suggestions) >= 1
         assert all("similarity" in s for s in suggestions)
 
-    async def test_create_with_related_memory_ids(self, db_pool, test_user, test_memory, clean_test_data):
+    async def test_create_with_related_memory_ids(
+        self, db_pool, test_user, test_memory, clean_test_data
+    ):
         """Test creating a memory with valid related_memory_ids."""
         prefix = clean_test_data
         repo = MemoryRepository(db_pool)
 
         memory = await repo.create(
-            username=f"{prefix}user", type="experience",
+            username=f"{prefix}user",
+            type="experience",
             content=f"{prefix} Related memory",
             related_memory_ids=[test_memory["id"]],
-            user_id=test_user["id"], organization_id=test_user["organization_id"],
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
         )
 
         assert test_memory["id"] in memory["related_memory_ids"]
@@ -581,10 +601,12 @@ class TestMemoryRepository:
 
         with pytest.raises(ValueError, match="not found"):
             await repo.create(
-                username=f"{prefix}user", type="experience",
+                username=f"{prefix}user",
+                type="experience",
                 content=f"{prefix} Bad related",
                 related_memory_ids=[uuid4()],
-                user_id=test_user["id"], organization_id=test_user["organization_id"],
+                user_id=test_user["id"],
+                organization_id=test_user["organization_id"],
             )
 
 
@@ -609,7 +631,9 @@ class TestUserRepository:
         assert user["provider"] == "github"
         assert user["email"] == f"{prefix}new@test.com"
 
-    async def test_create_user_creates_individual_memory(self, db_pool, test_organization, clean_test_data):
+    async def test_create_user_creates_individual_memory(
+        self, db_pool, test_organization, clean_test_data
+    ):
         """Test that creating a user also creates an individual memory."""
         prefix = clean_test_data
         user_repo = UserRepository(db_pool)
@@ -739,7 +763,9 @@ class TestUserRepository:
         user_ids = [u["id"] for u in users]
         assert test_user["id"] in user_ids
 
-    async def test_get_by_organization_with_role_filter(self, db_pool, test_user, test_organization):
+    async def test_get_by_organization_with_role_filter(
+        self, db_pool, test_user, test_organization
+    ):
         """Test listing org users filtered by role."""
         repo = UserRepository(db_pool)
 
@@ -1046,10 +1072,7 @@ class TestAuditRepository:
         result = await repo.get_by_organization_id(test_user["organization_id"])
 
         assert result["total_count"] >= 1
-        assert all(
-            e["organization_id"] == test_user["organization_id"]
-            for e in result["entries"]
-        )
+        assert all(e["organization_id"] == test_user["organization_id"] for e in result["entries"])
 
     async def test_get_recent(self, db_pool, test_memory, test_user):
         """Test retrieving recent audit entries."""
@@ -1191,6 +1214,7 @@ class TestAccessRepository:
 
         # Verify last_accessed_at was updated
         from lucent.db import MemoryRepository
+
         mem_repo = MemoryRepository(db_pool)
         memory = await mem_repo.get(test_memory["id"])
 

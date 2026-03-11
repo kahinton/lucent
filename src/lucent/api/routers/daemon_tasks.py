@@ -65,7 +65,7 @@ def _memory_to_task(memory: dict[str, Any]) -> DaemonTaskResponse:
     claimed_by = None
     for t in tags:
         if t.startswith("claimed-by-"):
-            claimed_by = t[len("claimed-by-"):]
+            claimed_by = t[len("claimed-by-") :]
             break
 
     # Result is stored in metadata
@@ -144,7 +144,12 @@ async def create_task(
         organization_id=user.organization_id,
     )
 
-    logger.info("Daemon task created: id=%s, agent=%s, priority=%s", result["id"], data.agent_type, data.priority)
+    logger.info(
+        "Daemon task created: id=%s, agent=%s, priority=%s",
+        result["id"],
+        data.agent_type,
+        data.priority,
+    )
 
     return _memory_to_task(result)
 
@@ -156,7 +161,9 @@ async def create_task(
 async def list_tasks(
     user: DaemonTaskUser,
     task_status: str | None = Query(
-        None, alias="status", description="Filter: pending, claimed, completed",
+        None,
+        alias="status",
+        description="Filter: pending, claimed, completed",
     ),
     since: datetime | None = Query(None, description="Only tasks updated after this ISO timestamp"),
     limit: int = Query(20, ge=1, le=100),
@@ -260,6 +267,7 @@ async def get_task_result(
 
     if task.status != "completed":
         from fastapi.responses import JSONResponse
+
         return JSONResponse(
             status_code=status.HTTP_202_ACCEPTED,
             content=task.model_dump(mode="json"),

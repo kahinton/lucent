@@ -56,6 +56,7 @@ async def org_prefix(db_pool):
 async def org_org(db_pool, org_prefix):
     """Create a test organization."""
     from lucent.db import OrganizationRepository
+
     org_repo = OrganizationRepository(db_pool)
     return await org_repo.create(name=f"{org_prefix}org")
 
@@ -64,6 +65,7 @@ async def org_org(db_pool, org_prefix):
 async def org_owner(db_pool, org_org, org_prefix):
     """Create a test user with owner role."""
     from lucent.db import UserRepository
+
     user_repo = UserRepository(db_pool)
     user = await user_repo.create(
         external_id=f"{org_prefix}owner",
@@ -80,6 +82,7 @@ async def org_owner(db_pool, org_org, org_prefix):
 async def org_admin(db_pool, org_org, org_prefix):
     """Create a test user with admin role."""
     from lucent.db import UserRepository
+
     user_repo = UserRepository(db_pool)
     user = await user_repo.create(
         external_id=f"{org_prefix}admin",
@@ -96,6 +99,7 @@ async def org_admin(db_pool, org_org, org_prefix):
 async def org_member(db_pool, org_org, org_prefix):
     """Create a test user with member role."""
     from lucent.db import UserRepository
+
     user_repo = UserRepository(db_pool)
     return await user_repo.create(
         external_id=f"{org_prefix}member",
@@ -110,6 +114,7 @@ def _build_app_with_team_mode(user_dict, role="member"):
     """Create app with team mode enabled and auth overridden."""
     with patch("lucent.api.app.is_team_mode", return_value=True):
         from lucent.api.app import create_app
+
         app = create_app()
     fake = CurrentUser(
         id=user_dict["id"],
@@ -164,7 +169,6 @@ async def member_client(db_pool, org_member):
 
 
 class TestGetCurrentOrganization:
-
     async def test_get_current_org_as_owner(self, owner_client, org_org):
         resp = await owner_client.get("/api/organizations/current")
         assert resp.status_code == 200
@@ -187,6 +191,7 @@ class TestGetCurrentOrganization:
     async def test_get_current_org_no_org(self, db_pool, org_prefix):
         """User without organization gets 400."""
         from lucent.db import OrganizationRepository, UserRepository
+
         # Create a user with no org
         org_repo = OrganizationRepository(db_pool)
         temp_org = await org_repo.create(name=f"{org_prefix}temp_org")
@@ -215,10 +220,9 @@ class TestGetCurrentOrganization:
 
 
 class TestUpdateCurrentOrganization:
-
     @pytest.mark.xfail(
         reason="Bug: organizations.py:89 passes organization_id= but "
-               "OrganizationRepository.update() expects org_id=",
+        "OrganizationRepository.update() expects org_id=",
         strict=True,
     )
     async def test_update_org_as_owner(self, owner_client, org_prefix):
@@ -249,6 +253,7 @@ class TestUpdateCurrentOrganization:
     async def test_update_org_no_org(self, db_pool, org_prefix):
         """Owner without org_id gets 400."""
         from lucent.db import OrganizationRepository, UserRepository
+
         org_repo = OrganizationRepository(db_pool)
         temp_org = await org_repo.create(name=f"{org_prefix}temp_upd_org")
         user_repo = UserRepository(db_pool)
@@ -278,7 +283,6 @@ class TestUpdateCurrentOrganization:
 
 
 class TestCreateOrganization:
-
     async def test_create_org_as_owner(self, owner_client, org_prefix):
         resp = await owner_client.post(
             "/api/organizations",
@@ -322,7 +326,6 @@ class TestCreateOrganization:
 
 
 class TestGetOrganizationById:
-
     async def test_get_own_org(self, owner_client, org_org):
         resp = await owner_client.get(f"/api/organizations/{org_org['id']}")
         assert resp.status_code == 200
@@ -349,7 +352,6 @@ class TestGetOrganizationById:
 
 
 class TestListOrganizations:
-
     async def test_list_orgs_as_owner(self, owner_client):
         resp = await owner_client.get("/api/organizations")
         assert resp.status_code == 200
@@ -388,10 +390,10 @@ class TestListOrganizations:
 
 
 class TestDeleteCurrentOrganization:
-
     async def test_delete_org_as_owner(self, db_pool, org_prefix):
         """Owner can delete their organization."""
         from lucent.db import OrganizationRepository, UserRepository
+
         # Create a throwaway org+user for this destructive test
         org_repo = OrganizationRepository(db_pool)
         temp_org = await org_repo.create(name=f"{org_prefix}delete_me")
@@ -431,6 +433,7 @@ class TestDeleteCurrentOrganization:
     async def test_delete_org_no_org(self, db_pool, org_prefix):
         """Owner without org_id gets 400."""
         from lucent.db import OrganizationRepository, UserRepository
+
         org_repo = OrganizationRepository(db_pool)
         temp_org = await org_repo.create(name=f"{org_prefix}temp_del_org")
         user_repo = UserRepository(db_pool)
@@ -457,15 +460,15 @@ class TestDeleteCurrentOrganization:
 
 
 class TestTransferOwnership:
-
     @pytest.mark.xfail(
         reason="Bug: organizations.py:279 promotes new owner before demoting old, "
-               "violating idx_one_owner_per_org unique constraint",
+        "violating idx_one_owner_per_org unique constraint",
         strict=True,
     )
     async def test_transfer_to_member(self, db_pool, org_prefix):
         """Owner can transfer ownership to another member."""
         from lucent.db import OrganizationRepository, UserRepository
+
         org_repo = OrganizationRepository(db_pool)
         temp_org = await org_repo.create(name=f"{org_prefix}transfer_org")
         user_repo = UserRepository(db_pool)
@@ -528,6 +531,7 @@ class TestTransferOwnership:
     async def test_transfer_to_user_in_other_org(self, owner_client, db_pool, org_prefix):
         """Cannot transfer to a user in a different organization."""
         from lucent.db import OrganizationRepository, UserRepository
+
         org_repo = OrganizationRepository(db_pool)
         other_org = await org_repo.create(name=f"{org_prefix}other_org")
         user_repo = UserRepository(db_pool)
@@ -564,6 +568,7 @@ class TestTransferOwnership:
     async def test_transfer_no_org(self, db_pool, org_prefix):
         """Owner without org_id gets 400."""
         from lucent.db import OrganizationRepository, UserRepository
+
         org_repo = OrganizationRepository(db_pool)
         temp_org = await org_repo.create(name=f"{org_prefix}temp_xfer_org")
         user_repo = UserRepository(db_pool)

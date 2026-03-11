@@ -19,6 +19,7 @@ logger = get_logger("mode")
 
 class DeploymentMode(str, Enum):
     """Available deployment modes."""
+
     PERSONAL = "personal"
     TEAM = "team"
 
@@ -46,16 +47,12 @@ def get_mode() -> DeploymentMode:
         license_key = os.environ.get("LUCENT_LICENSE_KEY", "").strip()
         if not license_key:
             logger.error(
-                "LUCENT_MODE=team requires LUCENT_LICENSE_KEY. "
-                "Falling back to personal mode."
+                "LUCENT_MODE=team requires LUCENT_LICENSE_KEY. Falling back to personal mode."
             )
             return DeploymentMode.PERSONAL
 
         if not _validate_license(license_key):
-            logger.error(
-                "Invalid LUCENT_LICENSE_KEY. "
-                "Falling back to personal mode."
-            )
+            logger.error("Invalid LUCENT_LICENSE_KEY. Falling back to personal mode.")
             return DeploymentMode.PERSONAL
 
         logger.info("Team mode enabled with valid license")

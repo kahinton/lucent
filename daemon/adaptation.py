@@ -35,9 +35,11 @@ SKILLS_DIR = DAEMON_DIR.parent / ".github" / "skills"
 # Data Models
 # ============================================================================
 
+
 @dataclass
 class AgentRecommendation:
     """A recommended agent to generate."""
+
     name: str
     purpose: str
     domain_template: str = "general"
@@ -47,6 +49,7 @@ class AgentRecommendation:
 @dataclass
 class SkillRecommendation:
     """A recommended skill to generate."""
+
     name: str
     purpose: str
     domain_template: str = "general"
@@ -55,6 +58,7 @@ class SkillRecommendation:
 @dataclass
 class AssessmentResult:
     """Parsed output from the assessment agent."""
+
     domain_primary: str = "software"
     domain_secondary: list[str] = field(default_factory=list)
     domain_description: str = ""
@@ -203,9 +207,11 @@ ROLE_DESCRIPTIONS = {
 # to work well together. When an assessment doesn't include explicit
 # recommendations, these archetypes fill in the gaps.
 
+
 @dataclass
 class AgentArchetype:
     """A prototypical agent for a domain."""
+
     name: str
     purpose: str
     domain_template: str
@@ -215,6 +221,7 @@ class AgentArchetype:
 @dataclass
 class SkillArchetype:
     """A prototypical skill for a domain."""
+
     name: str
     purpose: str
     domain_template: str
@@ -345,24 +352,82 @@ DOMAIN_ARCHETYPES: dict[str, dict] = {
 # Domain signal keywords used by DomainSignalParser
 DOMAIN_SIGNALS: dict[str, list[str]] = {
     "software": [
-        "src", "tests", "package.json", "pyproject.toml", "cargo.toml", "go.mod",
-        "tsconfig", ".eslintrc", "jest", "pytest", "docker", "ci", "cd", "github/workflows",
-        "python", "typescript", "javascript", "go", "rust", "java", "kotlin", "swift",
+        "src",
+        "tests",
+        "package.json",
+        "pyproject.toml",
+        "cargo.toml",
+        "go.mod",
+        "tsconfig",
+        ".eslintrc",
+        "jest",
+        "pytest",
+        "docker",
+        "ci",
+        "cd",
+        "github/workflows",
+        "python",
+        "typescript",
+        "javascript",
+        "go",
+        "rust",
+        "java",
+        "kotlin",
+        "swift",
     ],
     "legal": [
-        "contracts", "cases", "briefs", "legal", "compliance", "regulatory",
-        "statute", "regulation", "court", "litigation", "counsel", "attorney",
-        "jurisdiction", "precedent", "clause", "indemnif", "liability",
+        "contracts",
+        "cases",
+        "briefs",
+        "legal",
+        "compliance",
+        "regulatory",
+        "statute",
+        "regulation",
+        "court",
+        "litigation",
+        "counsel",
+        "attorney",
+        "jurisdiction",
+        "precedent",
+        "clause",
+        "indemnif",
+        "liability",
     ],
     "support": [
-        "runbooks", "playbooks", "tickets", "incidents", "sla", "monitoring",
-        "triage", "escalation", "on-call", "pagerduty", "jira", "zendesk",
-        "customer", "helpdesk", "support", "resolution",
+        "runbooks",
+        "playbooks",
+        "tickets",
+        "incidents",
+        "sla",
+        "monitoring",
+        "triage",
+        "escalation",
+        "on-call",
+        "pagerduty",
+        "jira",
+        "zendesk",
+        "customer",
+        "helpdesk",
+        "support",
+        "resolution",
     ],
     "research": [
-        "papers", "notebooks", "data", "analysis", "research", "hypothesis",
-        "experiment", "methodology", "citations", "journal", "publication",
-        "dataset", "statistical", "survey", "study",
+        "papers",
+        "notebooks",
+        "data",
+        "analysis",
+        "research",
+        "hypothesis",
+        "experiment",
+        "methodology",
+        "citations",
+        "journal",
+        "publication",
+        "dataset",
+        "statistical",
+        "survey",
+        "study",
     ],
 }
 
@@ -371,9 +436,11 @@ DOMAIN_SIGNALS: dict[str, list[str]] = {
 # Domain Signal Parser
 # ============================================================================
 
+
 @dataclass
 class DomainSignals:
     """Structured signals extracted from an assessment."""
+
     domain_scores: dict[str, float] = field(default_factory=dict)
     primary_domain: str = "software"
     secondary_domains: list[str] = field(default_factory=list)
@@ -473,9 +540,11 @@ class DomainSignalParser:
 # Validation
 # ============================================================================
 
+
 @dataclass
 class ValidationResult:
     """Result of validating a generated agent or skill."""
+
     valid: bool
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
@@ -621,7 +690,8 @@ def _build_agent_context(rec: AgentRecommendation, assessment: AssessmentResult)
         "framework": framework,
         "linter_config": linter_config,
         "preferred_tools": tools,
-        "guardrails": assessment.guardrails or [
+        "guardrails": assessment.guardrails
+        or [
             "Follow established patterns and conventions",
             "Ask for clarification rather than guessing",
         ],
@@ -674,8 +744,7 @@ def _build_skill_context(rec: SkillRecommendation, assessment: AssessmentResult)
         "pitfalls": [
             {
                 "name": "Skipping context",
-                "description": "Always check memories and existing "
-                "code before making changes",
+                "description": "Always check memories and existing code before making changes",
             },
         ],
         "tips": [
@@ -687,6 +756,7 @@ def _build_skill_context(rec: SkillRecommendation, assessment: AssessmentResult)
 # ============================================================================
 # Pipeline
 # ============================================================================
+
 
 class AdaptationPipeline:
     """Generates domain-specific agents and skills from assessment results."""
@@ -713,12 +783,10 @@ class AdaptationPipeline:
         domains = [self.signals.primary_domain] + self.signals.secondary_domains
 
         existing_agent_names = set(
-            self.assessment.existing_agents
-            + [r.name for r in self.assessment.recommended_agents]
+            self.assessment.existing_agents + [r.name for r in self.assessment.recommended_agents]
         )
         existing_skill_names = set(
-            self.assessment.existing_skills
-            + [r.name for r in self.assessment.recommended_skills]
+            self.assessment.existing_skills + [r.name for r in self.assessment.recommended_skills]
         )
 
         for domain in domains:
@@ -822,10 +890,7 @@ class AdaptationPipeline:
             lines.append("**Tech Stack**:")
             for key, values in self.assessment.tech_stack.items():
                 if values:
-                    val_str = (
-                        ", ".join(values) if isinstance(values, list)
-                        else values
-                    )
+                    val_str = ", ".join(values) if isinstance(values, list) else values
                     lines.append(f"  - {key}: {val_str}")
             lines.append("")
 
@@ -852,9 +917,7 @@ class AdaptationPipeline:
             lines.append("")
 
         # Validation warnings
-        warnings = {
-            k: v for k, v in self.validation_results.items() if v.warnings
-        }
+        warnings = {k: v for k, v in self.validation_results.items() if v.warnings}
         if warnings:
             lines.append("**Validation Warnings**:")
             for key, result in warnings.items():
@@ -922,9 +985,7 @@ class AdaptationPipeline:
 
         # Collect validation info
         validation_warnings = {
-            k: v.warnings
-            for k, v in self.validation_results.items()
-            if v.warnings
+            k: v.warnings for k, v in self.validation_results.items() if v.warnings
         }
 
         summary = {
@@ -932,11 +993,13 @@ class AdaptationPipeline:
             "agents_created": [str(p) for p in agent_paths],
             "skills_created": [str(p) for p in skill_paths],
             "agents_skipped": [
-                r.name for r in self.assessment.recommended_agents
+                r.name
+                for r in self.assessment.recommended_agents
                 if r.name not in self.generated_agents
             ],
             "skills_skipped": [
-                r.name for r in self.assessment.recommended_skills
+                r.name
+                for r in self.assessment.recommended_skills
                 if r.name not in self.generated_skills
             ],
             "validation_warnings": validation_warnings,

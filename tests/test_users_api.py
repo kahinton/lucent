@@ -56,6 +56,7 @@ async def usr_prefix(db_pool):
 async def usr_org(db_pool, usr_prefix):
     """Create a test organization."""
     from lucent.db import OrganizationRepository
+
     org_repo = OrganizationRepository(db_pool)
     return await org_repo.create(name=f"{usr_prefix}org")
 
@@ -64,6 +65,7 @@ async def usr_org(db_pool, usr_prefix):
 async def usr_owner(db_pool, usr_org, usr_prefix):
     """Create a test user with owner role."""
     from lucent.db import UserRepository
+
     user_repo = UserRepository(db_pool)
     user = await user_repo.create(
         external_id=f"{usr_prefix}owner",
@@ -80,6 +82,7 @@ async def usr_owner(db_pool, usr_org, usr_prefix):
 async def usr_admin(db_pool, usr_org, usr_prefix):
     """Create a test user with admin role."""
     from lucent.db import UserRepository
+
     user_repo = UserRepository(db_pool)
     user = await user_repo.create(
         external_id=f"{usr_prefix}admin",
@@ -96,6 +99,7 @@ async def usr_admin(db_pool, usr_org, usr_prefix):
 async def usr_member(db_pool, usr_org, usr_prefix):
     """Create a test user with member role."""
     from lucent.db import UserRepository
+
     user_repo = UserRepository(db_pool)
     return await user_repo.create(
         external_id=f"{usr_prefix}member",
@@ -129,6 +133,7 @@ async def admin_client(db_pool, usr_admin):
     """AsyncClient authenticated as admin."""
     with patch("lucent.api.app.is_team_mode", return_value=True):
         from lucent.api.app import create_app
+
         app = create_app()
     _make_client(app, usr_admin, role="admin")
     transport = ASGITransport(app=app, raise_app_exceptions=False)
@@ -142,6 +147,7 @@ async def owner_client(db_pool, usr_owner):
     """AsyncClient authenticated as owner."""
     with patch("lucent.api.app.is_team_mode", return_value=True):
         from lucent.api.app import create_app
+
         app = create_app()
     _make_client(app, usr_owner, role="owner")
     transport = ASGITransport(app=app, raise_app_exceptions=False)
@@ -155,6 +161,7 @@ async def member_client(db_pool, usr_member):
     """AsyncClient authenticated as member."""
     with patch("lucent.api.app.is_team_mode", return_value=True):
         from lucent.api.app import create_app
+
         app = create_app()
     _make_client(app, usr_member, role="member")
     transport = ASGITransport(app=app, raise_app_exceptions=False)
@@ -169,7 +176,6 @@ async def member_client(db_pool, usr_member):
 
 
 class TestGetCurrentUser:
-
     async def test_get_current_user(self, member_client, usr_member):
         resp = await member_client.get("/api/users/me")
         assert resp.status_code == 200
@@ -189,18 +195,23 @@ class TestGetCurrentUser:
 
 
 class TestUpdateCurrentUser:
-
     async def test_update_display_name(self, member_client):
-        resp = await member_client.patch("/api/users/me", json={
-            "display_name": "New Name",
-        })
+        resp = await member_client.patch(
+            "/api/users/me",
+            json={
+                "display_name": "New Name",
+            },
+        )
         assert resp.status_code == 200
         assert resp.json()["display_name"] == "New Name"
 
     async def test_update_email(self, member_client):
-        resp = await member_client.patch("/api/users/me", json={
-            "email": "new@example.com",
-        })
+        resp = await member_client.patch(
+            "/api/users/me",
+            json={
+                "email": "new@example.com",
+            },
+        )
         assert resp.status_code == 200
         assert resp.json()["email"] == "new@example.com"
 
@@ -211,7 +222,6 @@ class TestUpdateCurrentUser:
 
 
 class TestListUsers:
-
     async def test_list_org_users(self, admin_client):
         resp = await admin_client.get("/api/users")
         assert resp.status_code == 200
@@ -238,7 +248,6 @@ class TestListUsers:
 
 
 class TestGetUser:
-
     async def test_get_user_same_org(self, admin_client, usr_member):
         resp = await admin_client.get(f"/api/users/{usr_member['id']}")
         assert resp.status_code == 200
@@ -252,6 +261,7 @@ class TestGetUser:
     async def test_get_user_cross_org_returns_404(self, admin_client, db_pool, usr_prefix):
         """Users from other orgs should appear as 'not found'."""
         from lucent.db import OrganizationRepository, UserRepository
+
         org_repo = OrganizationRepository(db_pool)
         other_org = await org_repo.create(name=f"{usr_prefix}other_org")
         user_repo = UserRepository(db_pool)
@@ -272,15 +282,17 @@ class TestGetUser:
 
 
 class TestCreateUser:
-
     async def test_create_user_as_admin(self, admin_client, usr_prefix):
-        resp = await admin_client.post("/api/users", json={
-            "external_id": f"{usr_prefix}newuser",
-            "provider": "local",
-            "email": f"{usr_prefix}new@test.com",
-            "display_name": "New User",
-            "role": "member",
-        })
+        resp = await admin_client.post(
+            "/api/users",
+            json={
+                "external_id": f"{usr_prefix}newuser",
+                "provider": "local",
+                "email": f"{usr_prefix}new@test.com",
+                "display_name": "New User",
+                "role": "member",
+            },
+        )
         assert resp.status_code == 201
         data = resp.json()
         assert data["external_id"] == f"{usr_prefix}newuser"
@@ -288,27 +300,36 @@ class TestCreateUser:
 
     async def test_create_user_member_forbidden(self, member_client, usr_prefix):
         """Members cannot create users (requires admin)."""
-        resp = await member_client.post("/api/users", json={
-            "external_id": f"{usr_prefix}blocked",
-            "provider": "local",
-        })
+        resp = await member_client.post(
+            "/api/users",
+            json={
+                "external_id": f"{usr_prefix}blocked",
+                "provider": "local",
+            },
+        )
         assert resp.status_code == 403
 
     async def test_create_duplicate_user(self, admin_client, usr_prefix, usr_member):
         """Cannot create user with same external_id + provider."""
-        resp = await admin_client.post("/api/users", json={
-            "external_id": usr_member["external_id"],
-            "provider": "local",
-        })
+        resp = await admin_client.post(
+            "/api/users",
+            json={
+                "external_id": usr_member["external_id"],
+                "provider": "local",
+            },
+        )
         assert resp.status_code == 409
 
     async def test_admin_cannot_create_owner(self, admin_client, usr_prefix):
         """Admins cannot assign owner role."""
-        resp = await admin_client.post("/api/users", json={
-            "external_id": f"{usr_prefix}wannabe_owner",
-            "provider": "local",
-            "role": "owner",
-        })
+        resp = await admin_client.post(
+            "/api/users",
+            json={
+                "external_id": f"{usr_prefix}wannabe_owner",
+                "provider": "local",
+                "role": "owner",
+            },
+        )
         assert resp.status_code == 403
 
 
@@ -318,26 +339,34 @@ class TestCreateUser:
 
 
 class TestUpdateUser:
-
     async def test_update_user_as_admin(self, admin_client, usr_member):
-        resp = await admin_client.patch(f"/api/users/{usr_member['id']}", json={
-            "display_name": "Updated Member",
-        })
+        resp = await admin_client.patch(
+            f"/api/users/{usr_member['id']}",
+            json={
+                "display_name": "Updated Member",
+            },
+        )
         assert resp.status_code == 200
         assert resp.json()["display_name"] == "Updated Member"
 
     async def test_update_user_not_found(self, admin_client):
         fake_id = str(uuid4())
-        resp = await admin_client.patch(f"/api/users/{fake_id}", json={
-            "display_name": "Ghost",
-        })
+        resp = await admin_client.patch(
+            f"/api/users/{fake_id}",
+            json={
+                "display_name": "Ghost",
+            },
+        )
         assert resp.status_code == 404
 
     async def test_member_cannot_update_others(self, member_client, usr_admin):
         """Members cannot update other users."""
-        resp = await member_client.patch(f"/api/users/{usr_admin['id']}", json={
-            "display_name": "Hacked",
-        })
+        resp = await member_client.patch(
+            f"/api/users/{usr_admin['id']}",
+            json={
+                "display_name": "Hacked",
+            },
+        )
         assert resp.status_code == 403
 
 
@@ -347,32 +376,43 @@ class TestUpdateUser:
 
 
 class TestUpdateUserRole:
-
     async def test_owner_can_promote_to_admin(self, owner_client, usr_member):
-        resp = await owner_client.patch(f"/api/users/{usr_member['id']}/role", json={
-            "role": "admin",
-        })
+        resp = await owner_client.patch(
+            f"/api/users/{usr_member['id']}/role",
+            json={
+                "role": "admin",
+            },
+        )
         assert resp.status_code == 200
         assert resp.json()["role"] == "admin"
 
     async def test_admin_cannot_promote_to_owner(self, admin_client, usr_member):
         """Admins can only set member role."""
-        resp = await admin_client.patch(f"/api/users/{usr_member['id']}/role", json={
-            "role": "owner",
-        })
+        resp = await admin_client.patch(
+            f"/api/users/{usr_member['id']}/role",
+            json={
+                "role": "owner",
+            },
+        )
         assert resp.status_code == 403
 
     async def test_update_role_not_found(self, admin_client):
         fake_id = str(uuid4())
-        resp = await admin_client.patch(f"/api/users/{fake_id}/role", json={
-            "role": "member",
-        })
+        resp = await admin_client.patch(
+            f"/api/users/{fake_id}/role",
+            json={
+                "role": "member",
+            },
+        )
         assert resp.status_code == 404
 
     async def test_update_role_invalid_value(self, admin_client, usr_member):
-        resp = await admin_client.patch(f"/api/users/{usr_member['id']}/role", json={
-            "role": "superadmin",
-        })
+        resp = await admin_client.patch(
+            f"/api/users/{usr_member['id']}/role",
+            json={
+                "role": "superadmin",
+            },
+        )
         assert resp.status_code in (400, 403)
 
 
@@ -382,7 +422,6 @@ class TestUpdateUserRole:
 
 
 class TestDeleteUser:
-
     async def test_delete_user_as_admin(self, admin_client, usr_member):
         resp = await admin_client.delete(f"/api/users/{usr_member['id']}")
         assert resp.status_code == 200

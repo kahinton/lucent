@@ -104,8 +104,11 @@ class MCPAuthMiddleware:
 
                             if not rate_result.allowed:
                                 # Rate limited - return 429
-                                logger.warning("Rate limit exceeded: api_key_id=%s, retry_after=%s",
-                                               key_info["id"], rate_result.headers.get("Retry-After"))
+                                logger.warning(
+                                    "Rate limit exceeded: api_key_id=%s, retry_after=%s",
+                                    key_info["id"],
+                                    rate_result.headers.get("Retry-After"),
+                                )
                                 response = JSONResponse(
                                     status_code=429,
                                     content={
@@ -243,6 +246,7 @@ def main() -> None:
 
     # Show deployment mode
     from lucent.mode import get_mode
+
     mode = get_mode()
     logger.info(f"Deployment mode: {mode.value}")
 

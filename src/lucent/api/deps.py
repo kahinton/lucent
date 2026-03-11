@@ -178,6 +178,7 @@ def require_role(minimum_role: Role):
         async def admin_endpoint(user: CurrentUser = Depends(require_role(Role.ADMIN))):
             ...
     """
+
     async def check_role(
         user: CurrentUser = Depends(get_current_user),
     ) -> CurrentUser:
@@ -199,6 +200,7 @@ def require_permission_dep(permission: Permission):
         async def audit_endpoint(user: CurrentUser = Depends(require_permission_dep(Permission.AUDIT_VIEW_ORG))):
             ...
     """
+
     async def check_permission(
         user: CurrentUser = Depends(get_current_user),
     ) -> CurrentUser:
@@ -220,6 +222,7 @@ def require_scope_dep(scope: str):
         async def create_task(user: CurrentUser = Depends(require_scope_dep("daemon-tasks"))):
             ...
     """
+
     async def check_scope(
         user: CurrentUser = Depends(get_current_user),
     ) -> CurrentUser:

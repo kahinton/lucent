@@ -1,4 +1,5 @@
 """Quick test to verify MCP connection from daemon."""
+
 import asyncio
 import json
 
@@ -102,5 +103,6 @@ async def test_mcp():
             print("MEMORY WRITE WORKING!")
         else:
             print(f"Create error: {json.dumps(data, indent=2)}")
+
 
 asyncio.run(test_mcp())

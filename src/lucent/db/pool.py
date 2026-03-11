@@ -58,17 +58,17 @@ async def _init_connection(conn: Connection) -> None:
     """Initialize each connection with custom type codecs."""
     # Register UUID codec
     await conn.set_type_codec(
-        'uuid',
+        "uuid",
         encoder=str,
         decoder=lambda x: UUID(x) if x else None,
-        schema='pg_catalog',
+        schema="pg_catalog",
     )
     # Register JSON codec for JSONB
     await conn.set_type_codec(
-        'jsonb',
+        "jsonb",
         encoder=json.dumps,
         decoder=json.loads,
-        schema='pg_catalog',
+        schema="pg_catalog",
     )
 
 

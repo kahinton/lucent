@@ -19,6 +19,7 @@ from uuid import UUID
 
 class Role(str, Enum):
     """User roles in order of increasing privilege."""
+
     MEMBER = "member"
     ADMIN = "admin"
     OWNER = "owner"
@@ -62,6 +63,7 @@ class Role(str, Enum):
 
 class Permission(str, Enum):
     """Available permissions in the system."""
+
     # Memory permissions
     MEMORY_CREATE = "memory.create"
     MEMORY_READ_OWN = "memory.read.own"

@@ -24,18 +24,18 @@ async def fb_prefix(db_pool):
         await conn.execute(
             "DELETE FROM memory_audit_log WHERE memory_id IN "
             "(SELECT id FROM memories WHERE username LIKE $1)",
-            f"{prefix}%"
+            f"{prefix}%",
         )
         await conn.execute(
             "DELETE FROM memory_access_log WHERE memory_id IN "
             "(SELECT id FROM memories WHERE username LIKE $1)",
-            f"{prefix}%"
+            f"{prefix}%",
         )
         await conn.execute("DELETE FROM memories WHERE username LIKE $1", f"{prefix}%")
         await conn.execute(
             "DELETE FROM api_keys WHERE user_id IN "
             "(SELECT id FROM users WHERE external_id LIKE $1)",
-            f"{prefix}%"
+            f"{prefix}%",
         )
         await conn.execute("DELETE FROM users WHERE external_id LIKE $1", f"{prefix}%")
         await conn.execute("DELETE FROM organizations WHERE name LIKE $1", f"{prefix}%")
@@ -186,7 +186,8 @@ class TestFeedbackStorage:
         # Verify audit entry exists
         entries = await audit_repo.get_by_memory_id(daemon_memory["id"])
         feedback_entries = [
-            e for e in entries["entries"]
+            e
+            for e in entries["entries"]
             if e["action_type"] == "update" and e.get("notes") == "feedback:approve"
         ]
         assert len(feedback_entries) >= 1
@@ -203,15 +204,21 @@ class TestReviewQueue:
 
         # Create review and non-review memories
         await repo.create(
-            username=f"{fb_prefix}user", type="experience",
-            content="Review me", tags=["daemon", "needs-review"],
-            importance=5, user_id=fb_user["id"],
+            username=f"{fb_prefix}user",
+            type="experience",
+            content="Review me",
+            tags=["daemon", "needs-review"],
+            importance=5,
+            user_id=fb_user["id"],
             organization_id=fb_user["organization_id"],
         )
         await repo.create(
-            username=f"{fb_prefix}user", type="experience",
-            content="Routine daemon work", tags=["daemon"],
-            importance=5, user_id=fb_user["id"],
+            username=f"{fb_prefix}user",
+            type="experience",
+            content="Routine daemon work",
+            tags=["daemon"],
+            importance=5,
+            user_id=fb_user["id"],
             organization_id=fb_user["organization_id"],
         )
 
@@ -232,9 +239,12 @@ class TestReviewQueue:
 
         for i in range(3):
             await repo.create(
-                username=f"{fb_prefix}user", type="experience",
-                content=f"Review item {i}", tags=["daemon", "needs-review"],
-                importance=5, user_id=fb_user["id"],
+                username=f"{fb_prefix}user",
+                type="experience",
+                content=f"Review item {i}",
+                tags=["daemon", "needs-review"],
+                importance=5,
+                user_id=fb_user["id"],
                 organization_id=fb_user["organization_id"],
             )
 
@@ -380,15 +390,21 @@ class TestDaemonMessages:
         repo = MemoryRepository(db_pool)
 
         await repo.create(
-            username=f"{fb_prefix}user", type="experience",
-            content="Human message", tags=["daemon-message", "daemon", "from-human", "pending"],
-            importance=5, user_id=fb_user["id"],
+            username=f"{fb_prefix}user",
+            type="experience",
+            content="Human message",
+            tags=["daemon-message", "daemon", "from-human", "pending"],
+            importance=5,
+            user_id=fb_user["id"],
             organization_id=fb_user["organization_id"],
         )
         await repo.create(
-            username=f"{fb_prefix}user", type="experience",
-            content="Daemon reply", tags=["daemon-message", "daemon", "from-daemon"],
-            importance=5, user_id=fb_user["id"],
+            username=f"{fb_prefix}user",
+            type="experience",
+            content="Daemon reply",
+            tags=["daemon-message", "daemon", "from-daemon"],
+            importance=5,
+            user_id=fb_user["id"],
             organization_id=fb_user["organization_id"],
         )
 
@@ -408,15 +424,21 @@ class TestDaemonMessages:
         repo = MemoryRepository(db_pool)
 
         await repo.create(
-            username=f"{fb_prefix}user", type="experience",
-            content="Pending msg", tags=["daemon-message", "daemon", "from-human", "pending"],
-            importance=5, user_id=fb_user["id"],
+            username=f"{fb_prefix}user",
+            type="experience",
+            content="Pending msg",
+            tags=["daemon-message", "daemon", "from-human", "pending"],
+            importance=5,
+            user_id=fb_user["id"],
             organization_id=fb_user["organization_id"],
         )
         await repo.create(
-            username=f"{fb_prefix}user", type="experience",
-            content="Daemon reply", tags=["daemon-message", "daemon", "from-daemon"],
-            importance=5, user_id=fb_user["id"],
+            username=f"{fb_prefix}user",
+            type="experience",
+            content="Daemon reply",
+            tags=["daemon-message", "daemon", "from-daemon"],
+            importance=5,
+            user_id=fb_user["id"],
             organization_id=fb_user["organization_id"],
         )
 
@@ -436,10 +458,12 @@ class TestDaemonMessages:
         repo = MemoryRepository(db_pool)
 
         msg = await repo.create(
-            username=f"{fb_prefix}user", type="experience",
+            username=f"{fb_prefix}user",
+            type="experience",
             content="Please review auth changes",
             tags=["daemon-message", "daemon", "from-human", "pending"],
-            importance=5, user_id=fb_user["id"],
+            importance=5,
+            user_id=fb_user["id"],
             organization_id=fb_user["organization_id"],
         )
 
@@ -462,15 +486,21 @@ class TestDaemonMessages:
         repo = MemoryRepository(db_pool)
 
         human_msg = await repo.create(
-            username=f"{fb_prefix}user", type="experience",
-            content="From human", tags=["daemon-message", "from-human"],
-            importance=5, user_id=fb_user["id"],
+            username=f"{fb_prefix}user",
+            type="experience",
+            content="From human",
+            tags=["daemon-message", "from-human"],
+            importance=5,
+            user_id=fb_user["id"],
             organization_id=fb_user["organization_id"],
         )
         daemon_msg = await repo.create(
-            username=f"{fb_prefix}user", type="experience",
-            content="From daemon", tags=["daemon-message", "from-daemon"],
-            importance=5, user_id=fb_user["id"],
+            username=f"{fb_prefix}user",
+            type="experience",
+            content="From daemon",
+            tags=["daemon-message", "from-daemon"],
+            importance=5,
+            user_id=fb_user["id"],
             organization_id=fb_user["organization_id"],
         )
 
