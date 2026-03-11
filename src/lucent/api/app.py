@@ -123,6 +123,11 @@ def create_app() -> FastAPI:
             organizations.router, prefix="/api/organizations", tags=["Organizations"]
         )
 
+    # Include definitions management router
+    from lucent.api.routers import definitions
+
+    app.include_router(definitions.router, prefix="/api", tags=["Definitions"])
+
     # Include web interface routes (excluded from API docs)
     app.include_router(web_router, include_in_schema=False)
 
