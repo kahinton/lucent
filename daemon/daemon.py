@@ -797,7 +797,9 @@ class LucentDaemon:
             if line.startswith("CLAIMED|"):
                 parts = line.split("|")
                 if len(parts) >= 3:
-                    log(f"Task {parts[1][:8]} already claimed by {parts[2]}")
+                    claimed_id = parts[1].strip()
+                    if claimed_id and claimed_id not in ("<none>", "none", "N/A", "null"):
+                        log(f"Task {claimed_id[:8]} already claimed by {parts[2]}")
 
         # Parse and claim pending tasks (capped to prevent unbounded execution)
         dispatched = 0
@@ -812,6 +814,10 @@ class LucentDaemon:
             if len(parts) < 3:
                 continue
             _, memory_id, agent_type = parts[0], parts[1].strip(), parts[2].strip()
+
+            # Skip sentinel values from LLM output when no tasks exist
+            if not memory_id or memory_id in ("<none>", "none", "N/A", "null"):
+                continue
 
             # Claim the task via direct API (no LLM session needed)
             task_memory = await MemoryAPI.get(memory_id)
