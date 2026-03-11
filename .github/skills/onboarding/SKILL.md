@@ -5,65 +5,102 @@ description: 'Guide new contributors through project setup, architecture overvie
 
 # Onboarding
 
-Code review skill for python/fastapi projects.
+Guide new contributors through project setup, architecture overview, coding conventions, and first-contribution workflow.
 
 ## When to Use
 
-- Reviewing pull requests or code changes
-- Evaluating code quality during development
-- Performing security-focused code review
-- Checking for python-specific anti-patterns
+- A new contributor is setting up the project for the first time
+- Someone asks how the project is structured or how to get started
+- A contributor needs help understanding coding conventions or the development workflow
+- Onboarding documentation needs to be reviewed or updated
 
-## Review Process
+## Prerequisites
 
-### Step 1: Understand the Change
+- **Python 3.12+** installed
+- **Docker** and **Docker Compose** installed
+- **Git** configured with access to the repository
 
-1. Read the PR description or task context
-2. Identify what files changed and why
-3. Check if there are related tests
+## Project Setup
 
-### Step 2: Check Correctness
+### Step 1: Clone and Install
 
-1. Does the code do what it claims to do?
-2. Are edge cases handled?
-3. Are error paths covered?
-4. Is the logic sound?
+```bash
+git clone <repository-url>
+cd hindsight
 
-### Step 3: Check Style & Conventions
+# Create a virtual environment
+python3 -m venv .venv
+source .venv/bin/activate
 
-1. Run `ruff check` if available
-2. Verify type hints are present and correct
-3. Check docstrings for public APIs
-4. Ensure imports are organized (stdlib → third-party → local)
-5. Verify `pyproject.toml` conventions are followed
+# Install the project in development mode
+pip install -e ".[dev]"
+```
 
-### Step 4: Check Security
+### Step 2: Start Local Services
 
-1. No hardcoded secrets or credentials
-2. Input validation on external data
-3. Proper authentication/authorization checks
-4. SQL injection, XSS, or injection vulnerabilities
-5. Proper error messages (no internal details leaked)
+The project uses Docker Compose to run PostgreSQL and the Lucent server locally:
 
-### Step 5: Check Performance
+```bash
+docker compose up -d
+```
 
-1. No obvious O(n²) or worse algorithms where O(n) is possible
-2. No unnecessary database queries or API calls
-3. Proper resource management (connections, files, memory)
-4. Caching where appropriate
+This starts:
+- **PostgreSQL** — data store for memories
+- **Lucent server** — the MCP-compatible memory API
 
-### Step 6: Summarize
+Verify services are running: `docker compose ps`
 
-Output a structured review:
-- **Verdict**: approve / request-changes / needs-discussion
-- **Critical issues**: Things that must be fixed
-- **Suggestions**: Things that could be improved
-- **Positive notes**: What was done well
+### Step 3: Run Tests
 
-## Best Practices
+```bash
+pytest tests/
+```
 
-- Focus on logic and correctness over style (linters handle style)
-- Be specific: "this loop is O(n²) because X" not "performance concern"
-- Suggest alternatives, don't just point out problems
-- Acknowledge good patterns when you see them
-- Check for test coverage on new code paths
+All tests should pass on a clean checkout. If tests fail, check that Docker services are running and healthy.
+
+### Step 4: Verify Code Formatting
+
+The project uses **ruff** for linting and formatting:
+
+```bash
+ruff check .        # Lint
+ruff format --check .  # Check formatting
+ruff format .       # Auto-format
+```
+
+## Project Structure
+
+| Directory | Purpose |
+|---|---|
+| `src/lucent/` | Core application — MCP server, tools, memory operations, API |
+| `daemon/` | Autonomous daemon loop — perceive→reason→decide→act cognitive cycle |
+| `tests/` | Test suite (pytest) |
+| `.github/skills/` | Skill definitions for the AI agent |
+| `.github/agents/` | Agent definitions |
+| `docker/` | Docker configuration files |
+| `docs/` | Project documentation |
+| `examples/` | Usage examples |
+
+## Coding Conventions
+
+- **Type hints** are required on all function signatures
+- **Docstrings** are required on public APIs
+- **Import order**: stdlib → third-party → local (enforced by ruff)
+- **Formatting**: enforced by `ruff format` — do not manually override
+- **Tests**: every new feature or bug fix should include tests in `tests/`
+- Configuration lives in `pyproject.toml`
+
+## First Contribution Workflow
+
+1. Create a feature branch from `main`
+2. Make your changes with tests
+3. Run `ruff check . && ruff format --check . && pytest tests/` to validate
+4. Commit with a clear, descriptive message
+5. Open a pull request against `main`
+
+## Getting Help
+
+- Read `README.md` for a project overview
+- Read `CONTRIBUTING.md` for detailed contribution guidelines
+- Check `docs/` for architecture and design documentation
+- Review existing tests in `tests/` for examples of how components are used

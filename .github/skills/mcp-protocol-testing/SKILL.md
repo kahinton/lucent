@@ -3,67 +3,90 @@ name: mcp-protocol-testing
 description: 'Validate MCP tool implementations against protocol spec, test edge cases in memory operations, verify search behavior'
 ---
 
-# Mcp Protocol Testing
+# MCP Protocol Testing
 
-Code review skill for python/fastapi projects.
+Validate MCP tool implementations against the protocol spec, test edge cases in memory operations, and verify search behavior.
 
 ## When to Use
 
-- Reviewing pull requests or code changes
-- Evaluating code quality during development
-- Performing security-focused code review
-- Checking for python-specific anti-patterns
+- After adding or modifying MCP tool handlers in `src/lucent/tools/`
+- When memory CRUD operations behave unexpectedly
+- When search results are incorrect or incomplete
+- When validating tag filtering, pagination, or error handling
+- Before releasing a new version to ensure protocol compliance
 
-## Review Process
+## Key Files
 
-### Step 1: Understand the Change
+- `src/lucent/tools/` — MCP tool implementations (memory create, read, update, delete, search)
+- `tests/` — Test suite (run with `pytest`)
+- `pyproject.toml` — Project configuration and test settings
 
-1. Read the PR description or task context
-2. Identify what files changed and why
-3. Check if there are related tests
+## Testing Process
 
-### Step 2: Check Correctness
+### Step 1: Memory CRUD Operations
 
-1. Does the code do what it claims to do?
-2. Are edge cases handled?
-3. Are error paths covered?
-4. Is the logic sound?
+Test the full lifecycle of memory objects:
 
-### Step 3: Check Style & Conventions
+1. **Create**: Verify a memory can be created with content, tags, and metadata. Confirm the response includes a valid ID and timestamps.
+2. **Read**: Retrieve the created memory by ID. Verify all fields match what was stored.
+3. **Update**: Modify content, tags, or metadata. Confirm the update is persisted and `updated_at` changes.
+4. **Delete**: Remove the memory by ID. Confirm subsequent reads return a 404 or appropriate not-found response.
 
-1. Run `ruff check` if available
-2. Verify type hints are present and correct
-3. Check docstrings for public APIs
-4. Ensure imports are organized (stdlib → third-party → local)
-5. Verify `pyproject.toml` conventions are followed
+Edge cases to test:
+- Create with empty content or missing required fields (expect validation error)
+- Read with a non-existent ID (expect not-found response)
+- Update a deleted memory (expect not-found response)
+- Create with very large content or deeply nested metadata
 
-### Step 4: Check Security
+### Step 2: Search Behavior
 
-1. No hardcoded secrets or credentials
-2. Input validation on external data
-3. Proper authentication/authorization checks
-4. SQL injection, XSS, or injection vulnerabilities
-5. Proper error messages (no internal details leaked)
+1. Create several memories with distinct content and tags
+2. Test keyword search — verify results contain the search term
+3. Test relevance ordering — more relevant results should rank higher
+4. Verify that deleted memories do not appear in search results
+5. Test search with no results — should return empty list, not an error
 
-### Step 5: Check Performance
+### Step 3: Tag Filtering
 
-1. No obvious O(n²) or worse algorithms where O(n) is possible
-2. No unnecessary database queries or API calls
-3. Proper resource management (connections, files, memory)
-4. Caching where appropriate
+1. Create memories with various tag combinations
+2. Filter by a single tag — verify only matching memories are returned
+3. Filter by multiple tags — verify AND/OR behavior matches the spec
+4. Filter by a tag that no memory has — expect empty results
+5. Test tag operations: adding tags, removing tags, replacing tags
 
-### Step 6: Summarize
+### Step 4: Pagination
 
-Output a structured review:
-- **Verdict**: approve / request-changes / needs-discussion
-- **Critical issues**: Things that must be fixed
-- **Suggestions**: Things that could be improved
-- **Positive notes**: What was done well
+1. Create enough memories to exceed a single page (check default page size)
+2. Request the first page — verify correct count and presence of pagination metadata
+3. Request subsequent pages — verify no duplicates and all items are eventually returned
+4. Request a page beyond the last — expect empty results or appropriate response
+5. Verify `total` count is accurate across paginated requests
+
+### Step 5: Error Handling
+
+1. Send malformed JSON — expect a clear error response, not a crash
+2. Send requests with invalid field types (e.g., string where number expected)
+3. Send requests with missing required fields
+4. Verify error responses include useful error codes and messages
+5. Confirm the server remains operational after handling errors (no state corruption)
+
+### Step 6: Run the Test Suite
+
+```bash
+# Run all tests
+pytest tests/
+
+# Run with verbose output
+pytest tests/ -v
+
+# Run only MCP-related tests
+pytest tests/ -k "mcp" -v
+```
 
 ## Best Practices
 
-- Focus on logic and correctness over style (linters handle style)
-- Be specific: "this loop is O(n²) because X" not "performance concern"
-- Suggest alternatives, don't just point out problems
-- Acknowledge good patterns when you see them
-- Check for test coverage on new code paths
+- Test each operation in isolation before testing combinations
+- Always clean up test data to avoid polluting state across test runs
+- Use fixtures for common setup (creating test memories, establishing connections)
+- Check both the response body and HTTP status codes
+- When a test fails, verify whether it is a test bug or an implementation bug before filing an issue

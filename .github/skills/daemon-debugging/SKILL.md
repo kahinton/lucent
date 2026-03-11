@@ -5,65 +5,80 @@ description: 'Diagnose and fix daemon cycle failures, stuck tasks, and sub-agent
 
 # Daemon Debugging
 
-Code review skill for python/fastapi projects.
+Diagnose and fix daemon cognitive cycle failures, stuck tasks, and sub-agent dispatch issues in the Lucent daemon architecture.
 
 ## When to Use
 
-- Reviewing pull requests or code changes
-- Evaluating code quality during development
-- Performing security-focused code review
-- Checking for python-specific anti-patterns
+- Daemon cycle is failing or producing errors
+- Tasks are stuck in `pending` or `in_progress` state and not progressing
+- Sub-agent dispatch is failing or timing out
+- Memory API calls from the daemon are returning errors
+- Cycle timing is degraded or the daemon is running slower than expected
 
-## Review Process
+## Key Files
 
-### Step 1: Understand the Change
+- `daemon/daemon.py` — Main daemon loop implementing the perceive→reason→decide→act cycle
+- `daemon/` — Supporting daemon modules (config, agents, scheduling)
+- `src/lucent/tools/` — MCP tools the daemon calls for memory operations
+- `docker-compose.yml` — Service definitions (postgres, lucent server)
 
-1. Read the PR description or task context
-2. Identify what files changed and why
-3. Check if there are related tests
+## Debugging Process
 
-### Step 2: Check Correctness
+### Step 1: Check Daemon Logs
 
-1. Does the code do what it claims to do?
-2. Are edge cases handled?
-3. Are error paths covered?
-4. Is the logic sound?
+1. Review daemon stdout/stderr for tracebacks or error messages
+2. Look for repeated error patterns indicating a stuck loop
+3. Check timestamps to identify when the issue started
+4. Run `docker compose logs daemon` if running in Docker
 
-### Step 3: Check Style & Conventions
+### Step 2: Identify the Failing Cycle Phase
 
-1. Run `ruff check` if available
-2. Verify type hints are present and correct
-3. Check docstrings for public APIs
-4. Ensure imports are organized (stdlib → third-party → local)
-5. Verify `pyproject.toml` conventions are followed
+The daemon runs a **perceive → reason → decide → act** loop. Determine which phase is failing:
 
-### Step 4: Check Security
+- **Perceive**: Failure to read tasks or memory state. Check memory API connectivity and response codes.
+- **Reason**: Errors during LLM calls or context assembly. Check for token limit issues or malformed prompts.
+- **Decide**: Task selection or prioritization failures. Check for empty task queues or invalid task states.
+- **Act**: Sub-agent dispatch or execution failures. Check agent type validity and dispatch timeout settings.
 
-1. No hardcoded secrets or credentials
-2. Input validation on external data
-3. Proper authentication/authorization checks
-4. SQL injection, XSS, or injection vulnerabilities
-5. Proper error messages (no internal details leaked)
+### Step 3: Diagnose Stuck Tasks
 
-### Step 5: Check Performance
+1. Query the task store for tasks stuck in `pending` — look for missing dependencies or invalid `agent_type`
+2. Check for tasks stuck in `in_progress` — the daemon or sub-agent may have crashed mid-execution
+3. Look for circular dependencies preventing any task from becoming ready
+4. Verify task validation logic is not rejecting all candidates
 
-1. No obvious O(n²) or worse algorithms where O(n) is possible
-2. No unnecessary database queries or API calls
-3. Proper resource management (connections, files, memory)
-4. Caching where appropriate
+### Step 4: Diagnose Memory API Errors
 
-### Step 6: Summarize
+1. Verify the Lucent server is running: `curl http://localhost:8000/health`
+2. Check PostgreSQL connectivity: `docker compose exec postgres pg_isready`
+3. Look for HTTP 4xx/5xx responses in daemon logs when calling memory tools
+4. Test memory operations manually via the MCP endpoint to isolate server vs. daemon issues
 
-Output a structured review:
-- **Verdict**: approve / request-changes / needs-discussion
-- **Critical issues**: Things that must be fixed
-- **Suggestions**: Things that could be improved
-- **Positive notes**: What was done well
+### Step 5: Diagnose Sub-Agent Dispatch Failures
+
+1. Check that the requested `agent_type` is valid and has a registered handler
+2. Review dispatch timeout settings — long-running tasks may exceed the timeout
+3. Look for resource exhaustion (too many concurrent sub-agents)
+4. Verify sub-agent environment variables and API keys are configured
+
+### Step 6: Diagnose Cycle Timing Issues
+
+1. Measure time spent in each cycle phase (perceive, reason, decide, act)
+2. Check for slow memory API responses adding latency
+3. Look for LLM API rate limiting or high response times
+4. Verify sleep/backoff intervals between cycles are appropriate
+
+## Common Fixes
+
+- **Stuck pending tasks**: Reset task state or fix missing dependencies
+- **Memory API 500 errors**: Restart the Lucent server or check PostgreSQL disk space
+- **Sub-agent timeout**: Increase dispatch timeout or break task into smaller subtasks
+- **Cycle not advancing**: Check for infinite loops in decide phase when no tasks are ready
+- **Connection refused**: Ensure all Docker services are running with `docker compose ps`
 
 ## Best Practices
 
-- Focus on logic and correctness over style (linters handle style)
-- Be specific: "this loop is O(n²) because X" not "performance concern"
-- Suggest alternatives, don't just point out problems
-- Acknowledge good patterns when you see them
-- Check for test coverage on new code paths
+- Always check the simplest explanations first (service down, network issue, bad config)
+- Use `docker compose logs --tail=50 <service>` to get recent logs without noise
+- When resetting stuck tasks, investigate root cause before clearing state
+- Monitor cycle duration over time to catch gradual degradation
