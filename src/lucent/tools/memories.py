@@ -184,6 +184,7 @@ Args:
           preferences[],
           interaction_history[{date, context, notes}],
           last_interaction}
+    shared: Whether the memory is visible to other users in the same organization. Default is false.
 
 Returns:
     JSON string with the created memory including its ID.
@@ -198,6 +199,7 @@ Returns:
         importance: int = 5,
         related_memory_ids: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
+        shared: bool = False,
     ) -> str:
         try:
             # Validate input
@@ -245,6 +247,7 @@ Returns:
                 metadata=input_data.metadata,
                 user_id=user_id,
                 organization_id=org_id,
+                shared=shared,
             )
 
             # Log the creation in audit log with version snapshot

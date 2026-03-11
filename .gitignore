@@ -35,3 +35,4 @@ htmlcov/
 backups/
 *.log
 .vscode/mcp.json
+.daemon_api_key

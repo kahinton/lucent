@@ -23,6 +23,7 @@ class MemoryCreate(BaseModel):
     importance: int = Field(default=5, ge=1, le=10, description="Importance rating 1-10")
     related_memory_ids: list[UUID] | None = Field(default=None, description="Related memory UUIDs")
     metadata: dict[str, Any] | None = Field(default=None, description="Type-specific metadata")
+    shared: bool = Field(default=False, description="Visible to other org members")
 
 
 class MemoryUpdate(BaseModel):

@@ -108,6 +108,7 @@ async def create_memory(
         metadata=validated_metadata,
         user_id=user.id,
         organization_id=user.organization_id,
+        shared=data.shared,
     )
 
     logger.info("Memory created: id=%s, type=%s, user=%s", result["id"], data.type, user.id)

@@ -54,6 +54,7 @@ class MemoryRepository:
         metadata: dict[str, Any] | None = None,
         user_id: UUID | None = None,
         organization_id: UUID | None = None,
+        shared: bool = False,
     ) -> dict[str, Any]:
         """Create a new memory.
 
@@ -67,6 +68,7 @@ class MemoryRepository:
             metadata: Optional type-specific metadata.
             user_id: Optional user ID (foreign key to users table).
             organization_id: Optional organization ID (for efficient org-scoped queries).
+            shared: Whether the memory is visible to other org members.
 
         Returns:
             The created memory record.
@@ -75,7 +77,7 @@ class MemoryRepository:
             INSERT INTO memories (username, type, content, tags,
                 importance, related_memory_ids, metadata,
                 user_id, organization_id, shared)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, false)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             RETURNING {self._FULL_COLUMNS}
         """
 
@@ -95,6 +97,7 @@ class MemoryRepository:
                 metadata or {},
                 str(user_id) if user_id else None,
                 str(organization_id) if organization_id else None,
+                shared,
             )
 
         return self._row_to_dict(row)
