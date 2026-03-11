@@ -77,6 +77,12 @@ REVIEW_MODELS = [
     m.strip() for m in os.environ.get("LUCENT_REVIEW_MODELS", "").split(",") if m.strip()
 ]
 
+# Git operations: daemon can commit (but never push without ALLOW_GIT_PUSH)
+_git_commit_val = os.environ.get("LUCENT_ALLOW_GIT_COMMIT", "false")
+ALLOW_GIT_COMMIT = _git_commit_val.lower() in ("true", "1", "yes")
+_git_push_val = os.environ.get("LUCENT_ALLOW_GIT_PUSH", "false")
+ALLOW_GIT_PUSH = _git_push_val.lower() in ("true", "1", "yes")
+
 # Paths
 DAEMON_DIR = Path(__file__).parent
 COGNITIVE_PROMPT_PATH = DAEMON_DIR / "cognitive.md"
@@ -84,25 +90,184 @@ AGENTS_DIR = DAEMON_DIR / "agents"
 AGENT_DEF_PATH = DAEMON_DIR.parent / ".github" / "agents" / "memory-teammate.agent.md"
 SKILLS_DIR = DAEMON_DIR.parent / ".github" / "skills"
 LOG_FILE = DAEMON_DIR / "daemon.log"
+DAEMON_KEY_FILE = DAEMON_DIR / ".daemon_api_key"
 
 # MCP configuration — passed to all sessions
 MCP_URL = os.environ.get("LUCENT_MCP_URL", "http://localhost:8766/mcp")
 MCP_API_KEY = os.environ.get("LUCENT_MCP_API_KEY", "")
-MCP_CONFIG = (
-    {
-        "memory-server": {
-            "type": "http",
-            "url": MCP_URL,
-            "headers": {"Authorization": f"Bearer {MCP_API_KEY}"},
-        },
-    }
-    if MCP_API_KEY
-    else {}
+
+# Database URL for direct key provisioning (same DB the server uses)
+DATABASE_URL = os.environ.get(
+    "DATABASE_URL", "postgresql://lucent:lucent_dev_password@localhost:5433/lucent"
 )
 
-# REST API base URL (same host as MCP, different path)
+# These are set dynamically after key provisioning in LucentDaemon.start()
+MCP_CONFIG: dict = {}
 API_BASE = MCP_URL.replace("/mcp", "/api")
-API_HEADERS = {"Authorization": f"Bearer {MCP_API_KEY}", "Content-Type": "application/json"}
+API_HEADERS: dict = {"Content-Type": "application/json"}
+
+
+def _build_auth_config(api_key: str) -> tuple[dict, dict]:
+    """Build MCP_CONFIG and API_HEADERS from a valid API key."""
+    mcp_config = (
+        {
+            "memory-server": {
+                "type": "http",
+                "url": MCP_URL,
+                "headers": {"Authorization": f"Bearer {api_key}"},
+            },
+        }
+        if api_key
+        else {}
+    )
+    api_headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    return mcp_config, api_headers
+
+
+# ============================================================================
+# API Key Provisioning
+# ============================================================================
+
+
+async def _provision_daemon_api_key() -> str | None:
+    """Create a daemon service API key directly in the database.
+
+    Creates a 'lucent-daemon' user (if needed) and a persistent API key.
+    Returns the plain-text hs_ key, or None on failure.
+    """
+    import secrets
+
+    import asyncpg
+    import bcrypt
+
+    try:
+        conn = await asyncpg.connect(DATABASE_URL)
+    except Exception as e:
+        log(f"DB connect failed during key provisioning: {e}", "WARN")
+        return None
+
+    try:
+        # Ensure a daemon service user exists
+        user = await conn.fetchrow(
+            "SELECT id, organization_id FROM users "
+            "WHERE external_id = 'daemon-service' AND is_active = true"
+        )
+        if not user:
+            # Find the default organization (first org, or the owner's org)
+            org = await conn.fetchrow(
+                "SELECT id FROM organizations ORDER BY created_at LIMIT 1"
+            )
+            org_id = str(org["id"]) if org else None
+
+            user = await conn.fetchrow(
+                "INSERT INTO users (external_id, provider, organization_id, "
+                "  email, display_name, role) "
+                "VALUES ('daemon-service', 'local', $1, "
+                "  'daemon@lucent.local', 'Lucent Daemon', 'member') "
+                "RETURNING id, organization_id",
+                org_id,
+            )
+            log("Created daemon service user")
+
+        user_id = str(user["id"])
+        org_id = str(user["organization_id"]) if user["organization_id"] else None
+
+        # Check for existing active daemon key
+        existing = await conn.fetchrow(
+            "SELECT id FROM api_keys "
+            "WHERE user_id = $1 AND name = 'daemon-service-key' "
+            "AND is_active = true AND revoked_at IS NULL",
+            user_id,
+        )
+        if existing:
+            # Key exists but we don't have the plaintext — revoke and recreate
+            await conn.execute(
+                "UPDATE api_keys SET is_active = false, revoked_at = NOW() "
+                "WHERE id = $1",
+                existing["id"],
+            )
+
+        # Generate a new hs_ key
+        raw_key = secrets.token_urlsafe(32)
+        plain_key = f"hs_{raw_key}"
+        key_prefix = plain_key[:11]
+        key_hash = bcrypt.hashpw(plain_key.encode(), bcrypt.gensalt()).decode()
+
+        await conn.execute(
+            "INSERT INTO api_keys "
+            "(user_id, organization_id, name, key_prefix, key_hash, scopes) "
+            "VALUES ($1, $2, 'daemon-service-key', $3, $4, $5)",
+            user_id,
+            org_id,
+            key_prefix,
+            key_hash,
+            ["read", "write"],
+        )
+        log(f"Provisioned daemon API key (prefix: {key_prefix})")
+        return plain_key
+
+    except Exception as e:
+        log(f"Key provisioning failed: {e}", "ERROR")
+        return None
+    finally:
+        await conn.close()
+
+
+async def _verify_api_key(api_key: str) -> bool:
+    """Check if an API key is accepted by the server."""
+    if not api_key or not api_key.startswith("hs_"):
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get(
+                f"{API_BASE}/users/me",
+                headers={"Authorization": f"Bearer {api_key}"},
+            )
+            return resp.status_code == 200
+    except Exception:
+        return False
+
+
+async def ensure_valid_api_key() -> str:
+    """Ensure the daemon has a valid hs_ API key.
+
+    Checks (in order): env var, cached file, provision new.
+    Updates global MCP_CONFIG and API_HEADERS.
+    Returns the valid key.
+    """
+    global MCP_API_KEY, MCP_CONFIG, API_HEADERS
+
+    # 1. Check if the env var key works
+    if MCP_API_KEY and await _verify_api_key(MCP_API_KEY):
+        log("API key from environment is valid")
+        MCP_CONFIG, API_HEADERS = _build_auth_config(MCP_API_KEY)
+        return MCP_API_KEY
+
+    # 2. Check cached key file
+    if DAEMON_KEY_FILE.exists():
+        cached_key = DAEMON_KEY_FILE.read_text().strip()
+        if cached_key and await _verify_api_key(cached_key):
+            log("Using cached API key")
+            MCP_API_KEY = cached_key
+            MCP_CONFIG, API_HEADERS = _build_auth_config(cached_key)
+            return cached_key
+
+    # 3. Provision a new key
+    log("No valid API key found — provisioning daemon service account...")
+    new_key = await _provision_daemon_api_key()
+    if new_key:
+        # Cache for future cycles
+        DAEMON_KEY_FILE.write_text(new_key)
+        DAEMON_KEY_FILE.chmod(0o600)
+        MCP_API_KEY = new_key
+        MCP_CONFIG, API_HEADERS = _build_auth_config(new_key)
+        log("Daemon API key provisioned and cached")
+        return new_key
+
+    # 4. Fall back to whatever we have (may not work)
+    log("WARNING: Could not provision a valid API key", "WARN")
+    MCP_CONFIG, API_HEADERS = _build_auth_config(MCP_API_KEY)
+    return MCP_API_KEY
 
 
 # ============================================================================
@@ -346,7 +511,9 @@ After completing work, save what you learned:
 - Connections to existing knowledge
 
 --- GUARDRAILS ---
-- DO NOT run git push or git commit
+- {"Git commit is ALLOWED — commit meaningful changes with clear messages"
+   if ALLOW_GIT_COMMIT else "DO NOT run git commit"}
+- {"Git push is ALLOWED" if ALLOW_GIT_PUSH else "DO NOT run git push"}
 - DO NOT take irreversible actions without approval
 - Tag all memories with 'daemon' so activity is visible
 - Write concise, actionable output
@@ -376,6 +543,9 @@ class LucentDaemon:
         """Start the daemon."""
         log("Lucent daemon starting...")
         self.running = True
+
+        # Ensure we have a valid API key before anything else
+        await ensure_valid_api_key()
 
         # Start the watchdog thread — detects event loop freezes
         watchdog = threading.Thread(target=_watchdog_loop, daemon=True, name="watchdog")
@@ -1035,8 +1205,11 @@ class LucentDaemon:
     # --- Main Loops ---
 
     async def run_forever(self):
-        """Run the daemon loop."""
+        """Run the daemon loop with auto-reload on code changes."""
         await self.start()
+
+        # Snapshot file mtimes at startup for change detection
+        self._source_mtimes = self._snapshot_source_files()
 
         try:
             while self.running:
@@ -1049,6 +1222,13 @@ class LucentDaemon:
                 if self.cycle_count % LEARNING_INTERVAL == 0:
                     await self.run_learning_extraction()
 
+                # Auto-reload: check if source files changed since startup
+                if self._should_reload():
+                    log("Source files changed — restarting daemon to pick up new code")
+                    self.running = False
+                    self._restart_self()
+                    return  # _restart_self replaces the process
+
                 log(f"Next cycle in {DAEMON_INTERVAL_MINUTES} minutes")
                 await asyncio.sleep(DAEMON_INTERVAL_MINUTES * 60)
 
@@ -1056,6 +1236,56 @@ class LucentDaemon:
             pass
         finally:
             await self.stop()
+
+    def _snapshot_source_files(self) -> dict[str, float]:
+        """Capture mtimes of all daemon source files."""
+        files = {}
+        watch_paths = [
+            DAEMON_DIR / "daemon.py",
+            COGNITIVE_PROMPT_PATH,
+            AGENT_DEF_PATH,
+        ]
+        # Also watch all agent definitions and skills
+        if AGENTS_DIR.exists():
+            watch_paths.extend(AGENTS_DIR.glob("*.md"))
+        if SKILLS_DIR.exists():
+            for skill_dir in SKILLS_DIR.iterdir():
+                skill_file = skill_dir / "SKILL.md"
+                if skill_file.exists():
+                    watch_paths.append(skill_file)
+        # Watch adaptation module if it exists
+        adapt_path = DAEMON_DIR / "adaptation.py"
+        if adapt_path.exists():
+            watch_paths.append(adapt_path)
+
+        for p in watch_paths:
+            if p.exists():
+                files[str(p)] = p.stat().st_mtime
+        return files
+
+    def _should_reload(self) -> bool:
+        """Check if any watched source files have changed since startup."""
+        current = self._snapshot_source_files()
+        for path, mtime in current.items():
+            old_mtime = self._source_mtimes.get(path)
+            if old_mtime is None or mtime > old_mtime:
+                log(f"File changed: {Path(path).name} (mtime {old_mtime} -> {mtime})")
+                return True
+        # Also check for new files that didn't exist at startup
+        for path in current:
+            if path not in self._source_mtimes:
+                log(f"New file detected: {Path(path).name}")
+                return True
+        return False
+
+    def _restart_self(self):
+        """Replace the current process with a fresh one using the same args."""
+        log("Executing self-restart...")
+        # Flush logs
+        sys.stdout.flush()
+        sys.stderr.flush()
+        # Re-exec with the same Python and arguments
+        os.execv(sys.executable, [sys.executable] + sys.argv)
 
     async def run_once(self, task: str | None = None):
         """Run a single cycle or specific sub-agent task, then exit."""
