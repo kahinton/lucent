@@ -34,5 +34,6 @@ htmlcov/
 # Project specific
 backups/
 *.log
+*.log.[0-9]*
 .vscode/mcp.json
 .daemon_api_key
