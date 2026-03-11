@@ -1,7 +1,9 @@
 """Quick test to verify MCP connection from daemon."""
 import asyncio
 import json
+
 import httpx
+
 
 async def test_mcp():
     url = "http://localhost:8766/mcp"
@@ -43,7 +45,7 @@ async def test_mcp():
             "id": 2,
         }
         resp = await client.post(url, json=call, headers=headers)
-        
+
         # Handle both JSON and SSE responses
         content_type = resp.headers.get("content-type", "")
         if "text/event-stream" in content_type:

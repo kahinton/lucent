@@ -235,7 +235,7 @@ def log(message: str, level: str = "INFO"):
         print(f"[{timestamp}] [{level}] {message}")
         return
 
-    from lucent.logging import THOUGHT, STREAM
+    from lucent.logging import STREAM, THOUGHT
     level_map = {
         "INFO": _logger.info,
         "WARN": _logger.warning,
@@ -297,7 +297,7 @@ def build_subagent_prompt(agent_type: str, task_description: str, task_context: 
 --- YOUR TASK ---
 {task_description}
 
-{f"--- ADDITIONAL CONTEXT ---" + chr(10) + task_context if task_context else ""}
+{"--- ADDITIONAL CONTEXT ---" + chr(10) + task_context if task_context else ""}
 
 --- USING MEMORY ---
 Before starting work, search for relevant memories:
@@ -698,7 +698,7 @@ class LucentDaemon:
                 "For each one you find, output the memory ID and the agent type tag "
                 "(research, code, memory, reflection, documentation, or planning). "
                 "Also search for memories tagged 'daemon-task' that have a tag starting with "
-                f"'in-progress' to see what is currently being worked on. "
+                "'in-progress' to see what is currently being worked on. "
                 "Output ONLY lines in format:\n"
                 "  TASK|memory_id|agent_type  (for pending tasks)\n"
                 "  CLAIMED|memory_id|claimed_by  (for already-claimed tasks)"

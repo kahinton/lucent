@@ -204,9 +204,6 @@ async def get_organization_access_activity(
             detail="User is not part of an organization",
         )
 
-    pool = await get_pool()
-    access_repo = AccessRepository(pool)
-
     # TODO: Implement proper organization activity feed
     # For now, this endpoint is not available
     raise HTTPException(
