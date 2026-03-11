@@ -53,6 +53,7 @@ __all__ = [
     # Repositories
     "MemoryRepository",
     "VersionConflictError",
+    "DefinitionRepository",
     "UserRepository",
     "ApiKeyRepository",
     "OrganizationRepository",

@@ -5,7 +5,6 @@ Handles CRUD, approval workflow, and access grants (agent↔skill, agent↔MCP).
 
 from datetime import datetime, timezone
 from typing import Any
-from uuid import UUID
 
 from asyncpg import Pool
 
@@ -42,7 +41,7 @@ class DefinitionRepository:
 
     async def get_agent(self, agent_id: str, org_id: str) -> dict | None:
         query = """
-            SELECT a.*, 
+            SELECT a.*,
                 array_agg(DISTINCT s.name) FILTER (WHERE s.name IS NOT NULL) as skill_names,
                 array_agg(DISTINCT m.name) FILTER (WHERE m.name IS NOT NULL) as mcp_server_names
             FROM agent_definitions a
@@ -255,7 +254,9 @@ class DefinitionRepository:
             )
         return dict(row)
 
-    async def approve_mcp_server(self, server_id: str, org_id: str, approved_by: str) -> dict | None:
+    async def approve_mcp_server(
+        self, server_id: str, org_id: str, approved_by: str,
+    ) -> dict | None:
         query = """
             UPDATE mcp_server_configs
             SET status = 'active', approved_by = $3, approved_at = NOW(), updated_at = NOW()
@@ -283,7 +284,8 @@ class DefinitionRepository:
         try:
             async with self.pool.acquire() as conn:
                 await conn.execute(
-                    "INSERT INTO agent_skills (agent_id, skill_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                    "INSERT INTO agent_skills (agent_id, skill_id) "
+                    "VALUES ($1, $2) ON CONFLICT DO NOTHING",
                     agent_id, skill_id,
                 )
             return True
@@ -302,7 +304,8 @@ class DefinitionRepository:
         try:
             async with self.pool.acquire() as conn:
                 await conn.execute(
-                    "INSERT INTO agent_mcp_servers (agent_id, mcp_server_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                    "INSERT INTO agent_mcp_servers (agent_id, mcp_server_id) "
+                    "VALUES ($1, $2) ON CONFLICT DO NOTHING",
                     agent_id, mcp_server_id,
                 )
             return True
@@ -357,7 +360,8 @@ class DefinitionRepository:
         """Get an active agent by name with its skills and MCP servers loaded."""
         async with self.pool.acquire() as conn:
             agent = await conn.fetchrow(
-                "SELECT * FROM agent_definitions WHERE name = $1 AND organization_id = $2 AND status = 'active'",
+                "SELECT * FROM agent_definitions "
+                "WHERE name = $1 AND organization_id = $2 AND status = 'active'",
                 agent_name, org_id,
             )
         if not agent:
