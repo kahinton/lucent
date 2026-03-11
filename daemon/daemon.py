@@ -31,7 +31,14 @@ from pathlib import Path
 import httpx
 from copilot import CopilotClient, PermissionHandler
 
-from adaptation import AdaptationPipeline, parse_assessment_output
+# Optional: adaptation module for environment assessment
+try:
+    sys.path.insert(0, str(Path(__file__).parent))
+    from adaptation import AdaptationPipeline, parse_assessment_output
+    sys.path.pop(0)
+except (ImportError, Exception):
+    AdaptationPipeline = None
+    parse_assessment_output = None
 
 # ============================================================================
 # Configuration
