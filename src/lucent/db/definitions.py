@@ -18,10 +18,10 @@ class DefinitionRepository:
     # ── Agents ────────────────────────────────────────────────────────────
 
     async def list_agents(
-        self, org_id: str, status: str | None = None, scope: str | None = None
+        self, org_id: str, status: str | None = None
     ) -> list[dict]:
         query = """
-            SELECT id, name, description, scope, status,
+            SELECT id, name, description, status,
                    created_by, approved_by, approved_at,
                    created_at, updated_at
             FROM agent_definitions
@@ -31,9 +31,6 @@ class DefinitionRepository:
         if status:
             params.append(status)
             query += f" AND status = ${len(params)}"
-        if scope:
-            params.append(scope)
-            query += f" AND scope = ${len(params)}"
         query += " ORDER BY name"
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(query, *params)
@@ -58,25 +55,25 @@ class DefinitionRepository:
 
     async def create_agent(
         self, name: str, description: str, content: str,
-        org_id: str, created_by: str, scope: str = "instance",
+        org_id: str, created_by: str,
         status: str = "proposed",
     ) -> dict:
         query = """
-            INSERT INTO agent_definitions (name, description, content, scope, status,
+            INSERT INTO agent_definitions (name, description, content, status,
                 created_by, organization_id)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            VALUES ($1, $2, $3, $4, $5, $6)
             RETURNING *
         """
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
-                query, name, description, content, scope, status, created_by, org_id
+                query, name, description, content, status, created_by, org_id
             )
         return dict(row)
 
     async def update_agent(self, agent_id: str, org_id: str, **kwargs) -> dict | None:
         sets = []
         params: list[Any] = []
-        for key in ("name", "description", "content", "scope", "status"):
+        for key in ("name", "description", "content", "status"):
             if key in kwargs:
                 params.append(kwargs[key])
                 sets.append(f"{key} = ${len(params)}")
@@ -128,10 +125,10 @@ class DefinitionRepository:
     # ── Skills ────────────────────────────────────────────────────────────
 
     async def list_skills(
-        self, org_id: str, status: str | None = None, scope: str | None = None
+        self, org_id: str, status: str | None = None
     ) -> list[dict]:
         query = """
-            SELECT id, name, description, scope, status,
+            SELECT id, name, description, status,
                    created_by, approved_by, approved_at,
                    created_at, updated_at
             FROM skill_definitions
@@ -141,9 +138,6 @@ class DefinitionRepository:
         if status:
             params.append(status)
             query += f" AND status = ${len(params)}"
-        if scope:
-            params.append(scope)
-            query += f" AND scope = ${len(params)}"
         query += " ORDER BY name"
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(query, *params)
@@ -159,18 +153,18 @@ class DefinitionRepository:
 
     async def create_skill(
         self, name: str, description: str, content: str,
-        org_id: str, created_by: str, scope: str = "instance",
+        org_id: str, created_by: str,
         status: str = "proposed",
     ) -> dict:
         query = """
-            INSERT INTO skill_definitions (name, description, content, scope, status,
+            INSERT INTO skill_definitions (name, description, content, status,
                 created_by, organization_id)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            VALUES ($1, $2, $3, $4, $5, $6)
             RETURNING *
         """
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
-                query, name, description, content, scope, status, created_by, org_id
+                query, name, description, content, status, created_by, org_id
             )
         return dict(row)
 

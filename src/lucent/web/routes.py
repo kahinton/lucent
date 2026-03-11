@@ -636,6 +636,110 @@ async def dashboard(request: Request):
 # =============================================================================
 # Daemon Activity
 # =============================================================================
+# Definitions Management
+# =============================================================================
+
+@router.get("/definitions", response_class=HTMLResponse)
+async def definitions_page(request: Request, tab: str = "agents"):
+    """Manage instance-specific agent, skill, and MCP server definitions."""
+    user = await get_user_context(request)
+    pool = await get_pool()
+    from lucent.db.definitions import DefinitionRepository
+    repo = DefinitionRepository(pool)
+
+    org_id = str(user.organization_id)
+    agents = await repo.list_agents(org_id)
+    skills = await repo.list_skills(org_id)
+    mcp_servers = await repo.list_mcp_servers(org_id)
+    proposals = await repo.get_pending_proposals(org_id)
+
+    csrf_token = generate_csrf_token()
+    response = templates.TemplateResponse(
+        "definitions.html",
+        {
+            "request": request,
+            "user": user,
+            "tab": tab,
+            "agents": agents,
+            "skills": skills,
+            "mcp_servers": mcp_servers,
+            "proposals": proposals,
+            "csrf_token": csrf_token,
+        },
+    )
+    _set_csrf_cookie(response, csrf_token)
+    return response
+
+@router.post("/definitions/agents/{agent_id}/approve")
+async def approve_agent_web(request: Request, agent_id: str):
+    """Approve an agent definition from the web UI."""
+    form = await request.form()
+    await _check_csrf(request, form_token=str(form.get(CSRF_FIELD_NAME, "")))
+    user = await get_user_context(request)
+    pool = await get_pool()
+    from lucent.db.definitions import DefinitionRepository
+    repo = DefinitionRepository(pool)
+    await repo.approve_agent(agent_id, str(user.organization_id), str(user.id))
+    return RedirectResponse("/definitions?tab=agents", status_code=303)
+
+@router.post("/definitions/agents/{agent_id}/reject")
+async def reject_agent_web(request: Request, agent_id: str):
+    """Reject an agent definition from the web UI."""
+    form = await request.form()
+    await _check_csrf(request, form_token=str(form.get(CSRF_FIELD_NAME, "")))
+    user = await get_user_context(request)
+    pool = await get_pool()
+    from lucent.db.definitions import DefinitionRepository
+    repo = DefinitionRepository(pool)
+    await repo.reject_agent(agent_id, str(user.organization_id), str(user.id))
+    return RedirectResponse("/definitions?tab=agents", status_code=303)
+
+@router.post("/definitions/skills/{skill_id}/approve")
+async def approve_skill_web(request: Request, skill_id: str):
+    form = await request.form()
+    await _check_csrf(request, form_token=str(form.get(CSRF_FIELD_NAME, "")))
+    user = await get_user_context(request)
+    pool = await get_pool()
+    from lucent.db.definitions import DefinitionRepository
+    repo = DefinitionRepository(pool)
+    await repo.approve_skill(skill_id, str(user.organization_id), str(user.id))
+    return RedirectResponse("/definitions?tab=skills", status_code=303)
+
+@router.post("/definitions/skills/{skill_id}/reject")
+async def reject_skill_web(request: Request, skill_id: str):
+    form = await request.form()
+    await _check_csrf(request, form_token=str(form.get(CSRF_FIELD_NAME, "")))
+    user = await get_user_context(request)
+    pool = await get_pool()
+    from lucent.db.definitions import DefinitionRepository
+    repo = DefinitionRepository(pool)
+    await repo.reject_skill(skill_id, str(user.organization_id), str(user.id))
+    return RedirectResponse("/definitions?tab=skills", status_code=303)
+
+@router.post("/definitions/mcp-servers/{server_id}/approve")
+async def approve_mcp_web(request: Request, server_id: str):
+    form = await request.form()
+    await _check_csrf(request, form_token=str(form.get(CSRF_FIELD_NAME, "")))
+    user = await get_user_context(request)
+    pool = await get_pool()
+    from lucent.db.definitions import DefinitionRepository
+    repo = DefinitionRepository(pool)
+    await repo.approve_mcp_server(server_id, str(user.organization_id), str(user.id))
+    return RedirectResponse("/definitions?tab=mcp", status_code=303)
+
+@router.post("/definitions/mcp-servers/{server_id}/reject")
+async def reject_mcp_web(request: Request, server_id: str):
+    form = await request.form()
+    await _check_csrf(request, form_token=str(form.get(CSRF_FIELD_NAME, "")))
+    user = await get_user_context(request)
+    pool = await get_pool()
+    from lucent.db.definitions import DefinitionRepository
+    repo = DefinitionRepository(pool)
+    await repo.reject_mcp_server(server_id, str(user.organization_id), str(user.id))
+    return RedirectResponse("/definitions?tab=mcp", status_code=303)
+
+
+# =============================================================================
 
 
 @router.get("/daemon", response_class=HTMLResponse)

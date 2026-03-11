@@ -1,0 +1,234 @@
+{% extends "base.html" %}
+
+{% block title %}Agent Definitions - Lucent{% endblock %}
+
+{% block content %}
+<div class="mb-8">
+    <div class="flex items-center justify-between mb-2">
+        <div>
+            <h1 class="text-2xl font-bold text-gray-900">Definitions</h1>
+            <p class="text-sm text-gray-500">Manage instance-specific agents, skills, and MCP server connections</p>
+        </div>
+    </div>
+</div>
+
+<!-- Tab Navigation -->
+<div class="border-b border-gray-200 mb-6">
+    <nav class="flex gap-6">
+        <a href="/definitions?tab=agents" class="py-2 px-1 border-b-2 text-sm font-medium {% if tab == 'agents' %}border-primary-500 text-primary-600{% else %}border-transparent text-gray-500 hover:text-gray-700{% endif %}">
+            Agents {% if agents %}({{ agents|length }}){% endif %}
+        </a>
+        <a href="/definitions?tab=skills" class="py-2 px-1 border-b-2 text-sm font-medium {% if tab == 'skills' %}border-primary-500 text-primary-600{% else %}border-transparent text-gray-500 hover:text-gray-700{% endif %}">
+            Skills {% if skills %}({{ skills|length }}){% endif %}
+        </a>
+        <a href="/definitions?tab=mcp" class="py-2 px-1 border-b-2 text-sm font-medium {% if tab == 'mcp' %}border-primary-500 text-primary-600{% else %}border-transparent text-gray-500 hover:text-gray-700{% endif %}">
+            MCP Servers {% if mcp_servers %}({{ mcp_servers|length }}){% endif %}
+        </a>
+        {% if proposals and proposals.total > 0 %}
+        <a href="/definitions?tab=proposals" class="py-2 px-1 border-b-2 text-sm font-medium {% if tab == 'proposals' %}border-primary-500 text-primary-600{% else %}border-transparent text-gray-500 hover:text-gray-700{% endif %}">
+            Pending Approval <span class="ml-1 bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full text-xs">{{ proposals.total }}</span>
+        </a>
+        {% endif %}
+    </nav>
+</div>
+
+{% if tab == 'agents' %}
+<!-- Agents List -->
+<div class="space-y-3">
+    {% for agent in agents %}
+    <div class="bg-white rounded-lg border border-gray-200 p-4">
+        <div class="flex items-center justify-between">
+            <div>
+                <span class="font-medium text-gray-900">{{ agent.name }}</span>
+                <span class="ml-2 px-2 py-0.5 rounded text-xs
+                    {% if agent.status == 'active' %}bg-green-100 text-green-700
+                    {% elif agent.status == 'proposed' %}bg-amber-100 text-amber-700
+                    {% elif agent.status == 'rejected' %}bg-red-100 text-red-700
+                    {% else %}bg-gray-100 text-gray-600{% endif %}">
+                    {{ agent.status }}
+                </span>
+                {% if agent.description %}
+                <p class="text-sm text-gray-500 mt-1">{{ agent.description }}</p>
+                {% endif %}
+            </div>
+            <div class="flex gap-2">
+                {% if agent.status == 'proposed' %}
+                <form method="POST" action="/definitions/agents/{{ agent.id }}/approve">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <button type="submit" class="px-3 py-1 text-sm bg-green-50 text-green-700 rounded hover:bg-green-100">Approve</button>
+                </form>
+                <form method="POST" action="/definitions/agents/{{ agent.id }}/reject">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <button type="submit" class="px-3 py-1 text-sm bg-red-50 text-red-700 rounded hover:bg-red-100">Reject</button>
+                </form>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    {% else %}
+    <div class="bg-white rounded-lg border border-gray-200 p-8 text-center text-gray-500">
+        <p>No instance agents defined yet. The daemon will propose new agents as it learns your environment.</p>
+        <p class="text-xs text-gray-400 mt-2">Global agents (research, code, memory, etc.) are shipped with Lucent and don't appear here.</p>
+    </div>
+    {% endfor %}
+</div>
+
+{% elif tab == 'skills' %}
+<!-- Skills List -->
+<div class="space-y-3">
+    {% for skill in skills %}
+    <div class="bg-white rounded-lg border border-gray-200 p-4">
+        <div class="flex items-center justify-between">
+            <div>
+                <span class="font-medium text-gray-900">{{ skill.name }}</span>
+                <span class="ml-2 px-2 py-0.5 rounded text-xs
+                    {% if skill.status == 'active' %}bg-green-100 text-green-700
+                    {% elif skill.status == 'proposed' %}bg-amber-100 text-amber-700
+                    {% elif skill.status == 'rejected' %}bg-red-100 text-red-700
+                    {% else %}bg-gray-100 text-gray-600{% endif %}">
+                    {{ skill.status }}
+                </span>
+                {% if skill.description %}
+                <p class="text-sm text-gray-500 mt-1">{{ skill.description }}</p>
+                {% endif %}
+            </div>
+            <div class="flex gap-2">
+                {% if skill.status == 'proposed' %}
+                <form method="POST" action="/definitions/skills/{{ skill.id }}/approve">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <button type="submit" class="px-3 py-1 text-sm bg-green-50 text-green-700 rounded hover:bg-green-100">Approve</button>
+                </form>
+                <form method="POST" action="/definitions/skills/{{ skill.id }}/reject">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <button type="submit" class="px-3 py-1 text-sm bg-red-50 text-red-700 rounded hover:bg-red-100">Reject</button>
+                </form>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    {% else %}
+    <div class="bg-white rounded-lg border border-gray-200 p-8 text-center text-gray-500">
+        <p>No instance skills defined yet. The daemon will propose new skills as it learns your environment.</p>
+        <p class="text-xs text-gray-400 mt-2">Global skills (memory-init, memory-capture, etc.) are shipped with Lucent and don't appear here.</p>
+    </div>
+    {% endfor %}
+</div>
+
+{% elif tab == 'mcp' %}
+<!-- MCP Servers List -->
+<div class="space-y-3">
+    {% for server in mcp_servers %}
+    <div class="bg-white rounded-lg border border-gray-200 p-4">
+        <div class="flex items-center justify-between">
+            <div>
+                <span class="font-medium text-gray-900">{{ server.name }}</span>
+                <span class="ml-2 px-2 py-0.5 rounded text-xs
+                    {% if server.status == 'active' %}bg-green-100 text-green-700
+                    {% elif server.status == 'proposed' %}bg-amber-100 text-amber-700
+                    {% elif server.status == 'rejected' %}bg-red-100 text-red-700
+                    {% else %}bg-gray-100 text-gray-600{% endif %}">
+                    {{ server.status }}
+                </span>
+                <span class="ml-2 text-xs text-gray-400">{{ server.server_type }}</span>
+                {% if server.url %}
+                <span class="ml-2 text-xs text-gray-400 font-mono">{{ server.url }}</span>
+                {% endif %}
+                {% if server.description %}
+                <p class="text-sm text-gray-500 mt-1">{{ server.description }}</p>
+                {% endif %}
+            </div>
+            <div class="flex gap-2">
+                {% if server.status == 'proposed' %}
+                <form method="POST" action="/definitions/mcp-servers/{{ server.id }}/approve">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <button type="submit" class="px-3 py-1 text-sm bg-green-50 text-green-700 rounded hover:bg-green-100">Approve</button>
+                </form>
+                <form method="POST" action="/definitions/mcp-servers/{{ server.id }}/reject">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <button type="submit" class="px-3 py-1 text-sm bg-red-50 text-red-700 rounded hover:bg-red-100">Reject</button>
+                </form>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    {% else %}
+    <div class="bg-white rounded-lg border border-gray-200 p-8 text-center text-gray-500">
+        <p>No MCP server connections configured. The daemon can propose new connections as it discovers tools.</p>
+        <p class="text-xs text-gray-400 mt-2">Auth headers use env var templates like <code>${GITHUB_TOKEN}</code> — no secrets stored in the database.</p>
+    </div>
+    {% endfor %}
+</div>
+
+{% elif tab == 'proposals' %}
+<!-- Pending Proposals -->
+{% if proposals.total == 0 %}
+<div class="bg-white rounded-lg border border-gray-200 p-8 text-center text-gray-500">
+    No pending proposals.
+</div>
+{% else %}
+{% if proposals.agents %}
+<h3 class="text-sm font-medium text-gray-700 mb-2">Agents</h3>
+{% for agent in proposals.agents %}
+<div class="bg-amber-50 rounded-lg border border-amber-200 p-4 mb-3">
+    <div class="flex items-center justify-between">
+        <div>
+            <span class="font-medium text-gray-900">{{ agent.name }}</span>
+            {% if agent.description %}<p class="text-sm text-gray-500 mt-1">{{ agent.description }}</p>{% endif %}
+        </div>
+        <div class="flex gap-2">
+            <form method="POST" action="/definitions/agents/{{ agent.id }}/approve">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <button type="submit" class="px-3 py-1 text-sm bg-green-50 text-green-700 rounded hover:bg-green-100">Approve</button>
+            </form>
+            <form method="POST" action="/definitions/agents/{{ agent.id }}/reject">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <button type="submit" class="px-3 py-1 text-sm bg-red-50 text-red-700 rounded hover:bg-red-100">Reject</button>
+            </form>
+        </div>
+    </div>
+</div>
+{% endfor %}
+{% endif %}
+{% if proposals.skills %}
+<h3 class="text-sm font-medium text-gray-700 mb-2 mt-4">Skills</h3>
+{% for skill in proposals.skills %}
+<div class="bg-amber-50 rounded-lg border border-amber-200 p-4 mb-3">
+    <div class="flex items-center justify-between">
+        <span class="font-medium text-gray-900">{{ skill.name }}</span>
+        <div class="flex gap-2">
+            <form method="POST" action="/definitions/skills/{{ skill.id }}/approve">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <button type="submit" class="px-3 py-1 text-sm bg-green-50 text-green-700 rounded hover:bg-green-100">Approve</button>
+            </form>
+            <form method="POST" action="/definitions/skills/{{ skill.id }}/reject">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <button type="submit" class="px-3 py-1 text-sm bg-red-50 text-red-700 rounded hover:bg-red-100">Reject</button>
+            </form>
+        </div>
+    </div>
+</div>
+{% endfor %}
+{% endif %}
+{% if proposals.mcp_servers %}
+<h3 class="text-sm font-medium text-gray-700 mb-2 mt-4">MCP Servers</h3>
+{% for server in proposals.mcp_servers %}
+<div class="bg-amber-50 rounded-lg border border-amber-200 p-4 mb-3">
+    <div class="flex items-center justify-between">
+        <span class="font-medium text-gray-900">{{ server.name }}</span>
+        <div class="flex gap-2">
+            <form method="POST" action="/definitions/mcp-servers/{{ server.id }}/approve">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <button type="submit" class="px-3 py-1 text-sm bg-green-50 text-green-700 rounded hover:bg-green-100">Approve</button>
+            </form>
+            <form method="POST" action="/definitions/mcp-servers/{{ server.id }}/reject">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <button type="submit" class="px-3 py-1 text-sm bg-red-50 text-red-700 rounded hover:bg-red-100">Reject</button>
+            </form>
+        </div>
+    </div>
+</div>
+{% endfor %}
+{% endif %}
+{% endif %}
+{% endif %}
+{% endblock %}

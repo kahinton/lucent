@@ -462,6 +462,56 @@ def build_cognitive_prompt() -> str:
 """
 
 
+async def load_instance_agent(agent_type: str) -> dict | None:
+    """Load an instance agent definition from the database, if one exists."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                f"{API_BASE}/definitions/agents",
+                params={"status": "active"},
+                headers=API_HEADERS,
+            )
+            if resp.status_code == 200:
+                agents = resp.json()
+                for agent in agents:
+                    if agent.get("name") == agent_type:
+                        # Load full agent with skills and MCP servers
+                        detail_resp = await client.get(
+                            f"{API_BASE}/definitions/agents/{agent['id']}",
+                            headers=API_HEADERS,
+                        )
+                        if detail_resp.status_code == 200:
+                            return detail_resp.json()
+    except Exception:
+        pass
+    return None
+
+
+async def load_instance_skills_for_agent(agent_id: str) -> list[dict]:
+    """Load skills granted to an instance agent."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                f"{API_BASE}/definitions/agents/{agent_id}",
+                headers=API_HEADERS,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                return data.get("skills", [])
+    except Exception:
+        pass
+    return []
+
+
+def resolve_env_vars(value: str) -> str:
+    """Resolve ${ENV_VAR} patterns in a string from environment variables."""
+    import re
+    def replacer(match):
+        var_name = match.group(1)
+        return os.environ.get(var_name, match.group(0))  # Keep original if not found
+    return re.sub(r'\$\{([^}]+)\}', replacer, value)
+
+
 def build_subagent_prompt(agent_type: str, task_description: str, task_context: str = "") -> str:
     """Build the system message for a sub-agent session."""
     agent_file = AGENTS_DIR / f"{agent_type}.agent.md"
