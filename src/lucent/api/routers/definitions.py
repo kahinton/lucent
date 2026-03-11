@@ -19,13 +19,11 @@ class CreateAgent(BaseModel):
     name: str = Field(max_length=64)
     description: str | None = None
     content: str
-    scope: str = "instance"
 
 class CreateSkill(BaseModel):
     name: str = Field(max_length=64)
     description: str | None = None
     content: str
-    scope: str = "instance"
 
 class CreateMCPServer(BaseModel):
     name: str = Field(max_length=64)
@@ -45,11 +43,10 @@ class GrantAccess(BaseModel):
 @router.get("/agents")
 async def list_agents(
     user: AuthenticatedUser,
-    status: str | None = None, scope: str | None = None,
 ):
     pool = await get_pool()
     repo = DefinitionRepository(pool)
-    return await repo.list_agents(str(user.organization_id), status=status, scope=scope)
+    return await repo.list_agents()
 
 @router.post("/agents", status_code=201)
 async def create_agent(body: CreateAgent, user: AuthenticatedUser):
@@ -57,7 +54,6 @@ async def create_agent(body: CreateAgent, user: AuthenticatedUser):
     repo = DefinitionRepository(pool)
     return await repo.create_agent(
         name=body.name, description=body.description or "", content=body.content,
-        org_id=str(user.organization_id), created_by=str(user.id), scope=body.scope,
     )
 
 @router.get("/agents/{agent_id}")
@@ -75,7 +71,6 @@ async def update_agent(agent_id: str, body: CreateAgent, user: AuthenticatedUser
     repo = DefinitionRepository(pool)
     result = await repo.update_agent(
         agent_id, str(user.organization_id),
-        name=body.name, description=body.description, content=body.content, scope=body.scope,
     )
     if not result:
         raise HTTPException(404, "Agent not found")
@@ -143,11 +138,10 @@ async def revoke_mcp_from_agent(agent_id: str, server_id: str, user: Authenticat
 @router.get("/skills")
 async def list_skills(
     user: AuthenticatedUser,
-    status: str | None = None, scope: str | None = None,
 ):
     pool = await get_pool()
     repo = DefinitionRepository(pool)
-    return await repo.list_skills(str(user.organization_id), status=status, scope=scope)
+    return await repo.list_skills()
 
 @router.post("/skills", status_code=201)
 async def create_skill(body: CreateSkill, user: AuthenticatedUser):
@@ -155,7 +149,6 @@ async def create_skill(body: CreateSkill, user: AuthenticatedUser):
     repo = DefinitionRepository(pool)
     return await repo.create_skill(
         name=body.name, description=body.description or "", content=body.content,
-        org_id=str(user.organization_id), created_by=str(user.id), scope=body.scope,
     )
 
 @router.get("/skills/{skill_id}")
