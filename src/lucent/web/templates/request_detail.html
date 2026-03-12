@@ -1,0 +1,284 @@
+{% extends "base.html" %}
+
+{% block title %}{{ req.title }} - Lucent{% endblock %}
+
+{% block content %}
+<!-- Header -->
+<div class="mb-6">
+    <div class="flex items-center gap-2 text-sm text-gray-500 mb-2">
+        <a href="/requests" class="hover:text-gray-700">Requests</a>
+        <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5"/></svg>
+        <span class="text-gray-700">{{ req.title[:60] }}</span>
+    </div>
+    <div class="flex items-start justify-between gap-4">
+        <div>
+            <h1 class="text-2xl font-bold text-gray-900">{{ req.title }}</h1>
+            {% if req.description %}
+            <p class="text-sm text-gray-500 mt-1">{{ req.description }}</p>
+            {% endif %}
+        </div>
+        <div class="flex items-center gap-2 shrink-0">
+            <!-- Status -->
+            <span class="px-3 py-1 rounded-md text-sm font-medium
+                {% if req.status == 'completed' %}bg-green-100 text-green-700
+                {% elif req.status == 'in_progress' %}bg-blue-100 text-blue-700
+                {% elif req.status == 'pending' %}bg-amber-100 text-amber-700
+                {% elif req.status == 'planning' %}bg-purple-100 text-purple-700
+                {% elif req.status == 'failed' %}bg-red-100 text-red-700
+                {% else %}bg-gray-100 text-gray-600{% endif %}">
+                {{ req.status | replace('_', ' ') }}
+            </span>
+            <span class="px-3 py-1 rounded-md text-sm bg-gray-100 text-gray-500">{{ req.source }}</span>
+            {% if req.priority != 'medium' %}
+            <span class="px-3 py-1 rounded-md text-sm
+                {% if req.priority == 'urgent' %}bg-red-100 text-red-700
+                {% elif req.priority == 'high' %}bg-orange-100 text-orange-700
+                {% else %}bg-gray-100 text-gray-500{% endif %}">
+                {{ req.priority }}
+            </span>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+<!-- Stats Bar -->
+{% if req.stats %}
+<div class="grid grid-cols-5 gap-3 mb-6">
+    <div class="bg-white rounded-lg border border-gray-200 p-3 text-center">
+        <p class="text-xs text-gray-500">Total</p>
+        <p class="text-xl font-bold text-gray-900">{{ req.stats.total }}</p>
+    </div>
+    <div class="bg-white rounded-lg border border-gray-200 p-3 text-center">
+        <p class="text-xs text-gray-500">Pending</p>
+        <p class="text-xl font-bold text-amber-600">{{ req.stats.pending }}</p>
+    </div>
+    <div class="bg-white rounded-lg border border-gray-200 p-3 text-center">
+        <p class="text-xs text-gray-500">Running</p>
+        <p class="text-xl font-bold text-blue-600">{{ req.stats.running }}</p>
+    </div>
+    <div class="bg-white rounded-lg border border-gray-200 p-3 text-center">
+        <p class="text-xs text-gray-500">Completed</p>
+        <p class="text-xl font-bold text-green-600">{{ req.stats.completed }}</p>
+    </div>
+    <div class="bg-white rounded-lg border border-gray-200 p-3 text-center">
+        <p class="text-xs text-gray-500">Failed</p>
+        <p class="text-xl font-bold text-red-600">{{ req.stats.failed }}</p>
+    </div>
+</div>
+{% endif %}
+
+<div class="grid grid-cols-3 gap-6">
+    <!-- Left: Task Tree (2 cols) -->
+    <div class="col-span-2 space-y-3">
+        <h2 class="text-lg font-semibold text-gray-900">Task Breakdown</h2>
+
+        {% macro render_task(task, depth=0) %}
+        <details class="bg-white rounded-lg border border-gray-200 group {% if depth > 0 %}ml-6 border-l-2 border-l-gray-300{% endif %}" {% if task.status in ('running', 'claimed') %}open{% endif %}>
+            <summary class="p-3 cursor-pointer list-none">
+                <div class="flex items-start justify-between gap-3">
+                    <div class="flex-1 min-w-0">
+                        <div class="flex items-center gap-2 flex-wrap">
+                            <svg class="w-4 h-4 text-gray-400 transition-transform group-open:rotate-90 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5"/></svg>
+
+                            <!-- Step number -->
+                            <span class="text-xs font-mono text-gray-400">#{{ task.sequence_order + 1 }}</span>
+
+                            <span class="font-medium text-gray-900 text-sm">{{ task.title }}</span>
+
+                            <!-- Status -->
+                            <span class="px-1.5 py-0.5 rounded text-xs
+                                {% if task.status == 'completed' %}bg-green-100 text-green-700
+                                {% elif task.status == 'running' %}bg-blue-100 text-blue-700
+                                {% elif task.status == 'claimed' %}bg-blue-50 text-blue-600
+                                {% elif task.status == 'pending' or task.status == 'planned' %}bg-gray-100 text-gray-500
+                                {% elif task.status == 'failed' %}bg-red-100 text-red-700
+                                {% elif task.status == 'needs_review' %}bg-purple-100 text-purple-700
+                                {% else %}bg-gray-100 text-gray-600{% endif %}">
+                                {% if task.status == 'running' %}
+                                <span class="inline-block w-1.5 h-1.5 bg-blue-500 rounded-full animate-pulse mr-1"></span>
+                                {% endif %}
+                                {{ task.status }}
+                            </span>
+
+                            <!-- Agent type -->
+                            {% if task.agent_type %}
+                            <span class="px-1.5 py-0.5 rounded text-xs bg-indigo-50 text-indigo-600">{{ task.agent_type }}</span>
+                            {% endif %}
+
+                            <!-- Memory count -->
+                            {% if task.memories %}
+                            <span class="px-1.5 py-0.5 rounded text-xs bg-emerald-50 text-emerald-600">{{ task.memories|length }} memories</span>
+                            {% endif %}
+                        </div>
+                        {% if task.description %}
+                        <p class="text-xs text-gray-500 mt-1 ml-6">{{ task.description[:200] }}</p>
+                        {% endif %}
+                    </div>
+                    {% if task.completed_at %}
+                    <span class="text-xs text-gray-400 shrink-0">{{ task.completed_at.strftime('%H:%M:%S') }}</span>
+                    {% elif task.claimed_at %}
+                    <span class="text-xs text-blue-400 shrink-0">started {{ task.claimed_at.strftime('%H:%M:%S') }}</span>
+                    {% endif %}
+                </div>
+            </summary>
+
+            <div class="px-3 pb-3 border-t border-gray-100 pt-2 space-y-3">
+                <!-- Result -->
+                {% if task.result %}
+                <div>
+                    <h4 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1">Result</h4>
+                    <div class="bg-gray-50 rounded p-2 text-sm text-gray-700 max-h-48 overflow-y-auto whitespace-pre-wrap font-mono text-xs">{{ task.result[:2000] }}</div>
+                </div>
+                {% endif %}
+
+                <!-- Error -->
+                {% if task.error %}
+                <div>
+                    <h4 class="text-xs font-semibold text-red-400 uppercase tracking-wider mb-1">Error</h4>
+                    <div class="bg-red-50 rounded p-2 text-sm text-red-700 font-mono text-xs">{{ task.error }}</div>
+                </div>
+                {% endif %}
+
+                <!-- Linked Memories -->
+                {% if task.memories %}
+                <div>
+                    <h4 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1">Linked Memories</h4>
+                    <div class="space-y-1">
+                        {% for mem in task.memories %}
+                        <div class="flex items-center gap-2 text-xs">
+                            <span class="px-1.5 py-0.5 rounded
+                                {% if mem.relation == 'created' %}bg-green-50 text-green-600
+                                {% elif mem.relation == 'updated' %}bg-blue-50 text-blue-600
+                                {% else %}bg-gray-50 text-gray-500{% endif %}">
+                                {{ mem.relation }}
+                            </span>
+                            <a href="/memories/{{ mem.memory_id }}" class="text-primary-600 hover:underline truncate">
+                                {{ mem.content[:80] if mem.content else mem.memory_id }}
+                            </a>
+                            {% if mem.tags %}
+                            <div class="flex gap-1">
+                                {% for tag in mem.tags[:3] %}
+                                <span class="px-1 py-0.5 bg-gray-100 text-gray-400 rounded text-[10px]">{{ tag }}</span>
+                                {% endfor %}
+                            </div>
+                            {% endif %}
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+                {% endif %}
+
+                <!-- Events Timeline -->
+                {% if task.events %}
+                <div>
+                    <h4 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1">Timeline</h4>
+                    <div class="space-y-0.5">
+                        {% for event in task.events %}
+                        <div class="flex items-center gap-2 text-xs">
+                            <span class="text-gray-400 font-mono shrink-0">{{ event.created_at.strftime('%H:%M:%S') }}</span>
+                            <span class="w-1.5 h-1.5 rounded-full shrink-0
+                                {% if 'completed' in event.event_type %}bg-green-400
+                                {% elif 'failed' in event.event_type %}bg-red-400
+                                {% elif 'running' in event.event_type or 'claimed' in event.event_type %}bg-blue-400
+                                {% elif 'memory' in event.event_type %}bg-emerald-400
+                                {% else %}bg-gray-300{% endif %}"></span>
+                            <span class="text-gray-600">{{ event.detail or event.event_type }}</span>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+                {% endif %}
+
+                <!-- Sub-tasks -->
+                {% if task.sub_tasks %}
+                <div>
+                    <h4 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1">Sub-tasks</h4>
+                    {% for sub in task.sub_tasks %}
+                    {{ render_task(sub, depth + 1) }}
+                    {% endfor %}
+                </div>
+                {% endif %}
+            </div>
+        </details>
+        {% endmacro %}
+
+        {% if req.task_tree %}
+        {% for task in req.task_tree %}
+        {{ render_task(task) }}
+        {% endfor %}
+        {% else %}
+        <div class="bg-white rounded-lg border border-gray-200 p-6 text-center text-gray-500 text-sm">
+            No tasks planned yet. The cognitive layer will break this request into tasks during the next cycle.
+        </div>
+        {% endif %}
+    </div>
+
+    <!-- Right: Activity Feed (1 col) -->
+    <div>
+        <h2 class="text-lg font-semibold text-gray-900 mb-3">Activity Feed</h2>
+        <div class="bg-white rounded-lg border border-gray-200 p-3 max-h-[calc(100vh-16rem)] overflow-y-auto">
+            {% if recent_events %}
+            <div class="space-y-2">
+                {% for event in recent_events %}
+                <div class="flex gap-2 text-xs border-b border-gray-50 pb-2 last:border-0">
+                    <!-- Event dot -->
+                    <div class="mt-1 shrink-0">
+                        <span class="block w-2 h-2 rounded-full
+                            {% if 'completed' in event.event_type %}bg-green-400
+                            {% elif 'failed' in event.event_type %}bg-red-400
+                            {% elif 'running' in event.event_type or 'claimed' in event.event_type %}bg-blue-400
+                            {% elif 'memory' in event.event_type %}bg-emerald-400
+                            {% elif 'created' in event.event_type %}bg-gray-300
+                            {% else %}bg-gray-300{% endif %}"></span>
+                    </div>
+                    <div class="flex-1 min-w-0">
+                        <p class="text-gray-700">
+                            {% if event.task_title %}<span class="font-medium">{{ event.task_title }}</span> — {% endif %}
+                            {{ event.detail or event.event_type }}
+                        </p>
+                        <div class="flex items-center gap-2 text-gray-400 mt-0.5">
+                            <span>{{ event.created_at.strftime('%H:%M:%S') }}</span>
+                            {% if event.agent_type %}
+                            <span class="px-1 py-0.5 bg-indigo-50 text-indigo-500 rounded">{{ event.agent_type }}</span>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+            {% else %}
+            <p class="text-sm text-gray-400 text-center py-4">No activity yet</p>
+            {% endif %}
+        </div>
+
+        <!-- Request Metadata -->
+        <div class="mt-4 bg-white rounded-lg border border-gray-200 p-3">
+            <h3 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Details</h3>
+            <dl class="space-y-1 text-xs">
+                <div class="flex justify-between">
+                    <dt class="text-gray-500">ID</dt>
+                    <dd class="text-gray-700 font-mono">{{ (req.id | string)[:8] }}</dd>
+                </div>
+                <div class="flex justify-between">
+                    <dt class="text-gray-500">Created</dt>
+                    <dd class="text-gray-700">{{ req.created_at.strftime('%Y-%m-%d %H:%M:%S') if req.created_at }}</dd>
+                </div>
+                {% if req.completed_at %}
+                <div class="flex justify-between">
+                    <dt class="text-gray-500">Completed</dt>
+                    <dd class="text-gray-700">{{ req.completed_at.strftime('%Y-%m-%d %H:%M:%S') }}</dd>
+                </div>
+                {% endif %}
+                <div class="flex justify-between">
+                    <dt class="text-gray-500">Source</dt>
+                    <dd class="text-gray-700">{{ req.source }}</dd>
+                </div>
+                <div class="flex justify-between">
+                    <dt class="text-gray-500">Priority</dt>
+                    <dd class="text-gray-700">{{ req.priority }}</dd>
+                </div>
+            </dl>
+        </div>
+    </div>
+</div>
+{% endblock %}

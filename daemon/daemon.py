@@ -96,10 +96,16 @@ DAEMON_KEY_FILE = DAEMON_DIR / ".daemon_api_key"
 MCP_URL = os.environ.get("LUCENT_MCP_URL", "http://localhost:8766/mcp")
 MCP_API_KEY = os.environ.get("LUCENT_MCP_API_KEY", "")
 
-# Database URL for direct key provisioning (same DB the server uses)
+# Database URL for direct key provisioning.
+# Prefers DAEMON_DATABASE_URL (restricted lucent_daemon role) over DATABASE_URL
+# (full-privilege server role). The restricted role can only manage api_keys.
 DATABASE_URL = os.environ.get(
-    "DATABASE_URL", "postgresql://lucent:lucent_dev_password@localhost:5433/lucent"
+    "DAEMON_DATABASE_URL",
+    os.environ.get("DATABASE_URL", "postgresql://lucent:lucent_dev_password@localhost:5433/lucent"),
 )
+
+# Key expiry — daemon keys auto-expire and are refreshed each cycle
+KEY_TTL_HOURS = 24
 
 # These are set dynamically after key provisioning in LucentDaemon.start()
 MCP_CONFIG: dict = {}
@@ -115,6 +121,7 @@ def _build_auth_config(api_key: str) -> tuple[dict, dict]:
                 "type": "http",
                 "url": MCP_URL,
                 "headers": {"Authorization": f"Bearer {api_key}"},
+                "tools": ["*"],
             },
         }
         if api_key
@@ -128,17 +135,26 @@ def _build_auth_config(api_key: str) -> tuple[dict, dict]:
 # API Key Provisioning
 # ============================================================================
 
+# Tracks the current key's DB id so we can revoke it on shutdown
+_current_key_db_id: str | None = None
 
-async def _provision_daemon_api_key() -> str | None:
-    """Create a daemon service API key directly in the database.
 
-    Creates a 'lucent-daemon' user (if needed) and a persistent API key.
+async def _provision_daemon_api_key(instance_id: str) -> str | None:
+    """Provision an instance-scoped API key with a 24-hour expiry.
+
+    Uses the restricted lucent_daemon DB role which can only touch api_keys,
+    users (SELECT), and organizations (SELECT).  The daemon service user is
+    pre-created by migration 017; if it doesn't exist yet, we fall back to
+    creating it (works when connected as the full-privilege lucent role).
+
     Returns the plain-text hs_ key, or None on failure.
     """
     import secrets
 
     import asyncpg
     import bcrypt
+
+    global _current_key_db_id
 
     try:
         conn = await asyncpg.connect(DATABASE_URL)
@@ -147,63 +163,84 @@ async def _provision_daemon_api_key() -> str | None:
         return None
 
     try:
-        # Ensure a daemon service user exists
+        # Look up the daemon service user (created by migration 017)
         user = await conn.fetchrow(
             "SELECT id, organization_id FROM users "
             "WHERE external_id = 'daemon-service' AND is_active = true"
         )
         if not user:
-            # Find the default organization (first org, or the owner's org)
-            org = await conn.fetchrow(
-                "SELECT id FROM organizations ORDER BY created_at LIMIT 1"
-            )
-            org_id = str(org["id"]) if org else None
-
-            user = await conn.fetchrow(
-                "INSERT INTO users (external_id, provider, organization_id, "
-                "  email, display_name, role) "
-                "VALUES ('daemon-service', 'local', $1, "
-                "  'daemon@lucent.local', 'Lucent Daemon', 'member') "
-                "RETURNING id, organization_id",
-                org_id,
-            )
-            log("Created daemon service user")
+            # Fallback: create the user if we have sufficient privileges
+            # (only works with the full lucent role, not lucent_daemon)
+            try:
+                org = await conn.fetchrow(
+                    "SELECT id FROM organizations ORDER BY created_at LIMIT 1"
+                )
+                org_id = str(org["id"]) if org else None
+                user = await conn.fetchrow(
+                    "INSERT INTO users (external_id, provider, organization_id, "
+                    "  email, display_name, role) "
+                    "VALUES ('daemon-service', 'local', $1, "
+                    "  'daemon@lucent.local', 'Lucent Daemon', 'member') "
+                    "RETURNING id, organization_id",
+                    org_id,
+                )
+                log("Created daemon service user (fallback path)")
+            except Exception as e:
+                log(
+                    f"Daemon service user not found and cannot create: {e}. "
+                    "Run migration 017 or use the full DATABASE_URL.",
+                    "ERROR",
+                )
+                return None
 
         user_id = str(user["id"])
         org_id = str(user["organization_id"]) if user["organization_id"] else None
 
-        # Check for existing active daemon key
-        existing = await conn.fetchrow(
-            "SELECT id FROM api_keys "
-            "WHERE user_id = $1 AND name = 'daemon-service-key' "
-            "AND is_active = true AND revoked_at IS NULL",
+        # Instance-specific key name prevents collisions between daemon instances
+        key_name = f"daemon-{instance_id}"
+
+        # Revoke any prior key for THIS instance (unique constraint on name)
+        await conn.execute(
+            "UPDATE api_keys SET is_active = false, revoked_at = NOW() "
+            "WHERE user_id = $1 AND name = $2 AND revoked_at IS NULL",
+            user_id,
+            key_name,
+        )
+
+        # Hard-delete old revoked daemon keys to prevent table bloat.
+        # Keep only the 5 most recent revoked keys for audit trail.
+        await conn.execute(
+            "DELETE FROM api_keys WHERE user_id = $1 "
+            "AND name LIKE 'daemon-%' AND revoked_at IS NOT NULL "
+            "AND id NOT IN ("
+            "  SELECT id FROM api_keys WHERE user_id = $1 "
+            "  AND name LIKE 'daemon-%' AND revoked_at IS NOT NULL "
+            "  ORDER BY revoked_at DESC LIMIT 5"
+            ")",
             user_id,
         )
-        if existing:
-            # Key exists but we don't have the plaintext — revoke and recreate
-            await conn.execute(
-                "UPDATE api_keys SET is_active = false, revoked_at = NOW() "
-                "WHERE id = $1",
-                existing["id"],
-            )
 
-        # Generate a new hs_ key
+        # Generate a new hs_ key with 24h expiry
         raw_key = secrets.token_urlsafe(32)
         plain_key = f"hs_{raw_key}"
         key_prefix = plain_key[:11]
         key_hash = bcrypt.hashpw(plain_key.encode(), bcrypt.gensalt()).decode()
 
-        await conn.execute(
+        row = await conn.fetchrow(
             "INSERT INTO api_keys "
-            "(user_id, organization_id, name, key_prefix, key_hash, scopes) "
-            "VALUES ($1, $2, 'daemon-service-key', $3, $4, $5)",
+            "(user_id, organization_id, name, key_prefix, key_hash, scopes, expires_at) "
+            "VALUES ($1, $2, $3, $4, $5, $6, NOW() + INTERVAL '1 hour' * $7) "
+            "RETURNING id",
             user_id,
             org_id,
+            key_name,
             key_prefix,
             key_hash,
             ["read", "write"],
+            KEY_TTL_HOURS,
         )
-        log(f"Provisioned daemon API key (prefix: {key_prefix})")
+        _current_key_db_id = str(row["id"])
+        log(f"Provisioned daemon API key (prefix: {key_prefix}, expires in {KEY_TTL_HOURS}h)")
         return plain_key
 
     except Exception as e:
@@ -211,6 +248,38 @@ async def _provision_daemon_api_key() -> str | None:
         return None
     finally:
         await conn.close()
+
+
+async def _revoke_current_key() -> None:
+    """Revoke the daemon's current API key (called on shutdown)."""
+    import asyncpg
+
+    global _current_key_db_id
+
+    if not _current_key_db_id:
+        return
+
+    try:
+        conn = await asyncpg.connect(DATABASE_URL)
+        try:
+            await conn.execute(
+                "UPDATE api_keys SET is_active = false, revoked_at = NOW() "
+                "WHERE id = $1 AND revoked_at IS NULL",
+                _current_key_db_id,
+            )
+            log(f"Revoked daemon API key on shutdown (id: {_current_key_db_id[:8]}...)")
+        finally:
+            await conn.close()
+    except Exception as e:
+        log(f"Failed to revoke key on shutdown: {e}", "WARN")
+    finally:
+        _current_key_db_id = None
+        # Clean up cached key file
+        if DAEMON_KEY_FILE.exists():
+            try:
+                DAEMON_KEY_FILE.unlink()
+            except OSError:
+                pass
 
 
 async def _verify_api_key(api_key: str) -> bool:
@@ -228,7 +297,7 @@ async def _verify_api_key(api_key: str) -> bool:
         return False
 
 
-async def ensure_valid_api_key() -> str:
+async def ensure_valid_api_key(instance_id: str = "local") -> str:
     """Ensure the daemon has a valid hs_ API key.
 
     Checks (in order): env var, cached file, provision new.
@@ -252,11 +321,11 @@ async def ensure_valid_api_key() -> str:
             MCP_CONFIG, API_HEADERS = _build_auth_config(cached_key)
             return cached_key
 
-    # 3. Provision a new key
+    # 3. Provision a new key (instance-scoped, 24h expiry)
     log("No valid API key found — provisioning daemon service account...")
-    new_key = await _provision_daemon_api_key()
+    new_key = await _provision_daemon_api_key(instance_id)
     if new_key:
-        # Cache for future cycles
+        # Cache for future restarts (same instance can reuse if not expired)
         DAEMON_KEY_FILE.write_text(new_key)
         DAEMON_KEY_FILE.chmod(0o600)
         MCP_API_KEY = new_key
@@ -268,6 +337,29 @@ async def ensure_valid_api_key() -> str:
     log("WARNING: Could not provision a valid API key", "WARN")
     MCP_CONFIG, API_HEADERS = _build_auth_config(MCP_API_KEY)
     return MCP_API_KEY
+
+
+async def _handle_auth_failure(instance_id: str) -> bool:
+    """Re-provision API key after an authentication failure.
+
+    Returns True if a new key was provisioned successfully.
+    """
+    global MCP_API_KEY, MCP_CONFIG, API_HEADERS, _current_key_db_id
+
+    log("Auth failure detected — re-provisioning API key...", "WARN")
+    _current_key_db_id = None  # old key is dead
+
+    new_key = await _provision_daemon_api_key(instance_id)
+    if new_key:
+        DAEMON_KEY_FILE.write_text(new_key)
+        DAEMON_KEY_FILE.chmod(0o600)
+        MCP_API_KEY = new_key
+        MCP_CONFIG, API_HEADERS = _build_auth_config(new_key)
+        log("Re-provisioned daemon API key after auth failure")
+        return True
+
+    log("Failed to re-provision API key after auth failure", "ERROR")
+    return False
 
 
 # ============================================================================
@@ -357,6 +449,152 @@ class MemoryAPI:
         except Exception as e:
             log(f"API get failed: {e}", "WARN")
         return None
+
+
+class RequestAPI:
+    """REST API client for the request tracking system."""
+
+    API_TIMEOUT = 15
+
+    @staticmethod
+    async def create_request(title: str, description: str | None = None,
+                             source: str = "cognitive", priority: str = "medium") -> dict | None:
+        body = {"title": title, "source": source, "priority": priority}
+        if description:
+            body["description"] = description
+        try:
+            async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
+                resp = await client.post(f"{API_BASE}/requests", json=body, headers=API_HEADERS)
+                if resp.status_code in (200, 201):
+                    return resp.json()
+        except Exception as e:
+            log(f"API create_request failed: {e}", "WARN")
+        return None
+
+    @staticmethod
+    async def create_task(request_id: str, title: str, agent_type: str | None = None,
+                          description: str | None = None, priority: str = "medium",
+                          sequence_order: int = 0) -> dict | None:
+        body = {"title": title, "priority": priority, "sequence_order": sequence_order}
+        if agent_type:
+            body["agent_type"] = agent_type
+        if description:
+            body["description"] = description
+        try:
+            async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
+                resp = await client.post(
+                    f"{API_BASE}/requests/{request_id}/tasks", json=body, headers=API_HEADERS)
+                if resp.status_code in (200, 201):
+                    return resp.json()
+        except Exception as e:
+            log(f"API create_task failed: {e}", "WARN")
+        return None
+
+    @staticmethod
+    async def claim_task(task_id: str, instance_id: str) -> dict | None:
+        try:
+            async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
+                resp = await client.post(
+                    f"{API_BASE}/requests/tasks/{task_id}/claim",
+                    params={"instance_id": instance_id}, headers=API_HEADERS)
+                if resp.status_code in (200, 201):
+                    return resp.json()
+        except Exception as e:
+            log(f"API claim_task failed: {e}", "WARN")
+        return None
+
+    @staticmethod
+    async def start_task(task_id: str) -> dict | None:
+        try:
+            async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
+                resp = await client.post(
+                    f"{API_BASE}/requests/tasks/{task_id}/start", headers=API_HEADERS)
+                if resp.status_code == 200:
+                    return resp.json()
+        except Exception as e:
+            log(f"API start_task failed: {e}", "WARN")
+        return None
+
+    @staticmethod
+    async def complete_task(task_id: str, result: str) -> dict | None:
+        try:
+            async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
+                resp = await client.post(
+                    f"{API_BASE}/requests/tasks/{task_id}/complete",
+                    params={"result": result[:8000]}, headers=API_HEADERS)
+                if resp.status_code == 200:
+                    return resp.json()
+        except Exception as e:
+            log(f"API complete_task failed: {e}", "WARN")
+        return None
+
+    @staticmethod
+    async def fail_task(task_id: str, error: str) -> dict | None:
+        try:
+            async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
+                resp = await client.post(
+                    f"{API_BASE}/requests/tasks/{task_id}/fail",
+                    params={"error": error[:2000]}, headers=API_HEADERS)
+                if resp.status_code == 200:
+                    return resp.json()
+        except Exception as e:
+            log(f"API fail_task failed: {e}", "WARN")
+        return None
+
+    @staticmethod
+    async def add_event(task_id: str, event_type: str, detail: str | None = None,
+                        metadata: dict | None = None) -> dict | None:
+        body = {"event_type": event_type}
+        if detail:
+            body["detail"] = detail
+        if metadata:
+            body["metadata"] = metadata
+        try:
+            async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
+                resp = await client.post(
+                    f"{API_BASE}/requests/tasks/{task_id}/events",
+                    json=body, headers=API_HEADERS)
+                if resp.status_code in (200, 201):
+                    return resp.json()
+        except Exception as e:
+            log(f"API add_event failed: {e}", "WARN")
+        return None
+
+    @staticmethod
+    async def link_memory(task_id: str, memory_id: str, relation: str = "created") -> None:
+        body = {"memory_id": memory_id, "relation": relation}
+        try:
+            async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
+                await client.post(
+                    f"{API_BASE}/requests/tasks/{task_id}/memories",
+                    json=body, headers=API_HEADERS)
+        except Exception as e:
+            log(f"API link_memory failed: {e}", "WARN")
+
+    @staticmethod
+    async def get_pending_tasks() -> list[dict]:
+        try:
+            async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
+                resp = await client.get(
+                    f"{API_BASE}/requests/queue/pending", headers=API_HEADERS)
+                if resp.status_code == 200:
+                    return resp.json()
+        except Exception as e:
+            log(f"API get_pending_tasks failed: {e}", "WARN")
+        return []
+
+    @staticmethod
+    async def release_stale(stale_minutes: int = 30) -> int:
+        try:
+            async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
+                resp = await client.post(
+                    f"{API_BASE}/requests/queue/release-stale",
+                    params={"stale_minutes": stale_minutes}, headers=API_HEADERS)
+                if resp.status_code == 200:
+                    return resp.json().get("released", 0)
+        except Exception as e:
+            log(f"API release_stale failed: {e}", "WARN")
+        return 0
 
 
 # ============================================================================
@@ -595,7 +833,7 @@ class LucentDaemon:
         self.running = True
 
         # Ensure we have a valid API key before anything else
-        await ensure_valid_api_key()
+        await ensure_valid_api_key(self.instance_id)
 
         # Start the watchdog thread — detects event loop freezes
         watchdog = threading.Thread(target=_watchdog_loop, daemon=True, name="watchdog")
@@ -620,9 +858,12 @@ class LucentDaemon:
                 task.cancel()
 
     async def stop(self):
-        """Stop the daemon and clean up heartbeat."""
+        """Stop the daemon, revoke API key, and clean up."""
         log(f"Stopping daemon (instance: {self.instance_id})...")
         self.running = False
+
+        # Revoke the daemon's API key — clean up after ourselves
+        await _revoke_current_key()
 
         # Release any tasks claimed by this instance
         try:
@@ -696,7 +937,7 @@ class LucentDaemon:
                     "model": model or MODEL,
                     "system_message": {"content": system_message},
                     "on_permission_request": PermissionHandler.approve_all,
-                    "mcpServers": MCP_CONFIG,
+                    "mcp_servers": MCP_CONFIG,
                 }
             )
             self.active_sessions.append(session)
@@ -846,11 +1087,21 @@ class LucentDaemon:
         self.cycle_count += 1
         log(f"=== Cognitive cycle #{self.cycle_count} (instance: {self.instance_id}) ===")
 
+        # Verify API key is still valid (handles 24h expiry and revocation)
+        if not await _verify_api_key(MCP_API_KEY):
+            log("API key expired or revoked — re-provisioning...", "WARN")
+            if not await _handle_auth_failure(self.instance_id):
+                log("Cannot proceed without valid API key — skipping cycle", "ERROR")
+                return
+
         # Heartbeat before cognitive work
         await self._update_heartbeat()
 
-        # Release stale claims from dead instances
+        # Release stale claims from dead instances (both legacy and new system)
         await self._release_stale_claims()
+        stale = await RequestAPI.release_stale(STALE_HEARTBEAT_MINUTES)
+        if stale:
+            log(f"Released {stale} stale tracked tasks")
 
         # On first cycle, check if environment adaptation is needed
         if self.cycle_count == 1:
@@ -873,6 +1124,12 @@ class LucentDaemon:
 
         # After cognitive loop runs, check for pending tasks it created
         await self._dispatch_pending_tasks()
+
+        # Fire any due scheduled tasks (creates requests + tasks for them)
+        await self._check_due_schedules()
+
+        # Also dispatch from the new request tracking queue
+        await self._dispatch_tracked_tasks()
 
     # --- Distributed Coordination ---
 
@@ -1124,6 +1381,94 @@ class LucentDaemon:
                 release_tags = [t for t in claim_tags if t != "in-progress"] + ["pending"]
                 await MemoryAPI.update(memory_id, tags=release_tags)
                 log(f"Task {memory_id[:8]} NOT complete — {reason}. Released claim.", "WARN")
+
+    async def _check_due_schedules(self):
+        """Fire any scheduled tasks that are due, creating requests for them."""
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.get(f"{API_BASE}/schedules/due", headers=API_HEADERS)
+                if resp.status_code != 200:
+                    return
+                due = resp.json()
+                if not due:
+                    return
+
+            log(f"Found {len(due)} due schedules")
+
+            for sched in due:
+                sched_id = str(sched["id"])
+                title = sched.get("title", "Scheduled task")
+                template = sched.get("task_template") or {}
+
+                # Trigger the schedule via API (creates request + task + records run)
+                try:
+                    async with httpx.AsyncClient(timeout=15) as client:
+                        resp = await client.post(
+                            f"{API_BASE}/schedules/{sched_id}/trigger",
+                            headers=API_HEADERS,
+                        )
+                        if resp.status_code in (200, 201):
+                            data = resp.json()
+                            req_id = data.get("request", {}).get("id", "?")
+                            log(f"Triggered schedule {sched_id[:8]} '{title}' → request {str(req_id)[:8]}")
+                        else:
+                            log(f"Failed to trigger schedule {sched_id[:8]}: {resp.status_code}", "WARN")
+                except Exception as e:
+                    log(f"Error triggering schedule {sched_id[:8]}: {e}", "WARN")
+
+        except Exception as e:
+            log(f"Error checking due schedules: {e}", "WARN")
+
+    async def _dispatch_tracked_tasks(self, max_tasks: int = 2):
+        """Dispatch tasks from the new request tracking queue."""
+        pending = await RequestAPI.get_pending_tasks()
+        if not pending:
+            return
+
+        log(f"Found {len(pending)} tracked tasks in queue")
+        dispatched = 0
+
+        for task in pending:
+            if dispatched >= max_tasks:
+                log(f"Tracked task cap reached ({max_tasks}), deferring rest to next cycle")
+                break
+
+            task_id = str(task["id"])
+            agent_type = task.get("agent_type", "code")
+            title = task.get("title", "")
+            description = task.get("description", title)
+
+            # Claim it atomically
+            claimed = await RequestAPI.claim_task(task_id, self.instance_id)
+            if not claimed:
+                continue
+
+            log(f"Dispatching tracked task {task_id[:8]} to {agent_type}: {title[:80]}...")
+
+            # Mark running
+            await RequestAPI.start_task(task_id)
+            await RequestAPI.add_event(task_id, "agent_dispatched",
+                                       f"Dispatched to {agent_type} agent",
+                                       {"agent_type": agent_type, "instance_id": self.instance_id})
+
+            # Build and run the sub-agent
+            system_message = build_subagent_prompt(agent_type, description)
+            result = await self.run_session(
+                f"{agent_type}-{task_id[:8]}",
+                system_message,
+                f"Execute this task:\n\n{description}",
+            )
+            dispatched += 1
+
+            # Validate
+            success, reason = self._validate_task_result(result)
+
+            if success:
+                await RequestAPI.complete_task(task_id, result)
+                log(f"Tracked task {task_id[:8]} completed ({len(result) if result else 0} chars)")
+            else:
+                await RequestAPI.fail_task(task_id, reason)
+                log(f"Tracked task {task_id[:8]} failed: {reason}", "WARN")
 
     async def _multi_model_review(
         self, memory_id: str, agent_type: str, task_content: str, result: str

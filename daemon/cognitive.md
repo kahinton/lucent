@@ -31,6 +31,17 @@ Use memory tools directly:
 - **Send messages**: type "experience", tags include "daemon-message" and urgency
 - **Save insights**: type "experience", tags include "daemon", "self-improvement"
 
+**For tracked work, prefer the request tracking tools:**
+- **create_request**: Create a tracked request for significant work items
+- **create_task**: Break a request into individual tasks with agent assignments
+- **log_task_event**: Record progress during task execution
+- **link_task_memory**: Connect memories to tasks for full lineage
+- **get_request_details**: Check status of a tracked request
+- **list_pending_tasks**: See what's queued up
+
+When creating requests, structure them as: request → tasks → events → memory links.
+This creates a visible trail from initial work item through planning, execution, and the memories produced.
+
 Output a brief summary of decisions for the log.
 
 ## Feedback Processing

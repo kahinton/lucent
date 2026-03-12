@@ -31,6 +31,8 @@ services:
       DATABASE_URL: postgresql://lucent:${POSTGRES_PASSWORD:-lucent_dev_password}@postgres:5432/lucent
       LUCENT_MODE: ${LUCENT_MODE:-personal}
       LUCENT_LICENSE_KEY: ${LUCENT_LICENSE_KEY:-}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      LUCENT_CHAT_MODEL: ${LUCENT_CHAT_MODEL:-claude-opus-4.6}
     volumes:
       - ./src:/app/src:cached
       - ./pyproject.toml:/app/pyproject.toml:ro
@@ -62,6 +64,9 @@ services:
       LUCENT_DAEMON_MODEL: ${LUCENT_DAEMON_MODEL:-claude-opus-4.6}
       LUCENT_MAX_SESSIONS: ${LUCENT_MAX_SESSIONS:-3}
       LUCENT_STALE_HEARTBEAT_MINUTES: ${LUCENT_STALE_HEARTBEAT_MINUTES:-30}
+      # Restricted DB connection for API key provisioning only.
+      # Uses lucent_daemon role with least-privilege grants (see migration 017).
+      DAEMON_DATABASE_URL: postgresql://lucent_daemon:${DAEMON_DB_PASSWORD:-lucent_daemon_dev_password}@postgres:5432/lucent
     volumes:
       - ./daemon:/app/daemon:cached
       - ./src:/app/src:cached
@@ -83,6 +88,7 @@ services:
       LUCENT_DAEMON_MODEL: ${LUCENT_DAEMON_MODEL:-claude-opus-4.6}
       LUCENT_MAX_SESSIONS: ${LUCENT_MAX_SESSIONS:-3}
       LUCENT_STALE_HEARTBEAT_MINUTES: ${LUCENT_STALE_HEARTBEAT_MINUTES:-30}
+      DAEMON_DATABASE_URL: postgresql://lucent_daemon:${DAEMON_DB_PASSWORD:-lucent_daemon_dev_password}@postgres:5432/lucent
     volumes:
       - ./daemon:/app/daemon:cached
       - ./src:/app/src:cached

@@ -36,6 +36,14 @@ mcp = FastMCP("Lucent")
 # Register all memory tools
 register_tools(mcp)
 
+# Register request tracking tools
+from lucent.tools.requests import register_request_tools
+register_request_tools(mcp)
+
+# Register schedule management tools
+from lucent.tools.schedules import register_schedule_tools
+register_schedule_tools(mcp)
+
 # Get logger for this module
 logger = get_logger("server")
 
@@ -154,15 +162,49 @@ class MCPAuthMiddleware:
                 except Exception as e:
                     logger.error("API key auth error", exc_info=e)
 
-            # Invalid API key provided
-            logger.warning("MCP auth failed: invalid API key on %s", path)
+            # Not an hs_ key — try session token auth
+            # This allows the chat agent to pass the user's web session
+            # token so MCP operations run as the actual user.
+            if not api_key.startswith("hs_"):
+                try:
+                    from lucent.auth_providers import validate_session
+
+                    try:
+                        pool = await get_pool()
+                    except RuntimeError:
+                        database_url = os.environ.get("DATABASE_URL")
+                        pool = await init_db(database_url) if database_url else None
+
+                    if pool:
+                        logger.debug(
+                            "Trying session token auth on MCP: token_len=%d, prefix=%s",
+                            len(api_key), api_key[:8],
+                        )
+                        user = await validate_session(pool, api_key)
+                        if user:
+                            logger.info("MCP session auth succeeded for user %s", user.get("display_name"))
+                            set_current_user(user)
+                            try:
+                                await self.app(scope, receive, send)
+                            finally:
+                                set_current_user(None)
+                            return
+                        else:
+                            logger.warning("MCP session token auth: validate_session returned None")
+                    else:
+                        logger.warning("MCP session token auth: no pool available")
+                except Exception as e:
+                    logger.error("Session token auth error on MCP", exc_info=e)
+
+            # Auth failed
+            logger.warning("MCP auth failed: invalid credentials on %s", path)
             response = JSONResponse(
                 status_code=401,
                 content={
                     "jsonrpc": "2.0",
                     "error": {
                         "code": -32001,
-                        "message": "Unauthorized: Invalid or expired API key",
+                        "message": "Unauthorized: Invalid or expired credentials",
                     },
                     "id": None,
                 },
@@ -179,9 +221,8 @@ class MCPAuthMiddleware:
                 "error": {
                     "code": -32001,
                     "message": (
-                        "Unauthorized: API key required."
-                        " Use Authorization: Bearer"
-                        " hs_your_key_here"
+                        "Unauthorized: API key or session token required."
+                        " Use Authorization: Bearer <token>"
                     ),
                 },
                 "id": None,

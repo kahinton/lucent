@@ -1,0 +1,180 @@
+"""MCP tools for request tracking and task queue operations."""
+
+import json
+from uuid import UUID
+
+from mcp.server.fastmcp import FastMCP
+
+from lucent.db.requests import RequestRepository
+from lucent.tools.memories import _get_current_user_context, _get_repository
+
+
+async def _get_request_repository() -> RequestRepository:
+    """Get or create a RequestRepository instance."""
+    from lucent.db import init_db
+    from lucent.server import database_url
+    pool = await init_db(database_url)
+    return RequestRepository(pool)
+
+
+def register_request_tools(mcp: FastMCP) -> None:
+    """Register request tracking tools with the MCP server."""
+
+    @mcp.tool(description="""Create a tracked request — a top-level work item that will be broken into tasks.
+
+Use this when you identify new work to do (during cognitive cycles, from user messages, etc.).
+The request will appear in the Requests UI and can be broken into tasks.
+
+Args:
+    title: Short descriptive title (e.g. "Improve search performance")
+    description: Detailed description of what needs to be done
+    source: Where this request came from — 'cognitive', 'user', 'api', or 'daemon'
+    priority: 'low', 'medium', 'high', or 'urgent'
+
+Returns: JSON with the created request including its ID.""")
+    async def create_request(
+        title: str,
+        description: str = "",
+        source: str = "cognitive",
+        priority: str = "medium",
+    ) -> str:
+        user_id, org_id, _ = await _get_current_user_context()
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+
+        repo = await _get_request_repository()
+        req = await repo.create_request(
+            title=title, description=description,
+            source=source, priority=priority,
+            created_by=str(user_id) if user_id else None,
+            org_id=str(org_id),
+        )
+        return json.dumps({"id": str(req["id"]), "title": req["title"], "status": req["status"]})
+
+    @mcp.tool(description="""Create a task within a tracked request.
+
+Use after create_request to break a request into individual tasks that agents will execute.
+Each task can be assigned to a specific agent type and will be dispatched in sequence_order.
+
+Args:
+    request_id: ID of the parent request
+    title: Short descriptive title for the task
+    description: Full task instructions for the agent
+    agent_type: Agent to handle this — 'code', 'research', 'memory', 'reflection', 'documentation', 'planning', 'security'
+    priority: 'low', 'medium', 'high', or 'urgent'
+    sequence_order: Execution order (0-based, lower runs first)
+    parent_task_id: Optional — ID of parent task for sub-tasks
+
+Returns: JSON with the created task including its ID.""")
+    async def create_task(
+        request_id: str,
+        title: str,
+        description: str = "",
+        agent_type: str = "code",
+        priority: str = "medium",
+        sequence_order: int = 0,
+        parent_task_id: str | None = None,
+    ) -> str:
+        _, org_id, _ = await _get_current_user_context()
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+
+        repo = await _get_request_repository()
+        task = await repo.create_task(
+            request_id=request_id, title=title,
+            org_id=str(org_id), description=description,
+            agent_type=agent_type, priority=priority,
+            sequence_order=sequence_order,
+            parent_task_id=parent_task_id,
+        )
+        return json.dumps({
+            "id": str(task["id"]), "title": task["title"],
+            "status": task["status"], "agent_type": task["agent_type"],
+        })
+
+    @mcp.tool(description="""Log a progress event on a tracked task.
+
+Use during task execution to record progress, state changes, or noteworthy actions.
+Events appear in the task's timeline in the UI.
+
+Args:
+    task_id: ID of the task
+    event_type: Type of event — 'progress', 'info', 'warning', 'agent_dispatched', 'agent_completed', etc.
+    detail: Human-readable description of what happened
+
+Returns: JSON confirmation.""")
+    async def log_task_event(
+        task_id: str,
+        event_type: str,
+        detail: str = "",
+    ) -> str:
+        repo = await _get_request_repository()
+        event = await repo.add_task_event(task_id, event_type, detail)
+        return json.dumps({"id": str(event["id"]), "event_type": event_type})
+
+    @mcp.tool(description="""Link a memory to a tracked task — showing which memories were created, read, or updated during task execution.
+
+This creates the lineage between tasks and the memories they interact with,
+visible in the request detail UI.
+
+Args:
+    task_id: ID of the task
+    memory_id: ID of the memory that was touched
+    relation: How the memory was used — 'created', 'read', or 'updated'
+
+Returns: JSON confirmation.""")
+    async def link_task_memory(
+        task_id: str,
+        memory_id: str,
+        relation: str = "created",
+    ) -> str:
+        repo = await _get_request_repository()
+        await repo.link_memory(task_id, memory_id, relation)
+        return json.dumps({"status": "linked", "task_id": task_id, "memory_id": memory_id})
+
+    @mcp.tool(description="""Get the full details of a tracked request including its task tree, events, and memory links.
+
+Args:
+    request_id: ID of the request
+
+Returns: JSON with request details, task breakdown, events timeline, and memory links.""")
+    async def get_request_details(request_id: str) -> str:
+        _, org_id, _ = await _get_current_user_context()
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+
+        repo = await _get_request_repository()
+        req = await repo.get_request_with_tasks(request_id, str(org_id))
+        if not req:
+            return json.dumps({"error": "Request not found"})
+
+        # Serialize for JSON
+        def serialize(obj):
+            if hasattr(obj, "isoformat"):
+                return obj.isoformat()
+            if isinstance(obj, UUID):
+                return str(obj)
+            return str(obj)
+
+        return json.dumps(req, default=serialize)
+
+    @mcp.tool(description="""List pending tracked tasks in the queue.
+
+Returns tasks that are waiting to be claimed and executed, ordered by priority.
+Use this to see what work is queued up.""")
+    async def list_pending_tasks() -> str:
+        _, org_id, _ = await _get_current_user_context()
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+
+        repo = await _get_request_repository()
+        tasks = await repo.list_pending_tasks(str(org_id))
+
+        def serialize(obj):
+            if hasattr(obj, "isoformat"):
+                return obj.isoformat()
+            if isinstance(obj, UUID):
+                return str(obj)
+            return str(obj)
+
+        return json.dumps(tasks, default=serialize)

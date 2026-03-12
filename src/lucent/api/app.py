@@ -128,6 +128,21 @@ def create_app() -> FastAPI:
 
     app.include_router(definitions.router, prefix="/api", tags=["Definitions"])
 
+    # Include request tracking router
+    from lucent.api.routers import requests as requests_router
+
+    app.include_router(requests_router.router, prefix="/api", tags=["Requests"])
+
+    # Include schedule management router
+    from lucent.api.routers import schedules as schedules_router
+
+    app.include_router(schedules_router.router, prefix="/api", tags=["Schedules"])
+
+    # Include chat router
+    from lucent.api.routers import chat as chat_router
+
+    app.include_router(chat_router.router, prefix="/api", tags=["Chat"])
+
     # Include web interface routes (excluded from API docs)
     app.include_router(web_router, include_in_schema=False)
 

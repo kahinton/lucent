@@ -2237,3 +2237,126 @@ async def revoke_api_key(request: Request, key_id: UUID):
         raise HTTPException(status_code=404, detail="API key not found")
 
     return RedirectResponse("/settings", status_code=303)
+
+
+# =============================================================================
+# Request Tracking
+# =============================================================================
+
+
+@router.get("/requests", response_class=HTMLResponse)
+async def requests_list(request: Request, status: str | None = None):
+    """List all requests with status filtering."""
+    user = await get_user_context(request)
+    pool = await get_pool()
+    from lucent.db.requests import RequestRepository
+    repo = RequestRepository(pool)
+
+    org_id = str(user.organization_id)
+    requests_data = await repo.list_requests(org_id, status=status, limit=100)
+    summary = await repo.get_active_summary(org_id)
+
+    # Load task counts for each request
+    for req in requests_data:
+        tasks = await repo.list_tasks(str(req["id"]))
+        statuses = [t["status"] for t in tasks]
+        req["task_count"] = len(tasks)
+        req["tasks_completed"] = sum(1 for s in statuses if s == "completed")
+        req["tasks_running"] = sum(1 for s in statuses if s in ("claimed", "running"))
+        req["tasks_failed"] = sum(1 for s in statuses if s == "failed")
+
+    return templates.TemplateResponse(
+        "requests_list.html",
+        {
+            "request": request,
+            "user": user,
+            "requests": requests_data,
+            "summary": summary,
+            "filter_status": status,
+        },
+    )
+
+
+@router.get("/requests/{request_id}", response_class=HTMLResponse)
+async def request_detail(request: Request, request_id: str):
+    """Full request detail with task tree, events, and memory links."""
+    user = await get_user_context(request)
+    pool = await get_pool()
+    from lucent.db.requests import RequestRepository
+    repo = RequestRepository(pool)
+
+    req = await repo.get_request_with_tasks(request_id, str(user.organization_id))
+    if not req:
+        raise HTTPException(404, "Request not found")
+
+    # Get recent events for the activity feed
+    recent_events = []
+    for task in req.get("tasks", []):
+        for event in task.get("events", []):
+            event["task_title"] = task["title"]
+            event["agent_type"] = task.get("agent_type")
+            recent_events.append(event)
+    recent_events.sort(key=lambda e: e["created_at"], reverse=True)
+
+    return templates.TemplateResponse(
+        "request_detail.html",
+        {
+            "request": request,
+            "user": user,
+            "req": req,
+            "recent_events": recent_events[:50],
+        },
+    )
+
+
+# =============================================================================
+# Schedules
+# =============================================================================
+
+
+@router.get("/schedules", response_class=HTMLResponse)
+async def schedules_list(request: Request, status: str | None = None, enabled: str | None = None):
+    """List all scheduled tasks with filtering."""
+    user = await get_user_context(request)
+    pool = await get_pool()
+    from lucent.db.schedules import ScheduleRepository
+    repo = ScheduleRepository(pool)
+
+    org_id = str(user.organization_id)
+    enabled_filter = True if enabled == "true" else (False if enabled == "false" else None)
+    schedules = await repo.list_schedules(org_id, status=status, enabled=enabled_filter)
+    summary = await repo.get_summary(org_id)
+
+    return templates.TemplateResponse(
+        "schedules_list.html",
+        {
+            "request": request,
+            "user": user,
+            "schedules": schedules,
+            "summary": summary,
+            "filter_status": status,
+            "filter_enabled": enabled,
+        },
+    )
+
+
+@router.get("/schedules/{schedule_id}", response_class=HTMLResponse)
+async def schedule_detail(request: Request, schedule_id: str):
+    """Schedule detail page with run history."""
+    user = await get_user_context(request)
+    pool = await get_pool()
+    from lucent.db.schedules import ScheduleRepository
+    repo = ScheduleRepository(pool)
+
+    sched = await repo.get_schedule_with_runs(schedule_id, str(user.organization_id))
+    if not sched:
+        raise HTTPException(404, "Schedule not found")
+
+    return templates.TemplateResponse(
+        "schedule_detail.html",
+        {
+            "request": request,
+            "user": user,
+            "sched": sched,
+        },
+    )
