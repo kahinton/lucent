@@ -2,13 +2,12 @@
 -- Supports global (shipped) and instance (learned) definitions
 -- with approval workflow for daemon-created definitions.
 
--- Agent definitions: roles the daemon can fill
+-- Agent definitions: roles the daemon can fill (instance-specific only; global agents ship on filesystem)
 CREATE TABLE IF NOT EXISTS agent_definitions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name VARCHAR(64) NOT NULL,
     description TEXT,
     content TEXT NOT NULL,                    -- The agent.md content
-    scope VARCHAR(16) NOT NULL DEFAULT 'instance',  -- 'global' or 'instance'
     status VARCHAR(16) NOT NULL DEFAULT 'proposed', -- 'proposed', 'approved', 'active', 'rejected', 'archived'
     created_by UUID REFERENCES users(id),
     approved_by UUID REFERENCES users(id),
@@ -19,13 +18,12 @@ CREATE TABLE IF NOT EXISTS agent_definitions (
     UNIQUE(name, organization_id)
 );
 
--- Skill definitions: competencies that support roles
+-- Skill definitions: competencies that support roles (instance-specific only)
 CREATE TABLE IF NOT EXISTS skill_definitions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name VARCHAR(64) NOT NULL,
     description TEXT,
     content TEXT NOT NULL,                    -- The SKILL.md content
-    scope VARCHAR(16) NOT NULL DEFAULT 'instance',
     status VARCHAR(16) NOT NULL DEFAULT 'proposed',
     created_by UUID REFERENCES users(id),
     approved_by UUID REFERENCES users(id),
@@ -37,6 +35,7 @@ CREATE TABLE IF NOT EXISTS skill_definitions (
 );
 
 -- MCP server configs: tool connections the daemon can use
+-- Auth uses env var templates like ${GITHUB_TOKEN} — no secrets stored directly
 CREATE TABLE IF NOT EXISTS mcp_server_configs (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name VARCHAR(64) NOT NULL,
@@ -74,5 +73,3 @@ CREATE TABLE IF NOT EXISTS agent_mcp_servers (
 CREATE INDEX IF NOT EXISTS idx_agent_defs_org_status ON agent_definitions(organization_id, status);
 CREATE INDEX IF NOT EXISTS idx_skill_defs_org_status ON skill_definitions(organization_id, status);
 CREATE INDEX IF NOT EXISTS idx_mcp_configs_org_status ON mcp_server_configs(organization_id, status);
-CREATE INDEX IF NOT EXISTS idx_agent_defs_scope ON agent_definitions(scope);
-CREATE INDEX IF NOT EXISTS idx_skill_defs_scope ON skill_definitions(scope);

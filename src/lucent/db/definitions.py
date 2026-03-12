@@ -364,3 +364,11 @@ class DefinitionRepository:
         agent_dict["skills"] = await self.get_agent_skills(str(agent["id"]))
         agent_dict["mcp_servers"] = await self.get_agent_mcp_servers(str(agent["id"]))
         return agent_dict
+
+    async def list_agents_with_grants(self, org_id: str, status: str | None = None) -> list[dict]:
+        """List agents with their granted skills and MCP servers."""
+        agents = await self.list_agents(org_id, status=status)
+        for agent in agents:
+            agent["skills"] = await self.get_agent_skills(str(agent["id"]))
+            agent["mcp_servers"] = await self.get_agent_mcp_servers(str(agent["id"]))
+        return agents

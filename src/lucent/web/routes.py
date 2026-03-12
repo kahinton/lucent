@@ -648,7 +648,7 @@ async def definitions_page(request: Request, tab: str = "agents"):
     repo = DefinitionRepository(pool)
 
     org_id = str(user.organization_id)
-    agents = await repo.list_agents(org_id)
+    agents = await repo.list_agents_with_grants(org_id)
     skills = await repo.list_skills(org_id)
     mcp_servers = await repo.list_mcp_servers(org_id)
     proposals = await repo.get_pending_proposals(org_id)
