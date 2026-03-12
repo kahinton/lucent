@@ -156,12 +156,25 @@ class RequestRepository:
         return [dict(r) for r in rows]
 
     async def list_pending_tasks(self, org_id: str) -> list[dict]:
-        """Get all tasks ready to be claimed."""
+        """Get all tasks ready to be claimed.
+
+        Respects sequence_order as a dependency gate: a task is only
+        dispatchable when all lower-sequence tasks in the same request
+        have completed (or been cancelled/failed).  Tasks at the same
+        sequence_order can run in parallel.
+        """
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
                 """SELECT t.*, r.title as request_title
                    FROM tasks t JOIN requests r ON t.request_id = r.id
-                   WHERE t.organization_id = $1 AND t.status IN ('pending', 'planned')
+                   WHERE t.organization_id = $1
+                     AND t.status IN ('pending', 'planned')
+                     AND NOT EXISTS (
+                       SELECT 1 FROM tasks earlier
+                       WHERE earlier.request_id = t.request_id
+                         AND earlier.sequence_order < t.sequence_order
+                         AND earlier.status NOT IN ('completed', 'failed', 'cancelled')
+                     )
                    ORDER BY
                      CASE t.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1
                                      WHEN 'medium' THEN 2 ELSE 3 END,

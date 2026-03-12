@@ -62,6 +62,23 @@ LEARNING_INTERVAL = int(os.environ.get("LUCENT_LEARNING_INTERVAL", str(AUTONOMIC
 # Maximum characters stored from sub-agent results
 MAX_RESULT_LENGTH = int(os.environ.get("LUCENT_MAX_RESULT_LENGTH", "8000"))
 
+# ── Role-based loop configuration ─────────────────────────────────────────
+# Each daemon instance can run a subset of roles. Multi-instance deployments
+# can split work across instances (e.g. one cognitive, N dispatchers).
+# Roles: dispatcher, cognitive, scheduler, autonomic (or 'all')
+DAEMON_ROLES_STR = os.environ.get("LUCENT_DAEMON_ROLES", "all")
+# Dispatch loop: how often to poll if PG LISTEN misses a signal
+DISPATCH_POLL_SECONDS = int(os.environ.get("LUCENT_DISPATCH_POLL_SECONDS", "60"))
+# Scheduler loop: how often to check for due schedules
+SCHEDULER_CHECK_SECONDS = int(os.environ.get("LUCENT_SCHEDULER_CHECK_SECONDS", "60"))
+# Time-based intervals for independent loops (derive defaults from cycle-count configs)
+AUTONOMIC_MINUTES = int(
+    os.environ.get("LUCENT_AUTONOMIC_MINUTES", str(AUTONOMIC_INTERVAL * DAEMON_INTERVAL_MINUTES))
+)
+LEARNING_MINUTES = int(
+    os.environ.get("LUCENT_LEARNING_MINUTES", str(LEARNING_INTERVAL * DAEMON_INTERVAL_MINUTES))
+)
+
 # Approval flow: when enabled, tasks go to needs-review before completing.
 # When disabled, tasks complete immediately after successful execution.
 REQUIRE_APPROVAL = os.environ.get("LUCENT_REQUIRE_APPROVAL", "false").lower() in (
@@ -817,7 +834,16 @@ After completing work, save what you learned:
 
 
 class LucentDaemon:
-    """Orchestrates Lucent's cognitive architecture."""
+    """Orchestrates Lucent's cognitive architecture.
+
+    Runs independent loops based on configured roles:
+      - dispatcher:  event-driven task execution (PG LISTEN + polling)
+      - cognitive:   periodic planning / goal assessment
+      - scheduler:   checks and fires due schedules
+      - autonomic:   memory maintenance, learning extraction
+    """
+
+    ALL_ROLES = frozenset({"dispatcher", "cognitive", "scheduler", "autonomic"})
 
     def __init__(self):
         self.active_sessions: list = []
@@ -826,6 +852,27 @@ class LucentDaemon:
         # Unique instance ID for distributed coordination
         hostname = platform.node() or "unknown"
         self.instance_id = f"{hostname}-{os.getpid()}-{int(datetime.now(timezone.utc).timestamp())}"
+
+        # Role-based loop configuration
+        self.roles = self._parse_roles(DAEMON_ROLES_STR)
+
+        # PG LISTEN infrastructure for event-driven dispatch
+        self._listen_conn = None
+        self._task_ready = asyncio.Event()
+
+        # Heartbeat memory ID (cached after first create/lookup)
+        self._heartbeat_memory_id: str | None = None
+
+    @staticmethod
+    def _parse_roles(roles_str: str) -> set[str]:
+        """Parse role configuration into a set of enabled roles."""
+        roles = {r.strip().lower() for r in roles_str.split(",")}
+        if "all" in roles:
+            return set(LucentDaemon.ALL_ROLES)
+        unknown = roles - LucentDaemon.ALL_ROLES
+        if unknown:
+            log(f"Unknown daemon roles ignored: {unknown}", "WARN")
+        return roles & LucentDaemon.ALL_ROLES
 
     async def start(self):
         """Start the daemon."""
@@ -845,8 +892,9 @@ class LucentDaemon:
             loop.add_signal_handler(sig, self._handle_shutdown)
 
         log(
-            f"Daemon ready. Instance: {self.instance_id}, Interval: {DAEMON_INTERVAL_MINUTES}m, "
-            f"Max sessions: {MAX_CONCURRENT_SESSIONS}, Model: {MODEL}"
+            f"Daemon ready. Instance: {self.instance_id}, "
+            f"Roles: {','.join(sorted(self.roles))}, "
+            f"Model: {MODEL}, Max sessions: {MAX_CONCURRENT_SESSIONS}"
         )
 
     def _handle_shutdown(self):
@@ -862,23 +910,16 @@ class LucentDaemon:
         log(f"Stopping daemon (instance: {self.instance_id})...")
         self.running = False
 
+        # Close PG LISTEN connection
+        if self._listen_conn and not self._listen_conn.is_closed():
+            try:
+                await self._listen_conn.close()
+            except Exception:
+                pass
+            self._listen_conn = None
+
         # Revoke the daemon's API key — clean up after ourselves
         await _revoke_current_key()
-
-        # Release any tasks claimed by this instance
-        try:
-            await self.run_session(
-                "shutdown-release",
-                (
-                    "You are a helper. Search for memories tagged 'daemon-task' that have a tag "
-                    f"'in-progress'. For each one found, use update_memory "
-                    f"to release it with instance_id '{self.instance_id}'. "
-                    f"Output the count released."
-                ),
-                f"Release all tasks claimed by instance {self.instance_id}.",
-            )
-        except Exception:
-            pass
 
         for session in self.active_sessions:
             try:
@@ -1083,7 +1124,12 @@ class LucentDaemon:
         )
 
     async def run_cognitive_cycle(self):
-        """Run one cognitive cycle — perceive, reason, decide, act via tools."""
+        """Run one cognitive cycle — perceive, reason, decide, act via tools.
+
+        This is the executive planning function. It assesses long-horizon goals,
+        reviews state, and creates requests/tasks. It does NOT dispatch tasks —
+        that is handled by the dispatch loop.
+        """
         self.cycle_count += 1
         log(f"=== Cognitive cycle #{self.cycle_count} (instance: {self.instance_id}) ===")
 
@@ -1093,15 +1139,6 @@ class LucentDaemon:
             if not await _handle_auth_failure(self.instance_id):
                 log("Cannot proceed without valid API key — skipping cycle", "ERROR")
                 return
-
-        # Heartbeat before cognitive work
-        await self._update_heartbeat()
-
-        # Release stale claims from dead instances (both legacy and new system)
-        await self._release_stale_claims()
-        stale = await RequestAPI.release_stale(STALE_HEARTBEAT_MINUTES)
-        if stale:
-            log(f"Released {stale} stale tracked tasks")
 
         # On first cycle, check if environment adaptation is needed
         if self.cycle_count == 1:
@@ -1121,15 +1158,6 @@ class LucentDaemon:
 
         if result:
             log(f"Cognitive cycle #{self.cycle_count} produced output", "INFO")
-
-        # After cognitive loop runs, check for pending tasks it created
-        await self._dispatch_pending_tasks()
-
-        # Fire any due scheduled tasks (creates requests + tasks for them)
-        await self._check_due_schedules()
-
-        # Also dispatch from the new request tracking queue
-        await self._dispatch_tracked_tasks()
 
     # --- Distributed Coordination ---
 
@@ -1168,8 +1196,7 @@ class LucentDaemon:
         return True, "ok"
 
     async def _update_heartbeat(self):
-        """Write/update this instance's heartbeat memory."""
-        log(f"Updating heartbeat for instance {self.instance_id}")
+        """Update instance heartbeat via direct API (no LLM session)."""
         heartbeat_content = json.dumps(
             {
                 "instance_id": self.instance_id,
@@ -1178,209 +1205,30 @@ class LucentDaemon:
                 "cycle_count": self.cycle_count,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "model": MODEL,
+                "roles": sorted(self.roles),
                 "max_sessions": MAX_CONCURRENT_SESSIONS,
             }
         )
 
-        await self.run_session(
-            f"heartbeat-{self.cycle_count}",
-            (
-                "You are a helper. Search for a memory tagged 'daemon-heartbeat' whose content "
-                f"contains the instance_id '{self.instance_id}'. "
-                "If found, update it with the new content provided. "
-                "If not found, create a new memory of type 'technical' with tags "
-                "['daemon-heartbeat', 'daemon'] and importance 3. "
-                "Output ONLY the memory ID."
-            ),
-            f"Heartbeat content:\n{heartbeat_content}",
-        )
-
-    async def _release_stale_claims(self):
-        """Find tasks stuck in 'in-progress' for too long and release them back to pending."""
-        log("Checking for stuck tasks...")
-        # Use direct API to find in-progress tasks
-        results = await MemoryAPI.search(
-            "in-progress daemon-task", tags=["daemon-task", "in-progress"], limit=20
-        )
-        if not results:
-            return
-
-        now = datetime.now(timezone.utc)
-        released = 0
-        for memory in results:
-            # If task has been in-progress for more than STALE_HEARTBEAT_MINUTES, release it
-            updated = memory.get("updated_at", "")
-            if updated:
-                try:
-                    updated_dt = datetime.fromisoformat(updated.replace("Z", "+00:00"))
-                    if (now - updated_dt) > timedelta(minutes=STALE_HEARTBEAT_MINUTES):
-                        mid = memory.get("id", "")
-                        current_tags = memory.get("tags", [])
-                        new_tags = [t for t in current_tags if t != "in-progress"] + ["pending"]
-                        await MemoryAPI.update(mid, tags=new_tags)
-                        log(
-                            f"Released stuck task {mid[:8]} "
-                            f"(in-progress for "
-                            f"{int((now - updated_dt).total_seconds() / 60)}m)"
-                        )
-                        released += 1
-                except (ValueError, TypeError):
-                    pass
-
-        if released:
-            log(f"Released {released} stuck task(s)")
-
-    async def _dispatch_pending_tasks(self, max_tasks: int = 2):
-        """Find and dispatch pending daemon-task memories, claiming them atomically.
-
-        Args:
-            max_tasks: Maximum tasks to dispatch per cycle to prevent unbounded execution.
-        """
-        # Run a session that searches for pending tasks
-        task_finder = await self.run_session(
-            "task-finder",
-            (
-                "You are a task dispatcher. Search for memories "
-                "tagged 'daemon-task' and 'pending'. "
-                "For each one you find, output the memory ID and the agent type tag "
-                "(research, code, memory, reflection, documentation, or planning). "
-                "Also search for memories tagged 'daemon-task' that have a tag starting with "
-                "'in-progress' to see what is currently being worked on. "
-                "Output ONLY lines in format:\n"
-                "  TASK|memory_id|agent_type  (for pending tasks)\n"
-                "  CLAIMED|memory_id|claimed_by  (for already-claimed tasks)"
-            ),
-            "Find all pending and claimed daemon tasks.",
-        )
-
-        if not task_finder:
-            log("No pending tasks found")
-            return
-
-        # Log what other instances are working on
-        for line in task_finder.strip().split("\n"):
-            line = line.strip()
-            if line.startswith("CLAIMED|"):
-                parts = line.split("|")
-                if len(parts) >= 3:
-                    claimed_id = parts[1].strip()
-                    if claimed_id and claimed_id not in ("<none>", "none", "N/A", "null"):
-                        log(f"Task {claimed_id[:8]} already claimed by {parts[2]}")
-
-        # Parse and claim pending tasks (capped to prevent unbounded execution)
-        dispatched = 0
-        for line in task_finder.strip().split("\n"):
-            line = line.strip()
-            if not line.startswith("TASK|"):
-                continue
-            if dispatched >= max_tasks:
-                log(f"Task cap reached ({max_tasks}), deferring remaining tasks to next cycle")
-                break
-            parts = line.split("|")
-            if len(parts) < 3:
-                continue
-            _, memory_id, agent_type = parts[0], parts[1].strip(), parts[2].strip()
-
-            # Skip sentinel values from LLM output when no tasks exist
-            if not memory_id or memory_id in ("<none>", "none", "N/A", "null"):
-                continue
-
-            # Claim the task via direct API (no LLM session needed)
-            task_memory = await MemoryAPI.get(memory_id)
-            if not task_memory:
-                log(f"Could not read task {memory_id[:8]}", "WARN")
-                continue
-
-            current_tags = task_memory.get("tags", [])
-            if "pending" not in current_tags:
-                log(
-                    f"Task {memory_id[:8]} no longer pending — likely claimed by another instance",
-                    "WARN",
-                )
-                continue
-
-            claim_tags = [t for t in current_tags if t != "pending"] + ["in-progress"]
-            claim_result = await MemoryAPI.update(memory_id, tags=claim_tags)
-            if not claim_result:
-                log(f"Could not claim task {memory_id[:8]}", "WARN")
-                continue
-
-            task_content = task_memory.get("content", "")
-            if not task_content:
-                # Release the claim if task has no content
-                release_tags = [t for t in claim_tags if t != "in-progress"] + ["pending"]
-                await MemoryAPI.update(memory_id, tags=release_tags)
-                continue
-
-            log(f"Dispatching task {memory_id[:8]} to {agent_type}: {task_content[:80]}...")
-
-            # Run the sub-agent
-            system_message = build_subagent_prompt(agent_type, task_content)
-            result = await self.run_session(
-                f"{agent_type}-{memory_id[:8]}",
-                system_message,
-                f"Execute this task:\n\n{task_content}",
+        if self._heartbeat_memory_id:
+            await MemoryAPI.update(self._heartbeat_memory_id, content=heartbeat_content)
+        else:
+            # Search for existing heartbeat from this instance
+            results = await MemoryAPI.search(
+                self.instance_id, tags=["daemon-heartbeat"], limit=1
             )
-
-            if result:
-                log(f"Sub-agent {agent_type} for task {memory_id[:8]} completed")
-            dispatched += 1
-
-            # Validate result before marking complete
-            success, reason = self._validate_task_result(result)
-
-            if success:
-                # Multi-model review if configured
-                if REVIEW_MODELS:
-                    review_passed = await self._multi_model_review(
-                        memory_id, agent_type, task_content, result
-                    )
-                    if not review_passed:
-                        log(f"Task {memory_id[:8]} failed multi-model review. Released.", "WARN")
-                        release_tags = [t for t in claim_tags if t != "in-progress"] + ["pending"]
-                        await MemoryAPI.update(memory_id, tags=release_tags)
-                        continue
-
-                # Get current tags to transform
-                current = await MemoryAPI.get(memory_id)
-                cur_tags = current.get("tags", claim_tags) if current else claim_tags
-
-                if REQUIRE_APPROVAL:
-                    # Mark as needs-review
-                    review_tags = [t for t in cur_tags if t != "in-progress"] + ["needs-review"]
-                    await MemoryAPI.update(
-                        memory_id,
-                        tags=review_tags,
-                        metadata={"result": result[:MAX_RESULT_LENGTH]} if result else None,
-                    )
-                    # Also create a daemon-result memory for discoverability
-                    await MemoryAPI.create(
-                        type="experience",
-                        content=result[:MAX_RESULT_LENGTH]
-                        if result
-                        else "Task completed (no output)",
-                        tags=["daemon-result", "needs-review", agent_type],
-                        importance=6,
-                        metadata={"task_id": memory_id, "agent_type": agent_type},
-                    )
-                    log(f"Task {memory_id[:8]} sent to review queue")
-                else:
-                    # Complete immediately — persist result in metadata
-                    done_tags = [t for t in cur_tags if t != "in-progress"] + ["completed"]
-                    await MemoryAPI.update(
-                        memory_id,
-                        tags=done_tags,
-                        metadata={"result": result[:MAX_RESULT_LENGTH]} if result else None,
-                    )
-                    log(
-                        f"Task {memory_id[:8]} marked completed "
-                        f"(result: {len(result) if result else 0} chars)"
-                    )
+            if results:
+                self._heartbeat_memory_id = results[0].get("id")
+                await MemoryAPI.update(self._heartbeat_memory_id, content=heartbeat_content)
             else:
-                # Release the claim so another instance can try
-                release_tags = [t for t in claim_tags if t != "in-progress"] + ["pending"]
-                await MemoryAPI.update(memory_id, tags=release_tags)
-                log(f"Task {memory_id[:8]} NOT complete — {reason}. Released claim.", "WARN")
+                result = await MemoryAPI.create(
+                    type="technical",
+                    content=heartbeat_content,
+                    tags=["daemon-heartbeat", "daemon"],
+                    importance=3,
+                )
+                if result:
+                    self._heartbeat_memory_id = result.get("id")
 
     async def _check_due_schedules(self):
         """Fire any scheduled tasks that are due, creating requests for them."""
@@ -1464,6 +1312,16 @@ class LucentDaemon:
             success, reason = self._validate_task_result(result)
 
             if success:
+                # Multi-model review if configured
+                if REVIEW_MODELS:
+                    review_passed = await self._multi_model_review(
+                        task_id, agent_type, description, result
+                    )
+                    if not review_passed:
+                        log(f"Tracked task {task_id[:8]} failed multi-model review", "WARN")
+                        await RequestAPI.fail_task(task_id, "Failed multi-model review")
+                        continue
+
                 await RequestAPI.complete_task(task_id, result)
                 log(f"Tracked task {task_id[:8]} completed ({len(result) if result else 0} chars)")
             else:
@@ -1597,35 +1455,228 @@ class LucentDaemon:
             ),
         )
 
-    # --- Main Loops ---
+    # --- PG LISTEN for event-driven dispatch ---
 
-    async def run_forever(self):
-        """Run the daemon loop with auto-reload on code changes."""
-        await self.start()
+    async def _setup_listen(self):
+        """Establish a persistent PG connection for LISTEN/NOTIFY.
 
-        # Snapshot file mtimes at startup for change detection
-        self._source_mtimes = self._snapshot_source_files()
+        Returns True if LISTEN is active, False if we'll rely on polling only.
+        """
+        import asyncpg
+
+        if self._listen_conn and not self._listen_conn.is_closed():
+            return True  # already connected
 
         try:
-            while self.running:
-                # Cognitive cycle
+            self._listen_conn = await asyncpg.connect(DATABASE_URL)
+            await self._listen_conn.add_listener("task_ready", self._on_task_ready)
+            log("PG LISTEN established on 'task_ready' channel")
+            return True
+        except Exception as e:
+            log(f"PG LISTEN setup failed (dispatch will use polling only): {e}", "WARN")
+            self._listen_conn = None
+            return False
+
+    def _on_task_ready(self, conn, pid, channel, payload):
+        """Callback when PG NOTIFY fires on task_ready channel."""
+        self._task_ready.set()
+
+    # --- Independent loop implementations ---
+
+    async def _dispatch_loop(self):
+        """Event-driven task dispatch loop.
+
+        Wakes on PG NOTIFY signals or polls as a fallback.  Claims and
+        executes pending tasks from the tracked-task queue.  Multiple
+        instances can run this loop safely — claim_task is atomic.
+        """
+        log(f"Dispatch loop started (poll fallback: {DISPATCH_POLL_SECONDS}s)")
+        await self._setup_listen()
+        heartbeat_interval = 300  # 5 minutes
+        last_heartbeat = 0
+
+        while self.running:
+            try:
+                # Wait for a NOTIFY signal or polling timeout
+                try:
+                    await asyncio.wait_for(
+                        self._task_ready.wait(), timeout=DISPATCH_POLL_SECONDS
+                    )
+                except asyncio.TimeoutError:
+                    pass  # polling fallback — this is normal
+                self._task_ready.clear()
+
+                # Verify API key is still valid
+                if not await _verify_api_key(MCP_API_KEY):
+                    if not await _handle_auth_failure(self.instance_id):
+                        log("Dispatch: no valid API key, retrying in 30s", "WARN")
+                        await asyncio.sleep(30)
+                        continue
+
+                # Periodic heartbeat
+                now = time.time()
+                if now - last_heartbeat >= heartbeat_interval:
+                    await self._update_heartbeat()
+                    last_heartbeat = now
+
+                # Release stale tasks from dead instances
+                stale = await RequestAPI.release_stale(STALE_HEARTBEAT_MINUTES)
+                if stale:
+                    log(f"Released {stale} stale tracked tasks")
+
+                # Dispatch all available tasks
+                await self._dispatch_tracked_tasks()
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                log(f"Dispatch loop error: {e}", "ERROR")
+                await asyncio.sleep(5)
+                # Reconnect LISTEN if connection dropped
+                if self._listen_conn is None or self._listen_conn.is_closed():
+                    await self._setup_listen()
+
+    async def _cognitive_loop(self):
+        """Periodic planning cycle — long-horizon goal assessment.
+
+        Runs the cognitive LLM session on a fixed interval.  Creates
+        requests/tasks for the dispatch loop to pick up.
+        """
+        log(f"Cognitive loop started (interval: {DAEMON_INTERVAL_MINUTES}m)")
+
+        while self.running:
+            try:
                 await self.run_cognitive_cycle()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                log(f"Cognitive loop error: {e}", "ERROR")
 
-                # Autonomic layer — runs independently from cognitive decisions
-                if self.cycle_count % AUTONOMIC_INTERVAL == 0:
-                    await self.run_autonomic()
-                if self.cycle_count % LEARNING_INTERVAL == 0:
-                    await self.run_learning_extraction()
+            # Sleep until next cycle
+            await asyncio.sleep(DAEMON_INTERVAL_MINUTES * 60)
 
-                # Auto-reload: check if source files changed since startup
+    async def _scheduler_loop(self):
+        """Check for due schedules and fire them.
+
+        Runs on a short interval so schedules fire close to their target time.
+        """
+        log(f"Scheduler loop started (interval: {SCHEDULER_CHECK_SECONDS}s)")
+
+        while self.running:
+            try:
+                # Verify API key
+                if not await _verify_api_key(MCP_API_KEY):
+                    if not await _handle_auth_failure(self.instance_id):
+                        await asyncio.sleep(30)
+                        continue
+
+                await self._check_due_schedules()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                log(f"Scheduler loop error: {e}", "ERROR")
+
+            await asyncio.sleep(SCHEDULER_CHECK_SECONDS)
+
+    async def _autonomic_loop(self):
+        """Periodic maintenance: memory consolidation, learning extraction.
+
+        Runs on longer intervals since these are background housekeeping tasks.
+        """
+        log(
+            f"Autonomic loop started (maintenance: {AUTONOMIC_MINUTES}m, "
+            f"learning: {LEARNING_MINUTES}m)"
+        )
+
+        # Give cognitive loop a head start on first boot
+        await asyncio.sleep(min(300, AUTONOMIC_MINUTES * 60))
+
+        last_maintenance = time.time()
+        last_learning = time.time()
+
+        while self.running:
+            try:
+                now = time.time()
+
+                if now - last_maintenance >= AUTONOMIC_MINUTES * 60:
+                    # Verify API key
+                    if await _verify_api_key(MCP_API_KEY) or await _handle_auth_failure(
+                        self.instance_id
+                    ):
+                        await self.run_autonomic()
+                        last_maintenance = now
+
+                if now - last_learning >= LEARNING_MINUTES * 60:
+                    if await _verify_api_key(MCP_API_KEY) or await _handle_auth_failure(
+                        self.instance_id
+                    ):
+                        await self.run_learning_extraction()
+                        last_learning = now
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                log(f"Autonomic loop error: {e}", "ERROR")
+
+            await asyncio.sleep(60)  # check every minute
+
+    async def _reload_watcher(self):
+        """Periodically check for source file changes and trigger auto-reload."""
+        while self.running:
+            try:
                 if self._should_reload():
                     log("Source files changed — restarting daemon to pick up new code")
                     self.running = False
                     self._restart_self()
-                    return  # _restart_self replaces the process
+                    return
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                log(f"Reload watcher error: {e}", "WARN")
+            await asyncio.sleep(30)
 
-                log(f"Next cycle in {DAEMON_INTERVAL_MINUTES} minutes")
-                await asyncio.sleep(DAEMON_INTERVAL_MINUTES * 60)
+    # --- Main Loops ---
+
+    async def run_forever(self):
+        """Run enabled daemon loops concurrently.
+
+        Each role spawns an independent asyncio task:
+          - dispatcher:  event-driven (PG LISTEN + polling fallback)
+          - cognitive:   interval-based planning
+          - scheduler:   short-interval schedule checks
+          - autonomic:   long-interval maintenance
+        """
+        await self.start()
+        self._source_mtimes = self._snapshot_source_files()
+
+        log(f"Daemon roles enabled: {', '.join(sorted(self.roles))}")
+
+        try:
+            loops: list[asyncio.Task] = []
+
+            if "dispatcher" in self.roles:
+                loops.append(asyncio.create_task(self._dispatch_loop(), name="dispatch"))
+            if "cognitive" in self.roles:
+                loops.append(asyncio.create_task(self._cognitive_loop(), name="cognitive"))
+            if "scheduler" in self.roles:
+                loops.append(asyncio.create_task(self._scheduler_loop(), name="scheduler"))
+            if "autonomic" in self.roles:
+                loops.append(asyncio.create_task(self._autonomic_loop(), name="autonomic"))
+
+            # File watcher for auto-reload (always runs)
+            loops.append(asyncio.create_task(self._reload_watcher(), name="reload-watcher"))
+
+            if len(loops) <= 1:
+                log("No roles enabled — nothing to do", "ERROR")
+                return
+
+            # Wait for any loop to exit (shouldn't happen unless shutdown/reload)
+            done, pending = await asyncio.wait(loops, return_when=asyncio.FIRST_COMPLETED)
+
+            # Cancel remaining loops
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
 
         except asyncio.CancelledError:
             pass
@@ -1683,7 +1734,11 @@ class LucentDaemon:
         os.execv(sys.executable, [sys.executable] + sys.argv)
 
     async def run_once(self, task: str | None = None):
-        """Run a single cycle or specific sub-agent task, then exit."""
+        """Run a single cycle or specific sub-agent task, then exit.
+
+        In single-cycle mode: runs cognitive planning, fires due schedules,
+        and dispatches any pending tasks — then exits.
+        """
         await self.start()
         try:
             if task:
@@ -1697,7 +1752,10 @@ class LucentDaemon:
                     ),
                 )
             else:
+                # Full single cycle: cognitive → schedule → dispatch
                 await self.run_cognitive_cycle()
+                await self._check_due_schedules()
+                await self._dispatch_tracked_tasks()
         finally:
             await self.stop()
 
@@ -1733,9 +1791,22 @@ def main():
         default=DAEMON_INTERVAL_MINUTES,
         help="Minutes between cognitive cycles",
     )
+    parser.add_argument(
+        "--roles",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated roles to enable: dispatcher, cognitive, scheduler, autonomic "
+            "(or 'all'). Overrides LUCENT_DAEMON_ROLES env var."
+        ),
+    )
     args = parser.parse_args()
 
     daemon = LucentDaemon()
+
+    # Override roles from CLI if provided
+    if args.roles:
+        daemon.roles = daemon._parse_roles(args.roles)
 
     if args.once or args.task:
         asyncio.run(daemon.run_once(args.task))
