@@ -3,11 +3,11 @@ name: memory-init
 description: 'Initialize conversation context by loading user preferences and relevant memories. Use at the start of every conversation, when greeting a user, when asked "who am I talking to", or when context seems missing.'
 ---
 
-# Starting a Conversation
+# Loading User Context
 
-Always call `get_current_user_context()` first. This returns:
-- User identity (name, role, email)
-- Their individual memory with preferences, working style, and history
+Call `get_current_user_context()` at the start of a conversation. This returns the user's identity, preferences, and individual memory.
+
+In long conversations, check that you still have the individual memory in your context. If it's been pushed out by the rolling window, reload it. You should always know who you're talking to — if you're unsure of their name or preferences, that's a signal to reload.
 
 ## What to Do With Context
 

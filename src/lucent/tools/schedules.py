@@ -33,6 +33,7 @@ Args:
     schedule_type: 'once', 'interval', or 'cron'
     description: Detailed description of the work
     agent_type: Which agent type should handle this ('code', 'research', 'memory', etc.)
+    model: LLM model to use for scheduled tasks. If not set, the daemon picks a default.
     cron_expression: Cron expression (required if schedule_type is 'cron')
     interval_seconds: Seconds between runs (required if schedule_type is 'interval', min 60)
     priority: 'low', 'medium', 'high', or 'urgent'
@@ -44,6 +45,7 @@ Returns: JSON with the created schedule including its ID and next_run_at.""")
         schedule_type: str = "once",
         description: str = "",
         agent_type: str = "code",
+        model: str | None = None,
         cron_expression: str | None = None,
         interval_seconds: int | None = None,
         priority: str = "medium",
@@ -53,6 +55,13 @@ Returns: JSON with the created schedule including its ID and next_run_at.""")
         if not org_id:
             return json.dumps({"error": "No organization context"})
 
+        # Validate model against registry
+        if model:
+            from lucent.model_registry import validate_model
+            error = validate_model(model)
+            if error:
+                return json.dumps({"error": error})
+
         repo = await _get_schedule_repository()
         sched = await repo.create_schedule(
             title=title,
@@ -60,6 +69,7 @@ Returns: JSON with the created schedule including its ID and next_run_at.""")
             schedule_type=schedule_type,
             description=description,
             agent_type=agent_type,
+            model=model,
             cron_expression=cron_expression,
             interval_seconds=interval_seconds,
             priority=priority,

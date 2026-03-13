@@ -118,19 +118,20 @@ class RequestRepository:
         parent_task_id: str | None = None,
         priority: str = "medium",
         sequence_order: int = 0,
+        model: str | None = None,
     ) -> dict:
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 """INSERT INTO tasks
                    (request_id, parent_task_id, title, description, agent_type,
-                    agent_definition_id, priority, sequence_order, organization_id)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    agent_definition_id, priority, sequence_order, organization_id, model)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                    RETURNING *""",
                 UUID(request_id),
                 UUID(parent_task_id) if parent_task_id else None,
                 title, description, agent_type,
                 UUID(agent_definition_id) if agent_definition_id else None,
-                priority, sequence_order, UUID(org_id),
+                priority, sequence_order, UUID(org_id), model,
             )
         task = dict(row)
         # Log creation event

@@ -48,6 +48,7 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     messages: list[ChatMessage]
     page_context: dict | None = None  # {url, title, type, data}
+    model: str | None = None  # override the default chat model
 
 
 async def _get_session_user(request: Request):
@@ -182,7 +183,7 @@ async def chat_stream(
     request: Request,
     body: ChatRequest,
 ):
-    """Stream a chat response using the Copilot SDK with claude-opus-4.6."""
+    """Stream a chat response. Model defaults to CHAT_MODEL but can be overridden per-request."""
     user, pool = await _get_session_user(request)
 
     if not COPILOT_SDK_AVAILABLE:
@@ -191,6 +192,8 @@ async def chat_stream(
             "Chat requires the github-copilot-sdk package. "
             "Install with: pip install github-copilot-sdk",
         )
+
+    selected_model = body.model or CHAT_MODEL
 
     system_prompt = await _build_system_prompt(user, pool, body.page_context)
 
@@ -233,7 +236,7 @@ async def chat_stream(
         )
 
         session = await client.create_session({
-            "model": CHAT_MODEL,
+            "model": selected_model,
             "system_message": {"content": system_prompt},
             "on_permission_request": PermissionHandler.approve_all,
             "mcp_servers": mcp_config,
@@ -288,6 +291,26 @@ async def chat_stream(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.get("/models")
+async def chat_models():
+    """List available models for the chat model picker."""
+    from lucent.model_registry import list_models as registry_list_models
+
+    models = registry_list_models()
+    return {
+        "default": CHAT_MODEL,
+        "models": [
+            {
+                "id": m.id,
+                "name": m.name,
+                "provider": m.provider,
+                "category": m.category,
+            }
+            for m in models
+        ],
+    }
 
 
 @router.get("/status")

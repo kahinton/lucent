@@ -26,6 +26,7 @@ class TaskCreate(BaseModel):
     parent_task_id: str | None = None
     priority: str = Field(default="medium", pattern=r"^(low|medium|high|urgent)$")
     sequence_order: int = 0
+    model: str | None = None
 
 class TaskEventCreate(BaseModel):
     event_type: str = Field(..., min_length=1, max_length=32)
@@ -107,7 +108,7 @@ async def create_task(
         org_id=str(user.organization_id), description=body.description,
         agent_type=body.agent_type, agent_definition_id=body.agent_definition_id,
         parent_task_id=body.parent_task_id, priority=body.priority,
-        sequence_order=body.sequence_order,
+        sequence_order=body.sequence_order, model=body.model,
     )
 
 @router.get("/{request_id}/tasks")

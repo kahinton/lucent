@@ -491,12 +491,14 @@ class RequestAPI:
     @staticmethod
     async def create_task(request_id: str, title: str, agent_type: str | None = None,
                           description: str | None = None, priority: str = "medium",
-                          sequence_order: int = 0) -> dict | None:
+                          sequence_order: int = 0, model: str | None = None) -> dict | None:
         body = {"title": title, "priority": priority, "sequence_order": sequence_order}
         if agent_type:
             body["agent_type"] = agent_type
         if description:
             body["description"] = description
+        if model:
+            body["model"] = model
         try:
             async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
                 resp = await client.post(
@@ -1283,6 +1285,7 @@ class LucentDaemon:
 
             task_id = str(task["id"])
             agent_type = task.get("agent_type", "code")
+            task_model = task.get("model")  # per-task model override
             title = task.get("title", "")
             description = task.get("description", title)
 
@@ -1305,6 +1308,7 @@ class LucentDaemon:
                 f"{agent_type}-{task_id[:8]}",
                 system_message,
                 f"Execute this task:\n\n{description}",
+                model=task_model,
             )
             dispatched += 1
 

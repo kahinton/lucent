@@ -76,6 +76,7 @@ class ScheduleRepository:
         schedule_type: str = "once",
         description: str = "",
         agent_type: str = "code",
+        model: str | None = None,
         task_template: dict | None = None,
         cron_expression: str | None = None,
         interval_seconds: int | None = None,
@@ -99,13 +100,13 @@ class ScheduleRepository:
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 """INSERT INTO schedules
-                   (title, organization_id, description, agent_type, task_template,
+                   (title, organization_id, description, agent_type, model, task_template,
                     schedule_type, cron_expression, interval_seconds, next_run_at,
                     priority, timezone, max_runs, expires_at, created_by)
-                   VALUES ($1, $2::uuid, $3, $4, $5::jsonb,
-                           $6, $7, $8, $9, $10, $11, $12, $13, $14::uuid)
+                   VALUES ($1, $2::uuid, $3, $4, $5, $6::jsonb,
+                           $7, $8, $9, $10, $11, $12, $13, $14, $15::uuid)
                    RETURNING *""",
-                title, org_id, description, agent_type,
+                title, org_id, description, agent_type, model,
                 __import__("json").dumps(task_template or {}),
                 schedule_type, cron_expression, interval_seconds, next_run_at,
                 priority, timezone_str, max_runs, expires_at, created_by,

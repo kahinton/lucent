@@ -61,6 +61,7 @@ Args:
     title: Short descriptive title for the task
     description: Full task instructions for the agent
     agent_type: Agent to handle this — 'code', 'research', 'memory', 'reflection', 'documentation', 'planning', 'security'
+    model: LLM model to use for this task. If not set, the daemon picks a default. See list_available_models for options.
     priority: 'low', 'medium', 'high', or 'urgent'
     sequence_order: Execution order (0-based, lower runs first)
     parent_task_id: Optional — ID of parent task for sub-tasks
@@ -71,6 +72,7 @@ Returns: JSON with the created task including its ID.""")
         title: str,
         description: str = "",
         agent_type: str = "code",
+        model: str | None = None,
         priority: str = "medium",
         sequence_order: int = 0,
         parent_task_id: str | None = None,
@@ -79,6 +81,13 @@ Returns: JSON with the created task including its ID.""")
         if not org_id:
             return json.dumps({"error": "No organization context"})
 
+        # Validate model against registry
+        if model:
+            from lucent.model_registry import validate_model
+            error = validate_model(model)
+            if error:
+                return json.dumps({"error": error})
+
         repo = await _get_request_repository()
         task = await repo.create_task(
             request_id=request_id, title=title,
@@ -86,10 +95,12 @@ Returns: JSON with the created task including its ID.""")
             agent_type=agent_type, priority=priority,
             sequence_order=sequence_order,
             parent_task_id=parent_task_id,
+            model=model,
         )
         return json.dumps({
             "id": str(task["id"]), "title": task["title"],
             "status": task["status"], "agent_type": task["agent_type"],
+            "model": task.get("model"),
         })
 
     @mcp.tool(description="""Log a progress event on a tracked task.

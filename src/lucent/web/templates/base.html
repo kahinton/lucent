@@ -243,7 +243,9 @@
                     </div>
                     <div>
                         <h3 class="text-sm font-semibold text-gray-900">Lucent</h3>
-                        <p class="text-[10px] text-gray-400" id="chat-model-label">AI Assistant</p>
+                        <select id="chat-model-select" class="text-[10px] text-gray-400 bg-transparent border-none p-0 pr-4 -ml-0.5 cursor-pointer focus:ring-0 focus:outline-none appearance-none hover:text-gray-600 transition-colors" style="background-image: url(&quot;data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='%239ca3af'%3E%3Cpath fill-rule='evenodd' d='M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z'/%3E%3C/svg%3E&quot;); background-repeat: no-repeat; background-position: right 0 center; background-size: 12px;">
+                            <option value="">Loading...</option>
+                        </select>
                     </div>
                 </div>
                 <div class="flex items-center gap-1">
@@ -315,17 +317,47 @@
             document.getElementById('chat-widget').style.display = 'block';
             if (data.available) {
                 document.getElementById('chat-status-dot').style.display = 'block';
-                if (data.model) {
-                    document.getElementById('chat-model-label').textContent = data.model;
+                // Load models into the dropdown
+                try {
+                    const modelsResp = await fetch('/api/chat/models');
+                    const modelsData = await modelsResp.json();
+                    const select = document.getElementById('chat-model-select');
+                    select.innerHTML = '';
+                    // Group by provider
+                    const byProvider = {};
+                    for (const m of modelsData.models) {
+                        (byProvider[m.provider] = byProvider[m.provider] || []).push(m);
+                    }
+                    for (const [provider, models] of Object.entries(byProvider)) {
+                        const group = document.createElement('optgroup');
+                        group.label = provider.charAt(0).toUpperCase() + provider.slice(1);
+                        for (const m of models) {
+                            const opt = document.createElement('option');
+                            opt.value = m.id;
+                            opt.textContent = m.name;
+                            if (m.id === modelsData.default) opt.selected = true;
+                            group.appendChild(opt);
+                        }
+                        select.appendChild(group);
+                    }
+                    chatState.defaultModel = modelsData.default;
+                } catch(e) {
+                    // Fallback: just show the default model
+                    const select = document.getElementById('chat-model-select');
+                    select.innerHTML = `<option value="${data.model}">${data.model}</option>`;
                 }
             } else {
-                document.getElementById('chat-model-label').textContent = 'Not configured';
+                const select = document.getElementById('chat-model-select');
+                select.innerHTML = '<option value="">Not configured</option>';
+                select.disabled = true;
                 document.getElementById('chat-status-dot').style.display = 'none';
             }
         } catch(e) {
             // Server down — still show widget with offline state
             document.getElementById('chat-widget').style.display = 'block';
-            document.getElementById('chat-model-label').textContent = 'Offline';
+            const select = document.getElementById('chat-model-select');
+            select.innerHTML = '<option value="">Offline</option>';
+            select.disabled = true;
         }
     })();
 
@@ -474,12 +506,14 @@
         let fullResponse = '';
 
         try {
+            const selectedModel = document.getElementById('chat-model-select').value;
             const resp = await fetch('/api/chat/stream', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     messages: chatState.messages,
                     page_context: getPageContext(),
+                    model: selectedModel || null,
                 }),
                 signal: chatState.abortController.signal,
             });

@@ -189,6 +189,7 @@ async def trigger_now(schedule_id: str, user=Depends(get_current_user), pool=Dep
         description=template.get("description", sched.get("description", "")),
         agent_type=sched.get("agent_type", "code"),
         priority=sched.get("priority", "medium"),
+        model=sched.get("model"),
     )
 
     # Record the run
