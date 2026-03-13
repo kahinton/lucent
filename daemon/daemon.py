@@ -42,6 +42,15 @@ except (ImportError, Exception):
     parse_assessment_output = None
 
 # ============================================================================
+# Exceptions
+# ============================================================================
+
+
+class AgentNotFoundError(Exception):
+    """Raised when a task references an agent type with no approved definition."""
+
+
+# ============================================================================
 # Configuration
 # ============================================================================
 
@@ -801,7 +810,7 @@ async def build_subagent_prompt(
     Resolution order:
       1. If agent_definition_id is set, load that specific definition from the DB
       2. Otherwise, search DB for an active definition matching agent_type by name
-      3. Fall back to a generic prompt if no DB definition exists
+      3. Raise AgentNotFoundError if no approved definition exists
 
     Only active (human-approved) definitions are used. This ensures a human
     is always in the loop for what roles the daemon can assume.
@@ -854,8 +863,10 @@ async def build_subagent_prompt(
                 pass
         log(f"Using approved DB definition for '{agent_type}' agent (id: {db_agent['id'][:8]})")
     else:
-        agent_def = f"You are Lucent's {agent_type} sub-agent."
-        log(f"No approved DB definition for '{agent_type}' — using generic prompt")
+        raise AgentNotFoundError(
+            f"No approved agent definition found for '{agent_type}'. "
+            f"Create and approve a definition at /definitions before dispatching tasks to this agent."
+        )
 
     identity = AGENT_DEF_PATH.read_text() if AGENT_DEF_PATH.exists() else ""
 
@@ -1161,12 +1172,17 @@ class LucentDaemon:
         log("No environment profile found — running adaptation pipeline")
 
         # Run the assessment agent
-        system_message = await build_subagent_prompt(
-            "assessment",
-            "Perform a full environment assessment. Discover tools, domain, "
-            "collaborators, and goals. Produce structured output for the "
-            "adaptation pipeline.",
-        )
+        try:
+            system_message = await build_subagent_prompt(
+                "assessment",
+                "Perform a full environment assessment. Discover tools, domain, "
+                "collaborators, and goals. Produce structured output for the "
+                "adaptation pipeline.",
+            )
+        except AgentNotFoundError:
+            log("No approved 'assessment' agent definition — skipping adaptation. "
+                "Create and approve one at /definitions to enable environment assessment.", "WARN")
+            return
         assessment_output = await self.run_session(
             "adaptation-assessment",
             system_message,
@@ -1381,9 +1397,17 @@ class LucentDaemon:
 
             # Build and run the sub-agent
             agent_def_id = task.get("agent_definition_id")
-            system_message = await build_subagent_prompt(
-                agent_type, description, agent_definition_id=str(agent_def_id) if agent_def_id else None,
-            )
+            try:
+                system_message = await build_subagent_prompt(
+                    agent_type, description, agent_definition_id=str(agent_def_id) if agent_def_id else None,
+                )
+            except AgentNotFoundError as exc:
+                log(f"Tracked task {task_id[:8]} failed: {exc}", "WARN")
+                await RequestAPI.fail_task(task_id, str(exc))
+                await RequestAPI.add_event(task_id, "agent_not_found",
+                                           f"No approved definition for agent '{agent_type}'")
+                continue
+
             result = await self.run_session(
                 f"{agent_type}-{task_id[:8]}",
                 system_message,
@@ -1478,17 +1502,21 @@ class LucentDaemon:
         Runs every N cycles without cognitive involvement.
         """
         log("Running autonomic: memory maintenance")
-        system_message = await build_subagent_prompt(
-            "memory",
-            (
-                "Quick memory maintenance pass — check for "
-                "obvious issues, fix what's straightforward."
-            ),
-            (
-                "This is an autonomic background task, "
-                "not a cognitive decision."
-            ),
-        )
+        try:
+            system_message = await build_subagent_prompt(
+                "memory",
+                (
+                    "Quick memory maintenance pass — check for "
+                    "obvious issues, fix what's straightforward."
+                ),
+                (
+                    "This is an autonomic background task, "
+                    "not a cognitive decision."
+                ),
+            )
+        except AgentNotFoundError:
+            log("No approved 'memory' agent — skipping autonomic maintenance", "WARN")
+            return
         await self.run_session(
             "autonomic-maintenance",
             system_message,
@@ -1506,19 +1534,24 @@ class LucentDaemon:
         Runs every LEARNING_INTERVAL cycles without cognitive involvement.
         """
         log("Running autonomic: learning extraction")
-        system_message = await build_subagent_prompt(
-            "reflection",
-            (
-                "Learning extraction pass — process recent "
-                "daemon-results and feedback into "
-                "reusable lessons."
-            ),
-            (
-                "This is an autonomic background task. "
-                "Follow the learning-extraction skill "
-                "instructions."
-            ),
-        )
+        try:
+            system_message = await build_subagent_prompt(
+                "reflection",
+                (
+                    "Learning extraction pass — process recent "
+                    "daemon-results and feedback into "
+                    "reusable lessons."
+                ),
+                (
+                    "This is an autonomic background task. "
+                    "Follow the learning-extraction skill "
+                    "instructions."
+                ),
+            )
+        except AgentNotFoundError:
+            log("No approved 'reflection' agent — skipping learning extraction", "WARN")
+            return
+
         await self.run_session(
             "autonomic-learning",
             system_message,
@@ -1818,7 +1851,11 @@ class LucentDaemon:
         await self.start()
         try:
             if task:
-                system_message = await build_subagent_prompt(task, f"Execute a {task} task.")
+                try:
+                    system_message = await build_subagent_prompt(task, f"Execute a {task} task.")
+                except AgentNotFoundError as exc:
+                    log(str(exc), "ERROR")
+                    return
                 await self.run_session(
                     f"{task}-manual",
                     system_message,

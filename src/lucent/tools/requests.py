@@ -59,17 +59,21 @@ Returns: JSON with the created request including its ID.""")
 Use after create_request to break a request into individual tasks that agents will execute.
 Each task can be assigned to a specific agent type and will be dispatched in sequence_order.
 
+IMPORTANT: The agent_type must match an approved agent definition in /definitions.
+Tasks with unrecognized agent types will be rejected. Use list_available_agents or
+check /definitions to see which agents are available.
+
 Args:
     request_id: ID of the parent request
     title: Short descriptive title for the task
     description: Full task instructions for the agent
-    agent_type: Agent to handle this — 'code', 'research', 'memory', 'reflection', 'documentation', 'planning', 'security'
+    agent_type: Name of an approved agent definition to handle this task
     model: LLM model to use for this task. If not set, the daemon picks a default. See list_available_models for options.
     priority: 'low', 'medium', 'high', or 'urgent'
     sequence_order: Execution order (0-based, lower runs first)
     parent_task_id: Optional — ID of parent task for sub-tasks
 
-Returns: JSON with the created task including its ID.""")
+Returns: JSON with the created task including its ID, or an error if the agent type is not approved.""")
     async def create_task(
         request_id: str,
         title: str,
@@ -90,6 +94,20 @@ Returns: JSON with the created task including its ID.""")
             error = validate_model(model)
             if error:
                 return json.dumps({"error": error})
+
+        # Validate agent_type resolves to an approved definition
+        from lucent.db.definitions import DefinitionRepository
+        from lucent.db import get_pool
+        pool = await get_pool()
+        def_repo = DefinitionRepository(pool)
+        agents = await def_repo.list_agents(str(org_id), status="active")
+        active_names = {a["name"] for a in agents}
+        if agent_type and agent_type not in active_names:
+            return json.dumps({
+                "error": f"No approved agent definition for '{agent_type}'. "
+                f"Create and approve one at /definitions before assigning tasks. "
+                f"Available agents: {sorted(active_names) if active_names else 'none — approve definitions first'}",
+            })
 
         repo = await _get_request_repository()
         task = await repo.create_task(

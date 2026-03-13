@@ -98,14 +98,37 @@ async def update_request_status(
 async def create_task(
     request_id: UUID, body: TaskCreate, user=Depends(get_current_user), pool=Depends(get_pool),
 ):
+    from lucent.db.definitions import DefinitionRepository
     from lucent.db.requests import RequestRepository
+
+    org_id = str(user.organization_id)
     repo = RequestRepository(pool)
-    req = await repo.get_request(str(request_id), str(user.organization_id))
+    req = await repo.get_request(str(request_id), org_id)
     if not req:
         raise HTTPException(404, "Request not found")
+
+    # Validate that agent_type or agent_definition_id resolves to an approved definition
+    def_repo = DefinitionRepository(pool)
+    if body.agent_definition_id:
+        agent_def = await def_repo.get_agent(body.agent_definition_id, org_id)
+        if not agent_def or agent_def.get("status") != "active":
+            raise HTTPException(
+                422,
+                f"Agent definition '{body.agent_definition_id}' not found or not approved. "
+                f"Approve it at /definitions before assigning tasks.",
+            )
+    elif body.agent_type:
+        agents = await def_repo.list_agents(org_id, status="active")
+        if not any(a["name"] == body.agent_type for a in agents):
+            raise HTTPException(
+                422,
+                f"No approved agent definition found for type '{body.agent_type}'. "
+                f"Create and approve one at /definitions before assigning tasks.",
+            )
+
     return await repo.create_task(
         request_id=str(request_id), title=body.title,
-        org_id=str(user.organization_id), description=body.description,
+        org_id=org_id, description=body.description,
         agent_type=body.agent_type, agent_definition_id=body.agent_definition_id,
         parent_task_id=body.parent_task_id, priority=body.priority,
         sequence_order=body.sequence_order, model=body.model,

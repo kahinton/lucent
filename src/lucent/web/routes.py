@@ -981,9 +981,10 @@ async def daemon_feedback(
 # Daemon Tasks
 # =============================================================================
 
-# Valid values (matching the API router)
-_TASK_AGENT_TYPES = {"research", "code", "memory", "reflection", "documentation", "planning"}
+# Valid priorities for tasks
 _TASK_PRIORITIES = {"low", "medium", "high"}
+# Legacy agent type names used for classifying memory-based tasks in the UI
+_TASK_AGENT_TYPES = {"research", "code", "memory", "reflection", "documentation", "planning"}
 
 
 def _memory_to_task_view(memory: dict) -> dict:
