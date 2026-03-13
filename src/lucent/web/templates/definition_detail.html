@@ -1,0 +1,194 @@
+{% extends "base.html" %}
+
+{% block title %}{{ definition.name }} - Definitions - Lucent{% endblock %}
+
+{% block content %}
+<!-- Breadcrumb -->
+<div class="flex items-center gap-2 text-sm text-gray-500 mb-4">
+    <a href="/definitions?tab={{ 'agents' if definition_type == 'agent' else ('skills' if definition_type == 'skill' else 'mcp') }}" class="hover:text-gray-700">Definitions</a>
+    <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5"/></svg>
+    <span class="capitalize text-gray-500">{{ definition_type | replace('-', ' ') }}s</span>
+    <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5"/></svg>
+    <span class="text-gray-700">{{ definition.name }}</span>
+</div>
+
+<!-- Header -->
+<div class="bg-white rounded-lg border border-gray-200 p-6 mb-6">
+    <div class="flex items-start justify-between gap-4">
+        <div class="flex-1 min-w-0">
+            <div class="flex items-center gap-3 flex-wrap">
+                <h1 class="text-2xl font-bold text-gray-900">{{ definition.name }}</h1>
+                {% set status = definition.status %}
+                <span class="px-2.5 py-1 rounded text-sm font-medium
+                    {% if status == 'active' %}bg-green-100 text-green-700
+                    {% elif status == 'proposed' %}bg-amber-100 text-amber-700
+                    {% elif status == 'rejected' %}bg-red-100 text-red-700
+                    {% else %}bg-gray-100 text-gray-600{% endif %}">
+                    {{ status }}
+                </span>
+                <span class="px-2.5 py-1 rounded text-sm bg-gray-100 text-gray-500 capitalize">{{ definition_type | replace('-', ' ') }}</span>
+            </div>
+            {% if definition.description %}
+            <p class="text-gray-500 mt-2">{{ definition.description }}</p>
+            {% endif %}
+        </div>
+        {% if definition.status == 'proposed' %}
+        <div class="flex gap-2 shrink-0">
+            <form method="POST" action="/definitions/{{ definition_type }}s/{{ definition.id }}/approve">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <button type="submit" class="px-4 py-2 text-sm bg-green-600 text-white rounded-md hover:bg-green-700 font-medium">Approve</button>
+            </form>
+            <form method="POST" action="/definitions/{{ definition_type }}s/{{ definition.id }}/reject">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <button type="submit" class="px-4 py-2 text-sm bg-red-50 text-red-700 rounded-md hover:bg-red-100 font-medium">Reject</button>
+            </form>
+        </div>
+        {% endif %}
+    </div>
+
+    <!-- Metadata -->
+    <div class="flex flex-wrap gap-x-6 gap-y-1 mt-4 text-xs text-gray-400">
+        <span>Created {{ definition.created_at.strftime('%b %d, %Y at %H:%M') if definition.created_at else 'unknown' }}</span>
+        {% if definition.approved_at %}
+        <span>Approved {{ definition.approved_at.strftime('%b %d, %Y at %H:%M') if definition.approved_at else '' }}</span>
+        {% endif %}
+        {% if definition.updated_at %}
+        <span>Updated {{ definition.updated_at.strftime('%b %d, %Y at %H:%M') if definition.updated_at else '' }}</span>
+        {% endif %}
+        <span class="font-mono">{{ definition.id }}</span>
+    </div>
+</div>
+
+{% if definition_type == 'agent' %}
+<!-- Skills and MCP Servers granted to this agent -->
+{% if skills or mcp_servers %}
+<div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+    {% if skills %}
+    <div class="bg-white rounded-lg border border-gray-200 p-5">
+        <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Granted Skills</h2>
+        <div class="space-y-2">
+            {% for skill in skills %}
+            <a href="/definitions/skills/{{ skill.id }}" class="block p-3 rounded-md border border-gray-100 hover:border-blue-200 hover:bg-blue-50/30 transition-colors">
+                <div class="flex items-center gap-2">
+                    <svg class="w-4 h-4 text-blue-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z"/></svg>
+                    <span class="font-medium text-gray-800">{{ skill.name }}</span>
+                    <span class="px-1.5 py-0.5 rounded text-xs {% if skill.status == 'active' %}bg-green-100 text-green-700{% else %}bg-gray-100 text-gray-500{% endif %}">{{ skill.status }}</span>
+                </div>
+                {% if skill.description %}
+                <p class="text-sm text-gray-500 mt-1 ml-6">{{ skill.description[:120] }}</p>
+                {% endif %}
+            </a>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+    {% if mcp_servers %}
+    <div class="bg-white rounded-lg border border-gray-200 p-5">
+        <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Granted MCP Servers</h2>
+        <div class="space-y-2">
+            {% for mcp in mcp_servers %}
+            <a href="/definitions/mcp-servers/{{ mcp.id }}" class="block p-3 rounded-md border border-gray-100 hover:border-purple-200 hover:bg-purple-50/30 transition-colors">
+                <div class="flex items-center gap-2">
+                    <svg class="w-4 h-4 text-purple-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M5.25 14.25h13.5m-13.5 0a3 3 0 01-3-3m3 3a3 3 0 100 6h13.5a3 3 0 100-6m-16.5-3a3 3 0 013-3h13.5a3 3 0 013 3m-19.5 0a4.5 4.5 0 01.9-2.7L5.737 5.1a3.375 3.375 0 012.7-1.35h7.126c1.062 0 2.062.5 2.7 1.35l2.587 3.45a4.5 4.5 0 01.9 2.7m0 0a3 3 0 01-3 3m0 3h.008v.008h-.008v-.008zm0-6h.008v.008h-.008v-.008zm-3 6h.008v.008h-.008v-.008zm0-6h.008v.008h-.008v-.008z"/></svg>
+                    <span class="font-medium text-gray-800">{{ mcp.name }}</span>
+                    <span class="text-xs text-gray-400 font-mono">{{ mcp.server_type }}</span>
+                    <span class="px-1.5 py-0.5 rounded text-xs {% if mcp.status == 'active' %}bg-green-100 text-green-700{% else %}bg-gray-100 text-gray-500{% endif %}">{{ mcp.status }}</span>
+                </div>
+                {% if mcp.url %}
+                <p class="text-xs text-gray-400 font-mono mt-1 ml-6 truncate">{{ mcp.url }}</p>
+                {% endif %}
+            </a>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+</div>
+{% endif %}
+{% endif %}
+
+{% if definition_type == 'mcp-server' %}
+<!-- MCP Server connection details -->
+<div class="bg-white rounded-lg border border-gray-200 p-5 mb-6">
+    <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Connection Details</h2>
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div>
+            <dt class="text-xs font-medium text-gray-400 uppercase">Server Type</dt>
+            <dd class="mt-1 text-sm text-gray-900 font-mono">{{ definition.server_type }}</dd>
+        </div>
+        {% if definition.url %}
+        <div>
+            <dt class="text-xs font-medium text-gray-400 uppercase">URL</dt>
+            <dd class="mt-1 text-sm text-gray-900 font-mono break-all">{{ definition.url }}</dd>
+        </div>
+        {% endif %}
+        {% if definition.command %}
+        <div>
+            <dt class="text-xs font-medium text-gray-400 uppercase">Command</dt>
+            <dd class="mt-1 text-sm text-gray-900 font-mono">{{ definition.command }}</dd>
+        </div>
+        {% endif %}
+        {% if definition.args %}
+        <div>
+            <dt class="text-xs font-medium text-gray-400 uppercase">Args</dt>
+            <dd class="mt-1 text-sm text-gray-900 font-mono">{{ definition.args }}</dd>
+        </div>
+        {% endif %}
+        {% if definition.headers %}
+        <div class="sm:col-span-2">
+            <dt class="text-xs font-medium text-gray-400 uppercase">Headers</dt>
+            <dd class="mt-1">
+                <pre class="text-xs text-gray-700 bg-gray-50 rounded-md p-3 overflow-x-auto">{{ definition.headers | tojson(indent=2) if definition.headers is mapping else definition.headers }}</pre>
+            </dd>
+        </div>
+        {% endif %}
+    </div>
+</div>
+{% endif %}
+
+<!-- Content -->
+{% if definition.content %}
+<div class="bg-white rounded-lg border border-gray-200 overflow-hidden">
+    <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+        <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider">
+            {% if definition_type == 'agent' %}Agent Definition
+            {% elif definition_type == 'skill' %}Skill Content
+            {% else %}Content{% endif %}
+        </h2>
+        <button onclick="toggleRaw()" class="text-xs text-gray-400 hover:text-gray-600 px-2 py-1 rounded border border-gray-200 hover:border-gray-300">
+            Toggle raw
+        </button>
+    </div>
+    <div id="content-rendered" class="p-6 prose prose-gray prose-sm max-w-none"></div>
+    <div id="content-raw" class="p-6 hidden">
+        <pre class="text-sm text-gray-700 bg-gray-50 rounded-lg p-4 overflow-x-auto whitespace-pre-wrap font-mono leading-relaxed">{{ definition.content }}</pre>
+    </div>
+</div>
+{% else %}
+<div class="bg-white rounded-lg border border-gray-200 p-8 text-center text-gray-400">
+    <p>No content defined.</p>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+    // Wait for base template scripts (renderMarkdown) to load
+    document.addEventListener('DOMContentLoaded', function() {
+        const rawContent = document.querySelector('#content-raw pre')?.textContent || '';
+        const renderedEl = document.getElementById('content-rendered');
+        if (renderedEl && rawContent && typeof renderMarkdown === 'function') {
+            renderedEl.innerHTML = renderMarkdown(rawContent);
+        } else if (renderedEl && rawContent) {
+            // Fallback: just show pre-formatted text
+            renderedEl.innerHTML = '<pre class="whitespace-pre-wrap text-sm text-gray-700">' + rawContent + '</pre>';
+        }
+    });
+
+    let showingRaw = false;
+    function toggleRaw() {
+        showingRaw = !showingRaw;
+        document.getElementById('content-rendered').classList.toggle('hidden', showingRaw);
+        document.getElementById('content-raw').classList.toggle('hidden', !showingRaw);
+    }
+</script>
+{% endblock %}

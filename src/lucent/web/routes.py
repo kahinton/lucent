@@ -670,6 +670,80 @@ async def definitions_page(request: Request, tab: str = "agents"):
     _set_csrf_cookie(response, csrf_token)
     return response
 
+@router.get("/definitions/agents/{agent_id}", response_class=HTMLResponse)
+async def agent_detail_page(request: Request, agent_id: str):
+    """View full agent definition with content, skills, and MCP servers."""
+    user = await get_user_context(request)
+    pool = await get_pool()
+    from lucent.db.definitions import DefinitionRepository
+    repo = DefinitionRepository(pool)
+    org_id = str(user.organization_id)
+    agent = await repo.get_agent(agent_id, org_id)
+    if not agent:
+        raise HTTPException(404, "Agent not found")
+    skills = await repo.get_agent_skills(agent_id)
+    mcp_servers = await repo.get_agent_mcp_servers(agent_id)
+    csrf_token = generate_csrf_token()
+    response = templates.TemplateResponse(
+        "definition_detail.html",
+        {
+            "request": request, "user": user,
+            "definition_type": "agent", "definition": agent,
+            "skills": skills, "mcp_servers": mcp_servers,
+            "csrf_token": csrf_token,
+        },
+    )
+    _set_csrf_cookie(response, csrf_token)
+    return response
+
+@router.get("/definitions/skills/{skill_id}", response_class=HTMLResponse)
+async def skill_detail_page(request: Request, skill_id: str):
+    """View full skill definition with content."""
+    user = await get_user_context(request)
+    pool = await get_pool()
+    from lucent.db.definitions import DefinitionRepository
+    repo = DefinitionRepository(pool)
+    org_id = str(user.organization_id)
+    skill = await repo.get_skill(skill_id, org_id)
+    if not skill:
+        raise HTTPException(404, "Skill not found")
+    csrf_token = generate_csrf_token()
+    response = templates.TemplateResponse(
+        "definition_detail.html",
+        {
+            "request": request, "user": user,
+            "definition_type": "skill", "definition": skill,
+            "skills": [], "mcp_servers": [],
+            "csrf_token": csrf_token,
+        },
+    )
+    _set_csrf_cookie(response, csrf_token)
+    return response
+
+@router.get("/definitions/mcp-servers/{server_id}", response_class=HTMLResponse)
+async def mcp_server_detail_page(request: Request, server_id: str):
+    """View full MCP server definition with config."""
+    user = await get_user_context(request)
+    pool = await get_pool()
+    from lucent.db.definitions import DefinitionRepository
+    repo = DefinitionRepository(pool)
+    org_id = str(user.organization_id)
+    server = await repo.get_mcp_server(server_id, org_id)
+    if not server:
+        raise HTTPException(404, "MCP server not found")
+    csrf_token = generate_csrf_token()
+    response = templates.TemplateResponse(
+        "definition_detail.html",
+        {
+            "request": request, "user": user,
+            "definition_type": "mcp-server", "definition": server,
+            "skills": [], "mcp_servers": [],
+            "csrf_token": csrf_token,
+        },
+    )
+    _set_csrf_cookie(response, csrf_token)
+    return response
+
 @router.post("/definitions/agents/{agent_id}/approve")
 async def approve_agent_web(request: Request, agent_id: str):
     """Approve an agent definition from the web UI."""
