@@ -1,6 +1,7 @@
 """MCP tools for schedule management."""
 
 import json
+import os
 
 from mcp.server.fastmcp import FastMCP
 
@@ -10,7 +11,9 @@ from lucent.tools.memories import _get_current_user_context
 
 async def _get_schedule_repository() -> ScheduleRepository:
     from lucent.db import init_db
-    from lucent.server import database_url
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url:
+        raise RuntimeError("DATABASE_URL environment variable is required")
     pool = await init_db(database_url)
     return ScheduleRepository(pool)
 

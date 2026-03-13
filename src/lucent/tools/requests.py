@@ -1,6 +1,7 @@
 """MCP tools for request tracking and task queue operations."""
 
 import json
+import os
 from uuid import UUID
 
 from mcp.server.fastmcp import FastMCP
@@ -12,7 +13,9 @@ from lucent.tools.memories import _get_current_user_context, _get_repository
 async def _get_request_repository() -> RequestRepository:
     """Get or create a RequestRepository instance."""
     from lucent.db import init_db
-    from lucent.server import database_url
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url:
+        raise RuntimeError("DATABASE_URL environment variable is required")
     pool = await init_db(database_url)
     return RequestRepository(pool)
 
