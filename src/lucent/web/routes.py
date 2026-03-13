@@ -2309,6 +2309,23 @@ async def request_detail(request: Request, request_id: str):
     )
 
 
+@router.post("/requests/tasks/{task_id}/retry", response_class=HTMLResponse)
+async def retry_task(request: Request, task_id: str):
+    """Retry a failed task — resets it to pending for the daemon to pick up."""
+    user = await get_user_context(request)
+    await validate_csrf_token(request)
+    pool = await get_pool()
+    from lucent.db.requests import RequestRepository
+    repo = RequestRepository(pool)
+
+    task = await repo.retry_task(task_id)
+    if not task:
+        raise HTTPException(409, "Task not in failed state")
+
+    request_id = str(task["request_id"])
+    return RedirectResponse(f"/requests/{request_id}", status_code=303)
+
+
 # =============================================================================
 # Schedules
 # =============================================================================

@@ -22,13 +22,12 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import httpx
 from jinja2 import Environment, FileSystemLoader
 
 # Paths
 DAEMON_DIR = Path(__file__).parent
 TEMPLATES_DIR = DAEMON_DIR / "templates"
-AGENTS_DIR = DAEMON_DIR / "agents"
-SKILLS_DIR = DAEMON_DIR.parent / ".github" / "skills"
 
 
 # ============================================================================
@@ -817,63 +816,121 @@ class AdaptationPipeline:
                     )
                     existing_skill_names.add(arch.name)
 
-    def generate_agents(self) -> list[Path]:
-        """Generate agent .md files from templates. Returns paths of created files."""
+    async def generate_agents(self, api_base: str = "", api_headers: dict | None = None) -> list[str]:
+        """Generate agent definitions via the definitions API (proposed status).
+
+        Definitions are created in 'proposed' status and require human approval
+        before the daemon can use them. Returns names of proposed agents.
+        """
         created = []
+        if not api_base or not api_headers:
+            return created
+
+        # Check which agents already exist as definitions
+        existing_names: set[str] = set()
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(
+                    f"{api_base}/definitions/agents",
+                    headers=api_headers,
+                )
+                if resp.status_code == 200:
+                    existing_names = {a["name"] for a in resp.json()}
+        except Exception:
+            pass
+
         for rec in self.assessment.recommended_agents:
-            # Skip if agent already exists
-            agent_path = AGENTS_DIR / f"{rec.name}.agent.md"
-            if agent_path.exists():
+            if rec.name in existing_names:
                 continue
 
             template_file = _select_agent_template(rec)
             try:
                 template = self.jinja_env.get_template(template_file)
             except Exception:
-                # Fall back to base template
                 template = self.jinja_env.get_template("agents/base_agent.md.j2")
 
             context = _build_agent_context(rec, self.assessment)
             content = template.render(**context)
 
-            # Validate before writing
             result = validate_agent(content, rec.name)
             self.validation_results[f"agent:{rec.name}"] = result
 
-            agent_path.write_text(content)
-            created.append(agent_path)
-            self.generated_agents.append(rec.name)
+            # Create in DB as 'proposed' — requires human approval
+            try:
+                async with httpx.AsyncClient(timeout=10) as client:
+                    resp = await client.post(
+                        f"{api_base}/definitions/agents",
+                        json={
+                            "name": rec.name,
+                            "description": rec.purpose,
+                            "content": content,
+                        },
+                        headers=api_headers,
+                    )
+                    if resp.status_code == 201:
+                        created.append(rec.name)
+                        self.generated_agents.append(rec.name)
+            except Exception:
+                pass
 
         return created
 
-    def generate_skills(self) -> list[Path]:
-        """Generate skill directories with SKILL.md files. Returns paths of created files."""
+    async def generate_skills(self, api_base: str = "", api_headers: dict | None = None) -> list[str]:
+        """Generate skill definitions via the definitions API (proposed status).
+
+        Definitions are created in 'proposed' status and require human approval.
+        Returns names of proposed skills.
+        """
         created = []
+        if not api_base or not api_headers:
+            return created
+
+        # Check which skills already exist as definitions
+        existing_names: set[str] = set()
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(
+                    f"{api_base}/definitions/skills",
+                    headers=api_headers,
+                )
+                if resp.status_code == 200:
+                    existing_names = {s["name"] for s in resp.json()}
+        except Exception:
+            pass
+
         for rec in self.assessment.recommended_skills:
-            # Skip if skill already exists
-            skill_dir = SKILLS_DIR / rec.name
-            skill_file = skill_dir / "SKILL.md"
-            if skill_file.exists():
+            if rec.name in existing_names:
                 continue
 
             template_file = _select_skill_template(rec)
             try:
                 template = self.jinja_env.get_template(template_file)
             except Exception:
-                # Fall back to base template
                 template = self.jinja_env.get_template("skills/base_skill.md.j2")
 
             context = _build_skill_context(rec, self.assessment)
             content = template.render(**context)
 
-            # Validate before writing
             result = validate_skill(content, rec.name)
             self.validation_results[f"skill:{rec.name}"] = result
 
-            skill_dir.mkdir(parents=True, exist_ok=True)
-            skill_file.write_text(content)
-            created.append(skill_file)
-            self.generated_skills.append(rec.name)
+            # Create in DB as 'proposed' — requires human approval
+            try:
+                async with httpx.AsyncClient(timeout=10) as client:
+                    resp = await client.post(
+                        f"{api_base}/definitions/skills",
+                        json={
+                            "name": rec.name,
+                            "description": rec.purpose,
+                            "content": content,
+                        },
+                        headers=api_headers,
+                    )
+                    if resp.status_code == 201:
+                        created.append(rec.name)
+                        self.generated_skills.append(rec.name)
+            except Exception:
+                pass
 
         return created
 
@@ -967,21 +1024,26 @@ class AdaptationPipeline:
             }
         return result
 
-    async def run(self, memory_api=None) -> dict:
+    async def run(self, memory_api=None, api_base: str = "", api_headers: dict | None = None) -> dict:
         """Execute the full adaptation pipeline.
+
+        Generates agent and skill definitions in the database with 'proposed'
+        status. A human must approve them via the definitions UI before the
+        daemon can use them as sub-agent roles.
 
         Args:
             memory_api: Optional MemoryAPI class for storing memories.
-                        If None, only generates files (useful for testing).
+            api_base: Base URL for the Lucent API (e.g. http://localhost:8766/api).
+            api_headers: Auth headers for API calls.
 
-        Returns a summary dict with what was created.
+        Returns a summary dict with what was proposed.
         """
         # Apply archetype recommendations based on domain signals
         self.apply_archetypes()
 
-        # Generate files
-        agent_paths = self.generate_agents()
-        skill_paths = self.generate_skills()
+        # Propose definitions via API (human approval required)
+        agents_proposed = await self.generate_agents(api_base, api_headers)
+        skills_proposed = await self.generate_skills(api_base, api_headers)
 
         # Collect validation info
         validation_warnings = {
@@ -990,8 +1052,8 @@ class AdaptationPipeline:
 
         summary = {
             "domain": self.assessment.domain_primary,
-            "agents_created": [str(p) for p in agent_paths],
-            "skills_created": [str(p) for p in skill_paths],
+            "agents_proposed": agents_proposed,
+            "skills_proposed": skills_proposed,
             "agents_skipped": [
                 r.name
                 for r in self.assessment.recommended_agents
@@ -1003,6 +1065,7 @@ class AdaptationPipeline:
                 if r.name not in self.generated_skills
             ],
             "validation_warnings": validation_warnings,
+            "requires_approval": True,
         }
 
         # Store memories if API is available
@@ -1019,12 +1082,19 @@ class AdaptationPipeline:
         return summary
 
 
-async def run_adaptation(raw_assessment_output: str, memory_api=None) -> dict | None:
+async def run_adaptation(
+    raw_assessment_output: str,
+    memory_api=None,
+    api_base: str = "",
+    api_headers: dict | None = None,
+) -> dict | None:
     """Convenience function: parse assessment output and run the pipeline.
 
     Args:
         raw_assessment_output: The full text output from the assessment agent.
         memory_api: Optional MemoryAPI class for storing memories.
+        api_base: Base URL for the Lucent API.
+        api_headers: Auth headers for API calls.
 
     Returns a summary dict, or None if parsing failed.
     """
@@ -1033,4 +1103,4 @@ async def run_adaptation(raw_assessment_output: str, memory_api=None) -> dict | 
         return None
 
     pipeline = AdaptationPipeline(assessment)
-    return await pipeline.run(memory_api=memory_api)
+    return await pipeline.run(memory_api=memory_api, api_base=api_base, api_headers=api_headers)

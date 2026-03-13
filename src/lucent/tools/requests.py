@@ -172,6 +172,28 @@ Returns: JSON with request details, task breakdown, events timeline, and memory 
 
         return json.dumps(req, default=serialize)
 
+    @mcp.tool(description="""List pending requests — top-level work items waiting to be planned or executed.
+
+Returns requests with status 'pending', including how many tasks each has.
+Requests with 0 tasks need to be broken into tasks before they can be dispatched.
+Use this during cognitive cycles to discover new work.""")
+    async def list_pending_requests() -> str:
+        _, org_id, _ = await _get_current_user_context()
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+
+        repo = await _get_request_repository()
+        requests = await repo.list_pending_requests(str(org_id))
+
+        def serialize(obj):
+            if hasattr(obj, "isoformat"):
+                return obj.isoformat()
+            if isinstance(obj, UUID):
+                return str(obj)
+            return str(obj)
+
+        return json.dumps(requests, default=serialize)
+
     @mcp.tool(description="""List pending tracked tasks in the queue.
 
 Returns tasks that are waiting to be claimed and executed, ordered by priority.

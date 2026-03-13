@@ -156,6 +156,23 @@ class RequestRepository:
             rows = await conn.fetch(query, *params)
         return [dict(r) for r in rows]
 
+    async def list_pending_requests(self, org_id: str) -> list[dict]:
+        """Get pending requests, including those with no tasks yet."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT r.*, count(t.id) as task_count
+                   FROM requests r LEFT JOIN tasks t ON t.request_id = r.id
+                   WHERE r.organization_id = $1
+                     AND r.status = 'pending'
+                   GROUP BY r.id
+                   ORDER BY
+                     CASE r.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1
+                                     WHEN 'medium' THEN 2 ELSE 3 END,
+                     r.created_at""",
+                UUID(org_id),
+            )
+        return [dict(r) for r in rows]
+
     async def list_pending_tasks(self, org_id: str) -> list[dict]:
         """Get all tasks ready to be claimed.
 
@@ -269,6 +286,25 @@ class RequestRepository:
         if row:
             await self.add_task_event(task_id, "released", "Task released back to pending")
             return dict(row)
+        return None
+
+    async def retry_task(self, task_id: str) -> dict | None:
+        """Reset a failed task back to pending for retry."""
+        now = datetime.now(timezone.utc)
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """UPDATE tasks SET status = 'pending', claimed_by = NULL,
+                   claimed_at = NULL, completed_at = NULL, result = NULL,
+                   error = NULL, updated_at = $2
+                   WHERE id = $1 AND status = 'failed' RETURNING *""",
+                UUID(task_id), now,
+            )
+        if row:
+            task = dict(row)
+            await self.add_task_event(task_id, "retried", "Task queued for retry")
+            # If parent request was marked failed, set it back to in_progress
+            await self._ensure_request_in_progress(str(task["request_id"]))
+            return task
         return None
 
     async def release_stale_tasks(self, stale_minutes: int = 30) -> int:

@@ -11,6 +11,8 @@ Each cycle: perceive, reason, decide, act.
 - Check for `daemon-message` memories (messages from collaborators)
 - Check for `feedback-approved` and `feedback-rejected` memories (process these FIRST)
 - Search for pending `daemon-task` memories
+- **Call `list_pending_requests` to find requests waiting for task planning**
+- Call `list_pending_tasks` to see what's queued for dispatch
 - Check goal progress
 - Assess what's changed in your environment
 

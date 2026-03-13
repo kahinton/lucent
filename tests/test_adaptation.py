@@ -3,8 +3,8 @@
 Validates:
 - Assessment output parsing (<assessment_result> JSON extraction)
 - AssessmentResult data model construction
-- Agent definition generation from Jinja2 templates
-- Skill directory/file creation from templates
+- Agent definition generation via definitions API
+- Skill definition generation via definitions API
 - Graceful handling of missing/malformed assessment output
 - End-to-end pipeline execution (without memory API)
 """
@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import textwrap
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -392,55 +392,99 @@ class TestContextBuilding:
 # ============================================================================
 
 
+def _mock_httpx_client(existing_agents=None, existing_skills=None):
+    """Create a mock httpx.AsyncClient that simulates the definitions API."""
+    existing_agents = existing_agents or []
+    existing_skills = existing_skills or []
+    created_agents = []
+    created_skills = []
+
+    async def mock_get(url, **kwargs):
+        resp = MagicMock()
+        if "/definitions/agents" in url:
+            resp.status_code = 200
+            resp.json.return_value = [{"name": n} for n in existing_agents]
+        elif "/definitions/skills" in url:
+            resp.status_code = 200
+            resp.json.return_value = [{"name": n} for n in existing_skills]
+        else:
+            resp.status_code = 404
+        return resp
+
+    async def mock_post(url, **kwargs):
+        resp = MagicMock()
+        body = kwargs.get("json", {})
+        if "/definitions/agents" in url:
+            created_agents.append(body)
+            resp.status_code = 201
+            resp.json.return_value = {"id": "test-id", **body}
+        elif "/definitions/skills" in url:
+            created_skills.append(body)
+            resp.status_code = 201
+            resp.json.return_value = {"id": "test-id", **body}
+        else:
+            resp.status_code = 404
+        return resp
+
+    client = AsyncMock()
+    client.get = mock_get
+    client.post = mock_post
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=False)
+
+    return client, created_agents, created_skills
+
+
 class TestAgentGeneration:
-    """Tests for generating agent .md files from templates."""
+    """Tests for generating agent definitions via the API."""
 
-    def test_generates_agent_files(self, sample_assessment: AssessmentResult, tmp_path: Path):
-        with patch("daemon.adaptation.AGENTS_DIR", tmp_path):
+    @pytest.mark.asyncio
+    async def test_proposes_agent_definitions(self, sample_assessment: AssessmentResult):
+        client, created_agents, _ = _mock_httpx_client()
+        with patch("daemon.adaptation.httpx.AsyncClient", return_value=client):
             pipeline = AdaptationPipeline(sample_assessment)
-            paths = pipeline.generate_agents()
+            names = await pipeline.generate_agents(
+                api_base="http://test/api", api_headers={"Authorization": "Bearer test"},
+            )
 
-        assert len(paths) == 2
-        for p in paths:
-            assert p.exists()
-            assert p.suffix == ".md"
-            content = p.read_text()
-            assert "# " in content  # Has a heading
-            assert "daemon" in content  # Tags reference
+        assert len(names) == 2
+        assert len(created_agents) == 2
+        for body in created_agents:
+            assert "name" in body
+            assert "content" in body
+            assert "description" in body
 
-    def test_skips_existing_agents(self, sample_assessment: AssessmentResult, tmp_path: Path):
-        # Pre-create one agent
-        existing = tmp_path / "security.agent.md"
-        existing.write_text("# Existing agent\n")
-
-        with patch("daemon.adaptation.AGENTS_DIR", tmp_path):
+    @pytest.mark.asyncio
+    async def test_skips_existing_agents(self, sample_assessment: AssessmentResult):
+        client, created_agents, _ = _mock_httpx_client(existing_agents=["security"])
+        with patch("daemon.adaptation.httpx.AsyncClient", return_value=client):
             pipeline = AdaptationPipeline(sample_assessment)
-            paths = pipeline.generate_agents()
+            names = await pipeline.generate_agents(
+                api_base="http://test/api", api_headers={"Authorization": "Bearer test"},
+            )
 
-        # Only deployment should be created, security was skipped
-        assert len(paths) == 1
-        assert paths[0].name == "deployment.agent.md"
-        # Existing file should be untouched
-        assert existing.read_text() == "# Existing agent\n"
+        # Only deployment should be proposed, security was skipped
+        assert len(names) == 1
+        assert names[0] == "deployment"
 
-    def test_generates_nothing_with_no_recommendations(self, tmp_path: Path):
+    @pytest.mark.asyncio
+    async def test_generates_nothing_with_no_recommendations(self):
         assessment = AssessmentResult()
-        with patch("daemon.adaptation.AGENTS_DIR", tmp_path):
+        client, created_agents, _ = _mock_httpx_client()
+        with patch("daemon.adaptation.httpx.AsyncClient", return_value=client):
             pipeline = AdaptationPipeline(assessment)
-            paths = pipeline.generate_agents()
+            names = await pipeline.generate_agents(
+                api_base="http://test/api", api_headers={"Authorization": "Bearer test"},
+            )
 
-        assert paths == []
+        assert names == []
+        assert created_agents == []
 
-    def test_software_template_includes_language_guidance(
-        self, sample_assessment: AssessmentResult, tmp_path: Path
-    ):
-        with patch("daemon.adaptation.AGENTS_DIR", tmp_path):
-            pipeline = AdaptationPipeline(sample_assessment)
-            paths = pipeline.generate_agents()
-
-        content = paths[0].read_text()
-        assert "python" in content.lower()
-        assert "ruff" in content.lower()
+    @pytest.mark.asyncio
+    async def test_generates_nothing_without_api_config(self, sample_assessment: AssessmentResult):
+        pipeline = AdaptationPipeline(sample_assessment)
+        names = await pipeline.generate_agents()
+        assert names == []
 
 
 # ============================================================================
@@ -449,43 +493,48 @@ class TestAgentGeneration:
 
 
 class TestSkillGeneration:
-    """Tests for generating skill directories with SKILL.md files."""
+    """Tests for generating skill definitions via the API."""
 
-    def test_generates_skill_directories(self, sample_assessment: AssessmentResult, tmp_path: Path):
-        with patch("daemon.adaptation.SKILLS_DIR", tmp_path):
+    @pytest.mark.asyncio
+    async def test_proposes_skill_definitions(self, sample_assessment: AssessmentResult):
+        client, _, created_skills = _mock_httpx_client()
+        with patch("daemon.adaptation.httpx.AsyncClient", return_value=client):
             pipeline = AdaptationPipeline(sample_assessment)
-            paths = pipeline.generate_skills()
+            names = await pipeline.generate_skills(
+                api_base="http://test/api", api_headers={"Authorization": "Bearer test"},
+            )
 
-        assert len(paths) == 2
-        for p in paths:
-            assert p.exists()
-            assert p.name == "SKILL.md"
-            assert p.parent.is_dir()
-            content = p.read_text()
-            assert "---" in content  # Has frontmatter
-            assert "name:" in content
+        assert len(names) == 2
+        assert len(created_skills) == 2
+        for body in created_skills:
+            assert "name" in body
+            assert "content" in body
 
-    def test_skips_existing_skills(self, sample_assessment: AssessmentResult, tmp_path: Path):
-        # Pre-create one skill
-        existing_dir = tmp_path / "code-review"
-        existing_dir.mkdir()
-        (existing_dir / "SKILL.md").write_text("# Existing skill\n")
-
-        with patch("daemon.adaptation.SKILLS_DIR", tmp_path):
+    @pytest.mark.asyncio
+    async def test_skips_existing_skills(self, sample_assessment: AssessmentResult):
+        client, _, created_skills = _mock_httpx_client(existing_skills=["code-review"])
+        with patch("daemon.adaptation.httpx.AsyncClient", return_value=client):
             pipeline = AdaptationPipeline(sample_assessment)
-            paths = pipeline.generate_skills()
+            names = await pipeline.generate_skills(
+                api_base="http://test/api", api_headers={"Authorization": "Bearer test"},
+            )
 
-        # Only dev-workflow should be created
-        assert len(paths) == 1
-        assert paths[0].parent.name == "dev-workflow"
+        # Only dev-workflow should be proposed
+        assert len(names) == 1
+        assert names[0] == "dev-workflow"
 
-    def test_generates_nothing_with_no_recommendations(self, tmp_path: Path):
+    @pytest.mark.asyncio
+    async def test_generates_nothing_with_no_recommendations(self):
         assessment = AssessmentResult()
-        with patch("daemon.adaptation.SKILLS_DIR", tmp_path):
+        client, _, created_skills = _mock_httpx_client()
+        with patch("daemon.adaptation.httpx.AsyncClient", return_value=client):
             pipeline = AdaptationPipeline(assessment)
-            paths = pipeline.generate_skills()
+            names = await pipeline.generate_skills(
+                api_base="http://test/api", api_headers={"Authorization": "Bearer test"},
+            )
 
-        assert paths == []
+        assert names == []
+        assert created_skills == []
 
 
 # ============================================================================
@@ -548,52 +597,43 @@ class TestPipelineEndToEnd:
 
     @pytest.mark.asyncio
     async def test_run_without_memory_api(
-        self, sample_assessment: AssessmentResult, tmp_path: Path
+        self, sample_assessment: AssessmentResult,
     ):
-        agents_dir = tmp_path / "agents"
-        agents_dir.mkdir()
-        skills_dir = tmp_path / "skills"
-        skills_dir.mkdir()
-
-        with (
-            patch("daemon.adaptation.AGENTS_DIR", agents_dir),
-            patch("daemon.adaptation.SKILLS_DIR", skills_dir),
-        ):
+        client, created_agents, created_skills = _mock_httpx_client()
+        with patch("daemon.adaptation.httpx.AsyncClient", return_value=client):
             pipeline = AdaptationPipeline(sample_assessment)
-            result = await pipeline.run(memory_api=None)
+            result = await pipeline.run(
+                memory_api=None,
+                api_base="http://test/api",
+                api_headers={"Authorization": "Bearer test"},
+            )
 
         assert result["domain"] == "software"
+        assert result["requires_approval"] is True
         # Explicit recommendations + archetype fills
-        assert len(result["agents_created"]) >= 2
-        assert len(result["skills_created"]) >= 2
+        assert len(result["agents_proposed"]) >= 2
+        assert len(result["skills_proposed"]) >= 2
         assert "validation_warnings" in result
 
     @pytest.mark.asyncio
-    async def test_run_reports_skipped(self, sample_assessment: AssessmentResult, tmp_path: Path):
-        agents_dir = tmp_path / "agents"
-        agents_dir.mkdir()
-        skills_dir = tmp_path / "skills"
-        skills_dir.mkdir()
-
-        # Pre-create one agent and one skill
-        (agents_dir / "security.agent.md").write_text("existing")
-        code_review_dir = skills_dir / "code-review"
-        code_review_dir.mkdir()
-        (code_review_dir / "SKILL.md").write_text("existing")
-
-        with (
-            patch("daemon.adaptation.AGENTS_DIR", agents_dir),
-            patch("daemon.adaptation.SKILLS_DIR", skills_dir),
-        ):
+    async def test_run_reports_skipped(self, sample_assessment: AssessmentResult):
+        # Pre-create security agent and code-review skill in mock API
+        client, _, _ = _mock_httpx_client(
+            existing_agents=["security"], existing_skills=["code-review"],
+        )
+        with patch("daemon.adaptation.httpx.AsyncClient", return_value=client):
             pipeline = AdaptationPipeline(sample_assessment)
-            result = await pipeline.run(memory_api=None)
+            result = await pipeline.run(
+                memory_api=None,
+                api_base="http://test/api",
+                api_headers={"Authorization": "Bearer test"},
+            )
 
-        # security agent and code-review skill were pre-created, so should be skipped
+        # security agent and code-review skill were pre-existing, so should be skipped
         assert "security" in result["agents_skipped"]
         assert "code-review" in result["skills_skipped"]
-        # deployment agent should still be created (not pre-existing)
-        created_paths = [Path(p).stem for p in result["agents_created"]]
-        assert "deployment.agent" in created_paths
+        # deployment agent should still be proposed (not pre-existing)
+        assert "deployment" in result["agents_proposed"]
 
 
 # ============================================================================
@@ -605,22 +645,20 @@ class TestRunAdaptation:
     """Tests for the run_adaptation convenience function."""
 
     @pytest.mark.asyncio
-    async def test_success(self, sample_raw_output: str, tmp_path: Path):
-        agents_dir = tmp_path / "agents"
-        agents_dir.mkdir()
-        skills_dir = tmp_path / "skills"
-        skills_dir.mkdir()
-
-        with (
-            patch("daemon.adaptation.AGENTS_DIR", agents_dir),
-            patch("daemon.adaptation.SKILLS_DIR", skills_dir),
-        ):
-            result = await run_adaptation(sample_raw_output)
+    async def test_success(self, sample_raw_output: str):
+        client, _, _ = _mock_httpx_client()
+        with patch("daemon.adaptation.httpx.AsyncClient", return_value=client):
+            result = await run_adaptation(
+                sample_raw_output,
+                api_base="http://test/api",
+                api_headers={"Authorization": "Bearer test"},
+            )
 
         assert result is not None
         assert result["domain"] == "software"
+        assert result["requires_approval"] is True
         # At least the 2 explicit + archetype additions
-        assert len(result["agents_created"]) >= 2
+        assert len(result["agents_proposed"]) >= 2
 
     @pytest.mark.asyncio
     async def test_returns_none_for_bad_input(self):
@@ -897,19 +935,15 @@ class TestValidation:
 class TestArchetypeApplication:
     """Tests for automatic archetype-based recommendations."""
 
-    def test_archetypes_fill_gaps_for_software(self, tmp_path: Path):
+    def test_archetypes_fill_gaps_for_software(self):
         """When assessment has no explicit recommendations, archetypes fill in."""
         assessment = AssessmentResult(
             domain_primary="software",
             domain_description="A Python web app",
             tech_stack={"languages": ["python"]},
         )
-        with (
-            patch("daemon.adaptation.AGENTS_DIR", tmp_path),
-            patch("daemon.adaptation.SKILLS_DIR", tmp_path),
-        ):
-            pipeline = AdaptationPipeline(assessment)
-            pipeline.apply_archetypes()
+        pipeline = AdaptationPipeline(assessment)
+        pipeline.apply_archetypes()
 
         agent_names = [r.name for r in assessment.recommended_agents]
         assert "code-review" in agent_names
@@ -917,43 +951,35 @@ class TestArchetypeApplication:
         skill_names = [r.name for r in assessment.recommended_skills]
         assert "code-review" in skill_names
 
-    def test_archetypes_fill_gaps_for_legal(self, tmp_path: Path):
+    def test_archetypes_fill_gaps_for_legal(self):
         assessment = AssessmentResult(
             domain_primary="legal",
             domain_description="A law firm",
         )
-        with (
-            patch("daemon.adaptation.AGENTS_DIR", tmp_path),
-            patch("daemon.adaptation.SKILLS_DIR", tmp_path),
-        ):
-            pipeline = AdaptationPipeline(assessment)
-            pipeline.apply_archetypes()
+        pipeline = AdaptationPipeline(assessment)
+        pipeline.apply_archetypes()
 
         agent_names = [r.name for r in assessment.recommended_agents]
         assert "legal-research" in agent_names
         assert "contract-review" in agent_names
         assert "compliance" in agent_names
 
-    def test_archetypes_dont_duplicate_existing(self, tmp_path: Path):
+    def test_archetypes_dont_duplicate_existing(self):
         """Archetypes skip agents/skills that already exist."""
         assessment = AssessmentResult(
             domain_primary="software",
             existing_agents=["code-review", "security"],
             existing_skills=["code-review"],
         )
-        with (
-            patch("daemon.adaptation.AGENTS_DIR", tmp_path),
-            patch("daemon.adaptation.SKILLS_DIR", tmp_path),
-        ):
-            pipeline = AdaptationPipeline(assessment)
-            pipeline.apply_archetypes()
+        pipeline = AdaptationPipeline(assessment)
+        pipeline.apply_archetypes()
 
         agent_names = [r.name for r in assessment.recommended_agents]
         assert "code-review" not in agent_names  # Already exists
         assert "security" not in agent_names  # Already exists
         assert "testing" in agent_names  # New from archetype
 
-    def test_archetypes_dont_duplicate_recommendations(self, tmp_path: Path):
+    def test_archetypes_dont_duplicate_recommendations(self):
         """Archetypes skip agents that are already recommended."""
         assessment = AssessmentResult(
             domain_primary="software",
@@ -965,12 +991,8 @@ class TestArchetypeApplication:
                 ),
             ],
         )
-        with (
-            patch("daemon.adaptation.AGENTS_DIR", tmp_path),
-            patch("daemon.adaptation.SKILLS_DIR", tmp_path),
-        ):
-            pipeline = AdaptationPipeline(assessment)
-            pipeline.apply_archetypes()
+        pipeline = AdaptationPipeline(assessment)
+        pipeline.apply_archetypes()
 
         # code-review should appear exactly once
         agent_names = [r.name for r in assessment.recommended_agents]
@@ -978,7 +1000,7 @@ class TestArchetypeApplication:
         # But others from archetype should be added
         assert "security" in agent_names
 
-    def test_cross_domain_archetypes(self, tmp_path: Path):
+    def test_cross_domain_archetypes(self):
         """Secondary domains contribute archetypes too."""
         assessment = AssessmentResult(
             domain_primary="software",
@@ -986,12 +1008,8 @@ class TestArchetypeApplication:
             tech_stack={"languages": ["python"], "tools": ["pytest"]},
             guardrails=["Ensure regulatory compliance"],
         )
-        with (
-            patch("daemon.adaptation.AGENTS_DIR", tmp_path),
-            patch("daemon.adaptation.SKILLS_DIR", tmp_path),
-        ):
-            pipeline = AdaptationPipeline(assessment)
-            pipeline.apply_archetypes()
+        pipeline = AdaptationPipeline(assessment)
+        pipeline.apply_archetypes()
 
         agent_names = [r.name for r in assessment.recommended_agents]
         # Should have software agents
@@ -1008,7 +1026,8 @@ class TestArchetypeApplication:
 class TestLegalTemplateGeneration:
     """Tests for legal domain template rendering."""
 
-    def test_legal_agent_generates(self, tmp_path: Path):
+    @pytest.mark.asyncio
+    async def test_legal_agent_generates(self):
         assessment = AssessmentResult(
             domain_primary="legal",
             domain_description="Corporate law firm",
@@ -1021,19 +1040,24 @@ class TestLegalTemplateGeneration:
             ],
             guardrails=["Maintain client confidentiality"],
         )
-        with patch("daemon.adaptation.AGENTS_DIR", tmp_path):
+        client, created_agents, _ = _mock_httpx_client()
+        with patch("daemon.adaptation.httpx.AsyncClient", return_value=client):
             pipeline = AdaptationPipeline(assessment)
-            paths = pipeline.generate_agents()
+            names = await pipeline.generate_agents(
+                api_base="http://test/api", api_headers={"Authorization": "Bearer test"},
+            )
 
-        assert len(paths) == 1
-        content = paths[0].read_text()
+        assert len(names) == 1
+        assert names[0] == "legal-research"
+        content = created_agents[0]["content"]
         assert "Legal Research" in content
         assert "legal environment" in content.lower()
         assert "privilege" in content.lower()
         assert "jurisdiction" in content.lower()
         assert "daemon" in content
 
-    def test_legal_skill_generates(self, tmp_path: Path):
+    @pytest.mark.asyncio
+    async def test_legal_skill_generates(self):
         assessment = AssessmentResult(
             domain_primary="legal",
             recommended_skills=[
@@ -1049,16 +1073,18 @@ class TestLegalTemplateGeneration:
                 ),
             ],
         )
-        with patch("daemon.adaptation.SKILLS_DIR", tmp_path):
+        client, _, created_skills = _mock_httpx_client()
+        with patch("daemon.adaptation.httpx.AsyncClient", return_value=client):
             pipeline = AdaptationPipeline(assessment)
-            paths = pipeline.generate_skills()
+            names = await pipeline.generate_skills(
+                api_base="http://test/api", api_headers={"Authorization": "Bearer test"},
+            )
 
-        assert len(paths) == 2
-        names = [p.parent.name for p in paths]
+        assert len(names) == 2
         assert "case-analysis" in names
         assert "compliance-review" in names
-        for p in paths:
-            content = p.read_text()
+        for body in created_skills:
+            content = body["content"]
             assert "---" in content  # Frontmatter
             assert "name:" in content
 
@@ -1072,60 +1098,50 @@ class TestPipelineWithArchetypes:
     """Tests for the full pipeline including archetype application."""
 
     @pytest.mark.asyncio
-    async def test_legal_domain_end_to_end(self, tmp_path: Path):
-        agents_dir = tmp_path / "agents"
-        agents_dir.mkdir()
-        skills_dir = tmp_path / "skills"
-        skills_dir.mkdir()
-
+    async def test_legal_domain_end_to_end(self):
         assessment = AssessmentResult(
             domain_primary="legal",
             domain_description="Corporate law practice with contracts and compliance",
         )
 
-        with (
-            patch("daemon.adaptation.AGENTS_DIR", agents_dir),
-            patch("daemon.adaptation.SKILLS_DIR", skills_dir),
-        ):
+        client, created_agents, created_skills = _mock_httpx_client()
+        with patch("daemon.adaptation.httpx.AsyncClient", return_value=client):
             pipeline = AdaptationPipeline(assessment)
-            result = await pipeline.run(memory_api=None)
+            result = await pipeline.run(
+                memory_api=None,
+                api_base="http://test/api",
+                api_headers={"Authorization": "Bearer test"},
+            )
 
         assert result["domain"] == "legal"
+        assert result["requires_approval"] is True
         # Archetypes should have filled in legal agents/skills
-        assert len(result["agents_created"]) >= 3  # legal-research, contract-review, compliance
-        assert len(result["skills_created"]) >= 2  # case-analysis, compliance-review
+        assert len(result["agents_proposed"]) >= 3  # legal-research, contract-review, compliance
+        assert len(result["skills_proposed"]) >= 2  # case-analysis, compliance-review
         assert "validation_warnings" in result
 
     @pytest.mark.asyncio
-    async def test_support_domain_end_to_end(self, tmp_path: Path):
-        agents_dir = tmp_path / "agents"
-        agents_dir.mkdir()
-        skills_dir = tmp_path / "skills"
-        skills_dir.mkdir()
-
+    async def test_support_domain_end_to_end(self):
         assessment = AssessmentResult(
             domain_primary="support",
             domain_description="Customer support team with ticketing",
         )
 
-        with (
-            patch("daemon.adaptation.AGENTS_DIR", agents_dir),
-            patch("daemon.adaptation.SKILLS_DIR", skills_dir),
-        ):
+        client, _, _ = _mock_httpx_client()
+        with patch("daemon.adaptation.httpx.AsyncClient", return_value=client):
             pipeline = AdaptationPipeline(assessment)
-            result = await pipeline.run(memory_api=None)
+            result = await pipeline.run(
+                memory_api=None,
+                api_base="http://test/api",
+                api_headers={"Authorization": "Bearer test"},
+            )
 
         assert result["domain"] == "support"
-        assert len(result["agents_created"]) >= 3  # triage, incident-response, knowledge-base
-        assert len(result["skills_created"]) >= 1  # triage
+        assert len(result["agents_proposed"]) >= 3  # triage, incident-response, knowledge-base
+        assert len(result["skills_proposed"]) >= 1  # triage
 
     @pytest.mark.asyncio
-    async def test_pipeline_includes_validation_warnings(self, tmp_path: Path):
-        agents_dir = tmp_path / "agents"
-        agents_dir.mkdir()
-        skills_dir = tmp_path / "skills"
-        skills_dir.mkdir()
-
+    async def test_pipeline_includes_validation_warnings(self):
         assessment = AssessmentResult(
             domain_primary="software",
             recommended_agents=[
@@ -1133,35 +1149,34 @@ class TestPipelineWithArchetypes:
             ],
         )
 
-        with (
-            patch("daemon.adaptation.AGENTS_DIR", agents_dir),
-            patch("daemon.adaptation.SKILLS_DIR", skills_dir),
-        ):
+        client, _, _ = _mock_httpx_client()
+        with patch("daemon.adaptation.httpx.AsyncClient", return_value=client):
             pipeline = AdaptationPipeline(assessment)
-            result = await pipeline.run(memory_api=None)
+            result = await pipeline.run(
+                memory_api=None,
+                api_base="http://test/api",
+                api_headers={"Authorization": "Bearer test"},
+            )
 
         # validation_warnings key should exist (may be empty if templates pass)
         assert "validation_warnings" in result
 
     @pytest.mark.asyncio
-    async def test_pipeline_signals_stored_in_metadata(self, tmp_path: Path):
-        agents_dir = tmp_path / "agents"
-        agents_dir.mkdir()
-        skills_dir = tmp_path / "skills"
-        skills_dir.mkdir()
-
+    async def test_pipeline_signals_stored_in_metadata(self):
         assessment = AssessmentResult(
             domain_primary="software",
             domain_description="A Python project",
             tech_stack={"languages": ["python"]},
         )
 
-        with (
-            patch("daemon.adaptation.AGENTS_DIR", agents_dir),
-            patch("daemon.adaptation.SKILLS_DIR", skills_dir),
-        ):
+        client, _, _ = _mock_httpx_client()
+        with patch("daemon.adaptation.httpx.AsyncClient", return_value=client):
             pipeline = AdaptationPipeline(assessment)
-            await pipeline.run(memory_api=None)
+            await pipeline.run(
+                memory_api=None,
+                api_base="http://test/api",
+                api_headers={"Authorization": "Bearer test"},
+            )
             metadata = pipeline.build_agent_registry_metadata()
 
         assert "domain_signals" in metadata

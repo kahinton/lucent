@@ -171,6 +171,15 @@ async def release_task(task_id: UUID, user=Depends(get_current_user), pool=Depen
         raise HTTPException(409, "Task not in claimed/running state")
     return task
 
+@router.post("/tasks/{task_id}/retry")
+async def retry_task(task_id: UUID, user=Depends(get_current_user), pool=Depends(get_pool)):
+    from lucent.db.requests import RequestRepository
+    repo = RequestRepository(pool)
+    task = await repo.retry_task(str(task_id))
+    if not task:
+        raise HTTPException(409, "Task not in failed state")
+    return task
+
 @router.get("/tasks/{task_id}/events")
 async def task_events(task_id: UUID, user=Depends(get_current_user), pool=Depends(get_pool)):
     from lucent.db.requests import RequestRepository

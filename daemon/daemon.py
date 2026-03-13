@@ -103,9 +103,7 @@ ALLOW_GIT_PUSH = _git_push_val.lower() in ("true", "1", "yes")
 # Paths
 DAEMON_DIR = Path(__file__).parent
 COGNITIVE_PROMPT_PATH = DAEMON_DIR / "cognitive.md"
-AGENTS_DIR = DAEMON_DIR / "agents"
 AGENT_DEF_PATH = DAEMON_DIR.parent / ".github" / "agents" / "memory-teammate.agent.md"
-SKILLS_DIR = DAEMON_DIR.parent / ".github" / "skills"
 LOG_FILE = DAEMON_DIR / "daemon.log"
 DAEMON_KEY_FILE = DAEMON_DIR / ".daemon_api_key"
 
@@ -154,6 +152,16 @@ def _build_auth_config(api_key: str) -> tuple[dict, dict]:
 
 # Tracks the current key's DB id so we can revoke it on shutdown
 _current_key_db_id: str | None = None
+# Lock to prevent concurrent key provisioning from multiple async loops
+_key_provision_lock: asyncio.Lock | None = None
+
+
+def _get_key_lock() -> asyncio.Lock:
+    """Get or create the key provisioning lock (must be called from event loop)."""
+    global _key_provision_lock
+    if _key_provision_lock is None:
+        _key_provision_lock = asyncio.Lock()
+    return _key_provision_lock
 
 
 async def _provision_daemon_api_key(instance_id: str) -> str | None:
@@ -300,14 +308,19 @@ async def _revoke_current_key() -> None:
 
 
 async def _verify_api_key(api_key: str) -> bool:
-    """Check if an API key is accepted by the server."""
+    """Check if an API key is accepted by the server.
+
+    Uses /api/search (available in all modes) rather than /api/users/me
+    which only exists in team mode.
+    """
     if not api_key or not api_key.startswith("hs_"):
         return False
     try:
         async with httpx.AsyncClient(timeout=5) as client:
             resp = await client.get(
-                f"{API_BASE}/users/me",
+                f"{API_BASE}/search",
                 headers={"Authorization": f"Bearer {api_key}"},
+                params={"q": "_verify"},
             )
             return resp.status_code == 200
     except Exception:
@@ -359,24 +372,32 @@ async def ensure_valid_api_key(instance_id: str = "local") -> str:
 async def _handle_auth_failure(instance_id: str) -> bool:
     """Re-provision API key after an authentication failure.
 
+    Uses a lock to prevent concurrent provisioning from multiple async loops
+    (cognitive, scheduler, dispatcher) which would hit the unique constraint.
     Returns True if a new key was provisioned successfully.
     """
     global MCP_API_KEY, MCP_CONFIG, API_HEADERS, _current_key_db_id
 
-    log("Auth failure detected — re-provisioning API key...", "WARN")
-    _current_key_db_id = None  # old key is dead
+    lock = _get_key_lock()
+    async with lock:
+        # Re-check after acquiring lock — another loop may have already fixed it
+        if MCP_API_KEY and await _verify_api_key(MCP_API_KEY):
+            return True
 
-    new_key = await _provision_daemon_api_key(instance_id)
-    if new_key:
-        DAEMON_KEY_FILE.write_text(new_key)
-        DAEMON_KEY_FILE.chmod(0o600)
-        MCP_API_KEY = new_key
-        MCP_CONFIG, API_HEADERS = _build_auth_config(new_key)
-        log("Re-provisioned daemon API key after auth failure")
-        return True
+        log("Auth failure detected — re-provisioning API key...", "WARN")
+        _current_key_db_id = None  # old key is dead
 
-    log("Failed to re-provision API key after auth failure", "ERROR")
-    return False
+        new_key = await _provision_daemon_api_key(instance_id)
+        if new_key:
+            DAEMON_KEY_FILE.write_text(new_key)
+            DAEMON_KEY_FILE.chmod(0o600)
+            MCP_API_KEY = new_key
+            MCP_CONFIG, API_HEADERS = _build_auth_config(new_key)
+            log("Re-provisioned daemon API key after auth failure")
+            return True
+
+        log("Failed to re-provision API key after auth failure", "ERROR")
+        return False
 
 
 # ============================================================================
@@ -396,7 +417,7 @@ class MemoryAPI:
         """Search memories via REST API."""
         params = {"query": query, "limit": limit}
         if tags:
-            params["tags"] = ",".join(tags)
+            params["tags"] = tags
         if type:
             params["type"] = type
         try:
@@ -769,23 +790,74 @@ def resolve_env_vars(value: str) -> str:
     return re.sub(r'\$\{([^}]+)\}', replacer, value)
 
 
-def build_subagent_prompt(agent_type: str, task_description: str, task_context: str = "") -> str:
-    """Build the system message for a sub-agent session."""
-    agent_file = AGENTS_DIR / f"{agent_type}.agent.md"
-    agent_def = (
-        agent_file.read_text()
-        if agent_file.exists()
-        else f"You are Lucent's {agent_type} sub-agent."
-    )
-    identity = AGENT_DEF_PATH.read_text() if AGENT_DEF_PATH.exists() else ""
+async def build_subagent_prompt(
+    agent_type: str,
+    task_description: str,
+    task_context: str = "",
+    agent_definition_id: str | None = None,
+) -> str:
+    """Build the system message for a sub-agent session.
 
-    # Load relevant skills
+    Resolution order:
+      1. If agent_definition_id is set, load that specific definition from the DB
+      2. Otherwise, search DB for an active definition matching agent_type by name
+      3. Fall back to a generic prompt if no DB definition exists
+
+    Only active (human-approved) definitions are used. This ensures a human
+    is always in the loop for what roles the daemon can assume.
+    """
+    agent_def = ""
     skills_context = ""
-    if SKILLS_DIR.exists():
-        for skill_dir in sorted(SKILLS_DIR.iterdir()):
-            skill_file = skill_dir / "SKILL.md"
-            if skill_file.exists():
-                skills_context += f"\n\n--- Skill: {skill_dir.name} ---\n{skill_file.read_text()}"
+
+    # Try loading from DB definitions (approved only)
+    db_agent = None
+    if agent_definition_id:
+        # Direct ID lookup
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(
+                    f"{API_BASE}/definitions/agents/{agent_definition_id}",
+                    headers=API_HEADERS,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if data.get("status") == "active":
+                        db_agent = data
+        except Exception:
+            pass
+
+    if not db_agent:
+        # Search by name among active definitions
+        db_agent = await load_instance_agent(agent_type)
+
+    if db_agent:
+        agent_def = db_agent.get("content", "")
+        # Load skills granted to this agent
+        skill_names = db_agent.get("skill_names", [])
+        if skill_names:
+            try:
+                async with httpx.AsyncClient(timeout=10) as client:
+                    for skill_name in skill_names:
+                        resp = await client.get(
+                            f"{API_BASE}/definitions/skills",
+                            params={"status": "active"},
+                            headers=API_HEADERS,
+                        )
+                        if resp.status_code == 200:
+                            for skill in resp.json():
+                                if skill.get("name") in skill_names and skill.get("content"):
+                                    skills_context += (
+                                        f"\n\n--- Skill: {skill['name']} ---\n{skill['content']}"
+                                    )
+                            break  # Only need one request for all skills
+            except Exception:
+                pass
+        log(f"Using approved DB definition for '{agent_type}' agent (id: {db_agent['id'][:8]})")
+    else:
+        agent_def = f"You are Lucent's {agent_type} sub-agent."
+        log(f"No approved DB definition for '{agent_type}' — using generic prompt")
+
+    identity = AGENT_DEF_PATH.read_text() if AGENT_DEF_PATH.exists() else ""
 
     return f"""You are a sub-agent of Lucent, a distributed intelligence.
 
@@ -795,8 +867,7 @@ def build_subagent_prompt(agent_type: str, task_description: str, task_context: 
 --- LUCENT IDENTITY ---
 {identity}
 
---- SKILLS ---
-{skills_context}
+{f"--- SKILLS ---{skills_context}" if skills_context else ""}
 
 --- YOUR TASK ---
 {task_description}
@@ -816,6 +887,10 @@ After completing work, save what you learned:
 - What worked vs. what didn't
 - What you'd do differently next time
 - Connections to existing knowledge
+
+--- OUTPUT ---
+Always output your findings and results as text. Do not rely solely on saving
+to memory — the dispatch system validates your text output.
 
 --- GUARDRAILS ---
 - {"Git commit is ALLOWED — commit meaningful changes with clear messages"
@@ -1086,7 +1161,7 @@ class LucentDaemon:
         log("No environment profile found — running adaptation pipeline")
 
         # Run the assessment agent
-        system_message = build_subagent_prompt(
+        system_message = await build_subagent_prompt(
             "assessment",
             "Perform a full environment assessment. Discover tools, domain, "
             "collaborators, and goals. Produce structured output for the "
@@ -1116,13 +1191,15 @@ class LucentDaemon:
             return
 
         pipeline = AdaptationPipeline(assessment)
-        summary = await pipeline.run(memory_api=MemoryAPI)
+        summary = await pipeline.run(
+            memory_api=MemoryAPI, api_base=API_BASE, api_headers=API_HEADERS,
+        )
 
-        agents_created = len(summary.get("agents_created", []))
-        skills_created = len(summary.get("skills_created", []))
+        agents_proposed = len(summary.get("agents_proposed", []))
+        skills_proposed = len(summary.get("skills_proposed", []))
         log(
-            f"Adaptation complete: {agents_created} agents, {skills_created} skills created "
-            f"for domain '{summary.get('domain', 'unknown')}'"
+            f"Adaptation complete: {agents_proposed} agents, {skills_proposed} skills proposed "
+            f"for domain '{summary.get('domain', 'unknown')}' — awaiting human approval"
         )
 
     async def run_cognitive_cycle(self):
@@ -1303,7 +1380,10 @@ class LucentDaemon:
                                        {"agent_type": agent_type, "instance_id": self.instance_id})
 
             # Build and run the sub-agent
-            system_message = build_subagent_prompt(agent_type, description)
+            agent_def_id = task.get("agent_definition_id")
+            system_message = await build_subagent_prompt(
+                agent_type, description, agent_definition_id=str(agent_def_id) if agent_def_id else None,
+            )
             result = await self.run_session(
                 f"{agent_type}-{task_id[:8]}",
                 system_message,
@@ -1398,7 +1478,7 @@ class LucentDaemon:
         Runs every N cycles without cognitive involvement.
         """
         log("Running autonomic: memory maintenance")
-        system_message = build_subagent_prompt(
+        system_message = await build_subagent_prompt(
             "memory",
             (
                 "Quick memory maintenance pass — check for "
@@ -1426,7 +1506,7 @@ class LucentDaemon:
         Runs every LEARNING_INTERVAL cycles without cognitive involvement.
         """
         log("Running autonomic: learning extraction")
-        system_message = build_subagent_prompt(
+        system_message = await build_subagent_prompt(
             "reflection",
             (
                 "Learning extraction pass — process recent "
@@ -1695,14 +1775,6 @@ class LucentDaemon:
             COGNITIVE_PROMPT_PATH,
             AGENT_DEF_PATH,
         ]
-        # Also watch all agent definitions and skills
-        if AGENTS_DIR.exists():
-            watch_paths.extend(AGENTS_DIR.glob("*.md"))
-        if SKILLS_DIR.exists():
-            for skill_dir in SKILLS_DIR.iterdir():
-                skill_file = skill_dir / "SKILL.md"
-                if skill_file.exists():
-                    watch_paths.append(skill_file)
         # Watch adaptation module if it exists
         adapt_path = DAEMON_DIR / "adaptation.py"
         if adapt_path.exists():
@@ -1746,7 +1818,7 @@ class LucentDaemon:
         await self.start()
         try:
             if task:
-                system_message = build_subagent_prompt(task, f"Execute a {task} task.")
+                system_message = await build_subagent_prompt(task, f"Execute a {task} task.")
                 await self.run_session(
                     f"{task}-manual",
                     system_message,
