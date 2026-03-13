@@ -1,9 +1,6 @@
 {% extends "base.html" %}
-
 {% block title %}{{ definition.name }} - Definitions - Lucent{% endblock %}
-
 {% block content %}
-<!-- Breadcrumb -->
 <div class="flex items-center gap-2 text-sm text-gray-500 mb-4">
     <a href="/definitions?tab={{ 'agents' if definition_type == 'agent' else ('skills' if definition_type == 'skill' else 'mcp') }}" class="hover:text-gray-700">Definitions</a>
     <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5"/></svg>
@@ -12,151 +9,136 @@
     <span class="text-gray-700">{{ definition.name }}</span>
 </div>
 
-<!-- Header -->
 <div class="bg-white rounded-lg border border-gray-200 p-6 mb-6">
     <div class="flex items-start justify-between gap-4">
         <div class="flex-1 min-w-0">
             <div class="flex items-center gap-3 flex-wrap">
                 <h1 class="text-2xl font-bold text-gray-900">{{ definition.name }}</h1>
-                {% set status = definition.status %}
-                <span class="px-2.5 py-1 rounded text-sm font-medium
-                    {% if status == 'active' %}bg-green-100 text-green-700
-                    {% elif status == 'proposed' %}bg-amber-100 text-amber-700
-                    {% elif status == 'rejected' %}bg-red-100 text-red-700
-                    {% else %}bg-gray-100 text-gray-600{% endif %}">
-                    {{ status }}
-                </span>
+                <span class="px-2.5 py-1 rounded text-sm font-medium {% if definition.status == 'active' %}bg-green-100 text-green-700{% elif definition.status == 'proposed' %}bg-amber-100 text-amber-700{% elif definition.status == 'rejected' %}bg-red-100 text-red-700{% else %}bg-gray-100 text-gray-600{% endif %}">{{ definition.status }}</span>
                 <span class="px-2.5 py-1 rounded text-sm bg-gray-100 text-gray-500 capitalize">{{ definition_type | replace('-', ' ') }}</span>
+                {% if definition.scope == 'built-in' %}<span class="px-2.5 py-1 rounded text-sm bg-indigo-100 text-indigo-700 font-medium">built-in</span>{% elif definition.scope == 'instance' %}<span class="px-2.5 py-1 rounded text-sm bg-gray-100 text-gray-500">instance</span>{% endif %}
             </div>
-            {% if definition.description %}
-            <p class="text-gray-500 mt-2">{{ definition.description }}</p>
+            {% if definition.description %}<p class="text-gray-500 mt-2">{{ definition.description }}</p>{% endif %}
+        </div>
+        <div class="flex gap-2 shrink-0">
+            {% if definition.status == 'proposed' %}
+            <form method="POST" action="/definitions/{{ definition_type }}s/{{ definition.id }}/approve"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit" class="px-4 py-2 text-sm bg-green-600 text-white rounded-md hover:bg-green-700 font-medium">Approve</button></form>
+            <form method="POST" action="/definitions/{{ definition_type }}s/{{ definition.id }}/reject"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit" class="px-4 py-2 text-sm bg-red-50 text-red-700 rounded-md hover:bg-red-100 font-medium">Reject</button></form>
+            {% endif %}
+            {% if definition.scope != 'built-in' %}
+            <button onclick="document.getElementById('edit-modal').classList.remove('hidden')" class="px-4 py-2 text-sm bg-gray-100 text-gray-700 rounded-md hover:bg-gray-200 font-medium">Edit</button>
+            <form method="POST" action="/definitions/{{ definition_type }}s/{{ definition.id }}/delete" onsubmit="return confirm('Delete this {{ definition_type }}? This cannot be undone.')"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit" class="px-4 py-2 text-sm bg-red-50 text-red-700 rounded-md hover:bg-red-100 font-medium">Delete</button></form>
             {% endif %}
         </div>
-        {% if definition.status == 'proposed' %}
-        <div class="flex gap-2 shrink-0">
-            <form method="POST" action="/definitions/{{ definition_type }}s/{{ definition.id }}/approve">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                <button type="submit" class="px-4 py-2 text-sm bg-green-600 text-white rounded-md hover:bg-green-700 font-medium">Approve</button>
-            </form>
-            <form method="POST" action="/definitions/{{ definition_type }}s/{{ definition.id }}/reject">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                <button type="submit" class="px-4 py-2 text-sm bg-red-50 text-red-700 rounded-md hover:bg-red-100 font-medium">Reject</button>
-            </form>
-        </div>
-        {% endif %}
     </div>
-
-    <!-- Metadata -->
     <div class="flex flex-wrap gap-x-6 gap-y-1 mt-4 text-xs text-gray-400">
         <span>Created {{ definition.created_at.strftime('%b %d, %Y at %H:%M') if definition.created_at else 'unknown' }}</span>
-        {% if definition.approved_at %}
-        <span>Approved {{ definition.approved_at.strftime('%b %d, %Y at %H:%M') if definition.approved_at else '' }}</span>
-        {% endif %}
-        {% if definition.updated_at %}
-        <span>Updated {{ definition.updated_at.strftime('%b %d, %Y at %H:%M') if definition.updated_at else '' }}</span>
-        {% endif %}
+        {% if definition.approved_at %}<span>Approved {{ definition.approved_at.strftime('%b %d, %Y at %H:%M') }}</span>{% endif %}
+        {% if definition.updated_at %}<span>Updated {{ definition.updated_at.strftime('%b %d, %Y at %H:%M') }}</span>{% endif %}
         <span class="font-mono">{{ definition.id }}</span>
     </div>
 </div>
 
 {% if definition_type == 'agent' %}
-<!-- Skills and MCP Servers granted to this agent -->
-{% if skills or mcp_servers %}
 <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
-    {% if skills %}
     <div class="bg-white rounded-lg border border-gray-200 p-5">
         <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Granted Skills</h2>
-        <div class="space-y-2">
+        {% if skills %}
+        <div class="space-y-2 mb-3">
             {% for skill in skills %}
-            <a href="/definitions/skills/{{ skill.id }}" class="block p-3 rounded-md border border-gray-100 hover:border-blue-200 hover:bg-blue-50/30 transition-colors">
-                <div class="flex items-center gap-2">
+            <div class="flex items-center justify-between p-2 rounded-md border border-gray-100 group hover:border-blue-200">
+                <a href="/definitions/skills/{{ skill.id }}" class="flex items-center gap-2 flex-1">
                     <svg class="w-4 h-4 text-blue-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z"/></svg>
-                    <span class="font-medium text-gray-800">{{ skill.name }}</span>
-                    <span class="px-1.5 py-0.5 rounded text-xs {% if skill.status == 'active' %}bg-green-100 text-green-700{% else %}bg-gray-100 text-gray-500{% endif %}">{{ skill.status }}</span>
-                </div>
-                {% if skill.description %}
-                <p class="text-sm text-gray-500 mt-1 ml-6">{{ skill.description[:120] }}</p>
-                {% endif %}
-            </a>
+                    <span class="text-sm font-medium text-gray-800">{{ skill.name }}</span>
+                    {% if skill.scope == 'built-in' %}<span class="px-1.5 py-0.5 rounded text-xs bg-indigo-100 text-indigo-700">built-in</span>{% endif %}
+                </a>
+                <form method="POST" action="/definitions/agents/{{ definition.id }}/revoke-skill/{{ skill.id }}" class="opacity-0 group-hover:opacity-100 transition-opacity">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <button type="submit" class="text-xs text-red-500 hover:text-red-700 px-2 py-1" title="Revoke">&times;</button>
+                </form>
+            </div>
             {% endfor %}
         </div>
+        {% else %}
+        <p class="text-sm text-gray-400 italic mb-3">No skills granted.</p>
+        {% endif %}
+        {% if all_skills %}
+        <form method="POST" action="/definitions/agents/{{ definition.id }}/grant-skill" class="flex gap-2">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <select name="skill_id" class="flex-1 px-2 py-1.5 border border-gray-300 rounded-md text-sm">
+                <option value="">Add a skill...</option>
+                {% for s in all_skills %}{% if s.id|string not in granted_skill_ids %}<option value="{{ s.id }}">{{ s.name }}</option>{% endif %}{% endfor %}
+            </select>
+            <button type="submit" class="px-3 py-1.5 text-sm bg-blue-50 text-blue-700 rounded-md hover:bg-blue-100 font-medium">Grant</button>
+        </form>
+        {% endif %}
     </div>
-    {% endif %}
-    {% if mcp_servers %}
+
     <div class="bg-white rounded-lg border border-gray-200 p-5">
         <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Granted MCP Servers</h2>
-        <div class="space-y-2">
+        {% if mcp_servers %}
+        <div class="space-y-2 mb-3">
             {% for mcp in mcp_servers %}
-            <a href="/definitions/mcp-servers/{{ mcp.id }}" class="block p-3 rounded-md border border-gray-100 hover:border-purple-200 hover:bg-purple-50/30 transition-colors">
-                <div class="flex items-center gap-2">
-                    <svg class="w-4 h-4 text-purple-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M5.25 14.25h13.5m-13.5 0a3 3 0 01-3-3m3 3a3 3 0 100 6h13.5a3 3 0 100-6m-16.5-3a3 3 0 013-3h13.5a3 3 0 013 3m-19.5 0a4.5 4.5 0 01.9-2.7L5.737 5.1a3.375 3.375 0 012.7-1.35h7.126c1.062 0 2.062.5 2.7 1.35l2.587 3.45a4.5 4.5 0 01.9 2.7m0 0a3 3 0 01-3 3m0 3h.008v.008h-.008v-.008zm0-6h.008v.008h-.008v-.008zm-3 6h.008v.008h-.008v-.008zm0-6h.008v.008h-.008v-.008z"/></svg>
-                    <span class="font-medium text-gray-800">{{ mcp.name }}</span>
-                    <span class="text-xs text-gray-400 font-mono">{{ mcp.server_type }}</span>
-                    <span class="px-1.5 py-0.5 rounded text-xs {% if mcp.status == 'active' %}bg-green-100 text-green-700{% else %}bg-gray-100 text-gray-500{% endif %}">{{ mcp.status }}</span>
+            <div class="p-2 rounded-md border border-gray-100 group hover:border-purple-200">
+                <div class="flex items-center justify-between">
+                    <a href="/definitions/mcp-servers/{{ mcp.id }}" class="flex items-center gap-2 flex-1">
+                        <svg class="w-4 h-4 text-purple-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M5.25 14.25h13.5m-13.5 0a3 3 0 01-3-3m3 3a3 3 0 100 6h13.5a3 3 0 100-6m-16.5-3a3 3 0 013-3h13.5a3 3 0 013 3m-19.5 0a4.5 4.5 0 01.9-2.7L5.737 5.1a3.375 3.375 0 012.7-1.35h7.126c1.062 0 2.062.5 2.7 1.35l2.587 3.45a4.5 4.5 0 01.9 2.7m0 0a3 3 0 01-3 3m0 3h.008v.008h-.008v-.008zm0-6h.008v.008h-.008v-.008zm-3 6h.008v.008h-.008v-.008zm0-6h.008v.008h-.008v-.008z"/></svg>
+                        <span class="text-sm font-medium text-gray-800">{{ mcp.name }}</span>
+                        <span class="text-xs text-gray-400 font-mono">{{ mcp.server_type }}</span>
+                    </a>
+                    <form method="POST" action="/definitions/agents/{{ definition.id }}/revoke-mcp/{{ mcp.id }}" class="opacity-0 group-hover:opacity-100 transition-opacity">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                        <button type="submit" class="text-xs text-red-500 hover:text-red-700 px-2 py-1" title="Revoke">&times;</button>
+                    </form>
                 </div>
-                {% if mcp.url %}
-                <p class="text-xs text-gray-400 font-mono mt-1 ml-6 truncate">{{ mcp.url }}</p>
-                {% endif %}
-            </a>
+                <form method="POST" action="/definitions/agents/{{ definition.id }}/mcp-tools/{{ mcp.id }}" class="mt-2 ml-6">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <div class="flex gap-2 items-center">
+                        <label class="text-xs text-gray-400 shrink-0">Allowed tools:</label>
+                        <input name="allowed_tools" value="{{ mcp.allowed_tools | join(', ') if mcp.allowed_tools else '' }}" class="flex-1 px-2 py-1 border border-gray-200 rounded text-xs font-mono" placeholder="all tools (leave blank) or: tool1, tool2">
+                        <button type="submit" class="text-xs text-purple-600 hover:text-purple-800 px-2 py-1 border border-purple-200 rounded hover:bg-purple-50">Save</button>
+                    </div>
+                </form>
+            </div>
             {% endfor %}
         </div>
+        {% else %}
+        <p class="text-sm text-gray-400 italic mb-3">No MCP servers granted.</p>
+        {% endif %}
+        {% if all_mcp %}
+        <form method="POST" action="/definitions/agents/{{ definition.id }}/grant-mcp" class="flex gap-2">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <select name="mcp_server_id" class="flex-1 px-2 py-1.5 border border-gray-300 rounded-md text-sm">
+                <option value="">Add an MCP server...</option>
+                {% for m in all_mcp %}{% if m.id|string not in granted_mcp_ids %}<option value="{{ m.id }}">{{ m.name }} ({{ m.server_type }})</option>{% endif %}{% endfor %}
+            </select>
+            <button type="submit" class="px-3 py-1.5 text-sm bg-purple-50 text-purple-700 rounded-md hover:bg-purple-100 font-medium">Grant</button>
+        </form>
+        {% endif %}
     </div>
-    {% endif %}
 </div>
-{% endif %}
 {% endif %}
 
 {% if definition_type == 'mcp-server' %}
-<!-- MCP Server connection details -->
 <div class="bg-white rounded-lg border border-gray-200 p-5 mb-6">
     <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Connection Details</h2>
     <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        <div>
-            <dt class="text-xs font-medium text-gray-400 uppercase">Server Type</dt>
-            <dd class="mt-1 text-sm text-gray-900 font-mono">{{ definition.server_type }}</dd>
-        </div>
-        {% if definition.url %}
-        <div>
-            <dt class="text-xs font-medium text-gray-400 uppercase">URL</dt>
-            <dd class="mt-1 text-sm text-gray-900 font-mono break-all">{{ definition.url }}</dd>
-        </div>
-        {% endif %}
-        {% if definition.command %}
-        <div>
-            <dt class="text-xs font-medium text-gray-400 uppercase">Command</dt>
-            <dd class="mt-1 text-sm text-gray-900 font-mono">{{ definition.command }}</dd>
-        </div>
-        {% endif %}
-        {% if definition.args %}
-        <div>
-            <dt class="text-xs font-medium text-gray-400 uppercase">Args</dt>
-            <dd class="mt-1 text-sm text-gray-900 font-mono">{{ definition.args }}</dd>
-        </div>
-        {% endif %}
+        <div><dt class="text-xs font-medium text-gray-400 uppercase">Server Type</dt><dd class="mt-1 text-sm text-gray-900 font-mono">{{ definition.server_type }}</dd></div>
+        {% if definition.url %}<div><dt class="text-xs font-medium text-gray-400 uppercase">URL</dt><dd class="mt-1 text-sm text-gray-900 font-mono break-all">{{ definition.url }}</dd></div>{% endif %}
+        {% if definition.command %}<div><dt class="text-xs font-medium text-gray-400 uppercase">Command</dt><dd class="mt-1 text-sm text-gray-900 font-mono">{{ definition.command }}</dd></div>{% endif %}
+        {% if definition.args %}<div><dt class="text-xs font-medium text-gray-400 uppercase">Args</dt><dd class="mt-1 text-sm text-gray-900 font-mono">{{ definition.args }}</dd></div>{% endif %}
         {% if definition.headers %}
-        <div class="sm:col-span-2">
-            <dt class="text-xs font-medium text-gray-400 uppercase">Headers</dt>
-            <dd class="mt-1">
-                <pre class="text-xs text-gray-700 bg-gray-50 rounded-md p-3 overflow-x-auto">{{ definition.headers | tojson(indent=2) if definition.headers is mapping else definition.headers }}</pre>
-            </dd>
-        </div>
+        <div class="sm:col-span-2"><dt class="text-xs font-medium text-gray-400 uppercase">Headers</dt><dd class="mt-1"><pre class="text-xs text-gray-700 bg-gray-50 rounded-md p-3 overflow-x-auto">{{ definition.headers | tojson(indent=2) if definition.headers is mapping else definition.headers }}</pre></dd></div>
         {% endif %}
     </div>
 </div>
 {% endif %}
 
-<!-- Content -->
 {% if definition.content %}
 <div class="bg-white rounded-lg border border-gray-200 overflow-hidden">
     <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
-        <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider">
-            {% if definition_type == 'agent' %}Agent Definition
-            {% elif definition_type == 'skill' %}Skill Content
-            {% else %}Content{% endif %}
-        </h2>
-        <button onclick="toggleRaw()" class="text-xs text-gray-400 hover:text-gray-600 px-2 py-1 rounded border border-gray-200 hover:border-gray-300">
-            Toggle raw
-        </button>
+        <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider">{% if definition_type == 'agent' %}Agent Definition{% elif definition_type == 'skill' %}Skill Content{% else %}Content{% endif %}</h2>
+        <button onclick="toggleRaw()" class="text-xs text-gray-400 hover:text-gray-600 px-2 py-1 rounded border border-gray-200 hover:border-gray-300">Toggle raw</button>
     </div>
     <div id="content-rendered" class="p-6 prose prose-gray prose-sm max-w-none"></div>
     <div id="content-raw" class="p-6 hidden">
@@ -164,31 +146,60 @@
     </div>
 </div>
 {% else %}
-<div class="bg-white rounded-lg border border-gray-200 p-8 text-center text-gray-400">
-    <p>No content defined.</p>
+<div class="bg-white rounded-lg border border-gray-200 p-8 text-center text-gray-400"><p>No content defined.</p></div>
+{% endif %}
+
+{% if definition.scope != 'built-in' %}
+<div id="edit-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+    <div class="bg-white rounded-lg shadow-xl w-full max-w-3xl mx-4 max-h-[90vh] overflow-y-auto">
+        {% if definition_type == 'agent' %}
+        <form method="POST" action="/definitions/agents/{{ definition.id }}/update">
+        {% elif definition_type == 'skill' %}
+        <form method="POST" action="/definitions/skills/{{ definition.id }}/update">
+        {% else %}
+        <form method="POST" action="/definitions/mcp-servers/{{ definition.id }}/update">
+        {% endif %}
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <div class="p-6 border-b border-gray-200"><div class="flex items-center justify-between"><h2 class="text-lg font-semibold text-gray-900">Edit {{ definition_type | replace('-', ' ') | title }}</h2><button type="button" onclick="this.closest('.fixed').classList.add('hidden')" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button></div></div>
+            <div class="p-6 space-y-4">
+                <div><label class="block text-sm font-medium text-gray-700 mb-1">Name</label><input name="name" value="{{ definition.name }}" required class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"></div>
+                <div><label class="block text-sm font-medium text-gray-700 mb-1">Description</label><input name="description" value="{{ definition.description or '' }}" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"></div>
+                {% if definition_type == 'mcp-server' %}
+                <div class="grid grid-cols-2 gap-4">
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Server Type</label><select name="server_type" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"><option value="http" {% if definition.server_type == 'http' %}selected{% endif %}>HTTP</option><option value="stdio" {% if definition.server_type == 'stdio' %}selected{% endif %}>stdio</option></select></div>
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">URL</label><input name="url" value="{{ definition.url or '' }}" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono"></div>
+                </div>
+                <div><label class="block text-sm font-medium text-gray-700 mb-1">Command</label><input name="command" value="{{ definition.command or '' }}" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono"></div>
+                <div><label class="block text-sm font-medium text-gray-700 mb-1">Headers (JSON)</label><textarea name="headers" rows="3" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono">{{ definition.headers | tojson(indent=2) if definition.headers is mapping else (definition.headers or '{}') }}</textarea></div>
+                {% else %}
+                <div><label class="block text-sm font-medium text-gray-700 mb-1">Content (Markdown)</label><textarea name="content" rows="15" required class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono">{{ definition.content }}</textarea></div>
+                {% endif %}
+            </div>
+            <div class="p-6 border-t border-gray-200 flex justify-end gap-3"><button type="button" onclick="this.closest('.fixed').classList.add('hidden')" class="px-4 py-2 text-sm text-gray-600">Cancel</button><button type="submit" class="px-4 py-2 text-sm bg-primary-600 text-white rounded-md hover:bg-primary-700 font-medium">Save Changes</button></div>
+        </form>
+    </div>
 </div>
 {% endif %}
 {% endblock %}
 
 {% block extra_scripts %}
 <script>
-    // Wait for base template scripts (renderMarkdown) to load
     document.addEventListener('DOMContentLoaded', function() {
-        const rawContent = document.querySelector('#content-raw pre')?.textContent || '';
-        const renderedEl = document.getElementById('content-rendered');
-        if (renderedEl && rawContent && typeof renderMarkdown === 'function') {
-            renderedEl.innerHTML = renderMarkdown(rawContent);
-        } else if (renderedEl && rawContent) {
-            // Fallback: just show pre-formatted text
-            renderedEl.innerHTML = '<pre class="whitespace-pre-wrap text-sm text-gray-700">' + rawContent + '</pre>';
+        var raw = document.querySelector('#content-raw pre');
+        var rendered = document.getElementById('content-rendered');
+        if (rendered && raw && typeof renderMarkdown === 'function') {
+            rendered.innerHTML = renderMarkdown(raw.textContent || '');
+        } else if (rendered && raw) {
+            rendered.textContent = raw.textContent;
         }
     });
-
-    let showingRaw = false;
+    var showingRaw = false;
     function toggleRaw() {
         showingRaw = !showingRaw;
-        document.getElementById('content-rendered').classList.toggle('hidden', showingRaw);
-        document.getElementById('content-raw').classList.toggle('hidden', !showingRaw);
+        var r = document.getElementById('content-rendered');
+        var w = document.getElementById('content-raw');
+        if (r) r.classList.toggle('hidden', showingRaw);
+        if (w) w.classList.toggle('hidden', !showingRaw);
     }
 </script>
 {% endblock %}

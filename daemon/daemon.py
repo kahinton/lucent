@@ -112,7 +112,7 @@ ALLOW_GIT_PUSH = _git_push_val.lower() in ("true", "1", "yes")
 # Paths
 DAEMON_DIR = Path(__file__).parent
 COGNITIVE_PROMPT_PATH = DAEMON_DIR / "cognitive.md"
-AGENT_DEF_PATH = DAEMON_DIR.parent / ".github" / "agents" / "memory-teammate.agent.md"
+AGENT_DEF_PATH = DAEMON_DIR.parent / ".github" / "agents" / "lucent.agent.md"
 LOG_FILE = DAEMON_DIR / "daemon.log"
 DAEMON_KEY_FILE = DAEMON_DIR / ".daemon_api_key"
 

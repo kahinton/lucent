@@ -683,6 +683,11 @@ async def agent_detail_page(request: Request, agent_id: str):
         raise HTTPException(404, "Agent not found")
     skills = await repo.get_agent_skills(agent_id)
     mcp_servers = await repo.get_agent_mcp_servers(agent_id)
+    # Get all available skills and MCP servers for grant dropdowns
+    all_skills = await repo.list_skills(org_id, status="active")
+    all_mcp = await repo.list_mcp_servers(org_id, status="active")
+    granted_skill_ids = {str(s["id"]) for s in skills}
+    granted_mcp_ids = {str(m["id"]) for m in mcp_servers}
     csrf_token = generate_csrf_token()
     response = templates.TemplateResponse(
         "definition_detail.html",
@@ -690,6 +695,9 @@ async def agent_detail_page(request: Request, agent_id: str):
             "request": request, "user": user,
             "definition_type": "agent", "definition": agent,
             "skills": skills, "mcp_servers": mcp_servers,
+            "all_skills": all_skills, "all_mcp": all_mcp,
+            "granted_skill_ids": granted_skill_ids,
+            "granted_mcp_ids": granted_mcp_ids,
             "csrf_token": csrf_token,
         },
     )
@@ -811,6 +819,224 @@ async def reject_mcp_web(request: Request, server_id: str):
     repo = DefinitionRepository(pool)
     await repo.reject_mcp_server(server_id, str(user.organization_id), str(user.id))
     return RedirectResponse("/definitions?tab=mcp", status_code=303)
+
+# ── Definition CRUD (create, update, delete) ──────────────────────────────
+
+@router.post("/definitions/agents/create")
+async def create_agent_web(request: Request):
+    form = await request.form()
+    await _check_csrf(request, form_token=str(form.get(CSRF_FIELD_NAME, "")))
+    user = await get_user_context(request)
+    pool = await get_pool()
+    from lucent.db.definitions import DefinitionRepository
+    repo = DefinitionRepository(pool)
+    await repo.create_agent(
+        name=str(form.get("name", "")).strip(),
+        description=str(form.get("description", "")).strip(),
+        content=str(form.get("content", "")).strip(),
+        org_id=str(user.organization_id),
+        created_by=str(user.id),
+    )
+    return RedirectResponse("/definitions?tab=agents", status_code=303)
+
+@router.post("/definitions/agents/{agent_id}/update")
+async def update_agent_web(request: Request, agent_id: str):
+    form = await request.form()
+    await _check_csrf(request, form_token=str(form.get(CSRF_FIELD_NAME, "")))
+    user = await get_user_context(request)
+    pool = await get_pool()
+    from lucent.db.definitions import DefinitionRepository
+    repo = DefinitionRepository(pool)
+    await repo.update_agent(
+        agent_id, str(user.organization_id),
+        name=str(form.get("name", "")).strip(),
+        description=str(form.get("description", "")).strip(),
+        content=str(form.get("content", "")).strip(),
+    )
+    return RedirectResponse(f"/definitions/agents/{agent_id}", status_code=303)
+
+@router.post("/definitions/agents/{agent_id}/delete")
+async def delete_agent_web(request: Request, agent_id: str):
+    form = await request.form()
+    await _check_csrf(request, form_token=str(form.get(CSRF_FIELD_NAME, "")))
+    user = await get_user_context(request)
+    pool = await get_pool()
+    from lucent.db.definitions import DefinitionRepository
+    repo = DefinitionRepository(pool)
+    await repo.delete_agent(agent_id, str(user.organization_id))
+    return RedirectResponse("/definitions?tab=agents", status_code=303)
+
+@router.post("/definitions/skills/create")
+async def create_skill_web(request: Request):
+    form = await request.form()
+    await _check_csrf(request, form_token=str(form.get(CSRF_FIELD_NAME, "")))
+    user = await get_user_context(request)
+    pool = await get_pool()
+    from lucent.db.definitions import DefinitionRepository
+    repo = DefinitionRepository(pool)
+    await repo.create_skill(
+        name=str(form.get("name", "")).strip(),
+        description=str(form.get("description", "")).strip(),
+        content=str(form.get("content", "")).strip(),
+        org_id=str(user.organization_id),
+        created_by=str(user.id),
+    )
+    return RedirectResponse("/definitions?tab=skills", status_code=303)
+
+@router.post("/definitions/skills/{skill_id}/update")
+async def update_skill_web(request: Request, skill_id: str):
+    form = await request.form()
+    await _check_csrf(request, form_token=str(form.get(CSRF_FIELD_NAME, "")))
+    user = await get_user_context(request)
+    pool = await get_pool()
+    from lucent.db.definitions import DefinitionRepository
+    repo = DefinitionRepository(pool)
+    await repo.update_skill(
+        skill_id, str(user.organization_id),
+        name=str(form.get("name", "")).strip(),
+        description=str(form.get("description", "")).strip(),
+        content=str(form.get("content", "")).strip(),
+    )
+    return RedirectResponse(f"/definitions/skills/{skill_id}", status_code=303)
+
+@router.post("/definitions/skills/{skill_id}/delete")
+async def delete_skill_web(request: Request, skill_id: str):
+    form = await request.form()
+    await _check_csrf(request, form_token=str(form.get(CSRF_FIELD_NAME, "")))
+    user = await get_user_context(request)
+    pool = await get_pool()
+    from lucent.db.definitions import DefinitionRepository
+    repo = DefinitionRepository(pool)
+    await repo.delete_skill(skill_id, str(user.organization_id))
+    return RedirectResponse("/definitions?tab=skills", status_code=303)
+
+@router.post("/definitions/mcp-servers/create")
+async def create_mcp_web(request: Request):
+    form = await request.form()
+    await _check_csrf(request, form_token=str(form.get(CSRF_FIELD_NAME, "")))
+    user = await get_user_context(request)
+    pool = await get_pool()
+    from lucent.db.definitions import DefinitionRepository
+    import json
+    repo = DefinitionRepository(pool)
+    headers_raw = str(form.get("headers", "{}")).strip()
+    try:
+        headers = json.loads(headers_raw) if headers_raw else {}
+    except json.JSONDecodeError:
+        headers = {}
+    await repo.create_mcp_server(
+        name=str(form.get("name", "")).strip(),
+        description=str(form.get("description", "")).strip(),
+        server_type=str(form.get("server_type", "http")).strip(),
+        url=str(form.get("url", "")).strip() or None,
+        org_id=str(user.organization_id),
+        created_by=str(user.id),
+        headers=headers,
+        command=str(form.get("command", "")).strip() or None,
+    )
+    return RedirectResponse("/definitions?tab=mcp", status_code=303)
+
+@router.post("/definitions/mcp-servers/{server_id}/update")
+async def update_mcp_web(request: Request, server_id: str):
+    form = await request.form()
+    await _check_csrf(request, form_token=str(form.get(CSRF_FIELD_NAME, "")))
+    user = await get_user_context(request)
+    pool = await get_pool()
+    from lucent.db.definitions import DefinitionRepository
+    import json
+    repo = DefinitionRepository(pool)
+    headers_raw = str(form.get("headers", "{}")).strip()
+    try:
+        headers = json.loads(headers_raw) if headers_raw else {}
+    except json.JSONDecodeError:
+        headers = {}
+    await repo.update_mcp_server(
+        server_id, str(user.organization_id),
+        name=str(form.get("name", "")).strip(),
+        description=str(form.get("description", "")).strip(),
+        server_type=str(form.get("server_type", "http")).strip(),
+        url=str(form.get("url", "")).strip() or None,
+        headers=headers,
+        command=str(form.get("command", "")).strip() or None,
+    )
+    return RedirectResponse(f"/definitions/mcp-servers/{server_id}", status_code=303)
+
+@router.post("/definitions/mcp-servers/{server_id}/delete")
+async def delete_mcp_web(request: Request, server_id: str):
+    form = await request.form()
+    await _check_csrf(request, form_token=str(form.get(CSRF_FIELD_NAME, "")))
+    user = await get_user_context(request)
+    pool = await get_pool()
+    from lucent.db.definitions import DefinitionRepository
+    repo = DefinitionRepository(pool)
+    await repo.delete_mcp_server(server_id, str(user.organization_id))
+    return RedirectResponse("/definitions?tab=mcp", status_code=303)
+
+# ── Grant management (skill/MCP ↔ agent) ─────────────────────────────────
+
+@router.post("/definitions/agents/{agent_id}/grant-skill")
+async def grant_skill_web(request: Request, agent_id: str):
+    form = await request.form()
+    await _check_csrf(request, form_token=str(form.get(CSRF_FIELD_NAME, "")))
+    user = await get_user_context(request)
+    pool = await get_pool()
+    from lucent.db.definitions import DefinitionRepository
+    repo = DefinitionRepository(pool)
+    skill_id = str(form.get("skill_id", ""))
+    if skill_id:
+        await repo.grant_skill(agent_id, skill_id)
+    return RedirectResponse(f"/definitions/agents/{agent_id}", status_code=303)
+
+@router.post("/definitions/agents/{agent_id}/revoke-skill/{skill_id}")
+async def revoke_skill_web(request: Request, agent_id: str, skill_id: str):
+    form = await request.form()
+    await _check_csrf(request, form_token=str(form.get(CSRF_FIELD_NAME, "")))
+    await get_user_context(request)
+    pool = await get_pool()
+    from lucent.db.definitions import DefinitionRepository
+    repo = DefinitionRepository(pool)
+    await repo.revoke_skill(agent_id, skill_id)
+    return RedirectResponse(f"/definitions/agents/{agent_id}", status_code=303)
+
+@router.post("/definitions/agents/{agent_id}/grant-mcp")
+async def grant_mcp_web(request: Request, agent_id: str):
+    form = await request.form()
+    await _check_csrf(request, form_token=str(form.get(CSRF_FIELD_NAME, "")))
+    user = await get_user_context(request)
+    pool = await get_pool()
+    from lucent.db.definitions import DefinitionRepository
+    repo = DefinitionRepository(pool)
+    mcp_id = str(form.get("mcp_server_id", ""))
+    if mcp_id:
+        await repo.grant_mcp_server(agent_id, mcp_id)
+    return RedirectResponse(f"/definitions/agents/{agent_id}", status_code=303)
+
+@router.post("/definitions/agents/{agent_id}/revoke-mcp/{server_id}")
+async def revoke_mcp_web(request: Request, agent_id: str, server_id: str):
+    form = await request.form()
+    await _check_csrf(request, form_token=str(form.get(CSRF_FIELD_NAME, "")))
+    await get_user_context(request)
+    pool = await get_pool()
+    from lucent.db.definitions import DefinitionRepository
+    repo = DefinitionRepository(pool)
+    await repo.revoke_mcp_server(agent_id, server_id)
+    return RedirectResponse(f"/definitions/agents/{agent_id}", status_code=303)
+
+@router.post("/definitions/agents/{agent_id}/mcp-tools/{server_id}")
+async def update_mcp_tools_web(request: Request, agent_id: str, server_id: str):
+    form = await request.form()
+    await _check_csrf(request, form_token=str(form.get(CSRF_FIELD_NAME, "")))
+    await get_user_context(request)
+    pool = await get_pool()
+    from lucent.db.definitions import DefinitionRepository
+    repo = DefinitionRepository(pool)
+    tools_raw = str(form.get("allowed_tools", "")).strip()
+    if tools_raw:
+        tools = [t.strip() for t in tools_raw.split(",") if t.strip()]
+        await repo.update_mcp_tool_grants(agent_id, server_id, tools if tools else None)
+    else:
+        await repo.update_mcp_tool_grants(agent_id, server_id, None)
+    return RedirectResponse(f"/definitions/agents/{agent_id}", status_code=303)
 
 
 # =============================================================================
