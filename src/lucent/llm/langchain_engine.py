@@ -3,11 +3,9 @@
 Uses LangChain's init_chat_model() for provider-agnostic LLM access,
 with MCPToolBridge for MCP tool integration.
 
-Required packages (install the ones you need):
-    pip install langchain langchain-anthropic   # For Claude models
-    pip install langchain langchain-openai      # For GPT models
-    pip install langchain langchain-google-genai # For Gemini models
-    pip install langchain langchain-ollama      # For local Ollama models
+All major provider packages (langchain-anthropic, langchain-openai,
+langchain-google-genai) are included in the base Lucent install.
+For local models via Ollama, install: pip install lucent[ollama]
 """
 
 from __future__ import annotations
