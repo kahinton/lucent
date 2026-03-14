@@ -135,5 +135,10 @@ async def close_db() -> None:
     """Close the database connection pool."""
     global _pool
     if _pool is not None:
-        await _pool.close()
-        _pool = None
+        try:
+            await _pool.close()
+            logger.info("Database connection pool closed")
+        except Exception:
+            logger.exception("Error closing database pool")
+        finally:
+            _pool = None

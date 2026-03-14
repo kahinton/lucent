@@ -463,3 +463,36 @@ Base path: `/api/access`
 | `GET` | `/memory/{memory_id}/searches` | any | Search queries that surfaced a memory |
 | `GET` | `/user/{user_id}` | any/admin | A user's memory access activity |
 | `GET` | `/most-accessed` | any | Most frequently accessed memories (`?organization_wide=true` for admins) |
+
+### Sandboxes
+
+Base path: `/api/sandboxes`
+
+| Method | Path | Role | Description |
+|--------|------|------|-------------|
+| `POST` | `/` | any | Create a new sandbox instance |
+| `GET` | `/` | any | List sandboxes (filtered by organization) |
+| `GET` | `/{sandbox_id}` | any | Get sandbox details (org-scoped) |
+| `POST` | `/{sandbox_id}/exec` | any | Execute a command in a sandbox |
+| `GET` | `/{sandbox_id}/files` | any | List files in sandbox (default `/workspace`) |
+| `GET` | `/{sandbox_id}/files/{path}` | any | Read a file from sandbox |
+| `PUT` | `/{sandbox_id}/files/{path}` | any | Write a file to sandbox |
+| `POST` | `/{sandbox_id}/stop` | any | Stop a running sandbox |
+| `DELETE` | `/{sandbox_id}` | any | Permanently destroy a sandbox |
+
+All instance endpoints verify the caller's organization matches the sandbox. Sandbox IDs from other organizations return `404`.
+
+### Sandbox Templates
+
+Base path: `/api/sandboxes/templates`
+
+| Method | Path | Role | Description |
+|--------|------|------|-------------|
+| `POST` | `/` | any | Create a reusable sandbox template |
+| `GET` | `/` | any | List templates for the organization |
+| `GET` | `/{template_id}` | any | Get a template by ID |
+| `PATCH` | `/{template_id}` | any | Update a template |
+| `DELETE` | `/{template_id}` | any | Delete a template |
+| `POST` | `/{template_id}/launch` | any | Launch a sandbox instance from a template |
+
+Templates define reusable environment configurations (image, setup commands, resource limits, etc.) that can be referenced by tasks and schedules via `sandbox_template_id`.

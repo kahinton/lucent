@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any
+import re
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
@@ -17,6 +18,10 @@ logger = get_logger("api.sandboxes")
 
 router = APIRouter()
 
+# Allowed values for input validation
+_MEMORY_RE = re.compile(r"^[1-9]\d{0,4}[mgt]$")
+_IMAGE_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._/:-]{0,254}$")
+
 
 # --- Request/Response Models ---
 
@@ -24,18 +29,19 @@ router = APIRouter()
 class SandboxCreateRequest(BaseModel):
     """Request body for creating a sandbox."""
 
-    name: str | None = None
-    image: str = "python:3.12-slim"
-    repo_url: str | None = None
-    branch: str | None = None
-    setup_commands: list[str] = Field(default_factory=list)
+    name: str | None = Field(default=None, max_length=128, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
+    image: str = Field(default="python:3.12-slim", max_length=256)
+    repo_url: str | None = Field(default=None, max_length=512)
+    branch: str | None = Field(default=None, max_length=128)
+    setup_commands: list[str] = Field(default_factory=list, max_length=50)
     env_vars: dict[str, str] = Field(default_factory=dict)
     working_dir: str = "/workspace"
-    memory_limit: str = "2g"
-    cpu_limit: float = 2.0
-    network_mode: str = "none"
-    allowed_hosts: list[str] = Field(default_factory=list)
-    timeout_seconds: int = 1800
+    memory_limit: str = Field(default="2g", pattern=r"^[1-9]\d{0,4}[mgt]$")
+    cpu_limit: float = Field(default=2.0, gt=0, le=16)
+    disk_limit: str = Field(default="10g", pattern=r"^[1-9]\d{0,4}[mgt]$")
+    network_mode: Literal["none", "bridge", "allowlist"] = "none"
+    allowed_hosts: list[str] = Field(default_factory=list, max_length=50)
+    timeout_seconds: int = Field(default=1800, ge=60, le=86400)
     task_id: str | None = None
     request_id: str | None = None
 
@@ -43,16 +49,16 @@ class SandboxCreateRequest(BaseModel):
 class SandboxExecRequest(BaseModel):
     """Request body for executing a command."""
 
-    command: str
-    cwd: str | None = None
+    command: str = Field(..., max_length=4096)
+    cwd: str | None = Field(default=None, max_length=256)
     env: dict[str, str] | None = None
-    timeout: int = 300
+    timeout: int = Field(default=300, ge=1, le=3600)
 
 
 class SandboxWriteFileRequest(BaseModel):
     """Request body for writing a file."""
 
-    path: str
+    path: str = Field(..., max_length=512)
     content: str  # UTF-8 text content
 
 
@@ -84,6 +90,56 @@ class FileListResponse(BaseModel):
     files: list[dict[str, Any]]
 
 
+# --- Helpers ---
+
+
+async def _get_sandbox_for_user(
+    sandbox_id: str, user: AuthenticatedUser
+) -> dict:
+    """Fetch a sandbox and verify the caller owns it. Raises 404/403."""
+    manager = get_sandbox_manager()
+    info = await manager.get(sandbox_id)
+    if not info:
+        raise HTTPException(status_code=404, detail="Sandbox not found")
+    # Verify organization ownership
+    org_id = info.get("organization_id") if isinstance(info, dict) else getattr(info, "organization_id", None)
+    if org_id and str(org_id) != str(user.organization_id):
+        raise HTTPException(status_code=404, detail="Sandbox not found")
+    return info
+
+
+def _validate_sandbox_path(path: str) -> str:
+    """Validate and normalize a sandbox file path to prevent traversal."""
+    import posixpath
+    normalized = posixpath.normpath(path)
+    if ".." in normalized.split("/"):
+        raise HTTPException(status_code=400, detail="Invalid path")
+    return normalized
+
+
+def _to_response(info) -> SandboxResponse:
+    """Convert SandboxInfo or dict to SandboxResponse."""
+    if isinstance(info, dict):
+        return SandboxResponse(
+            id=str(info["id"]),
+            name=info.get("name", ""),
+            status=info.get("status", "unknown"),
+            container_id=info.get("container_id"),
+            created_at=info["created_at"].isoformat() if info.get("created_at") else None,
+            ready_at=info["ready_at"].isoformat() if info.get("ready_at") else None,
+            error=info.get("error"),
+        )
+    return SandboxResponse(
+        id=info.id,
+        name=info.name,
+        status=info.status.value if hasattr(info.status, "value") else str(info.status),
+        container_id=info.container_id,
+        created_at=info.created_at.isoformat() if info.created_at else None,
+        ready_at=info.ready_at.isoformat() if info.ready_at else None,
+        error=info.error,
+    )
+
+
 # --- Endpoints ---
 
 
@@ -112,7 +168,7 @@ async def create_sandbox(
         timeout_seconds=body.timeout_seconds,
         task_id=body.task_id,
         request_id=body.request_id,
-        organization_id=user.organization_id,
+        organization_id=str(user.organization_id),
     )
     manager = get_sandbox_manager()
     info = await manager.create(config)
@@ -120,7 +176,7 @@ async def create_sandbox(
     if info.status == SandboxStatus.FAILED:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Sandbox creation failed: {info.error}",
+            detail="Sandbox creation failed",
         )
 
     return _to_response(info)
@@ -128,9 +184,9 @@ async def create_sandbox(
 
 @router.get("", response_model=list[SandboxResponse])
 async def list_sandboxes(user: AuthenticatedUser) -> list[SandboxResponse]:
-    """List all sandboxes."""
+    """List all sandboxes for the caller's organization."""
     manager = get_sandbox_manager()
-    sandboxes = await manager.list_all(user.organization_id)
+    sandboxes = await manager.list_all(str(user.organization_id))
     return [_to_response(s) for s in sandboxes]
 
 
@@ -140,10 +196,7 @@ async def get_sandbox(
     user: AuthenticatedUser,
 ) -> SandboxResponse:
     """Get sandbox status and details."""
-    manager = get_sandbox_manager()
-    info = await manager.get(sandbox_id)
-    if not info:
-        raise HTTPException(status_code=404, detail="Sandbox not found")
+    info = await _get_sandbox_for_user(sandbox_id, user)
     return _to_response(info)
 
 
@@ -154,11 +207,9 @@ async def exec_in_sandbox(
     user: AuthenticatedUser,
 ) -> ExecResponse:
     """Execute a command in a sandbox."""
-    manager = get_sandbox_manager()
-    info = await manager.get(sandbox_id)
-    if not info:
-        raise HTTPException(status_code=404, detail="Sandbox not found")
+    await _get_sandbox_for_user(sandbox_id, user)
 
+    manager = get_sandbox_manager()
     result = await manager.exec(
         sandbox_id,
         body.command,
@@ -179,11 +230,13 @@ async def exec_in_sandbox(
 async def list_sandbox_files(
     sandbox_id: str,
     path: str = "/workspace",
-    user: AuthenticatedUser = None,
+    user: AuthenticatedUser = ...,
 ) -> FileListResponse:
     """List files in a sandbox directory."""
+    await _get_sandbox_for_user(sandbox_id, user)
+    safe_path = _validate_sandbox_path(path)
     manager = get_sandbox_manager()
-    files = await manager.list_files(sandbox_id, path)
+    files = await manager.list_files(sandbox_id, safe_path)
     return FileListResponse(files=files)
 
 
@@ -194,12 +247,14 @@ async def read_sandbox_file(
     user: AuthenticatedUser,
 ) -> dict:
     """Read a file from a sandbox."""
+    await _get_sandbox_for_user(sandbox_id, user)
+    safe_path = _validate_sandbox_path(f"/{file_path}")
     manager = get_sandbox_manager()
     try:
-        content = await manager.read_file(sandbox_id, f"/{file_path}")
+        content = await manager.read_file(sandbox_id, safe_path)
         return {"path": file_path, "content": content.decode("utf-8", errors="replace")}
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="File not found")
 
 
 @router.put("/{sandbox_id}/files/{file_path:path}")
@@ -210,8 +265,10 @@ async def write_sandbox_file(
     user: AuthenticatedUser,
 ) -> dict:
     """Write a file to a sandbox."""
+    await _get_sandbox_for_user(sandbox_id, user)
+    safe_path = _validate_sandbox_path(f"/{file_path}")
     manager = get_sandbox_manager()
-    await manager.write_file(sandbox_id, f"/{file_path}", body.content.encode("utf-8"))
+    await manager.write_file(sandbox_id, safe_path, body.content.encode("utf-8"))
     return {"path": file_path, "written": True}
 
 
@@ -220,6 +277,7 @@ async def stop_sandbox(
     sandbox_id: str, user: AuthenticatedUser
 ) -> dict:
     """Stop a sandbox (preserves state)."""
+    await _get_sandbox_for_user(sandbox_id, user)
     manager = get_sandbox_manager()
     await manager.stop(sandbox_id)
     return {"id": sandbox_id, "status": "stopped"}
@@ -230,6 +288,7 @@ async def destroy_sandbox(
     sandbox_id: str, user: AuthenticatedUser
 ) -> dict:
     """Permanently destroy a sandbox."""
+    await _get_sandbox_for_user(sandbox_id, user)
     manager = get_sandbox_manager()
     await manager.destroy(sandbox_id)
     return {"id": sandbox_id, "status": "destroyed"}
@@ -239,25 +298,25 @@ async def destroy_sandbox(
 
 
 class TemplateCreateRequest(BaseModel):
-    name: str = Field(..., min_length=1, max_length=128)
-    description: str = ""
-    image: str = "python:3.12-slim"
-    repo_url: str | None = None
-    branch: str | None = None
-    setup_commands: list[str] = Field(default_factory=list)
+    name: str = Field(..., min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
+    description: str = Field(default="", max_length=512)
+    image: str = Field(default="python:3.12-slim", max_length=256)
+    repo_url: str | None = Field(default=None, max_length=512)
+    branch: str | None = Field(default=None, max_length=128)
+    setup_commands: list[str] = Field(default_factory=list, max_length=50)
     env_vars: dict[str, str] = Field(default_factory=dict)
     working_dir: str = "/workspace"
-    memory_limit: str = "2g"
-    cpu_limit: float = 2.0
-    disk_limit: str = "10g"
-    network_mode: str = "none"
-    allowed_hosts: list[str] = Field(default_factory=list)
-    timeout_seconds: int = 1800
+    memory_limit: str = Field(default="2g", pattern=r"^[1-9]\d{0,4}[mgt]$")
+    cpu_limit: float = Field(default=2.0, gt=0, le=16)
+    disk_limit: str = Field(default="10g", pattern=r"^[1-9]\d{0,4}[mgt]$")
+    network_mode: Literal["none", "bridge", "allowlist"] = "none"
+    allowed_hosts: list[str] = Field(default_factory=list, max_length=50)
+    timeout_seconds: int = Field(default=1800, ge=60, le=86400)
 
 
 class TemplateUpdateRequest(BaseModel):
-    name: str | None = None
-    description: str | None = None
+    name: str | None = Field(default=None, min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
+    description: str | None = Field(default=None, max_length=512)
     image: str | None = None
     repo_url: str | None = None
     branch: str | None = None
@@ -378,31 +437,5 @@ async def launch_from_template(
     manager = get_sandbox_manager()
     info = await manager.create(config)
     if info.status == SandboxStatus.FAILED:
-        raise HTTPException(500, f"Sandbox creation failed: {info.error}")
+        raise HTTPException(500, "Sandbox creation failed")
     return _to_response(info)
-
-
-# --- Helpers ---
-
-
-def _to_response(info) -> SandboxResponse:
-    # Handle both SandboxInfo objects and dict records from DB
-    if isinstance(info, dict):
-        return SandboxResponse(
-            id=str(info["id"]),
-            name=info.get("name", ""),
-            status=info.get("status", "unknown"),
-            container_id=info.get("container_id"),
-            created_at=info["created_at"].isoformat() if info.get("created_at") else None,
-            ready_at=info["ready_at"].isoformat() if info.get("ready_at") else None,
-            error=info.get("error"),
-        )
-    return SandboxResponse(
-        id=info.id,
-        name=info.name,
-        status=info.status.value if hasattr(info.status, "value") else str(info.status),
-        container_id=info.container_id,
-        created_at=info.created_at.isoformat() if info.created_at else None,
-        ready_at=info.ready_at.isoformat() if info.ready_at else None,
-        error=info.error,
-    )

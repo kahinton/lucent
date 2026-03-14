@@ -168,6 +168,64 @@ class RateLimiter:
 
         return removed
 
+
+class LoginRateLimiter:
+    """IP-based rate limiter for login attempts.
+
+    Uses a stricter limit than the API rate limiter: 5 attempts per minute
+    per IP address. After exceeding the limit, further login attempts are
+    blocked until the window expires.
+    """
+
+    def __init__(
+        self,
+        max_attempts: int | None = None,
+        window_seconds: int = 60,
+    ):
+        if max_attempts is None:
+            max_attempts = int(os.environ.get("LUCENT_LOGIN_RATE_LIMIT", "5"))
+        self.max_attempts = max_attempts
+        self.window_seconds = window_seconds
+        self._buckets: dict[str, RateLimitBucket] = defaultdict(RateLimitBucket)
+
+    def check(self, client_ip: str) -> tuple[bool, int]:
+        """Check if a login attempt from this IP is allowed.
+
+        Returns:
+            Tuple of (allowed, retry_after_seconds).
+        """
+        bucket = self._buckets[client_ip]
+        allowed, _remaining, reset_at = bucket.check_and_record(
+            self.max_attempts, self.window_seconds
+        )
+        retry_after = max(1, reset_at - int(time.time())) if not allowed else 0
+        return allowed, retry_after
+
+    def cleanup_expired(self) -> int:
+        """Remove expired buckets."""
+        now = time.time()
+        window_start = now - self.window_seconds
+        keys_to_remove = []
+        for key, bucket in self._buckets.items():
+            bucket.requests = [t for t in bucket.requests if t > window_start]
+            if not bucket.requests:
+                keys_to_remove.append(key)
+        for key in keys_to_remove:
+            del self._buckets[key]
+        return len(keys_to_remove)
+
+
+# Module-level login rate limiter singleton
+_login_limiter: LoginRateLimiter | None = None
+
+
+def get_login_limiter() -> LoginRateLimiter:
+    """Get the singleton login rate limiter."""
+    global _login_limiter
+    if _login_limiter is None:
+        _login_limiter = LoginRateLimiter()
+    return _login_limiter
+
     def reset(self, api_key_id: UUID) -> None:
         """Reset rate limit for a specific API key.
 

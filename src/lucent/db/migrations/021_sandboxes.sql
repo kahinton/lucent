@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS sandboxes (
 
 CREATE INDEX IF NOT EXISTS idx_sandboxes_status ON sandboxes(status);
 CREATE INDEX IF NOT EXISTS idx_sandboxes_org ON sandboxes(organization_id);
+CREATE INDEX IF NOT EXISTS idx_sandboxes_org_status ON sandboxes(organization_id, status);
 CREATE INDEX IF NOT EXISTS idx_sandboxes_task ON sandboxes(task_id);
 
 -- Add sandbox_config JSONB to tasks (optional — daemon reads it before dispatch)

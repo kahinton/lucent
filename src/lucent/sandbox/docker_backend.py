@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import shlex
 import logging
 import time
 import uuid
@@ -260,9 +261,9 @@ class DockerBackend(SandboxBackend):
         if container is None:
             raise FileNotFoundError(f"Sandbox {sandbox_id} not found")
 
-        result = await self.exec(sandbox_id, f"cat '{path}'", timeout=10)
+        result = await self.exec(sandbox_id, f"cat {shlex.quote(path)}", timeout=10)
         if result.exit_code != 0:
-            raise FileNotFoundError(f"File not found: {path} ({result.stderr})")
+            raise FileNotFoundError(f"File not found: {path}")
         return result.stdout.encode("utf-8")
 
     async def write_file(self, sandbox_id: str, path: str, content: bytes) -> None:
@@ -288,8 +289,8 @@ class DockerBackend(SandboxBackend):
     async def list_files(self, sandbox_id: str, path: str = "/workspace") -> list[dict]:
         result = await self.exec(
             sandbox_id,
-            f"find '{path}' -maxdepth 1 -printf '%T@ %s %y %p\\n' 2>/dev/null || "
-            f"ls -la '{path}' 2>/dev/null",
+            f"find {shlex.quote(path)} -maxdepth 1 -printf '%T@ %s %y %p\\n' 2>/dev/null || "
+            f"ls -la {shlex.quote(path)} 2>/dev/null",
             timeout=10,
         )
         files = []

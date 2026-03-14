@@ -6,6 +6,8 @@ Handles CRUD, approval workflow, and access grants (agent↔skill, agent↔MCP).
 from datetime import datetime, timezone
 from typing import Any
 
+import json
+
 from asyncpg import Pool
 
 
@@ -233,7 +235,6 @@ class DefinitionRepository:
         command: str | None = None, args: list | None = None,
         status: str = "proposed",
     ) -> dict:
-        import json
         query = """
             INSERT INTO mcp_server_configs (name, description, server_type, url,
                 command, args, headers, status, created_by, organization_id)
@@ -340,7 +341,6 @@ class DefinitionRepository:
         self, agent_id: str, mcp_server_id: str, allowed_tools: list[str] | None,
     ) -> bool:
         """Set which tools an agent can use from an MCP server. None = all."""
-        import json
         val = json.dumps(allowed_tools) if allowed_tools is not None else None
         async with self.pool.acquire() as conn:
             result = await conn.execute(
@@ -373,7 +373,6 @@ class DefinitionRepository:
         return dict(row) if row else None
 
     async def update_mcp_server(self, server_id: str, org_id: str, **kwargs) -> dict | None:
-        import json as _json
         sets = []
         params: list[Any] = []
         for key in ("name", "description", "server_type", "url", "command"):
@@ -382,7 +381,7 @@ class DefinitionRepository:
                 sets.append(f"{key} = ${len(params)}")
         for key in ("headers", "args"):
             if key in kwargs:
-                params.append(_json.dumps(kwargs[key]) if kwargs[key] else None)
+                params.append(json.dumps(kwargs[key]) if kwargs[key] else None)
                 sets.append(f"{key} = ${len(params)}")
         if not sets:
             return await self.get_mcp_server(server_id, org_id)

@@ -21,14 +21,20 @@
 </div>
 
 <!-- Success/Error Messages -->
-{% if request.query_params.get('success') %}
+{% if temp_password %}
 <div class="mb-6 bg-emerald-50 border border-emerald-200 rounded-xl p-4">
-    <p class="text-sm text-emerald-700">{{ request.query_params.get('success') | replace('+', ' ') }}</p>
+    <p class="text-sm font-medium text-emerald-800">User created successfully</p>
+    <p class="text-sm text-emerald-700 mt-1">Temporary password (shown once): <code class="bg-emerald-100 px-2 py-0.5 rounded font-mono text-sm select-all">{{ temp_password }}</code></p>
+    <p class="text-xs text-emerald-600 mt-1">This password will not be shown again. Please share it securely with the user.</p>
+</div>
+{% elif success %}
+<div class="mb-6 bg-emerald-50 border border-emerald-200 rounded-xl p-4">
+    <p class="text-sm text-emerald-700">{{ success | replace('+', ' ') }}</p>
 </div>
 {% endif %}
-{% if request.query_params.get('error') %}
+{% if error %}
 <div class="mb-6 bg-red-50 border border-red-200 rounded-xl p-4">
-    <p class="text-sm text-red-700">{{ request.query_params.get('error') | replace('+', ' ') }}</p>
+    <p class="text-sm text-red-700">{{ error | replace('+', ' ') }}</p>
 </div>
 {% endif %}
 

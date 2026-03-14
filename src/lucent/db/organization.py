@@ -145,25 +145,38 @@ class OrganizationRepository:
 
         return result is not None
 
-    async def list_all(self, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
-        """List all organizations.
+    async def list_all(
+        self, limit: int = 100, offset: int = 0, organization_id: Any | None = None,
+    ) -> list[dict[str, Any]]:
+        """List organizations, optionally filtered by ID.
 
         Args:
             limit: Maximum number to return.
             offset: Pagination offset.
+            organization_id: If provided, only return this org (for non-admin callers).
 
         Returns:
             List of organization records.
         """
-        query = """
-            SELECT id, name, created_at, updated_at
-            FROM organizations
-            ORDER BY name ASC
-            LIMIT $1 OFFSET $2
-        """
-
-        async with self.pool.acquire() as conn:
-            rows = await conn.fetch(query, limit, offset)
+        if organization_id:
+            query = """
+                SELECT id, name, created_at, updated_at
+                FROM organizations
+                WHERE id = $1
+                ORDER BY name ASC
+                LIMIT $2 OFFSET $3
+            """
+            async with self.pool.acquire() as conn:
+                rows = await conn.fetch(query, str(organization_id), limit, offset)
+        else:
+            query = """
+                SELECT id, name, created_at, updated_at
+                FROM organizations
+                ORDER BY name ASC
+                LIMIT $1 OFFSET $2
+            """
+            async with self.pool.acquire() as conn:
+                rows = await conn.fetch(query, limit, offset)
 
         return [self._row_to_dict(row) for row in rows]
 

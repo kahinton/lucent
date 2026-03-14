@@ -77,11 +77,44 @@ class RequestRepository:
         if not req:
             return None
         req["tasks"] = await self.list_tasks(request_id)
-        # Load events and memory links for each task
-        for task in req["tasks"]:
-            tid = str(task["id"])
-            task["events"] = await self.list_task_events(tid)
-            task["memories"] = await self.list_task_memories(tid)
+
+        # Batch-load events and memory links for ALL tasks (avoids N+1)
+        task_ids = [task["id"] for task in req["tasks"]]
+        if task_ids:
+            async with self.pool.acquire() as conn:
+                event_rows = await conn.fetch(
+                    "SELECT * FROM task_events WHERE task_id = ANY($1) ORDER BY created_at",
+                    task_ids,
+                )
+                memory_rows = await conn.fetch(
+                    """SELECT tm.*, m.content, m.type as memory_type, m.tags
+                       FROM task_memories tm
+                       JOIN memories m ON tm.memory_id = m.id
+                       WHERE tm.task_id = ANY($1)
+                       ORDER BY tm.created_at""",
+                    task_ids,
+                )
+
+            # Group by task_id
+            events_by_task: dict[str, list[dict]] = {}
+            for row in event_rows:
+                tid = str(row["task_id"])
+                events_by_task.setdefault(tid, []).append(dict(row))
+
+            memories_by_task: dict[str, list[dict]] = {}
+            for row in memory_rows:
+                tid = str(row["task_id"])
+                memories_by_task.setdefault(tid, []).append(dict(row))
+
+            for task in req["tasks"]:
+                tid = str(task["id"])
+                task["events"] = events_by_task.get(tid, [])
+                task["memories"] = memories_by_task.get(tid, [])
+        else:
+            for task in req["tasks"]:
+                task["events"] = []
+                task["memories"] = []
+
         # Build task tree (nest sub-tasks under parents)
         task_map = {str(t["id"]): t for t in req["tasks"]}
         root_tasks = []

@@ -1682,7 +1682,17 @@ class LucentDaemon:
         import asyncpg
 
         if self._listen_conn and not self._listen_conn.is_closed():
-            return True  # already connected
+            # Verify the connection is actually alive with a quick query
+            try:
+                await self._listen_conn.fetchval("SELECT 1")
+                return True
+            except Exception:
+                log("PG LISTEN connection stale, will reconnect", "WARN")
+                try:
+                    await self._listen_conn.close()
+                except Exception:
+                    pass
+                self._listen_conn = None
 
         try:
             self._listen_conn = await asyncpg.connect(DATABASE_URL)

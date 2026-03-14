@@ -632,7 +632,9 @@
         text = text.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) =>
             `<pre class="bg-gray-900 text-gray-100 rounded-lg p-3 my-2 overflow-x-auto text-xs"><code>${escapeHtml(code.trim())}</code></pre>`);
         // Inline code
-        text = text.replace(/`([^`]+)`/g, '<code class="bg-gray-100 text-primary-700 px-1 py-0.5 rounded text-xs">$1</code>');
+        text = text.replace(/`([^`]+)`/g, function(_, code) {
+            return '<code class="bg-gray-100 text-primary-700 px-1 py-0.5 rounded text-xs">' + escapeHtml(code) + '</code>';
+        });
         // Bold
         text = text.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
         // Italic
@@ -646,8 +648,14 @@
         text = text.replace(/(<li[^>]*>.*<\/li>\n?)+/g, '<ul class="my-1">$&</ul>');
         // Ordered lists
         text = text.replace(/^\d+\. (.+)$/gm, '<li class="ml-4 list-decimal">$1</li>');
-        // Links
-        text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" class="text-primary-600 underline" target="_blank">$1</a>');
+        // Links (sanitize href to prevent javascript: URLs)
+        text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, function(_, label, url) {
+            var safeUrl = url.trim();
+            if (/^(https?:\/\/|\/|#|mailto:)/i.test(safeUrl)) {
+                return '<a href="' + escapeHtml(safeUrl) + '" class="text-primary-600 underline" target="_blank" rel="noopener">' + escapeHtml(label) + '</a>';
+            }
+            return escapeHtml(label);  // Strip unsafe links
+        });
         // Paragraphs
         text = text.replace(/\n\n/g, '</p><p class="mt-1.5">');
         text = '<p>' + text + '</p>';

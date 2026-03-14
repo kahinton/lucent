@@ -294,8 +294,13 @@ async def chat_stream(
 
 
 @router.get("/models")
-async def chat_models():
+async def chat_models(request: Request):
     """List available models for the chat model picker."""
+    # Require a valid session to prevent unauthenticated probing
+    session_token = request.cookies.get(SESSION_COOKIE_NAME)
+    if not session_token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
     from lucent.model_registry import list_models as registry_list_models
 
     models = registry_list_models()
@@ -314,8 +319,12 @@ async def chat_models():
 
 
 @router.get("/status")
-async def chat_status():
+async def chat_status(request: Request):
     """Check if chat is configured and available."""
+    session_token = request.cookies.get(SESSION_COOKIE_NAME)
+    if not session_token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
     return {
         "available": COPILOT_SDK_AVAILABLE,
         "model": CHAT_MODEL if COPILOT_SDK_AVAILABLE else None,

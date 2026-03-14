@@ -103,6 +103,19 @@ def _set_csrf_cookie(response, token: str) -> None:
     )
 
 
+def _parse_env_vars(text: str) -> dict[str, str]:
+    """Parse KEY=VALUE lines into a dict, skipping blank/invalid lines."""
+    result = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if "=" in line:
+            k, v = line.split("=", 1)
+            key = k.strip()
+            if key:
+                result[key] = v.strip()
+    return result
+
+
 def _build_metadata_from_form(
     memory_type: str,
     *,
@@ -410,6 +423,26 @@ async def login_submit(request: Request):
     form = await request.form()
     csrf_form_token = str(form.get(CSRF_FIELD_NAME, ""))
     await _check_csrf(request, form_token=csrf_form_token)
+
+    # Rate limit login attempts by IP
+    from lucent.rate_limit import get_login_limiter
+
+    client_ip = request.client.host if request.client else "unknown"
+    limiter = get_login_limiter()
+    allowed, retry_after = limiter.check(client_ip)
+    if not allowed:
+        provider = await get_auth_provider()
+        logger.warning("Login rate limit exceeded for IP %s", client_ip)
+        return templates.TemplateResponse(
+            "login.html",
+            {
+                "request": request,
+                "fields": provider.get_login_fields(),
+                "error": f"Too many login attempts. Please try again in {retry_after} seconds.",
+            },
+            status_code=429,
+        )
+
     pool = await get_pool()
     credentials = {key: str(value) for key, value in form.items()}
 
@@ -430,6 +463,11 @@ async def login_submit(request: Request):
         )
 
     if user is None:
+        logger.warning(
+            "Failed login attempt from IP %s for user '%s'",
+            client_ip,
+            credentials.get("username", credentials.get("email", "unknown")),
+        )
         return templates.TemplateResponse(
             "login.html",
             {
@@ -465,6 +503,7 @@ async def login_submit(request: Request):
     )
     # Set CSRF cookie for authenticated pages
     _set_csrf_cookie(response, generate_csrf_token())
+    logger.info("Successful login for user %s from IP %s", user.get("email", user["id"]), client_ip)
     return response
 
 
@@ -1651,6 +1690,7 @@ async def memory_new_submit(
 ):
     """Handle new memory form submission."""
     user = await get_user_context(request)
+    await _check_csrf(request)
     pool = await get_pool()
 
     repo = MemoryRepository(pool)
@@ -1961,6 +2001,7 @@ async def memory_share(request: Request, memory_id: UUID):
     if not is_team_mode():
         raise HTTPException(status_code=404, detail="Sharing requires team mode")
     user = await get_user_context(request)
+    await _check_csrf(request)
     pool = await get_pool()
 
     repo = MemoryRepository(pool)
@@ -2057,6 +2098,7 @@ async def memory_delete(request: Request, memory_id: UUID):
 async def memory_restore(request: Request, memory_id: UUID, version: int):
     """Restore a memory to a previous version."""
     user = await get_user_context(request)
+    await _check_csrf(request)
     pool = await get_pool()
 
     repo = MemoryRepository(pool)
@@ -2201,7 +2243,23 @@ async def users_list(request: Request):
         user.role == "owner" if isinstance(user.role, str) else user.role.value == "owner"
     )
 
-    return templates.TemplateResponse(
+    # Check for one-time temp password display (from user creation)
+    temp_pw_display = None
+    temp_pw_cookie = request.cookies.get("lucent_temp_pw", "")
+    if temp_pw_cookie and ":" in temp_pw_cookie:
+        import hashlib
+        import hmac
+
+        pw, sig = temp_pw_cookie.rsplit(":", 1)
+        session_token = request.cookies.get("lucent_session", "")
+        expected_sig = hmac.new(session_token.encode(), pw.encode(), hashlib.sha256).hexdigest()[:16]
+        if hmac.compare_digest(sig, expected_sig):
+            temp_pw_display = pw
+
+    success = request.query_params.get("success")
+    error = request.query_params.get("error")
+
+    response = templates.TemplateResponse(
         "users.html",
         {
             "request": request,
@@ -2209,8 +2267,15 @@ async def users_list(request: Request):
             "users": users,
             "can_manage": can_manage,
             "can_impersonate": can_impersonate,
+            "temp_password": temp_pw_display,
+            "success": success,
+            "error": error,
         },
     )
+    # Clear the temp password cookie after reading
+    if temp_pw_cookie:
+        response.delete_cookie("lucent_temp_pw", path="/users")
+    return response
 
 
 @router.post("/users/create", response_class=HTMLResponse)
@@ -2224,6 +2289,7 @@ async def create_user(
     if not is_team_mode():
         raise HTTPException(status_code=404, detail="User management requires team mode")
     user = await get_user_context(request)
+    await _check_csrf(request)
 
     # Check permission
     if not (
@@ -2276,18 +2342,28 @@ async def create_user(
         await user_repo.update_role(new_user["id"], role)
 
     # Set a temporary password so the user can log in
-    # TODO: Implement invite/password-set flow instead of temp passwords
     from lucent.auth_providers import set_user_password
 
     temp_password = secrets.token_urlsafe(12)
     await set_user_password(pool, new_user["id"], temp_password)
 
-    from urllib.parse import quote
+    # Store temp password in session (not the URL) for one-time display
+    response = RedirectResponse(url="/users?success=user_created", status_code=303)
+    # Use a short-lived signed cookie for the temp password display
+    import hashlib
+    import hmac
 
-    return RedirectResponse(
-        url=f"/users?success=User+created.+Temporary+password:+{quote(temp_password)}",
-        status_code=303,
+    session_token = request.cookies.get("lucent_session", "")
+    sig = hmac.new(session_token.encode(), temp_password.encode(), hashlib.sha256).hexdigest()[:16]
+    response.set_cookie(
+        key="lucent_temp_pw",
+        value=f"{temp_password}:{sig}",
+        httponly=True,
+        samesite="lax",
+        max_age=60,  # Expires after 60 seconds
+        path="/users",
     )
+    return response
 
 
 @router.post("/users/{user_id}/impersonate")
@@ -2459,22 +2535,18 @@ async def create_template_web(
     setup_commands: str = Form(default=""),
     env_vars: str = Form(default=""),
     memory_limit: str = Form(default="2g"),
+    cpu_limit: float = Form(default=2.0),
+    disk_limit: str = Form(default="10g"),
     network_mode: str = Form(default="none"),
     timeout_seconds: int = Form(default=1800),
+    csrf_token: str = Form(default=""),
 ):
     """Create a new sandbox template."""
     user = await get_user_context(request)
+    await _check_csrf(request, form_token=csrf_token)
     pool = await get_pool()
     from lucent.db.sandbox_template import SandboxTemplateRepository
     repo = SandboxTemplateRepository(pool)
-
-    # Parse env_vars from KEY=VALUE lines
-    parsed_env = {}
-    for line in env_vars.splitlines():
-        line = line.strip()
-        if "=" in line:
-            k, v = line.split("=", 1)
-            parsed_env[k.strip()] = v.strip()
 
     await repo.create(
         name=name.strip(),
@@ -2484,8 +2556,10 @@ async def create_template_web(
         repo_url=repo_url.strip() or None,
         branch=branch.strip() or None,
         setup_commands=[c.strip() for c in setup_commands.splitlines() if c.strip()],
-        env_vars=parsed_env,
+        env_vars=_parse_env_vars(env_vars),
         memory_limit=memory_limit,
+        cpu_limit=cpu_limit,
+        disk_limit=disk_limit,
         network_mode=network_mode,
         timeout_seconds=timeout_seconds,
         created_by=str(user.id),
@@ -2527,21 +2601,18 @@ async def update_template_web(
     setup_commands: str = Form(default=""),
     env_vars: str = Form(default=""),
     memory_limit: str = Form(default="2g"),
+    cpu_limit: float = Form(default=2.0),
+    disk_limit: str = Form(default="10g"),
     network_mode: str = Form(default="none"),
     timeout_seconds: int = Form(default=1800),
+    csrf_token: str = Form(default=""),
 ):
     """Update a sandbox template."""
     user = await get_user_context(request)
+    await _check_csrf(request, form_token=csrf_token)
     pool = await get_pool()
     from lucent.db.sandbox_template import SandboxTemplateRepository
     repo = SandboxTemplateRepository(pool)
-
-    parsed_env = {}
-    for line in env_vars.splitlines():
-        line = line.strip()
-        if "=" in line:
-            k, v = line.split("=", 1)
-            parsed_env[k.strip()] = v.strip()
 
     await repo.update(
         template_id, str(user.organization_id),
@@ -2551,8 +2622,10 @@ async def update_template_web(
         repo_url=repo_url.strip() or None,
         branch=branch.strip() or None,
         setup_commands=[c.strip() for c in setup_commands.splitlines() if c.strip()],
-        env_vars=parsed_env,
+        env_vars=_parse_env_vars(env_vars),
         memory_limit=memory_limit,
+        cpu_limit=cpu_limit,
+        disk_limit=disk_limit,
         network_mode=network_mode,
         timeout_seconds=timeout_seconds,
     )
@@ -2563,6 +2636,7 @@ async def update_template_web(
 async def delete_template_web(request: Request, template_id: str):
     """Delete a sandbox template."""
     user = await get_user_context(request)
+    await _check_csrf(request)
     pool = await get_pool()
     from lucent.db.sandbox_template import SandboxTemplateRepository
     repo = SandboxTemplateRepository(pool)
@@ -2575,9 +2649,11 @@ async def launch_sandbox_web(
     request: Request,
     template_id: str = Form(...),
     name: str = Form(default=""),
+    csrf_token: str = Form(default=""),
 ):
     """Launch a sandbox instance from a template."""
     user = await get_user_context(request)
+    await _check_csrf(request, form_token=csrf_token)
     pool = await get_pool()
     from lucent.db.sandbox_template import SandboxTemplateRepository
     from lucent.sandbox.manager import get_sandbox_manager
@@ -2612,6 +2688,7 @@ async def launch_sandbox_web(
 async def stop_sandbox_web(request: Request, sandbox_id: str):
     """Stop a sandbox from the web UI."""
     await get_user_context(request)
+    await _check_csrf(request)
     from lucent.sandbox.manager import get_sandbox_manager
 
     manager = get_sandbox_manager()
@@ -2623,6 +2700,7 @@ async def stop_sandbox_web(request: Request, sandbox_id: str):
 async def destroy_sandbox_web(request: Request, sandbox_id: str):
     """Destroy a sandbox from the web UI."""
     await get_user_context(request)
+    await _check_csrf(request)
     from lucent.sandbox.manager import get_sandbox_manager
 
     manager = get_sandbox_manager()
@@ -2735,6 +2813,7 @@ async def create_api_key(
 ):
     """Create a new API key."""
     user = await get_user_context(request)
+    await _check_csrf(request)
     pool = await get_pool()
     api_key_repo = ApiKeyRepository(pool)
 
@@ -2766,6 +2845,7 @@ async def create_api_key(
 async def revoke_api_key(request: Request, key_id: UUID):
     """Revoke an API key."""
     user = await get_user_context(request)
+    await _check_csrf(request)
     pool = await get_pool()
     api_key_repo = ApiKeyRepository(pool)
 

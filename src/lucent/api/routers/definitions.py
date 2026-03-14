@@ -4,10 +4,12 @@ Provides CRUD endpoints and approval workflow for managing definitions.
 Agents can be granted access to specific skills and MCP servers.
 """
 
+from typing import Literal
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from lucent.api.deps import AuthenticatedUser
+from lucent.api.deps import AdminUser, AuthenticatedUser
 from lucent.db import DefinitionRepository, get_pool
 
 router = APIRouter(prefix="/definitions", tags=["definitions"])
@@ -43,7 +45,7 @@ class GrantAccess(BaseModel):
 @router.get("/agents")
 async def list_agents(
     user: AuthenticatedUser,
-    status: str | None = None,
+    status: Literal["proposed", "active", "rejected"] | None = None,
 ):
     pool = await get_pool()
     repo = DefinitionRepository(pool)
@@ -80,7 +82,7 @@ async def update_agent(agent_id: str, body: CreateAgent, user: AuthenticatedUser
     return result
 
 @router.post("/agents/{agent_id}/approve")
-async def approve_agent(agent_id: str, user: AuthenticatedUser):
+async def approve_agent(agent_id: str, user: AdminUser):
     pool = await get_pool()
     repo = DefinitionRepository(pool)
     result = await repo.approve_agent(agent_id, str(user.organization_id), str(user.id))
@@ -89,7 +91,7 @@ async def approve_agent(agent_id: str, user: AuthenticatedUser):
     return result
 
 @router.post("/agents/{agent_id}/reject")
-async def reject_agent(agent_id: str, user: AuthenticatedUser):
+async def reject_agent(agent_id: str, user: AdminUser):
     pool = await get_pool()
     repo = DefinitionRepository(pool)
     result = await repo.reject_agent(agent_id, str(user.organization_id), str(user.id))
@@ -98,7 +100,7 @@ async def reject_agent(agent_id: str, user: AuthenticatedUser):
     return result
 
 @router.delete("/agents/{agent_id}", status_code=204)
-async def delete_agent(agent_id: str, user: AuthenticatedUser):
+async def delete_agent(agent_id: str, user: AdminUser):
     pool = await get_pool()
     repo = DefinitionRepository(pool)
     if not await repo.delete_agent(agent_id, str(user.organization_id)):
@@ -141,7 +143,7 @@ async def revoke_mcp_from_agent(agent_id: str, server_id: str, user: Authenticat
 @router.get("/skills")
 async def list_skills(
     user: AuthenticatedUser,
-    status: str | None = None,
+    status: Literal["proposed", "active", "rejected"] | None = None,
 ):
     pool = await get_pool()
     repo = DefinitionRepository(pool)
@@ -166,7 +168,7 @@ async def get_skill(skill_id: str, user: AuthenticatedUser):
     return skill
 
 @router.post("/skills/{skill_id}/approve")
-async def approve_skill(skill_id: str, user: AuthenticatedUser):
+async def approve_skill(skill_id: str, user: AdminUser):
     pool = await get_pool()
     repo = DefinitionRepository(pool)
     result = await repo.approve_skill(skill_id, str(user.organization_id), str(user.id))
@@ -175,7 +177,7 @@ async def approve_skill(skill_id: str, user: AuthenticatedUser):
     return result
 
 @router.post("/skills/{skill_id}/reject")
-async def reject_skill(skill_id: str, user: AuthenticatedUser):
+async def reject_skill(skill_id: str, user: AdminUser):
     pool = await get_pool()
     repo = DefinitionRepository(pool)
     result = await repo.reject_skill(skill_id, str(user.organization_id), str(user.id))
@@ -184,7 +186,7 @@ async def reject_skill(skill_id: str, user: AuthenticatedUser):
     return result
 
 @router.delete("/skills/{skill_id}", status_code=204)
-async def delete_skill(skill_id: str, user: AuthenticatedUser):
+async def delete_skill(skill_id: str, user: AdminUser):
     pool = await get_pool()
     repo = DefinitionRepository(pool)
     if not await repo.delete_skill(skill_id, str(user.organization_id)):
@@ -193,7 +195,7 @@ async def delete_skill(skill_id: str, user: AuthenticatedUser):
 # ── MCP Server Endpoints ─────────────────────────────────────────────────
 
 @router.get("/mcp-servers")
-async def list_mcp_servers(user: AuthenticatedUser, status: str | None = None):
+async def list_mcp_servers(user: AuthenticatedUser, status: Literal["proposed", "active", "rejected"] | None = None):
     pool = await get_pool()
     repo = DefinitionRepository(pool)
     return await repo.list_mcp_servers(str(user.organization_id), status=status)
@@ -209,7 +211,7 @@ async def create_mcp_server(body: CreateMCPServer, user: AuthenticatedUser):
     )
 
 @router.post("/mcp-servers/{server_id}/approve")
-async def approve_mcp_server(server_id: str, user: AuthenticatedUser):
+async def approve_mcp_server(server_id: str, user: AdminUser):
     pool = await get_pool()
     repo = DefinitionRepository(pool)
     result = await repo.approve_mcp_server(server_id, str(user.organization_id), str(user.id))
@@ -218,7 +220,7 @@ async def approve_mcp_server(server_id: str, user: AuthenticatedUser):
     return result
 
 @router.post("/mcp-servers/{server_id}/reject")
-async def reject_mcp_server(server_id: str, user: AuthenticatedUser):
+async def reject_mcp_server(server_id: str, user: AdminUser):
     pool = await get_pool()
     repo = DefinitionRepository(pool)
     result = await repo.reject_mcp_server(server_id, str(user.organization_id), str(user.id))

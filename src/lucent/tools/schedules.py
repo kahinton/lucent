@@ -58,6 +58,26 @@ Returns: JSON with the created schedule including its ID and next_run_at.""")
         if not org_id:
             return json.dumps({"error": "No organization context"})
 
+        # Validate schedule_type and required fields
+        if schedule_type not in ("once", "interval", "cron"):
+            return json.dumps({"error": "schedule_type must be 'once', 'interval', or 'cron'"})
+        if schedule_type == "cron" and not cron_expression:
+            return json.dumps({"error": "cron_expression is required for 'cron' schedule_type"})
+        if schedule_type == "interval" and (not interval_seconds or interval_seconds < 60):
+            return json.dumps({"error": "interval_seconds must be >= 60 for 'interval' schedule_type"})
+        if priority not in ("low", "medium", "high", "urgent"):
+            return json.dumps({"error": "priority must be 'low', 'medium', 'high', or 'urgent'"})
+
+        # Validate cron expression syntax (basic format check)
+        if cron_expression:
+            import re
+            # Accept 5 or 6 space-separated fields
+            cron_pattern = re.compile(
+                r"^(\S+\s+){4,5}\S+$"
+            )
+            if not cron_pattern.match(cron_expression.strip()):
+                return json.dumps({"error": f"Invalid cron expression format: {cron_expression}"})
+
         # Validate model against registry
         if model:
             from lucent.model_registry import validate_model

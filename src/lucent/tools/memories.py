@@ -356,6 +356,9 @@ Returns:
             if not memory_ids:
                 return _error_response("memory_ids list cannot be empty")
 
+            if len(memory_ids) > 100:
+                return _error_response("Cannot request more than 100 memories at once")
+
             # Parse and validate all UUIDs first
             try:
                 uuid_ids = [UUID(mid) for mid in memory_ids]

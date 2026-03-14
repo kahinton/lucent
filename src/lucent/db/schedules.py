@@ -8,6 +8,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
 
+import json
+
 from asyncpg import Pool
 
 
@@ -108,8 +110,8 @@ class ScheduleRepository:
                            $8, $9, $10, $11, $12, $13, $14, $15, $16::uuid)
                    RETURNING *""",
                 title, org_id, description, agent_type, model,
-                __import__("json").dumps(task_template or {}),
-                __import__("json").dumps(sandbox_config) if sandbox_config else None,
+                json.dumps(task_template or {}),
+                json.dumps(sandbox_config) if sandbox_config else None,
                 schedule_type, cron_expression, interval_seconds, next_run_at,
                 priority, timezone_str, max_runs, expires_at, created_by,
             )
@@ -168,7 +170,7 @@ class ScheduleRepository:
         for key, val in fields.items():
             if key == "task_template":
                 sets.append(f"task_template = ${idx}::jsonb")
-                params.append(__import__("json").dumps(val))
+                params.append(json.dumps(val))
             else:
                 sets.append(f"{key} = ${idx}")
                 params.append(val)
