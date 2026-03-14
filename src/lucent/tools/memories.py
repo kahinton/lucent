@@ -382,7 +382,8 @@ Returns:
                 else:
                     # No auth context — deny access rather than falling back to unscoped query
                     return _error_response(
-                        "Authentication required: unable to determine user context for access control"
+                        "Authentication required: unable to determine "
+                        "user context for access control"
                     )
 
                 if result is None:

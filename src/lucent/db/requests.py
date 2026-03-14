@@ -30,7 +30,8 @@ class RequestRepository:
     ) -> dict:
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
-                """INSERT INTO requests (title, description, source, priority, created_by, organization_id)
+                """INSERT INTO requests
+                   (title, description, source, priority, created_by, organization_id)
                    VALUES ($1, $2, $3, $4, $5, $6)
                    RETURNING *""",
                 title,
@@ -74,7 +75,9 @@ class RequestRepository:
         completed_at = now if status in ("completed", "failed", "cancelled") else None
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
-                """UPDATE requests SET status = $2, updated_at = $3, completed_at = COALESCE($4, completed_at)
+                """UPDATE requests
+                   SET status = $2, updated_at = $3,
+                       completed_at = COALESCE($4, completed_at)
                    WHERE id = $1 RETURNING *""",
                 UUID(request_id),
                 status,

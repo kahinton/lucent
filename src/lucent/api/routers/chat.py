@@ -79,9 +79,12 @@ async def _build_system_prompt(user: dict, pool, page_context: dict | None) -> s
         f"You're talking with {display_name}.",
         "Be helpful, concise, and knowledgeable about the system they're using.",
         "You have access to context about what the user is currently viewing.",
-        "You also have access to the Lucent MCP server (memory-server) — use it to search, create, update, and manage memories when the user asks.",
-        "When the user asks about their memories, use the MCP tools to search and retrieve accurate information rather than relying only on the page context.",
-        "Answer questions about their data, explain what they're seeing, and help them use the system.",
+        "You also have access to the Lucent MCP server (memory-server) — "
+        "use it to search, create, update, and manage memories when the user asks.",
+        "When the user asks about their memories, use the MCP tools to search and "
+        "retrieve accurate information rather than relying only on the page context.",
+        "Answer questions about their data, explain what they're seeing, "
+        "and help them use the system.",
         "Format responses in markdown when helpful. Keep answers focused and practical.",
         f"Current time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}.",
     ]
@@ -133,7 +136,8 @@ async def _build_system_prompt(user: dict, pool, page_context: dict | None) -> s
                         parts.append(f"- Total runs: {len(runs)}")
                         latest = runs[0]
                         parts.append(
-                            f"- Latest run: {latest.get('status')} — {str(latest.get('result_summary', ''))[:300]}"
+                            f"- Latest run: {latest.get('status')} — "
+                            f"{str(latest.get('result_summary', ''))[:300]}"
                         )
 
             elif page_type == "request_detail" and page_data.get("request_id") and org_id:

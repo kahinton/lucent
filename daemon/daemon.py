@@ -902,7 +902,8 @@ async def build_subagent_prompt(
     else:
         raise AgentNotFoundError(
             f"No approved agent definition found for '{agent_type}'. "
-            f"Create and approve a definition at /definitions before dispatching tasks to this agent."
+            f"Create and approve a definition at /definitions "
+            f"before dispatching tasks to this agent."
         )
 
     identity = AGENT_DEF_PATH.read_text() if AGENT_DEF_PATH.exists() else ""
@@ -1101,7 +1102,6 @@ class LucentDaemon:
         (e.g. when running the daemon standalone outside the package).
         """
         selected_model = model or MODEL
-        session_id = f"session-{name}-{id(self)}"
 
         if _LLM_ENGINE_AVAILABLE:
             return await self._run_via_engine(name, system_message, prompt, selected_model)
@@ -1456,7 +1456,6 @@ class LucentDaemon:
             for sched in due:
                 sched_id = str(sched["id"])
                 title = sched.get("title", "Scheduled task")
-                template = sched.get("task_template") or {}
 
                 # Trigger the schedule via API (creates request + task + records run)
                 try:
@@ -1469,7 +1468,8 @@ class LucentDaemon:
                             data = resp.json()
                             req_id = data.get("request", {}).get("id", "?")
                             log(
-                                f"Triggered schedule {sched_id[:8]} '{title}' → request {str(req_id)[:8]}"
+                                f"Triggered schedule {sched_id[:8]} "
+                                f"'{title}' → request {str(req_id)[:8]}"
                             )
                         else:
                             log(
@@ -1552,7 +1552,8 @@ class LucentDaemon:
                             f"{description}\n\n"
                             f"[SANDBOX] This task runs in sandbox {sandbox_id[:12]}. "
                             f"Use the sandbox exec API at POST /api/sandboxes/{sandbox_id}/exec "
-                            f"to run commands. Working directory: {sandbox_config.get('working_dir', '/workspace')}"
+                            f"to run commands. Working directory: "
+                            f"{sandbox_config.get('working_dir', '/workspace')}"
                         )
                         await RequestAPI.add_event(
                             task_id,

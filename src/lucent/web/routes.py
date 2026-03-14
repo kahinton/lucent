@@ -670,14 +670,18 @@ async def dashboard(request: Request):
     active_agents = len(agents)
     active_skills = len(skills)
 
-    # Pending tasks count
-    pending_tasks = await memory_repo.search(
-        limit=1,
-        tags=["daemon-task", "pending"],
-        requesting_user_id=user.id,
-        requesting_org_id=user.organization_id,
+    # Active requests count (from request tracking system)
+    from lucent.db.requests import RequestRepository
+    req_repo = RequestRepository(pool)
+    active_requests = await req_repo.list_requests(
+        org_id=str(user.organization_id),
+        status="in_progress",
     )
-    pending_task_count = pending_tasks.get("total_count", 0)
+    pending_requests = await req_repo.list_requests(
+        org_id=str(user.organization_id),
+        status="pending",
+    )
+    active_request_count = len(active_requests) + len(pending_requests)
 
     return templates.TemplateResponse(
         "dashboard.html",
@@ -690,7 +694,7 @@ async def dashboard(request: Request):
             "total_memories": recent["total_count"],
             "active_agents": active_agents,
             "active_skills": active_skills,
-            "pending_task_count": pending_task_count,
+            "active_request_count": active_request_count,
         },
     )
 
@@ -1096,7 +1100,7 @@ async def delete_mcp_web(request: Request, server_id: str):
 async def grant_skill_web(request: Request, agent_id: str):
     form = await request.form()
     await _check_csrf(request, form_token=str(form.get(CSRF_FIELD_NAME, "")))
-    user = await get_user_context(request)
+    await get_user_context(request)
     pool = await get_pool()
     from lucent.db.definitions import DefinitionRepository
 
@@ -1124,7 +1128,7 @@ async def revoke_skill_web(request: Request, agent_id: str, skill_id: str):
 async def grant_mcp_web(request: Request, agent_id: str):
     form = await request.form()
     await _check_csrf(request, form_token=str(form.get(CSRF_FIELD_NAME, "")))
-    user = await get_user_context(request)
+    await get_user_context(request)
     pool = await get_pool()
     from lucent.db.definitions import DefinitionRepository
 
@@ -1453,169 +1457,23 @@ def _memory_to_task_view(memory: dict) -> dict:
     }
 
 
+# Legacy Task Queue routes — redirect to Requests (tasks now live under requests)
 @router.get("/daemon/tasks", response_class=HTMLResponse)
-async def daemon_tasks_list(
-    request: Request,
-    status: str | None = None,
-):
-    """List daemon tasks with optional status filter."""
-    user = await get_user_context(request)
-    pool = await get_pool()
-    repo = MemoryRepository(pool)
-
-    # Fetch all daemon-task memories
-    tags_filter = ["daemon-task"]
-    if status in ("pending", "completed"):
-        tags_filter.append(status)
-
-    result = await repo.search(
-        tags=tags_filter,
-        limit=100,
-        requesting_user_id=user.id,
-        requesting_org_id=user.organization_id,
-    )
-
-    all_tasks = [_memory_to_task_view(m) for m in result["memories"]]
-
-    # Post-filter for "claimed" status (prefix tag)
-    if status == "claimed":
-        all_tasks = [t for t in all_tasks if t["status"] == "claimed"]
-
-    # Compute status counts from unfiltered set
-    all_result = (
-        await repo.search(
-            tags=["daemon-task"],
-            limit=100,
-            requesting_user_id=user.id,
-            requesting_org_id=user.organization_id,
-        )
-        if status
-        else result
-    )
-    all_for_counts = (
-        [_memory_to_task_view(m) for m in all_result["memories"]] if status else all_tasks
-    )
-    status_counts = {}
-    for t in all_for_counts:
-        status_counts[t["status"]] = status_counts.get(t["status"], 0) + 1
-
-    return templates.TemplateResponse(
-        "daemon_tasks.html",
-        {
-            "request": request,
-            "user": user,
-            "tasks": all_tasks,
-            "current_status": status,
-            "total_count": len(all_for_counts),
-            "status_counts": status_counts,
-        },
-    )
+async def daemon_tasks_redirect(request: Request):
+    """Redirect legacy task queue to requests page."""
+    return RedirectResponse(url="/requests", status_code=301)
 
 
 @router.get("/daemon/tasks/new", response_class=HTMLResponse)
-async def daemon_tasks_new_form(request: Request):
-    """Show the task submission form."""
-    user = await get_user_context(request)
-    return templates.TemplateResponse(
-        "daemon_tasks_new.html",
-        {"request": request, "user": user},
-    )
-
-
-@router.post("/daemon/tasks/new", response_class=HTMLResponse)
-async def daemon_tasks_create(
-    request: Request,
-    description: str = Form(...),
-    agent_type: str = Form("code"),
-    priority: str = Form("medium"),
-    context: str = Form(""),
-    tags: str = Form(""),
-):
-    """Handle task submission form POST."""
-    await _check_csrf(request)
-    user = await get_user_context(request)
-    pool = await get_pool()
-    repo = MemoryRepository(pool)
-
-    if agent_type not in _TASK_AGENT_TYPES:
-        agent_type = "code"
-    if priority not in _TASK_PRIORITIES:
-        priority = "medium"
-
-    # Build tags
-    memory_tags = ["daemon-task", "daemon", "pending", agent_type, priority]
-    if tags.strip():
-        extra = [t.strip() for t in tags.split(",") if t.strip()]
-        memory_tags.extend(extra)
-
-    # Build metadata
-    metadata: dict = {"submitted_by": str(user.id), "source": "web"}
-    if context.strip():
-        metadata["context"] = context.strip()
-
-    username = user.display_name or user.email or str(user.id)
-
-    await repo.create(
-        username=username,
-        type="technical",
-        content=description,
-        tags=memory_tags,
-        importance={"low": 3, "medium": 5, "high": 8}.get(priority, 5),
-        metadata=metadata,
-        user_id=user.id,
-        organization_id=user.organization_id,
-    )
-
-    return RedirectResponse(url="/daemon/tasks", status_code=303)
+async def daemon_tasks_new_redirect(request: Request):
+    """Redirect legacy new task form to requests page."""
+    return RedirectResponse(url="/requests", status_code=301)
 
 
 @router.get("/daemon/tasks/{task_id}", response_class=HTMLResponse)
-async def daemon_task_detail(request: Request, task_id: UUID):
-    """Show task detail with execution history."""
-    user = await get_user_context(request)
-    pool = await get_pool()
-    repo = MemoryRepository(pool)
-    audit_repo = AuditRepository(pool)
-
-    memory = await repo.get_accessible(task_id, user.id, user.organization_id)
-    if memory is None or "daemon-task" not in (memory.get("tags") or []):
-        raise HTTPException(status_code=404, detail="Task not found")
-
-    task = _memory_to_task_view(memory)
-
-    # Get version history
-    version_data = await audit_repo.get_versions(task_id, limit=50)
-    versions = version_data.get("versions", [])
-
-    return templates.TemplateResponse(
-        "daemon_task_detail.html",
-        {
-            "request": request,
-            "user": user,
-            "task": task,
-            "versions": versions,
-        },
-    )
-
-
-@router.post("/daemon/tasks/{task_id}/cancel", response_class=HTMLResponse)
-async def daemon_task_cancel(request: Request, task_id: UUID):
-    """Cancel a pending daemon task."""
-    await _check_csrf(request)
-    user = await get_user_context(request)
-    pool = await get_pool()
-    repo = MemoryRepository(pool)
-
-    memory = await repo.get_accessible(task_id, user.id, user.organization_id)
-    if memory is None or "daemon-task" not in (memory.get("tags") or []):
-        raise HTTPException(status_code=404, detail="Task not found")
-
-    tags = memory.get("tags") or []
-    if "pending" not in tags:
-        raise HTTPException(status_code=400, detail="Only pending tasks can be cancelled")
-
-    await repo.delete(task_id)
-    return RedirectResponse(url="/daemon/tasks", status_code=303)
+async def daemon_task_detail_redirect(request: Request, task_id: UUID):
+    """Redirect legacy task detail to requests page."""
+    return RedirectResponse(url="/requests", status_code=301)
 
 
 # =============================================================================
@@ -3042,7 +2900,7 @@ async def request_detail(request: Request, request_id: str):
 @router.post("/requests/tasks/{task_id}/retry", response_class=HTMLResponse)
 async def retry_task(request: Request, task_id: str):
     """Retry a failed task — resets it to pending for the daemon to pick up."""
-    user = await get_user_context(request)
+    await get_user_context(request)
     await validate_csrf_token(request)
     pool = await get_pool()
     from lucent.db.requests import RequestRepository

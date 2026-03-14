@@ -360,7 +360,10 @@ class ScheduleRepository:
                    count(*) FILTER (WHERE enabled AND status = 'active') as active,
                    count(*) FILTER (WHERE NOT enabled OR status = 'paused') as paused,
                    count(*) FILTER (WHERE status = 'completed') as completed,
-                   count(*) FILTER (WHERE next_run_at <= now() AND enabled AND status = 'active') as due_now,
+                   count(*) FILTER (
+                       WHERE next_run_at <= now() AND enabled
+                       AND status = 'active'
+                   ) as due_now,
                    count(*) FILTER (WHERE schedule_type = 'once') as one_time,
                    count(*) FILTER (WHERE schedule_type = 'interval') as interval,
                    count(*) FILTER (WHERE schedule_type = 'cron') as cron

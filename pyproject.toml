@@ -13,12 +13,12 @@ authors = [
     { name = "kahinton" }
 ]
 dependencies = [
-    "mcp[cli]>=1.0.0",
+    "mcp[cli]>=1.26.0",
     "asyncpg>=0.29.0",
     "pydantic>=2.0.0",
-    "python-dotenv>=1.0.0",
-    "fastapi>=0.115.0",
-    "uvicorn>=0.32.0",
+    "python-dotenv>=1.2.2",
+    "fastapi>=0.135.0",
+    "uvicorn>=0.41.0",
     "jinja2>=3.1.0",
     "python-multipart>=0.0.22",
     "bcrypt>=4.0.0",
@@ -27,11 +27,11 @@ dependencies = [
     "httpx>=0.27.0",
     "cryptography>=46.0.5",
     "PyJWT>=2.12.0",
-    "langchain>=0.3.0",
-    "langchain-core>=0.3.0",
-    "langchain-anthropic>=0.3.0",
-    "langchain-openai>=0.3.0",
-    "langchain-google-genai>=2.0.0",
+    "langchain>=1.0.0",
+    "langchain-core>=1.0.0",
+    "langchain-anthropic>=1.0.0",
+    "langchain-openai>=1.0.0",
+    "langchain-google-genai>=4.0.0",
 ]
 
 [project.urls]
@@ -43,10 +43,10 @@ Issues = "https://github.com/kahinton/lucent/issues"
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
-    "ruff>=0.1.0",
+    "ruff>=0.14.0",
 ]
 ollama = [
-    "langchain-ollama>=0.3.0",
+    "langchain-ollama>=1.0.0",
 ]
 
 [project.scripts]
@@ -65,3 +65,4 @@ select = ["E", "F", "I", "N", "W"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+norecursedirs = ["tests/manual"]

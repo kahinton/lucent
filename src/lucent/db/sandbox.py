@@ -145,7 +145,7 @@ class SandboxRepository:
         if organization_id:
             async with self.pool.acquire() as conn:
                 rows = await conn.fetch(
-                    """SELECT * FROM sandboxes 
+                    """SELECT * FROM sandboxes
                        WHERE status != 'destroyed' AND organization_id = $1
                        ORDER BY created_at DESC""",
                     UUID(organization_id),
