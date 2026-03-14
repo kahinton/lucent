@@ -29,7 +29,20 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
-from copilot import CopilotClient, PermissionHandler
+
+# Import LLM engine abstraction — the daemon no longer calls CopilotClient directly
+try:
+    from lucent.llm import get_engine, get_engine_name, SessionEvent, SessionEventType
+    _LLM_ENGINE_AVAILABLE = True
+except ImportError:
+    _LLM_ENGINE_AVAILABLE = False
+
+# Legacy import for backward compat (daemon may be run outside the package)
+try:
+    from copilot import CopilotClient, PermissionHandler
+    _COPILOT_SDK_AVAILABLE = True
+except ImportError:
+    _COPILOT_SDK_AVAILABLE = False
 
 # Optional: adaptation module for environment assessment
 try:
@@ -979,10 +992,11 @@ class LucentDaemon:
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, self._handle_shutdown)
 
+        engine_name = get_engine_name() if _LLM_ENGINE_AVAILABLE else "copilot-direct"
         log(
             f"Daemon ready. Instance: {self.instance_id}, "
             f"Roles: {','.join(sorted(self.roles))}, "
-            f"Model: {MODEL}, Max sessions: {MAX_CONCURRENT_SESSIONS}"
+            f"Engine: {engine_name}, Model: {MODEL}, Max sessions: {MAX_CONCURRENT_SESSIONS}"
         )
 
     def _handle_shutdown(self):
@@ -1054,7 +1068,69 @@ class LucentDaemon:
     async def _run_session_inner(
         self, name: str, system_message: str, prompt: str, model: str | None = None
     ) -> str | None:
-        """Inner session runner — separated so the caller can wrap with a hard timeout."""
+        """Inner session runner — uses the LLM engine abstraction.
+
+        Falls back to direct CopilotClient if the engine module isn't available
+        (e.g. when running the daemon standalone outside the package).
+        """
+        selected_model = model or MODEL
+        session_id = f"session-{name}-{id(self)}"
+
+        if _LLM_ENGINE_AVAILABLE:
+            return await self._run_via_engine(name, system_message, prompt, selected_model)
+        elif _COPILOT_SDK_AVAILABLE:
+            return await self._run_via_copilot_direct(name, system_message, prompt, selected_model)
+        else:
+            log("No LLM engine available — install lucent or github-copilot-sdk", "ERROR")
+            return None
+
+    async def _run_via_engine(
+        self, name: str, system_message: str, prompt: str, model: str
+    ) -> str | None:
+        """Run session using the LLM engine abstraction layer."""
+        engine = get_engine()
+        session_id = f"engine-session-{name}"
+        self.active_sessions.append(session_id)
+
+        try:
+            def on_event(event: SessionEvent) -> None:
+                etype = event.type.value
+                if event.type == SessionEventType.MESSAGE:
+                    if event.content:
+                        log(f"  [{name}] message: {event.content[:200]}...", "STREAM")
+                elif event.type == SessionEventType.ERROR:
+                    log(f"  [{name}] error: {event.content}", "ERROR")
+                elif event.type == SessionEventType.TOOL_CALL:
+                    log(f"  [{name}] event: tool.call tool={event.tool_name}", "STREAM")
+                elif event.type == SessionEventType.TOOL_RESULT:
+                    output = event.tool_output[:300] if event.tool_output else ""
+                    log(f"  [{name}] event: tool.result tool={event.tool_name} output={output}", "STREAM")
+                elif event.type != SessionEventType.MESSAGE_DELTA:
+                    log(f"  [{name}] event: {etype}", "STREAM")
+
+            result = await engine.run_session_streaming(
+                model=model,
+                system_message=system_message,
+                prompt=prompt,
+                mcp_config=MCP_CONFIG,
+                on_event=on_event,
+                timeout=600,
+            )
+
+            if result:
+                log(f"Session '{name}' completed ({len(result)} chars)")
+                log(f"--- {name} full output ---\n{result}\n--- end {name} ---", "THOUGHT")
+            else:
+                log(f"Session '{name}' completed (no response)")
+            return result
+        finally:
+            if session_id in self.active_sessions:
+                self.active_sessions.remove(session_id)
+
+    async def _run_via_copilot_direct(
+        self, name: str, system_message: str, prompt: str, model: str
+    ) -> str | None:
+        """Legacy fallback: run session using CopilotClient directly."""
         client = None
 
         try:
@@ -1063,7 +1139,7 @@ class LucentDaemon:
 
             session = await client.create_session(
                 {
-                    "model": model or MODEL,
+                    "model": model,
                     "system_message": {"content": system_message},
                     "on_permission_request": PermissionHandler.approve_all,
                     "mcp_servers": MCP_CONFIG,
@@ -1072,7 +1148,6 @@ class LucentDaemon:
             self.active_sessions.append(session)
 
             try:
-                # Collect response with event streaming for visibility
                 response_parts = []
                 done = asyncio.Event()
 
@@ -1085,7 +1160,7 @@ class LucentDaemon:
                             response_parts.append(content)
                             log(f"  [{name}] message: {content[:200]}...", "STREAM")
                     elif etype == "assistant.message_delta":
-                        pass  # Skip deltas — final message has full content
+                        pass
                     elif etype == "session.idle":
                         done.set()
                     elif "error" in etype.lower():
@@ -1096,13 +1171,11 @@ class LucentDaemon:
                         )
                         done.set()
                     else:
-                        # Log all other events for visibility (tool calls, etc.)
                         detail = ""
                         if hasattr(event.data, "tool_name"):
                             detail = f" tool={event.data.tool_name}"
                         elif hasattr(event.data, "name"):
                             detail = f" name={event.data.name}"
-                        # Include tool output/result snippets when available
                         if hasattr(event.data, "output"):
                             output = str(event.data.output)[:300]
                             detail += f" output={output}"
@@ -1119,7 +1192,6 @@ class LucentDaemon:
                 except asyncio.TimeoutError:
                     log(f"Session '{name}' timed out after 10 minutes", "WARN")
 
-                # Cleanup
                 try:
                     await session.destroy()
                 except Exception:

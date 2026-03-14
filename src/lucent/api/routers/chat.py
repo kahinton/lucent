@@ -1,7 +1,7 @@
 """Chat API endpoint — streaming LLM conversations with page context.
 
-Uses the GitHub Copilot SDK (CopilotClient) with claude-opus-4.6 for
-streaming responses. Each message includes page context and relevant
+Uses the configured LLM engine (Copilot SDK or LangChain) for
+responses. Each message includes page context and relevant
 memories for grounded answers. The chat agent has full access to the
 Lucent MCP server for memory search, creation, and management.
 """
@@ -20,13 +20,6 @@ from lucent.db import get_pool
 from lucent.logging import get_logger
 
 logger = get_logger("chat")
-
-# Try to import CopilotClient — gracefully degrade if not installed
-try:
-    from copilot import CopilotClient, PermissionHandler
-    COPILOT_SDK_AVAILABLE = True
-except ImportError:
-    COPILOT_SDK_AVAILABLE = False
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -186,20 +179,15 @@ async def chat_stream(
     """Stream a chat response. Model defaults to CHAT_MODEL but can be overridden per-request."""
     user, pool = await _get_session_user(request)
 
-    if not COPILOT_SDK_AVAILABLE:
-        raise HTTPException(
-            503,
-            "Chat requires the github-copilot-sdk package. "
-            "Install with: pip install github-copilot-sdk",
-        )
+    from lucent.llm import get_engine
+
+    engine = get_engine()
 
     selected_model = body.model or CHAT_MODEL
 
     system_prompt = await _build_system_prompt(user, pool, body.page_context)
 
     # Build the conversation as a single prompt with history
-    # The Copilot SDK uses session.send() with a prompt string,
-    # so we format the conversation history into the prompt.
     history_parts = []
     for m in body.messages[:-1]:  # All but the last message
         prefix = "User" if m.role == "user" else "Assistant"
@@ -216,62 +204,30 @@ async def chat_stream(
     else:
         prompt = last_message
 
-    # Run the Copilot session and get result
-    client = None
+    # Build MCP config using the user's session token
+    session_token = request.cookies.get(SESSION_COOKIE_NAME)
+    mcp_config = _build_mcp_config(session_token) if session_token else {}
+    logger.info(
+        "Chat session: engine=%s, model=%s, mcp=%s",
+        engine.name,
+        selected_model,
+        "present" if session_token else "MISSING",
+    )
+
+    # Run the LLM session via the engine abstraction
     try:
-        client_opts: dict = {"log_level": "debug"}
-        if GITHUB_TOKEN:
-            client_opts["github_token"] = GITHUB_TOKEN
-
-        client = CopilotClient(client_opts)
-        await client.start()
-
-        # Pass the user's session token so MCP ops run as this user
-        session_token = request.cookies.get(SESSION_COOKIE_NAME)
-        mcp_config = _build_mcp_config(session_token) if session_token else {}
-        logger.info(
-            "Chat MCP config: session_token=%s, url=%s",
-            "present" if session_token else "MISSING",
-            MCP_URL,
-        )
-
-        session = await client.create_session({
-            "model": selected_model,
-            "system_message": {"content": system_prompt},
-            "on_permission_request": PermissionHandler.approve_all,
-            "mcp_servers": mcp_config,
-        })
-
-        response = await session.send_and_wait(
-            {"prompt": prompt},
+        result_text = await engine.run_session(
+            model=selected_model,
+            system_message=system_prompt,
+            prompt=prompt,
+            mcp_config=mcp_config,
             timeout=CHAT_SESSION_TIMEOUT,
         )
-
-        result_text = response.data.content if response and response.data else None
-
-        try:
-            await session.disconnect()
-        except Exception:
-            pass
-
-    except asyncio.TimeoutError:
-        result_text = None
-        error = "Response timed out"
+        error = None if result_text else "No response received"
     except Exception as e:
-        logger.error(f"Chat session failed: {e}")
+        logger.error("Chat session failed: %s", e)
         result_text = None
         error = str(e)
-    else:
-        error = None
-    finally:
-        if client:
-            try:
-                await asyncio.wait_for(client.stop(), timeout=5)
-            except (asyncio.TimeoutError, Exception):
-                try:
-                    await client.force_stop()
-                except Exception:
-                    pass
 
     # Return SSE response
     async def generate():
@@ -325,7 +281,10 @@ async def chat_status(request: Request):
     if not session_token:
         raise HTTPException(status_code=401, detail="Not authenticated")
 
+    from lucent.llm import get_engine_name
+
     return {
-        "available": COPILOT_SDK_AVAILABLE,
-        "model": CHAT_MODEL if COPILOT_SDK_AVAILABLE else None,
+        "available": True,
+        "model": CHAT_MODEL,
+        "engine": get_engine_name(),
     }

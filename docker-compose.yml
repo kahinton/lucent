@@ -33,6 +33,12 @@ services:
       LUCENT_LICENSE_KEY: ${LUCENT_LICENSE_KEY:-}
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       LUCENT_CHAT_MODEL: ${LUCENT_CHAT_MODEL:-claude-opus-4.6}
+      # LLM Engine: "copilot" (default, uses GitHub Copilot SDK) or "langchain"
+      LUCENT_LLM_ENGINE: ${LUCENT_LLM_ENGINE:-copilot}
+      # Provider API keys (only needed when LUCENT_LLM_ENGINE=langchain)
+      # ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      # GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
     volumes:
       - ./src:/app/src:cached
       - ./pyproject.toml:/app/pyproject.toml:ro
@@ -64,6 +70,7 @@ services:
       LUCENT_MCP_API_KEY: ${LUCENT_MCP_API_KEY:-}
       LUCENT_DAEMON_INTERVAL: ${LUCENT_DAEMON_INTERVAL:-15}
       LUCENT_DAEMON_MODEL: ${LUCENT_DAEMON_MODEL:-claude-opus-4.6}
+      LUCENT_LLM_ENGINE: ${LUCENT_LLM_ENGINE:-copilot}
       LUCENT_MAX_SESSIONS: ${LUCENT_MAX_SESSIONS:-3}
       LUCENT_STALE_HEARTBEAT_MINUTES: ${LUCENT_STALE_HEARTBEAT_MINUTES:-30}
       # Restricted DB connection for API key provisioning only.

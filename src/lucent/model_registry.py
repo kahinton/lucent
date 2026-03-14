@@ -13,10 +13,11 @@ from dataclasses import dataclass, field
 class ModelInfo:
     """Metadata for a single LLM model."""
 
-    id: str  # model identifier string used by the API
-    provider: str  # provider name (anthropic, openai, google, alibaba, etc.)
+    id: str  # model identifier string used by Copilot SDK / Lucent
+    provider: str  # provider name (anthropic, openai, google)
     name: str  # human-readable display name
     category: str  # task category: general, fast, reasoning, agentic, visual
+    api_model_id: str = ""  # provider API model ID (for direct API / LangChain)
     context_window: int = 0  # context window size in tokens (0 = unknown)
     supports_tools: bool = True  # whether the model supports tool/function calling
     supports_vision: bool = False  # whether the model supports image input
@@ -35,6 +36,7 @@ MODELS: list[ModelInfo] = [
         provider="openai",
         name="GPT-4.1",
         category="general",
+        api_model_id="gpt-4.1",
         supports_vision=True,
         notes="General-purpose coding and writing. Fast, accurate code completions.",
         tags=["coding", "writing", "general"],
@@ -44,6 +46,7 @@ MODELS: list[ModelInfo] = [
         provider="openai",
         name="GPT-5 mini",
         category="general",
+        api_model_id="gpt-5-mini",
         supports_vision=True,
         notes="Reliable default for most coding and writing tasks.",
         tags=["coding", "writing", "general", "fast"],
@@ -53,6 +56,7 @@ MODELS: list[ModelInfo] = [
         provider="openai",
         name="GPT-5.1",
         category="reasoning",
+        api_model_id="gpt-5.1",
         notes="Multi-step problem solving and architecture-level code analysis.",
         tags=["reasoning", "debugging", "architecture"],
     ),
@@ -61,6 +65,7 @@ MODELS: list[ModelInfo] = [
         provider="openai",
         name="GPT-5.1-Codex",
         category="reasoning",
+        api_model_id="gpt-5.1-codex",
         notes="Deep reasoning and debugging. Multi-step problem solving.",
         tags=["reasoning", "debugging", "code"],
     ),
@@ -69,6 +74,7 @@ MODELS: list[ModelInfo] = [
         provider="openai",
         name="GPT-5.1 Codex Max",
         category="agentic",
+        api_model_id="gpt-5.1-codex-max",
         notes="Agentic software development. High premium request cost.",
         tags=["agentic", "coding", "premium"],
     ),
@@ -77,6 +83,7 @@ MODELS: list[ModelInfo] = [
         provider="openai",
         name="GPT-5.1-Codex-Mini",
         category="reasoning",
+        api_model_id="gpt-5.1-codex-mini",
         notes="Deep reasoning and debugging, smaller footprint.",
         tags=["reasoning", "debugging", "code"],
     ),
@@ -85,6 +92,7 @@ MODELS: list[ModelInfo] = [
         provider="openai",
         name="GPT-5.2",
         category="reasoning",
+        api_model_id="gpt-5.2",
         notes="Deep reasoning and debugging.",
         tags=["reasoning", "debugging"],
     ),
@@ -93,6 +101,7 @@ MODELS: list[ModelInfo] = [
         provider="openai",
         name="GPT-5.2-Codex",
         category="agentic",
+        api_model_id="gpt-5.2-codex",
         notes="Agentic software development.",
         tags=["agentic", "coding"],
     ),
@@ -101,6 +110,7 @@ MODELS: list[ModelInfo] = [
         provider="openai",
         name="GPT-5.3-Codex",
         category="agentic",
+        api_model_id="gpt-5.3-codex",
         notes="Higher-quality code on complex engineering tasks.",
         tags=["agentic", "coding"],
     ),
@@ -109,6 +119,7 @@ MODELS: list[ModelInfo] = [
         provider="openai",
         name="GPT-5.4",
         category="reasoning",
+        api_model_id="gpt-5.4",
         notes="Complex reasoning, code analysis, and technical decisions.",
         tags=["reasoning", "analysis"],
     ),
@@ -118,6 +129,7 @@ MODELS: list[ModelInfo] = [
         provider="anthropic",
         name="Claude Haiku 4.5",
         category="fast",
+        api_model_id="claude-haiku-4-5-20251001",
         notes="Fast, reliable answers to lightweight coding questions.",
         tags=["fast", "coding", "lightweight"],
     ),
@@ -126,6 +138,7 @@ MODELS: list[ModelInfo] = [
         provider="anthropic",
         name="Claude Opus 4.5",
         category="reasoning",
+        api_model_id="claude-opus-4-5-20251101",
         notes="Complex problem-solving, sophisticated reasoning.",
         tags=["reasoning", "analysis", "premium"],
     ),
@@ -134,6 +147,7 @@ MODELS: list[ModelInfo] = [
         provider="anthropic",
         name="Claude Opus 4.6",
         category="reasoning",
+        api_model_id="claude-opus-4-6-20260301",
         notes="Anthropic's most powerful model. Improves on Claude Opus 4.5.",
         tags=["reasoning", "analysis", "premium"],
     ),
@@ -142,6 +156,7 @@ MODELS: list[ModelInfo] = [
         provider="anthropic",
         name="Claude Sonnet 4.0",
         category="reasoning",
+        api_model_id="claude-sonnet-4-20250514",
         supports_vision=True,
         notes="Performance and practicality, balanced for coding workflows.",
         tags=["reasoning", "coding", "balanced"],
@@ -151,6 +166,7 @@ MODELS: list[ModelInfo] = [
         provider="anthropic",
         name="Claude Sonnet 4.5",
         category="general",
+        api_model_id="claude-sonnet-4-5-20250620",
         supports_vision=True,
         notes="General-purpose coding and agent tasks.",
         tags=["general", "coding", "agentic"],
@@ -160,6 +176,7 @@ MODELS: list[ModelInfo] = [
         provider="anthropic",
         name="Claude Sonnet 4.6",
         category="general",
+        api_model_id="claude-sonnet-4-6-20260115",
         supports_vision=True,
         notes="Reliable completions and smarter reasoning under pressure.",
         tags=["general", "coding", "agentic", "reasoning"],
@@ -169,6 +186,7 @@ MODELS: list[ModelInfo] = [
         provider="anthropic",
         name="Claude Opus 4.6 (fast mode)",
         category="reasoning",
+        api_model_id="claude-opus-4-6-20260301",
         notes="Preview. Opus-level reasoning with lower latency.",
         tags=["reasoning", "fast", "preview"],
     ),
@@ -178,6 +196,7 @@ MODELS: list[ModelInfo] = [
         provider="google",
         name="Gemini 2.5 Pro",
         category="reasoning",
+        api_model_id="gemini-2.5-pro",
         notes="Complex code generation, debugging, and research workflows.",
         tags=["reasoning", "research", "coding"],
     ),
@@ -186,6 +205,7 @@ MODELS: list[ModelInfo] = [
         provider="google",
         name="Gemini 3 Flash",
         category="fast",
+        api_model_id="gemini-3-flash",
         notes="Fast, reliable answers to lightweight coding questions.",
         tags=["fast", "coding", "lightweight"],
     ),
@@ -194,6 +214,7 @@ MODELS: list[ModelInfo] = [
         provider="google",
         name="Gemini 3 Pro",
         category="reasoning",
+        api_model_id="gemini-3-pro",
         supports_vision=True,
         notes="Advanced reasoning across long contexts. Scientific and technical analysis.",
         tags=["reasoning", "research", "long-context"],
@@ -203,6 +224,7 @@ MODELS: list[ModelInfo] = [
         provider="google",
         name="Gemini 3.1 Pro",
         category="reasoning",
+        api_model_id="gemini-3.1-pro",
         notes="Effective edit-then-test loops with high tool precision.",
         tags=["reasoning", "agentic", "tools"],
     ),
@@ -263,3 +285,34 @@ def get_recommended_model(task_type: str) -> str:
         "agentic": "gpt-5.3-codex",
     }
     return recommendations.get(task_type, "claude-sonnet-4.6")
+
+
+def get_api_model_id(model_id: str) -> str:
+    """Get the provider API model ID for a given Lucent model ID.
+
+    When using LangChain/direct API access, models may need different
+    identifiers than when using the Copilot SDK. Returns the api_model_id
+    if set, otherwise falls back to the Lucent model ID.
+    """
+    model = _MODEL_BY_ID.get(model_id)
+    if model and model.api_model_id:
+        return model.api_model_id
+    return model_id
+
+
+def get_provider(model_id: str) -> str | None:
+    """Get the provider name for a model ID.
+
+    Returns 'anthropic', 'openai', 'google', or None if unknown.
+    """
+    model = _MODEL_BY_ID.get(model_id)
+    if model:
+        return model.provider
+    # Infer from name
+    if model_id.startswith("claude"):
+        return "anthropic"
+    elif model_id.startswith("gpt") or model_id.startswith("o1") or model_id.startswith("o3"):
+        return "openai"
+    elif model_id.startswith("gemini"):
+        return "google"
+    return None

@@ -66,6 +66,7 @@ async def def_user(db_pool, def_prefix):
         organization_id=org["id"],
         email=f"{def_prefix}user@test.com",
         display_name=f"{def_prefix}User",
+        role="admin",
     )
     return user
 
@@ -78,7 +79,7 @@ async def client(db_pool, def_user):
     fake_user = CurrentUser(
         id=def_user["id"],
         organization_id=def_user["organization_id"],
-        role=def_user.get("role", "member"),
+        role=def_user.get("role", "admin"),
         email=def_user.get("email"),
         display_name=def_user.get("display_name"),
         auth_method="api_key",
