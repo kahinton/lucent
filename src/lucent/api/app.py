@@ -115,13 +115,18 @@ def create_app() -> FastAPI:
         openapi_url="/api/openapi.json",
     )
 
-    # Configure CORS
+    # Configure CORS — default is no origins (safe); set LUCENT_CORS_ORIGINS explicitly
     cors_env = os.environ.get("LUCENT_CORS_ORIGINS", "")
-    if cors_env == "*" and is_team_mode():
+    if cors_env == "*":
+        logger.warning("=" * 72)
         logger.warning(
-            "LUCENT_CORS_ORIGINS is set to '*' in team mode — this allows any origin. "
-            "Set explicit origins for production deployments."
+            "SECURITY WARNING: LUCENT_CORS_ORIGINS is set to '*' — "
+            "this allows ANY origin to make cross-origin requests."
         )
+        logger.warning(
+            "Set explicit origins (e.g. 'http://localhost:8766') for safe operation."
+        )
+        logger.warning("=" * 72)
     allowed_origins = [o for o in cors_env.split(",") if o] if cors_env and cors_env != "*" else []
     app.add_middleware(
         CORSMiddleware,

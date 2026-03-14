@@ -166,7 +166,7 @@ docker run --rm -v lucent_data:/data -v $(pwd):/backup alpine \
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `LUCENT_RATE_LIMIT_PER_MINUTE` | `100` | Max requests per minute per API key |
-| `LUCENT_CORS_ORIGINS` | `*` | Allowed origins (comma-separated) |
+| `LUCENT_CORS_ORIGINS` | *(none)* | Allowed origins (comma-separated). `*` allows all but logs a security warning. |
 
 ### Logging
 
