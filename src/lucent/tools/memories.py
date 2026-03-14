@@ -307,8 +307,10 @@ Returns:
                 # Use access-controlled get
                 result = await repo.get_accessible(uuid_id, user_id, org_id)
             else:
-                # No auth context, use basic get (for backward compatibility)
-                result = await repo.get(uuid_id)
+                # No auth context — deny access rather than falling back to unscoped query
+                return _error_response(
+                    "Authentication required: unable to determine user context for access control"
+                )
 
             if result is None:
                 return _error_response(f"Memory not found or not accessible: {memory_id}")
@@ -378,7 +380,10 @@ Returns:
                 if user_id is not None and org_id is not None:
                     result = await repo.get_accessible(uuid_id, user_id, org_id)
                 else:
-                    result = await repo.get(uuid_id)
+                    # No auth context — deny access rather than falling back to unscoped query
+                    return _error_response(
+                        "Authentication required: unable to determine user context for access control"
+                    )
 
                 if result is None:
                     not_found.append(original_id)
@@ -1163,8 +1168,7 @@ Returns:
                     **_serialize_memory(result),
                     "restored_from_version": version,
                     "message": (
-                        f"Memory restored to version {version}"
-                        f" (now at version {result['version']})"
+                        f"Memory restored to version {version} (now at version {result['version']})"
                     ),
                 },
                 indent=2,

@@ -44,8 +44,10 @@ async def _sync_built_in_definitions():
     """Sync built-in skills and agents from .github/ into the database."""
     try:
         from lucent.db import get_pool
+
         pool = await get_pool()
         from lucent.db.definitions import DefinitionRepository
+
         repo = DefinitionRepository(pool)
         # Get any org to sync into (there's typically one)
         async with pool.acquire() as conn:
@@ -114,11 +116,17 @@ def create_app() -> FastAPI:
     )
 
     # Configure CORS
-    allowed_origins = os.environ.get("LUCENT_CORS_ORIGINS", "*").split(",")
+    cors_env = os.environ.get("LUCENT_CORS_ORIGINS", "")
+    if cors_env == "*" and is_team_mode():
+        logger.warning(
+            "LUCENT_CORS_ORIGINS is set to '*' in team mode — this allows any origin. "
+            "Set explicit origins for production deployments."
+        )
+    allowed_origins = [o for o in cors_env.split(",") if o] if cors_env and cors_env != "*" else []
     app.add_middleware(
         CORSMiddleware,
         allow_origins=allowed_origins,
-        allow_credentials=allowed_origins != ["*"],
+        allow_credentials=bool(allowed_origins),
         allow_methods=["*"],
         allow_headers=["*"],
     )
@@ -186,9 +194,7 @@ def create_app() -> FastAPI:
     # Include sandbox management router
     from lucent.api.routers import sandboxes as sandboxes_router
 
-    app.include_router(
-        sandboxes_router.router, prefix="/api/sandboxes", tags=["Sandboxes"]
-    )
+    app.include_router(sandboxes_router.router, prefix="/api/sandboxes", tags=["Sandboxes"])
 
     # Include web interface routes (excluded from API docs)
     app.include_router(web_router, include_in_schema=False)

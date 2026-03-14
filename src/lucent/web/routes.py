@@ -507,9 +507,10 @@ async def login_submit(request: Request):
     return response
 
 
-@router.get("/logout")
+@router.post("/logout")
 async def logout(request: Request):
     """Log the user out."""
+    await _check_csrf(request)
     pool = await get_pool()
 
     session_token = request.cookies.get(SESSION_COOKIE_NAME)
@@ -661,6 +662,7 @@ async def dashboard(request: Request):
 
     # Agent/skill stats
     from lucent.db.definitions import DefinitionRepository
+
     def_repo = DefinitionRepository(pool)
     org_id = str(user.organization_id)
     agents = await def_repo.list_agents(org_id, status="active")
@@ -699,12 +701,14 @@ async def dashboard(request: Request):
 # Definitions Management
 # =============================================================================
 
+
 @router.get("/definitions", response_class=HTMLResponse)
 async def definitions_page(request: Request, tab: str = "agents"):
     """Manage instance-specific agent, skill, and MCP server definitions."""
     user = await get_user_context(request)
     pool = await get_pool()
     from lucent.db.definitions import DefinitionRepository
+
     repo = DefinitionRepository(pool)
 
     org_id = str(user.organization_id)
@@ -730,12 +734,14 @@ async def definitions_page(request: Request, tab: str = "agents"):
     _set_csrf_cookie(response, csrf_token)
     return response
 
+
 @router.get("/definitions/agents/{agent_id}", response_class=HTMLResponse)
 async def agent_detail_page(request: Request, agent_id: str):
     """View full agent definition with content, skills, and MCP servers."""
     user = await get_user_context(request)
     pool = await get_pool()
     from lucent.db.definitions import DefinitionRepository
+
     repo = DefinitionRepository(pool)
     org_id = str(user.organization_id)
     agent = await repo.get_agent(agent_id, org_id)
@@ -752,10 +758,14 @@ async def agent_detail_page(request: Request, agent_id: str):
     response = templates.TemplateResponse(
         "definition_detail.html",
         {
-            "request": request, "user": user,
-            "definition_type": "agent", "definition": agent,
-            "skills": skills, "mcp_servers": mcp_servers,
-            "all_skills": all_skills, "all_mcp": all_mcp,
+            "request": request,
+            "user": user,
+            "definition_type": "agent",
+            "definition": agent,
+            "skills": skills,
+            "mcp_servers": mcp_servers,
+            "all_skills": all_skills,
+            "all_mcp": all_mcp,
             "granted_skill_ids": granted_skill_ids,
             "granted_mcp_ids": granted_mcp_ids,
             "csrf_token": csrf_token,
@@ -764,12 +774,14 @@ async def agent_detail_page(request: Request, agent_id: str):
     _set_csrf_cookie(response, csrf_token)
     return response
 
+
 @router.get("/definitions/skills/{skill_id}", response_class=HTMLResponse)
 async def skill_detail_page(request: Request, skill_id: str):
     """View full skill definition with content."""
     user = await get_user_context(request)
     pool = await get_pool()
     from lucent.db.definitions import DefinitionRepository
+
     repo = DefinitionRepository(pool)
     org_id = str(user.organization_id)
     skill = await repo.get_skill(skill_id, org_id)
@@ -779,14 +791,18 @@ async def skill_detail_page(request: Request, skill_id: str):
     response = templates.TemplateResponse(
         "definition_detail.html",
         {
-            "request": request, "user": user,
-            "definition_type": "skill", "definition": skill,
-            "skills": [], "mcp_servers": [],
+            "request": request,
+            "user": user,
+            "definition_type": "skill",
+            "definition": skill,
+            "skills": [],
+            "mcp_servers": [],
             "csrf_token": csrf_token,
         },
     )
     _set_csrf_cookie(response, csrf_token)
     return response
+
 
 @router.get("/definitions/mcp-servers/{server_id}", response_class=HTMLResponse)
 async def mcp_server_detail_page(request: Request, server_id: str):
@@ -794,6 +810,7 @@ async def mcp_server_detail_page(request: Request, server_id: str):
     user = await get_user_context(request)
     pool = await get_pool()
     from lucent.db.definitions import DefinitionRepository
+
     repo = DefinitionRepository(pool)
     org_id = str(user.organization_id)
     server = await repo.get_mcp_server(server_id, org_id)
@@ -803,14 +820,18 @@ async def mcp_server_detail_page(request: Request, server_id: str):
     response = templates.TemplateResponse(
         "definition_detail.html",
         {
-            "request": request, "user": user,
-            "definition_type": "mcp-server", "definition": server,
-            "skills": [], "mcp_servers": [],
+            "request": request,
+            "user": user,
+            "definition_type": "mcp-server",
+            "definition": server,
+            "skills": [],
+            "mcp_servers": [],
             "csrf_token": csrf_token,
         },
     )
     _set_csrf_cookie(response, csrf_token)
     return response
+
 
 @router.post("/definitions/agents/{agent_id}/approve")
 async def approve_agent_web(request: Request, agent_id: str):
@@ -820,9 +841,11 @@ async def approve_agent_web(request: Request, agent_id: str):
     user = await get_user_context(request)
     pool = await get_pool()
     from lucent.db.definitions import DefinitionRepository
+
     repo = DefinitionRepository(pool)
     await repo.approve_agent(agent_id, str(user.organization_id), str(user.id))
     return RedirectResponse("/definitions?tab=agents", status_code=303)
+
 
 @router.post("/definitions/agents/{agent_id}/reject")
 async def reject_agent_web(request: Request, agent_id: str):
@@ -832,9 +855,11 @@ async def reject_agent_web(request: Request, agent_id: str):
     user = await get_user_context(request)
     pool = await get_pool()
     from lucent.db.definitions import DefinitionRepository
+
     repo = DefinitionRepository(pool)
     await repo.reject_agent(agent_id, str(user.organization_id), str(user.id))
     return RedirectResponse("/definitions?tab=agents", status_code=303)
+
 
 @router.post("/definitions/skills/{skill_id}/approve")
 async def approve_skill_web(request: Request, skill_id: str):
@@ -843,9 +868,11 @@ async def approve_skill_web(request: Request, skill_id: str):
     user = await get_user_context(request)
     pool = await get_pool()
     from lucent.db.definitions import DefinitionRepository
+
     repo = DefinitionRepository(pool)
     await repo.approve_skill(skill_id, str(user.organization_id), str(user.id))
     return RedirectResponse("/definitions?tab=skills", status_code=303)
+
 
 @router.post("/definitions/skills/{skill_id}/reject")
 async def reject_skill_web(request: Request, skill_id: str):
@@ -854,9 +881,11 @@ async def reject_skill_web(request: Request, skill_id: str):
     user = await get_user_context(request)
     pool = await get_pool()
     from lucent.db.definitions import DefinitionRepository
+
     repo = DefinitionRepository(pool)
     await repo.reject_skill(skill_id, str(user.organization_id), str(user.id))
     return RedirectResponse("/definitions?tab=skills", status_code=303)
+
 
 @router.post("/definitions/mcp-servers/{server_id}/approve")
 async def approve_mcp_web(request: Request, server_id: str):
@@ -865,9 +894,11 @@ async def approve_mcp_web(request: Request, server_id: str):
     user = await get_user_context(request)
     pool = await get_pool()
     from lucent.db.definitions import DefinitionRepository
+
     repo = DefinitionRepository(pool)
     await repo.approve_mcp_server(server_id, str(user.organization_id), str(user.id))
     return RedirectResponse("/definitions?tab=mcp", status_code=303)
+
 
 @router.post("/definitions/mcp-servers/{server_id}/reject")
 async def reject_mcp_web(request: Request, server_id: str):
@@ -876,11 +907,14 @@ async def reject_mcp_web(request: Request, server_id: str):
     user = await get_user_context(request)
     pool = await get_pool()
     from lucent.db.definitions import DefinitionRepository
+
     repo = DefinitionRepository(pool)
     await repo.reject_mcp_server(server_id, str(user.organization_id), str(user.id))
     return RedirectResponse("/definitions?tab=mcp", status_code=303)
 
+
 # ── Definition CRUD (create, update, delete) ──────────────────────────────
+
 
 @router.post("/definitions/agents/create")
 async def create_agent_web(request: Request):
@@ -889,6 +923,7 @@ async def create_agent_web(request: Request):
     user = await get_user_context(request)
     pool = await get_pool()
     from lucent.db.definitions import DefinitionRepository
+
     repo = DefinitionRepository(pool)
     await repo.create_agent(
         name=str(form.get("name", "")).strip(),
@@ -899,6 +934,7 @@ async def create_agent_web(request: Request):
     )
     return RedirectResponse("/definitions?tab=agents", status_code=303)
 
+
 @router.post("/definitions/agents/{agent_id}/update")
 async def update_agent_web(request: Request, agent_id: str):
     form = await request.form()
@@ -906,14 +942,17 @@ async def update_agent_web(request: Request, agent_id: str):
     user = await get_user_context(request)
     pool = await get_pool()
     from lucent.db.definitions import DefinitionRepository
+
     repo = DefinitionRepository(pool)
     await repo.update_agent(
-        agent_id, str(user.organization_id),
+        agent_id,
+        str(user.organization_id),
         name=str(form.get("name", "")).strip(),
         description=str(form.get("description", "")).strip(),
         content=str(form.get("content", "")).strip(),
     )
     return RedirectResponse(f"/definitions/agents/{agent_id}", status_code=303)
+
 
 @router.post("/definitions/agents/{agent_id}/delete")
 async def delete_agent_web(request: Request, agent_id: str):
@@ -922,9 +961,11 @@ async def delete_agent_web(request: Request, agent_id: str):
     user = await get_user_context(request)
     pool = await get_pool()
     from lucent.db.definitions import DefinitionRepository
+
     repo = DefinitionRepository(pool)
     await repo.delete_agent(agent_id, str(user.organization_id))
     return RedirectResponse("/definitions?tab=agents", status_code=303)
+
 
 @router.post("/definitions/skills/create")
 async def create_skill_web(request: Request):
@@ -933,6 +974,7 @@ async def create_skill_web(request: Request):
     user = await get_user_context(request)
     pool = await get_pool()
     from lucent.db.definitions import DefinitionRepository
+
     repo = DefinitionRepository(pool)
     await repo.create_skill(
         name=str(form.get("name", "")).strip(),
@@ -943,6 +985,7 @@ async def create_skill_web(request: Request):
     )
     return RedirectResponse("/definitions?tab=skills", status_code=303)
 
+
 @router.post("/definitions/skills/{skill_id}/update")
 async def update_skill_web(request: Request, skill_id: str):
     form = await request.form()
@@ -950,14 +993,17 @@ async def update_skill_web(request: Request, skill_id: str):
     user = await get_user_context(request)
     pool = await get_pool()
     from lucent.db.definitions import DefinitionRepository
+
     repo = DefinitionRepository(pool)
     await repo.update_skill(
-        skill_id, str(user.organization_id),
+        skill_id,
+        str(user.organization_id),
         name=str(form.get("name", "")).strip(),
         description=str(form.get("description", "")).strip(),
         content=str(form.get("content", "")).strip(),
     )
     return RedirectResponse(f"/definitions/skills/{skill_id}", status_code=303)
+
 
 @router.post("/definitions/skills/{skill_id}/delete")
 async def delete_skill_web(request: Request, skill_id: str):
@@ -966,9 +1012,11 @@ async def delete_skill_web(request: Request, skill_id: str):
     user = await get_user_context(request)
     pool = await get_pool()
     from lucent.db.definitions import DefinitionRepository
+
     repo = DefinitionRepository(pool)
     await repo.delete_skill(skill_id, str(user.organization_id))
     return RedirectResponse("/definitions?tab=skills", status_code=303)
+
 
 @router.post("/definitions/mcp-servers/create")
 async def create_mcp_web(request: Request):
@@ -976,8 +1024,10 @@ async def create_mcp_web(request: Request):
     await _check_csrf(request, form_token=str(form.get(CSRF_FIELD_NAME, "")))
     user = await get_user_context(request)
     pool = await get_pool()
-    from lucent.db.definitions import DefinitionRepository
     import json
+
+    from lucent.db.definitions import DefinitionRepository
+
     repo = DefinitionRepository(pool)
     headers_raw = str(form.get("headers", "{}")).strip()
     try:
@@ -996,14 +1046,17 @@ async def create_mcp_web(request: Request):
     )
     return RedirectResponse("/definitions?tab=mcp", status_code=303)
 
+
 @router.post("/definitions/mcp-servers/{server_id}/update")
 async def update_mcp_web(request: Request, server_id: str):
     form = await request.form()
     await _check_csrf(request, form_token=str(form.get(CSRF_FIELD_NAME, "")))
     user = await get_user_context(request)
     pool = await get_pool()
-    from lucent.db.definitions import DefinitionRepository
     import json
+
+    from lucent.db.definitions import DefinitionRepository
+
     repo = DefinitionRepository(pool)
     headers_raw = str(form.get("headers", "{}")).strip()
     try:
@@ -1011,7 +1064,8 @@ async def update_mcp_web(request: Request, server_id: str):
     except json.JSONDecodeError:
         headers = {}
     await repo.update_mcp_server(
-        server_id, str(user.organization_id),
+        server_id,
+        str(user.organization_id),
         name=str(form.get("name", "")).strip(),
         description=str(form.get("description", "")).strip(),
         server_type=str(form.get("server_type", "http")).strip(),
@@ -1021,6 +1075,7 @@ async def update_mcp_web(request: Request, server_id: str):
     )
     return RedirectResponse(f"/definitions/mcp-servers/{server_id}", status_code=303)
 
+
 @router.post("/definitions/mcp-servers/{server_id}/delete")
 async def delete_mcp_web(request: Request, server_id: str):
     form = await request.form()
@@ -1028,11 +1083,14 @@ async def delete_mcp_web(request: Request, server_id: str):
     user = await get_user_context(request)
     pool = await get_pool()
     from lucent.db.definitions import DefinitionRepository
+
     repo = DefinitionRepository(pool)
     await repo.delete_mcp_server(server_id, str(user.organization_id))
     return RedirectResponse("/definitions?tab=mcp", status_code=303)
 
+
 # ── Grant management (skill/MCP ↔ agent) ─────────────────────────────────
+
 
 @router.post("/definitions/agents/{agent_id}/grant-skill")
 async def grant_skill_web(request: Request, agent_id: str):
@@ -1041,11 +1099,13 @@ async def grant_skill_web(request: Request, agent_id: str):
     user = await get_user_context(request)
     pool = await get_pool()
     from lucent.db.definitions import DefinitionRepository
+
     repo = DefinitionRepository(pool)
     skill_id = str(form.get("skill_id", ""))
     if skill_id:
         await repo.grant_skill(agent_id, skill_id)
     return RedirectResponse(f"/definitions/agents/{agent_id}", status_code=303)
+
 
 @router.post("/definitions/agents/{agent_id}/revoke-skill/{skill_id}")
 async def revoke_skill_web(request: Request, agent_id: str, skill_id: str):
@@ -1054,9 +1114,11 @@ async def revoke_skill_web(request: Request, agent_id: str, skill_id: str):
     await get_user_context(request)
     pool = await get_pool()
     from lucent.db.definitions import DefinitionRepository
+
     repo = DefinitionRepository(pool)
     await repo.revoke_skill(agent_id, skill_id)
     return RedirectResponse(f"/definitions/agents/{agent_id}", status_code=303)
+
 
 @router.post("/definitions/agents/{agent_id}/grant-mcp")
 async def grant_mcp_web(request: Request, agent_id: str):
@@ -1065,11 +1127,13 @@ async def grant_mcp_web(request: Request, agent_id: str):
     user = await get_user_context(request)
     pool = await get_pool()
     from lucent.db.definitions import DefinitionRepository
+
     repo = DefinitionRepository(pool)
     mcp_id = str(form.get("mcp_server_id", ""))
     if mcp_id:
         await repo.grant_mcp_server(agent_id, mcp_id)
     return RedirectResponse(f"/definitions/agents/{agent_id}", status_code=303)
+
 
 @router.post("/definitions/agents/{agent_id}/revoke-mcp/{server_id}")
 async def revoke_mcp_web(request: Request, agent_id: str, server_id: str):
@@ -1078,9 +1142,11 @@ async def revoke_mcp_web(request: Request, agent_id: str, server_id: str):
     await get_user_context(request)
     pool = await get_pool()
     from lucent.db.definitions import DefinitionRepository
+
     repo = DefinitionRepository(pool)
     await repo.revoke_mcp_server(agent_id, server_id)
     return RedirectResponse(f"/definitions/agents/{agent_id}", status_code=303)
+
 
 @router.post("/definitions/agents/{agent_id}/mcp-tools/{server_id}")
 async def update_mcp_tools_web(request: Request, agent_id: str, server_id: str):
@@ -1089,6 +1155,7 @@ async def update_mcp_tools_web(request: Request, agent_id: str, server_id: str):
     await get_user_context(request)
     pool = await get_pool()
     from lucent.db.definitions import DefinitionRepository
+
     repo = DefinitionRepository(pool)
     tools_raw = str(form.get("allowed_tools", "")).strip()
     if tools_raw:
@@ -2273,7 +2340,9 @@ async def users_list(request: Request):
 
         pw, sig = temp_pw_cookie.rsplit(":", 1)
         session_token = request.cookies.get("lucent_session", "")
-        expected_sig = hmac.new(session_token.encode(), pw.encode(), hashlib.sha256).hexdigest()[:16]
+        expected_sig = hmac.new(session_token.encode(), pw.encode(), hashlib.sha256).hexdigest()[
+            :16
+        ]
         if hmac.compare_digest(sig, expected_sig):
             temp_pw_display = pw
 
@@ -2506,6 +2575,7 @@ async def sandboxes_page(
     # Always load templates (needed for both tabs and launch modal)
     pool = await get_pool()
     from lucent.db.sandbox_template import SandboxTemplateRepository
+
     tpl_repo = SandboxTemplateRepository(pool)
     try:
         template_list = await tpl_repo.list_all(org_id) if org_id else []
@@ -2517,6 +2587,7 @@ async def sandboxes_page(
     active_tab = tab or "templates"
     if active_tab == "instances":
         from lucent.sandbox.manager import get_sandbox_manager
+
         manager = get_sandbox_manager()
         try:
             if show == "active":
@@ -2567,6 +2638,7 @@ async def create_template_web(
     await _check_csrf(request, form_token=csrf_token)
     pool = await get_pool()
     from lucent.db.sandbox_template import SandboxTemplateRepository
+
     repo = SandboxTemplateRepository(pool)
 
     await repo.create(
@@ -2594,6 +2666,7 @@ async def edit_template_page(request: Request, template_id: str):
     user = await get_user_context(request)
     pool = await get_pool()
     from lucent.db.sandbox_template import SandboxTemplateRepository
+
     repo = SandboxTemplateRepository(pool)
     tpl = await repo.get(template_id, str(user.organization_id))
     if not tpl:
@@ -2633,10 +2706,12 @@ async def update_template_web(
     await _check_csrf(request, form_token=csrf_token)
     pool = await get_pool()
     from lucent.db.sandbox_template import SandboxTemplateRepository
+
     repo = SandboxTemplateRepository(pool)
 
     await repo.update(
-        template_id, str(user.organization_id),
+        template_id,
+        str(user.organization_id),
         name=name.strip(),
         description=description.strip(),
         image=image,
@@ -2660,6 +2735,7 @@ async def delete_template_web(request: Request, template_id: str):
     await _check_csrf(request)
     pool = await get_pool()
     from lucent.db.sandbox_template import SandboxTemplateRepository
+
     repo = SandboxTemplateRepository(pool)
     await repo.delete(template_id, str(user.organization_id))
     return RedirectResponse("/sandboxes", status_code=303)
@@ -2819,7 +2895,20 @@ async def change_password(request: Request):
     # Set new password
     await set_user_password(pool, user.id, new_password)
 
-    return RedirectResponse("/settings?password_changed=1", status_code=303)
+    # Invalidate all existing sessions and create a fresh one
+    await destroy_session(pool, user.id)
+    new_token = await create_session(pool, user.id)
+
+    response = RedirectResponse("/settings?password_changed=1", status_code=303)
+    params = get_cookie_params()
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=new_token,
+        max_age=SESSION_TTL_HOURS * 3600,
+        **params,
+    )
+    _set_csrf_cookie(response, generate_csrf_token())
+    return response
 
 
 # =============================================================================
@@ -2889,6 +2978,7 @@ async def requests_list(request: Request, status: str | None = None):
     user = await get_user_context(request)
     pool = await get_pool()
     from lucent.db.requests import RequestRepository
+
     repo = RequestRepository(pool)
 
     org_id = str(user.organization_id)
@@ -2922,6 +3012,7 @@ async def request_detail(request: Request, request_id: str):
     user = await get_user_context(request)
     pool = await get_pool()
     from lucent.db.requests import RequestRepository
+
     repo = RequestRepository(pool)
 
     req = await repo.get_request_with_tasks(request_id, str(user.organization_id))
@@ -2955,6 +3046,7 @@ async def retry_task(request: Request, task_id: str):
     await validate_csrf_token(request)
     pool = await get_pool()
     from lucent.db.requests import RequestRepository
+
     repo = RequestRepository(pool)
 
     task = await repo.retry_task(task_id)
@@ -2976,6 +3068,7 @@ async def schedules_list(request: Request, status: str | None = None, enabled: s
     user = await get_user_context(request)
     pool = await get_pool()
     from lucent.db.schedules import ScheduleRepository
+
     repo = ScheduleRepository(pool)
 
     org_id = str(user.organization_id)
@@ -3002,6 +3095,7 @@ async def schedule_detail(request: Request, schedule_id: str):
     user = await get_user_context(request)
     pool = await get_pool()
     from lucent.db.schedules import ScheduleRepository
+
     repo = ScheduleRepository(pool)
 
     sched = await repo.get_schedule_with_runs(schedule_id, str(user.organization_id))
