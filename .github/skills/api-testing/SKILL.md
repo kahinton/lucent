@@ -3,67 +3,83 @@ name: api-testing
 description: 'Procedures for testing REST API endpoints and MCP protocol compliance — pairs with the existing api-testing agent'
 ---
 
-# Api Testing
+# API Testing — Lucent Project
 
-Code review skill for python/fastapi projects.
+## Endpoints Reference
 
-## When to Use
+### REST API (FastAPI at `:8766/api`)
 
-- Reviewing pull requests or code changes
-- Evaluating code quality during development
-- Performing security-focused code review
-- Checking for python-specific anti-patterns
+| Endpoint | Method | Auth | Purpose |
+|----------|--------|------|---------|
+| `/api/health` | GET | None | Liveness check |
+| `/api/memories` | GET | Required | List memories (paginated, org-scoped) |
+| `/api/memories/{id}` | GET | Required | Get single memory |
+| `/api/memories/search` | POST | Required | Fuzzy search with tag/type filters |
+| `/api/definitions/agents` | GET | Required | List agent definitions |
+| `/api/definitions/skills` | GET | Required | List skill definitions |
+| `/api/users` | GET | Admin | List org users |
+| `/api/daemon/tasks` | POST | Required | Create daemon task |
+| `/api/daemon/tasks` | GET | Required | List daemon tasks |
 
-## Review Process
+### MCP Protocol (via `/mcp` SSE/StreamableHTTP)
 
-### Step 1: Understand the Change
+| Tool | Key Parameters | Validations |
+|------|---------------|-------------|
+| `create_memory` | type, content, tags, importance, metadata | Type enum, `individual` blocked, metadata schema |
+| `search_memories` | query (optional), tags, type, limit (max 50) | Limit capping, datetime parsing |
+| `search_memories_full` | query (required), type, limit | Empty query check |
+| `update_memory` | memory_id, expected_version | UUID check, ownership, optimistic locking |
+| `delete_memory` | memory_id | UUID check, ownership, `individual` blocked |
+| `get_current_user_context` | (none) | Auth context extraction |
+| `get_existing_tags` | limit (max 100) | Limit capping |
 
-1. Read the PR description or task context
-2. Identify what files changed and why
-3. Check if there are related tests
+## Test Procedures
 
-### Step 2: Check Correctness
+### 1. Auth Flow Testing
+- Login with valid creds → session cookie set (HttpOnly, Secure, SameSite=Lax)
+- Access without auth → 401
+- Access with valid session → 200
+- Expired session → 401
+- API key auth (`Authorization: Bearer hs_...`) → same access as session
 
-1. Does the code do what it claims to do?
-2. Are edge cases handled?
-3. Are error paths covered?
-4. Is the logic sound?
+### 2. Org Isolation Testing
+- Create memory as Org A user
+- Search/GET as Org B user → must NOT see it (return 404, not 403)
 
-### Step 3: Check Style & Conventions
+### 3. RBAC Testing
+- Member: can read/write memories
+- Admin: can manage users
+- Owner: can do everything
+- Wrong role → 403
 
-1. Run `ruff check` if available
-2. Verify type hints are present and correct
-3. Check docstrings for public APIs
-4. Ensure imports are organized (stdlib → third-party → local)
-5. Verify `pyproject.toml` conventions are followed
+### 4. MCP Protocol CRUD Lifecycle
+```
+create_memory → get_memory → update_memory → search_memories → delete_memory
+```
+Verify each step returns expected data. Test optimistic locking: update with wrong `expected_version` → version conflict error.
 
-### Step 4: Check Security
+### 5. Rate Limiting
+- Normal rate → 200
+- Exceed limit → 429 with `Retry-After`
+- Wait for refill → 200 again
 
-1. No hardcoded secrets or credentials
-2. Input validation on external data
-3. Proper authentication/authorization checks
-4. SQL injection, XSS, or injection vulnerabilities
-5. Proper error messages (no internal details leaked)
+### 6. Input Validation
+- Invalid UUID → appropriate error
+- Invalid memory type → rejected
+- Missing required fields → 400/422
+- Oversized content → handled gracefully
 
-### Step 5: Check Performance
+## Running Tests
+```bash
+pytest tests/test_mcp_tools.py -v          # MCP tool tests
+pytest tests/test_memories_api.py -v       # Memory API tests
+pytest tests/test_auth.py -v               # Auth tests
+pytest tests/test_search_api.py -v         # Search tests
+pytest tests/test_rate_limit.py -v         # Rate limit tests
+```
 
-1. No obvious O(n²) or worse algorithms where O(n) is possible
-2. No unnecessary database queries or API calls
-3. Proper resource management (connections, files, memory)
-4. Caching where appropriate
-
-### Step 6: Summarize
-
-Output a structured review:
-- **Verdict**: approve / request-changes / needs-discussion
-- **Critical issues**: Things that must be fixed
-- **Suggestions**: Things that could be improved
-- **Positive notes**: What was done well
-
-## Best Practices
-
-- Focus on logic and correctness over style (linters handle style)
-- Be specific: "this loop is O(n²) because X" not "performance concern"
-- Suggest alternatives, don't just point out problems
-- Acknowledge good patterns when you see them
-- Check for test coverage on new code paths
+## Key Test Files
+- `tests/conftest.py` — shared fixtures (db_pool, test users, async client)
+- `tests/test_mcp_tools.py` — MCP tool integration tests
+- `tests/test_auth.py`, `test_auth_providers.py` — auth flow tests
+- `tests/test_memories_api.py` — REST memory CRUD tests
