@@ -183,6 +183,13 @@ def create_app() -> FastAPI:
 
     app.include_router(chat_router.router, prefix="/api", tags=["Chat"])
 
+    # Include sandbox management router
+    from lucent.api.routers import sandboxes as sandboxes_router
+
+    app.include_router(
+        sandboxes_router.router, prefix="/api/sandboxes", tags=["Sandboxes"]
+    )
+
     # Include web interface routes (excluded from API docs)
     app.include_router(web_router, include_in_schema=False)
 

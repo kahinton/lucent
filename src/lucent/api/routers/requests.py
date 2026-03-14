@@ -27,6 +27,8 @@ class TaskCreate(BaseModel):
     priority: str = Field(default="medium", pattern=r"^(low|medium|high|urgent)$")
     sequence_order: int = 0
     model: str | None = None
+    sandbox_template_id: str | None = None  # Reference a saved sandbox template
+    sandbox_config: dict | None = None  # Or inline sandbox config (template takes precedence)
 
 class TaskEventCreate(BaseModel):
     event_type: str = Field(..., min_length=1, max_length=32)
@@ -132,6 +134,8 @@ async def create_task(
         agent_type=body.agent_type, agent_definition_id=body.agent_definition_id,
         parent_task_id=body.parent_task_id, priority=body.priority,
         sequence_order=body.sequence_order, model=body.model,
+        sandbox_template_id=body.sandbox_template_id,
+        sandbox_config=body.sandbox_config,
     )
 
 @router.get("/{request_id}/tasks")

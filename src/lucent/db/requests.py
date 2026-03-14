@@ -3,6 +3,7 @@
 Full lineage: request → tasks → events → memory links.
 """
 
+import json
 from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
@@ -119,19 +120,24 @@ class RequestRepository:
         priority: str = "medium",
         sequence_order: int = 0,
         model: str | None = None,
+        sandbox_template_id: str | None = None,
+        sandbox_config: dict | None = None,
     ) -> dict:
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 """INSERT INTO tasks
                    (request_id, parent_task_id, title, description, agent_type,
-                    agent_definition_id, priority, sequence_order, organization_id, model)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                    agent_definition_id, priority, sequence_order, organization_id,
+                    model, sandbox_template_id, sandbox_config)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                    RETURNING *""",
                 UUID(request_id),
                 UUID(parent_task_id) if parent_task_id else None,
                 title, description, agent_type,
                 UUID(agent_definition_id) if agent_definition_id else None,
                 priority, sequence_order, UUID(org_id), model,
+                UUID(sandbox_template_id) if sandbox_template_id else None,
+                json.dumps(sandbox_config) if sandbox_config else None,
             )
         task = dict(row)
         # Log creation event

@@ -18,6 +18,8 @@ class ScheduleCreate(BaseModel):
     description: str = ""
     agent_type: str = "code"
     task_template: dict | None = None
+    sandbox_template_id: str | None = None  # Reference a saved sandbox template
+    sandbox_config: dict | None = None  # Or inline sandbox config
     schedule_type: str = Field(default="once", pattern=r"^(once|interval|cron)$")
     cron_expression: str | None = None
     interval_seconds: int | None = Field(default=None, ge=60)  # min 1 minute
@@ -33,6 +35,8 @@ class ScheduleUpdate(BaseModel):
     description: str | None = None
     agent_type: str | None = None
     task_template: dict | None = None
+    sandbox_template_id: str | None = None
+    sandbox_config: dict | None = None
     cron_expression: str | None = None
     interval_seconds: int | None = Field(default=None, ge=60)
     next_run_at: datetime | None = None
@@ -58,6 +62,7 @@ async def create_schedule(body: ScheduleCreate, user=Depends(get_current_user), 
         description=body.description,
         agent_type=body.agent_type,
         task_template=body.task_template,
+        sandbox_config=body.sandbox_config,
         cron_expression=body.cron_expression,
         interval_seconds=body.interval_seconds,
         next_run_at=body.next_run_at,
@@ -190,6 +195,9 @@ async def trigger_now(schedule_id: str, user=Depends(get_current_user), pool=Dep
         agent_type=sched.get("agent_type", "code"),
         priority=sched.get("priority", "medium"),
         model=sched.get("model"),
+        sandbox_template_id=str(sched["sandbox_template_id"]) if sched.get("sandbox_template_id") else None,
+        sandbox_config=sched.get("sandbox_config"),
+        org_id=str(user.organization_id),
     )
 
     # Record the run

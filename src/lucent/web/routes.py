@@ -2393,6 +2393,243 @@ def _decode_pending_key(signed: str) -> tuple[str, str] | None:
     return key_id, plain_key
 
 
+# ── Sandboxes ──────────────────────────────────────────────────────
+
+
+@router.get("/sandboxes", response_class=HTMLResponse)
+async def sandboxes_page(
+    request: Request,
+    tab: str | None = Query(default=None),
+    show: str | None = Query(default=None),
+):
+    """Sandbox templates and instances."""
+    user = await get_user_context(request)
+    org_id = str(user.organization_id) if user.organization_id else None
+
+    # Always load templates (needed for both tabs and launch modal)
+    pool = await get_pool()
+    from lucent.db.sandbox_template import SandboxTemplateRepository
+    tpl_repo = SandboxTemplateRepository(pool)
+    try:
+        template_list = await tpl_repo.list_all(org_id) if org_id else []
+    except Exception:
+        template_list = []
+
+    # Load instances only when on instances tab
+    sandbox_list = []
+    active_tab = tab or "templates"
+    if active_tab == "instances":
+        from lucent.sandbox.manager import get_sandbox_manager
+        manager = get_sandbox_manager()
+        try:
+            if show == "active":
+                sandbox_list = await manager.list_active(org_id)
+            else:
+                sandbox_list = await manager.list_all(org_id)
+        except Exception:
+            sandbox_list = []
+
+        # Enrich with template name
+        tpl_names = {str(t["id"]): t["name"] for t in template_list}
+        for sb in sandbox_list:
+            sb["template_name"] = tpl_names.get(str(sb.get("template_id", "")))
+
+    return templates.TemplateResponse(
+        "sandboxes.html",
+        {
+            "request": request,
+            "tab": active_tab,
+            "templates": template_list,
+            "sandboxes": sandbox_list,
+            "show_filter": show or "all",
+            "user": user,
+            "csrf_token": request.cookies.get(CSRF_COOKIE_NAME, ""),
+        },
+    )
+
+
+@router.post("/sandboxes/templates/create")
+async def create_template_web(
+    request: Request,
+    name: str = Form(...),
+    description: str = Form(default=""),
+    image: str = Form(default="python:3.12-slim"),
+    repo_url: str = Form(default=""),
+    branch: str = Form(default="main"),
+    setup_commands: str = Form(default=""),
+    env_vars: str = Form(default=""),
+    memory_limit: str = Form(default="2g"),
+    network_mode: str = Form(default="none"),
+    timeout_seconds: int = Form(default=1800),
+):
+    """Create a new sandbox template."""
+    user = await get_user_context(request)
+    pool = await get_pool()
+    from lucent.db.sandbox_template import SandboxTemplateRepository
+    repo = SandboxTemplateRepository(pool)
+
+    # Parse env_vars from KEY=VALUE lines
+    parsed_env = {}
+    for line in env_vars.splitlines():
+        line = line.strip()
+        if "=" in line:
+            k, v = line.split("=", 1)
+            parsed_env[k.strip()] = v.strip()
+
+    await repo.create(
+        name=name.strip(),
+        organization_id=str(user.organization_id),
+        description=description.strip(),
+        image=image,
+        repo_url=repo_url.strip() or None,
+        branch=branch.strip() or None,
+        setup_commands=[c.strip() for c in setup_commands.splitlines() if c.strip()],
+        env_vars=parsed_env,
+        memory_limit=memory_limit,
+        network_mode=network_mode,
+        timeout_seconds=timeout_seconds,
+        created_by=str(user.id),
+    )
+    return RedirectResponse("/sandboxes", status_code=303)
+
+
+@router.get("/sandboxes/templates/{template_id}/edit", response_class=HTMLResponse)
+async def edit_template_page(request: Request, template_id: str):
+    """Edit a sandbox template."""
+    user = await get_user_context(request)
+    pool = await get_pool()
+    from lucent.db.sandbox_template import SandboxTemplateRepository
+    repo = SandboxTemplateRepository(pool)
+    tpl = await repo.get(template_id, str(user.organization_id))
+    if not tpl:
+        raise HTTPException(404, "Template not found")
+
+    return templates.TemplateResponse(
+        "sandbox_template_edit.html",
+        {
+            "request": request,
+            "template": tpl,
+            "user": user,
+            "csrf_token": request.cookies.get(CSRF_COOKIE_NAME, ""),
+        },
+    )
+
+
+@router.post("/sandboxes/templates/{template_id}/edit")
+async def update_template_web(
+    request: Request,
+    template_id: str,
+    name: str = Form(...),
+    description: str = Form(default=""),
+    image: str = Form(default="python:3.12-slim"),
+    repo_url: str = Form(default=""),
+    branch: str = Form(default="main"),
+    setup_commands: str = Form(default=""),
+    env_vars: str = Form(default=""),
+    memory_limit: str = Form(default="2g"),
+    network_mode: str = Form(default="none"),
+    timeout_seconds: int = Form(default=1800),
+):
+    """Update a sandbox template."""
+    user = await get_user_context(request)
+    pool = await get_pool()
+    from lucent.db.sandbox_template import SandboxTemplateRepository
+    repo = SandboxTemplateRepository(pool)
+
+    parsed_env = {}
+    for line in env_vars.splitlines():
+        line = line.strip()
+        if "=" in line:
+            k, v = line.split("=", 1)
+            parsed_env[k.strip()] = v.strip()
+
+    await repo.update(
+        template_id, str(user.organization_id),
+        name=name.strip(),
+        description=description.strip(),
+        image=image,
+        repo_url=repo_url.strip() or None,
+        branch=branch.strip() or None,
+        setup_commands=[c.strip() for c in setup_commands.splitlines() if c.strip()],
+        env_vars=parsed_env,
+        memory_limit=memory_limit,
+        network_mode=network_mode,
+        timeout_seconds=timeout_seconds,
+    )
+    return RedirectResponse("/sandboxes", status_code=303)
+
+
+@router.post("/sandboxes/templates/{template_id}/delete")
+async def delete_template_web(request: Request, template_id: str):
+    """Delete a sandbox template."""
+    user = await get_user_context(request)
+    pool = await get_pool()
+    from lucent.db.sandbox_template import SandboxTemplateRepository
+    repo = SandboxTemplateRepository(pool)
+    await repo.delete(template_id, str(user.organization_id))
+    return RedirectResponse("/sandboxes", status_code=303)
+
+
+@router.post("/sandboxes/launch")
+async def launch_sandbox_web(
+    request: Request,
+    template_id: str = Form(...),
+    name: str = Form(default=""),
+):
+    """Launch a sandbox instance from a template."""
+    user = await get_user_context(request)
+    pool = await get_pool()
+    from lucent.db.sandbox_template import SandboxTemplateRepository
+    from lucent.sandbox.manager import get_sandbox_manager
+    from lucent.sandbox.models import SandboxConfig
+
+    tpl_repo = SandboxTemplateRepository(pool)
+    tpl = await tpl_repo.get(template_id, str(user.organization_id))
+    if not tpl:
+        raise HTTPException(404, "Template not found")
+
+    config = SandboxConfig(
+        name=name.strip() or f"{tpl['name']}-instance",
+        image=tpl["image"],
+        repo_url=tpl.get("repo_url"),
+        branch=tpl.get("branch"),
+        setup_commands=tpl.get("setup_commands") or [],
+        env_vars=tpl.get("env_vars") or {},
+        working_dir=tpl.get("working_dir", "/workspace"),
+        memory_limit=tpl.get("memory_limit", "2g"),
+        cpu_limit=float(tpl.get("cpu_limit", 2.0)),
+        network_mode=tpl.get("network_mode", "none"),
+        allowed_hosts=tpl.get("allowed_hosts") or [],
+        timeout_seconds=tpl.get("timeout_seconds", 1800),
+        organization_id=str(user.organization_id),
+    )
+    manager = get_sandbox_manager()
+    await manager.create(config)
+    return RedirectResponse("/sandboxes?tab=instances", status_code=303)
+
+
+@router.post("/sandboxes/{sandbox_id}/stop")
+async def stop_sandbox_web(request: Request, sandbox_id: str):
+    """Stop a sandbox from the web UI."""
+    await get_user_context(request)
+    from lucent.sandbox.manager import get_sandbox_manager
+
+    manager = get_sandbox_manager()
+    await manager.stop(sandbox_id)
+    return RedirectResponse("/sandboxes?tab=instances", status_code=303)
+
+
+@router.post("/sandboxes/{sandbox_id}/destroy")
+async def destroy_sandbox_web(request: Request, sandbox_id: str):
+    """Destroy a sandbox from the web UI."""
+    await get_user_context(request)
+    from lucent.sandbox.manager import get_sandbox_manager
+
+    manager = get_sandbox_manager()
+    await manager.destroy(sandbox_id)
+    return RedirectResponse("/sandboxes?tab=instances", status_code=303)
+
+
 @router.get("/settings", response_class=HTMLResponse)
 async def settings(
     request: Request,

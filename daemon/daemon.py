@@ -1397,6 +1397,14 @@ class LucentDaemon:
 
             # Build and run the sub-agent
             agent_def_id = task.get("agent_definition_id")
+            sandbox_config = task.get("sandbox_config")
+            sandbox_template_id = task.get("sandbox_template_id")
+            sandbox_id = None
+
+            # Resolve sandbox_template_id → sandbox_config
+            if sandbox_template_id and not sandbox_config:
+                sandbox_config = await self._resolve_sandbox_template(str(sandbox_template_id))
+
             try:
                 system_message = await build_subagent_prompt(
                     agent_type, description, agent_definition_id=str(agent_def_id) if agent_def_id else None,
@@ -1408,6 +1416,31 @@ class LucentDaemon:
                                            f"No approved definition for agent '{agent_type}'")
                 continue
 
+            # Create sandbox if configured
+            if sandbox_config:
+                try:
+                    sandbox_id = await self._create_task_sandbox(task_id, sandbox_config)
+                    if sandbox_id:
+                        # Inject sandbox context into the task description
+                        description = (
+                            f"{description}\n\n"
+                            f"[SANDBOX] This task runs in sandbox {sandbox_id[:12]}. "
+                            f"Use the sandbox exec API at POST /api/sandboxes/{sandbox_id}/exec "
+                            f"to run commands. Working directory: {sandbox_config.get('working_dir', '/workspace')}"
+                        )
+                        await RequestAPI.add_event(
+                            task_id, "sandbox_created",
+                            f"Sandbox {sandbox_id[:12]} created for task",
+                            {"sandbox_id": sandbox_id},
+                        )
+                except Exception as e:
+                    log(f"Sandbox creation failed for task {task_id[:8]}: {e}", "WARN")
+                    await RequestAPI.add_event(
+                        task_id, "sandbox_failed",
+                        f"Sandbox creation failed: {e}",
+                    )
+                    # Continue without sandbox — task can still run
+
             result = await self.run_session(
                 f"{agent_type}-{task_id[:8]}",
                 system_message,
@@ -1415,6 +1448,17 @@ class LucentDaemon:
                 model=task_model,
             )
             dispatched += 1
+
+            # Destroy sandbox after task completes
+            if sandbox_id:
+                try:
+                    await self._destroy_task_sandbox(sandbox_id)
+                    await RequestAPI.add_event(
+                        task_id, "sandbox_destroyed",
+                        f"Sandbox {sandbox_id[:12]} destroyed after task completion",
+                    )
+                except Exception as e:
+                    log(f"Sandbox cleanup failed for {sandbox_id[:12]}: {e}", "WARN")
 
             # Validate
             success, reason = self._validate_task_result(result)
@@ -1435,6 +1479,62 @@ class LucentDaemon:
             else:
                 await RequestAPI.fail_task(task_id, reason)
                 log(f"Tracked task {task_id[:8]} failed: {reason}", "WARN")
+
+    async def _create_task_sandbox(self, task_id: str, sandbox_config: dict) -> str | None:
+        """Create a sandbox for a task. Returns sandbox_id or None."""
+        from lucent.sandbox.manager import get_sandbox_manager
+        from lucent.sandbox.models import SandboxConfig
+
+        config = SandboxConfig(
+            name=sandbox_config.get("name", f"task-{task_id[:12]}"),
+            image=sandbox_config.get("image", "python:3.12-slim"),
+            repo_url=sandbox_config.get("repo_url"),
+            branch=sandbox_config.get("branch"),
+            git_credentials=sandbox_config.get("git_credentials"),
+            setup_commands=sandbox_config.get("setup_commands", []),
+            env_vars=sandbox_config.get("env_vars", {}),
+            working_dir=sandbox_config.get("working_dir", "/workspace"),
+            memory_limit=sandbox_config.get("memory_limit", "2g"),
+            cpu_limit=sandbox_config.get("cpu_limit", 2.0),
+            network_mode=sandbox_config.get("network_mode", "none"),
+            allowed_hosts=sandbox_config.get("allowed_hosts", []),
+            timeout_seconds=sandbox_config.get("timeout_seconds", 1800),
+            task_id=task_id,
+        )
+        manager = get_sandbox_manager()
+        info = await manager.create(config)
+        if info.status.value == "ready":
+            log(f"Sandbox {info.id[:12]} created for task {task_id[:8]}")
+            return info.id
+        else:
+            log(f"Sandbox creation failed for task {task_id[:8]}: {info.error}", "WARN")
+            return None
+
+    async def _destroy_task_sandbox(self, sandbox_id: str) -> None:
+        """Destroy a task's sandbox."""
+        from lucent.sandbox.manager import get_sandbox_manager
+        manager = get_sandbox_manager()
+        await manager.destroy(sandbox_id)
+        log(f"Sandbox {sandbox_id[:12]} destroyed")
+
+    async def _resolve_sandbox_template(self, template_id: str) -> dict | None:
+        """Resolve a sandbox template ID to a sandbox_config dict."""
+        try:
+            from lucent.db.pool import get_pool
+            from lucent.db.sandbox_template import SandboxTemplateRepository
+            pool = await get_pool()
+            repo = SandboxTemplateRepository(pool)
+            tpl = await repo.get(template_id)
+            if tpl:
+                config = repo.to_sandbox_config(tpl)
+                log(f"Resolved sandbox template '{tpl['name']}' for dispatch")
+                return config
+            else:
+                log(f"Sandbox template {template_id[:8]} not found", "WARN")
+                return None
+        except Exception as e:
+            log(f"Failed to resolve sandbox template {template_id[:8]}: {e}", "WARN")
+            return None
 
     async def _multi_model_review(
         self, memory_id: str, agent_type: str, task_content: str, result: str

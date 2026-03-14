@@ -78,6 +78,7 @@ class ScheduleRepository:
         agent_type: str = "code",
         model: str | None = None,
         task_template: dict | None = None,
+        sandbox_config: dict | None = None,
         cron_expression: str | None = None,
         interval_seconds: int | None = None,
         next_run_at: datetime | None = None,
@@ -101,13 +102,14 @@ class ScheduleRepository:
             row = await conn.fetchrow(
                 """INSERT INTO schedules
                    (title, organization_id, description, agent_type, model, task_template,
-                    schedule_type, cron_expression, interval_seconds, next_run_at,
-                    priority, timezone, max_runs, expires_at, created_by)
-                   VALUES ($1, $2::uuid, $3, $4, $5, $6::jsonb,
-                           $7, $8, $9, $10, $11, $12, $13, $14, $15::uuid)
+                    sandbox_config, schedule_type, cron_expression, interval_seconds,
+                    next_run_at, priority, timezone, max_runs, expires_at, created_by)
+                   VALUES ($1, $2::uuid, $3, $4, $5, $6::jsonb, $7::jsonb,
+                           $8, $9, $10, $11, $12, $13, $14, $15, $16::uuid)
                    RETURNING *""",
                 title, org_id, description, agent_type, model,
                 __import__("json").dumps(task_template or {}),
+                __import__("json").dumps(sandbox_config) if sandbox_config else None,
                 schedule_type, cron_expression, interval_seconds, next_run_at,
                 priority, timezone_str, max_runs, expires_at, created_by,
             )
