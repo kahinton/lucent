@@ -11,6 +11,7 @@ from lucent.tools.memories import _get_current_user_context
 
 async def _get_schedule_repository() -> ScheduleRepository:
     from lucent.db import init_db
+
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
         raise RuntimeError("DATABASE_URL environment variable is required")
@@ -21,7 +22,8 @@ async def _get_schedule_repository() -> ScheduleRepository:
 def register_schedule_tools(mcp: FastMCP) -> None:
     """Register schedule management tools with the MCP server."""
 
-    @mcp.tool(description="""Create a scheduled task — either one-time or repeating.
+    @mcp.tool(
+        description="""Create a scheduled task — either one-time or repeating.
 
 Schedule types:
 - 'once': Runs once at next_run_at (or immediately if not set)
@@ -42,7 +44,8 @@ Args:
     priority: 'low', 'medium', 'high', or 'urgent'
     max_runs: Optional limit on total number of runs (null = unlimited)
 
-Returns: JSON with the created schedule including its ID and next_run_at.""")
+Returns: JSON with the created schedule including its ID and next_run_at."""
+    )
     async def create_schedule(
         title: str,
         schedule_type: str = "once",
@@ -64,23 +67,25 @@ Returns: JSON with the created schedule including its ID and next_run_at.""")
         if schedule_type == "cron" and not cron_expression:
             return json.dumps({"error": "cron_expression is required for 'cron' schedule_type"})
         if schedule_type == "interval" and (not interval_seconds or interval_seconds < 60):
-            return json.dumps({"error": "interval_seconds must be >= 60 for 'interval' schedule_type"})
+            return json.dumps(
+                {"error": "interval_seconds must be >= 60 for 'interval' schedule_type"}
+            )
         if priority not in ("low", "medium", "high", "urgent"):
             return json.dumps({"error": "priority must be 'low', 'medium', 'high', or 'urgent'"})
 
         # Validate cron expression syntax (basic format check)
         if cron_expression:
             import re
+
             # Accept 5 or 6 space-separated fields
-            cron_pattern = re.compile(
-                r"^(\S+\s+){4,5}\S+$"
-            )
+            cron_pattern = re.compile(r"^(\S+\s+){4,5}\S+$")
             if not cron_pattern.match(cron_expression.strip()):
                 return json.dumps({"error": f"Invalid cron expression format: {cron_expression}"})
 
         # Validate model against registry
         if model:
             from lucent.model_registry import validate_model
+
             error = validate_model(model)
             if error:
                 return json.dumps({"error": error})
@@ -99,15 +104,19 @@ Returns: JSON with the created schedule including its ID and next_run_at.""")
             max_runs=max_runs,
             created_by=str(user_id) if user_id else None,
         )
-        return json.dumps({k: str(v) if hasattr(v, "hex") else str(v) for k, v in sched.items()}, default=str)
+        return json.dumps(
+            {k: str(v) if hasattr(v, "hex") else str(v) for k, v in sched.items()}, default=str
+        )
 
-    @mcp.tool(description="""List scheduled tasks, optionally filtered by status or enabled state.
+    @mcp.tool(
+        description="""List scheduled tasks, optionally filtered by status or enabled state.
 
 Args:
     status: Filter by status ('active', 'paused', 'completed', 'expired') or null for all
     enabled_only: If true, only show enabled schedules
 
-Returns: JSON array of schedules.""")
+Returns: JSON array of schedules."""
+    )
     async def list_schedules(
         status: str | None = None,
         enabled_only: bool = False,
@@ -127,13 +136,15 @@ Returns: JSON array of schedules.""")
             default=str,
         )
 
-    @mcp.tool(description="""Toggle a schedule on or off.
+    @mcp.tool(
+        description="""Toggle a schedule on or off.
 
 Args:
     schedule_id: The schedule UUID to toggle
     enabled: true to enable, false to disable
 
-Returns: JSON with the updated schedule.""")
+Returns: JSON with the updated schedule."""
+    )
     async def toggle_schedule(schedule_id: str, enabled: bool) -> str:
         user_id, org_id, _ = await _get_current_user_context()
         if not org_id:
@@ -143,14 +154,18 @@ Returns: JSON with the updated schedule.""")
         result = await repo.toggle_schedule(schedule_id, str(org_id), enabled)
         if not result:
             return json.dumps({"error": "Schedule not found"})
-        return json.dumps({k: str(v) if hasattr(v, "hex") else str(v) for k, v in result.items()}, default=str)
+        return json.dumps(
+            {k: str(v) if hasattr(v, "hex") else str(v) for k, v in result.items()}, default=str
+        )
 
-    @mcp.tool(description="""Get the run history for a specific schedule.
+    @mcp.tool(
+        description="""Get the run history for a specific schedule.
 
 Args:
     schedule_id: The schedule UUID
 
-Returns: JSON with the schedule details and its run history.""")
+Returns: JSON with the schedule details and its run history."""
+    )
     async def get_schedule_details(schedule_id: str) -> str:
         user_id, org_id, _ = await _get_current_user_context()
         if not org_id:

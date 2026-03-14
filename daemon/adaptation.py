@@ -816,7 +816,9 @@ class AdaptationPipeline:
                     )
                     existing_skill_names.add(arch.name)
 
-    async def generate_agents(self, api_base: str = "", api_headers: dict | None = None) -> list[str]:
+    async def generate_agents(
+        self, api_base: str = "", api_headers: dict | None = None
+    ) -> list[str]:
         """Generate agent definitions via the definitions API (proposed status).
 
         Definitions are created in 'proposed' status and require human approval
@@ -875,7 +877,9 @@ class AdaptationPipeline:
 
         return created
 
-    async def generate_skills(self, api_base: str = "", api_headers: dict | None = None) -> list[str]:
+    async def generate_skills(
+        self, api_base: str = "", api_headers: dict | None = None
+    ) -> list[str]:
         """Generate skill definitions via the definitions API (proposed status).
 
         Definitions are created in 'proposed' status and require human approval.
@@ -1024,7 +1028,9 @@ class AdaptationPipeline:
             }
         return result
 
-    async def run(self, memory_api=None, api_base: str = "", api_headers: dict | None = None) -> dict:
+    async def run(
+        self, memory_api=None, api_base: str = "", api_headers: dict | None = None
+    ) -> dict:
         """Execute the full adaptation pipeline.
 
         Generates agent and skill definitions in the database with 'proposed'

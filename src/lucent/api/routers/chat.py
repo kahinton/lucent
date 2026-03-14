@@ -6,7 +6,6 @@ memories for grounded answers. The chat agent has full access to the
 Lucent MCP server for memory search, creation, and management.
 """
 
-import asyncio
 import json
 import os
 from datetime import datetime, timezone
@@ -29,8 +28,6 @@ GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 MCP_URL = os.environ.get("LUCENT_CHAT_MCP_URL", "http://localhost:8766/mcp")
 # Session timeout for chat (shorter than daemon — chat should be snappy)
 CHAT_SESSION_TIMEOUT = int(os.environ.get("LUCENT_CHAT_TIMEOUT", "300"))
-
-
 
 
 class ChatMessage(BaseModel):
@@ -96,21 +93,24 @@ async def _build_system_prompt(user: dict, pool, page_context: dict | None) -> s
         page_type = page_context.get("type", "unknown")
         page_data = page_context.get("data", {})
 
-        parts.append(f"\n## Current Page Context")
+        parts.append("\n## Current Page Context")
         parts.append(f"The user is viewing: **{title}** ({url})")
         parts.append(f"Page type: {page_type}")
 
         if page_data:
-            parts.append(f"Page data:\n```json\n{json.dumps(page_data, default=str, indent=2)[:3000]}\n```")
+            parts.append(
+                f"Page data:\n```json\n{json.dumps(page_data, default=str, indent=2)[:3000]}\n```"
+            )
 
         # Load deep context for detail pages
         try:
             if page_type == "memory_detail" and page_data.get("memory_id") and org_id:
                 from lucent.db import MemoryRepository
+
                 repo = MemoryRepository(pool)
                 mem = await repo.get_memory(page_data["memory_id"], org_id)
                 if mem:
-                    parts.append(f"\n## Memory Being Viewed")
+                    parts.append("\n## Memory Being Viewed")
                     parts.append(f"- Type: {mem.get('type', '?')}")
                     parts.append(f"- Tags: {', '.join(mem.get('tags', []))}")
                     parts.append(f"- Importance: {mem.get('importance', '?')}/10")
@@ -118,10 +118,11 @@ async def _build_system_prompt(user: dict, pool, page_context: dict | None) -> s
 
             elif page_type == "schedule_detail" and page_data.get("schedule_id") and org_id:
                 from lucent.db.schedules import ScheduleRepository
+
                 repo = ScheduleRepository(pool)
                 sched = await repo.get_schedule_with_runs(page_data["schedule_id"], org_id)
                 if sched:
-                    parts.append(f"\n## Schedule Being Viewed")
+                    parts.append("\n## Schedule Being Viewed")
                     parts.append(f"- Title: {sched.get('title')}")
                     parts.append(f"- Type: {sched.get('schedule_type')}")
                     parts.append(f"- Status: {sched.get('status')}")
@@ -131,14 +132,17 @@ async def _build_system_prompt(user: dict, pool, page_context: dict | None) -> s
                     if runs:
                         parts.append(f"- Total runs: {len(runs)}")
                         latest = runs[0]
-                        parts.append(f"- Latest run: {latest.get('status')} — {str(latest.get('result_summary', ''))[:300]}")
+                        parts.append(
+                            f"- Latest run: {latest.get('status')} — {str(latest.get('result_summary', ''))[:300]}"
+                        )
 
             elif page_type == "request_detail" and page_data.get("request_id") and org_id:
                 from lucent.db.requests import RequestRepository
+
                 repo = RequestRepository(pool)
                 req = await repo.get_request(page_data["request_id"], org_id)
                 if req:
-                    parts.append(f"\n## Request Being Viewed")
+                    parts.append("\n## Request Being Viewed")
                     parts.append(f"- Title: {req.get('title')}")
                     parts.append(f"- Status: {req.get('status')}")
                     parts.append(f"- Priority: {req.get('priority')}")
@@ -154,10 +158,12 @@ async def _build_system_prompt(user: dict, pool, page_context: dict | None) -> s
     # Pull relevant memories for context
     try:
         from lucent.db import MemoryRepository
+
         memo_repo = MemoryRepository(pool)
         if org_id:
             recent = await memo_repo.list_memories(
-                org_id=org_id, limit=10,
+                org_id=org_id,
+                limit=10,
             )
             if recent:
                 parts.append("\n## Recent Memories (for context)")
@@ -196,11 +202,7 @@ async def chat_stream(
     last_message = body.messages[-1].content if body.messages else ""
 
     if history_parts:
-        prompt = (
-            "Previous conversation:\n"
-            + "\n".join(history_parts)
-            + f"\n\nUser: {last_message}"
-        )
+        prompt = "Previous conversation:\n" + "\n".join(history_parts) + f"\n\nUser: {last_message}"
     else:
         prompt = last_message
 

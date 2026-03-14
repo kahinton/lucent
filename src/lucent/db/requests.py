@@ -33,8 +33,12 @@ class RequestRepository:
                 """INSERT INTO requests (title, description, source, priority, created_by, organization_id)
                    VALUES ($1, $2, $3, $4, $5, $6)
                    RETURNING *""",
-                title, description, source, priority,
-                UUID(created_by) if created_by else None, UUID(org_id),
+                title,
+                description,
+                source,
+                priority,
+                UUID(created_by) if created_by else None,
+                UUID(org_id),
             )
         return dict(row)
 
@@ -42,12 +46,17 @@ class RequestRepository:
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT * FROM requests WHERE id = $1 AND organization_id = $2",
-                UUID(request_id), UUID(org_id),
+                UUID(request_id),
+                UUID(org_id),
             )
         return dict(row) if row else None
 
     async def list_requests(
-        self, org_id: str, status: str | None = None, limit: int = 50, offset: int = 0,
+        self,
+        org_id: str,
+        status: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
     ) -> list[dict]:
         query = "SELECT * FROM requests WHERE organization_id = $1"
         params: list[Any] = [UUID(org_id)]
@@ -67,7 +76,10 @@ class RequestRepository:
             row = await conn.fetchrow(
                 """UPDATE requests SET status = $2, updated_at = $3, completed_at = COALESCE($4, completed_at)
                    WHERE id = $1 RETURNING *""",
-                UUID(request_id), status, now, completed_at,
+                UUID(request_id),
+                status,
+                now,
+                completed_at,
             )
         return dict(row) if row else None
 
@@ -166,9 +178,14 @@ class RequestRepository:
                    RETURNING *""",
                 UUID(request_id),
                 UUID(parent_task_id) if parent_task_id else None,
-                title, description, agent_type,
+                title,
+                description,
+                agent_type,
                 UUID(agent_definition_id) if agent_definition_id else None,
-                priority, sequence_order, UUID(org_id), model,
+                priority,
+                sequence_order,
+                UUID(org_id),
+                model,
                 UUID(sandbox_template_id) if sandbox_template_id else None,
                 json.dumps(sandbox_config) if sandbox_config else None,
             )
@@ -183,7 +200,9 @@ class RequestRepository:
         return dict(row) if row else None
 
     async def list_tasks(
-        self, request_id: str, status: str | None = None,
+        self,
+        request_id: str,
+        status: str | None = None,
     ) -> list[dict]:
         query = "SELECT * FROM tasks WHERE request_id = $1"
         params: list[Any] = [UUID(request_id)]
@@ -249,12 +268,16 @@ class RequestRepository:
                    claimed_at = $3, updated_at = $3
                    WHERE id = $1 AND status IN ('pending', 'planned')
                    RETURNING *""",
-                UUID(task_id), instance_id, now,
+                UUID(task_id),
+                instance_id,
+                now,
             )
         if row:
             task = dict(row)
             await self.add_task_event(
-                task_id, "claimed", f"Claimed by {instance_id}",
+                task_id,
+                "claimed",
+                f"Claimed by {instance_id}",
                 metadata={"instance_id": instance_id},
             )
             # Update parent request to in_progress if still pending/planning
@@ -269,7 +292,8 @@ class RequestRepository:
             row = await conn.fetchrow(
                 """UPDATE tasks SET status = 'running', updated_at = $2
                    WHERE id = $1 AND status = 'claimed' RETURNING *""",
-                UUID(task_id), now,
+                UUID(task_id),
+                now,
             )
         if row:
             await self.add_task_event(task_id, "running", "Agent started execution")
@@ -284,12 +308,16 @@ class RequestRepository:
                 """UPDATE tasks SET status = 'completed', result = $2,
                    completed_at = $3, updated_at = $3
                    WHERE id = $1 RETURNING *""",
-                UUID(task_id), result, now,
+                UUID(task_id),
+                result,
+                now,
             )
         if row:
             task = dict(row)
             await self.add_task_event(
-                task_id, "completed", f"Completed ({len(result)} chars output)",
+                task_id,
+                "completed",
+                f"Completed ({len(result)} chars output)",
             )
             # Check if all tasks in request are done
             await self._check_request_completion(str(task["request_id"]))
@@ -304,7 +332,9 @@ class RequestRepository:
                 """UPDATE tasks SET status = 'failed', error = $2,
                    completed_at = $3, updated_at = $3
                    WHERE id = $1 RETURNING *""",
-                UUID(task_id), error, now,
+                UUID(task_id),
+                error,
+                now,
             )
         if row:
             task = dict(row)
@@ -320,7 +350,8 @@ class RequestRepository:
                 """UPDATE tasks SET status = 'pending', claimed_by = NULL,
                    claimed_at = NULL, updated_at = $2
                    WHERE id = $1 AND status IN ('claimed', 'running') RETURNING *""",
-                UUID(task_id), now,
+                UUID(task_id),
+                now,
             )
         if row:
             await self.add_task_event(task_id, "released", "Task released back to pending")
@@ -336,7 +367,8 @@ class RequestRepository:
                    claimed_at = NULL, completed_at = NULL, result = NULL,
                    error = NULL, updated_at = $2
                    WHERE id = $1 AND status = 'failed' RETURNING *""",
-                UUID(task_id), now,
+                UUID(task_id),
+                now,
             )
         if row:
             task = dict(row)
@@ -359,7 +391,8 @@ class RequestRepository:
             )
         for row in rows:
             await self.add_task_event(
-                str(row["id"]), "released",
+                str(row["id"]),
+                "released",
                 f"Auto-released: stale for >{stale_minutes}min",
             )
         return len(rows)
@@ -374,11 +407,14 @@ class RequestRepository:
         metadata: dict | None = None,
     ) -> dict:
         import json
+
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 """INSERT INTO task_events (task_id, event_type, detail, metadata)
                    VALUES ($1, $2, $3, $4) RETURNING *""",
-                UUID(task_id), event_type, detail,
+                UUID(task_id),
+                event_type,
+                detail,
                 json.dumps(metadata) if metadata else "{}",
             )
         return dict(row)
@@ -387,23 +423,30 @@ class RequestRepository:
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
                 "SELECT * FROM task_events WHERE task_id = $1 ORDER BY created_at LIMIT $2",
-                UUID(task_id), limit,
+                UUID(task_id),
+                limit,
             )
         return [dict(r) for r in rows]
 
     # ── Task ↔ Memory Links ──────────────────────────────────────────────
 
     async def link_memory(
-        self, task_id: str, memory_id: str, relation: str = "created",
+        self,
+        task_id: str,
+        memory_id: str,
+        relation: str = "created",
     ) -> None:
         async with self.pool.acquire() as conn:
             await conn.execute(
                 """INSERT INTO task_memories (task_id, memory_id, relation)
                    VALUES ($1, $2, $3) ON CONFLICT DO NOTHING""",
-                UUID(task_id), UUID(memory_id), relation,
+                UUID(task_id),
+                UUID(memory_id),
+                relation,
             )
         await self.add_task_event(
-            task_id, f"memory_{relation}",
+            task_id,
+            f"memory_{relation}",
             f"Memory {relation}: {memory_id[:8]}...",
             metadata={"memory_id": memory_id, "relation": relation},
         )
@@ -490,6 +533,7 @@ class RequestRepository:
                    JOIN requests r ON t.request_id = r.id
                    WHERE t.organization_id = $1
                    ORDER BY te.created_at DESC LIMIT $2""",
-                UUID(org_id), limit,
+                UUID(org_id),
+                limit,
             )
         return [dict(r) for r in rows]

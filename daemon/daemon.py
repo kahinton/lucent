@@ -25,14 +25,15 @@ import signal
 import sys
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
 
 # Import LLM engine abstraction — the daemon no longer calls CopilotClient directly
 try:
-    from lucent.llm import get_engine, get_engine_name, SessionEvent, SessionEventType
+    from lucent.llm import SessionEvent, SessionEventType, get_engine, get_engine_name
+
     _LLM_ENGINE_AVAILABLE = True
 except ImportError:
     _LLM_ENGINE_AVAILABLE = False
@@ -40,6 +41,7 @@ except ImportError:
 # Legacy import for backward compat (daemon may be run outside the package)
 try:
     from copilot import CopilotClient, PermissionHandler
+
     _COPILOT_SDK_AVAILABLE = True
 except ImportError:
     _COPILOT_SDK_AVAILABLE = False
@@ -517,8 +519,12 @@ class RequestAPI:
     API_TIMEOUT = 15
 
     @staticmethod
-    async def create_request(title: str, description: str | None = None,
-                             source: str = "cognitive", priority: str = "medium") -> dict | None:
+    async def create_request(
+        title: str,
+        description: str | None = None,
+        source: str = "cognitive",
+        priority: str = "medium",
+    ) -> dict | None:
         body = {"title": title, "source": source, "priority": priority}
         if description:
             body["description"] = description
@@ -532,9 +538,15 @@ class RequestAPI:
         return None
 
     @staticmethod
-    async def create_task(request_id: str, title: str, agent_type: str | None = None,
-                          description: str | None = None, priority: str = "medium",
-                          sequence_order: int = 0, model: str | None = None) -> dict | None:
+    async def create_task(
+        request_id: str,
+        title: str,
+        agent_type: str | None = None,
+        description: str | None = None,
+        priority: str = "medium",
+        sequence_order: int = 0,
+        model: str | None = None,
+    ) -> dict | None:
         body = {"title": title, "priority": priority, "sequence_order": sequence_order}
         if agent_type:
             body["agent_type"] = agent_type
@@ -545,7 +557,8 @@ class RequestAPI:
         try:
             async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
                 resp = await client.post(
-                    f"{API_BASE}/requests/{request_id}/tasks", json=body, headers=API_HEADERS)
+                    f"{API_BASE}/requests/{request_id}/tasks", json=body, headers=API_HEADERS
+                )
                 if resp.status_code in (200, 201):
                     return resp.json()
         except Exception as e:
@@ -558,7 +571,9 @@ class RequestAPI:
             async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
                 resp = await client.post(
                     f"{API_BASE}/requests/tasks/{task_id}/claim",
-                    params={"instance_id": instance_id}, headers=API_HEADERS)
+                    params={"instance_id": instance_id},
+                    headers=API_HEADERS,
+                )
                 if resp.status_code in (200, 201):
                     return resp.json()
         except Exception as e:
@@ -570,7 +585,8 @@ class RequestAPI:
         try:
             async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
                 resp = await client.post(
-                    f"{API_BASE}/requests/tasks/{task_id}/start", headers=API_HEADERS)
+                    f"{API_BASE}/requests/tasks/{task_id}/start", headers=API_HEADERS
+                )
                 if resp.status_code == 200:
                     return resp.json()
         except Exception as e:
@@ -583,7 +599,9 @@ class RequestAPI:
             async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
                 resp = await client.post(
                     f"{API_BASE}/requests/tasks/{task_id}/complete",
-                    params={"result": result[:8000]}, headers=API_HEADERS)
+                    params={"result": result[:8000]},
+                    headers=API_HEADERS,
+                )
                 if resp.status_code == 200:
                     return resp.json()
         except Exception as e:
@@ -596,7 +614,9 @@ class RequestAPI:
             async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
                 resp = await client.post(
                     f"{API_BASE}/requests/tasks/{task_id}/fail",
-                    params={"error": error[:2000]}, headers=API_HEADERS)
+                    params={"error": error[:2000]},
+                    headers=API_HEADERS,
+                )
                 if resp.status_code == 200:
                     return resp.json()
         except Exception as e:
@@ -604,8 +624,9 @@ class RequestAPI:
         return None
 
     @staticmethod
-    async def add_event(task_id: str, event_type: str, detail: str | None = None,
-                        metadata: dict | None = None) -> dict | None:
+    async def add_event(
+        task_id: str, event_type: str, detail: str | None = None, metadata: dict | None = None
+    ) -> dict | None:
         body = {"event_type": event_type}
         if detail:
             body["detail"] = detail
@@ -614,8 +635,8 @@ class RequestAPI:
         try:
             async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
                 resp = await client.post(
-                    f"{API_BASE}/requests/tasks/{task_id}/events",
-                    json=body, headers=API_HEADERS)
+                    f"{API_BASE}/requests/tasks/{task_id}/events", json=body, headers=API_HEADERS
+                )
                 if resp.status_code in (200, 201):
                     return resp.json()
         except Exception as e:
@@ -628,8 +649,8 @@ class RequestAPI:
         try:
             async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
                 await client.post(
-                    f"{API_BASE}/requests/tasks/{task_id}/memories",
-                    json=body, headers=API_HEADERS)
+                    f"{API_BASE}/requests/tasks/{task_id}/memories", json=body, headers=API_HEADERS
+                )
         except Exception as e:
             log(f"API link_memory failed: {e}", "WARN")
 
@@ -637,8 +658,7 @@ class RequestAPI:
     async def get_pending_tasks() -> list[dict]:
         try:
             async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
-                resp = await client.get(
-                    f"{API_BASE}/requests/queue/pending", headers=API_HEADERS)
+                resp = await client.get(f"{API_BASE}/requests/queue/pending", headers=API_HEADERS)
                 if resp.status_code == 200:
                     return resp.json()
         except Exception as e:
@@ -651,7 +671,9 @@ class RequestAPI:
             async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
                 resp = await client.post(
                     f"{API_BASE}/requests/queue/release-stale",
-                    params={"stale_minutes": stale_minutes}, headers=API_HEADERS)
+                    params={"stale_minutes": stale_minutes},
+                    headers=API_HEADERS,
+                )
                 if resp.status_code == 200:
                     return resp.json().get("released", 0)
         except Exception as e:
@@ -806,10 +828,12 @@ async def load_instance_skills_for_agent(agent_id: str) -> list[dict]:
 def resolve_env_vars(value: str) -> str:
     """Resolve ${ENV_VAR} patterns in a string from environment variables."""
     import re
+
     def replacer(match):
         var_name = match.group(1)
         return os.environ.get(var_name, match.group(0))  # Keep original if not found
-    return re.sub(r'\$\{([^}]+)\}', replacer, value)
+
+    return re.sub(r"\$\{([^}]+)\}", replacer, value)
 
 
 async def build_subagent_prompt(
@@ -917,8 +941,11 @@ Always output your findings and results as text. Do not rely solely on saving
 to memory — the dispatch system validates your text output.
 
 --- GUARDRAILS ---
-- {"Git commit is ALLOWED — commit meaningful changes with clear messages"
-   if ALLOW_GIT_COMMIT else "DO NOT run git commit"}
+- {
+        "Git commit is ALLOWED — commit meaningful changes with clear messages"
+        if ALLOW_GIT_COMMIT
+        else "DO NOT run git commit"
+    }
 - {"Git push is ALLOWED" if ALLOW_GIT_PUSH else "DO NOT run git push"}
 - DO NOT take irreversible actions without approval
 - Tag all memories with 'daemon' so activity is visible
@@ -1093,6 +1120,7 @@ class LucentDaemon:
         self.active_sessions.append(session_id)
 
         try:
+
             def on_event(event: SessionEvent) -> None:
                 etype = event.type.value
                 if event.type == SessionEventType.MESSAGE:
@@ -1104,7 +1132,10 @@ class LucentDaemon:
                     log(f"  [{name}] event: tool.call tool={event.tool_name}", "STREAM")
                 elif event.type == SessionEventType.TOOL_RESULT:
                     output = event.tool_output[:300] if event.tool_output else ""
-                    log(f"  [{name}] event: tool.result tool={event.tool_name} output={output}", "STREAM")
+                    log(
+                        f"  [{name}] event: tool.result tool={event.tool_name} output={output}",
+                        "STREAM",
+                    )
                 elif event.type != SessionEventType.MESSAGE_DELTA:
                     log(f"  [{name}] event: {etype}", "STREAM")
 
@@ -1252,8 +1283,11 @@ class LucentDaemon:
                 "adaptation pipeline.",
             )
         except AgentNotFoundError:
-            log("No approved 'assessment' agent definition — skipping adaptation. "
-                "Create and approve one at /definitions to enable environment assessment.", "WARN")
+            log(
+                "No approved 'assessment' agent definition — skipping adaptation. "
+                "Create and approve one at /definitions to enable environment assessment.",
+                "WARN",
+            )
             return
         assessment_output = await self.run_session(
             "adaptation-assessment",
@@ -1280,7 +1314,9 @@ class LucentDaemon:
 
         pipeline = AdaptationPipeline(assessment)
         summary = await pipeline.run(
-            memory_api=MemoryAPI, api_base=API_BASE, api_headers=API_HEADERS,
+            memory_api=MemoryAPI,
+            api_base=API_BASE,
+            api_headers=API_HEADERS,
         )
 
         agents_proposed = len(summary.get("agents_proposed", []))
@@ -1349,10 +1385,19 @@ class LucentDaemon:
 
         # For shorter output, check if it's mostly a failure message
         failure_indicators = [
-            "couldn't find", "could not find", "unable to", "failed to",
-            "i don't have", "i do not have", "no context",
-            "cannot complete", "couldn't complete", "could not complete",
-            "task not completed", "error occurred", "exception occurred",
+            "couldn't find",
+            "could not find",
+            "unable to",
+            "failed to",
+            "i don't have",
+            "i do not have",
+            "no context",
+            "cannot complete",
+            "couldn't complete",
+            "could not complete",
+            "task not completed",
+            "error occurred",
+            "exception occurred",
         ]
 
         result_lower = result.lower()
@@ -1381,9 +1426,7 @@ class LucentDaemon:
             await MemoryAPI.update(self._heartbeat_memory_id, content=heartbeat_content)
         else:
             # Search for existing heartbeat from this instance
-            results = await MemoryAPI.search(
-                self.instance_id, tags=["daemon-heartbeat"], limit=1
-            )
+            results = await MemoryAPI.search(self.instance_id, tags=["daemon-heartbeat"], limit=1)
             if results:
                 self._heartbeat_memory_id = results[0].get("id")
                 await MemoryAPI.update(self._heartbeat_memory_id, content=heartbeat_content)
@@ -1425,9 +1468,14 @@ class LucentDaemon:
                         if resp.status_code in (200, 201):
                             data = resp.json()
                             req_id = data.get("request", {}).get("id", "?")
-                            log(f"Triggered schedule {sched_id[:8]} '{title}' → request {str(req_id)[:8]}")
+                            log(
+                                f"Triggered schedule {sched_id[:8]} '{title}' → request {str(req_id)[:8]}"
+                            )
                         else:
-                            log(f"Failed to trigger schedule {sched_id[:8]}: {resp.status_code}", "WARN")
+                            log(
+                                f"Failed to trigger schedule {sched_id[:8]}: {resp.status_code}",
+                                "WARN",
+                            )
                 except Exception as e:
                     log(f"Error triggering schedule {sched_id[:8]}: {e}", "WARN")
 
@@ -1463,9 +1511,12 @@ class LucentDaemon:
 
             # Mark running
             await RequestAPI.start_task(task_id)
-            await RequestAPI.add_event(task_id, "agent_dispatched",
-                                       f"Dispatched to {agent_type} agent",
-                                       {"agent_type": agent_type, "instance_id": self.instance_id})
+            await RequestAPI.add_event(
+                task_id,
+                "agent_dispatched",
+                f"Dispatched to {agent_type} agent",
+                {"agent_type": agent_type, "instance_id": self.instance_id},
+            )
 
             # Build and run the sub-agent
             agent_def_id = task.get("agent_definition_id")
@@ -1479,13 +1530,16 @@ class LucentDaemon:
 
             try:
                 system_message = await build_subagent_prompt(
-                    agent_type, description, agent_definition_id=str(agent_def_id) if agent_def_id else None,
+                    agent_type,
+                    description,
+                    agent_definition_id=str(agent_def_id) if agent_def_id else None,
                 )
             except AgentNotFoundError as exc:
                 log(f"Tracked task {task_id[:8]} failed: {exc}", "WARN")
                 await RequestAPI.fail_task(task_id, str(exc))
-                await RequestAPI.add_event(task_id, "agent_not_found",
-                                           f"No approved definition for agent '{agent_type}'")
+                await RequestAPI.add_event(
+                    task_id, "agent_not_found", f"No approved definition for agent '{agent_type}'"
+                )
                 continue
 
             # Create sandbox if configured
@@ -1501,14 +1555,16 @@ class LucentDaemon:
                             f"to run commands. Working directory: {sandbox_config.get('working_dir', '/workspace')}"
                         )
                         await RequestAPI.add_event(
-                            task_id, "sandbox_created",
+                            task_id,
+                            "sandbox_created",
                             f"Sandbox {sandbox_id[:12]} created for task",
                             {"sandbox_id": sandbox_id},
                         )
                 except Exception as e:
                     log(f"Sandbox creation failed for task {task_id[:8]}: {e}", "WARN")
                     await RequestAPI.add_event(
-                        task_id, "sandbox_failed",
+                        task_id,
+                        "sandbox_failed",
                         f"Sandbox creation failed: {e}",
                     )
                     # Continue without sandbox — task can still run
@@ -1526,7 +1582,8 @@ class LucentDaemon:
                 try:
                     await self._destroy_task_sandbox(sandbox_id)
                     await RequestAPI.add_event(
-                        task_id, "sandbox_destroyed",
+                        task_id,
+                        "sandbox_destroyed",
                         f"Sandbox {sandbox_id[:12]} destroyed after task completion",
                     )
                 except Exception as e:
@@ -1585,6 +1642,7 @@ class LucentDaemon:
     async def _destroy_task_sandbox(self, sandbox_id: str) -> None:
         """Destroy a task's sandbox."""
         from lucent.sandbox.manager import get_sandbox_manager
+
         manager = get_sandbox_manager()
         await manager.destroy(sandbox_id)
         log(f"Sandbox {sandbox_id[:12]} destroyed")
@@ -1594,6 +1652,7 @@ class LucentDaemon:
         try:
             from lucent.db.pool import get_pool
             from lucent.db.sandbox_template import SandboxTemplateRepository
+
             pool = await get_pool()
             repo = SandboxTemplateRepository(pool)
             tpl = await repo.get(template_id)
@@ -1681,10 +1740,7 @@ class LucentDaemon:
                     "Quick memory maintenance pass — check for "
                     "obvious issues, fix what's straightforward."
                 ),
-                (
-                    "This is an autonomic background task, "
-                    "not a cognitive decision."
-                ),
+                ("This is an autonomic background task, not a cognitive decision."),
             )
         except AgentNotFoundError:
             log("No approved 'memory' agent — skipping autonomic maintenance", "WARN")
@@ -1798,9 +1854,7 @@ class LucentDaemon:
             try:
                 # Wait for a NOTIFY signal or polling timeout
                 try:
-                    await asyncio.wait_for(
-                        self._task_ready.wait(), timeout=DISPATCH_POLL_SECONDS
-                    )
+                    await asyncio.wait_for(self._task_ready.wait(), timeout=DISPATCH_POLL_SECONDS)
                 except asyncio.TimeoutError:
                     pass  # polling fallback — this is normal
                 self._task_ready.clear()
@@ -2075,9 +2129,7 @@ def main():
         "--task",
         type=str,
         help=(
-            "Run a specific sub-agent "
-            "(research, code, memory, reflection, "
-            "documentation, planning)"
+            "Run a specific sub-agent (research, code, memory, reflection, documentation, planning)"
         ),
     )
     parser.add_argument(

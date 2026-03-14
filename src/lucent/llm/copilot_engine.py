@@ -142,9 +142,7 @@ class CopilotEngine(LLMEngine):
 
             def _on_sdk_event(event: Any) -> None:
                 """Translate Copilot SDK events to normalized SessionEvents."""
-                etype = (
-                    event.type.value if hasattr(event.type, "value") else str(event.type)
-                )
+                etype = event.type.value if hasattr(event.type, "value") else str(event.type)
 
                 if etype == "assistant.message":
                     content = getattr(event.data, "content", None)

@@ -2,10 +2,10 @@
 
 from lucent.sandbox.manager import SandboxManager
 from lucent.sandbox.models import (
+    ExecResult,
     SandboxConfig,
     SandboxInfo,
     SandboxStatus,
-    ExecResult,
 )
 
 __all__ = [

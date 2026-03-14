@@ -53,6 +53,7 @@ Output a brief summary of decisions for the log.
 Approved work (tagged `feedback-approved`):
 - Mark as `feedback-processed` and `validated`
 - Note the validated pattern for future reference
+- **If the approved work contains actionable items** (findings to fix, plans to implement, recommendations to act on), **create tasks to execute them**. Approval means "go ahead and do this" — not just "I acknowledge this exists." Decompose the approved content into concrete tasks and queue them via `create_task` under an appropriate request.
 
 Rejected work (tagged `feedback-rejected`):
 - Read the rejection reason carefully

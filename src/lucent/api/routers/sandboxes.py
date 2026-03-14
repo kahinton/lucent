@@ -93,16 +93,18 @@ class FileListResponse(BaseModel):
 # --- Helpers ---
 
 
-async def _get_sandbox_for_user(
-    sandbox_id: str, user: AuthenticatedUser
-) -> dict:
+async def _get_sandbox_for_user(sandbox_id: str, user: AuthenticatedUser) -> dict:
     """Fetch a sandbox and verify the caller owns it. Raises 404/403."""
     manager = get_sandbox_manager()
     info = await manager.get(sandbox_id)
     if not info:
         raise HTTPException(status_code=404, detail="Sandbox not found")
     # Verify organization ownership
-    org_id = info.get("organization_id") if isinstance(info, dict) else getattr(info, "organization_id", None)
+    org_id = (
+        info.get("organization_id")
+        if isinstance(info, dict)
+        else getattr(info, "organization_id", None)
+    )
     if org_id and str(org_id) != str(user.organization_id):
         raise HTTPException(status_code=404, detail="Sandbox not found")
     return info
@@ -111,6 +113,7 @@ async def _get_sandbox_for_user(
 def _validate_sandbox_path(path: str) -> str:
     """Validate and normalize a sandbox file path to prevent traversal."""
     import posixpath
+
     normalized = posixpath.normpath(path)
     if ".." in normalized.split("/"):
         raise HTTPException(status_code=400, detail="Invalid path")
@@ -273,9 +276,7 @@ async def write_sandbox_file(
 
 
 @router.post("/{sandbox_id}/stop")
-async def stop_sandbox(
-    sandbox_id: str, user: AuthenticatedUser
-) -> dict:
+async def stop_sandbox(sandbox_id: str, user: AuthenticatedUser) -> dict:
     """Stop a sandbox (preserves state)."""
     await _get_sandbox_for_user(sandbox_id, user)
     manager = get_sandbox_manager()
@@ -284,9 +285,7 @@ async def stop_sandbox(
 
 
 @router.delete("/{sandbox_id}")
-async def destroy_sandbox(
-    sandbox_id: str, user: AuthenticatedUser
-) -> dict:
+async def destroy_sandbox(sandbox_id: str, user: AuthenticatedUser) -> dict:
     """Permanently destroy a sandbox."""
     await _get_sandbox_for_user(sandbox_id, user)
     manager = get_sandbox_manager()
@@ -315,7 +314,9 @@ class TemplateCreateRequest(BaseModel):
 
 
 class TemplateUpdateRequest(BaseModel):
-    name: str | None = Field(default=None, min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
+    name: str | None = Field(
+        default=None, min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+    )
     description: str | None = Field(default=None, max_length=512)
     image: str | None = None
     repo_url: str | None = None
@@ -335,6 +336,7 @@ class TemplateUpdateRequest(BaseModel):
 async def create_template(body: TemplateCreateRequest, user: AuthenticatedUser):
     """Create a reusable sandbox template."""
     from lucent.db.sandbox_template import SandboxTemplateRepository
+
     pool = await get_pool()
     repo = SandboxTemplateRepository(pool)
     return await repo.create(
@@ -361,6 +363,7 @@ async def create_template(body: TemplateCreateRequest, user: AuthenticatedUser):
 async def list_templates(user: AuthenticatedUser):
     """List all sandbox templates for the organization."""
     from lucent.db.sandbox_template import SandboxTemplateRepository
+
     pool = await get_pool()
     repo = SandboxTemplateRepository(pool)
     return await repo.list_all(str(user.organization_id))
@@ -370,6 +373,7 @@ async def list_templates(user: AuthenticatedUser):
 async def get_template(template_id: str, user: AuthenticatedUser):
     """Get a sandbox template by ID."""
     from lucent.db.sandbox_template import SandboxTemplateRepository
+
     pool = await get_pool()
     repo = SandboxTemplateRepository(pool)
     tpl = await repo.get(template_id, str(user.organization_id))
@@ -382,6 +386,7 @@ async def get_template(template_id: str, user: AuthenticatedUser):
 async def update_template(template_id: str, body: TemplateUpdateRequest, user: AuthenticatedUser):
     """Update a sandbox template."""
     from lucent.db.sandbox_template import SandboxTemplateRepository
+
     pool = await get_pool()
     repo = SandboxTemplateRepository(pool)
     updates = body.model_dump(exclude_none=True)
@@ -397,6 +402,7 @@ async def update_template(template_id: str, body: TemplateUpdateRequest, user: A
 async def delete_template(template_id: str, user: AuthenticatedUser):
     """Delete a sandbox template."""
     from lucent.db.sandbox_template import SandboxTemplateRepository
+
     pool = await get_pool()
     repo = SandboxTemplateRepository(pool)
     deleted = await repo.delete(template_id, str(user.organization_id))
@@ -413,6 +419,7 @@ async def launch_from_template(
 ) -> SandboxResponse:
     """Launch a sandbox instance from a template."""
     from lucent.db.sandbox_template import SandboxTemplateRepository
+
     pool = await get_pool()
     tpl_repo = SandboxTemplateRepository(pool)
     tpl = await tpl_repo.get(template_id, str(user.organization_id))

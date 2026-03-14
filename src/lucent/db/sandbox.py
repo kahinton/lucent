@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -107,9 +107,7 @@ class SandboxRepository:
     async def get(self, sandbox_id: str) -> dict | None:
         """Get a sandbox by ID."""
         async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT * FROM sandboxes WHERE id = $1", UUID(sandbox_id)
-            )
+            row = await conn.fetchrow("SELECT * FROM sandboxes WHERE id = $1", UUID(sandbox_id))
             return dict(row) if row else None
 
     async def list_all(

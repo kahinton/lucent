@@ -51,9 +51,8 @@ class MCPToolBridge:
         except Exception as e:
             # If tool discovery fails, continue without tools
             import logging
-            logging.getLogger("llm.mcp_bridge").warning(
-                "MCP tool discovery failed: %s", e
-            )
+
+            logging.getLogger("llm.mcp_bridge").warning("MCP tool discovery failed: %s", e)
             self._tools = []
             return []
 

@@ -214,10 +214,12 @@ class LangChainEngine(LLMEngine):
                 if text:
                     full_response_parts.append(text)
                     if on_event:
-                        on_event(SessionEvent(
-                            type=SessionEventType.MESSAGE,
-                            content=text,
-                        ))
+                        on_event(
+                            SessionEvent(
+                                type=SessionEventType.MESSAGE,
+                                content=text,
+                            )
+                        )
 
                 # Check for tool calls
                 if not ai_msg.tool_calls or not bridge:
@@ -233,24 +235,30 @@ class LangChainEngine(LLMEngine):
                     tool_id = tool_call.get("id", "")
 
                     if on_event:
-                        on_event(SessionEvent(
-                            type=SessionEventType.TOOL_CALL,
-                            tool_name=tool_name,
-                        ))
+                        on_event(
+                            SessionEvent(
+                                type=SessionEventType.TOOL_CALL,
+                                tool_name=tool_name,
+                            )
+                        )
 
                     result = await bridge.call_tool(tool_name, tool_args)
 
                     if on_event:
-                        on_event(SessionEvent(
-                            type=SessionEventType.TOOL_RESULT,
-                            tool_name=tool_name,
-                            tool_output=result[:300] if result else None,
-                        ))
+                        on_event(
+                            SessionEvent(
+                                type=SessionEventType.TOOL_RESULT,
+                                tool_name=tool_name,
+                                tool_output=result[:300] if result else None,
+                            )
+                        )
 
-                    messages.append(ToolMessage(
-                        content=result,
-                        tool_call_id=tool_id,
-                    ))
+                    messages.append(
+                        ToolMessage(
+                            content=result,
+                            tool_call_id=tool_id,
+                        )
+                    )
 
             if on_event:
                 on_event(SessionEvent(type=SessionEventType.SESSION_IDLE))

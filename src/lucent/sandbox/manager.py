@@ -36,15 +36,18 @@ class SandboxManager:
         backend_type = os.environ.get("LUCENT_SANDBOX_BACKEND", "docker")
         if backend_type == "kubernetes":
             from lucent.sandbox.k8s_backend import KubernetesBackend
+
             return KubernetesBackend()
         else:
             from lucent.sandbox.docker_backend import DockerBackend
+
             return DockerBackend()
 
     async def _repo(self):
         """Lazy-load the DB repository."""
         from lucent.db import get_pool
         from lucent.db.sandbox import SandboxRepository
+
         pool = await get_pool()
         return SandboxRepository(pool)
 
@@ -73,22 +76,19 @@ class SandboxManager:
             # Update status if ready or failed
             if info.status == SandboxStatus.READY:
                 await repo.update_status(
-                    info.id, "ready",
+                    info.id,
+                    "ready",
                     container_id=info.container_id,
                     ready_at=info.ready_at,
                 )
             elif info.status == SandboxStatus.FAILED:
-                await repo.update_status(
-                    info.id, "failed", error=info.error
-                )
+                await repo.update_status(info.id, "failed", error=info.error)
         except Exception as e:
             logger.warning("Failed to persist sandbox %s to DB: %s", info.id[:12], e)
 
         # Schedule auto-destruction based on timeout
         if config.timeout_seconds > 0 and info.status != SandboxStatus.FAILED:
-            task = asyncio.create_task(
-                self._auto_destroy(info.id, config.timeout_seconds)
-            )
+            task = asyncio.create_task(self._auto_destroy(info.id, config.timeout_seconds))
             self._cleanup_tasks[info.id] = task
 
         return info
@@ -103,9 +103,7 @@ class SandboxManager:
         timeout: int = 300,
     ) -> ExecResult:
         """Execute a command in a sandbox."""
-        return await self._backend.exec(
-            sandbox_id, command, cwd=cwd, env=env, timeout=timeout
-        )
+        return await self._backend.exec(sandbox_id, command, cwd=cwd, env=env, timeout=timeout)
 
     async def read_file(self, sandbox_id: str, path: str) -> bytes:
         return await self._backend.read_file(sandbox_id, path)
@@ -134,7 +132,8 @@ class SandboxManager:
         try:
             repo = await self._repo()
             await repo.update_status(
-                sandbox_id, "stopped",
+                sandbox_id,
+                "stopped",
                 stopped_at=datetime.now(timezone.utc),
             )
         except Exception as e:
@@ -154,7 +153,8 @@ class SandboxManager:
         try:
             repo = await self._repo()
             await repo.update_status(
-                sandbox_id, "destroyed",
+                sandbox_id,
+                "destroyed",
                 destroyed_at=datetime.now(timezone.utc),
             )
         except Exception as e:
@@ -198,7 +198,8 @@ class SandboxManager:
             await asyncio.sleep(timeout)
             logger.info(
                 "Auto-destroying sandbox %s after %ds timeout",
-                sandbox_id[:12], timeout,
+                sandbox_id[:12],
+                timeout,
             )
             await self.destroy(sandbox_id)
         except asyncio.CancelledError:

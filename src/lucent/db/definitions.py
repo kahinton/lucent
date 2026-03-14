@@ -3,10 +3,9 @@
 Handles CRUD, approval workflow, and access grants (agent↔skill, agent↔MCP).
 """
 
+import json
 from datetime import datetime, timezone
 from typing import Any
-
-import json
 
 from asyncpg import Pool
 
@@ -19,9 +18,7 @@ class DefinitionRepository:
 
     # ── Agents ────────────────────────────────────────────────────────────
 
-    async def list_agents(
-        self, org_id: str, status: str | None = None
-    ) -> list[dict]:
+    async def list_agents(self, org_id: str, status: str | None = None) -> list[dict]:
         query = """
             SELECT id, name, description, status, scope,
                    created_by, approved_by, approved_at,
@@ -56,8 +53,12 @@ class DefinitionRepository:
         return dict(row) if row else None
 
     async def create_agent(
-        self, name: str, description: str, content: str,
-        org_id: str, created_by: str,
+        self,
+        name: str,
+        description: str,
+        content: str,
+        org_id: str,
+        created_by: str,
         status: str = "proposed",
     ) -> dict:
         query = """
@@ -67,9 +68,7 @@ class DefinitionRepository:
             RETURNING *
         """
         async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(
-                query, name, description, content, status, created_by, org_id
-            )
+            row = await conn.fetchrow(query, name, description, content, status, created_by, org_id)
         return dict(row)
 
     async def update_agent(self, agent_id: str, org_id: str, **kwargs) -> dict | None:
@@ -86,7 +85,7 @@ class DefinitionRepository:
         params.append(agent_id)
         params.append(org_id)
         query = f"""
-            UPDATE agent_definitions SET {', '.join(sets)}
+            UPDATE agent_definitions SET {", ".join(sets)}
             WHERE id = ${len(params) - 1} AND organization_id = ${len(params)}
             RETURNING *
         """
@@ -120,15 +119,14 @@ class DefinitionRepository:
         async with self.pool.acquire() as conn:
             result = await conn.execute(
                 "DELETE FROM agent_definitions WHERE id = $1 AND organization_id = $2",
-                agent_id, org_id,
+                agent_id,
+                org_id,
             )
         return result == "DELETE 1"
 
     # ── Skills ────────────────────────────────────────────────────────────
 
-    async def list_skills(
-        self, org_id: str, status: str | None = None
-    ) -> list[dict]:
+    async def list_skills(self, org_id: str, status: str | None = None) -> list[dict]:
         query = """
             SELECT id, name, description, status, scope,
                    created_by, approved_by, approved_at,
@@ -149,13 +147,18 @@ class DefinitionRepository:
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT * FROM skill_definitions WHERE id = $1 AND organization_id = $2",
-                skill_id, org_id,
+                skill_id,
+                org_id,
             )
         return dict(row) if row else None
 
     async def create_skill(
-        self, name: str, description: str, content: str,
-        org_id: str, created_by: str,
+        self,
+        name: str,
+        description: str,
+        content: str,
+        org_id: str,
+        created_by: str,
         status: str = "proposed",
     ) -> dict:
         query = """
@@ -165,9 +168,7 @@ class DefinitionRepository:
             RETURNING *
         """
         async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(
-                query, name, description, content, status, created_by, org_id
-            )
+            row = await conn.fetchrow(query, name, description, content, status, created_by, org_id)
         return dict(row)
 
     async def approve_skill(self, skill_id: str, org_id: str, approved_by: str) -> dict | None:
@@ -196,15 +197,14 @@ class DefinitionRepository:
         async with self.pool.acquire() as conn:
             result = await conn.execute(
                 "DELETE FROM skill_definitions WHERE id = $1 AND organization_id = $2",
-                skill_id, org_id,
+                skill_id,
+                org_id,
             )
         return result == "DELETE 1"
 
     # ── MCP Servers ───────────────────────────────────────────────────────
 
-    async def list_mcp_servers(
-        self, org_id: str, status: str | None = None
-    ) -> list[dict]:
+    async def list_mcp_servers(self, org_id: str, status: str | None = None) -> list[dict]:
         query = """
             SELECT id, name, description, server_type, url, status, scope,
                    created_by, approved_by, approved_at,
@@ -225,14 +225,22 @@ class DefinitionRepository:
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT * FROM mcp_server_configs WHERE id = $1 AND organization_id = $2",
-                server_id, org_id,
+                server_id,
+                org_id,
             )
         return dict(row) if row else None
 
     async def create_mcp_server(
-        self, name: str, description: str, server_type: str, url: str | None,
-        org_id: str, created_by: str, headers: dict | None = None,
-        command: str | None = None, args: list | None = None,
+        self,
+        name: str,
+        description: str,
+        server_type: str,
+        url: str | None,
+        org_id: str,
+        created_by: str,
+        headers: dict | None = None,
+        command: str | None = None,
+        args: list | None = None,
         status: str = "proposed",
     ) -> dict:
         query = """
@@ -243,14 +251,25 @@ class DefinitionRepository:
         """
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
-                query, name, description, server_type, url,
-                command, json.dumps(args or []), json.dumps(headers or {}),
-                status, created_by, org_id,
+                query,
+                name,
+                description,
+                server_type,
+                url,
+                command,
+                json.dumps(args or []),
+                json.dumps(headers or {}),
+                status,
+                created_by,
+                org_id,
             )
         return dict(row)
 
     async def approve_mcp_server(
-        self, server_id: str, org_id: str, approved_by: str,
+        self,
+        server_id: str,
+        org_id: str,
+        approved_by: str,
     ) -> dict | None:
         query = """
             UPDATE mcp_server_configs
@@ -281,7 +300,8 @@ class DefinitionRepository:
                 await conn.execute(
                     "INSERT INTO agent_skills (agent_id, skill_id) "
                     "VALUES ($1, $2) ON CONFLICT DO NOTHING",
-                    agent_id, skill_id,
+                    agent_id,
+                    skill_id,
                 )
             return True
         except Exception:
@@ -291,7 +311,8 @@ class DefinitionRepository:
         async with self.pool.acquire() as conn:
             result = await conn.execute(
                 "DELETE FROM agent_skills WHERE agent_id = $1 AND skill_id = $2",
-                agent_id, skill_id,
+                agent_id,
+                skill_id,
             )
         return result == "DELETE 1"
 
@@ -301,7 +322,8 @@ class DefinitionRepository:
                 await conn.execute(
                     "INSERT INTO agent_mcp_servers (agent_id, mcp_server_id) "
                     "VALUES ($1, $2) ON CONFLICT DO NOTHING",
-                    agent_id, mcp_server_id,
+                    agent_id,
+                    mcp_server_id,
                 )
             return True
         except Exception:
@@ -311,7 +333,8 @@ class DefinitionRepository:
         async with self.pool.acquire() as conn:
             result = await conn.execute(
                 "DELETE FROM agent_mcp_servers WHERE agent_id = $1 AND mcp_server_id = $2",
-                agent_id, mcp_server_id,
+                agent_id,
+                mcp_server_id,
             )
         return result == "DELETE 1"
 
@@ -338,7 +361,10 @@ class DefinitionRepository:
         return [dict(r) for r in rows]
 
     async def update_mcp_tool_grants(
-        self, agent_id: str, mcp_server_id: str, allowed_tools: list[str] | None,
+        self,
+        agent_id: str,
+        mcp_server_id: str,
+        allowed_tools: list[str] | None,
     ) -> bool:
         """Set which tools an agent can use from an MCP server. None = all."""
         val = json.dumps(allowed_tools) if allowed_tools is not None else None
@@ -346,7 +372,9 @@ class DefinitionRepository:
             result = await conn.execute(
                 "UPDATE agent_mcp_servers SET allowed_tools = $3 "
                 "WHERE agent_id = $1 AND mcp_server_id = $2",
-                agent_id, mcp_server_id, val,
+                agent_id,
+                mcp_server_id,
+                val,
             )
         return result == "UPDATE 1"
 
@@ -364,7 +392,7 @@ class DefinitionRepository:
         params.append(skill_id)
         params.append(org_id)
         query = f"""
-            UPDATE skill_definitions SET {', '.join(sets)}
+            UPDATE skill_definitions SET {", ".join(sets)}
             WHERE id = ${len(params) - 1} AND organization_id = ${len(params)}
             RETURNING *
         """
@@ -390,7 +418,7 @@ class DefinitionRepository:
         params.append(server_id)
         params.append(org_id)
         query = f"""
-            UPDATE mcp_server_configs SET {', '.join(sets)}
+            UPDATE mcp_server_configs SET {", ".join(sets)}
             WHERE id = ${len(params) - 1} AND organization_id = ${len(params)}
             RETURNING *
         """
@@ -402,7 +430,8 @@ class DefinitionRepository:
         async with self.pool.acquire() as conn:
             result = await conn.execute(
                 "DELETE FROM mcp_server_configs WHERE id = $1 AND organization_id = $2",
-                server_id, org_id,
+                server_id,
+                org_id,
             )
         return result == "DELETE 1"
 
@@ -426,7 +455,8 @@ class DefinitionRepository:
             agent = await conn.fetchrow(
                 "SELECT * FROM agent_definitions "
                 "WHERE name = $1 AND organization_id = $2 AND status = 'active'",
-                agent_name, org_id,
+                agent_name,
+                org_id,
             )
         if not agent:
             return None
@@ -450,6 +480,7 @@ class DefinitionRepository:
         """
         import pathlib
         import re
+
         synced = 0
         skills_path = pathlib.Path(skills_dir)
         if not skills_path.is_dir():
@@ -468,7 +499,8 @@ class DefinitionRepository:
                     if line.startswith("description:"):
                         description = line.split(":", 1)[1].strip().strip("'\"")
             async with self.pool.acquire() as conn:
-                await conn.execute("""
+                await conn.execute(
+                    """
                     INSERT INTO skill_definitions
                         (name, description, content, status, scope, organization_id)
                     VALUES ($1, $2, $3, 'active', 'built-in', $4)
@@ -478,7 +510,12 @@ class DefinitionRepository:
                             scope = 'built-in',
                             updated_at = NOW()
                         WHERE skill_definitions.scope = 'built-in'
-                """, name, description, raw, org_id)
+                """,
+                    name,
+                    description,
+                    raw,
+                    org_id,
+                )
             synced += 1
         return synced
 
@@ -490,6 +527,7 @@ class DefinitionRepository:
         """
         import pathlib
         import re
+
         synced = 0
         agents_path = pathlib.Path(agents_dir)
         if not agents_path.is_dir():
@@ -507,7 +545,8 @@ class DefinitionRepository:
                     if line.startswith("description:"):
                         description = line.split(":", 1)[1].strip().strip("'\"")
             async with self.pool.acquire() as conn:
-                await conn.execute("""
+                await conn.execute(
+                    """
                     INSERT INTO agent_definitions
                         (name, description, content, status, scope, organization_id)
                     VALUES ($1, $2, $3, 'active', 'built-in', $4)
@@ -517,6 +556,11 @@ class DefinitionRepository:
                             scope = 'built-in',
                             updated_at = NOW()
                         WHERE agent_definitions.scope = 'built-in'
-                """, name, description, raw, org_id)
+                """,
+                    name,
+                    description,
+                    raw,
+                    org_id,
+                )
             synced += 1
         return synced

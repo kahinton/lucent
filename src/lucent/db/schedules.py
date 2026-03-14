@@ -4,11 +4,9 @@ Supports one-time, interval, and cron schedules.
 Each run creates a tracked request for full lineage.
 """
 
+import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
-from uuid import UUID
-
-import json
 
 from asyncpg import Pool
 
@@ -109,11 +107,22 @@ class ScheduleRepository:
                    VALUES ($1, $2::uuid, $3, $4, $5, $6::jsonb, $7::jsonb,
                            $8, $9, $10, $11, $12, $13, $14, $15, $16::uuid)
                    RETURNING *""",
-                title, org_id, description, agent_type, model,
+                title,
+                org_id,
+                description,
+                agent_type,
+                model,
                 json.dumps(task_template or {}),
                 json.dumps(sandbox_config) if sandbox_config else None,
-                schedule_type, cron_expression, interval_seconds, next_run_at,
-                priority, timezone_str, max_runs, expires_at, created_by,
+                schedule_type,
+                cron_expression,
+                interval_seconds,
+                next_run_at,
+                priority,
+                timezone_str,
+                max_runs,
+                expires_at,
+                created_by,
             )
             return dict(row)
 
@@ -121,7 +130,8 @@ class ScheduleRepository:
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT * FROM schedules WHERE id = $1::uuid AND organization_id = $2::uuid",
-                schedule_id, org_id,
+                schedule_id,
+                org_id,
             )
             return dict(row) if row else None
 
@@ -149,7 +159,7 @@ class ScheduleRepository:
             params.append(limit)
             rows = await conn.fetch(
                 f"""SELECT * FROM schedules
-                    WHERE {' AND '.join(conditions)}
+                    WHERE {" AND ".join(conditions)}
                     ORDER BY
                         CASE WHEN enabled AND status = 'active' THEN 0 ELSE 1 END,
                         next_run_at ASC NULLS LAST
@@ -158,9 +168,7 @@ class ScheduleRepository:
             )
             return [dict(r) for r in rows]
 
-    async def update_schedule(
-        self, schedule_id: str, org_id: str, **fields
-    ) -> dict | None:
+    async def update_schedule(self, schedule_id: str, org_id: str, **fields) -> dict | None:
         if not fields:
             return await self.get_schedule(schedule_id, org_id)
 
@@ -183,8 +191,8 @@ class ScheduleRepository:
         params.extend([schedule_id, org_id])
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
-                f"""UPDATE schedules SET {', '.join(sets)}
-                    WHERE id = ${idx}::uuid AND organization_id = ${idx+1}::uuid
+                f"""UPDATE schedules SET {", ".join(sets)}
+                    WHERE id = ${idx}::uuid AND organization_id = ${idx + 1}::uuid
                     RETURNING *""",
                 *params,
             )
@@ -197,7 +205,8 @@ class ScheduleRepository:
         async with self.pool.acquire() as conn:
             result = await conn.execute(
                 "DELETE FROM schedules WHERE id = $1::uuid AND organization_id = $2::uuid",
-                schedule_id, org_id,
+                schedule_id,
+                org_id,
             )
             return result == "DELETE 1"
 
@@ -221,7 +230,7 @@ class ScheduleRepository:
 
             rows = await conn.fetch(
                 f"""SELECT * FROM schedules
-                    WHERE {' AND '.join(conditions)}
+                    WHERE {" AND ".join(conditions)}
                     ORDER BY
                         CASE priority
                             WHEN 'urgent' THEN 0
@@ -255,7 +264,9 @@ class ScheduleRepository:
                     """INSERT INTO schedule_runs (schedule_id, request_id, status, started_at)
                        VALUES ($1::uuid, $2::uuid, 'running', $3)
                        RETURNING *""",
-                    schedule_id, request_id, now,
+                    schedule_id,
+                    request_id,
+                    now,
                 )
 
                 # Calculate next run
@@ -287,7 +298,11 @@ class ScheduleRepository:
                        last_run_at = $2, run_count = $3,
                        next_run_at = $4, status = $5, updated_at = $2
                        WHERE id = $1::uuid""",
-                    schedule_id, now, new_run_count, next_run, new_status,
+                    schedule_id,
+                    now,
+                    new_run_count,
+                    next_run,
+                    new_status,
                 )
 
                 return dict(run)
@@ -298,7 +313,8 @@ class ScheduleRepository:
                 """UPDATE schedule_runs SET
                    status = 'completed', completed_at = now(), result = $2
                    WHERE id = $1::uuid RETURNING *""",
-                run_id, result,
+                run_id,
+                result,
             )
             return dict(row) if row else None
 
@@ -308,7 +324,8 @@ class ScheduleRepository:
                 """UPDATE schedule_runs SET
                    status = 'failed', completed_at = now(), error = $2
                    WHERE id = $1::uuid RETURNING *""",
-                run_id, error,
+                run_id,
+                error,
             )
             return dict(row) if row else None
 
@@ -320,7 +337,8 @@ class ScheduleRepository:
                 """SELECT * FROM schedule_runs
                    WHERE schedule_id = $1::uuid
                    ORDER BY created_at DESC LIMIT $2""",
-                schedule_id, limit,
+                schedule_id,
+                limit,
             )
             return [dict(r) for r in rows]
 

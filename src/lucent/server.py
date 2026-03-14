@@ -38,10 +38,12 @@ register_tools(mcp)
 
 # Register request tracking tools
 from lucent.tools.requests import register_request_tools
+
 register_request_tools(mcp)
 
 # Register schedule management tools
 from lucent.tools.schedules import register_schedule_tools
+
 register_schedule_tools(mcp)
 
 # Get logger for this module
@@ -178,11 +180,14 @@ class MCPAuthMiddleware:
                     if pool:
                         logger.debug(
                             "Trying session token auth on MCP: token_len=%d, prefix=%s",
-                            len(api_key), api_key[:8],
+                            len(api_key),
+                            api_key[:8],
                         )
                         user = await validate_session(pool, api_key)
                         if user:
-                            logger.info("MCP session auth succeeded for user %s", user.get("display_name"))
+                            logger.info(
+                                "MCP session auth succeeded for user %s", user.get("display_name")
+                            )
                             set_current_user(user)
                             try:
                                 await self.app(scope, receive, send)

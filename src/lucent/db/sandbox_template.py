@@ -80,7 +80,8 @@ class SandboxTemplateRepository:
             if organization_id:
                 row = await conn.fetchrow(
                     "SELECT * FROM sandbox_templates WHERE id = $1 AND organization_id = $2",
-                    UUID(template_id), UUID(organization_id),
+                    UUID(template_id),
+                    UUID(organization_id),
                 )
             else:
                 row = await conn.fetchrow(
@@ -93,7 +94,8 @@ class SandboxTemplateRepository:
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT * FROM sandbox_templates WHERE name = $1 AND organization_id = $2",
-                name, UUID(organization_id),
+                name,
+                UUID(organization_id),
             )
             return self._parse_row(row) if row else None
 
@@ -107,9 +109,7 @@ class SandboxTemplateRepository:
             )
             return [self._parse_row(r) for r in rows]
 
-    async def update(
-        self, template_id: str, organization_id: str, **kwargs
-    ) -> dict | None:
+    async def update(self, template_id: str, organization_id: str, **kwargs) -> dict | None:
         """Update template fields. Only non-None kwargs are applied."""
         sets = ["updated_at = NOW()"]
         params: list[Any] = [UUID(template_id), UUID(organization_id)]
@@ -147,7 +147,7 @@ class SandboxTemplateRepository:
 
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
-                f"""UPDATE sandbox_templates SET {', '.join(sets)}
+                f"""UPDATE sandbox_templates SET {", ".join(sets)}
                     WHERE id = $1 AND organization_id = $2
                     RETURNING *""",
                 *params,
@@ -158,7 +158,8 @@ class SandboxTemplateRepository:
         async with self.pool.acquire() as conn:
             result = await conn.execute(
                 "DELETE FROM sandbox_templates WHERE id = $1 AND organization_id = $2",
-                UUID(template_id), UUID(organization_id),
+                UUID(template_id),
+                UUID(organization_id),
             )
             return result == "DELETE 1"
 

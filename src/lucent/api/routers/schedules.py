@@ -1,17 +1,17 @@
 """API router for scheduled tasks."""
 
-from datetime import datetime, timezone
-from uuid import UUID
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from lucent.api.deps import get_pool, get_current_user
+from lucent.api.deps import get_current_user, get_pool
 
 router = APIRouter(prefix="/schedules", tags=["schedules"])
 
 
 # ── Models ────────────────────────────────────────────────────────────────
+
 
 class ScheduleCreate(BaseModel):
     title: str = Field(..., min_length=1, max_length=256)
@@ -51,9 +51,13 @@ class ScheduleToggle(BaseModel):
 
 # ── Endpoints ─────────────────────────────────────────────────────────────
 
+
 @router.post("")
-async def create_schedule(body: ScheduleCreate, user=Depends(get_current_user), pool=Depends(get_pool)):
+async def create_schedule(
+    body: ScheduleCreate, user=Depends(get_current_user), pool=Depends(get_pool)
+):
     from lucent.db.schedules import ScheduleRepository
+
     repo = ScheduleRepository(pool)
     return await repo.create_schedule(
         title=body.title,
@@ -82,6 +86,7 @@ async def list_schedules(
     pool=Depends(get_pool),
 ):
     from lucent.db.schedules import ScheduleRepository
+
     repo = ScheduleRepository(pool)
     return await repo.list_schedules(str(user.organization_id), status=status, enabled=enabled)
 
@@ -89,6 +94,7 @@ async def list_schedules(
 @router.get("/summary")
 async def schedule_summary(user=Depends(get_current_user), pool=Depends(get_pool)):
     from lucent.db.schedules import ScheduleRepository
+
     repo = ScheduleRepository(pool)
     return await repo.get_summary(str(user.organization_id))
 
@@ -96,6 +102,7 @@ async def schedule_summary(user=Depends(get_current_user), pool=Depends(get_pool
 @router.get("/due")
 async def get_due_schedules(user=Depends(get_current_user), pool=Depends(get_pool)):
     from lucent.db.schedules import ScheduleRepository
+
     repo = ScheduleRepository(pool)
     return await repo.get_due_schedules(str(user.organization_id))
 
@@ -103,6 +110,7 @@ async def get_due_schedules(user=Depends(get_current_user), pool=Depends(get_poo
 @router.get("/{schedule_id}")
 async def get_schedule(schedule_id: str, user=Depends(get_current_user), pool=Depends(get_pool)):
     from lucent.db.schedules import ScheduleRepository
+
     repo = ScheduleRepository(pool)
     result = await repo.get_schedule_with_runs(schedule_id, str(user.organization_id))
     if not result:
@@ -118,6 +126,7 @@ async def update_schedule(
     pool=Depends(get_pool),
 ):
     from lucent.db.schedules import ScheduleRepository
+
     repo = ScheduleRepository(pool)
     fields = {k: v for k, v in body.model_dump(exclude_unset=True).items()}
     if "timezone" in fields:
@@ -136,6 +145,7 @@ async def toggle_schedule(
     pool=Depends(get_pool),
 ):
     from lucent.db.schedules import ScheduleRepository
+
     repo = ScheduleRepository(pool)
     result = await repo.toggle_schedule(schedule_id, str(user.organization_id), body.enabled)
     if not result:
@@ -146,6 +156,7 @@ async def toggle_schedule(
 @router.delete("/{schedule_id}")
 async def delete_schedule(schedule_id: str, user=Depends(get_current_user), pool=Depends(get_pool)):
     from lucent.db.schedules import ScheduleRepository
+
     repo = ScheduleRepository(pool)
     ok = await repo.delete_schedule(schedule_id, str(user.organization_id))
     if not ok:
@@ -156,6 +167,7 @@ async def delete_schedule(schedule_id: str, user=Depends(get_current_user), pool
 @router.get("/{schedule_id}/runs")
 async def list_runs(schedule_id: str, user=Depends(get_current_user), pool=Depends(get_pool)):
     from lucent.db.schedules import ScheduleRepository
+
     repo = ScheduleRepository(pool)
     # Verify ownership
     sched = await repo.get_schedule(schedule_id, str(user.organization_id))
@@ -167,8 +179,9 @@ async def list_runs(schedule_id: str, user=Depends(get_current_user), pool=Depen
 @router.post("/{schedule_id}/trigger")
 async def trigger_now(schedule_id: str, user=Depends(get_current_user), pool=Depends(get_pool)):
     """Manually trigger a schedule immediately, regardless of next_run_at."""
-    from lucent.db.schedules import ScheduleRepository
     from lucent.db.requests import RequestRepository
+    from lucent.db.schedules import ScheduleRepository
+
     sched_repo = ScheduleRepository(pool)
     req_repo = RequestRepository(pool)
 
@@ -195,7 +208,9 @@ async def trigger_now(schedule_id: str, user=Depends(get_current_user), pool=Dep
         agent_type=sched.get("agent_type", "code"),
         priority=sched.get("priority", "medium"),
         model=sched.get("model"),
-        sandbox_template_id=str(sched["sandbox_template_id"]) if sched.get("sandbox_template_id") else None,
+        sandbox_template_id=str(sched["sandbox_template_id"])
+        if sched.get("sandbox_template_id")
+        else None,
         sandbox_config=sched.get("sandbox_config"),
         org_id=str(user.organization_id),
     )

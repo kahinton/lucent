@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-import shlex
 import logging
+import shlex
 import time
 import uuid
 from datetime import datetime, timezone
 
-import docker
 import docker.errors
 
+import docker
 from lucent.sandbox.backend import SandboxBackend
 from lucent.sandbox.models import (
     ExecResult,
@@ -43,9 +43,10 @@ class DockerBackend(SandboxBackend):
                 # Auto-detect: try docker context for Colima/Rancher/etc.
                 try:
                     result = subprocess.run(
-                        ["docker", "context", "inspect", "--format",
-                         "{{.Endpoints.docker.Host}}"],
-                        capture_output=True, text=True, timeout=5,
+                        ["docker", "context", "inspect", "--format", "{{.Endpoints.docker.Host}}"],
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
                     )
                     if result.returncode == 0 and result.stdout.strip():
                         base_url = result.stdout.strip()
@@ -64,9 +65,7 @@ class DockerBackend(SandboxBackend):
         try:
             client.networks.get(self._network_name)
         except docker.errors.NotFound:
-            client.networks.create(
-                self._network_name, driver="bridge", internal=True
-            )
+            client.networks.create(self._network_name, driver="bridge", internal=True)
             logger.info("Created sandbox network: %s", self._network_name)
 
     async def create(self, config: SandboxConfig) -> SandboxInfo:
@@ -81,9 +80,7 @@ class DockerBackend(SandboxBackend):
         )
 
         try:
-            container = await asyncio.to_thread(
-                self._create_container, sandbox_id, name, config
-            )
+            container = await asyncio.to_thread(self._create_container, sandbox_id, name, config)
             info.container_id = container.id
 
             # Clone repo if configured
@@ -104,7 +101,9 @@ class DockerBackend(SandboxBackend):
                 if result.exit_code != 0:
                     logger.warning(
                         "Setup command failed in %s: %s (exit %d)",
-                        name, cmd, result.exit_code,
+                        name,
+                        cmd,
+                        result.exit_code,
                     )
                     # Don't fail the sandbox — setup commands are best-effort
 
@@ -147,9 +146,9 @@ class DockerBackend(SandboxBackend):
             network_mode = "none"
         elif config.network_mode == "bridge":
             self._ensure_network()
-            networking_config = client.api.create_networking_config({
-                self._network_name: client.api.create_endpoint_config()
-            })
+            networking_config = client.api.create_networking_config(
+                {self._network_name: client.api.create_endpoint_config()}
+            )
         # For "allowlist" mode, we use bridge + iptables (handled post-create)
 
         container = client.containers.run(
@@ -200,9 +199,7 @@ class DockerBackend(SandboxBackend):
     ) -> ExecResult:
         container = self._find_container(sandbox_id)
         if container is None:
-            return ExecResult(
-                exit_code=-1, stdout="", stderr="Sandbox not found", timed_out=False
-            )
+            return ExecResult(exit_code=-1, stdout="", stderr="Sandbox not found", timed_out=False)
 
         if isinstance(command, list):
             cmd = command
@@ -211,9 +208,7 @@ class DockerBackend(SandboxBackend):
 
         start = time.monotonic()
         try:
-            result = await asyncio.to_thread(
-                self._exec_sync, container, cmd, cwd, env, timeout
-            )
+            result = await asyncio.to_thread(self._exec_sync, container, cmd, cwd, env, timeout)
             duration_ms = int((time.monotonic() - start) * 1000)
             return ExecResult(
                 exit_code=result[0],
@@ -282,9 +277,7 @@ class DockerBackend(SandboxBackend):
             tar.addfile(file_info, io.BytesIO(content))
         tar_stream.seek(0)
 
-        await asyncio.to_thread(
-            container.put_archive, "/", tar_stream.read()
-        )
+        await asyncio.to_thread(container.put_archive, "/", tar_stream.read())
 
     async def list_files(self, sandbox_id: str, path: str = "/workspace") -> list[dict]:
         result = await self.exec(
@@ -297,11 +290,13 @@ class DockerBackend(SandboxBackend):
         for line in result.stdout.strip().splitlines():
             parts = line.split(None, 3)
             if len(parts) >= 4:
-                files.append({
-                    "path": parts[3],
-                    "size": int(parts[1]) if parts[1].isdigit() else 0,
-                    "is_dir": parts[2] == "d",
-                })
+                files.append(
+                    {
+                        "path": parts[3],
+                        "size": int(parts[1]) if parts[1].isdigit() else 0,
+                        "is_dir": parts[2] == "d",
+                    }
+                )
         return files
 
     async def get(self, sandbox_id: str) -> SandboxInfo | None:
@@ -360,18 +355,18 @@ class DockerBackend(SandboxBackend):
                 "exited": SandboxStatus.STOPPED,
                 "dead": SandboxStatus.FAILED,
             }
-            results.append(SandboxInfo(
-                id=sid,
-                name=c.name,
-                status=status_map.get(c.status, SandboxStatus.FAILED),
-                config=SandboxConfig(),
-                container_id=c.id,
-            ))
+            results.append(
+                SandboxInfo(
+                    id=sid,
+                    name=c.name,
+                    status=status_map.get(c.status, SandboxStatus.FAILED),
+                    config=SandboxConfig(),
+                    container_id=c.id,
+                )
+            )
         return results
 
-    def _find_container(
-        self, sandbox_id: str
-    ) -> docker.models.containers.Container | None:
+    def _find_container(self, sandbox_id: str) -> docker.models.containers.Container | None:
         client = self._docker()
         containers = client.containers.list(
             all=True,

@@ -146,7 +146,10 @@ class OrganizationRepository:
         return result is not None
 
     async def list_all(
-        self, limit: int = 100, offset: int = 0, organization_id: Any | None = None,
+        self,
+        limit: int = 100,
+        offset: int = 0,
+        organization_id: Any | None = None,
     ) -> list[dict[str, Any]]:
         """List organizations, optionally filtered by ID.
 
