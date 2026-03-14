@@ -1,63 +1,74 @@
 ---
 name: dev-workflow
-description: 'Standard development workflow'
+description: 'Standard development workflow for the Lucent project — code, test, review cycle with project-specific conventions'
 ---
 
-# Dev Workflow
+# Dev Workflow — Lucent Project
 
-Workflow skill for python/fastapi development.
+## Before Starting Any Task
 
-## When to Use
+1. **Search memories** for related past work: `search_memories(query="feature/module name")`
+2. Read existing code in the area you're changing — understand patterns before modifying
+3. Check for existing tests that cover the area
 
-- Starting a new feature or bug fix
-- Running the development cycle (code → test → review)
-- Setting up the development environment
-- Debugging test failures
+## Development Cycle
 
-## Development Workflow
+### 1. Implement
 
-### Step 1: Understand the Task
+- Make minimal, focused changes — one concern per commit
+- Follow existing code patterns in the file you're editing
+- Use type hints (Python 3.12+ style — `str | None` not `Optional[str]`)
+- Keep imports organized: stdlib → third-party → local
+- Don't add docstrings/comments to code you didn't change
 
-1. Read the task description or issue
-2. Search memories for related past work
-3. Identify affected files and modules
-4. Check for existing tests that cover this area
+### 2. Test
 
-### Step 2: Set Up
+Run tests frequently — catch issues early:
+```bash
+# Run specific test file
+pytest tests/test_<module>.py -v --tb=short
 
-1. Ensure virtual environment is active
-2. Run `pip install -e ".[dev]"` if dependencies changed
-3. Verify `ruff` and `pytest` are available
+# Run full suite
+pytest tests/ -q --tb=short
 
-### Step 3: Implement
+# Run with ruff linting
+ruff check src/lucent/
+```
 
-1. Make minimal, focused changes
-2. Follow existing code patterns and conventions
-3. Add type annotations/hints where expected
-4. Write clear commit-worthy code (no TODOs left behind)
+Test configuration: `pyproject.toml` `[tool.pytest.ini_options]`, asyncio_mode = "auto"
 
-### Step 4: Test
+### 3. Verify in Docker
 
-1. Run `pytest` for the affected test files
-2. Run `pytest --tb=short` for a quick overview
-3. Run `ruff check .` for linting
+If the change affects runtime behavior:
+```bash
+docker restart lucent-server
+# Wait for health check, then verify
+docker logs lucent-server --since 30s 2>&1 | head -10
+```
 
-### Step 5: Document
+Source files are volume-mounted so most changes hot-reload. Dependency changes or new files need a container rebuild: `docker compose build lucent`.
 
-1. Update relevant documentation if behavior changed
-2. Add inline comments only where logic is non-obvious
-3. Save a memory of what you learned
+### 4. Capture What You Learned
 
-## Environment Maintenance
+If you fixed a tricky bug, made a design decision, or learned something non-obvious — save it as a memory immediately. Don't wait until end of conversation.
 
-- Keep dependencies up to date
-- Watch for deprecation warnings
-- Monitor test execution time
-- Clean up temporary files
+## Project Conventions
 
-## Tips
+| Convention | Details |
+|-----------|---------|
+| Python version | 3.12+ |
+| Linter | ruff (config in pyproject.toml) |
+| Test runner | pytest + pytest-asyncio |
+| Line length | 100 characters |
+| SQL | Raw SQL with asyncpg parameterized queries (`$1`, `$2`) — no ORM |
+| Migrations | Numbered raw SQL files in `src/lucent/db/migrations/` |
+| API framework | FastAPI with Pydantic v2 models |
+| Auth | Session cookies + API keys, RBAC via deps |
 
-- Run tests frequently — catch issues early
-- Read test failures carefully before changing code
-- Check git diff before finishing — review your own changes
-- Search for similar patterns in the codebase before inventing new ones
+## Common Gotchas
+
+- **asyncpg pool**: Don't hold connections across await boundaries — use `async with pool.acquire()` blocks
+- **Test isolation**: Tests use a shared `db_pool` fixture but clean up after themselves
+- **Docker volumes**: If code changes aren't reflected, the volume cache may be stale — restart the container
+- **MCP tools field**: When configuring MCP servers for Copilot SDK, `"tools": ["*"]` is REQUIRED
+- **Daemon imports**: The daemon runs as `python -m daemon.daemon` — imports need to work from that context

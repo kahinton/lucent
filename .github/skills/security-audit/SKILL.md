@@ -3,67 +3,63 @@ name: security-audit
 description: 'Security review procedures for auth, API keys, rate limiting, RBAC, and memory access control — pairs with the existing security agent'
 ---
 
-# Security Audit
+# Security Audit — Lucent Project
 
-Code review skill for python/fastapi projects.
+## Lucent Security Architecture
 
-## When to Use
+| Layer | Implementation | Key Files |
+|-------|---------------|-----------|
+| Authentication | Session cookies (bcrypt + PyNaCl), API keys, OAuth providers | `auth.py`, `auth_providers.py` |
+| Authorization | RBAC (owner/admin/member) + org-scoped isolation | `rbac.py`, `api/deps.py` |
+| Rate limiting | Token bucket per-user, configurable per-endpoint | `rate_limit.py` |
+| Memory isolation | Organization-scoped — users only see their org's memories | `db/` repositories, SQL queries |
+| MCP auth | Session token or API key via Bearer auth in MCP middleware | `server.py` middleware |
+| CSRF | Double-submit cookie pattern on state-changing endpoints | `api/app.py` |
 
-- Reviewing pull requests or code changes
-- Evaluating code quality during development
-- Performing security-focused code review
-- Checking for python-specific anti-patterns
+## Audit Checklist
 
-## Review Process
+### 1. Authentication
+- [ ] Session cookies: `HttpOnly`, `Secure`, `SameSite=Lax`, proper expiry
+- [ ] Password hashing: bcrypt with adequate work factor
+- [ ] Session tokens: cryptographically random, not guessable
+- [ ] API keys: hashed in database (never stored plaintext)
+- [ ] No auth bypass on sensitive endpoints (check `get_current_user` dependency)
 
-### Step 1: Understand the Change
+### 2. Authorization (RBAC)
+- [ ] Destructive operations (DELETE) require `admin` or `owner` role
+- [ ] Write operations require `member` or above
+- [ ] Organization isolation: queries always filter by `organization_id`
+- [ ] No IDOR — users can't access resources from other orgs by guessing IDs
+- [ ] Daemon API key has minimal permissions (read/write, not admin)
 
-1. Read the PR description or task context
-2. Identify what files changed and why
-3. Check if there are related tests
+### 3. Input Validation
+- [ ] All API inputs validated via Pydantic models
+- [ ] SQL queries use parameterized queries (asyncpg `$1` placeholders, never f-strings)
+- [ ] File paths validated and sandboxed (sandbox module)
+- [ ] Search queries sanitized (no SQL injection via search)
 
-### Step 2: Check Correctness
+### 4. Rate Limiting
+- [ ] Auth endpoints (login, register) have strict rate limits
+- [ ] API endpoints have per-user rate limits
+- [ ] Rate limit headers returned in responses
+- [ ] Failed auth attempts tracked and limited
 
-1. Does the code do what it claims to do?
-2. Are edge cases handled?
-3. Are error paths covered?
-4. Is the logic sound?
+### 5. Memory Access Control
+- [ ] Memories scoped to organization — cross-org access impossible
+- [ ] Shared memories only visible within the same org
+- [ ] Memory operations validate user.organization_id against memory.organization_id
+- [ ] Daemon operations use the daemon's own identity, not impersonation
 
-### Step 3: Check Style & Conventions
+### 6. MCP Protocol Security
+- [ ] MCP middleware validates session token or API key on every request
+- [ ] Tool operations respect the authenticated user's permissions
+- [ ] No tools expose internal server state or other users' data
 
-1. Run `ruff check` if available
-2. Verify type hints are present and correct
-3. Check docstrings for public APIs
-4. Ensure imports are organized (stdlib → third-party → local)
-5. Verify `pyproject.toml` conventions are followed
+## How to Run an Audit
 
-### Step 4: Check Security
-
-1. No hardcoded secrets or credentials
-2. Input validation on external data
-3. Proper authentication/authorization checks
-4. SQL injection, XSS, or injection vulnerabilities
-5. Proper error messages (no internal details leaked)
-
-### Step 5: Check Performance
-
-1. No obvious O(n²) or worse algorithms where O(n) is possible
-2. No unnecessary database queries or API calls
-3. Proper resource management (connections, files, memory)
-4. Caching where appropriate
-
-### Step 6: Summarize
-
-Output a structured review:
-- **Verdict**: approve / request-changes / needs-discussion
-- **Critical issues**: Things that must be fixed
-- **Suggestions**: Things that could be improved
-- **Positive notes**: What was done well
-
-## Best Practices
-
-- Focus on logic and correctness over style (linters handle style)
-- Be specific: "this loop is O(n²) because X" not "performance concern"
-- Suggest alternatives, don't just point out problems
-- Acknowledge good patterns when you see them
-- Check for test coverage on new code paths
+1. **Search memories** for past audit results: `search_memories(tags=["security", "code-review"])`
+2. **Read the auth chain**: `auth.py` → `auth_providers.py` → `api/deps.py` → router endpoints
+3. **Check every route** in `api/routers/` — verify auth dependency is present and RBAC is correct
+4. **Grep for red flags**: `f"SELECT`, `f"INSERT`, `f"UPDATE`, `f"DELETE` (SQL injection risk), `password` in logs, hardcoded secrets
+5. **Test boundary conditions**: What happens with expired sessions? Revoked API keys? Wrong org ID?
+6. **Save findings** as a memory tagged `security`, `code-review` with importance 8-9

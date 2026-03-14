@@ -3,67 +3,85 @@ name: docker-operations
 description: 'Build, debug, and manage Docker containers and compose services for local dev and deployment'
 ---
 
-# Docker Operations
+# Docker Operations — Lucent Project
 
-Code review skill for python/fastapi projects.
+## Project Docker Setup
 
-## When to Use
+Lucent uses Docker Compose with these services:
 
-- Reviewing pull requests or code changes
-- Evaluating code quality during development
-- Performing security-focused code review
-- Checking for python-specific anti-patterns
+| Service | File | Purpose |
+|---------|------|---------|
+| `lucent` (lucent-server) | `Dockerfile.dev` | Main MCP server + FastAPI web app |
+| `postgres` | stock postgres image | Database |
+| `daemon-1`, `daemon-2` | `Dockerfile.dev` (multi-daemon profile) | Autonomous daemon instances |
 
-## Review Process
+Key files: `docker-compose.yml`, `Dockerfile`, `Dockerfile.dev`, `docker/init.sql`
 
-### Step 1: Understand the Change
+## Common Operations
 
-1. Read the PR description or task context
-2. Identify what files changed and why
-3. Check if there are related tests
+### Rebuild after code changes (hot-reload handles most, but dependency changes need rebuild)
+```bash
+docker compose build lucent
+docker compose up -d lucent
+```
 
-### Step 2: Check Correctness
+### View logs
+```bash
+docker logs lucent-server --since 5m    # Recent server logs
+docker logs lucent-server -f            # Follow live
+docker compose logs daemon-1 --since 5m # Daemon logs
+```
 
-1. Does the code do what it claims to do?
-2. Are edge cases handled?
-3. Are error paths covered?
-4. Is the logic sound?
+### Restart a service
+```bash
+docker restart lucent-server
+docker compose restart daemon-1
+```
 
-### Step 3: Check Style & Conventions
+### Full stack restart
+```bash
+docker compose down && docker compose up -d
+```
 
-1. Run `ruff check` if available
-2. Verify type hints are present and correct
-3. Check docstrings for public APIs
-4. Ensure imports are organized (stdlib → third-party → local)
-5. Verify `pyproject.toml` conventions are followed
+### Run tests inside container
+```bash
+docker exec lucent-server pytest tests/ -q --tb=short
+```
 
-### Step 4: Check Security
+### Check container health
+```bash
+docker compose ps                       # Service status
+docker exec lucent-server python -c "import httpx; print(httpx.get('http://localhost:8766/api/health').json())"
+```
 
-1. No hardcoded secrets or credentials
-2. Input validation on external data
-3. Proper authentication/authorization checks
-4. SQL injection, XSS, or injection vulnerabilities
-5. Proper error messages (no internal details leaked)
+## Multi-Daemon Setup
+```bash
+docker compose --profile multi-daemon up -d
+```
+This starts `daemon-1` and `daemon-2` with role-based coordination.
 
-### Step 5: Check Performance
+## Environment Variables
 
-1. No obvious O(n²) or worse algorithms where O(n) is possible
-2. No unnecessary database queries or API calls
-3. Proper resource management (connections, files, memory)
-4. Caching where appropriate
+Key env vars in `docker-compose.yml`:
+- `DATABASE_URL` — PostgreSQL connection
+- `GITHUB_TOKEN` — Copilot SDK auth
+- `LUCENT_LLM_ENGINE` — `copilot` (default) or `langchain`
+- `LUCENT_CHAT_MODEL` — default model for chat
+- `LUCENT_DAEMON_MODEL` — default model for daemon sessions
 
-### Step 6: Summarize
+## Debugging Container Issues
 
-Output a structured review:
-- **Verdict**: approve / request-changes / needs-discussion
-- **Critical issues**: Things that must be fixed
-- **Suggestions**: Things that could be improved
-- **Positive notes**: What was done well
+1. **Container won't start**: Check `docker compose logs lucent` for Python import errors or missing env vars
+2. **Database connection refused**: Ensure postgres is healthy — `docker compose ps` should show postgres as healthy
+3. **Hot-reload not working**: Source files are volume-mounted (`./src:/app/src:cached`). If changes aren't reflected, the volume mount may be stale — rebuild
+4. **Out of disk space**: `docker system prune -f` to clean unused images/containers
 
-## Best Practices
+## Database Operations
 
-- Focus on logic and correctness over style (linters handle style)
-- Be specific: "this loop is O(n²) because X" not "performance concern"
-- Suggest alternatives, don't just point out problems
-- Acknowledge good patterns when you see them
-- Check for test coverage on new code paths
+```bash
+# Connect to postgres directly
+docker exec -it hindsight-postgres-1 psql -U lucent -d lucent
+
+# Run migrations
+docker exec lucent-server python -c "from lucent.db import run_migrations; import asyncio; asyncio.run(run_migrations())"
+```

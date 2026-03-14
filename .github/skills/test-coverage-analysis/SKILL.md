@@ -1,13 +1,84 @@
 ---
 name: test-coverage-analysis
-description: 'Identify untested code paths, prioritize test writing, track coverage metrics across the 27K-line codebase'
+description: 'Identify untested code paths, prioritize test writing, track coverage metrics across the Lucent codebase'
 ---
 
-# Test Coverage Analysis
+# Test Coverage Analysis — Lucent Project
 
-Code review skill for python/fastapi projects.
+## Test Infrastructure
 
-## When to Use
+| Tool | Command | Config |
+|------|---------|--------|
+| pytest | `.venv/bin/pytest tests/ -q --tb=short` | `pyproject.toml` `[tool.pytest.ini_options]` |
+| pytest-asyncio | Async test support | `asyncio_mode = "auto"` |
+| ruff | `.venv/bin/ruff check .` | `pyproject.toml` `[tool.ruff]` |
+| coverage | `.venv/bin/pytest --cov=src/lucent tests/` | Optional — install `pytest-cov` |
+
+## Test File Layout
+
+Tests live in `tests/` and mirror the source structure:
+```
+tests/
+  conftest.py          # Shared fixtures (db_pool, test users, etc.)
+  test_auth.py         # Authentication tests
+  test_rbac.py         # RBAC and role checks
+  test_server.py       # MCP server and tools
+  test_memories_api.py # Memory CRUD API
+  test_search_api.py   # Search endpoint tests
+  test_llm_engine.py   # LLM engine abstraction
+  test_daemon_api.py   # Daemon API endpoints
+  ...
+```
+
+## How to Assess Coverage
+
+### Step 1: Run tests and check current count
+```bash
+pytest tests/ -q --tb=short  # Quick pass/fail count
+```
+
+### Step 2: Identify coverage gaps
+Run with coverage report:
+```bash
+pytest --cov=src/lucent --cov-report=term-missing tests/
+```
+
+Look for files with low coverage, especially:
+- `src/lucent/api/routers/` — each router should have a corresponding test file
+- `src/lucent/db/` — database repositories need CRUD coverage
+- `src/lucent/tools/` — MCP tool implementations
+- `src/lucent/llm/` — engine abstraction layer
+
+### Step 3: Prioritize what to test
+
+**High priority** (security/correctness critical):
+1. Auth flows — login, session validation, API key auth, token expiry
+2. RBAC — role checks on every endpoint, org isolation
+3. Memory operations — CRUD, search, access control, org scoping
+4. Input validation — malformed requests, injection attempts
+
+**Medium priority** (functional correctness):
+5. MCP tools — each tool's happy path and error cases
+6. Database repositories — edge cases, concurrent access
+7. LLM engine — factory selection, error handling, timeout behavior
+
+**Lower priority** (operational):
+8. Rate limiting behavior
+9. Logging and audit trails
+10. Mode/license checks
+
+### Step 4: Write tests that matter
+
+Good tests for Lucent:
+- **Use the shared fixtures** in `conftest.py` — `db_pool`, `test_user`, `async_client`
+- **Test auth boundaries** — verify endpoints reject unauthenticated requests
+- **Test org isolation** — verify user A can't see user B's memories
+- **Test error paths** — not just happy paths
+- **Keep tests fast** — mock external services (LLM calls, Copilot SDK), use in-memory where possible
+
+## Current Test State
+
+Check `search_memories(tags=["code-review", "test-coverage"])` for previous coverage assessments and known gaps.
 
 - Reviewing pull requests or code changes
 - Evaluating code quality during development

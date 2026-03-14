@@ -3,67 +3,69 @@ name: observability-operations
 description: 'Procedures for monitoring Lucent via Prometheus metrics and Grafana dashboards — query patterns, alert tuning, dashboard creation'
 ---
 
-# Observability Operations
+# Observability Operations — Lucent Project
 
-Code review skill for python/fastapi projects.
+## Current Monitoring Infrastructure
 
-## When to Use
+Lucent exposes operational data through:
+- **Structured logging** (`src/lucent/logging.py`) — JSON-formatted logs with request IDs
+- **Health endpoint** (`/api/health`) — basic liveness check
+- **Daemon logs** (`daemon/daemon.log`) — cognitive loop activity, session outcomes, task dispatch
 
-- Reviewing pull requests or code changes
-- Evaluating code quality during development
-- Performing security-focused code review
-- Checking for python-specific anti-patterns
+Future: Prometheus metrics endpoint and Grafana dashboards are planned but not yet implemented.
 
-## Review Process
+## What to Monitor
 
-### Step 1: Understand the Change
+### Server Health
+- HTTP response codes and latency (from access logs)
+- Database connection pool status
+- Memory usage and request throughput
+- MCP tool call success/failure rates
 
-1. Read the PR description or task context
-2. Identify what files changed and why
-3. Check if there are related tests
+### Daemon Health
+- Cognitive loop cycle timing (target: completes within DAEMON_INTERVAL_MINUTES)
+- Session success rate (sessions that return a response vs timeout/error)
+- Active session count vs MAX_CONCURRENT_SESSIONS
+- Task throughput: created → dispatched → completed pipeline
+- Watchdog heartbeat (detect event loop freezes)
 
-### Step 2: Check Correctness
+### Database
+- Connection pool utilization (asyncpg pool size vs active connections)
+- Query latency for common operations (memory search, create, list)
+- Migration status (are all migrations applied?)
 
-1. Does the code do what it claims to do?
-2. Are edge cases handled?
-3. Are error paths covered?
-4. Is the logic sound?
+## Log Analysis
 
-### Step 3: Check Style & Conventions
+### Server logs (inside container)
+```bash
+docker logs lucent-server --since 1h 2>&1 | grep -i error
+docker logs lucent-server --since 1h 2>&1 | grep "status_code=5"
+```
 
-1. Run `ruff check` if available
-2. Verify type hints are present and correct
-3. Check docstrings for public APIs
-4. Ensure imports are organized (stdlib → third-party → local)
-5. Verify `pyproject.toml` conventions are followed
+### Daemon logs
+```bash
+docker compose logs daemon-1 --since 1h | grep -E "ERROR|WARN|TIMEOUT"
+docker compose logs daemon-1 --since 1h | grep "Session.*completed"
+```
 
-### Step 4: Check Security
+### Common patterns to watch for
+- `HARD TIMEOUT` — session lifecycle hung (likely during client.start or create_session)
+- `at session limit` — all session slots occupied, work being skipped
+- `force_stop` — client.stop() hung, had to force-kill
+- `Connection refused` — database or MCP server unreachable
 
-1. No hardcoded secrets or credentials
-2. Input validation on external data
-3. Proper authentication/authorization checks
-4. SQL injection, XSS, or injection vulnerabilities
-5. Proper error messages (no internal details leaked)
+## Alert Conditions (Future)
 
-### Step 5: Check Performance
+When Prometheus metrics are added, alert on:
+- Health endpoint returning non-200 for > 30s
+- Daemon cycle taking > 2x normal duration
+- Session error rate > 20% over 15 minutes
+- Database connection pool exhaustion
+- Zero successful sessions in 30 minutes (daemon may be stuck)
 
-1. No obvious O(n²) or worse algorithms where O(n) is possible
-2. No unnecessary database queries or API calls
-3. Proper resource management (connections, files, memory)
-4. Caching where appropriate
+## Adding Metrics
 
-### Step 6: Summarize
-
-Output a structured review:
-- **Verdict**: approve / request-changes / needs-discussion
-- **Critical issues**: Things that must be fixed
-- **Suggestions**: Things that could be improved
-- **Positive notes**: What was done well
-
-## Best Practices
-
-- Focus on logic and correctness over style (linters handle style)
-- Be specific: "this loop is O(n²) because X" not "performance concern"
-- Suggest alternatives, don't just point out problems
-- Acknowledge good patterns when you see them
-- Check for test coverage on new code paths
+When implementing Prometheus metrics, instrument:
+1. `src/lucent/api/app.py` — HTTP request duration histogram, request count by status
+2. `src/lucent/server.py` — MCP tool call count and duration
+3. `daemon/daemon.py` — session duration, cycle duration, task counts by status
