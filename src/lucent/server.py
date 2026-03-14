@@ -37,12 +37,12 @@ mcp = FastMCP("Lucent")
 register_tools(mcp)
 
 # Register request tracking tools
-from lucent.tools.requests import register_request_tools
+from lucent.tools.requests import register_request_tools  # noqa: E402
 
 register_request_tools(mcp)
 
 # Register schedule management tools
-from lucent.tools.schedules import register_schedule_tools
+from lucent.tools.schedules import register_schedule_tools  # noqa: E402
 
 register_schedule_tools(mcp)
 

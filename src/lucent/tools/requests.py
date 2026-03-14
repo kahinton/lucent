@@ -25,7 +25,8 @@ def register_request_tools(mcp: FastMCP) -> None:
     """Register request tracking tools with the MCP server."""
 
     @mcp.tool(
-        description="""Create a tracked request — a top-level work item that will be broken into tasks.
+        description="""Create a tracked request \u2014 a top-level work item
+that will be broken into tasks.
 
 Use this when you identify new work to do (during cognitive cycles, from user messages, etc.).
 The request will appear in the Requests UI and can be broken into tasks.
@@ -74,12 +75,14 @@ Args:
     title: Short descriptive title for the task
     description: Full task instructions for the agent
     agent_type: Name of an approved agent definition to handle this task
-    model: LLM model to use for this task. If not set, the daemon picks a default. See list_available_models for options.
+    model: LLM model to use for this task. If not set, the daemon
+        picks a default. See list_available_models for options.
     priority: 'low', 'medium', 'high', or 'urgent'
     sequence_order: Execution order (0-based, lower runs first)
-    parent_task_id: Optional — ID of parent task for sub-tasks
+    parent_task_id: Optional \u2014 ID of parent task for sub-tasks
 
-Returns: JSON with the created task including its ID, or an error if the agent type is not approved."""
+Returns: JSON with the created task including its ID, or an error
+if the agent type is not approved."""
     )
     async def create_task(
         request_id: str,
@@ -112,11 +115,12 @@ Returns: JSON with the created task including its ID, or an error if the agent t
         agents = await def_repo.list_agents(str(org_id), status="active")
         active_names = {a["name"] for a in agents}
         if agent_type and agent_type not in active_names:
+            avail = sorted(active_names) if active_names else "none — approve definitions first"
             return json.dumps(
                 {
                     "error": f"No approved agent definition for '{agent_type}'. "
                     f"Create and approve one at /definitions before assigning tasks. "
-                    f"Available agents: {sorted(active_names) if active_names else 'none — approve definitions first'}",
+                    f"Available agents: {avail}",
                 }
             )
 
@@ -150,7 +154,8 @@ Events appear in the task's timeline in the UI.
 
 Args:
     task_id: ID of the task
-    event_type: Type of event — 'progress', 'info', 'warning', 'agent_dispatched', 'agent_completed', etc.
+    event_type: Type of event \u2014 'progress', 'info', 'warning',
+        'agent_dispatched', 'agent_completed', etc.
     detail: Human-readable description of what happened
 
 Returns: JSON confirmation."""
@@ -165,7 +170,8 @@ Returns: JSON confirmation."""
         return json.dumps({"id": str(event["id"]), "event_type": event_type})
 
     @mcp.tool(
-        description="""Link a memory to a tracked task — showing which memories were created, read, or updated during task execution.
+        description="""Link a memory to a tracked task \u2014 showing which
+memories were created, read, or updated during task execution.
 
 This creates the lineage between tasks and the memories they interact with,
 visible in the request detail UI.
@@ -187,7 +193,8 @@ Returns: JSON confirmation."""
         return json.dumps({"status": "linked", "task_id": task_id, "memory_id": memory_id})
 
     @mcp.tool(
-        description="""Get the full details of a tracked request including its task tree, events, and memory links.
+        description="""Get the full details of a tracked request
+including its task tree, events, and memory links.
 
 Args:
     request_id: ID of the request
@@ -215,7 +222,8 @@ Returns: JSON with request details, task breakdown, events timeline, and memory 
         return json.dumps(req, default=serialize)
 
     @mcp.tool(
-        description="""List pending requests — top-level work items waiting to be planned or executed.
+        description="""List pending requests \u2014 top-level work items
+waiting to be planned or executed.
 
 Returns requests with status 'pending', including how many tasks each has.
 Requests with 0 tasks need to be broken into tasks before they can be dispatched.
