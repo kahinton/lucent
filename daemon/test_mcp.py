@@ -2,13 +2,14 @@
 
 import asyncio
 import json
+import os
 
 import httpx
 
 
 async def test_mcp():
     url = "http://localhost:8766/mcp"
-    key = "hs_Vzwb0Lk88Eelu9OlYhZMpzqY-KKJbnRFSDZvlR7EQGo"
+    key = os.environ["LUCENT_MCP_API_KEY"]
     headers = {
         "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
