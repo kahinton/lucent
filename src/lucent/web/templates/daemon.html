@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}Daemon Activity - Lucent{% endblock %}
+{% block title %}Autonomous Activity - Lucent{% endblock %}
 
 {% block content %}
 <!-- Page Header -->
@@ -12,8 +12,8 @@
             </svg>
         </div>
         <div>
-            <h1 class="text-2xl font-bold text-gray-900">Daemon Activity</h1>
-            <p class="text-sm text-gray-500">What Lucent has been thinking about autonomously</p>
+            <h1 class="text-2xl font-bold text-gray-900">Autonomous Activity</h1>
+            <p class="text-sm text-gray-500">What Lucent has been thinking about and working on</p>
         </div>
         {% if needs_review_count > 0 %}
         <a href="/daemon/review" class="ml-auto inline-flex items-center gap-2 px-4 py-2 bg-amber-100 text-amber-800 text-sm font-medium rounded-lg hover:bg-amber-200 transition-colors">
@@ -34,7 +34,7 @@
                 <path stroke-linecap="round" stroke-linejoin="round" d="M7.5 8.25h9m-9 3H12m-9.75 1.51c0 1.6 1.123 2.994 2.707 3.227 1.087.16 2.185.283 3.293.369V21l4.076-4.076a1.526 1.526 0 011.037-.443 48.282 48.282 0 005.68-.494c1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0012 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018z" />
             </svg>
             <h2 class="text-lg font-semibold text-gray-900">Messages</h2>
-            <span class="text-xs text-gray-400">Communicate with the daemon</span>
+            <span class="text-xs text-gray-400">Send Lucent a message</span>
         </div>
     </div>
     
@@ -50,7 +50,7 @@
               hx-swap="innerHTML scroll:#message-thread:bottom"
               class="flex gap-3">
             <textarea name="content"
-                      placeholder="Send a message to the daemon..."
+                      placeholder="Send a message to Lucent..."
                       rows="2"
                       required
                       class="flex-1 px-4 py-2.5 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none resize-none"
@@ -150,9 +150,9 @@
     <svg class="mx-auto w-16 h-16 text-gray-300 mb-4" fill="none" viewBox="0 0 24 24" stroke-width="1" stroke="currentColor">
         <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
     </svg>
-    <h3 class="text-lg font-semibold text-gray-900 mb-2">No daemon activity yet</h3>
+    <h3 class="text-lg font-semibold text-gray-900 mb-2">No autonomous activity yet</h3>
     <p class="text-sm text-gray-500 max-w-md mx-auto">
-        When the Lucent daemon runs autonomously, its reflections, maintenance work, 
+        When Lucent runs autonomously, its reflections, maintenance work, 
         and discoveries will appear here.
     </p>
     <p class="text-xs text-gray-400 mt-4 font-mono">

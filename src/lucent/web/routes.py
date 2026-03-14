@@ -659,6 +659,24 @@ async def dashboard(request: Request):
         requesting_org_id=user.organization_id,
     )
 
+    # Agent/skill stats
+    from lucent.db.definitions import DefinitionRepository
+    def_repo = DefinitionRepository(pool)
+    org_id = str(user.organization_id)
+    agents = await def_repo.list_agents(org_id, status="active")
+    skills = await def_repo.list_skills(org_id, status="active")
+    active_agents = len(agents)
+    active_skills = len(skills)
+
+    # Pending tasks count
+    pending_tasks = await memory_repo.search(
+        limit=1,
+        tags=["daemon-task", "pending"],
+        requesting_user_id=user.id,
+        requesting_org_id=user.organization_id,
+    )
+    pending_task_count = pending_tasks.get("total_count", 0)
+
     return templates.TemplateResponse(
         "dashboard.html",
         {
@@ -668,6 +686,9 @@ async def dashboard(request: Request):
             "most_accessed": most_accessed,
             "top_tags": tags,
             "total_memories": recent["total_count"],
+            "active_agents": active_agents,
+            "active_skills": active_skills,
+            "pending_task_count": pending_task_count,
         },
     )
 

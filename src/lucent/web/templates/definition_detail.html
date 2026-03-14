@@ -1,8 +1,8 @@
 {% extends "base.html" %}
-{% block title %}{{ definition.name }} - Definitions - Lucent{% endblock %}
+{% block title %}{{ definition.name }} - Agents & Skills - Lucent{% endblock %}
 {% block content %}
 <div class="flex items-center gap-2 text-sm text-gray-500 mb-4">
-    <a href="/definitions?tab={{ 'agents' if definition_type == 'agent' else ('skills' if definition_type == 'skill' else 'mcp') }}" class="hover:text-gray-700">Definitions</a>
+    <a href="/definitions?tab={{ 'agents' if definition_type == 'agent' else ('skills' if definition_type == 'skill' else 'mcp') }}" class="hover:text-gray-700">Agents & Skills</a>
     <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5"/></svg>
     <span class="capitalize text-gray-500">{{ definition_type | replace('-', ' ') }}s</span>
     <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5"/></svg>
