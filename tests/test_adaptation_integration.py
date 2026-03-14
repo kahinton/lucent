@@ -24,7 +24,6 @@ from daemon.adaptation import (
     validate_skill,
 )
 
-
 # ── Mock helper ──────────────────────────────────────────────────────────
 
 def _mock_httpx_client(existing_agents=None, existing_skills=None):

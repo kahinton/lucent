@@ -1,7 +1,9 @@
 """Quick check for valid sessions in DB."""
 import asyncio
 import os
+
 from lucent.db import init_db
+
 
 async def check():
     pool = await init_db(os.environ["DATABASE_URL"])

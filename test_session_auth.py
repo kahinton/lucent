@@ -6,8 +6,9 @@ one and testing validate_session with it.
 import asyncio
 import os
 import secrets
-from lucent.db import init_db
+
 from lucent.auth_providers import hash_session_token, validate_session
+from lucent.db import init_db
 
 
 async def test():

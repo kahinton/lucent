@@ -11,13 +11,12 @@ Tests /api/definitions endpoints:
 from uuid import uuid4
 
 import httpx
-import pytest
 import pytest_asyncio
 from httpx import ASGITransport
 
 from lucent.api.app import create_app
 from lucent.api.deps import CurrentUser, get_current_user
-from lucent.db import DefinitionRepository, OrganizationRepository, UserRepository
+from lucent.db import OrganizationRepository, UserRepository
 
 # ============================================================================
 # Fixtures

@@ -1,11 +1,11 @@
 """Tests for the LLM engine abstraction layer."""
 
 import os
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
-from lucent.llm.engine import LLMEngine, SessionEvent, SessionEventType
+from lucent.llm.engine import SessionEvent, SessionEventType
 from lucent.llm.factory import get_engine, get_engine_name, reset_engine
 
 
