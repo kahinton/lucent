@@ -190,7 +190,7 @@ Explain:
 > - **Memories** — how many things I remember (knowledge, experiences, procedures, goals)
 > - **Active Agents** — specialized roles I can take on for autonomous work (code review, security, testing, etc.)
 > - **Active Skills** — specific capabilities loaded into those agents
-> - **Pending Tasks** — work queued up for me to do autonomously
+> - **Active Requests** — work I'm currently processing or that's queued up
 >
 > Below that you'll see recent memories and popular tags for quick navigation.
 
@@ -222,18 +222,18 @@ Explain:
 >
 > The items with **Approve/Reject** buttons are work I've done that I'd like you to review before I consider it finalized. Your feedback helps me improve.
 
-Ask: **"Want to see the task queue?"**
+Ask: **"Want to see how you can submit work for me to do?"**
 
-#### 5d: Task Queue (`/daemon/tasks`)
+#### 5d: Requests (`/requests`)
 
-Navigate to `http://localhost:8766/daemon/tasks` and take a screenshot.
+Navigate to `http://localhost:8766/requests` and take a screenshot.
 
 Explain:
-> This is the Task Queue — where you can submit work for me to handle autonomously.
+> This is the Requests page — where you submit work for me to handle autonomously and track its progress.
 >
-> Each task has a **priority** (low/medium/high/critical), a **category** (code, testing, research, etc.), and a **description** of what to do. I'll pick these up during my cognitive cycles and dispatch them to the right specialized agent.
+> You describe what you need done, and I break it down into tasks, assign each to the right specialized agent, and execute them. You can watch the progress in real time — each request shows its task breakdown, which agent is handling what, and how long each step took.
 >
-> You can also create tasks right from our chat — just tell me what you want done and I'll queue it up.
+> You can also create requests right from our chat — just tell me what you want done and I'll queue it up.
 
 Ask: **"Next up is where you manage my capabilities — ready?"**
 
@@ -275,7 +275,7 @@ Explain:
 > You can generate new API keys here if you need to connect from additional tools or environments. Each key is shown once and then hashed — I never store them in plaintext.
 
 End the tour:
-> That's the full tour! The web UI is one way to interact with me. Most of the time you'll probably just talk to me here in the chat. Everything in the UI is also available through our conversation — I can search memories, create tasks, manage agents, all through chat.
+> That's the full tour! The web UI is one way to interact with me. Most of the time you'll probably just talk to me here in the chat. Everything in the UI is also available through our conversation — I can search memories, submit requests, manage agents, all through chat.
 
 ## Step 6: What's Next
 
