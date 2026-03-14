@@ -168,6 +168,41 @@ class RateLimiter:
 
         return removed
 
+    def reset(self, api_key_id: UUID) -> None:
+        """Reset rate limit for a specific API key.
+
+        Useful for testing or manual intervention.
+
+        Args:
+            api_key_id: The API key to reset.
+        """
+        if api_key_id in self._buckets:
+            del self._buckets[api_key_id]
+
+    def get_usage(self, api_key_id: UUID) -> dict[str, int]:
+        """Get current usage stats for an API key.
+
+        Args:
+            api_key_id: The API key to check.
+
+        Returns:
+            Dict with 'used', 'limit', and 'remaining' counts.
+        """
+        now = time.time()
+        window_start = now - self.window_seconds
+
+        if api_key_id not in self._buckets:
+            return {"used": 0, "limit": self.limit, "remaining": self.limit}
+        bucket = self._buckets[api_key_id]
+
+        current = len([t for t in bucket.requests if t > window_start])
+
+        return {
+            "used": current,
+            "limit": self.limit,
+            "remaining": max(0, self.limit - current),
+        }
+
 
 class LoginRateLimiter:
     """IP-based rate limiter for login attempts.
@@ -225,41 +260,6 @@ def get_login_limiter() -> LoginRateLimiter:
     if _login_limiter is None:
         _login_limiter = LoginRateLimiter()
     return _login_limiter
-
-    def reset(self, api_key_id: UUID) -> None:
-        """Reset rate limit for a specific API key.
-
-        Useful for testing or manual intervention.
-
-        Args:
-            api_key_id: The API key to reset.
-        """
-        if api_key_id in self._buckets:
-            del self._buckets[api_key_id]
-
-    def get_usage(self, api_key_id: UUID) -> dict[str, int]:
-        """Get current usage stats for an API key.
-
-        Args:
-            api_key_id: The API key to check.
-
-        Returns:
-            Dict with 'used', 'limit', and 'remaining' counts.
-        """
-        now = time.time()
-        window_start = now - self.window_seconds
-
-        if api_key_id not in self._buckets:
-            return {"used": 0, "limit": self.limit, "remaining": self.limit}
-        bucket = self._buckets[api_key_id]
-
-        current = len([t for t in bucket.requests if t > window_start])
-
-        return {
-            "used": current,
-            "limit": self.limit,
-            "remaining": max(0, self.limit - current),
-        }
 
 
 # Global rate limiter instance
