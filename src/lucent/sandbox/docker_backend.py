@@ -51,7 +51,7 @@ class DockerBackend(SandboxBackend):
                     if result.returncode == 0 and result.stdout.strip():
                         base_url = result.stdout.strip()
                 except Exception:
-                    pass
+                    logger.debug("Failed to inspect docker context", exc_info=True)
 
             if base_url:
                 self._client = docker.DockerClient(base_url=base_url)
@@ -334,7 +334,11 @@ class DockerBackend(SandboxBackend):
             try:
                 await asyncio.to_thread(container.stop, timeout=5)
             except Exception:
-                pass
+                logger.debug(
+                    "Failed to stop container %s before removal",
+                    sandbox_id[:12],
+                    exc_info=True,
+                )
             await asyncio.to_thread(container.remove, force=True)
             logger.info("Destroyed sandbox: %s", sandbox_id[:12])
 
