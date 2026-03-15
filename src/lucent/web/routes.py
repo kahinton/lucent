@@ -2893,7 +2893,7 @@ async def request_detail(request: Request, request_id: str):
 async def retry_task(request: Request, task_id: str):
     """Retry a failed task — resets it to pending for the daemon to pick up."""
     await get_user_context(request)
-    await validate_csrf_token(request)
+    await _check_csrf(request)
     pool = await get_pool()
     from lucent.db.requests import RequestRepository
 
