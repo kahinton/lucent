@@ -2960,3 +2960,46 @@ async def schedule_detail(request: Request, schedule_id: str):
             "sched": sched,
         },
     )
+
+
+@router.post("/schedules/{schedule_id}/toggle", response_class=HTMLResponse)
+async def schedule_toggle(request: Request, schedule_id: str):
+    """Toggle a schedule between enabled and paused."""
+    await _check_csrf(request)
+    user = await get_user_context(request)
+    pool = await get_pool()
+    from lucent.db.schedules import ScheduleRepository
+
+    repo = ScheduleRepository(pool)
+    org_id = str(user.organization_id)
+
+    sched = await repo.get_schedule(schedule_id, org_id)
+    if not sched:
+        raise HTTPException(404, "Schedule not found")
+
+    new_enabled = not sched["enabled"]
+    await repo.toggle_schedule(schedule_id, org_id, new_enabled)
+
+    # Redirect back to referrer or detail page
+    referer = request.headers.get("referer", "")
+    if "/schedules/" in referer and schedule_id in referer:
+        return RedirectResponse(url=f"/schedules/{schedule_id}", status_code=303)
+    return RedirectResponse(url="/schedules", status_code=303)
+
+
+@router.post("/schedules/{schedule_id}/delete", response_class=HTMLResponse)
+async def schedule_delete(request: Request, schedule_id: str):
+    """Delete a schedule."""
+    await _check_csrf(request)
+    user = await get_user_context(request)
+    pool = await get_pool()
+    from lucent.db.schedules import ScheduleRepository
+
+    repo = ScheduleRepository(pool)
+    org_id = str(user.organization_id)
+
+    deleted = await repo.delete_schedule(schedule_id, org_id)
+    if not deleted:
+        raise HTTPException(404, "Schedule not found")
+
+    return RedirectResponse(url="/schedules", status_code=303)

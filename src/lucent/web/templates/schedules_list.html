@@ -54,9 +54,9 @@
 <!-- Schedule List -->
 <div class="space-y-3">
     {% for sched in schedules %}
-    <a href="/schedules/{{ sched.id }}" class="block bg-white rounded-lg border border-gray-200 hover:border-gray-300 hover:shadow-sm transition-all p-4">
+    <div class="bg-white rounded-lg border border-gray-200 hover:border-gray-300 hover:shadow-sm transition-all p-4">
         <div class="flex items-start justify-between">
-            <div class="flex-1 min-w-0">
+            <a href="/schedules/{{ sched.id }}" class="flex-1 min-w-0">
                 <div class="flex items-center gap-2 flex-wrap">
                     <span class="font-medium text-gray-900">{{ sched.title }}</span>
 
@@ -100,23 +100,36 @@
                 {% if sched.description %}
                 <p class="text-sm text-gray-500 mt-1 truncate">{{ sched.description[:150] }}</p>
                 {% endif %}
-            </div>
-            <div class="text-right shrink-0 ml-4">
-                <!-- Run count -->
-                <div class="flex items-center gap-1 text-xs text-gray-500">
-                    <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M5.25 8.25h15m-16.5 7.5h15m-1.8-13.5l-3.9 19.5m-2.1-19.5l-3.9 19.5" /></svg>
-                    {{ sched.run_count or 0 }} run{{ 's' if (sched.run_count or 0) != 1 }}{% if sched.max_runs %} / {{ sched.max_runs }}{% endif %}
+            </a>
+            <div class="flex items-center gap-3 shrink-0 ml-4">
+                <!-- Toggle button -->
+                <form method="POST" action="/schedules/{{ sched.id }}/toggle" onclick="event.stopPropagation();">
+                    {% if sched.enabled %}
+                    <button type="submit" class="p-1.5 rounded-md text-blue-600 hover:bg-blue-50 transition-colors" title="Pause schedule">
+                        <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 5.25v13.5m-7.5-13.5v13.5" /></svg>
+                    </button>
+                    {% else %}
+                    <button type="submit" class="p-1.5 rounded-md text-green-600 hover:bg-green-50 transition-colors" title="Resume schedule">
+                        <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M5.25 5.653c0-.856.917-1.398 1.667-.986l11.54 6.348a1.125 1.125 0 010 1.971l-11.54 6.347a1.125 1.125 0 01-1.667-.986V5.653z" /></svg>
+                    </button>
+                    {% endif %}
+                </form>
+                <!-- Stats -->
+                <div class="text-right">
+                    <div class="flex items-center gap-1 text-xs text-gray-500">
+                        <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M5.25 8.25h15m-16.5 7.5h15m-1.8-13.5l-3.9 19.5m-2.1-19.5l-3.9 19.5" /></svg>
+                        {{ sched.run_count or 0 }} run{{ 's' if (sched.run_count or 0) != 1 }}{% if sched.max_runs %} / {{ sched.max_runs }}{% endif %}
+                    </div>
+                    {% if sched.next_run_at and sched.enabled and sched.status == 'active' %}
+                    <p class="text-xs text-gray-400 mt-1">next: {{ sched.next_run_at.strftime('%Y-%m-%d %H:%M') }}</p>
+                    {% endif %}
+                    {% if sched.last_run_at %}
+                    <p class="text-xs text-gray-400 mt-0.5">last: {{ sched.last_run_at.strftime('%Y-%m-%d %H:%M') }}</p>
+                    {% endif %}
                 </div>
-                <!-- Next run -->
-                {% if sched.next_run_at and sched.enabled and sched.status == 'active' %}
-                <p class="text-xs text-gray-400 mt-1">next: {{ sched.next_run_at.strftime('%Y-%m-%d %H:%M') }}</p>
-                {% endif %}
-                {% if sched.last_run_at %}
-                <p class="text-xs text-gray-400 mt-0.5">last: {{ sched.last_run_at.strftime('%Y-%m-%d %H:%M') }}</p>
-                {% endif %}
             </div>
         </div>
-    </a>
+    </div>
     {% else %}
     <p class="text-gray-500 text-sm py-8 text-center">No schedules yet. Create one via the API or MCP tools.</p>
     {% endfor %}
