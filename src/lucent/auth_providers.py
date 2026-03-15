@@ -343,6 +343,8 @@ async def set_user_password(pool: Pool, user_id: UUID, password: str) -> None:
         user_id: The user's UUID.
         password: The new plaintext password (will be hashed).
     """
+    if not password or len(password) < 8:
+        raise ValueError("Password must be at least 8 characters long")
     pw_hash = hash_password(password)
     query = "UPDATE users SET password_hash = $1 WHERE id = $2"
     async with pool.acquire() as conn:

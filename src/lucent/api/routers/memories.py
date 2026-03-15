@@ -178,6 +178,8 @@ async def suggest_tags(
         query=query,
         username=username,
         limit=min(limit, 25),
+        requesting_user_id=user.id,
+        requesting_org_id=user.organization_id,
     )
 
     return TagSuggestionsResponse(
