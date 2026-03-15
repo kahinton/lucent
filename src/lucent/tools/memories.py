@@ -413,6 +413,7 @@ Returns:
             )
 
         except Exception as e:
+            logger.error("get_memories failed", exc_info=e)
             return _error_response(f"Failed to retrieve memories: {str(e)}")
 
     @mcp.tool()
@@ -463,6 +464,7 @@ Returns:
             return json.dumps(result, indent=2)
 
         except Exception as e:
+            logger.error("get_current_user_context failed", exc_info=e)
             return _error_response(f"Failed to get user context: {str(e)}")
 
     @mcp.tool()
@@ -954,6 +956,7 @@ Returns:
             )
 
         except Exception as e:
+            logger.error("get_existing_tags failed", exc_info=e)
             return _error_response(f"Failed to get tags: {str(e)}")
 
     @mcp.tool()
@@ -1002,6 +1005,7 @@ Returns:
             )
 
         except Exception as e:
+            logger.error("get_tag_suggestions failed", exc_info=e)
             return _error_response(f"Failed to get tag suggestions: {str(e)}")
 
     @mcp.tool()
@@ -1081,6 +1085,7 @@ Returns:
         except ValueError as e:
             return _error_response(f"Invalid memory ID format: {e}")
         except Exception as e:
+            logger.error("get_memory_versions failed: id=%s", memory_id, exc_info=e)
             return _error_response(f"Failed to get memory versions: {e}")
 
     @mcp.tool()
@@ -1178,6 +1183,7 @@ Returns:
         except ValueError as e:
             return _error_response(f"Invalid input: {e}")
         except Exception as e:
+            logger.error("restore_memory_version failed: id=%s", memory_id, exc_info=e)
             return _error_response(f"Failed to restore memory version: {e}")
 
     # Team-only tools: sharing
@@ -1236,6 +1242,7 @@ Returns:
             except ValueError as e:
                 return _error_response(f"Invalid memory_id: {str(e)}")
             except Exception as e:
+                logger.error("share_memory failed: id=%s", memory_id, exc_info=e)
                 return _error_response(f"Failed to share memory: {str(e)}")
 
         @mcp.tool()
@@ -1290,6 +1297,7 @@ Returns:
             except ValueError as e:
                 return _error_response(f"Invalid memory_id: {str(e)}")
             except Exception as e:
+                logger.error("unshare_memory failed: id=%s", memory_id, exc_info=e)
                 return _error_response(f"Failed to unshare memory: {str(e)}")
 
     @mcp.tool()
@@ -1381,6 +1389,7 @@ Returns:
             return json.dumps(_serialize_memory(result), indent=2)
 
         except Exception as e:
+            logger.error("create_daemon_task failed", exc_info=e)
             return _error_response(f"Failed to create daemon task: {str(e)}")
 
     @mcp.tool()
@@ -1446,6 +1455,7 @@ Returns:
         except ValueError as e:
             return _error_response(f"Invalid input: {str(e)}")
         except Exception as e:
+            logger.error("claim_task failed: id=%s", memory_id, exc_info=e)
             return _error_response(f"Failed to claim task: {str(e)}")
 
     @mcp.tool()
@@ -1509,6 +1519,7 @@ Returns:
         except ValueError as e:
             return _error_response(f"Invalid input: {str(e)}")
         except Exception as e:
+            logger.error("release_claim failed: id=%s", memory_id, exc_info=e)
             return _error_response(f"Failed to release claim: {str(e)}")
 
     @mcp.tool()
@@ -1583,6 +1594,7 @@ Returns:
         except ValueError as e:
             return _error_response(f"Invalid parameter: {str(e)}")
         except Exception as e:
+            logger.error("export_memories failed", exc_info=e)
             return _error_response(f"Failed to export memories: {str(e)}")
 
     @mcp.tool()
@@ -1639,6 +1651,7 @@ Returns:
             return json.dumps(result, indent=2)
 
         except Exception as e:
+            logger.error("import_memories failed", exc_info=e)
             return _error_response(f"Failed to import memories: {str(e)}")
 
 

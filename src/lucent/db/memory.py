@@ -3,12 +3,15 @@
 Handles CRUD operations for memories including search functionality.
 """
 
+import logging
 from datetime import datetime
 from typing import Any
 from uuid import UUID
 
 import asyncpg
 from asyncpg import Pool
+
+logger = logging.getLogger(__name__)
 
 
 class VersionConflictError(Exception):
@@ -1127,6 +1130,7 @@ class MemoryRepository:
                     imported += 1
 
                 except Exception as e:
+                    logger.error("Failed to import memory at index %d", idx, exc_info=e)
                     errors.append({"index": str(idx), "error": str(e)})
 
         return {

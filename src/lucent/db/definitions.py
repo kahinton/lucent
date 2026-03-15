@@ -308,6 +308,7 @@ class DefinitionRepository:
                 )
             return True
         except Exception:
+            logger.error("Failed to grant skill %s to agent %s", skill_id, agent_id, exc_info=True)
             return False
 
     async def revoke_skill(self, agent_id: str, skill_id: str) -> bool:
@@ -330,6 +331,12 @@ class DefinitionRepository:
                 )
             return True
         except Exception:
+            logger.error(
+                "Failed to grant MCP server %s to agent %s",
+                mcp_server_id,
+                agent_id,
+                exc_info=True,
+            )
             return False
 
     async def revoke_mcp_server(self, agent_id: str, mcp_server_id: str) -> bool:

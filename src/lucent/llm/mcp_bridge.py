@@ -7,9 +7,12 @@ and wraps each as a LangChain tool that the LLM can call.
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 
 class MCPToolBridge:
@@ -113,6 +116,7 @@ class MCPToolBridge:
                 )
             return json.dumps(result)
         except Exception as e:
+            logger.error("Error calling MCP tool %s", tool_name, exc_info=e)
             return f"Error calling tool {tool_name}: {e}"
 
     async def close(self) -> None:
