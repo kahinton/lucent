@@ -1175,20 +1175,29 @@ async def update_mcp_tools_web(request: Request, agent_id: str, server_id: str):
 
 @router.get("/daemon", response_class=HTMLResponse)
 async def daemon_activity(request: Request):
-    """Show daemon autonomous activity — memories tagged 'daemon'."""
+    """Show daemon autonomous activity — requests created by the cognitive loop."""
     user = await get_user_context(request)
     pool = await get_pool()
-    repo = MemoryRepository(pool)
 
-    # Search for daemon-tagged memories, most recent first
-    result = await repo.search(
-        tags=["daemon"],
-        limit=50,
-        requesting_user_id=user.id,
-        requesting_org_id=user.organization_id,
-    )
+    from lucent.db.requests import RequestRepository
+
+    req_repo = RequestRepository(pool)
+    org_id = str(user.organization_id)
+
+    # Daemon-created requests (source=cognitive)
+    daemon_requests = await req_repo.list_requests(org_id, source="cognitive", limit=50)
+
+    # Load task counts for each request
+    for req in daemon_requests:
+        tasks = await req_repo.list_tasks(str(req["id"]))
+        statuses = [t["status"] for t in tasks]
+        req["task_count"] = len(tasks)
+        req["tasks_completed"] = sum(1 for s in statuses if s == "completed")
+        req["tasks_running"] = sum(1 for s in statuses if s in ("claimed", "running"))
+        req["tasks_failed"] = sum(1 for s in statuses if s == "failed")
 
     # Count needs-review items for the badge
+    repo = MemoryRepository(pool)
     review_result = await repo.search(
         tags=["daemon", "needs-review"],
         limit=1,
@@ -1197,38 +1206,13 @@ async def daemon_activity(request: Request):
     )
     needs_review_count = review_result.get("total_count", 0)
 
-    # Fetch daemon messages for the conversation thread
-    messages_result = await repo.search(
-        tags=["daemon-message"],
-        limit=50,
-        requesting_user_id=user.id,
-        requesting_org_id=user.organization_id,
-    )
-    # Build message list with sender info, sorted oldest-first for chat display
-    daemon_messages = []
-    for mem in messages_result.get("memories", []):
-        tags = mem.get("tags") or []
-        metadata = mem.get("metadata") or {}
-        daemon_messages.append(
-            {
-                "id": mem["id"],
-                "content": mem["content"],
-                "sender": "daemon" if "from-daemon" in tags else "human",
-                "acknowledged": "acknowledged" in tags,
-                "created_at": mem["created_at"],
-                "in_reply_to": metadata.get("in_reply_to"),
-            }
-        )
-    daemon_messages.reverse()  # oldest first for chat order
-
     return templates.TemplateResponse(
         "daemon.html",
         {
             "request": request,
             "user": user,
-            "daemon_memories": result["memories"],
+            "daemon_requests": daemon_requests,
             "needs_review_count": needs_review_count,
-            "daemon_messages": daemon_messages,
         },
     )
 

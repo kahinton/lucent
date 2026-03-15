@@ -56,6 +56,7 @@ class RequestRepository:
         self,
         org_id: str,
         status: str | None = None,
+        source: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> list[dict]:
@@ -64,6 +65,9 @@ class RequestRepository:
         if status:
             params.append(status)
             query += f" AND status = ${len(params)}"
+        if source:
+            params.append(source)
+            query += f" AND source = ${len(params)}"
         query += f" ORDER BY created_at DESC LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}"
         params.extend([limit, offset])
         async with self.pool.acquire() as conn:
