@@ -87,6 +87,7 @@ class ScheduleRepository:
         max_runs: int | None = None,
         expires_at: datetime | None = None,
         created_by: str | None = None,
+        prompt: str = "",
     ) -> dict:
         # Calculate next_run_at if not provided
         if next_run_at is None:
@@ -103,9 +104,9 @@ class ScheduleRepository:
                 """INSERT INTO schedules
                    (title, organization_id, description, agent_type, model, task_template,
                     sandbox_config, schedule_type, cron_expression, interval_seconds,
-                    next_run_at, priority, timezone, max_runs, expires_at, created_by)
+                    next_run_at, priority, timezone, max_runs, expires_at, created_by, prompt)
                    VALUES ($1, $2::uuid, $3, $4, $5, $6::jsonb, $7::jsonb,
-                           $8, $9, $10, $11, $12, $13, $14, $15, $16::uuid)
+                           $8, $9, $10, $11, $12, $13, $14, $15, $16::uuid, $17)
                    RETURNING *""",
                 title,
                 org_id,
@@ -123,6 +124,7 @@ class ScheduleRepository:
                 max_runs,
                 expires_at,
                 created_by,
+                prompt,
             )
             return dict(row)
 

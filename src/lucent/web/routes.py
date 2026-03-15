@@ -2944,6 +2944,7 @@ async def schedule_detail(request: Request, schedule_id: str):
     """Schedule detail page with run history."""
     user = await get_user_context(request)
     pool = await get_pool()
+    from lucent.db.definitions import DefinitionRepository
     from lucent.db.schedules import ScheduleRepository
 
     repo = ScheduleRepository(pool)
@@ -2952,12 +2953,16 @@ async def schedule_detail(request: Request, schedule_id: str):
     if not sched:
         raise HTTPException(404, "Schedule not found")
 
+    def_repo = DefinitionRepository(pool)
+    active_agents = await def_repo.list_agents(str(user.organization_id), status="active")
+
     return templates.TemplateResponse(
         "schedule_detail.html",
         {
             "request": request,
             "user": user,
             "sched": sched,
+            "active_agents": active_agents,
         },
     )
 
@@ -3003,3 +3008,59 @@ async def schedule_delete(request: Request, schedule_id: str):
         raise HTTPException(404, "Schedule not found")
 
     return RedirectResponse(url="/schedules", status_code=303)
+
+
+@router.post("/schedules/{schedule_id}/edit", response_class=HTMLResponse)
+async def schedule_edit(request: Request, schedule_id: str):
+    """Update editable schedule fields."""
+    await _check_csrf(request)
+    user = await get_user_context(request)
+    pool = await get_pool()
+    from lucent.db.schedules import ScheduleRepository
+
+    repo = ScheduleRepository(pool)
+    org_id = str(user.organization_id)
+
+    sched = await repo.get_schedule(schedule_id, org_id)
+    if not sched:
+        raise HTTPException(404, "Schedule not found")
+
+    form = await request.form()
+    updates: dict[str, Any] = {}
+
+    # Text fields
+    title = form.get("title", "").strip()
+    if title and title != sched["title"]:
+        updates["title"] = title
+
+    description = form.get("description", "").strip()
+    if description != (sched["description"] or ""):
+        updates["description"] = description
+
+    agent_type = form.get("agent_type", "").strip()
+    if agent_type and agent_type != sched["agent_type"]:
+        updates["agent_type"] = agent_type
+
+    # Schedule-type-specific fields
+    cron_expression = form.get("cron_expression", "").strip()
+    if cron_expression and cron_expression != (sched.get("cron_expression") or ""):
+        updates["cron_expression"] = cron_expression
+
+    interval_str = form.get("interval_seconds", "").strip()
+    if interval_str:
+        try:
+            interval_val = int(interval_str)
+            if interval_val != (sched.get("interval_seconds") or 0):
+                updates["interval_seconds"] = interval_val
+        except ValueError:
+            pass
+
+    # Prompt (free-form text sent to the agent)
+    prompt = form.get("prompt", "").strip()
+    if prompt != (sched.get("prompt") or ""):
+        updates["prompt"] = prompt
+
+    if updates:
+        await repo.update_schedule(schedule_id, org_id, **updates)
+
+    return RedirectResponse(url=f"/schedules/{schedule_id}", status_code=303)

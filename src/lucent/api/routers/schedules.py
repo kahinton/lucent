@@ -191,6 +191,7 @@ async def trigger_now(schedule_id: str, user=Depends(get_current_user), pool=Dep
 
     # Create a request from the schedule
     template = sched.get("task_template") or {}
+    prompt = sched.get("prompt") or ""
     req = await req_repo.create_request(
         title=f"[Scheduled] {sched['title']}",
         org_id=str(user.organization_id),
@@ -200,11 +201,12 @@ async def trigger_now(schedule_id: str, user=Depends(get_current_user), pool=Dep
         created_by=str(user.id),
     )
 
-    # Create the task from template
+    # Create the task — use prompt as description if set, else fall back to template/description
+    task_description = prompt or template.get("description", sched.get("description", ""))
     await req_repo.create_task(
         request_id=str(req["id"]),
         title=template.get("title", sched["title"]),
-        description=template.get("description", sched.get("description", "")),
+        description=task_description,
         agent_type=sched.get("agent_type", "code"),
         priority=sched.get("priority", "medium"),
         model=sched.get("model"),

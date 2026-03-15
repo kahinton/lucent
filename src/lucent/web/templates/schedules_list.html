@@ -89,11 +89,6 @@
                     </span>
                     {% endif %}
 
-                    <!-- Priority -->
-                    {% if sched.priority and sched.priority != 'medium' %}
-                    <span class="px-2 py-0.5 rounded text-xs {% if sched.priority == 'urgent' %}bg-red-100 text-red-700{% elif sched.priority == 'high' %}bg-orange-100 text-orange-700{% else %}bg-gray-100 text-gray-500{% endif %}">{{ sched.priority }}</span>
-                    {% endif %}
-
                     <!-- Agent type -->
                     <span class="px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-500">{{ sched.agent_type }}</span>
                 </div>

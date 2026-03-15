@@ -12,7 +12,7 @@
     </div>
 </div>
 
-<!-- Header -->
+<!-- Header with actions -->
 <div class="mb-6">
     <div class="flex items-start justify-between">
         <div>
@@ -36,7 +36,6 @@
                 </button>
                 {% endif %}
             </form>
-
             <!-- Delete button -->
             <form method="POST" action="/schedules/{{ sched.id }}/delete" onsubmit="return confirm('Delete this schedule? This cannot be undone.');">
                 <button type="submit" class="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-lg bg-red-50 text-red-700 hover:bg-red-100 transition-colors">
@@ -44,8 +43,7 @@
                     Delete
                 </button>
             </form>
-
-            <!-- Status badge -->
+            <!-- Status badges -->
             {% if sched.enabled and sched.status == 'active' %}
             <span class="px-3 py-1 rounded-full text-sm font-medium bg-blue-100 text-blue-700">Active</span>
             {% elif sched.status == 'paused' or not sched.enabled %}
@@ -55,25 +53,31 @@
             {% elif sched.status == 'expired' %}
             <span class="px-3 py-1 rounded-full text-sm font-medium bg-red-100 text-red-700">Expired</span>
             {% endif %}
-
-            <!-- Schedule type -->
-            {% if sched.schedule_type == 'once' %}
-            <span class="px-3 py-1 rounded-full text-sm bg-indigo-100 text-indigo-700">One-time</span>
-            {% elif sched.schedule_type == 'interval' %}
-            <span class="px-3 py-1 rounded-full text-sm bg-violet-100 text-violet-700">Interval</span>
-            {% elif sched.schedule_type == 'cron' %}
-            <span class="px-3 py-1 rounded-full text-sm bg-cyan-100 text-cyan-700">Cron</span>
-            {% endif %}
-
-            <!-- Priority -->
-            {% if sched.priority %}
-            <span class="px-3 py-1 rounded-full text-sm {% if sched.priority == 'urgent' %}bg-red-100 text-red-700{% elif sched.priority == 'high' %}bg-orange-100 text-orange-700{% elif sched.priority == 'low' %}bg-gray-100 text-gray-500{% else %}bg-gray-100 text-gray-600{% endif %}">{{ sched.priority }}</span>
-            {% endif %}
         </div>
     </div>
 </div>
 
-<!-- Schedule Info Cards -->
+<!-- Warnings -->
+{% if not sched.prompt and (not sched.task_template or sched.task_template == {}) %}
+<div class="mb-4 px-4 py-3 bg-amber-50 border border-amber-200 rounded-lg flex items-start gap-3">
+    <svg class="w-5 h-5 text-amber-500 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" /></svg>
+    <div>
+        <p class="text-sm font-medium text-amber-800">No prompt set</p>
+        <p class="text-xs text-amber-600 mt-0.5">This schedule has no prompt. When triggered, the agent will only receive the title and description as context. Add a prompt below to give the agent specific instructions.</p>
+    </div>
+</div>
+{% endif %}
+{% if sched.agent_type not in active_agents | map(attribute='name') | list %}
+<div class="mb-4 px-4 py-3 bg-red-50 border border-red-200 rounded-lg flex items-start gap-3">
+    <svg class="w-5 h-5 text-red-500 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" /></svg>
+    <div>
+        <p class="text-sm font-medium text-red-800">Invalid agent type: "{{ sched.agent_type }}"</p>
+        <p class="text-xs text-red-600 mt-0.5">This agent is not active in your system. The schedule will fail when triggered. Select a valid agent below, or <a href="/definitions" class="underline">create and approve</a> one matching this name.</p>
+    </div>
+</div>
+{% endif %}
+
+<!-- Stats cards -->
 <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
     <div class="bg-white rounded-lg border border-gray-200 p-4">
         <p class="text-xs text-gray-500 uppercase tracking-wider">Runs</p>
@@ -101,146 +105,125 @@
     </div>
 </div>
 
-<!-- Schedule Configuration -->
-<div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
-    <!-- Main config -->
-    <div class="lg:col-span-2">
-        <div class="bg-white rounded-lg border border-gray-200">
-            <div class="px-4 py-3 border-b border-gray-100">
-                <h2 class="text-lg font-semibold text-gray-900">Schedule Configuration</h2>
+<!-- Editable Configuration Form -->
+<form method="POST" action="/schedules/{{ sched.id }}/edit" class="space-y-6 mb-6">
+    <div class="bg-white rounded-lg border border-gray-200">
+        <div class="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
+            <h2 class="text-lg font-semibold text-gray-900">Configuration</h2>
+            <button type="submit" class="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg bg-primary-600 text-white hover:bg-primary-700 transition-colors">
+                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5" /></svg>
+                Save Changes
+            </button>
+        </div>
+        <div class="p-5 space-y-5">
+            <!-- Title & Description -->
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                <div>
+                    <label for="title" class="block text-sm font-medium text-gray-700 mb-1">Title</label>
+                    <input type="text" name="title" id="title" value="{{ sched.title }}"
+                        class="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none">
+                </div>
+                <div>
+                    <label for="description" class="block text-sm font-medium text-gray-700 mb-1">Description</label>
+                    <input type="text" name="description" id="description" value="{{ sched.description or '' }}"
+                        class="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none">
+                </div>
             </div>
-            <div class="p-4 space-y-3">
-                <div class="grid grid-cols-2 gap-x-4 gap-y-3">
-                    <div>
-                        <dt class="text-xs text-gray-500 uppercase">Type</dt>
-                        <dd class="text-sm font-medium text-gray-900 mt-0.5">{{ sched.schedule_type }}</dd>
-                    </div>
-                    {% if sched.schedule_type == 'cron' %}
-                    <div>
-                        <dt class="text-xs text-gray-500 uppercase">Cron Expression</dt>
-                        <dd class="text-sm font-mono text-gray-900 mt-0.5">{{ sched.cron_expression }}</dd>
-                    </div>
+
+            <!-- Agent, Priority, Schedule Type -->
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div>
+                    <label for="agent_type" class="block text-sm font-medium text-gray-700 mb-1">Agent Type</label>
+                    <select name="agent_type" id="agent_type"
+                        class="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none bg-white">
+                        {% for agent in active_agents %}
+                        <option value="{{ agent.name }}" {% if agent.name == sched.agent_type %}selected{% endif %}>{{ agent.name }}</option>
+                        {% endfor %}
+                        {% if sched.agent_type not in active_agents | map(attribute='name') | list %}
+                        <option value="{{ sched.agent_type }}" selected>{{ sched.agent_type }} (not found)</option>
+                        {% endif %}
+                    </select>
+                    {% if active_agents | length == 0 %}
+                    <p class="text-xs text-red-500 mt-1">No active agents. Create and approve agents at <a href="/definitions" class="underline">Agents &amp; Skills</a>.</p>
+                    {% elif sched.agent_type not in active_agents | map(attribute='name') | list %}
+                    <p class="text-xs text-amber-600 mt-1">
+                        <svg class="w-3 h-3 inline -mt-0.5" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" /></svg>
+                        "{{ sched.agent_type }}" is not an active agent. This schedule will fail when triggered.
+                    </p>
                     {% endif %}
-                    {% if sched.schedule_type == 'interval' %}
-                    <div>
-                        <dt class="text-xs text-gray-500 uppercase">Interval</dt>
-                        <dd class="text-sm text-gray-900 mt-0.5">
-                            {% if sched.interval_seconds >= 86400 %}
-                                {{ sched.interval_seconds // 86400 }}d {{ (sched.interval_seconds % 86400) // 3600 }}h
-                            {% elif sched.interval_seconds >= 3600 %}
-                                {{ sched.interval_seconds // 3600 }}h {{ (sched.interval_seconds % 3600) // 60 }}m
-                            {% else %}
-                                {{ sched.interval_seconds // 60 }}m
-                            {% endif %}
-                            <span class="text-gray-400">({{ sched.interval_seconds }}s)</span>
-                        </dd>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Schedule Type</label>
+                    <div class="px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg text-gray-600">
+                        {{ sched.schedule_type }}
+                        <span class="text-xs text-gray-400 ml-1">(not editable)</span>
                     </div>
+                </div>
+            </div>
+
+            <!-- Schedule-specific params -->
+            {% if sched.schedule_type == 'interval' %}
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                    <label for="interval_seconds" class="block text-sm font-medium text-gray-700 mb-1">Interval (seconds)</label>
+                    <input type="number" name="interval_seconds" id="interval_seconds" value="{{ sched.interval_seconds }}" min="60"
+                        class="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none">
+                    <p class="text-xs text-gray-400 mt-1">
+                        Currently:
+                        {% if sched.interval_seconds >= 86400 %}{{ sched.interval_seconds // 86400 }}d {{ (sched.interval_seconds % 86400) // 3600 }}h
+                        {% elif sched.interval_seconds >= 3600 %}{{ sched.interval_seconds // 3600 }}h {{ (sched.interval_seconds % 3600) // 60 }}m
+                        {% else %}{{ sched.interval_seconds // 60 }}m{% endif %}
+                    </p>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Timezone</label>
+                    <div class="px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg text-gray-600">{{ sched.timezone }}</div>
+                </div>
+            </div>
+            {% elif sched.schedule_type == 'cron' %}
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                    <label for="cron_expression" class="block text-sm font-medium text-gray-700 mb-1">Cron Expression</label>
+                    <input type="text" name="cron_expression" id="cron_expression" value="{{ sched.cron_expression }}"
+                        class="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none"
+                        placeholder="* * * * *">
+                    <p class="text-xs text-gray-400 mt-1">minute hour day-of-month month day-of-week</p>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Timezone</label>
+                    <div class="px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg text-gray-600">{{ sched.timezone }}</div>
+                </div>
+            </div>
+            {% endif %}
+
+            <!-- Prompt -->
+            <div>
+                <label for="prompt" class="block text-sm font-medium text-gray-700 mb-1">Prompt</label>
+                <p class="text-xs text-gray-400 mb-2">Instructions sent to the agent when this schedule fires. If empty, the description above is used instead.</p>
+                <textarea name="prompt" id="prompt" rows="8"
+                    class="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none resize-y"
+                    placeholder="Tell the agent what to do...">{{ sched.prompt or '' }}</textarea>
+            </div>
+
+            <!-- Metadata (read-only) -->
+            <div class="pt-3 border-t border-gray-100">
+                <div class="flex items-center gap-6 text-xs text-gray-400">
+                    <span>ID: <span class="font-mono">{{ (sched.id | string)[:8] }}</span></span>
+                    <span>Created: {{ sched.created_at.strftime('%Y-%m-%d %H:%M:%S') if sched.created_at }}</span>
+                    {% if sched.updated_at %}
+                    <span>Updated: {{ sched.updated_at.strftime('%Y-%m-%d %H:%M:%S') }}</span>
                     {% endif %}
-                    <div>
-                        <dt class="text-xs text-gray-500 uppercase">Timezone</dt>
-                        <dd class="text-sm text-gray-900 mt-0.5">{{ sched.timezone }}</dd>
-                    </div>
-                    <div>
-                        <dt class="text-xs text-gray-500 uppercase">Enabled</dt>
-                        <dd class="text-sm mt-0.5">
-                            {% if sched.enabled %}
-                            <span class="text-green-600 font-medium">Yes</span>
-                            {% else %}
-                            <span class="text-red-600 font-medium">No</span>
-                            {% endif %}
-                        </dd>
-                    </div>
                     {% if sched.max_runs %}
-                    <div>
-                        <dt class="text-xs text-gray-500 uppercase">Max Runs</dt>
-                        <dd class="text-sm text-gray-900 mt-0.5">{{ sched.max_runs }}</dd>
-                    </div>
+                    <span>Max runs: {{ sched.max_runs }}</span>
                     {% endif %}
                     {% if sched.expires_at %}
-                    <div>
-                        <dt class="text-xs text-gray-500 uppercase">Expires</dt>
-                        <dd class="text-sm text-gray-900 mt-0.5">{{ sched.expires_at.strftime('%Y-%m-%d %H:%M') }}</dd>
-                    </div>
+                    <span>Expires: {{ sched.expires_at.strftime('%Y-%m-%d %H:%M') }}</span>
                     {% endif %}
-                    <div>
-                        <dt class="text-xs text-gray-500 uppercase">Created</dt>
-                        <dd class="text-sm text-gray-900 mt-0.5">{{ sched.created_at.strftime('%Y-%m-%d %H:%M:%S') if sched.created_at }}</dd>
-                    </div>
-                    <div>
-                        <dt class="text-xs text-gray-500 uppercase">ID</dt>
-                        <dd class="text-sm font-mono text-gray-500 mt-0.5">{{ (sched.id | string)[:8] }}</dd>
-                    </div>
                 </div>
-
-                {% if sched.task_template and sched.task_template != {} %}
-                <div class="mt-4 pt-3 border-t border-gray-100">
-                    <dt class="text-xs text-gray-500 uppercase mb-1">Task Template</dt>
-                    <dd class="text-xs font-mono bg-gray-50 rounded p-2 text-gray-700 whitespace-pre-wrap">{{ sched.task_template | tojson(indent=2) }}</dd>
-                </div>
-                {% endif %}
             </div>
         </div>
     </div>
-
-    <!-- Visual schedule indicator -->
-    <div>
-        <div class="bg-white rounded-lg border border-gray-200">
-            <div class="px-4 py-3 border-b border-gray-100">
-                <h2 class="text-lg font-semibold text-gray-900">Schedule</h2>
-            </div>
-            <div class="p-4">
-                {% if sched.schedule_type == 'once' %}
-                <div class="text-center py-4">
-                    <svg class="w-12 h-12 mx-auto text-indigo-400 mb-2" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-                    <p class="text-sm font-medium text-gray-700">One-time execution</p>
-                    {% if sched.status == 'completed' %}
-                    <p class="text-xs text-green-600 mt-1">Completed</p>
-                    {% elif sched.next_run_at %}
-                    <p class="text-xs text-blue-600 mt-1">Scheduled for {{ sched.next_run_at.strftime('%Y-%m-%d %H:%M') }}</p>
-                    {% endif %}
-                </div>
-                {% elif sched.schedule_type == 'interval' %}
-                <div class="text-center py-4">
-                    <svg class="w-12 h-12 mx-auto text-violet-400 mb-2" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182M2.985 19.644l3.181-3.183" /></svg>
-                    <p class="text-sm font-medium text-gray-700">Repeats every</p>
-                    <p class="text-lg font-bold text-violet-600">
-                        {% if sched.interval_seconds >= 86400 %}{{ sched.interval_seconds // 86400 }} day{{ 's' if sched.interval_seconds >= 172800 }}
-                        {% elif sched.interval_seconds >= 3600 %}{{ sched.interval_seconds // 3600 }} hour{{ 's' if sched.interval_seconds >= 7200 }}
-                        {% else %}{{ sched.interval_seconds // 60 }} minute{{ 's' if sched.interval_seconds >= 120 }}{% endif %}
-                    </p>
-                    {% if sched.run_count and sched.run_count > 0 %}
-                    <p class="text-xs text-gray-500 mt-2">{{ sched.run_count }} run{{ 's' if sched.run_count != 1 }} so far</p>
-                    {% endif %}
-                </div>
-                {% elif sched.schedule_type == 'cron' %}
-                <div class="text-center py-4">
-                    <svg class="w-12 h-12 mx-auto text-cyan-400 mb-2" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6.75 3v2.25M17.25 3v2.25M3 18.75V7.5a2.25 2.25 0 012.25-2.25h13.5A2.25 2.25 0 0121 7.5v11.25m-18 0A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75m-18 0v-7.5A2.25 2.25 0 015.25 9h13.5A2.25 2.25 0 0121 11.25v7.5" /></svg>
-                    <p class="text-sm font-medium text-gray-700">Cron schedule</p>
-                    <p class="text-lg font-mono font-bold text-cyan-600">{{ sched.cron_expression }}</p>
-                    {% if sched.run_count and sched.run_count > 0 %}
-                    <p class="text-xs text-gray-500 mt-2">{{ sched.run_count }} run{{ 's' if sched.run_count != 1 }} so far</p>
-                    {% endif %}
-                </div>
-                {% endif %}
-            </div>
-        </div>
-
-        {% if sched.run_count and sched.run_count > 0 %}
-        <!-- Progress toward max -->
-        {% if sched.max_runs %}
-        <div class="bg-white rounded-lg border border-gray-200 mt-4 p-4">
-            <div class="flex justify-between text-xs text-gray-500 mb-1">
-                <span>Progress</span>
-                <span>{{ sched.run_count }} / {{ sched.max_runs }}</span>
-            </div>
-            <div class="w-full bg-gray-200 rounded-full h-2">
-                <div class="bg-blue-600 h-2 rounded-full transition-all" style="width: {{ [((sched.run_count or 0) / sched.max_runs * 100), 100] | min }}%"></div>
-            </div>
-        </div>
-        {% endif %}
-        {% endif %}
-    </div>
-</div>
+</form>
 
 <!-- Run History -->
 <div class="bg-white rounded-lg border border-gray-200">
@@ -252,7 +235,6 @@
         {% for run in sched.runs %}
         <div class="px-4 py-3 flex items-center justify-between">
             <div class="flex items-center gap-3">
-                <!-- Status icon -->
                 {% if run.status == 'completed' %}
                 <div class="w-8 h-8 rounded-full bg-green-100 flex items-center justify-center">
                     <svg class="w-4 h-4 text-green-600" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5" /></svg>
@@ -274,7 +256,6 @@
                     <svg class="w-4 h-4 text-amber-600" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
                 </div>
                 {% endif %}
-
                 <div>
                     <div class="flex items-center gap-2">
                         <span class="text-sm font-medium text-gray-900">Run #{{ loop.revindex }}</span>
@@ -288,11 +269,10 @@
                     {% endif %}
                 </div>
             </div>
-
             <div class="text-right shrink-0">
                 <p class="text-xs text-gray-500">{{ run.created_at.strftime('%Y-%m-%d %H:%M:%S') if run.created_at }}</p>
                 {% if run.request_id %}
-                <a href="/requests/{{ run.request_id }}" class="text-xs text-primary-600 hover:underline">View request →</a>
+                <a href="/activity/{{ run.request_id }}" class="text-xs text-primary-600 hover:underline">View request →</a>
                 {% endif %}
                 {% if run.completed_at and run.started_at %}
                 <p class="text-xs text-gray-400">{{ ((run.completed_at - run.started_at).total_seconds()) | int }}s</p>
