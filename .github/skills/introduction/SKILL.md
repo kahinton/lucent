@@ -209,35 +209,22 @@ Explain:
 
 Ask: **"Ready for the next one?"**
 
-#### 5c: Autonomous Activity (`/daemon`)
+#### 5c: Activity (`/activity`)
 
-Navigate to `http://localhost:8766/daemon` and take a screenshot.
-
-Explain:
-> This is Autonomous Activity — what I've been doing on my own when we're not chatting.
->
-> I have a cognitive loop that runs periodically. It reviews pending tasks, reflects on recent work, does maintenance (like consolidating redundant memories), and works on tasks you've assigned or that I've identified.
->
-> You can send me messages here too — they'll be picked up during my next cognitive cycle.
->
-> The items with **Approve/Reject** buttons are work I've done that I'd like you to review before I consider it finalized. Your feedback helps me improve.
-
-Ask: **"Want to see how you can submit work for me to do?"**
-
-#### 5d: Requests (`/requests`)
-
-Navigate to `http://localhost:8766/requests` and take a screenshot.
+Navigate to `http://localhost:8766/activity` and take a screenshot.
 
 Explain:
-> This is the Requests page — where you submit work for me to handle autonomously and track its progress.
+> This is the Activity page — a unified view of all work, both yours and mine.
 >
-> You describe what you need done, and I break it down into tasks, assign each to the right specialized agent, and execute them. You can watch the progress in real time — each request shows its task breakdown, which agent is handling what, and how long each step took.
+> You can filter by **who** created the request — "You" for things you submitted, "Lucent" for work I initiated during cognitive cycles — and by **status** (pending, in progress, completed, failed).
 >
-> You can also create requests right from our chat — just tell me what you want done and I'll queue it up.
+> Each request shows its task breakdown with a progress bar. Click into any request to see the full detail — which agents handled what, how long each step took, and the output.
+>
+> My autonomous work shows up with a sparkles icon. I create requests when I identify improvements, process approved feedback, or handle scheduled work.
 
 Ask: **"Next up is where you manage my capabilities — ready?"**
 
-#### 5e: Agents & Skills (`/definitions`)
+#### 5d: Agents & Skills (`/definitions`)
 
 Navigate to `http://localhost:8766/definitions` and take a screenshot.
 
@@ -254,7 +241,7 @@ Explain:
 
 Ask: **"Want to see the review queue, or should we wrap up the tour?"**
 
-#### 5f: Review Queue (`/daemon/review`)
+#### 5e: Review Queue (`/daemon/review`)
 
 Navigate to `http://localhost:8766/daemon/review` and take a screenshot.
 
@@ -265,7 +252,7 @@ Explain:
 >
 > Your feedback directly shapes how I work. It's one of the main ways I improve over time.
 
-#### 5g: Settings (`/settings`)
+#### 5f: Settings (`/settings`)
 
 Navigate to `http://localhost:8766/settings` and take a screenshot.
 

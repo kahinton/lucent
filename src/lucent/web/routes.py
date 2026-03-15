@@ -1185,46 +1185,8 @@ async def update_mcp_tools_web(request: Request, agent_id: str, server_id: str):
 
 @router.get("/daemon", response_class=HTMLResponse)
 async def daemon_activity(request: Request):
-    """Show daemon autonomous activity — requests created by the cognitive loop."""
-    user = await get_user_context(request)
-    pool = await get_pool()
-
-    from lucent.db.requests import RequestRepository
-
-    req_repo = RequestRepository(pool)
-    org_id = str(user.organization_id)
-
-    # Daemon-created requests (source=cognitive)
-    daemon_requests = await req_repo.list_requests(org_id, source="cognitive", limit=50)
-
-    # Load task counts for each request
-    for req in daemon_requests:
-        tasks = await req_repo.list_tasks(str(req["id"]))
-        statuses = [t["status"] for t in tasks]
-        req["task_count"] = len(tasks)
-        req["tasks_completed"] = sum(1 for s in statuses if s == "completed")
-        req["tasks_running"] = sum(1 for s in statuses if s in ("claimed", "running"))
-        req["tasks_failed"] = sum(1 for s in statuses if s == "failed")
-
-    # Count needs-review items for the badge
-    repo = MemoryRepository(pool)
-    review_result = await repo.search(
-        tags=["daemon", "needs-review"],
-        limit=1,
-        requesting_user_id=user.id,
-        requesting_org_id=user.organization_id,
-    )
-    needs_review_count = review_result.get("total_count", 0)
-
-    return templates.TemplateResponse(
-        "daemon.html",
-        {
-            "request": request,
-            "user": user,
-            "daemon_requests": daemon_requests,
-            "needs_review_count": needs_review_count,
-        },
-    )
+    """Redirect old /daemon URL to /activity filtered to Lucent's work."""
+    return RedirectResponse(url="/activity?source=cognitive", status_code=301)
 
 
 @router.post("/daemon/messages", response_class=HTMLResponse)
@@ -1451,23 +1413,23 @@ def _memory_to_task_view(memory: dict) -> dict:
     }
 
 
-# Legacy Task Queue routes — redirect to Requests (tasks now live under requests)
+# Legacy Task Queue routes — redirect to Activity
 @router.get("/daemon/tasks", response_class=HTMLResponse)
 async def daemon_tasks_redirect(request: Request):
-    """Redirect legacy task queue to requests page."""
-    return RedirectResponse(url="/requests", status_code=301)
+    """Redirect legacy task queue to activity page."""
+    return RedirectResponse(url="/activity", status_code=301)
 
 
 @router.get("/daemon/tasks/new", response_class=HTMLResponse)
 async def daemon_tasks_new_redirect(request: Request):
-    """Redirect legacy new task form to requests page."""
-    return RedirectResponse(url="/requests", status_code=301)
+    """Redirect legacy new task form to activity page."""
+    return RedirectResponse(url="/activity", status_code=301)
 
 
 @router.get("/daemon/tasks/{task_id}", response_class=HTMLResponse)
 async def daemon_task_detail_redirect(request: Request, task_id: UUID):
-    """Redirect legacy task detail to requests page."""
-    return RedirectResponse(url="/requests", status_code=301)
+    """Redirect legacy task detail to activity page."""
+    return RedirectResponse(url="/activity", status_code=301)
 
 
 # =============================================================================
@@ -2835,9 +2797,13 @@ async def revoke_api_key(request: Request, key_id: UUID):
 # =============================================================================
 
 
-@router.get("/requests", response_class=HTMLResponse)
-async def requests_list(request: Request, status: str | None = None):
-    """List all requests with status filtering."""
+@router.get("/activity", response_class=HTMLResponse)
+async def activity_list(
+    request: Request,
+    status: str | None = None,
+    source: str | None = None,
+):
+    """Unified activity page — all requests from users and the daemon."""
     user = await get_user_context(request)
     pool = await get_pool()
     from lucent.db.requests import RequestRepository
@@ -2845,7 +2811,7 @@ async def requests_list(request: Request, status: str | None = None):
     repo = RequestRepository(pool)
 
     org_id = str(user.organization_id)
-    requests_data = await repo.list_requests(org_id, status=status, limit=100)
+    requests_data = await repo.list_requests(org_id, status=status, source=source, limit=100)
     summary = await repo.get_active_summary(org_id)
 
     # Load task counts for each request
@@ -2857,6 +2823,16 @@ async def requests_list(request: Request, status: str | None = None):
         req["tasks_running"] = sum(1 for s in statuses if s in ("claimed", "running"))
         req["tasks_failed"] = sum(1 for s in statuses if s == "failed")
 
+    # Count needs-review items for the badge
+    memory_repo = MemoryRepository(pool)
+    review_result = await memory_repo.search(
+        tags=["daemon", "needs-review"],
+        limit=1,
+        requesting_user_id=user.id,
+        requesting_org_id=user.organization_id,
+    )
+    needs_review_count = review_result.get("total_count", 0)
+
     return templates.TemplateResponse(
         "requests_list.html",
         {
@@ -2865,10 +2841,21 @@ async def requests_list(request: Request, status: str | None = None):
             "requests": requests_data,
             "summary": summary,
             "filter_status": status,
+            "filter_source": source,
+            "needs_review_count": needs_review_count,
         },
     )
 
 
+@router.get("/requests", response_class=HTMLResponse)
+async def requests_redirect(request: Request):
+    """Redirect old /requests URL to /activity."""
+    qs = str(request.url.query)
+    url = "/activity" + ("?" + qs if qs else "")
+    return RedirectResponse(url=url, status_code=301)
+
+
+@router.get("/activity/{request_id}", response_class=HTMLResponse)
 @router.get("/requests/{request_id}", response_class=HTMLResponse)
 async def request_detail(request: Request, request_id: str):
     """Full request detail with task tree, events, and memory links."""
