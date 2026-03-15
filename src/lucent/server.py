@@ -187,9 +187,7 @@ class MCPAuthMiddleware:
 
                             # Check rate limit for session token auth
                             rate_limiter = get_rate_limiter()
-                            rate_result = rate_limiter.check_rate_limit(
-                                f"session:{user['id']}"
-                            )
+                            rate_result = rate_limiter.check_rate_limit(f"session:{user['id']}")
 
                             if not rate_result.allowed:
                                 logger.warning(

@@ -532,9 +532,7 @@ class TestAccessGrants:
         )
 
         # Revoke
-        resp = await client.delete(
-            f"/api/definitions/agents/{agent_id}/skills/{skill_id}"
-        )
+        resp = await client.delete(f"/api/definitions/agents/{agent_id}/skills/{skill_id}")
         assert resp.status_code == 200
         assert resp.json()["status"] == "revoked"
 
@@ -596,9 +594,7 @@ class TestAccessGrants:
             json={"target_id": server_id},
         )
 
-        resp = await client.delete(
-            f"/api/definitions/agents/{agent_id}/mcp-servers/{server_id}"
-        )
+        resp = await client.delete(f"/api/definitions/agents/{agent_id}/mcp-servers/{server_id}")
         assert resp.status_code == 200
         assert resp.json()["status"] == "revoked"
 

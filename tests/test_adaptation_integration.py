@@ -26,6 +26,7 @@ from daemon.adaptation import (
 
 # ── Mock helper ──────────────────────────────────────────────────────────
 
+
 def _mock_httpx_client(existing_agents=None, existing_skills=None):
     """Create a mock httpx.AsyncClient that simulates the definitions API."""
     existing_agents = existing_agents or []
@@ -91,28 +92,54 @@ SUPPORT_ASSESSMENT_JSON = {
         ),
     },
     "tech_stack": {
-        "languages": [], "frameworks": [], "infrastructure": ["aws"],
-        "databases": [], "tools": ["zendesk", "pagerduty", "confluence", "slack", "jira"],
+        "languages": [],
+        "frameworks": [],
+        "infrastructure": ["aws"],
+        "databases": [],
+        "tools": ["zendesk", "pagerduty", "confluence", "slack", "jira"],
     },
     "collaborators": [
-        {"name": "Maria Chen", "role": "Support Team Lead",
-         "preferences": "Structured handoffs, clear escalation paths"},
-        {"name": "James Park", "role": "Senior Support Engineer",
-         "preferences": "Detailed runbooks, root cause analysis"},
+        {
+            "name": "Maria Chen",
+            "role": "Support Team Lead",
+            "preferences": "Structured handoffs, clear escalation paths",
+        },
+        {
+            "name": "James Park",
+            "role": "Senior Support Engineer",
+            "preferences": "Detailed runbooks, root cause analysis",
+        },
     ],
     "existing_agents": [],
     "existing_skills": ["memory-init", "memory-search"],
     "recommended_agents": [
-        {"name": "triage", "purpose": "Classify incoming support tickets by severity, product area, and route to the right team",
-         "domain_template": "support", "specialization": {}},
-        {"name": "incident-response", "purpose": "Coordinate incident resolution with structured updates and stakeholder communication",
-         "domain_template": "support", "specialization": {}},
-        {"name": "knowledge-base", "purpose": "Maintain and improve runbooks, FAQs, and resolution playbooks",
-         "domain_template": "support", "specialization": {}},
+        {
+            "name": "triage",
+            "purpose": "Classify incoming support tickets by severity, "
+            "product area, and route to the right team",
+            "domain_template": "support",
+            "specialization": {},
+        },
+        {
+            "name": "incident-response",
+            "purpose": "Coordinate incident resolution with structured "
+            "updates and stakeholder communication",
+            "domain_template": "support",
+            "specialization": {},
+        },
+        {
+            "name": "knowledge-base",
+            "purpose": "Maintain and improve runbooks, FAQs, and resolution playbooks",
+            "domain_template": "support",
+            "specialization": {},
+        },
     ],
     "recommended_skills": [
-        {"name": "triage", "purpose": "Issue triage and classification with severity assessment and routing",
-         "domain_template": "support"},
+        {
+            "name": "triage",
+            "purpose": "Issue triage and classification with severity assessment and routing",
+            "domain_template": "support",
+        },
     ],
     "guardrails": [
         "Never share customer data between accounts",
@@ -134,30 +161,57 @@ LEGAL_ASSESSMENT_JSON = {
         ),
     },
     "tech_stack": {
-        "languages": [], "frameworks": [], "infrastructure": [], "databases": [],
+        "languages": [],
+        "frameworks": [],
+        "infrastructure": [],
+        "databases": [],
         "tools": ["westlaw", "lexisnexis", "docusign", "netdocuments"],
     },
     "collaborators": [
-        {"name": "Sarah Thompson", "role": "Senior Partner",
-         "preferences": "Concise memos, risk-focused analysis"},
-        {"name": "David Kim", "role": "Associate Attorney",
-         "preferences": "Thorough research with full citation chains"},
+        {
+            "name": "Sarah Thompson",
+            "role": "Senior Partner",
+            "preferences": "Concise memos, risk-focused analysis",
+        },
+        {
+            "name": "David Kim",
+            "role": "Associate Attorney",
+            "preferences": "Thorough research with full citation chains",
+        },
     ],
     "existing_agents": [],
     "existing_skills": ["memory-init", "memory-search"],
     "recommended_agents": [
-        {"name": "legal-research", "purpose": "Research legal precedents, statutes, and regulations across jurisdictions",
-         "domain_template": "legal", "specialization": {}},
-        {"name": "contract-review", "purpose": "Analyze contracts for risks, obligations, and compliance issues",
-         "domain_template": "legal", "specialization": {}},
-        {"name": "compliance", "purpose": "Monitor regulatory requirements and ensure organizational compliance",
-         "domain_template": "legal", "specialization": {}},
+        {
+            "name": "legal-research",
+            "purpose": "Research legal precedents, statutes, and regulations across jurisdictions",
+            "domain_template": "legal",
+            "specialization": {},
+        },
+        {
+            "name": "contract-review",
+            "purpose": "Analyze contracts for risks, obligations, and compliance issues",
+            "domain_template": "legal",
+            "specialization": {},
+        },
+        {
+            "name": "compliance",
+            "purpose": "Monitor regulatory requirements and ensure organizational compliance",
+            "domain_template": "legal",
+            "specialization": {},
+        },
     ],
     "recommended_skills": [
-        {"name": "case-analysis", "purpose": "Structured legal case analysis with precedent mapping",
-         "domain_template": "legal"},
-        {"name": "compliance-review", "purpose": "Regulatory compliance review and gap analysis",
-         "domain_template": "legal"},
+        {
+            "name": "case-analysis",
+            "purpose": "Structured legal case analysis with precedent mapping",
+            "domain_template": "legal",
+        },
+        {
+            "name": "compliance-review",
+            "purpose": "Regulatory compliance review and gap analysis",
+            "domain_template": "legal",
+        },
     ],
     "guardrails": [
         "Maintain attorney-client privilege at all times",
@@ -179,7 +233,6 @@ def _wrap_assessment(data: dict) -> str:
 
 
 class TestSupportDomainIntegration:
-
     @pytest.mark.asyncio
     async def test_full_pipeline_from_raw_output(self):
         client, created_agents, created_skills = _mock_httpx_client()
@@ -286,7 +339,6 @@ class TestSupportDomainIntegration:
 
 
 class TestLegalDomainIntegration:
-
     @pytest.mark.asyncio
     async def test_full_pipeline_from_raw_output(self):
         client, created_agents, created_skills = _mock_httpx_client()
@@ -383,7 +435,6 @@ class TestLegalDomainIntegration:
 
 
 class TestArchetypeOnlyIntegration:
-
     @pytest.mark.asyncio
     async def test_support_domain_with_no_recommendations(self):
         client, _, _ = _mock_httpx_client()
@@ -448,7 +499,6 @@ class TestArchetypeOnlyIntegration:
 
 
 class TestCrossCuttingIntegration:
-
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "domain_json",
@@ -519,7 +569,8 @@ class TestCrossCuttingIntegration:
         agent_names = [a["name"] for a in agents1]
         skill_names = [s["name"] for s in skills1]
         client2, _, _ = _mock_httpx_client(
-            existing_agents=agent_names, existing_skills=skill_names,
+            existing_agents=agent_names,
+            existing_skills=skill_names,
         )
         assessment2 = AssessmentResult.from_json(SUPPORT_ASSESSMENT_JSON)
         with patch("daemon.adaptation.httpx.AsyncClient", return_value=client2):

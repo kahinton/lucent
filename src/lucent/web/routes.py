@@ -681,6 +681,7 @@ async def dashboard(request: Request):
 
     # Active requests count (from request tracking system)
     from lucent.db.requests import RequestRepository
+
     req_repo = RequestRepository(pool)
     active_requests = await req_repo.list_requests(
         org_id=str(user.organization_id),

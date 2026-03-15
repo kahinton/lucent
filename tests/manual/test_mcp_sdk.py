@@ -1,4 +1,5 @@
 """Test Copilot SDK with MCP server inside Docker."""
+
 import asyncio
 import os
 
@@ -33,16 +34,24 @@ async def test():
         },
     }
 
-    session = await client.create_session({
-        "model": "claude-opus-4.6",
-        "system_message": {"content": "You are a helpful assistant with access to a memory server via MCP tools. Use the search_memories tool to answer questions about the user's memories."},
-        "on_permission_request": PermissionHandler.approve_all,
-        "mcpServers": mcp_config,
-    })
+    session = await client.create_session(
+        {
+            "model": "claude-opus-4.6",
+            "system_message": {
+                "content": (
+                    "You are a helpful assistant with access to a memory server via MCP tools. "
+                    "Use the search_memories tool to answer questions about the user's memories."
+                )
+            },
+            "on_permission_request": PermissionHandler.approve_all,
+            "mcpServers": mcp_config,
+        }
+    )
     print("Session created with MCP config")
 
     # Collect events
     events = []
+
     def on_event(event):
         etype = event.type.value if hasattr(event.type, "value") else str(event.type)
         print(f"Event: {etype}")
@@ -68,5 +77,6 @@ async def test():
     await session.disconnect()
     await client.stop()
     print("Done")
+
 
 asyncio.run(test())

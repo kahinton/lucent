@@ -443,7 +443,8 @@ class TestAgentGeneration:
         with patch("daemon.adaptation.httpx.AsyncClient", return_value=client):
             pipeline = AdaptationPipeline(sample_assessment)
             names = await pipeline.generate_agents(
-                api_base="http://test/api", api_headers={"Authorization": "Bearer test"},
+                api_base="http://test/api",
+                api_headers={"Authorization": "Bearer test"},
             )
 
         assert len(names) == 2
@@ -459,7 +460,8 @@ class TestAgentGeneration:
         with patch("daemon.adaptation.httpx.AsyncClient", return_value=client):
             pipeline = AdaptationPipeline(sample_assessment)
             names = await pipeline.generate_agents(
-                api_base="http://test/api", api_headers={"Authorization": "Bearer test"},
+                api_base="http://test/api",
+                api_headers={"Authorization": "Bearer test"},
             )
 
         # Only deployment should be proposed, security was skipped
@@ -473,7 +475,8 @@ class TestAgentGeneration:
         with patch("daemon.adaptation.httpx.AsyncClient", return_value=client):
             pipeline = AdaptationPipeline(assessment)
             names = await pipeline.generate_agents(
-                api_base="http://test/api", api_headers={"Authorization": "Bearer test"},
+                api_base="http://test/api",
+                api_headers={"Authorization": "Bearer test"},
             )
 
         assert names == []
@@ -500,7 +503,8 @@ class TestSkillGeneration:
         with patch("daemon.adaptation.httpx.AsyncClient", return_value=client):
             pipeline = AdaptationPipeline(sample_assessment)
             names = await pipeline.generate_skills(
-                api_base="http://test/api", api_headers={"Authorization": "Bearer test"},
+                api_base="http://test/api",
+                api_headers={"Authorization": "Bearer test"},
             )
 
         assert len(names) == 2
@@ -515,7 +519,8 @@ class TestSkillGeneration:
         with patch("daemon.adaptation.httpx.AsyncClient", return_value=client):
             pipeline = AdaptationPipeline(sample_assessment)
             names = await pipeline.generate_skills(
-                api_base="http://test/api", api_headers={"Authorization": "Bearer test"},
+                api_base="http://test/api",
+                api_headers={"Authorization": "Bearer test"},
             )
 
         # Only dev-workflow should be proposed
@@ -529,7 +534,8 @@ class TestSkillGeneration:
         with patch("daemon.adaptation.httpx.AsyncClient", return_value=client):
             pipeline = AdaptationPipeline(assessment)
             names = await pipeline.generate_skills(
-                api_base="http://test/api", api_headers={"Authorization": "Bearer test"},
+                api_base="http://test/api",
+                api_headers={"Authorization": "Bearer test"},
             )
 
         assert names == []
@@ -596,7 +602,8 @@ class TestPipelineEndToEnd:
 
     @pytest.mark.asyncio
     async def test_run_without_memory_api(
-        self, sample_assessment: AssessmentResult,
+        self,
+        sample_assessment: AssessmentResult,
     ):
         client, created_agents, created_skills = _mock_httpx_client()
         with patch("daemon.adaptation.httpx.AsyncClient", return_value=client):
@@ -618,7 +625,8 @@ class TestPipelineEndToEnd:
     async def test_run_reports_skipped(self, sample_assessment: AssessmentResult):
         # Pre-create security agent and code-review skill in mock API
         client, _, _ = _mock_httpx_client(
-            existing_agents=["security"], existing_skills=["code-review"],
+            existing_agents=["security"],
+            existing_skills=["code-review"],
         )
         with patch("daemon.adaptation.httpx.AsyncClient", return_value=client):
             pipeline = AdaptationPipeline(sample_assessment)
@@ -1043,7 +1051,8 @@ class TestLegalTemplateGeneration:
         with patch("daemon.adaptation.httpx.AsyncClient", return_value=client):
             pipeline = AdaptationPipeline(assessment)
             names = await pipeline.generate_agents(
-                api_base="http://test/api", api_headers={"Authorization": "Bearer test"},
+                api_base="http://test/api",
+                api_headers={"Authorization": "Bearer test"},
             )
 
         assert len(names) == 1
@@ -1076,7 +1085,8 @@ class TestLegalTemplateGeneration:
         with patch("daemon.adaptation.httpx.AsyncClient", return_value=client):
             pipeline = AdaptationPipeline(assessment)
             names = await pipeline.generate_skills(
-                api_base="http://test/api", api_headers={"Authorization": "Bearer test"},
+                api_base="http://test/api",
+                api_headers={"Authorization": "Bearer test"},
             )
 
         assert len(names) == 2

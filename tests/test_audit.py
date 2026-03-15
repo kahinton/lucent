@@ -341,15 +341,9 @@ class TestAuditRepositoryGetByUserId:
         """Test filtering audit entries by action type."""
         repo = AuditRepository(db_pool)
 
-        await repo.log(
-            memory_id=audit_memory["id"], action_type="create", user_id=audit_user["id"]
-        )
-        await repo.log(
-            memory_id=audit_memory["id"], action_type="update", user_id=audit_user["id"]
-        )
-        await repo.log(
-            memory_id=audit_memory["id"], action_type="update", user_id=audit_user["id"]
-        )
+        await repo.log(memory_id=audit_memory["id"], action_type="create", user_id=audit_user["id"])
+        await repo.log(memory_id=audit_memory["id"], action_type="update", user_id=audit_user["id"])
+        await repo.log(memory_id=audit_memory["id"], action_type="update", user_id=audit_user["id"])
 
         result = await repo.get_by_user_id(audit_user["id"], action_type="update")
         assert result["total_count"] == 2
@@ -358,9 +352,7 @@ class TestAuditRepositoryGetByUserId:
         """Test filtering audit entries by timestamp."""
         repo = AuditRepository(db_pool)
 
-        await repo.log(
-            memory_id=audit_memory["id"], action_type="create", user_id=audit_user["id"]
-        )
+        await repo.log(memory_id=audit_memory["id"], action_type="create", user_id=audit_user["id"])
 
         # Search for entries since a past time (should find the entry)
         past = datetime.now(timezone.utc) - timedelta(hours=1)
@@ -391,9 +383,7 @@ class TestAuditRepositoryGetByOrganizationId:
         assert result["total_count"] == 1
         assert result["entries"][0]["organization_id"] == audit_org["id"]
 
-    async def test_filter_action_type_and_since(
-        self, db_pool, audit_user, audit_org, audit_memory
-    ):
+    async def test_filter_action_type_and_since(self, db_pool, audit_user, audit_org, audit_memory):
         """Test combined action_type and since filters."""
         repo = AuditRepository(db_pool)
 
@@ -425,16 +415,12 @@ class TestAuditRepositoryGetRecent:
         """Test getting recent entries without filters."""
         repo = AuditRepository(db_pool)
 
-        await repo.log(
-            memory_id=audit_memory["id"], action_type="create", user_id=audit_user["id"]
-        )
+        await repo.log(memory_id=audit_memory["id"], action_type="create", user_id=audit_user["id"])
 
         entries = await repo.get_recent()
         assert len(entries) >= 1
 
-    async def test_get_recent_with_org_filter(
-        self, db_pool, audit_user, audit_org, audit_memory
-    ):
+    async def test_get_recent_with_org_filter(self, db_pool, audit_user, audit_org, audit_memory):
         """Test filtering recent entries by organization."""
         repo = AuditRepository(db_pool)
 
@@ -453,12 +439,8 @@ class TestAuditRepositoryGetRecent:
         """Test filtering recent entries by action types list."""
         repo = AuditRepository(db_pool)
 
-        await repo.log(
-            memory_id=audit_memory["id"], action_type="create", user_id=audit_user["id"]
-        )
-        await repo.log(
-            memory_id=audit_memory["id"], action_type="delete", user_id=audit_user["id"]
-        )
+        await repo.log(memory_id=audit_memory["id"], action_type="create", user_id=audit_user["id"])
+        await repo.log(memory_id=audit_memory["id"], action_type="delete", user_id=audit_user["id"])
 
         entries = await repo.get_recent(action_types=["create"])
         assert all(e["action_type"] == "create" for e in entries)
@@ -562,9 +544,7 @@ class TestAuditRepositoryFilterColumnValidation:
 class TestAuditMemoryEndpoint:
     """Tests for GET /api/audit/memory/{memory_id}."""
 
-    async def test_member_sees_own_entries(
-        self, member_client, db_pool, audit_user, audit_memory
-    ):
+    async def test_member_sees_own_entries(self, member_client, db_pool, audit_user, audit_memory):
         """Member can see their own audit entries for a memory."""
         repo = AuditRepository(db_pool)
         await repo.log(
@@ -616,16 +596,12 @@ class TestAuditUserEndpoint:
         data = resp.json()
         assert data["total_count"] >= 1
 
-    async def test_member_cannot_see_other_user(
-        self, member_client, audit_admin
-    ):
+    async def test_member_cannot_see_other_user(self, member_client, audit_admin):
         """Member cannot view another user's audit log."""
         resp = await member_client.get(f"/api/audit/user/{audit_admin['id']}")
         assert resp.status_code == 403
 
-    async def test_admin_sees_other_user(
-        self, admin_client, db_pool, audit_user, audit_memory
-    ):
+    async def test_admin_sees_other_user(self, admin_client, db_pool, audit_user, audit_memory):
         """Admin can view any user's audit log in their org."""
         repo = AuditRepository(db_pool)
         await repo.log(
