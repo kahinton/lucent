@@ -120,6 +120,7 @@ class SandboxManager:
             repo = await self._repo()
             return await repo.get(sandbox_id)
         except Exception:
+            logger.debug("Failed to get sandbox %s from DB", sandbox_id, exc_info=True)
             return None
 
     async def get_live(self, sandbox_id: str) -> SandboxInfo | None:
@@ -203,7 +204,7 @@ class SandboxManager:
             )
             await self.destroy(sandbox_id)
         except asyncio.CancelledError:
-            pass  # Normal — sandbox was manually destroyed
+            logger.debug("Auto-destroy cancelled for sandbox %s (manual destroy)", sandbox_id[:12])
 
 
 # Global singleton

@@ -157,7 +157,7 @@ async def _build_system_prompt(user: dict, pool, page_context: dict | None) -> s
                         for t in tasks[:5]:
                             parts.append(f"  - [{t.get('status')}] {t.get('title', '?')}")
         except Exception:
-            pass  # Don't fail chat for context loading errors
+            logger.debug("Failed to load request context for chat", exc_info=True)
 
     # Pull relevant memories for context
     try:
@@ -176,7 +176,7 @@ async def _build_system_prompt(user: dict, pool, page_context: dict | None) -> s
                     content_preview = str(m.get("content", ""))[:200]
                     parts.append(f"- [{tags}] {content_preview}")
     except Exception:
-        pass  # Don't fail chat if memory lookup fails
+        logger.debug("Failed to load memories for chat context", exc_info=True)
 
     return "\n".join(parts)
 

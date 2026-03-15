@@ -328,7 +328,7 @@ async def _revoke_current_key() -> None:
             try:
                 DAEMON_KEY_FILE.unlink()
             except OSError:
-                pass
+                log("Failed to remove daemon key file", "DEBUG")
 
 
 async def _verify_api_key(api_key: str) -> bool:
@@ -348,6 +348,7 @@ async def _verify_api_key(api_key: str) -> bool:
             )
             return resp.status_code == 200
     except Exception:
+        log("API key verification failed", "DEBUG")
         return False
 
 
@@ -805,7 +806,7 @@ async def load_instance_agent(agent_type: str) -> dict | None:
                         if detail_resp.status_code == 200:
                             return detail_resp.json()
     except Exception:
-        pass
+        log("Failed to load instance agent definition", "DEBUG")
     return None
 
 
@@ -821,7 +822,7 @@ async def load_instance_skills_for_agent(agent_id: str) -> list[dict]:
                 data = resp.json()
                 return data.get("skills", [])
     except Exception:
-        pass
+        log("Failed to load instance skills for agent", "DEBUG")
     return []
 
 
@@ -870,7 +871,7 @@ async def build_subagent_prompt(
                     if data.get("status") == "active":
                         db_agent = data
         except Exception:
-            pass
+            log(f"Failed to fetch agent definition {agent_definition_id}", "DEBUG")
 
     if not db_agent:
         # Search by name among active definitions
@@ -897,7 +898,7 @@ async def build_subagent_prompt(
                                     )
                             break  # Only need one request for all skills
             except Exception:
-                pass
+                log(f"Failed to load skills for agent '{agent_type}'", "DEBUG")
         log(f"Using approved DB definition for '{agent_type}' agent (id: {db_agent['id'][:8]})")
     else:
         raise AgentNotFoundError(
@@ -1045,7 +1046,7 @@ class LucentDaemon:
             try:
                 await self._listen_conn.close()
             except Exception:
-                pass
+                log("Failed to close PG LISTEN connection during stop", "DEBUG")
             self._listen_conn = None
 
         # Revoke the daemon's API key — clean up after ourselves
@@ -1055,7 +1056,7 @@ class LucentDaemon:
             try:
                 await session.destroy()
             except Exception:
-                pass
+                log("Failed to destroy active session during stop", "DEBUG")
         log("Daemon stopped")
         sys.exit(0)
 
@@ -1226,7 +1227,7 @@ class LucentDaemon:
                 try:
                     await session.destroy()
                 except Exception:
-                    pass
+                    log(f"Failed to destroy session '{name}'", "DEBUG")
             finally:
                 if session in self.active_sessions:
                     self.active_sessions.remove(session)
@@ -1255,7 +1256,7 @@ class LucentDaemon:
             try:
                 await client.force_stop()
             except Exception:
-                pass
+                log("Failed to force-stop Copilot client", "DEBUG")
 
     # --- Cognitive Loop ---
 
@@ -1820,7 +1821,7 @@ class LucentDaemon:
                 try:
                     await self._listen_conn.close()
                 except Exception:
-                    pass
+                    log("Failed to close stale PG LISTEN connection", "DEBUG")
                 self._listen_conn = None
 
         try:
@@ -2033,7 +2034,7 @@ class LucentDaemon:
             await asyncio.gather(*pending, return_exceptions=True)
 
         except asyncio.CancelledError:
-            pass
+            log("Main run loop cancelled", "DEBUG")
         finally:
             await self.stop()
 

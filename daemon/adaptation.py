@@ -18,12 +18,15 @@ Pipeline:
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import httpx
 from jinja2 import Environment, FileSystemLoader
+
+logger = logging.getLogger(__name__)
 
 # Paths
 DAEMON_DIR = Path(__file__).parent
@@ -839,7 +842,7 @@ class AdaptationPipeline:
                 if resp.status_code == 200:
                     existing_names = {a["name"] for a in resp.json()}
         except Exception:
-            pass
+            logger.debug("Failed to list existing agent definitions", exc_info=True)
 
         for rec in self.assessment.recommended_agents:
             if rec.name in existing_names:
@@ -849,6 +852,7 @@ class AdaptationPipeline:
             try:
                 template = self.jinja_env.get_template(template_file)
             except Exception:
+                logger.debug("Template %s not found, using base agent template", template_file)
                 template = self.jinja_env.get_template("agents/base_agent.md.j2")
 
             context = _build_agent_context(rec, self.assessment)
@@ -873,7 +877,7 @@ class AdaptationPipeline:
                         created.append(rec.name)
                         self.generated_agents.append(rec.name)
             except Exception:
-                pass
+                logger.debug("Failed to create agent definition '%s'", rec.name, exc_info=True)
 
         return created
 
@@ -900,7 +904,7 @@ class AdaptationPipeline:
                 if resp.status_code == 200:
                     existing_names = {s["name"] for s in resp.json()}
         except Exception:
-            pass
+            logger.debug("Failed to list existing skill definitions", exc_info=True)
 
         for rec in self.assessment.recommended_skills:
             if rec.name in existing_names:
@@ -910,6 +914,7 @@ class AdaptationPipeline:
             try:
                 template = self.jinja_env.get_template(template_file)
             except Exception:
+                logger.debug("Template %s not found, using base skill template", template_file)
                 template = self.jinja_env.get_template("skills/base_skill.md.j2")
 
             context = _build_skill_context(rec, self.assessment)
@@ -934,7 +939,7 @@ class AdaptationPipeline:
                         created.append(rec.name)
                         self.generated_skills.append(rec.name)
             except Exception:
-                pass
+                logger.debug("Failed to create skill definition '%s'", rec.name, exc_info=True)
 
         return created
 

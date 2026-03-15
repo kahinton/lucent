@@ -94,7 +94,7 @@ class CopilotEngine(LLMEngine):
             try:
                 await session.disconnect()
             except Exception:
-                pass
+                logger.debug("Failed to disconnect Copilot session", exc_info=True)
 
             return result
 
@@ -204,7 +204,7 @@ class CopilotEngine(LLMEngine):
             try:
                 await session.destroy()
             except Exception:
-                pass
+                logger.debug("Failed to destroy Copilot streaming session", exc_info=True)
 
             return "\n".join(response_parts) if response_parts else None
 
@@ -227,4 +227,4 @@ class CopilotEngine(LLMEngine):
             try:
                 await client.force_stop()
             except Exception:
-                pass
+                logger.debug("Failed to force-stop Copilot client", exc_info=True)

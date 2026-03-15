@@ -326,7 +326,7 @@ Returns:
                         organization_id=org_id,
                     )
                 except Exception:
-                    pass  # Don't fail the request if access logging fails
+                    logger.debug("Access log failed for get_memory", exc_info=True)
 
             return json.dumps(_serialize_memory(result), indent=2)
 
@@ -400,7 +400,7 @@ Returns:
                                 organization_id=org_id,
                             )
                         except Exception:
-                            pass
+                            logger.debug("Access log failed for get_memories", exc_info=True)
 
             return json.dumps(
                 {
@@ -571,7 +571,7 @@ Returns:
                         },
                     )
                 except Exception:
-                    pass  # Don't fail the request if access logging fails
+                    logger.debug("Access log failed for search_memories", exc_info=True)
 
             # Serialize the results
             serialized = {
@@ -666,7 +666,7 @@ Returns:
                         },
                     )
                 except Exception:
-                    pass  # Don't fail the request if access logging fails
+                    logger.debug("Access log failed for search_memories_full", exc_info=True)
 
             serialized = {
                 "memories": [_serialize_truncated_memory(m) for m in result["memories"]],

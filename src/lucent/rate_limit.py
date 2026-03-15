@@ -130,7 +130,7 @@ class RateLimiter:
         allowed, remaining, reset_at = bucket.check_and_record(effective_limit, self.window_seconds)
 
         headers = {
-            "X-RateLimit-Limit": str(self.limit),
+            "X-RateLimit-Limit": str(effective_limit),
             "X-RateLimit-Remaining": str(remaining),
             "X-RateLimit-Reset": str(reset_at),
         }

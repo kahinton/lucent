@@ -4,10 +4,13 @@ Handles CRUD, approval workflow, and access grants (agent↔skill, agent↔MCP).
 """
 
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
 from asyncpg import Pool
+
+logger = logging.getLogger(__name__)
 
 
 class DefinitionRepository:

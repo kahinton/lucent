@@ -376,7 +376,7 @@ async def get_user_context(request: Request) -> CurrentUser:
                                     impersonator_display_name=current_user.display_name,
                                 )
                 except (ValueError, Exception):
-                    pass  # Invalid UUID or other error, skip impersonation
+                    logger.debug("Impersonation failed for header value", exc_info=True)
 
     return current_user
 
@@ -2422,6 +2422,7 @@ async def sandboxes_page(
     try:
         template_list = await tpl_repo.list_all(org_id) if org_id else []
     except Exception:
+        logger.debug("Failed to load sandbox templates", exc_info=True)
         template_list = []
 
     # Load instances only when on instances tab
@@ -2437,6 +2438,7 @@ async def sandboxes_page(
             else:
                 sandbox_list = await manager.list_all(org_id)
         except Exception:
+            logger.debug("Failed to load sandbox list", exc_info=True)
             sandbox_list = []
 
         # Enrich with template name

@@ -123,11 +123,18 @@ def create_app() -> FastAPI:
             "SECURITY WARNING: LUCENT_CORS_ORIGINS is set to '*' — "
             "this allows ANY origin to make cross-origin requests."
         )
-        logger.warning(
-            "Set explicit origins (e.g. 'http://localhost:8766') for safe operation."
-        )
+        if is_team_mode():
+            logger.warning(
+                "CRITICAL: Wildcard CORS in team mode exposes multi-user data "
+                "to cross-origin attacks. Set explicit origins immediately."
+            )
+        else:
+            logger.warning(
+                "Set explicit origins (e.g. 'http://localhost:8766') for safe operation."
+            )
         logger.warning("=" * 72)
     allowed_origins = [o for o in cors_env.split(",") if o] if cors_env and cors_env != "*" else []
+    # Never allow credentials with wildcard — only when explicit origins are set
     app.add_middleware(
         CORSMiddleware,
         allow_origins=allowed_origins,
