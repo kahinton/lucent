@@ -46,7 +46,7 @@ async def _get_session_user(request: Request):
     session_token = request.cookies.get(SESSION_COOKIE_NAME)
     if not session_token:
         raise HTTPException(401, "Not authenticated")
-    logger.debug("Session token for chat: len=%d prefix=%s", len(session_token), session_token[:8])
+    logger.debug("Session token present for chat request")
     pool = await get_pool()
     user = await validate_session(pool, session_token)
     if not user:

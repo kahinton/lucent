@@ -178,19 +178,58 @@ class MCPAuthMiddleware:
                         pool = await init_db(database_url) if database_url else None
 
                     if pool:
-                        logger.debug(
-                            "Trying session token auth on MCP: token_len=%d, prefix=%s",
-                            len(api_key),
-                            api_key[:8],
-                        )
+                        logger.debug("Trying session token auth on MCP: session token present")
                         user = await validate_session(pool, api_key)
                         if user:
                             logger.info(
                                 "MCP session auth succeeded for user %s", user.get("display_name")
                             )
+
+                            # Check rate limit for session token auth
+                            rate_limiter = get_rate_limiter()
+                            rate_result = rate_limiter.check_rate_limit(
+                                f"session:{user['id']}"
+                            )
+
+                            if not rate_result.allowed:
+                                logger.warning(
+                                    "Rate limit exceeded: session user_id=%s, retry_after=%s",
+                                    user["id"],
+                                    rate_result.headers.get("Retry-After"),
+                                )
+                                response = JSONResponse(
+                                    status_code=429,
+                                    content={
+                                        "jsonrpc": "2.0",
+                                        "error": {
+                                            "code": -32000,
+                                            "message": (
+                                                "Rate limit exceeded."
+                                                " Please slow down your requests."
+                                            ),
+                                        },
+                                        "id": None,
+                                    },
+                                    headers=rate_result.headers,
+                                )
+                                await response(scope, receive, send)
+                                return
+
                             set_current_user(user)
+
+                            # Wrap send to inject rate limit headers
+                            rate_headers = rate_result.headers
+
+                            async def send_with_session_headers(message):
+                                if message["type"] == "http.response.start":
+                                    headers = list(message.get("headers", []))
+                                    for name, value in rate_headers.items():
+                                        headers.append((name.lower().encode(), value.encode()))
+                                    message = {**message, "headers": headers}
+                                await send(message)
+
                             try:
-                                await self.app(scope, receive, send)
+                                await self.app(scope, receive, send_with_session_headers)
                             finally:
                                 set_current_user(None)
                             return

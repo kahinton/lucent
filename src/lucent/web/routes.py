@@ -28,6 +28,7 @@ from lucent.auth_providers import (
     set_user_password,
     sign_value,
     validate_csrf_token,
+    validate_password_complexity,
     validate_session,
     verify_signed_value,
 )
@@ -571,6 +572,14 @@ async def setup_submit(request: Request):
         return templates.TemplateResponse(
             "setup.html",
             {"request": request, "error": "Password must be at least 8 characters."},
+            status_code=400,
+        )
+
+    complexity_error = validate_password_complexity(password)
+    if complexity_error:
+        return templates.TemplateResponse(
+            "setup.html",
+            {"request": request, "error": complexity_error},
             status_code=400,
         )
 
@@ -2713,6 +2722,13 @@ async def change_password(request: Request):
     if len(new_password) < 8:
         return RedirectResponse(
             f"/settings?error={quote('New password must be at least 8 characters.')}",
+            status_code=303,
+        )
+
+    complexity_error = validate_password_complexity(new_password)
+    if complexity_error:
+        return RedirectResponse(
+            f"/settings?error={quote(complexity_error)}",
             status_code=303,
         )
 

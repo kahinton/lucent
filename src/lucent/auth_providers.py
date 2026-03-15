@@ -35,7 +35,9 @@ logger = get_logger("auth.providers")
 # Session configuration
 SESSION_COOKIE_NAME = "lucent_session"
 SESSION_TTL_HOURS = int(os.environ.get("LUCENT_SESSION_TTL_HOURS", "72"))
-SECURE_COOKIES = os.environ.get("LUCENT_SECURE_COOKIES", "false").lower() in ("true", "1", "yes")
+SECURE_COOKIES = os.environ.get("LUCENT_SECURE_COOKIES", "true").lower() in ("true", "1", "yes")
+if not SECURE_COOKIES:
+    logger.warning("LUCENT_SECURE_COOKIES is disabled — only use this for local HTTP development")
 
 # CSRF configuration — simple double-submit cookie pattern
 CSRF_COOKIE_NAME = "lucent_csrf"
@@ -335,6 +337,22 @@ def hash_password(password: str) -> str:
     return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
 
+def validate_password_complexity(password: str) -> str | None:
+    """Check password meets complexity requirements.
+
+    Returns None if valid, or a descriptive error message if invalid.
+    """
+    if not password or len(password) < 8:
+        return "Password must be at least 8 characters."
+    if not any(c.isupper() for c in password):
+        return "Password must contain at least one uppercase letter."
+    if not any(c.islower() for c in password):
+        return "Password must contain at least one lowercase letter."
+    if not any(c.isdigit() for c in password):
+        return "Password must contain at least one digit."
+    return None
+
+
 async def set_user_password(pool: Pool, user_id: UUID, password: str) -> None:
     """Set or update a user's password.
 
@@ -343,8 +361,9 @@ async def set_user_password(pool: Pool, user_id: UUID, password: str) -> None:
         user_id: The user's UUID.
         password: The new plaintext password (will be hashed).
     """
-    if not password or len(password) < 8:
-        raise ValueError("Password must be at least 8 characters long")
+    error = validate_password_complexity(password)
+    if error:
+        raise ValueError(error)
     pw_hash = hash_password(password)
     query = "UPDATE users SET password_hash = $1 WHERE id = $2"
     async with pool.acquire() as conn:
