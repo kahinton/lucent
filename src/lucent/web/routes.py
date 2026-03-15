@@ -2297,10 +2297,12 @@ async def create_user(
 
     session_token = request.cookies.get("lucent_session", "")
     sig = hmac.new(session_token.encode(), temp_password.encode(), hashlib.sha256).hexdigest()[:16]
+    params = get_cookie_params()
     response.set_cookie(
         key="lucent_temp_pw",
         value=f"{temp_password}:{sig}",
         httponly=True,
+        secure=params["secure"],
         samesite="lax",
         max_age=60,  # Expires after 60 seconds
         path="/users",
