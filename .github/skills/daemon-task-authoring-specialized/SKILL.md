@@ -17,16 +17,16 @@ Advanced patterns for authoring daemon tasks in the Lucent architecture. Builds 
 ## Lucent Task Lifecycle
 
 ```
-Created (pending) → Claimed (in-progress) → Executed → Validated → Completed/Failed
+Request created → Daemon picks up → Tasks created → Agent dispatched → Validated → Completed/Failed
 ```
 
-### Key Implementation Details
+### How It Works
 
-1. **Tasks are memories**: Stored as type `procedural` with tags `["daemon-task", "pending", "<agent_type>"]`
-2. **Claiming**: Cognitive cycle swaps `pending` → `in-progress` + `claimed-by-{instance_id}`
-3. **Execution**: Sub-agent runs in a CopilotClient session with `SESSION_TOTAL_TIMEOUT` (720s)
-4. **Validation**: `_validate_task_result()` checks result length, error patterns, objective reference
-5. **Result storage**: Truncated to `MAX_RESULT_LENGTH` (8000 chars) in task metadata + full result in separate `daemon-result` memory
+1. **`create_request` MCP tool** — single call creates a request in the pending queue
+2. **Daemon cognitive cycle** — picks up pending requests, creates tasks, assigns agents
+3. **Agent dispatch** — sub-agent runs with the agent definition + task description as prompt
+4. **Validation** — daemon checks result quality, marks completed or failed
+5. **Review** — results appear in Review Queue for human approval
 
 ## Sub-Agent System Prompts
 

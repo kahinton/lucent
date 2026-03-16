@@ -9,21 +9,33 @@ How to create daemon tasks that get picked up, executed successfully, and pass v
 
 ## When to Use
 
-- Creating daemon tasks via API (`POST /api/daemon/tasks`) or memory
-- Reviewing why tasks failed validation or produced poor results
-- Calibrating task priority for the cognitive cycle queue
+- User asks to create work for the daemon
+- Scheduling recurring tasks
+- Submitting requests for agent creation, code changes, research, etc.
 
-## Task Structure
+## How to Create a Request
 
-A daemon task is a memory with tags `["daemon-task", "pending", "<agent_type>"]` and these fields:
+**Use the `create_request` MCP tool.** This is a single call:
+
+```
+create_request(
+  title="Short title for the work",
+  description="Full instructions for the daemon — everything it needs to do.",
+  source="user",
+  priority="medium"
+)
+```
+
+That's it. The daemon picks it up, creates tasks, and dispatches to the appropriate agent.
+
+## Key Fields
 
 | Field | Required | Notes |
 |-------|----------|-------|
-| `description` | Yes | The full instructions for the sub-agent. Must be self-contained. |
-| `agent_type` | Yes | One of: `research`, `code`, `memory`, `reflection`, `documentation`, `planning` |
-| `priority` | Yes | `low`, `medium`, or `high` — affects dispatch order |
-| `context` | No | Additional context (file paths, error messages, prior results) |
-| `tags` | No | Extra tags for categorization beyond the auto-added ones |
+| `title` | Yes | Short label (1-256 chars) |
+| `description` | Yes | Full instructions. Must be self-contained. This is what the daemon reads. |
+| `source` | No | `"user"` (default), `"cognitive"`, `"api"`, `"schedule"` |
+| `priority` | No | `"low"`, `"medium"` (default), `"high"`, `"urgent"` |
 
 ## Writing Good Descriptions
 
