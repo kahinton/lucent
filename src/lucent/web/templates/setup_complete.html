@@ -3,10 +3,12 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="light dark">
     <title>Setup Complete - Lucent</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
         tailwind.config = {
+            darkMode: 'media',
             theme: {
                 extend: {
                     colors: {
@@ -20,18 +22,28 @@
             }
         }
     </script>
+    <style>
+        @media (prefers-color-scheme: dark) {
+            .bg-gray-50 { background-color: #0d1117 !important; }
+            .bg-white { background-color: #111827 !important; }
+            .border-gray-200 { border-color: #1e293b !important; }
+            .text-gray-900 { color: #f1f5f9 !important; }
+            .text-gray-500 { color: #64748b !important; }
+            pre { background-color: #1a2233 !important; border-color: #334155 !important; color: #e2e8f0 !important; }
+        }
+    </style>
 </head>
-<body class="min-h-screen bg-gray-50 flex items-center justify-center">
+<body class="min-h-screen bg-gray-50 dark:bg-gray-950 flex items-center justify-center">
     <div class="w-full max-w-lg">
         <div class="flex flex-col items-center mb-8">
             <img src="/static/lucent_logo_128.png" alt="Lucent" class="h-16 mb-4">
-            <h1 class="text-2xl font-bold text-gray-900">You're All Set!</h1>
+            <h1 class="text-2xl font-bold text-gray-900 dark:text-gray-100">You're All Set!</h1>
         </div>
 
-        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-8 space-y-6">
-            <div class="p-4 bg-green-50 border border-green-200 rounded-lg">
-                <p class="text-sm font-medium text-green-800">Account created successfully</p>
-                <p class="text-sm text-green-700 mt-1">Welcome, {{ display_name }}!</p>
+        <div class="bg-white dark:bg-gray-900 rounded-xl shadow-sm border border-gray-200 dark:border-gray-800 p-8 space-y-6">
+            <div class="p-4 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-lg">
+                <p class="text-sm font-medium text-green-800 dark:text-green-400">Account created successfully</p>
+                <p class="text-sm text-green-700 dark:text-green-500 mt-1">Welcome, {{ display_name }}!</p>
             </div>
 
             <div>

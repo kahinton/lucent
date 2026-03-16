@@ -1,8 +1,9 @@
 <!DOCTYPE html>
-<html lang="en" class="h-full bg-gray-50">
+<html lang="en" class="h-full">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="light dark">
     <title>{% block title %}Lucent{% endblock %}</title>
     
     <!-- Favicon -->
@@ -14,6 +15,7 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
         tailwind.config = {
+            darkMode: 'media',
             theme: {
                 extend: {
                     colors: {
@@ -39,7 +41,7 @@
     <script src="https://unpkg.com/htmx.org@1.9.10"></script>
     
     <style>
-        /* Custom scrollbar */
+        /* Custom scrollbar — light */
         ::-webkit-scrollbar { width: 6px; height: 6px; }
         ::-webkit-scrollbar-track { background: #f1f5f9; }
         ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
@@ -48,20 +50,120 @@
         /* HTMX loading states */
         .htmx-request .htmx-indicator { display: inline-block; }
         .htmx-indicator { display: none; }
+
+        /* ─── Dark Mode (system preference) ──────────────────────── */
+        @media (prefers-color-scheme: dark) {
+            ::-webkit-scrollbar-track { background: #1e293b; }
+            ::-webkit-scrollbar-thumb { background: #475569; }
+            ::-webkit-scrollbar-thumb:hover { background: #64748b; }
+
+            /* Page background */
+            html { background-color: #0a0a0f; }
+            body { background-color: #0a0a0f; color: #e2e8f0; }
+
+            /* Invert gray backgrounds */
+            .bg-white { background-color: #111827 !important; }
+            .bg-gray-50 { background-color: #0d1117 !important; }
+            .bg-gray-100 { background-color: #1a2233 !important; }
+            .bg-gray-200 { background-color: #1e293b !important; }
+
+            /* Borders */
+            .border-gray-100 { border-color: #1e293b !important; }
+            .border-gray-200 { border-color: #1e293b !important; }
+            .border-gray-300 { border-color: #334155 !important; }
+            .divide-gray-100 > :not([hidden]) ~ :not([hidden]) { border-color: #1e293b !important; }
+            .divide-gray-200 > :not([hidden]) ~ :not([hidden]) { border-color: #1e293b !important; }
+
+            /* Text */
+            .text-gray-900 { color: #f1f5f9 !important; }
+            .text-gray-800 { color: #e2e8f0 !important; }
+            .text-gray-700 { color: #cbd5e1 !important; }
+            .text-gray-600 { color: #94a3b8 !important; }
+            .text-gray-500 { color: #64748b !important; }
+            .text-gray-400 { color: #4b5e78 !important; }
+
+            /* Form inputs */
+            input, textarea, select {
+                background-color: #1a2233 !important;
+                color: #e2e8f0 !important;
+                border-color: #334155 !important;
+            }
+            input::placeholder, textarea::placeholder {
+                color: #4b5e78 !important;
+            }
+            input:focus, textarea:focus, select:focus {
+                border-color: #6366f1 !important;
+                box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2) !important;
+            }
+            option { background-color: #1a2233; color: #e2e8f0; }
+
+            /* Primary tinted backgrounds */
+            .bg-primary-50 { background-color: rgba(99, 102, 241, 0.12) !important; }
+            .bg-primary-100 { background-color: rgba(99, 102, 241, 0.18) !important; }
+            .text-primary-700 { color: #a5b4fc !important; }
+            .text-primary-600 { color: #818cf8 !important; }
+            .bg-primary-600 { background-color: #4f46e5 !important; }
+
+            /* Status backgrounds — soften for dark */
+            .bg-green-50 { background-color: rgba(34, 197, 94, 0.1) !important; }
+            .bg-green-100 { background-color: rgba(34, 197, 94, 0.15) !important; }
+            .bg-red-50 { background-color: rgba(239, 68, 68, 0.1) !important; }
+            .bg-red-100 { background-color: rgba(239, 68, 68, 0.15) !important; }
+            .bg-amber-50 { background-color: rgba(245, 158, 11, 0.1) !important; }
+            .bg-amber-100 { background-color: rgba(245, 158, 11, 0.15) !important; }
+            .bg-blue-50 { background-color: rgba(59, 130, 246, 0.1) !important; }
+            .bg-blue-100 { background-color: rgba(59, 130, 246, 0.15) !important; }
+            .bg-indigo-100 { background-color: rgba(99, 102, 241, 0.15) !important; }
+            .bg-violet-100 { background-color: rgba(139, 92, 246, 0.15) !important; }
+            .bg-cyan-100 { background-color: rgba(34, 211, 238, 0.15) !important; }
+            .bg-orange-100 { background-color: rgba(249, 115, 22, 0.15) !important; }
+            .bg-emerald-100 { background-color: rgba(52, 211, 153, 0.15) !important; }
+
+            /* Gray tinted backgrounds used in badges/tags */
+            .bg-gray-50\/50 { background-color: rgba(30, 41, 59, 0.5) !important; }
+
+            /* Hover states */
+            .hover\:bg-gray-50:hover { background-color: #1a2233 !important; }
+            .hover\:bg-gray-100:hover { background-color: #1e293b !important; }
+            .hover\:bg-gray-200:hover { background-color: #334155 !important; }
+            .hover\:text-gray-900:hover { color: #f1f5f9 !important; }
+            .hover\:text-gray-600:hover { color: #94a3b8 !important; }
+            .hover\:bg-green-100:hover { background-color: rgba(34, 197, 94, 0.2) !important; }
+            .hover\:bg-red-100:hover { background-color: rgba(239, 68, 68, 0.2) !important; }
+
+            /* Shadow adjustments */
+            .shadow-md, .shadow-lg, .shadow-xl, .shadow-2xl {
+                --tw-shadow-color: rgba(0, 0, 0, 0.4);
+            }
+
+            /* Code/mono blocks */
+            .font-mono { color: #a5b4fc; }
+            pre, code { background-color: #1a2233 !important; color: #c7d2fe !important; }
+
+            /* Gradient adjustments */
+            .from-primary-400 { --tw-gradient-from: #6366f1 !important; }
+            .to-primary-600 { --tw-gradient-to: #4338ca !important; }
+            .bg-gradient-to-r.from-primary-50 { background: rgba(99, 102, 241, 0.08) !important; }
+
+            /* Chat panel */
+            #chat-panel { background-color: #111827 !important; border-color: #1e293b !important; }
+            #chat-panel .border-gray-100 { border-color: #1e293b !important; }
+            #chat-input { background-color: #1a2233 !important; border-color: #334155 !important; }
+        }
     </style>
     {% block extra_head %}{% endblock %}
 </head>
-<body class="h-full">
+<body class="h-full bg-gray-50 dark:bg-gray-950">
     <div class="min-h-full">
         <!-- Sidebar -->
-        <div class="fixed inset-y-0 left-0 z-50 w-64 bg-white border-r border-gray-200">
+        <div class="fixed inset-y-0 left-0 z-50 w-64 bg-white dark:bg-gray-900 border-r border-gray-200 dark:border-gray-800">
             <div class="flex flex-col h-full">
                 <!-- Logo -->
-                <div class="flex items-center gap-3 px-6 py-5 border-b border-gray-100">
+                <div class="flex items-center gap-3 px-6 py-5 border-b border-gray-100 dark:border-gray-800">
                     <img src="/static/lucent_logo_64.png" alt="Lucent Logo" class="h-10 object-contain">
                     <div>
-                        <h1 class="text-lg font-bold text-gray-900">Lucent</h1>
-                        <p class="text-xs text-gray-500">AI Teammate</p>
+                        <h1 class="text-lg font-bold text-gray-900 dark:text-gray-100">Lucent</h1>
+                        <p class="text-xs text-gray-500 dark:text-gray-400">AI Teammate</p>
                     </div>
                 </div>
                 
