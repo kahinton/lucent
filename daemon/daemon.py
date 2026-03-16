@@ -989,6 +989,7 @@ class LucentDaemon:
         # PG LISTEN infrastructure for event-driven dispatch
         self._listen_conn = None
         self._task_ready = asyncio.Event()
+        self._request_ready = asyncio.Event()
 
         # Heartbeat memory ID (cached after first create/lookup)
         self._heartbeat_memory_id: str | None = None
@@ -1827,7 +1828,8 @@ class LucentDaemon:
         try:
             self._listen_conn = await asyncpg.connect(DATABASE_URL)
             await self._listen_conn.add_listener("task_ready", self._on_task_ready)
-            log("PG LISTEN established on 'task_ready' channel")
+            await self._listen_conn.add_listener("request_ready", self._on_request_ready)
+            log("PG LISTEN established on 'task_ready' and 'request_ready' channels")
             return True
         except Exception as e:
             log(f"PG LISTEN setup failed (dispatch will use polling only): {e}", "WARN")
@@ -1837,6 +1839,14 @@ class LucentDaemon:
     def _on_task_ready(self, conn, pid, channel, payload):
         """Callback when PG NOTIFY fires on task_ready channel."""
         self._task_ready.set()
+
+    def _on_request_ready(self, conn, pid, channel, payload):
+        """Callback when PG NOTIFY fires on request_ready channel.
+
+        Wakes the cognitive loop so user/API requests are processed
+        immediately instead of waiting for the next scheduled cycle.
+        """
+        self._request_ready.set()
 
     # --- Independent loop implementations ---
 
@@ -1896,8 +1906,14 @@ class LucentDaemon:
 
         Runs the cognitive LLM session on a fixed interval.  Creates
         requests/tasks for the dispatch loop to pick up.
+
+        Wakes immediately when a user/API request arrives via PG NOTIFY
+        on the 'request_ready' channel, so human requests skip the queue.
         """
         log(f"Cognitive loop started (interval: {DAEMON_INTERVAL_MINUTES}m)")
+        # Set up PG LISTEN if not already done (dispatch loop may have set it up)
+        if not self._listen_conn or self._listen_conn.is_closed():
+            await self._setup_listen()
 
         while self.running:
             try:
@@ -1907,8 +1923,17 @@ class LucentDaemon:
             except Exception as e:
                 log(f"Cognitive loop error: {e}", "ERROR")
 
-            # Sleep until next cycle
-            await asyncio.sleep(DAEMON_INTERVAL_MINUTES * 60)
+            # Sleep until next cycle OR a user request arrives
+            try:
+                await asyncio.wait_for(
+                    self._request_ready.wait(),
+                    timeout=DAEMON_INTERVAL_MINUTES * 60,
+                )
+                # Woke early — a user/API request came in
+                log("Cognitive loop woke early: new user/API request detected")
+            except asyncio.TimeoutError:
+                pass  # Normal scheduled cycle
+            self._request_ready.clear()
 
     async def _scheduler_loop(self):
         """Check for due schedules and fire them.
