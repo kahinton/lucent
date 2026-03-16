@@ -18,13 +18,6 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport
 
-
-@pytest.fixture
-def team_mode():
-    """Patch is_team_mode to return True for the duration of the test."""
-    with patch("lucent.web.routes.is_team_mode", return_value=True):
-        yield
-
 from lucent.api.app import create_app
 from lucent.auth_providers import (
     CSRF_COOKIE_NAME,
@@ -33,6 +26,14 @@ from lucent.auth_providers import (
     set_user_password,
 )
 from lucent.db import AuditRepository, MemoryRepository, OrganizationRepository, UserRepository
+
+
+@pytest.fixture
+def team_mode():
+    """Patch is_team_mode to return True for the duration of the test."""
+    with patch("lucent.web.routes.is_team_mode", return_value=True):
+        yield
+
 
 TEST_PASSWORD = "TestPass1"
 
