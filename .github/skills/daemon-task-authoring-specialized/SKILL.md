@@ -30,18 +30,13 @@ Request created → Daemon picks up → Tasks created → Agent dispatched → V
 
 ## Sub-Agent System Prompts
 
-Each agent type loads its prompt from `daemon/agents/<type>.agent.md`. The task description is appended to this prompt. Available agents:
+Each agent type gets its prompt from the agent definition stored in the database (manageable via the Agents & Skills page). The task description is appended to this prompt.
 
-| Agent | File | Specialty |
-|-------|------|-----------|
-| code | `code.agent.md` | File editing, testing, CLI tools |
-| research | `research.agent.md` | Investigation, web access, synthesis |
-| memory | `memory.agent.md` | Memory CRUD, consolidation |
-| reflection | `reflection.agent.md` | Self-analysis, behavioral review |
-| documentation | `documentation.agent.md` | Docs, guides, knowledge bases |
-| planning | `planning.agent.md` | Goal decomposition, roadmaps |
+Agent types are dynamic — they match the `name` field of active agent definitions. Check currently available agents at Agents & Skills in the web UI or `GET /api/definitions/agents?status=active`.
 
-Additional specialized agents exist (api-testing, security, performance, etc.) but are not yet wired as valid `agent_type` values.
+Common built-in agent types include: `code-review`, `testing`, `security`, `documentation`, `deployment`, `monitoring`, `triage`, `data-analysis`, `knowledge-base`, and many more.
+
+When creating a request, you don't need to specify an agent_type — the daemon's cognitive cycle will analyze the request and assign appropriate agents automatically.
 
 ## Multi-Step Task Decomposition
 

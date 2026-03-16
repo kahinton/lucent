@@ -33,7 +33,7 @@ Write down the specific behavior that needs to change. Vague goals like "be bett
 | Wrong default behavior | Agent definition (`.github/agents/lucent.agent.md`) — add/change an operating rule |
 | Skill instructions producing bad output | The specific skill file (`.github/skills/*/SKILL.md`) |
 | Missing capability | Create a new skill file |
-| Daemon sub-agent behavior | Daemon agent templates (`daemon/templates/agents/`) |
+| Daemon sub-agent behavior | Agent definitions in the web UI (Agents & Skills page) or `daemon/templates/agents/` |
 | Domain-specific gap | Generate new skill via capability-generation |
 
 ## Step 3: Read Before Writing

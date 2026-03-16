@@ -57,7 +57,8 @@ Procedures for validating Lucent's MCP tool implementations, testing edge cases,
 | `get_tag_suggestions` | `query`, `limit` (max 25) | Partial match behavior |
 | `get_current_user_context` | (none) | Auth context extraction |
 | `share_memory` / `unshare_memory` | `memory_id` | Team mode only (conditional registration) |
-| `create_daemon_task` | `description`, `agent_type`, `priority` | Creates procedural memory with daemon tags |
+| `create_daemon_task` | `description`, `agent_type`, `priority` | Creates a task in the tasks table (not a memory) |
+| `create_request` | `title`, `description`, `source`, `priority` | Creates a request in the pending queue |
 
 ## Testing Procedures
 
@@ -148,11 +149,17 @@ Test `get_memories` with mixed valid/invalid IDs:
 3. `restore_memory_version(version=2)` → content should match version 2
 4. Version count should increment (restore creates a new version)
 
-### 7. Daemon Task Creation Testing
+### 7. Request/Task Creation Testing
 
-`create_daemon_task` creates a `procedural` memory with specific tags:
-- Verify tags include `daemon-task` and `pending`
-- Verify `agent_type` is stored (used by daemon dispatch)
+`create_request` creates a request in the pending queue:
+- Verify request appears in `GET /api/requests?status=pending`
+- Verify `source` field is preserved (`user`, `cognitive`, `api`, `schedule`)
+- Verify `priority` is preserved
+- Test with all source types
+
+`create_daemon_task` creates a task in the tasks table:
+- Verify task appears linked to its parent request
+- Verify `agent_type` matches an active agent definition
 - Verify `priority` is stored
 - Test with optional `context` and `tags` parameters
 

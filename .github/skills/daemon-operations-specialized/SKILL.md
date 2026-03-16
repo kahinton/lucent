@@ -105,10 +105,10 @@ The interval is the **pause between cycles**, not cycle duration. Actual time be
 
 ### Measuring Throughput
 
-1. **Pending queue depth**: `search_memories` with tags `["daemon-task", "pending"]` — count results
-2. **In-progress tasks**: `search_memories` with tags `["daemon-task", "in-progress"]` — should be ≤ `MAX_CONCURRENT_SESSIONS`
-3. **Completed tasks**: `search_memories` with tags `["daemon-task", "completed"]` — growth rate = throughput
-4. **Failed/released tasks**: Look for tasks that cycled between `pending` → `in-progress` → `pending` multiple times (check version count via `get_memory_versions`)
+1. **Pending queue depth**: `GET /api/requests/queue/pending` or check Activity page
+2. **Running tasks**: Activity page shows in-progress tasks — should be ≤ `MAX_CONCURRENT_SESSIONS`
+3. **Completed tasks**: `GET /api/requests?status=completed` — growth rate = throughput
+4. **Failed tasks**: `GET /api/requests?status=failed` or check Activity page for error details
 
 ### Throughput Bottlenecks
 
@@ -135,12 +135,12 @@ Monitor these key tags for growth:
 
 | Tag | Expected Growth | Alert If |
 |-----|----------------|----------|
-| `daemon-task` | Steady (created + completed balance) | Pending count growing unbounded |
-| `daemon-result` | Grows with completed tasks | Exceeds 100 without consolidation |
 | `daemon-state` | 1 per cycle (updated in place) | Multiple exist (should be singleton) |
 | `daemon-heartbeat` | 1 per instance | Multiple stale heartbeats (crashed instances) |
 | `daemon-message` | Sporadic (inter-agent comms) | Unprocessed messages accumulating |
 | `lesson` | Grows slowly via learning extraction | Duplicates (check `memory-management` skill) |
+
+**Note**: Tasks and requests are stored in the database `requests` and `tasks` tables, not as memories. Use the Activity page or requests API to monitor them.
 
 ### Memory Cleanup Triggers
 
@@ -153,37 +153,24 @@ If memories are growing too fast:
 
 ### Result Storage
 
-Task results are stored in two places:
-- Task memory metadata: `{"result": "..."}` truncated to `MAX_RESULT_LENGTH` (8000 chars)
-- Separate `daemon-result` memory with the full result
-
-This duplication is intentional — the metadata enables quick scanning, the separate memory enables full retrieval.
+Task results are stored in the `tasks` table with a `result` field. The daemon also creates a `daemon-result` memory with the full output for searchability.
 
 ## Multi-Instance Coordination
 
 ### How Instances Coordinate
 
-Multiple daemon instances share the same memory store. Coordination is tag-based:
+Multiple daemon instances share the same database. Coordination is atomic:
 
-1. **Task claiming**: Atomic tag swap `pending` → `in-progress`. First writer wins.
-2. **Heartbeat tracking**: Each instance writes its own heartbeat. Other instances can read all heartbeats.
-3. **Stale release**: Any instance can release tasks stuck `in-progress` for >30 minutes (`_release_stale_claims()`).
+1. **Task claiming**: Atomic `claim_task(task_id, instance_id)` — database-level lock. First writer wins.
+2. **Heartbeat tracking**: Each instance writes its own heartbeat memory.
+3. **Stale release**: `POST /api/requests/queue/release-stale?stale_minutes=30` releases stuck tasks.
 
 ### Monitoring Multi-Instance
 
-1. Search for all heartbeat memories: tags `["daemon-heartbeat"]`
+1. Search for all heartbeat memories: `search_memories(tags=["daemon-heartbeat"])`
 2. Each should have a unique `instance_id` and recent `timestamp`
 3. Count active instances: heartbeats with `timestamp` < 2× interval
-4. Check for split-brain: multiple instances claiming the same task (look for rapid tag flipping in `get_memory_versions`)
-
-### Instance Conflicts
-
-If two instances claim the same task:
-- Both update tags to `in-progress`
-- Both run sub-agent sessions
-- Both try to mark `completed`
-- One will succeed, the other's update may clobber — this is a known limitation
-- Mitigation: keep `MAX_CONCURRENT_SESSIONS` low across instances to reduce collision probability
+4. Task claiming is now atomic at the database level — no split-brain risk
 
 ## Operational Runbook
 
@@ -199,11 +186,11 @@ curl -s http://localhost:8766/api/health | python -m json.tool
 # 3. Recent log activity?
 tail -5 daemon/daemon.log
 
-# 4. Check pending queue via MCP
-# search_memories(tags=["daemon-task", "pending"])
+# 4. Check pending queue
+curl -s http://localhost:8766/api/requests/queue/pending
 
-# 5. Check for stuck tasks via MCP
-# search_memories(tags=["daemon-task", "in-progress"])
+# 5. Check for stuck tasks — release stale claims
+curl -s -X POST http://localhost:8766/api/requests/queue/release-stale?stale_minutes=30
 ```
 
 ### After Configuration Changes

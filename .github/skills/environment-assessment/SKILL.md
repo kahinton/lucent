@@ -39,9 +39,9 @@ This skill enables Lucent to understand any environment it's deployed into — s
 
 ## Phase 4: Inventory Existing Capabilities
 
-1. **Agents**: List files in `daemon/agents/` — what sub-agents exist?
-2. **Skills**: List directories in `.github/skills/` — what skills are defined?
-3. **For each agent/skill**: Read it and summarize its purpose
+1. **Agents**: Check the Agents & Skills page in the web UI, or `GET /api/definitions/agents?status=active`
+2. **Skills**: Check Skills tab on the same page, or `GET /api/definitions/skills?status=active`
+3. **For each agent/skill**: Review its description and purpose
 
 ## Phase 5: Gap Analysis
 

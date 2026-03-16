@@ -23,7 +23,7 @@ Procedures for diagnosing failures in the Lucent daemon's three-layer architectu
 | `daemon/daemon.py` | Main orchestrator — `LucentDaemon`, `MemoryAPI`, task dispatch |
 | `daemon/cognitive.md` | PRDA protocol (Perceive → Reason → Decide → Act) |
 | `daemon/adaptation.py` | Environment assessment and `AdaptationPipeline` |
-| `daemon/agents/*.agent.md` | Sub-agent role definitions |
+| `daemon/templates/agents/` | Jinja2 templates for generating new agent definitions |
 | `daemon/daemon.log` | Runtime log (rotates at 10 MB, keeps 5 backups) |
 
 ## Debugging Procedures
@@ -46,13 +46,13 @@ Procedures for diagnosing failures in the Lucent daemon's three-layer architectu
 
 ### 2. Stuck Tasks (in-progress forever)
 
-**Symptoms**: Tasks tagged `daemon-task` + `in-progress` with `updated_at` older than 30 minutes.
+**Symptoms**: Tasks in `running` status for longer than 30 minutes.
 
 **Steps**:
-1. Search for stuck tasks via MCP: `search_memories` with tags `["daemon-task", "in-progress"]`
-2. Check the `updated_at` timestamp — `_release_stale_claims()` in `daemon.py` releases tasks where `updated_at` > 30 minutes ago by swapping `in-progress` → `pending`
-3. If the release mechanism isn't firing, check that `run_cognitive_cycle()` is being called (it runs `_release_stale_claims()` at the start of each cycle)
-4. Manual fix: call `update_memory(memory_id, tags=[...replace "in-progress" with "pending"...])`
+1. Check the Activity page for tasks stuck in `running` status
+2. The daemon's `_release_stale_claims()` releases tasks where `started_at` > 30 minutes ago
+3. If the release mechanism isn't firing, check that the cognitive cycle is running (heartbeat memory should be recent)
+4. Manual fix: `POST /api/requests/queue/release-stale?stale_minutes=30`
 5. Check if the sub-agent session timed out — look for `TimeoutError` or `SESSION_TOTAL_TIMEOUT` in logs around the task's `updated_at` time
 
 **Root causes**:
@@ -65,12 +65,12 @@ Procedures for diagnosing failures in the Lucent daemon's three-layer architectu
 **Symptoms**: Pending tasks exist but never get picked up. Logs show cognitive cycles completing but `_dispatch_pending_tasks()` finds nothing or fails.
 
 **Steps**:
-1. Verify pending tasks exist: `search_memories` with tags `["daemon-task", "pending"]`
-2. Check task memory content — `_dispatch_pending_tasks()` reads the memory content to build the sub-agent prompt. If content is empty or malformed, it skips the task.
-3. Check the `role` field in task metadata — it must match a valid agent definition in `daemon/agents/`. Valid roles: `research`, `code`, `memory`, `reflection`, `documentation`, `planning`, `assessment`.
+1. Verify pending tasks exist: check Activity page or `GET /api/requests/queue/pending`
+2. Check task description — `_dispatch_pending_tasks()` reads the task row to build the sub-agent prompt. If description is empty, it may skip.
+3. Check the `agent_type` field — it must match an active agent definition. Check Agents & Skills page for available agents.
 4. Check `MAX_CONCURRENT_SESSIONS` (default 3) — if the semaphore is full, new dispatches block.
-5. Look for the atomic claim pattern: the daemon updates tags from `pending` to `in-progress`. If another instance already claimed it, the tags won't match on re-read.
-6. Confirm the sub-agent definition file exists: `daemon/agents/{role}.agent.md`
+5. Check that the agent definition exists and is approved (status = `active`) in the definitions table.
+6. The daemon builds the prompt via `build_subagent_prompt(agent_type, description, agent_definition_id)`.
 
 **The dispatch flow** (lines 926–1076 of `daemon.py`):
 ```
@@ -135,10 +135,10 @@ find pending tasks → get memory details → atomic claim (tag swap) → run_se
 1. Is the process running?           → ps aux | grep daemon.py
 2. Is the server healthy?            → curl localhost:8766/api/health
 3. Is the database reachable?        → docker exec lucent-db pg_isready -U lucent
-4. Are there stale tasks?            → search tags=["daemon-task","in-progress"]
-5. Is the heartbeat current?         → search tags=["daemon-heartbeat"]
-6. What did the last cycle decide?   → search tags=["daemon-state"]
-7. Are there pending messages?       → search tags=["daemon-message"]
+4. Are there stale tasks?            → Activity page or GET /api/requests/queue/pending
+5. Is the heartbeat current?         → search_memories(tags=["daemon-heartbeat"])
+6. What did the last cycle decide?   → search_memories(tags=["daemon-state"])
+7. Are there pending requests?       → Activity page or GET /api/requests?status=pending
 8. What errors are in the log?       → grep -i "error\|exception\|timeout" daemon/daemon.log | tail -20
 ```
 

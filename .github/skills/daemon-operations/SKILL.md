@@ -19,15 +19,15 @@ Operational procedures for monitoring and maintaining the Lucent daemon. For det
 1. **Process running?** Check heartbeat memory (tags: `daemon-heartbeat`) — timestamp should be within 2× `DAEMON_INTERVAL_MINUTES`
 2. **Server up?** `curl http://localhost:8766/api/health`
 3. **Recent activity?** `tail -5 daemon/daemon.log`
-4. **Queue depth?** Search memories with tags `["daemon-task", "pending"]`
+4. **Queue depth?** Check Activity page in web UI, or `GET /api/requests/queue/pending`
 
 ## Key Metrics
 
 | Metric | Where to Find | Healthy |
 |--------|--------------|---------|
 | Cycle count | Heartbeat memory `cycle_count` | Incrementing |
-| Pending tasks | Search `daemon-task` + `pending` | Stable or decreasing |
-| Stuck tasks | Search `daemon-task` + `in-progress` older than 30min | Zero |
+| Pending requests | Activity page or `GET /api/requests?status=pending` | Stable or decreasing |
+| Running tasks | Activity page or `GET /api/requests/queue/pending` | ≤ `MAX_CONCURRENT_SESSIONS` |
 | Memory count | Total memories in store | Not growing unboundedly |
 
 ## Configuration Reference

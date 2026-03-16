@@ -98,10 +98,10 @@ For each recommended agent/skill:
 1. **Select template** based on `domain_template` field
 2. **Build context** with domain-specific parameters (language, framework, tools, guardrails)
 3. **Render template** via Jinja2
-4. **Write file** to `daemon/agents/` (agents) or `.github/skills/` (skills)
+4. **Create agent/skill definition** via the definitions API (`POST /api/definitions/agents` or `POST /api/definitions/skills`)
 5. **Skip existing** — never overwrite agents or skills that already exist
 
-The generation uses the `AdaptationPipeline` class in `daemon/adaptation.py`.
+The generation uses the `AdaptationPipeline` class in `daemon/adaptation.py`. Agent definitions are stored in the database and managed via the Agents & Skills page in the web UI.
 
 ## Phase 4: Validate Generated Capabilities
 
