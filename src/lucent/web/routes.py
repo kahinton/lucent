@@ -406,9 +406,9 @@ async def login_page(request: Request, error: str | None = None):
     provider = await get_auth_provider()
     csrf_token = generate_csrf_token()
     response = templates.TemplateResponse(
+        request,
         "login.html",
         {
-            "request": request,
             "fields": provider.get_login_fields(),
             "error": error,
             "csrf_token": csrf_token,
@@ -435,9 +435,9 @@ async def login_submit(request: Request):
         provider = await get_auth_provider()
         logger.warning("Login rate limit exceeded for IP %s", client_ip)
         return templates.TemplateResponse(
+            request,
             "login.html",
             {
-                "request": request,
                 "fields": provider.get_login_fields(),
                 "error": f"Too many login attempts. Please try again in {retry_after} seconds.",
             },
@@ -454,9 +454,9 @@ async def login_submit(request: Request):
     except Exception:
         logger.exception("Error during authentication")
         return templates.TemplateResponse(
+            request,
             "login.html",
             {
-                "request": request,
                 "fields": provider.get_login_fields(),
                 "error": "An unexpected error occurred. Please try again later.",
             },
@@ -470,9 +470,9 @@ async def login_submit(request: Request):
             credentials.get("username", credentials.get("email", "unknown")),
         )
         return templates.TemplateResponse(
+            request,
             "login.html",
             {
-                "request": request,
                 "fields": provider.get_login_fields(),
                 "error": "Invalid credentials. Please try again.",
             },
@@ -485,9 +485,9 @@ async def login_submit(request: Request):
     except Exception:
         logger.exception("Error creating session")
         return templates.TemplateResponse(
+            request,
             "login.html",
             {
-                "request": request,
                 "fields": provider.get_login_fields(),
                 "error": "An unexpected error occurred. Please try again later.",
             },
@@ -538,8 +538,9 @@ async def setup_page(request: Request, error: str | None = None):
 
     csrf_token = generate_csrf_token()
     response = templates.TemplateResponse(
+        request,
         "setup.html",
-        {"request": request, "error": error, "csrf_token": csrf_token},
+        {"error": error, "csrf_token": csrf_token},
     )
     _set_csrf_cookie(response, csrf_token)
     return response
@@ -563,30 +564,34 @@ async def setup_submit(request: Request):
     # Validate
     if not display_name:
         return templates.TemplateResponse(
+            request,
             "setup.html",
-            {"request": request, "error": "Display name is required."},
+            {"error": "Display name is required."},
             status_code=400,
         )
 
     if len(password) < 8:
         return templates.TemplateResponse(
+            request,
             "setup.html",
-            {"request": request, "error": "Password must be at least 8 characters."},
+            {"error": "Password must be at least 8 characters."},
             status_code=400,
         )
 
     complexity_error = validate_password_complexity(password)
     if complexity_error:
         return templates.TemplateResponse(
+            request,
             "setup.html",
-            {"request": request, "error": complexity_error},
+            {"error": complexity_error},
             status_code=400,
         )
 
     if password != password_confirm:
         return templates.TemplateResponse(
+            request,
             "setup.html",
-            {"request": request, "error": "Passwords do not match."},
+            {"error": "Passwords do not match."},
             status_code=400,
         )
 
@@ -595,9 +600,9 @@ async def setup_submit(request: Request):
     except Exception:
         logger.exception("Error during initial user setup")
         return templates.TemplateResponse(
+            request,
             "setup.html",
             {
-                "request": request,
                 "error": "Setup failed due to an unexpected error. Please try again.",
             },
             status_code=500,
@@ -609,17 +614,18 @@ async def setup_submit(request: Request):
     except Exception:
         logger.exception("Error creating session after setup")
         return templates.TemplateResponse(
+            request,
             "setup.html",
             {
-                "request": request,
                 "error": "Account created but session failed. Please log in manually.",
             },
             status_code=500,
         )
 
     response = templates.TemplateResponse(
+        request,
         "setup_complete.html",
-        {"request": request, "display_name": display_name, "api_key": api_key},
+        {"display_name": display_name, "api_key": api_key},
     )
     params = get_cookie_params()
     response.set_cookie(
@@ -694,9 +700,9 @@ async def dashboard(request: Request):
     active_request_count = len(active_requests) + len(pending_requests)
 
     return templates.TemplateResponse(
+        request,
         "dashboard.html",
         {
-            "request": request,
             "user": user,
             "recent_memories": recent["memories"],
             "most_accessed": most_accessed,
@@ -733,9 +739,9 @@ async def definitions_page(request: Request, tab: str = "agents"):
 
     csrf_token = generate_csrf_token()
     response = templates.TemplateResponse(
+        request,
         "definitions.html",
         {
-            "request": request,
             "user": user,
             "tab": tab,
             "agents": agents,
@@ -770,9 +776,9 @@ async def agent_detail_page(request: Request, agent_id: str):
     granted_mcp_ids = {str(m["id"]) for m in mcp_servers}
     csrf_token = generate_csrf_token()
     response = templates.TemplateResponse(
+        request,
         "definition_detail.html",
         {
-            "request": request,
             "user": user,
             "definition_type": "agent",
             "definition": agent,
@@ -803,9 +809,9 @@ async def skill_detail_page(request: Request, skill_id: str):
         raise HTTPException(404, "Skill not found")
     csrf_token = generate_csrf_token()
     response = templates.TemplateResponse(
+        request,
         "definition_detail.html",
         {
-            "request": request,
             "user": user,
             "definition_type": "skill",
             "definition": skill,
@@ -832,9 +838,9 @@ async def mcp_server_detail_page(request: Request, server_id: str):
         raise HTTPException(404, "MCP server not found")
     csrf_token = generate_csrf_token()
     response = templates.TemplateResponse(
+        request,
         "definition_detail.html",
         {
-            "request": request,
             "user": user,
             "definition_type": "mcp-server",
             "definition": server,
@@ -1238,8 +1244,9 @@ async def send_daemon_message(request: Request):
     daemon_messages.reverse()
 
     return templates.TemplateResponse(
+        request,
         "partials/message_thread.html",
-        {"request": request, "daemon_messages": daemon_messages},
+        {"daemon_messages": daemon_messages},
     )
 
 
@@ -1258,9 +1265,9 @@ async def daemon_review_queue(request: Request):
     )
 
     return templates.TemplateResponse(
+        request,
         "daemon_review.html",
         {
-            "request": request,
             "user": user,
             "review_memories": result["memories"],
         },
@@ -1359,8 +1366,9 @@ async def daemon_feedback(
     # Re-fetch memory to get updated state
     updated_memory = await repo.get(memory_id)
     return templates.TemplateResponse(
+        request,
         "partials/feedback_actions.html",
-        {"request": request, "memory": updated_memory},
+        {"memory": updated_memory},
     )
 
 
@@ -1483,9 +1491,9 @@ async def memories_list(
     # For HTMX partial updates
     if request.headers.get("HX-Request"):
         return templates.TemplateResponse(
+            request,
             "partials/memory_list.html",
             {
-                "request": request,
                 "memories": result["memories"],
                 "total_count": result["total_count"],
                 "page": page,
@@ -1497,9 +1505,9 @@ async def memories_list(
         )
 
     return templates.TemplateResponse(
+        request,
         "memories.html",
         {
-            "request": request,
             "user": user,
             "memories": result["memories"],
             "total_count": result["total_count"],
@@ -1535,9 +1543,9 @@ async def memory_new_form(request: Request):
     )
 
     return templates.TemplateResponse(
+        request,
         "memory_new.html",
         {
-            "request": request,
             "user": user,
             "memory_types": ["experience", "technical", "procedural", "goal", "individual"],
             "existing_tags": tags,
@@ -1708,9 +1716,9 @@ async def memory_detail(request: Request, memory_id: UUID):
     is_owner = memory.get("user_id") == user.id
 
     return templates.TemplateResponse(
+        request,
         "memory_detail.html",
         {
-            "request": request,
             "user": user,
             "memory": memory,
             "audit_entries": audit["entries"],
@@ -1742,9 +1750,9 @@ async def memory_edit_form(request: Request, memory_id: UUID):
     )
 
     return templates.TemplateResponse(
+        request,
         "memory_edit.html",
         {
-            "request": request,
             "user": user,
             "memory": memory,
             "memory_types": ["experience", "technical", "procedural", "goal", "individual"],
@@ -2105,9 +2113,9 @@ async def audit_logs(
     total_pages = (result["total_count"] + limit - 1) // limit
 
     return templates.TemplateResponse(
+        request,
         "audit.html",
         {
-            "request": request,
             "user": user,
             "entries": result["entries"],
             "total_count": result["total_count"],
@@ -2164,9 +2172,9 @@ async def users_list(request: Request):
     error = request.query_params.get("error")
 
     response = templates.TemplateResponse(
+        request,
         "users.html",
         {
-            "request": request,
             "user": user,
             "users": users,
             "can_manage": can_manage,
@@ -2421,9 +2429,9 @@ async def sandboxes_page(
             sb["template_name"] = tpl_names.get(str(sb.get("template_id", "")))
 
     return templates.TemplateResponse(
+        request,
         "sandboxes.html",
         {
-            "request": request,
             "tab": active_tab,
             "templates": template_list,
             "sandboxes": sandbox_list,
@@ -2491,9 +2499,9 @@ async def edit_template_page(request: Request, template_id: str):
         raise HTTPException(404, "Template not found")
 
     return templates.TemplateResponse(
+        request,
         "sandbox_template_edit.html",
         {
-            "request": request,
             "template": tpl,
             "user": user,
             "csrf_token": request.cookies.get(CSRF_COOKIE_NAME, ""),
@@ -2652,9 +2660,9 @@ async def settings(
                     break
 
     return templates.TemplateResponse(
+        request,
         "settings.html",
         {
-            "request": request,
             "user": user,
             "organization": org,
             "api_keys": api_keys,
@@ -2834,9 +2842,9 @@ async def activity_list(
     needs_review_count = review_result.get("total_count", 0)
 
     return templates.TemplateResponse(
+        request,
         "requests_list.html",
         {
-            "request": request,
             "user": user,
             "requests": requests_data,
             "summary": summary,
@@ -2879,9 +2887,9 @@ async def request_detail(request: Request, request_id: str):
     recent_events.sort(key=lambda e: e["created_at"], reverse=True)
 
     return templates.TemplateResponse(
+        request,
         "request_detail.html",
         {
-            "request": request,
             "user": user,
             "req": req,
             "recent_events": recent_events[:50],
@@ -2927,9 +2935,9 @@ async def schedules_list(request: Request, status: str | None = None, enabled: s
     summary = await repo.get_summary(org_id)
 
     return templates.TemplateResponse(
+        request,
         "schedules_list.html",
         {
-            "request": request,
             "user": user,
             "schedules": schedules,
             "summary": summary,
@@ -2957,9 +2965,9 @@ async def schedule_detail(request: Request, schedule_id: str):
     active_agents = await def_repo.list_agents(str(user.organization_id), status="active")
 
     return templates.TemplateResponse(
+        request,
         "schedule_detail.html",
         {
-            "request": request,
             "user": user,
             "sched": sched,
             "active_agents": active_agents,
