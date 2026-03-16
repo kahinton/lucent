@@ -67,6 +67,7 @@ async def create_schedule(
         agent_type=body.agent_type,
         task_template=body.task_template,
         sandbox_config=body.sandbox_config,
+        sandbox_template_id=body.sandbox_template_id,
         cron_expression=body.cron_expression,
         interval_seconds=body.interval_seconds,
         next_run_at=body.next_run_at,

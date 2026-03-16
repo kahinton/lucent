@@ -159,6 +159,23 @@
                         <span class="text-xs text-gray-400 ml-1">(not editable)</span>
                     </div>
                 </div>
+                {% if sandbox_template %}
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Sandbox Template</label>
+                    <div class="px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg text-gray-600">
+                        <span class="font-medium">{{ sandbox_template.name }}</span>
+                        <span class="text-xs text-gray-400 ml-1 font-mono">({{ (sched.sandbox_template_id | string)[:8] }})</span>
+                    </div>
+                </div>
+                {% elif sched.sandbox_template_id %}
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Sandbox Template</label>
+                    <div class="px-3 py-2 text-sm bg-amber-50 border border-amber-200 rounded-lg text-amber-600">
+                        <span class="font-mono text-xs">{{ (sched.sandbox_template_id | string)[:8] }}</span>
+                        <span class="text-xs ml-1">(template not found)</span>
+                    </div>
+                </div>
+                {% endif %}
             </div>
 
             <!-- Schedule-specific params -->

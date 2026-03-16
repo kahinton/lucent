@@ -43,6 +43,7 @@ Args:
     interval_seconds: Seconds between runs (required if schedule_type is 'interval', min 60)
     priority: 'low', 'medium', 'high', or 'urgent'
     max_runs: Optional limit on total number of runs (null = unlimited)
+    sandbox_template_id: Optional UUID of a sandbox template to use when executing tasks
 
 Returns: JSON with the created schedule including its ID and next_run_at."""
     )
@@ -56,6 +57,7 @@ Returns: JSON with the created schedule including its ID and next_run_at."""
         interval_seconds: int | None = None,
         priority: str = "medium",
         max_runs: int | None = None,
+        sandbox_template_id: str | None = None,
     ) -> str:
         user_id, org_id, _ = await _get_current_user_context()
         if not org_id:
@@ -102,6 +104,7 @@ Returns: JSON with the created schedule including its ID and next_run_at."""
             interval_seconds=interval_seconds,
             priority=priority,
             max_runs=max_runs,
+            sandbox_template_id=sandbox_template_id,
             created_by=str(user_id) if user_id else None,
         )
         return json.dumps(

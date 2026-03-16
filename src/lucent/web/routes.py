@@ -2965,6 +2965,16 @@ async def schedule_detail(request: Request, schedule_id: str):
     def_repo = DefinitionRepository(pool)
     active_agents = await def_repo.list_agents(str(user.organization_id), status="active")
 
+    # Resolve sandbox template name if linked
+    sandbox_template = None
+    if sched.get("sandbox_template_id"):
+        from lucent.db.sandbox_template import SandboxTemplateRepository
+
+        tmpl_repo = SandboxTemplateRepository(pool)
+        sandbox_template = await tmpl_repo.get(
+            str(sched["sandbox_template_id"]), str(user.organization_id)
+        )
+
     return templates.TemplateResponse(
         request,
         "schedule_detail.html",
@@ -2972,6 +2982,7 @@ async def schedule_detail(request: Request, schedule_id: str):
             "user": user,
             "sched": sched,
             "active_agents": active_agents,
+            "sandbox_template": sandbox_template,
         },
     )
 
