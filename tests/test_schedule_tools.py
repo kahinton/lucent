@@ -14,7 +14,6 @@ from lucent.auth import set_current_user
 from lucent.db.schedules import ScheduleRepository
 from lucent.tools.schedules import register_schedule_tools
 
-
 # ============================================================================
 # Fixtures
 # ============================================================================
@@ -55,9 +54,7 @@ async def cleanup_schedules(db_pool, test_organization):
     yield
     org_id = test_organization["id"]
     async with db_pool.acquire() as conn:
-        await conn.execute(
-            "DELETE FROM schedules WHERE organization_id = $1", org_id
-        )
+        await conn.execute("DELETE FROM schedules WHERE organization_id = $1", org_id)
 
 
 async def _call(mcp, tool_name: str, args: dict | None = None) -> dict | list:
@@ -339,9 +336,7 @@ class TestGetScheduleDetails:
 
     @pytest.mark.asyncio
     async def test_get_details(self, mcp, auth_user, schedule_id):
-        result = await _call(
-            mcp, "get_schedule_details", {"schedule_id": schedule_id}
-        )
+        result = await _call(mcp, "get_schedule_details", {"schedule_id": schedule_id})
         assert result["title"] == "Details Test"
 
     @pytest.mark.asyncio

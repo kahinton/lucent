@@ -48,12 +48,8 @@ async def web_prefix(db_pool):
             "(SELECT id FROM users WHERE external_id LIKE $1)",
             f"{prefix}%",
         )
-        await conn.execute(
-            "DELETE FROM users WHERE external_id LIKE $1", f"{prefix}%"
-        )
-        await conn.execute(
-            "DELETE FROM organizations WHERE name LIKE $1", f"{prefix}%"
-        )
+        await conn.execute("DELETE FROM users WHERE external_id LIKE $1", f"{prefix}%")
+        await conn.execute("DELETE FROM organizations WHERE name LIKE $1", f"{prefix}%")
 
 
 @pytest_asyncio.fixture

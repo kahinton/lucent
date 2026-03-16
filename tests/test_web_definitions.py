@@ -32,7 +32,6 @@ Uses real DB sessions + CSRF tokens through the full ASGI stack.
 from uuid import uuid4
 
 import httpx
-import pytest
 import pytest_asyncio
 from httpx import ASGITransport
 
@@ -45,7 +44,6 @@ from lucent.auth_providers import (
 )
 from lucent.db import OrganizationRepository, UserRepository
 from lucent.db.definitions import DefinitionRepository
-
 
 # ============================================================================
 # Fixtures
@@ -300,11 +298,14 @@ class TestAgentCreate:
     async def test_create_redirects(self, client):
         resp = await client.post(
             "/definitions/agents/create",
-            data=_csrf_data(client, {
-                "name": "Created Agent",
-                "description": "Created via test",
-                "content": "# Created\nContent here.",
-            }),
+            data=_csrf_data(
+                client,
+                {
+                    "name": "Created Agent",
+                    "description": "Created via test",
+                    "content": "# Created\nContent here.",
+                },
+            ),
             follow_redirects=False,
         )
         assert resp.status_code == 303
@@ -314,11 +315,14 @@ class TestAgentCreate:
         _user, org, _token = web_user
         await client.post(
             "/definitions/agents/create",
-            data=_csrf_data(client, {
-                "name": "Persisted Agent",
-                "description": "Check persistence",
-                "content": "# Persisted",
-            }),
+            data=_csrf_data(
+                client,
+                {
+                    "name": "Persisted Agent",
+                    "description": "Check persistence",
+                    "content": "# Persisted",
+                },
+            ),
         )
         repo = DefinitionRepository(db_pool)
         agents = await repo.list_agents(str(org["id"]))
@@ -342,11 +346,14 @@ class TestAgentUpdate:
     async def test_update_redirects(self, client, agent_def):
         resp = await client.post(
             f"/definitions/agents/{agent_def['id']}/update",
-            data=_csrf_data(client, {
-                "name": "Updated Agent",
-                "description": "Updated desc",
-                "content": "# Updated",
-            }),
+            data=_csrf_data(
+                client,
+                {
+                    "name": "Updated Agent",
+                    "description": "Updated desc",
+                    "content": "# Updated",
+                },
+            ),
             follow_redirects=False,
         )
         assert resp.status_code == 303
@@ -356,11 +363,14 @@ class TestAgentUpdate:
         _user, org, _token = web_user
         await client.post(
             f"/definitions/agents/{agent_def['id']}/update",
-            data=_csrf_data(client, {
-                "name": "Renamed Agent",
-                "description": "New desc",
-                "content": "# New content",
-            }),
+            data=_csrf_data(
+                client,
+                {
+                    "name": "Renamed Agent",
+                    "description": "New desc",
+                    "content": "# New content",
+                },
+            ),
         )
         repo = DefinitionRepository(db_pool)
         agent = await repo.get_agent(str(agent_def["id"]), str(org["id"]))
@@ -446,11 +456,14 @@ class TestSkillCreate:
     async def test_create_redirects(self, client):
         resp = await client.post(
             "/definitions/skills/create",
-            data=_csrf_data(client, {
-                "name": "Created Skill",
-                "description": "Created via test",
-                "content": "# Created Skill",
-            }),
+            data=_csrf_data(
+                client,
+                {
+                    "name": "Created Skill",
+                    "description": "Created via test",
+                    "content": "# Created Skill",
+                },
+            ),
             follow_redirects=False,
         )
         assert resp.status_code == 303
@@ -468,11 +481,14 @@ class TestSkillUpdate:
     async def test_update_redirects(self, client, skill_def):
         resp = await client.post(
             f"/definitions/skills/{skill_def['id']}/update",
-            data=_csrf_data(client, {
-                "name": "Updated Skill",
-                "description": "Updated",
-                "content": "# Updated",
-            }),
+            data=_csrf_data(
+                client,
+                {
+                    "name": "Updated Skill",
+                    "description": "Updated",
+                    "content": "# Updated",
+                },
+            ),
             follow_redirects=False,
         )
         assert resp.status_code == 303
@@ -481,11 +497,14 @@ class TestSkillUpdate:
         _user, org, _token = web_user
         await client.post(
             f"/definitions/skills/{skill_def['id']}/update",
-            data=_csrf_data(client, {
-                "name": "Renamed Skill",
-                "description": "New",
-                "content": "# New",
-            }),
+            data=_csrf_data(
+                client,
+                {
+                    "name": "Renamed Skill",
+                    "description": "New",
+                    "content": "# New",
+                },
+            ),
         )
         repo = DefinitionRepository(db_pool)
         skill = await repo.get_skill(str(skill_def["id"]), str(org["id"]))
@@ -543,12 +562,15 @@ class TestMcpCreate:
     async def test_create_redirects(self, client):
         resp = await client.post(
             "/definitions/mcp-servers/create",
-            data=_csrf_data(client, {
-                "name": "Created MCP",
-                "description": "Created via test",
-                "server_type": "http",
-                "url": "http://localhost:8080",
-            }),
+            data=_csrf_data(
+                client,
+                {
+                    "name": "Created MCP",
+                    "description": "Created via test",
+                    "server_type": "http",
+                    "url": "http://localhost:8080",
+                },
+            ),
             follow_redirects=False,
         )
         assert resp.status_code == 303
@@ -558,13 +580,16 @@ class TestMcpCreate:
         _user, org, _token = web_user
         await client.post(
             "/definitions/mcp-servers/create",
-            data=_csrf_data(client, {
-                "name": "MCP With Headers",
-                "description": "Has headers",
-                "server_type": "http",
-                "url": "http://localhost:8080",
-                "headers": '{"Authorization": "Bearer test"}',
-            }),
+            data=_csrf_data(
+                client,
+                {
+                    "name": "MCP With Headers",
+                    "description": "Has headers",
+                    "server_type": "http",
+                    "url": "http://localhost:8080",
+                    "headers": '{"Authorization": "Bearer test"}',
+                },
+            ),
         )
         repo = DefinitionRepository(db_pool)
         servers = await repo.list_mcp_servers(str(org["id"]))
@@ -575,13 +600,16 @@ class TestMcpCreate:
         """Invalid JSON in headers should not crash — falls back to empty dict."""
         resp = await client.post(
             "/definitions/mcp-servers/create",
-            data=_csrf_data(client, {
-                "name": "Bad Headers MCP",
-                "description": "Invalid JSON",
-                "server_type": "http",
-                "url": "http://localhost:8080",
-                "headers": "not-json{{{",
-            }),
+            data=_csrf_data(
+                client,
+                {
+                    "name": "Bad Headers MCP",
+                    "description": "Invalid JSON",
+                    "server_type": "http",
+                    "url": "http://localhost:8080",
+                    "headers": "not-json{{{",
+                },
+            ),
             follow_redirects=False,
         )
         assert resp.status_code == 303
@@ -598,12 +626,15 @@ class TestMcpUpdate:
     async def test_update_redirects(self, client, mcp_def):
         resp = await client.post(
             f"/definitions/mcp-servers/{mcp_def['id']}/update",
-            data=_csrf_data(client, {
-                "name": "Updated MCP",
-                "description": "Updated",
-                "server_type": "http",
-                "url": "http://localhost:9090",
-            }),
+            data=_csrf_data(
+                client,
+                {
+                    "name": "Updated MCP",
+                    "description": "Updated",
+                    "server_type": "http",
+                    "url": "http://localhost:9090",
+                },
+            ),
             follow_redirects=False,
         )
         assert resp.status_code == 303
@@ -612,12 +643,15 @@ class TestMcpUpdate:
         _user, org, _token = web_user
         await client.post(
             f"/definitions/mcp-servers/{mcp_def['id']}/update",
-            data=_csrf_data(client, {
-                "name": "Renamed MCP",
-                "description": "New",
-                "server_type": "http",
-                "url": "http://localhost:7777",
-            }),
+            data=_csrf_data(
+                client,
+                {
+                    "name": "Renamed MCP",
+                    "description": "New",
+                    "server_type": "http",
+                    "url": "http://localhost:7777",
+                },
+            ),
         )
         repo = DefinitionRepository(db_pool)
         server = await repo.get_mcp_server(str(mcp_def["id"]), str(org["id"]))

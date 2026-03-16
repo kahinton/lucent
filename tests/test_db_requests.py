@@ -46,9 +46,7 @@ async def cleanup_requests(db_pool, test_organization):
     org_id = test_organization["id"]
     async with db_pool.acquire() as conn:
         # task_events and task_memories cascade from tasks, tasks cascade from requests
-        await conn.execute(
-            "DELETE FROM requests WHERE organization_id = $1", org_id
-        )
+        await conn.execute("DELETE FROM requests WHERE organization_id = $1", org_id)
 
 
 class TestCreateRequest:
@@ -102,9 +100,7 @@ class TestGetRequest:
         from lucent.db import OrganizationRepository
 
         prefix = clean_test_data
-        other_org = await OrganizationRepository(db_pool).create(
-            name=f"{prefix}other_org"
-        )
+        other_org = await OrganizationRepository(db_pool).create(name=f"{prefix}other_org")
         found = await repo.get_request(str(req["id"]), str(other_org["id"]))
         assert found is None
 
@@ -259,10 +255,10 @@ class TestListTasks:
     @pytest.mark.asyncio
     async def test_list_ordered_by_sequence(self, repo, req, test_organization):
         org = str(test_organization["id"])
-        t0 = await repo.create_task(
+        _t0 = await repo.create_task(
             request_id=str(req["id"]), title="First", org_id=org, sequence_order=0
         )
-        t1 = await repo.create_task(
+        _t1 = await repo.create_task(
             request_id=str(req["id"]), title="Second", org_id=org, sequence_order=1
         )
         tasks = await repo.list_tasks(str(req["id"]))
@@ -483,12 +479,8 @@ class TestRequestCompletion:
         """
         org = str(test_organization["id"])
         r = await repo.create_request(title="Fail Test", org_id=org)
-        t1 = await repo.create_task(
-            request_id=str(r["id"]), title="T1", org_id=org
-        )
-        t2 = await repo.create_task(
-            request_id=str(r["id"]), title="T2", org_id=org
-        )
+        t1 = await repo.create_task(request_id=str(r["id"]), title="T1", org_id=org)
+        t2 = await repo.create_task(request_id=str(r["id"]), title="T2", org_id=org)
         # Fail t1 first
         await repo.claim_task(str(t1["id"]), "d1")
         await repo.fail_task(str(t1["id"]), "oops")
@@ -503,9 +495,7 @@ class TestRequestCompletion:
         """Retrying a task on a pending request moves it to in_progress."""
         org = str(test_organization["id"])
         r = await repo.create_request(title="Retry Test", org_id=org)
-        t = await repo.create_task(
-            request_id=str(r["id"]), title="T", org_id=org
-        )
+        t = await repo.create_task(request_id=str(r["id"]), title="T", org_id=org)
         tid = str(t["id"])
         await repo.claim_task(tid, "d1")
         await repo.fail_task(tid, "oops")
@@ -554,9 +544,7 @@ class TestTaskEvents:
 class TestTaskMemoryLinks:
     @pytest.mark.asyncio
     async def test_link_memory(self, repo, task, test_memory):
-        await repo.link_memory(
-            str(task["id"]), str(test_memory["id"]), relation="created"
-        )
+        await repo.link_memory(str(task["id"]), str(test_memory["id"]), relation="created")
         memories = await repo.list_task_memories(str(task["id"]))
         assert len(memories) == 1
         assert memories[0]["relation"] == "created"

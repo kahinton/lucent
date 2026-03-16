@@ -13,7 +13,6 @@ Uses real DB sessions + CSRF tokens through the full ASGI stack.
 from uuid import uuid4
 
 import httpx
-import pytest
 import pytest_asyncio
 from httpx import ASGITransport
 
@@ -26,7 +25,6 @@ from lucent.auth_providers import (
 )
 from lucent.db import OrganizationRepository, UserRepository
 from lucent.db.schedules import ScheduleRepository
-
 
 # ============================================================================
 # Fixtures

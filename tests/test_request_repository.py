@@ -1,14 +1,11 @@
 """Tests for RequestRepository — request tracking and task queue."""
 
-import asyncio
-from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
 
 from lucent.db.requests import RequestRepository
-
 
 # ── Fixtures ─────────────────────────────────────────────────────────────
 
@@ -50,18 +47,10 @@ async def cleanup_requests(db_pool, test_organization):
                 )
             ]
             if task_ids:
-                await conn.execute(
-                    "DELETE FROM task_memories WHERE task_id = ANY($1)", task_ids
-                )
-                await conn.execute(
-                    "DELETE FROM task_events WHERE task_id = ANY($1)", task_ids
-                )
-            await conn.execute(
-                "DELETE FROM tasks WHERE request_id = ANY($1)", req_ids
-            )
-            await conn.execute(
-                "DELETE FROM requests WHERE organization_id = $1", org_uuid
-            )
+                await conn.execute("DELETE FROM task_memories WHERE task_id = ANY($1)", task_ids)
+                await conn.execute("DELETE FROM task_events WHERE task_id = ANY($1)", task_ids)
+            await conn.execute("DELETE FROM tasks WHERE request_id = ANY($1)", req_ids)
+            await conn.execute("DELETE FROM requests WHERE organization_id = $1", org_uuid)
 
 
 async def _make_request(repo, org_id, **kwargs):
@@ -455,7 +444,7 @@ class TestRetryTask:
         # Mark request as failed manually (simulating _check_request_completion)
         await repo.update_request_status(str(req["id"]), "failed")
         await repo.retry_task(str(task["id"]))
-        updated = await repo.get_request(str(req["id"]), org_id)
+        _updated = await repo.get_request(str(req["id"]), org_id)
         # _ensure_request_in_progress checks for 'pending' or 'planning',
         # 'failed' is not in that list so it won't auto-transition
         # Just verify the retry itself worked
@@ -494,7 +483,7 @@ class TestReleaseStaleTasks:
         task = await _make_task(repo, str(req["id"]), org_id)
         await repo.claim_task(str(task["id"]), "inst-1")
         # freshly claimed — should NOT be released
-        count = await repo.release_stale_tasks(stale_minutes=30)
+        _count = await repo.release_stale_tasks(stale_minutes=30)
         refreshed = await repo.get_task(str(task["id"]))
         assert refreshed["status"] == "claimed"
 
@@ -610,9 +599,7 @@ class TestGetRequestWithTasks:
         req = await _make_request(repo, org_id)
         rid = str(req["id"])
         parent = await _make_task(repo, rid, org_id, title="Parent")
-        await _make_task(
-            repo, rid, org_id, title="Child", parent_task_id=str(parent["id"])
-        )
+        await _make_task(repo, rid, org_id, title="Child", parent_task_id=str(parent["id"]))
         full = await repo.get_request_with_tasks(rid, org_id)
         assert len(full["task_tree"]) == 1  # only root
         assert full["task_tree"][0]["title"] == "Parent"
@@ -639,7 +626,7 @@ class TestGetRequestWithTasks:
         rid = str(req["id"])
         t1 = await _make_task(repo, rid, org_id, title="T1")
         t2 = await _make_task(repo, rid, org_id, title="T2")
-        t3 = await _make_task(repo, rid, org_id, title="T3")
+        _t3 = await _make_task(repo, rid, org_id, title="T3")
         await repo.claim_task(str(t1["id"]), "inst-1")
         await repo.start_task(str(t1["id"]))
         await repo.complete_task(str(t2["id"]), "Done")
@@ -654,7 +641,7 @@ class TestGetRequestWithTasks:
 
 class TestListPendingRequests:
     async def test_returns_pending_only(self, repo, org_id):
-        r1 = await _make_request(repo, org_id, title="Pending one")
+        _r1 = await _make_request(repo, org_id, title="Pending one")
         r2 = await _make_request(repo, org_id, title="Done one")
         await repo.update_request_status(str(r2["id"]), "completed")
         pending = await repo.list_pending_requests(org_id)
@@ -691,7 +678,7 @@ class TestListPendingTasks:
     async def test_respects_sequence_order_deps(self, repo, org_id):
         req = await _make_request(repo, org_id)
         rid = str(req["id"])
-        t0 = await _make_task(repo, rid, org_id, title="Step 0", sequence_order=0)
+        _t0 = await _make_task(repo, rid, org_id, title="Step 0", sequence_order=0)
         await _make_task(repo, rid, org_id, title="Step 1", sequence_order=1)
         pending = await repo.list_pending_tasks(org_id)
         titles = [t["title"] for t in pending]

@@ -10,7 +10,8 @@ async def check():
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT id, display_name, session_token, session_expires_at, is_active "
-            "FROM users WHERE session_token IS NOT NULL AND session_expires_at > NOW() AND is_active = true"
+            "FROM users WHERE session_token IS NOT NULL"
+            " AND session_expires_at > NOW() AND is_active = true"
         )
         if row:
             tok = row["session_token"]
@@ -20,10 +21,14 @@ async def check():
         else:
             print("No valid sessions!")
             rows = await conn.fetch(
-                "SELECT display_name, session_token IS NOT NULL as has_token, session_expires_at, is_active FROM users"
+                "SELECT display_name, session_token IS NOT NULL as has_token,"
+                " session_expires_at, is_active FROM users"
             )
             for r in rows:
-                print(f"  {r['display_name']}: token={r['has_token']}, expires={r['session_expires_at']}, active={r['is_active']}")
+                print(
+                    f"  {r['display_name']}: token={r['has_token']},"
+                    f" expires={r['session_expires_at']}, active={r['is_active']}"
+                )
 
     # Also check hashing
     from lucent.auth_providers import hash_session_token

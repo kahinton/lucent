@@ -15,7 +15,6 @@ from lucent.auth import set_current_user
 from lucent.db.requests import RequestRepository
 from lucent.tools.requests import register_request_tools
 
-
 # ============================================================================
 # Fixtures
 # ============================================================================
@@ -56,12 +55,8 @@ async def cleanup_requests(db_pool, test_organization):
     yield
     org_id = test_organization["id"]
     async with db_pool.acquire() as conn:
-        await conn.execute(
-            "DELETE FROM requests WHERE organization_id = $1", org_id
-        )
-        await conn.execute(
-            "DELETE FROM agent_definitions WHERE organization_id = $1", org_id
-        )
+        await conn.execute("DELETE FROM requests WHERE organization_id = $1", org_id)
+        await conn.execute("DELETE FROM agent_definitions WHERE organization_id = $1", org_id)
 
 
 async def _call(mcp, tool_name: str, args: dict | None = None) -> dict | list:
@@ -294,9 +289,7 @@ class TestGetRequestDetails:
 
     @pytest.mark.asyncio
     async def test_get_details(self, mcp, auth_user, request_id):
-        result = await _call(
-            mcp, "get_request_details", {"request_id": request_id}
-        )
+        result = await _call(mcp, "get_request_details", {"request_id": request_id})
         assert result["title"] == "Details Test"
 
     @pytest.mark.asyncio

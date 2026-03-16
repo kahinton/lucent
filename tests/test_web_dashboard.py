@@ -10,7 +10,6 @@ from httpx import ASGITransport
 from lucent.api.app import create_app
 from lucent.auth_providers import (
     CSRF_COOKIE_NAME,
-    CSRF_FIELD_NAME,
     SESSION_COOKIE_NAME,
     create_session,
     set_user_password,

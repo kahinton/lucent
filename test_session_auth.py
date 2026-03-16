@@ -39,7 +39,8 @@ async def test():
         # Debug: check what's in the DB
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT session_token, session_expires_at FROM users WHERE display_name = 'kahinton'"
+                "SELECT session_token, session_expires_at"
+                " FROM users WHERE display_name = 'kahinton'"
             )
             print(f"DB hash: {row['session_token'][:20]}... stored_len={len(row['session_token'])}")
             print(f"Our hash: {token_hash[:20]}... our_len={len(token_hash)}")

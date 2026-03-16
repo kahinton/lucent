@@ -163,9 +163,7 @@ class TestLoginPage:
         # We test the inverse: when users exist, login does NOT redirect to setup.
         app = create_app()
         transport = ASGITransport(app=app, raise_app_exceptions=False)
-        async with httpx.AsyncClient(
-            transport=transport, base_url="http://test"
-        ) as c:
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
             resp = await c.get("/login", follow_redirects=False)
             # If users exist, we get 200 (login page). If not, 303 to /setup.
             assert resp.status_code in (200, 303)
@@ -188,10 +186,13 @@ class TestLoginSubmit:
         user, _org, _token = web_user
         resp = await unauthenticated_client.post(
             "/login",
-            data=_csrf_data(unauthenticated_client, {
-                "username": user["email"],
-                "password": TEST_PASSWORD,
-            }),
+            data=_csrf_data(
+                unauthenticated_client,
+                {
+                    "username": user["email"],
+                    "password": TEST_PASSWORD,
+                },
+            ),
             follow_redirects=False,
         )
         assert resp.status_code == 303
@@ -204,10 +205,13 @@ class TestLoginSubmit:
         user, _org, _token = web_user
         resp = await unauthenticated_client.post(
             "/login",
-            data=_csrf_data(unauthenticated_client, {
-                "username": user["display_name"],
-                "password": TEST_PASSWORD,
-            }),
+            data=_csrf_data(
+                unauthenticated_client,
+                {
+                    "username": user["display_name"],
+                    "password": TEST_PASSWORD,
+                },
+            ),
             follow_redirects=False,
         )
         assert resp.status_code == 303
@@ -218,10 +222,13 @@ class TestLoginSubmit:
         user, _org, _token = web_user
         resp = await unauthenticated_client.post(
             "/login",
-            data=_csrf_data(unauthenticated_client, {
-                "username": user["email"],
-                "password": "WrongPass1",
-            }),
+            data=_csrf_data(
+                unauthenticated_client,
+                {
+                    "username": user["email"],
+                    "password": "WrongPass1",
+                },
+            ),
             follow_redirects=False,
         )
         assert resp.status_code == 401
@@ -231,10 +238,13 @@ class TestLoginSubmit:
         _reset_login_limiter()
         resp = await unauthenticated_client.post(
             "/login",
-            data=_csrf_data(unauthenticated_client, {
-                "username": "nobody@nowhere.com",
-                "password": "SomePass1",
-            }),
+            data=_csrf_data(
+                unauthenticated_client,
+                {
+                    "username": "nobody@nowhere.com",
+                    "password": "SomePass1",
+                },
+            ),
             follow_redirects=False,
         )
         assert resp.status_code == 401
@@ -260,10 +270,13 @@ class TestLoginSubmit:
         for _ in range(6):
             resp = await unauthenticated_client.post(
                 "/login",
-                data=_csrf_data(unauthenticated_client, {
-                    "username": user["email"],
-                    "password": "WrongPass1",
-                }),
+                data=_csrf_data(
+                    unauthenticated_client,
+                    {
+                        "username": user["email"],
+                        "password": "WrongPass1",
+                    },
+                ),
                 follow_redirects=False,
             )
         assert resp.status_code == 429
@@ -273,10 +286,13 @@ class TestLoginSubmit:
         _reset_login_limiter()
         resp = await unauthenticated_client.post(
             "/login",
-            data=_csrf_data(unauthenticated_client, {
-                "username": "",
-                "password": "",
-            }),
+            data=_csrf_data(
+                unauthenticated_client,
+                {
+                    "username": "",
+                    "password": "",
+                },
+            ),
             follow_redirects=False,
         )
         assert resp.status_code == 401
@@ -306,7 +322,7 @@ class TestLogout:
         # The session cookie should be deleted (set with max-age=0 or empty)
         set_cookie_headers = resp.headers.get_list("set-cookie")
         session_cleared = any(
-            SESSION_COOKIE_NAME in h and ('max-age=0' in h.lower() or 'expires=' in h.lower())
+            SESSION_COOKIE_NAME in h and ("max-age=0" in h.lower() or "expires=" in h.lower())
             for h in set_cookie_headers
         )
         assert session_cleared
@@ -319,7 +335,7 @@ class TestLogout:
         )
         set_cookie_headers = resp.headers.get_list("set-cookie")
         csrf_cleared = any(
-            CSRF_COOKIE_NAME in h and ('max-age=0' in h.lower() or 'expires=' in h.lower())
+            CSRF_COOKIE_NAME in h and ("max-age=0" in h.lower() or "expires=" in h.lower())
             for h in set_cookie_headers
         )
         assert csrf_cleared
@@ -366,11 +382,14 @@ class TestSetupSubmit:
         """If users already exist, POST /setup redirects to /login."""
         resp = await unauthenticated_client.post(
             "/setup",
-            data=_csrf_data(unauthenticated_client, {
-                "display_name": "New Admin",
-                "password": "ValidPass1",
-                "password_confirm": "ValidPass1",
-            }),
+            data=_csrf_data(
+                unauthenticated_client,
+                {
+                    "display_name": "New Admin",
+                    "password": "ValidPass1",
+                    "password_confirm": "ValidPass1",
+                },
+            ),
             follow_redirects=False,
         )
         assert resp.status_code == 303
@@ -505,11 +524,14 @@ class TestPasswordChange:
     async def test_successful_password_change(self, client, web_user, db_pool):
         resp = await client.post(
             "/settings/password",
-            data=_csrf_data(client, {
-                "current_password": TEST_PASSWORD,
-                "new_password": NEW_PASSWORD,
-                "confirm_password": NEW_PASSWORD,
-            }),
+            data=_csrf_data(
+                client,
+                {
+                    "current_password": TEST_PASSWORD,
+                    "new_password": NEW_PASSWORD,
+                    "confirm_password": NEW_PASSWORD,
+                },
+            ),
             follow_redirects=False,
         )
         assert resp.status_code == 303
@@ -520,11 +542,14 @@ class TestPasswordChange:
     async def test_password_change_wrong_current(self, client, web_user):
         resp = await client.post(
             "/settings/password",
-            data=_csrf_data(client, {
-                "current_password": "WrongCurrent1",
-                "new_password": NEW_PASSWORD,
-                "confirm_password": NEW_PASSWORD,
-            }),
+            data=_csrf_data(
+                client,
+                {
+                    "current_password": "WrongCurrent1",
+                    "new_password": NEW_PASSWORD,
+                    "confirm_password": NEW_PASSWORD,
+                },
+            ),
             follow_redirects=False,
         )
         assert resp.status_code == 303
@@ -533,11 +558,14 @@ class TestPasswordChange:
     async def test_password_change_too_short(self, client, web_user):
         resp = await client.post(
             "/settings/password",
-            data=_csrf_data(client, {
-                "current_password": TEST_PASSWORD,
-                "new_password": "Short1",
-                "confirm_password": "Short1",
-            }),
+            data=_csrf_data(
+                client,
+                {
+                    "current_password": TEST_PASSWORD,
+                    "new_password": "Short1",
+                    "confirm_password": "Short1",
+                },
+            ),
             follow_redirects=False,
         )
         assert resp.status_code == 303
@@ -546,11 +574,14 @@ class TestPasswordChange:
     async def test_password_change_weak_password(self, client, web_user):
         resp = await client.post(
             "/settings/password",
-            data=_csrf_data(client, {
-                "current_password": TEST_PASSWORD,
-                "new_password": "alllowercase",
-                "confirm_password": "alllowercase",
-            }),
+            data=_csrf_data(
+                client,
+                {
+                    "current_password": TEST_PASSWORD,
+                    "new_password": "alllowercase",
+                    "confirm_password": "alllowercase",
+                },
+            ),
             follow_redirects=False,
         )
         assert resp.status_code == 303
@@ -560,11 +591,14 @@ class TestPasswordChange:
     async def test_password_change_mismatch(self, client, web_user):
         resp = await client.post(
             "/settings/password",
-            data=_csrf_data(client, {
-                "current_password": TEST_PASSWORD,
-                "new_password": NEW_PASSWORD,
-                "confirm_password": "Mismatch99",
-            }),
+            data=_csrf_data(
+                client,
+                {
+                    "current_password": TEST_PASSWORD,
+                    "new_password": NEW_PASSWORD,
+                    "confirm_password": "Mismatch99",
+                },
+            ),
             follow_redirects=False,
         )
         assert resp.status_code == 303
@@ -586,11 +620,14 @@ class TestPasswordChange:
         """Unauthenticated user gets redirected to /login."""
         resp = await unauthenticated_client.post(
             "/settings/password",
-            data=_csrf_data(unauthenticated_client, {
-                "current_password": TEST_PASSWORD,
-                "new_password": NEW_PASSWORD,
-                "confirm_password": NEW_PASSWORD,
-            }),
+            data=_csrf_data(
+                unauthenticated_client,
+                {
+                    "current_password": TEST_PASSWORD,
+                    "new_password": NEW_PASSWORD,
+                    "confirm_password": NEW_PASSWORD,
+                },
+            ),
             follow_redirects=False,
         )
         assert resp.status_code == 303

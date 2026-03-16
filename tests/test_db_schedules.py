@@ -36,9 +36,7 @@ async def cleanup_schedules(db_pool, test_organization):
     org_id = test_organization["id"]
     async with db_pool.acquire() as conn:
         # schedule_runs cascade from schedules
-        await conn.execute(
-            "DELETE FROM schedules WHERE organization_id = $1", org_id
-        )
+        await conn.execute("DELETE FROM schedules WHERE organization_id = $1", org_id)
 
 
 # ── _parse_cron tests ─────────────────────────────────────────────────────
@@ -218,9 +216,7 @@ class TestCreateSchedule:
 class TestGetSchedule:
     @pytest.mark.asyncio
     async def test_get_existing(self, repo, schedule, test_organization):
-        found = await repo.get_schedule(
-            str(schedule["id"]), str(test_organization["id"])
-        )
+        found = await repo.get_schedule(str(schedule["id"]), str(test_organization["id"]))
         assert found is not None
         assert found["id"] == schedule["id"]
 
@@ -237,9 +233,7 @@ class TestGetSchedule:
         from lucent.db import OrganizationRepository
 
         prefix = clean_test_data
-        other_org = await OrganizationRepository(db_pool).create(
-            name=f"{prefix}other_org"
-        )
+        other_org = await OrganizationRepository(db_pool).create(name=f"{prefix}other_org")
         found = await repo.get_schedule(str(schedule["id"]), str(other_org["id"]))
         assert found is None
 
@@ -304,9 +298,7 @@ class TestListSchedules:
         from lucent.db import OrganizationRepository
 
         prefix = clean_test_data
-        empty_org = await OrganizationRepository(db_pool).create(
-            name=f"{prefix}empty_org"
-        )
+        empty_org = await OrganizationRepository(db_pool).create(name=f"{prefix}empty_org")
         results = await repo.list_schedules(str(empty_org["id"]))
         assert results == []
 
@@ -315,9 +307,7 @@ class TestUpdateSchedule:
     @pytest.mark.asyncio
     async def test_update_title(self, repo, schedule, test_organization):
         org = str(test_organization["id"])
-        updated = await repo.update_schedule(
-            str(schedule["id"]), org, title="New Title"
-        )
+        updated = await repo.update_schedule(str(schedule["id"]), org, title="New Title")
         assert updated["title"] == "New Title"
 
     @pytest.mark.asyncio
@@ -351,19 +341,15 @@ class TestUpdateSchedule:
     @pytest.mark.asyncio
     async def test_update_nonexistent(self, repo, test_organization):
         org = str(test_organization["id"])
-        result = await repo.update_schedule(
-            "00000000-0000-0000-0000-000000000000", org, title="X"
-        )
+        result = await repo.update_schedule("00000000-0000-0000-0000-000000000000", org, title="X")
         assert result is None
 
     @pytest.mark.asyncio
     async def test_update_sets_updated_at(self, repo, schedule, test_organization):
         """update_schedule should set the updated_at timestamp."""
         org = str(test_organization["id"])
-        original = schedule["updated_at"]
-        updated = await repo.update_schedule(
-            str(schedule["id"]), org, description="changed"
-        )
+        _original = schedule["updated_at"]
+        updated = await repo.update_schedule(str(schedule["id"]), org, description="changed")
         # updated_at is refreshed (may differ by microseconds either way)
         assert updated["updated_at"] is not None
         assert updated["description"] == "changed"
@@ -396,9 +382,7 @@ class TestDeleteSchedule:
     @pytest.mark.asyncio
     async def test_delete_nonexistent(self, repo, test_organization):
         org = str(test_organization["id"])
-        deleted = await repo.delete_schedule(
-            "00000000-0000-0000-0000-000000000000", org
-        )
+        deleted = await repo.delete_schedule("00000000-0000-0000-0000-000000000000", org)
         assert deleted is False
 
     @pytest.mark.asyncio
@@ -406,12 +390,8 @@ class TestDeleteSchedule:
         from lucent.db import OrganizationRepository
 
         prefix = clean_test_data
-        other_org = await OrganizationRepository(db_pool).create(
-            name=f"{prefix}other_org2"
-        )
-        deleted = await repo.delete_schedule(
-            str(schedule["id"]), str(other_org["id"])
-        )
+        other_org = await OrganizationRepository(db_pool).create(name=f"{prefix}other_org2")
+        deleted = await repo.delete_schedule(str(schedule["id"]), str(other_org["id"]))
         assert deleted is False
 
 
@@ -512,9 +492,7 @@ class TestGetDueSchedules:
     async def test_excludes_completed(self, repo, test_organization, db_pool):
         """Completed schedules are not returned even if next_run_at is past."""
         org = str(test_organization["id"])
-        s = await repo.create_schedule(
-            title="Done", org_id=org, schedule_type="once"
-        )
+        s = await repo.create_schedule(title="Done", org_id=org, schedule_type="once")
         # Mark as run (once → completed) then backdate
         await repo.mark_schedule_run(str(s["id"]))
         async with db_pool.acquire() as conn:
@@ -555,7 +533,7 @@ class TestMarkScheduleRun:
             schedule_type="interval",
             interval_seconds=3600,
         )
-        run = await repo.mark_schedule_run(str(s["id"]))
+        _run = await repo.mark_schedule_run(str(s["id"]))
         updated = await repo.get_schedule(str(s["id"]), org)
         assert updated["status"] == "active"
         assert updated["run_count"] == 1
@@ -573,7 +551,7 @@ class TestMarkScheduleRun:
             schedule_type="cron",
             cron_expression="0 9 * * *",
         )
-        run = await repo.mark_schedule_run(str(s["id"]))
+        _run = await repo.mark_schedule_run(str(s["id"]))
         updated = await repo.get_schedule(str(s["id"]), org)
         assert updated["status"] == "active"
         assert updated["next_run_at"] is not None
@@ -633,9 +611,7 @@ class TestMarkScheduleRun:
         assert run["request_id"] == req["id"]
         # Cleanup: delete schedule_runs (which ref requests) first, then request
         async with db_pool.acquire() as conn:
-            await conn.execute(
-                "DELETE FROM schedule_runs WHERE request_id = $1", req["id"]
-            )
+            await conn.execute("DELETE FROM schedule_runs WHERE request_id = $1", req["id"])
             await conn.execute("DELETE FROM requests WHERE id = $1", req["id"])
 
     @pytest.mark.asyncio
@@ -700,9 +676,7 @@ class TestCompleteRun:
     async def test_complete_run_no_result(self, repo, test_organization):
         """complete_run with result=None."""
         org = str(test_organization["id"])
-        s = await repo.create_schedule(
-            title="CRN", org_id=org, schedule_type="once"
-        )
+        s = await repo.create_schedule(title="CRN", org_id=org, schedule_type="once")
         run = await repo.mark_schedule_run(str(s["id"]))
         completed = await repo.complete_run(str(run["id"]))
         assert completed["status"] == "completed"
@@ -733,9 +707,7 @@ class TestFailRun:
     async def test_fail_run_no_error(self, repo, test_organization):
         """fail_run with error=None."""
         org = str(test_organization["id"])
-        s = await repo.create_schedule(
-            title="FRN", org_id=org, schedule_type="once"
-        )
+        s = await repo.create_schedule(title="FRN", org_id=org, schedule_type="once")
         run = await repo.mark_schedule_run(str(s["id"]))
         failed = await repo.fail_run(str(run["id"]))
         assert failed["status"] == "failed"
@@ -818,9 +790,7 @@ class TestGetSummary:
     @pytest.mark.asyncio
     async def test_summary_type_breakdown(self, repo, test_organization):
         org = str(test_organization["id"])
-        await repo.create_schedule(
-            title="Once", org_id=org, schedule_type="once"
-        )
+        await repo.create_schedule(title="Once", org_id=org, schedule_type="once")
         await repo.create_schedule(
             title="Cron",
             org_id=org,
@@ -842,9 +812,7 @@ class TestGetSummary:
     async def test_summary_due_now(self, repo, test_organization, db_pool):
         """Summary due_now reflects schedules whose next_run_at is past."""
         org = str(test_organization["id"])
-        s = await repo.create_schedule(
-            title="Due", org_id=org, schedule_type="once"
-        )
+        s = await repo.create_schedule(title="Due", org_id=org, schedule_type="once")
         async with db_pool.acquire() as conn:
             await conn.execute(
                 "UPDATE schedules SET next_run_at = NOW() - interval '1 minute' WHERE id = $1",
@@ -857,9 +825,7 @@ class TestGetSummary:
     async def test_summary_paused_count(self, repo, test_organization):
         """Disabled schedules appear in the paused count."""
         org = str(test_organization["id"])
-        s = await repo.create_schedule(
-            title="Paused", org_id=org, schedule_type="once"
-        )
+        s = await repo.create_schedule(title="Paused", org_id=org, schedule_type="once")
         await repo.toggle_schedule(str(s["id"]), org, False)
         summary = await repo.get_summary(org)
         assert summary["paused"] >= 1
@@ -868,9 +834,7 @@ class TestGetSummary:
     async def test_summary_completed_count(self, repo, test_organization):
         """Completed schedules appear in the completed count."""
         org = str(test_organization["id"])
-        s = await repo.create_schedule(
-            title="Done", org_id=org, schedule_type="once"
-        )
+        s = await repo.create_schedule(title="Done", org_id=org, schedule_type="once")
         await repo.mark_schedule_run(str(s["id"]))
         summary = await repo.get_summary(org)
         assert summary["completed"] >= 1
@@ -881,9 +845,7 @@ class TestGetSummary:
         from lucent.db import OrganizationRepository
 
         prefix = clean_test_data
-        empty_org = await OrganizationRepository(db_pool).create(
-            name=f"{prefix}empty_org2"
-        )
+        empty_org = await OrganizationRepository(db_pool).create(name=f"{prefix}empty_org2")
         summary = await repo.get_summary(str(empty_org["id"]))
         assert summary["total"] == 0
         assert summary["active"] == 0

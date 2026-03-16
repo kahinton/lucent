@@ -18,6 +18,13 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport
 
+
+@pytest.fixture
+def team_mode():
+    """Patch is_team_mode to return True for the duration of the test."""
+    with patch("lucent.web.routes.is_team_mode", return_value=True):
+        yield
+
 from lucent.api.app import create_app
 from lucent.auth_providers import (
     CSRF_COOKIE_NAME,
@@ -151,15 +158,13 @@ async def audit_entries(db_pool, web_user, web_prefix):
 
 class TestAuditPageLoad:
     @pytest.mark.asyncio
-    @patch("lucent.web.routes.is_team_mode", return_value=True)
-    async def test_audit_returns_200(_mock_tm, self, client):
+    async def test_audit_returns_200(self, client, team_mode):
         resp = await client.get("/audit")
         assert resp.status_code == 200
         assert "text/html" in resp.headers["content-type"]
 
     @pytest.mark.asyncio
-    @patch("lucent.web.routes.is_team_mode", return_value=True)
-    async def test_audit_contains_page_header(_mock_tm, self, client):
+    async def test_audit_contains_page_header(self, client, team_mode):
         resp = await client.get("/audit")
         assert "Audit Log" in resp.text
 
@@ -177,8 +182,7 @@ class TestAuditPageLoad:
 
 class TestAuditUnauthenticated:
     @pytest.mark.asyncio
-    @patch("lucent.web.routes.is_team_mode", return_value=True)
-    async def test_unauthenticated_redirects_to_login(_mock_tm, self, db_pool):
+    async def test_unauthenticated_redirects_to_login(self, db_pool, team_mode):
         app = create_app()
         transport = ASGITransport(app=app, raise_app_exceptions=False)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
@@ -194,30 +198,27 @@ class TestAuditUnauthenticated:
 
 class TestAuditPagination:
     @pytest.mark.asyncio
-    @patch("lucent.web.routes.is_team_mode", return_value=True)
-    async def test_page_param_accepted(_mock_tm, self, client):
+    async def test_page_param_accepted(self, client, team_mode):
         resp = await client.get("/audit", params={"page": "2"})
         assert resp.status_code == 200
 
     @pytest.mark.asyncio
-    @patch("lucent.web.routes.is_team_mode", return_value=True)
-    async def test_action_type_filter(_mock_tm, self, client, audit_entries):
+    async def test_action_type_filter(self, client, audit_entries, team_mode):
         resp = await client.get("/audit", params={"action_type": "create"})
         assert resp.status_code == 200
         # The filter dropdown should show 'create' selected
         assert "Create" in resp.text or "create" in resp.text
 
     @pytest.mark.asyncio
-    @patch("lucent.web.routes.is_team_mode", return_value=True)
-    async def test_action_type_filter_update(_mock_tm, self, client, audit_entries):
+    async def test_action_type_filter_update(self, client, audit_entries, team_mode):
         resp = await client.get("/audit", params={"action_type": "update"})
         assert resp.status_code == 200
 
     @pytest.mark.asyncio
-    @patch("lucent.web.routes.is_team_mode", return_value=True)
-    async def test_page_and_action_type_combined(_mock_tm, self, client):
+    async def test_page_and_action_type_combined(self, client, team_mode):
         resp = await client.get(
-            "/audit", params={"page": "1", "action_type": "delete"},
+            "/audit",
+            params={"page": "1", "action_type": "delete"},
         )
         assert resp.status_code == 200
 
@@ -229,16 +230,14 @@ class TestAuditPagination:
 
 class TestAuditContentRendering:
     @pytest.mark.asyncio
-    @patch("lucent.web.routes.is_team_mode", return_value=True)
-    async def test_empty_state_shown_when_no_entries(_mock_tm, self, client):
+    async def test_empty_state_shown_when_no_entries(self, client, team_mode):
         """With no audit entries, page shows empty state message."""
         resp = await client.get("/audit")
         assert resp.status_code == 200
         assert "No audit entries" in resp.text or "audit log is empty" in resp.text
 
     @pytest.mark.asyncio
-    @patch("lucent.web.routes.is_team_mode", return_value=True)
-    async def test_entries_rendered(_mock_tm, self, client, audit_entries):
+    async def test_entries_rendered(self, client, audit_entries, team_mode):
         """With audit entries present, they appear on the page."""
         resp = await client.get("/audit")
         assert resp.status_code == 200
@@ -247,24 +246,21 @@ class TestAuditContentRendering:
         assert memory_id_str[:8] in resp.text or memory_id_str[:12] in resp.text
 
     @pytest.mark.asyncio
-    @patch("lucent.web.routes.is_team_mode", return_value=True)
-    async def test_action_types_dropdown_rendered(_mock_tm, self, client):
+    async def test_action_types_dropdown_rendered(self, client, team_mode):
         """Filter dropdown contains expected action type options."""
         resp = await client.get("/audit")
         assert resp.status_code == 200
         assert "All Actions" in resp.text
 
     @pytest.mark.asyncio
-    @patch("lucent.web.routes.is_team_mode", return_value=True)
-    async def test_entry_count_shown(_mock_tm, self, client, audit_entries):
+    async def test_entry_count_shown(self, client, audit_entries, team_mode):
         """Total entry count appears in the page."""
         resp = await client.get("/audit")
         assert resp.status_code == 200
         assert "entries" in resp.text
 
     @pytest.mark.asyncio
-    @patch("lucent.web.routes.is_team_mode", return_value=True)
-    async def test_create_entry_rendered_with_icon(_mock_tm, self, client, audit_entries):
+    async def test_create_entry_rendered_with_icon(self, client, audit_entries, team_mode):
         """Create action entry shows on the page."""
         resp = await client.get("/audit")
         assert resp.status_code == 200
@@ -272,9 +268,11 @@ class TestAuditContentRendering:
         assert "Create" in resp.text or "create" in resp.text
 
     @pytest.mark.asyncio
-    @patch("lucent.web.routes.is_team_mode", return_value=True)
     async def test_update_entry_shows_changed_fields(
-        _mock_tm, self, client, audit_entries,
+        self,
+        client,
+        audit_entries,
+        team_mode,
     ):
         """Update entries show changed fields."""
         resp = await client.get("/audit")
@@ -282,8 +280,7 @@ class TestAuditContentRendering:
         assert "content" in resp.text.lower()
 
     @pytest.mark.asyncio
-    @patch("lucent.web.routes.is_team_mode", return_value=True)
-    async def test_memory_link_present(_mock_tm, self, client, audit_entries):
+    async def test_memory_link_present(self, client, audit_entries, team_mode):
         """Each entry links to the memory detail page."""
         resp = await client.get("/audit")
         assert resp.status_code == 200

@@ -11,8 +11,8 @@ Tests:
 - POST /sandboxes/{id}/destroy                    (destroy sandbox)
 """
 
-from uuid import uuid4
 from unittest.mock import AsyncMock, patch
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -55,12 +55,8 @@ async def web_prefix(db_pool):
             f"{prefix}%",
         )
         await conn.execute("DELETE FROM memories WHERE username LIKE $1", f"{prefix}%")
-        await conn.execute(
-            "DELETE FROM users WHERE external_id LIKE $1", f"{prefix}%"
-        )
-        await conn.execute(
-            "DELETE FROM organizations WHERE name LIKE $1", f"{prefix}%"
-        )
+        await conn.execute("DELETE FROM users WHERE external_id LIKE $1", f"{prefix}%")
+        await conn.execute("DELETE FROM organizations WHERE name LIKE $1", f"{prefix}%")
 
 
 @pytest_asyncio.fixture
@@ -128,9 +124,7 @@ async def test_sandboxes_instances_tab_active_filter(client):
     mock_manager = AsyncMock()
     mock_manager.list_active.return_value = []
     with patch("lucent.sandbox.manager.get_sandbox_manager", return_value=mock_manager):
-        resp = await client.get(
-            "/sandboxes?tab=instances&show=active", follow_redirects=True
-        )
+        resp = await client.get("/sandboxes?tab=instances&show=active", follow_redirects=True)
     assert resp.status_code == 200
     mock_manager.list_active.assert_called_once()
 
@@ -213,18 +207,14 @@ async def test_edit_template_page_returns_200(client, db_pool, web_user, web_pre
         image="python:3.12-slim",
         created_by=str(user["id"]),
     )
-    resp = await client.get(
-        f"/sandboxes/templates/{tpl['id']}/edit", follow_redirects=True
-    )
+    resp = await client.get(f"/sandboxes/templates/{tpl['id']}/edit", follow_redirects=True)
     assert resp.status_code == 200
 
 
 @pytest.mark.asyncio
 async def test_edit_nonexistent_template_returns_404(client):
     fake_id = str(uuid4())
-    resp = await client.get(
-        f"/sandboxes/templates/{fake_id}/edit", follow_redirects=True
-    )
+    resp = await client.get(f"/sandboxes/templates/{fake_id}/edit", follow_redirects=True)
     assert resp.status_code == 404
 
 

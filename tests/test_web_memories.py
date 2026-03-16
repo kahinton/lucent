@@ -17,7 +17,6 @@ Uses real DB sessions + CSRF tokens through the full ASGI stack.
 from uuid import uuid4
 
 import httpx
-import pytest
 import pytest_asyncio
 from httpx import ASGITransport
 
@@ -224,12 +223,15 @@ class TestMemoryNewSubmit:
     async def test_create_redirects_to_detail(self, client):
         resp = await client.post(
             "/memories/new",
-            data=_csrf_data(client, {
-                "type": "experience",
-                "content": "Created via test",
-                "tags": "test,create",
-                "importance": "5",
-            }),
+            data=_csrf_data(
+                client,
+                {
+                    "type": "experience",
+                    "content": "Created via test",
+                    "tags": "test,create",
+                    "importance": "5",
+                },
+            ),
             follow_redirects=False,
         )
         assert resp.status_code == 303
@@ -238,10 +240,13 @@ class TestMemoryNewSubmit:
     async def test_create_individual_returns_400(self, client):
         resp = await client.post(
             "/memories/new",
-            data=_csrf_data(client, {
-                "type": "individual",
-                "content": "Should not work",
-            }),
+            data=_csrf_data(
+                client,
+                {
+                    "type": "individual",
+                    "content": "Should not work",
+                },
+            ),
             follow_redirects=False,
         )
         assert resp.status_code == 400
@@ -327,7 +332,8 @@ class TestMemoryEditForm:
         transport = ASGITransport(app=app, raise_app_exceptions=False)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
             resp = await c.get(
-                f"/memories/{web_memory['id']}/edit", follow_redirects=False,
+                f"/memories/{web_memory['id']}/edit",
+                follow_redirects=False,
             )
             assert resp.status_code == 303
             assert "/login" in resp.headers.get("location", "")
@@ -342,11 +348,14 @@ class TestMemoryEditSubmit:
     async def test_edit_redirects_to_detail(self, client, web_memory):
         resp = await client.post(
             f"/memories/{web_memory['id']}/edit",
-            data=_csrf_data(client, {
-                "content": "Updated content",
-                "tags": "updated",
-                "importance": "7",
-            }),
+            data=_csrf_data(
+                client,
+                {
+                    "content": "Updated content",
+                    "tags": "updated",
+                    "importance": "7",
+                },
+            ),
             follow_redirects=False,
         )
         assert resp.status_code == 303
@@ -356,26 +365,34 @@ class TestMemoryEditSubmit:
         user, org, _token = web_user
         await client.post(
             f"/memories/{web_memory['id']}/edit",
-            data=_csrf_data(client, {
-                "content": "Persisted update",
-                "tags": "persisted",
-                "importance": "8",
-            }),
+            data=_csrf_data(
+                client,
+                {
+                    "content": "Persisted update",
+                    "tags": "persisted",
+                    "importance": "8",
+                },
+            ),
         )
         repo = MemoryRepository(db_pool)
         updated = await repo.get_accessible(
-            web_memory["id"], user["id"], org["id"],
+            web_memory["id"],
+            user["id"],
+            org["id"],
         )
         assert updated["content"] == "Persisted update"
 
     async def test_edit_not_found(self, client):
         resp = await client.post(
             f"/memories/{uuid4()}/edit",
-            data=_csrf_data(client, {
-                "content": "x",
-                "tags": "",
-                "importance": "5",
-            }),
+            data=_csrf_data(
+                client,
+                {
+                    "content": "x",
+                    "tags": "",
+                    "importance": "5",
+                },
+            ),
             follow_redirects=False,
         )
         assert resp.status_code == 404
@@ -383,11 +400,14 @@ class TestMemoryEditSubmit:
     async def test_edit_other_user_returns_403(self, client, other_user_memory):
         resp = await client.post(
             f"/memories/{other_user_memory['id']}/edit",
-            data=_csrf_data(client, {
-                "content": "Hacked",
-                "tags": "",
-                "importance": "5",
-            }),
+            data=_csrf_data(
+                client,
+                {
+                    "content": "Hacked",
+                    "tags": "",
+                    "importance": "5",
+                },
+            ),
             follow_redirects=False,
         )
         assert resp.status_code == 403
@@ -463,7 +483,11 @@ class TestMemoryDelete:
         assert resp.status_code == 403
 
     async def test_delete_individual_type_returns_400(
-        self, client, db_pool, web_user, web_prefix,
+        self,
+        client,
+        db_pool,
+        web_user,
+        web_prefix,
     ):
         """Individual memories cannot be deleted via web."""
         user, org, _token = web_user
@@ -500,7 +524,11 @@ class TestMemoryDelete:
 
 class TestMemoryRestore:
     async def test_restore_redirects_to_detail(
-        self, client, db_pool, web_user, web_prefix,
+        self,
+        client,
+        db_pool,
+        web_user,
+        web_prefix,
     ):
         """Create a memory, edit it (creating version 2), then restore to version 1."""
         user, org, _token = web_user

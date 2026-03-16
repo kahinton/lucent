@@ -26,7 +26,8 @@ async def test():
     key_hash = bcrypt.hashpw(plain_key.encode(), bcrypt.gensalt()).decode()
 
     row = await conn.fetchrow(
-        "INSERT INTO api_keys (user_id, organization_id, name, key_prefix, key_hash, scopes, expires_at) "
+        "INSERT INTO api_keys (user_id, organization_id, name,"
+        " key_prefix, key_hash, scopes, expires_at) "
         "VALUES ($1, $2, $3, $4, $5, $6, NOW() + INTERVAL '24 hours') RETURNING id",
         user_id, org_id, "test-verify-key", key_prefix, key_hash, ["read", "write"],
     )

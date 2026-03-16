@@ -13,7 +13,6 @@ Uses real DB sessions + CSRF tokens through the full ASGI stack.
 from uuid import uuid4
 
 import httpx
-import pytest
 import pytest_asyncio
 from httpx import ASGITransport
 
@@ -26,7 +25,6 @@ from lucent.auth_providers import (
 )
 from lucent.db import OrganizationRepository, UserRepository
 from lucent.db.requests import RequestRepository
-
 
 # ============================================================================
 # Fixtures
@@ -218,9 +216,7 @@ class TestRequestsRedirect:
         assert resp.headers.get("location") == "/activity"
 
     async def test_redirect_preserves_query_string(self, client):
-        resp = await client.get(
-            "/requests", params={"status": "pending"}, follow_redirects=False
-        )
+        resp = await client.get("/requests", params={"status": "pending"}, follow_redirects=False)
         assert resp.status_code == 301
         location = resp.headers.get("location", "")
         assert location.startswith("/activity?")
@@ -263,9 +259,7 @@ class TestRequestDetail:
         app = create_app()
         transport = ASGITransport(app=app, raise_app_exceptions=False)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
-            resp = await c.get(
-                f"/activity/{sample_request['id']}", follow_redirects=False
-            )
+            resp = await c.get(f"/activity/{sample_request['id']}", follow_redirects=False)
             assert resp.status_code == 303
             assert "/login" in resp.headers.get("location", "")
 
