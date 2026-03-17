@@ -207,6 +207,13 @@ async def trigger_now(schedule_id: str, user=Depends(get_current_user), pool=Dep
 
     # Create a request from the schedule
     template = sched.get("task_template") or {}
+    if isinstance(template, str):
+        import json
+
+        try:
+            template = json.loads(template)
+        except (json.JSONDecodeError, TypeError):
+            template = {}
     prompt = sched.get("prompt") or ""
     try:
         req = await req_repo.create_request(
