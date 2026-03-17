@@ -11,6 +11,17 @@ import pytest_asyncio
 from lucent.db.schedules import ScheduleRepository, _parse_cron
 
 
+async def _make_due(db_pool, schedule_id):
+    """Backdate next_run_at so mark_schedule_run treats the schedule as due."""
+    past = datetime.now(timezone.utc) - timedelta(minutes=1)
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE schedules SET next_run_at = $1 WHERE id = $2",
+            past,
+            schedule_id,
+        )
+
+
 @pytest_asyncio.fixture
 async def repo(db_pool):
     return ScheduleRepository(db_pool)
@@ -525,7 +536,7 @@ class TestMarkScheduleRun:
         assert updated["next_run_at"] is None
 
     @pytest.mark.asyncio
-    async def test_interval_advances_next_run(self, repo, test_organization):
+    async def test_interval_advances_next_run(self, repo, test_organization, db_pool):
         org = str(test_organization["id"])
         s = await repo.create_schedule(
             title="Interval",
@@ -533,6 +544,7 @@ class TestMarkScheduleRun:
             schedule_type="interval",
             interval_seconds=3600,
         )
+        await _make_due(db_pool, s["id"])
         _run = await repo.mark_schedule_run(str(s["id"]))
         updated = await repo.get_schedule(str(s["id"]), org)
         assert updated["status"] == "active"
@@ -558,7 +570,7 @@ class TestMarkScheduleRun:
         assert updated["next_run_at"].hour == 9
 
     @pytest.mark.asyncio
-    async def test_max_runs_completes(self, repo, test_organization):
+    async def test_max_runs_completes(self, repo, test_organization, db_pool):
         org = str(test_organization["id"])
         s = await repo.create_schedule(
             title="MaxRuns",
@@ -567,14 +579,16 @@ class TestMarkScheduleRun:
             interval_seconds=60,
             max_runs=2,
         )
+        await _make_due(db_pool, s["id"])
         await repo.mark_schedule_run(str(s["id"]))
+        await _make_due(db_pool, s["id"])
         await repo.mark_schedule_run(str(s["id"]))
         updated = await repo.get_schedule(str(s["id"]), org)
         assert updated["status"] == "completed"
         assert updated["run_count"] == 2
 
     @pytest.mark.asyncio
-    async def test_expiration(self, repo, test_organization):
+    async def test_expiration(self, repo, test_organization, db_pool):
         org = str(test_organization["id"])
         # Expires in the past so next run would be after expiry
         past = datetime.now(timezone.utc) - timedelta(hours=1)
@@ -585,6 +599,7 @@ class TestMarkScheduleRun:
             interval_seconds=3600,
             expires_at=past,
         )
+        await _make_due(db_pool, s["id"])
         await repo.mark_schedule_run(str(s["id"]))
         updated = await repo.get_schedule(str(s["id"]), org)
         assert updated["status"] == "expired"
@@ -624,10 +639,12 @@ class TestMarkScheduleRun:
             schedule_type="cron",
             cron_expression="0 9 * * *",  # valid initially
         )
-        # Manually set an impossible cron expression to trigger parse failure
+        # Manually set an impossible cron expression and backdate to trigger parse failure
         async with db_pool.acquire() as conn:
+            past = datetime.now(timezone.utc) - timedelta(minutes=1)
             await conn.execute(
-                "UPDATE schedules SET cron_expression = '0 0 31 2 *' WHERE id = $1",
+                "UPDATE schedules SET cron_expression = '0 0 31 2 *', next_run_at = $1 WHERE id = $2",
+                past,
                 s["id"],
             )
         await repo.mark_schedule_run(str(s["id"]))
@@ -635,7 +652,7 @@ class TestMarkScheduleRun:
         assert updated["status"] == "expired"
 
     @pytest.mark.asyncio
-    async def test_interval_multiple_runs(self, repo, test_organization):
+    async def test_interval_multiple_runs(self, repo, test_organization, db_pool):
         """Multiple runs on an interval schedule keep advancing."""
         org = str(test_organization["id"])
         s = await repo.create_schedule(
@@ -644,12 +661,30 @@ class TestMarkScheduleRun:
             schedule_type="interval",
             interval_seconds=60,
         )
+        await _make_due(db_pool, s["id"])
         run1 = await repo.mark_schedule_run(str(s["id"]))
+        await _make_due(db_pool, s["id"])
         run2 = await repo.mark_schedule_run(str(s["id"]))
         assert run1["id"] != run2["id"]
         updated = await repo.get_schedule(str(s["id"]), org)
         assert updated["run_count"] == 2
         assert updated["status"] == "active"
+
+    @pytest.mark.asyncio
+    async def test_idempotency_guard_skips_future(self, repo, test_organization):
+        """mark_schedule_run returns None when next_run_at is still in the future."""
+        org = str(test_organization["id"])
+        s = await repo.create_schedule(
+            title="Idempotent",
+            org_id=org,
+            schedule_type="interval",
+            interval_seconds=3600,
+        )
+        # Don't backdate — next_run_at is 1 hour from now
+        result = await repo.mark_schedule_run(str(s["id"]))
+        assert result is None
+        updated = await repo.get_schedule(str(s["id"]), org)
+        assert updated["run_count"] == 0
 
 
 class TestCompleteRun:
@@ -719,7 +754,7 @@ class TestFailRun:
 
 class TestListRuns:
     @pytest.mark.asyncio
-    async def test_list_runs(self, repo, test_organization):
+    async def test_list_runs(self, repo, test_organization, db_pool):
         org = str(test_organization["id"])
         s = await repo.create_schedule(
             title="LR",
@@ -727,13 +762,15 @@ class TestListRuns:
             schedule_type="interval",
             interval_seconds=60,
         )
+        await _make_due(db_pool, s["id"])
         await repo.mark_schedule_run(str(s["id"]))
+        await _make_due(db_pool, s["id"])
         await repo.mark_schedule_run(str(s["id"]))
         runs = await repo.list_runs(str(s["id"]))
         assert len(runs) == 2
 
     @pytest.mark.asyncio
-    async def test_list_runs_limit(self, repo, test_organization):
+    async def test_list_runs_limit(self, repo, test_organization, db_pool):
         org = str(test_organization["id"])
         s = await repo.create_schedule(
             title="LRL",
@@ -742,6 +779,7 @@ class TestListRuns:
             interval_seconds=60,
         )
         for _ in range(5):
+            await _make_due(db_pool, s["id"])
             await repo.mark_schedule_run(str(s["id"]))
         runs = await repo.list_runs(str(s["id"]), limit=3)
         assert len(runs) == 3
@@ -749,7 +787,7 @@ class TestListRuns:
 
 class TestGetScheduleWithRuns:
     @pytest.mark.asyncio
-    async def test_with_runs(self, repo, test_organization):
+    async def test_with_runs(self, repo, test_organization, db_pool):
         org = str(test_organization["id"])
         s = await repo.create_schedule(
             title="SWR",
@@ -757,6 +795,7 @@ class TestGetScheduleWithRuns:
             schedule_type="interval",
             interval_seconds=60,
         )
+        await _make_due(db_pool, s["id"])
         await repo.mark_schedule_run(str(s["id"]))
         result = await repo.get_schedule_with_runs(str(s["id"]), org)
         assert result is not None

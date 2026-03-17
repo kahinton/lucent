@@ -1469,11 +1469,17 @@ class LucentDaemon:
                         )
                         if resp.status_code in (200, 201):
                             data = resp.json()
-                            req_id = data.get("request", {}).get("id", "?")
-                            log(
-                                f"Triggered schedule {sched_id[:8]} "
-                                f"'{title}' → request {str(req_id)[:8]}"
-                            )
+                            if data.get("already_fired"):
+                                log(
+                                    f"Schedule {sched_id[:8]} '{title}' "
+                                    f"already fired, skipping"
+                                )
+                            else:
+                                req_id = data.get("request", {}).get("id", "?")
+                                log(
+                                    f"Triggered schedule {sched_id[:8]} "
+                                    f"'{title}' → request {str(req_id)[:8]}"
+                                )
                         else:
                             log(
                                 f"Failed to trigger schedule {sched_id[:8]}: {resp.status_code}",

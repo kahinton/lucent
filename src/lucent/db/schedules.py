@@ -7,6 +7,7 @@ Each run creates a tracked request for full lineage.
 import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from asyncpg import Pool
 
@@ -61,6 +62,14 @@ def _parse_cron(expression: str, after: datetime) -> datetime:
     raise ValueError(f"No next run found within 366 days for: {expression}")
 
 
+def _next_cron_utc(expression: str, after_utc: datetime, tz_name: str = "UTC") -> datetime:
+    """Calculate next cron run in the schedule's timezone, return as UTC."""
+    tz = ZoneInfo(tz_name)
+    after_local = after_utc.astimezone(tz)
+    next_local = _parse_cron(expression, after_local)
+    return next_local.astimezone(timezone.utc).replace(tzinfo=timezone.utc)
+
+
 class ScheduleRepository:
     """Manages scheduled tasks and their run history."""
 
@@ -98,7 +107,7 @@ class ScheduleRepository:
             elif schedule_type == "interval" and interval_seconds:
                 next_run_at = now + timedelta(seconds=interval_seconds)
             elif schedule_type == "cron" and cron_expression:
-                next_run_at = _parse_cron(cron_expression, now)
+                next_run_at = _next_cron_utc(cron_expression, now, timezone_str)
 
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -254,8 +263,13 @@ class ScheduleRepository:
             )
             return [dict(r) for r in rows]
 
-    async def mark_schedule_run(self, schedule_id: str, request_id: str | None = None) -> dict:
-        """Record a run and advance the schedule's next_run_at."""
+    async def mark_schedule_run(
+        self, schedule_id: str, request_id: str | None = None
+    ) -> dict | None:
+        """Record a run and advance the schedule's next_run_at.
+
+        Returns None if the schedule was already advanced (idempotency guard).
+        """
         async with self.pool.acquire() as conn:
             async with conn.transaction():
                 sched = await conn.fetchrow(
@@ -266,6 +280,14 @@ class ScheduleRepository:
                     raise ValueError(f"Schedule {schedule_id} not found")
 
                 now = datetime.now(timezone.utc)
+
+                # Idempotency guard: if another cycle already advanced this
+                # schedule, skip to prevent duplicate runs.
+                if (
+                    sched["next_run_at"] is not None
+                    and sched["next_run_at"] > now
+                ):
+                    return None
                 new_run_count = (sched["run_count"] or 0) + 1
 
                 # Create the run record
@@ -288,7 +310,8 @@ class ScheduleRepository:
                     next_run = now + timedelta(seconds=sched["interval_seconds"])
                 elif sched["schedule_type"] == "cron" and sched["cron_expression"]:
                     try:
-                        next_run = _parse_cron(sched["cron_expression"], now)
+                        tz_name = sched.get("timezone") or "UTC"
+                        next_run = _next_cron_utc(sched["cron_expression"], now, tz_name)
                     except ValueError:
                         new_status = "expired"
 

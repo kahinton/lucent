@@ -180,9 +180,12 @@ async def list_runs(schedule_id: str, user=Depends(get_current_user), pool=Depen
 @router.post("/{schedule_id}/trigger")
 async def trigger_now(schedule_id: str, user=Depends(get_current_user), pool=Depends(get_pool)):
     """Manually trigger a schedule immediately, regardless of next_run_at."""
+    import logging
+
     from lucent.db.requests import RequestRepository
     from lucent.db.schedules import ScheduleRepository
 
+    logger = logging.getLogger("lucent.schedules")
     sched_repo = ScheduleRepository(pool)
     req_repo = RequestRepository(pool)
 
@@ -190,35 +193,47 @@ async def trigger_now(schedule_id: str, user=Depends(get_current_user), pool=Dep
     if not sched:
         raise HTTPException(404, "Schedule not found")
 
+    # Advance the schedule FIRST to prevent runaway retries if task creation fails.
+    # Without this, a persistent failure (e.g. FK violation on sandbox_template_id)
+    # causes the scheduler loop to re-fire every cycle, creating orphaned requests.
+    run = await sched_repo.mark_schedule_run(schedule_id)
+
+    # Idempotency: if the schedule was already advanced by another cycle, skip.
+    if run is None:
+        return {"schedule": sched, "already_fired": True}
+
     # Create a request from the schedule
     template = sched.get("task_template") or {}
     prompt = sched.get("prompt") or ""
-    req = await req_repo.create_request(
-        title=f"[Scheduled] {sched['title']}",
-        org_id=str(user.organization_id),
-        description=sched.get("description", ""),
-        source="schedule",
-        priority=sched.get("priority", "medium"),
-        created_by=str(user.id),
-    )
+    try:
+        req = await req_repo.create_request(
+            title=f"[Scheduled] {sched['title']}",
+            org_id=str(user.organization_id),
+            description=sched.get("description", ""),
+            source="schedule",
+            priority=sched.get("priority", "medium"),
+            created_by=str(user.id),
+        )
 
-    # Create the task — use prompt as description if set, else fall back to template/description
-    task_description = prompt or template.get("description", sched.get("description", ""))
-    await req_repo.create_task(
-        request_id=str(req["id"]),
-        title=template.get("title", sched["title"]),
-        description=task_description,
-        agent_type=sched.get("agent_type", "code"),
-        priority=sched.get("priority", "medium"),
-        model=sched.get("model"),
-        sandbox_template_id=str(sched["sandbox_template_id"])
-        if sched.get("sandbox_template_id")
-        else None,
-        sandbox_config=sched.get("sandbox_config"),
-        org_id=str(user.organization_id),
-    )
-
-    # Record the run
-    run = await sched_repo.mark_schedule_run(schedule_id, str(req["id"]))
+        # Create the task — use prompt as description if set, else fall back to template/description
+        task_description = prompt or template.get("description", sched.get("description", ""))
+        await req_repo.create_task(
+            request_id=str(req["id"]),
+            title=template.get("title", sched["title"]),
+            description=task_description,
+            agent_type=sched.get("agent_type", "code"),
+            priority=sched.get("priority", "medium"),
+            model=sched.get("model"),
+            sandbox_template_id=str(sched["sandbox_template_id"])
+            if sched.get("sandbox_template_id")
+            else None,
+            sandbox_config=sched.get("sandbox_config"),
+            org_id=str(user.organization_id),
+        )
+    except Exception as e:
+        # Schedule was already advanced — log and fail the run record
+        logger.error(f"Schedule {schedule_id} triggered but task creation failed: {e}")
+        await sched_repo.fail_run(str(run["id"]), str(e))
+        raise HTTPException(500, f"Schedule advanced but task creation failed: {e}")
 
     return {"schedule": sched, "request": req, "run": run}
