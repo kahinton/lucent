@@ -796,9 +796,7 @@ class TestMarkScheduleRun:
         )
         # Manually set status to expired
         async with db_pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE schedules SET status = 'expired' WHERE id = $1", s["id"]
-            )
+            await conn.execute("UPDATE schedules SET status = 'expired' WHERE id = $1", s["id"])
         await _make_due(db_pool, s["id"])
         result = await repo.mark_schedule_run(str(s["id"]))
         assert result is None
@@ -1097,9 +1095,7 @@ class TestSchedulerDeduplication:
             interval_seconds=3600,
         )
         async with db_pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE schedules SET next_run_at = NULL WHERE id = $1", s["id"]
-            )
+            await conn.execute("UPDATE schedules SET next_run_at = NULL WHERE id = $1", s["id"])
         result = await repo.mark_schedule_run(str(s["id"]))
         assert result is None
 

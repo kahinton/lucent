@@ -1470,10 +1470,7 @@ class LucentDaemon:
                         if resp.status_code in (200, 201):
                             data = resp.json()
                             if data.get("already_fired"):
-                                log(
-                                    f"Schedule {sched_id[:8]} '{title}' "
-                                    f"already fired, skipping"
-                                )
+                                log(f"Schedule {sched_id[:8]} '{title}' already fired, skipping")
                             else:
                                 req_id = data.get("request", {}).get("id", "?")
                                 log(

@@ -42,7 +42,10 @@ def _parse_cron(expression: str, after: datetime) -> datetime:
     hours = _expand(parts[1], 0, 23)
     doms = _expand(parts[2], 1, 31)
     months = _expand(parts[3], 1, 12)
-    dows = _expand(parts[4], 0, 6)  # 0=Monday in isoweekday-1
+    # Cron DOW: 0=Sunday, 6=Saturday.  Python weekday(): 0=Monday, 6=Sunday.
+    # Convert cron → Python so the comparison on line 55 is correct.
+    cron_dows = _expand(parts[4], 0, 6)
+    dows = {(d - 1) % 7 for d in cron_dows}
 
     # Walk forward minute by minute from after, capped at 366 days
     candidate = after.replace(second=0, microsecond=0) + timedelta(minutes=1)
