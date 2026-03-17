@@ -95,11 +95,18 @@ class TestParseCron:
         assert result.minute == 0
 
     def test_day_of_week(self):
-        """0 9 * * 1 = 9am every Monday."""
+        """0 9 * * 1 = 9am every Monday (cron DOW: 0=Sun, 1=Mon, ..., 6=Sat)."""
         # 2026-03-15 is a Sunday (weekday=6)
         now = datetime(2026, 3, 15, 10, 0, 0, tzinfo=timezone.utc)
+        # Cron DOW 0 = Sunday → next Sunday is 2026-03-22
         result = _parse_cron("0 9 * * 0", now)
-        assert result.weekday() == 0  # Monday in Python is 0
+        assert result.weekday() == 6  # Python weekday 6 = Sunday
+        assert result.day == 22
+        assert result.hour == 9
+        # Cron DOW 1 = Monday → next Monday is 2026-03-16
+        result = _parse_cron("0 9 * * 1", now)
+        assert result.weekday() == 0  # Python weekday 0 = Monday
+        assert result.day == 16
         assert result.hour == 9
 
     def test_specific_month(self):
@@ -139,13 +146,13 @@ class TestParseCron:
         assert result.second == 0
         assert result.microsecond == 0
 
-    def test_day_of_week_sunday(self):
-        """Test that dow=6 correctly matches Sunday (Python weekday 6)."""
-        # 2026-03-15 is a Sunday
+    def test_day_of_week_saturday(self):
+        """Test that cron dow=6 correctly matches Saturday."""
+        # Cron DOW 6 = Saturday.  2026-03-14 is a Saturday.
         now = datetime(2026, 3, 14, 10, 0, 0, tzinfo=timezone.utc)  # Saturday
         result = _parse_cron("0 9 * * 6", now)
-        assert result.weekday() == 6  # Sunday
-        assert result.day == 15
+        assert result.weekday() == 5  # Python weekday 5 = Saturday
+        assert result.day == 21  # Next Saturday
 
 
 # ── _next_cron_utc timezone tests ─────────────────────────────────────────
@@ -217,15 +224,15 @@ class TestNextCronUtc:
         assert result.tzinfo == timezone.utc
 
     def test_cron_with_timezone_stored_on_schedule(self):
-        """Cron '0 9 * * 0' (Monday 9AM) in US/Pacific should convert properly.
+        """Cron '0 9 * * 0' (Sunday 9AM) in US/Pacific should convert properly.
 
-        Note: This cron implementation uses Python weekday (0=Monday).
+        Standard cron DOW: 0=Sunday.
         """
         # Wednesday March 18, 2026 at 00:00 UTC = Tuesday March 17 5PM PT
         after_utc = datetime(2026, 3, 18, 0, 0, 0, tzinfo=timezone.utc)
         result = _next_cron_utc("0 9 * * 0", after_utc, "US/Pacific")
-        # Next Monday 9 AM PDT = 16:00 UTC (March 23, 2026)
-        assert result == datetime(2026, 3, 23, 16, 0, 0, tzinfo=timezone.utc)
+        # Next Sunday 9 AM PDT = 16:00 UTC (March 22, 2026)
+        assert result == datetime(2026, 3, 22, 16, 0, 0, tzinfo=timezone.utc)
 
 
 # ── Schedule CRUD ──────────────────────────────────────────────────────────
@@ -723,7 +730,8 @@ class TestMarkScheduleRun:
         async with db_pool.acquire() as conn:
             past = datetime.now(timezone.utc) - timedelta(minutes=1)
             await conn.execute(
-                "UPDATE schedules SET cron_expression = '0 0 31 2 *', next_run_at = $1 WHERE id = $2",
+                "UPDATE schedules SET cron_expression = '0 0 31 2 *',"
+                " next_run_at = $1 WHERE id = $2",
                 past,
                 s["id"],
             )
