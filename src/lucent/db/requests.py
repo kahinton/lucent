@@ -346,6 +346,7 @@ class RequestRepository:
         if row:
             task = dict(row)
             await self.add_task_event(task_id, "failed", f"Failed: {error[:200]}")
+            await self._check_request_completion(str(task["request_id"]))
             return task
         return None
 
