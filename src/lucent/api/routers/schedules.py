@@ -178,8 +178,13 @@ async def list_runs(schedule_id: str, user=Depends(get_current_user), pool=Depen
 
 
 @router.post("/{schedule_id}/trigger")
-async def trigger_now(schedule_id: str, user=Depends(get_current_user), pool=Depends(get_pool)):
-    """Manually trigger a schedule immediately, regardless of next_run_at."""
+async def trigger_now(
+    schedule_id: str,
+    force: bool = False,
+    user=Depends(get_current_user),
+    pool=Depends(get_pool),
+):
+    """Trigger a schedule. Pass force=true to bypass the time guard (manual run)."""
     import logging
 
     from lucent.db.requests import RequestRepository
@@ -199,7 +204,9 @@ async def trigger_now(schedule_id: str, user=Depends(get_current_user), pool=Dep
     # Advance the schedule FIRST to prevent runaway retries if task creation fails.
     # Without this, a persistent failure (e.g. FK violation on sandbox_template_id)
     # causes the scheduler loop to re-fire every cycle, creating orphaned requests.
-    run = await sched_repo.mark_schedule_run(schedule_id, force=True)
+    # Note: force=False uses the time guard (next_run_at <= now) to prevent
+    # duplicate fires if two scheduler cycles overlap.
+    run = await sched_repo.mark_schedule_run(schedule_id, force=force)
 
     # Idempotency: if the schedule was already advanced by another cycle, skip.
     if run is None:
