@@ -988,6 +988,7 @@ class LucentDaemon:
 
         # PG LISTEN infrastructure for event-driven dispatch
         self._listen_conn = None
+        self._listen_lock = asyncio.Lock()
         self._task_ready = asyncio.Event()
         self._request_ready = asyncio.Event()
 
@@ -1809,32 +1810,34 @@ class LucentDaemon:
         """Establish a persistent PG connection for LISTEN/NOTIFY.
 
         Returns True if LISTEN is active, False if we'll rely on polling only.
+        Uses a lock to prevent concurrent setup from dispatch + cognitive loops.
         """
         import asyncpg
 
-        if self._listen_conn and not self._listen_conn.is_closed():
-            # Verify the connection is actually alive with a quick query
-            try:
-                await self._listen_conn.fetchval("SELECT 1")
-                return True
-            except Exception:
-                log("PG LISTEN connection stale, will reconnect", "WARN")
+        async with self._listen_lock:
+            if self._listen_conn and not self._listen_conn.is_closed():
+                # Verify the connection is actually alive with a quick query
                 try:
-                    await self._listen_conn.close()
+                    await self._listen_conn.fetchval("SELECT 1")
+                    return True
                 except Exception:
-                    log("Failed to close stale PG LISTEN connection", "DEBUG")
-                self._listen_conn = None
+                    log("PG LISTEN connection stale, will reconnect", "WARN")
+                    try:
+                        await self._listen_conn.close()
+                    except Exception:
+                        log("Failed to close stale PG LISTEN connection", "DEBUG")
+                    self._listen_conn = None
 
-        try:
-            self._listen_conn = await asyncpg.connect(DATABASE_URL)
-            await self._listen_conn.add_listener("task_ready", self._on_task_ready)
-            await self._listen_conn.add_listener("request_ready", self._on_request_ready)
-            log("PG LISTEN established on 'task_ready' and 'request_ready' channels")
-            return True
-        except Exception as e:
-            log(f"PG LISTEN setup failed (dispatch will use polling only): {e}", "WARN")
-            self._listen_conn = None
-            return False
+            try:
+                self._listen_conn = await asyncpg.connect(DATABASE_URL)
+                await self._listen_conn.add_listener("task_ready", self._on_task_ready)
+                await self._listen_conn.add_listener("request_ready", self._on_request_ready)
+                log("PG LISTEN established on 'task_ready' and 'request_ready' channels")
+                return True
+            except Exception as e:
+                log(f"PG LISTEN setup failed (dispatch will use polling only): {e}", "WARN")
+                self._listen_conn = None
+                return False
 
     def _on_task_ready(self, conn, pid, channel, payload):
         """Callback when PG NOTIFY fires on task_ready channel."""
