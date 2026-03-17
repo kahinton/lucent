@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 import pytest_asyncio
 
-from lucent.db.schedules import ScheduleRepository, _parse_cron
+from lucent.db.schedules import ScheduleRepository, _next_cron_utc, _parse_cron
 
 
 async def _make_due(db_pool, schedule_id):
@@ -146,6 +146,86 @@ class TestParseCron:
         result = _parse_cron("0 9 * * 6", now)
         assert result.weekday() == 6  # Sunday
         assert result.day == 15
+
+
+# ── _next_cron_utc timezone tests ─────────────────────────────────────────
+
+
+class TestNextCronUtc:
+    """Tests for timezone-aware cron scheduling via _next_cron_utc."""
+
+    def test_est_winter_offset(self):
+        """9 AM EST (UTC-5) should be 14:00 UTC."""
+        after_utc = datetime(2026, 1, 15, 12, 0, 0, tzinfo=timezone.utc)
+        result = _next_cron_utc("0 9 * * *", after_utc, "America/New_York")
+        assert result.hour == 14
+        assert result.minute == 0
+        assert result.day == 15
+
+    def test_edt_summer_offset(self):
+        """9 AM EDT (UTC-4) should be 13:00 UTC."""
+        after_utc = datetime(2026, 7, 15, 12, 0, 0, tzinfo=timezone.utc)
+        result = _next_cron_utc("0 9 * * *", after_utc, "America/New_York")
+        assert result.hour == 13
+        assert result.minute == 0
+
+    def test_dst_spring_forward_gap_hour(self):
+        """Cron at 2:30 AM during spring forward fires at same UTC instant (7:30 UTC).
+
+        On 2026-03-08, 2:00 AM EST jumps to 3:00 AM EDT. The 2:30 AM slot
+        doesn't exist as wall-clock time, but the cron fires at the
+        equivalent UTC instant (pre-transition offset).
+        """
+        # 6:00 UTC = 1:00 AM EST, before the spring forward
+        after_utc = datetime(2026, 3, 8, 6, 0, 0, tzinfo=timezone.utc)
+        result = _next_cron_utc("30 2 * * *", after_utc, "America/New_York")
+        # 2:30 AM EST = 7:30 UTC (same instant as 3:30 AM EDT)
+        assert result == datetime(2026, 3, 8, 7, 30, 0, tzinfo=timezone.utc)
+
+    def test_dst_fall_back_ambiguous_hour(self):
+        """Cron at 1:30 AM during fall back picks the first (EDT) occurrence.
+
+        On 2026-11-01, 2:00 AM EDT falls back to 1:00 AM EST. The 1:30 AM
+        slot occurs twice; the walk-forward algorithm hits EDT first.
+        """
+        # 4:00 UTC = midnight EDT (Nov 1)
+        after_utc = datetime(2026, 11, 1, 4, 0, 0, tzinfo=timezone.utc)
+        result = _next_cron_utc("30 1 * * *", after_utc, "America/New_York")
+        # 1:30 AM EDT = 5:30 UTC (first occurrence, before clocks fall back)
+        assert result == datetime(2026, 11, 1, 5, 30, 0, tzinfo=timezone.utc)
+
+    def test_non_us_timezone_asia_tokyo(self):
+        """9 AM JST (UTC+9) should be 00:00 UTC."""
+        after_utc = datetime(2026, 6, 1, 0, 0, 0, tzinfo=timezone.utc)
+        result = _next_cron_utc("0 9 * * *", after_utc, "Asia/Tokyo")
+        assert result.hour == 0
+        assert result.minute == 0
+        assert result.day == 2  # 9 AM June 2 JST = June 2 00:00 UTC
+
+    def test_utc_default_passthrough(self):
+        """With UTC timezone (default), result matches _parse_cron directly."""
+        after_utc = datetime(2026, 5, 1, 10, 30, 0, tzinfo=timezone.utc)
+        result = _next_cron_utc("0 12 * * *", after_utc)
+        assert result.hour == 12
+        assert result.minute == 0
+        assert result.day == 1
+
+    def test_result_always_utc(self):
+        """Result tzinfo should always be UTC regardless of input timezone."""
+        after_utc = datetime(2026, 4, 1, 0, 0, 0, tzinfo=timezone.utc)
+        result = _next_cron_utc("0 9 * * *", after_utc, "Europe/London")
+        assert result.tzinfo == timezone.utc
+
+    def test_cron_with_timezone_stored_on_schedule(self):
+        """Cron '0 9 * * 0' (Monday 9AM) in US/Pacific should convert properly.
+
+        Note: This cron implementation uses Python weekday (0=Monday).
+        """
+        # Wednesday March 18, 2026 at 00:00 UTC = Tuesday March 17 5PM PT
+        after_utc = datetime(2026, 3, 18, 0, 0, 0, tzinfo=timezone.utc)
+        result = _next_cron_utc("0 9 * * 0", after_utc, "US/Pacific")
+        # Next Monday 9 AM PDT = 16:00 UTC (March 23, 2026)
+        assert result == datetime(2026, 3, 23, 16, 0, 0, tzinfo=timezone.utc)
 
 
 # ── Schedule CRUD ──────────────────────────────────────────────────────────
@@ -686,6 +766,65 @@ class TestMarkScheduleRun:
         updated = await repo.get_schedule(str(s["id"]), org)
         assert updated["run_count"] == 0
 
+    @pytest.mark.asyncio
+    async def test_idempotency_guard_blocks_completed_once(self, repo, test_organization):
+        """A once schedule that already fired cannot fire again (next_run_at is None)."""
+        org = str(test_organization["id"])
+        s = await repo.create_schedule(title="OnceGuard", org_id=org, schedule_type="once")
+        run1 = await repo.mark_schedule_run(str(s["id"]))
+        assert run1 is not None
+        # Second attempt should return None — schedule is completed
+        run2 = await repo.mark_schedule_run(str(s["id"]))
+        assert run2 is None
+        updated = await repo.get_schedule(str(s["id"]), org)
+        assert updated["run_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_idempotency_guard_blocks_non_active(self, repo, test_organization, db_pool):
+        """mark_schedule_run returns None for expired/completed schedules."""
+        org = str(test_organization["id"])
+        s = await repo.create_schedule(
+            title="Expired", org_id=org, schedule_type="interval", interval_seconds=60
+        )
+        # Manually set status to expired
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE schedules SET status = 'expired' WHERE id = $1", s["id"]
+            )
+        await _make_due(db_pool, s["id"])
+        result = await repo.mark_schedule_run(str(s["id"]))
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_force_bypasses_time_guard(self, repo, test_organization):
+        """force=True allows triggering even when next_run_at is in the future."""
+        org = str(test_organization["id"])
+        s = await repo.create_schedule(
+            title="ForceRun",
+            org_id=org,
+            schedule_type="interval",
+            interval_seconds=3600,
+        )
+        # next_run_at is 1 hour from now — without force this returns None
+        result = await repo.mark_schedule_run(str(s["id"]))
+        assert result is None
+        # With force, it should proceed
+        result = await repo.mark_schedule_run(str(s["id"]), force=True)
+        assert result is not None
+        updated = await repo.get_schedule(str(s["id"]), org)
+        assert updated["run_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_force_still_blocks_non_active(self, repo, test_organization):
+        """force=True still respects the status guard — cannot fire a completed schedule."""
+        org = str(test_organization["id"])
+        s = await repo.create_schedule(title="ForceBlock", org_id=org, schedule_type="once")
+        run = await repo.mark_schedule_run(str(s["id"]))
+        assert run is not None
+        # Schedule is now completed; force should still return None
+        result = await repo.mark_schedule_run(str(s["id"]), force=True)
+        assert result is None
+
 
 class TestCompleteRun:
     @pytest.mark.asyncio
@@ -888,3 +1027,115 @@ class TestGetSummary:
         summary = await repo.get_summary(str(empty_org["id"]))
         assert summary["total"] == 0
         assert summary["active"] == 0
+
+
+# ── Scheduler deduplication tests ─────────────────────────────────────────
+
+
+class TestSchedulerDeduplication:
+    """Tests for concurrent/duplicate run prevention in mark_schedule_run."""
+
+    @pytest.mark.asyncio
+    async def test_concurrent_mark_only_one_succeeds(self, repo, test_organization, db_pool):
+        """Two concurrent mark_schedule_run calls — only one should create a run."""
+        import asyncio
+
+        org = str(test_organization["id"])
+        s = await repo.create_schedule(
+            title="ConcurrentTest",
+            org_id=org,
+            schedule_type="interval",
+            interval_seconds=3600,
+        )
+        await _make_due(db_pool, s["id"])
+
+        results = await asyncio.gather(
+            repo.mark_schedule_run(str(s["id"])),
+            repo.mark_schedule_run(str(s["id"])),
+        )
+        successful = [r for r in results if r is not None]
+        assert len(successful) == 1, f"Expected exactly 1 successful run, got {len(successful)}"
+        updated = await repo.get_schedule(str(s["id"]), org)
+        assert updated["run_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_rapid_sequential_double_fire(self, repo, test_organization, db_pool):
+        """Two rapid sequential calls — second should return None."""
+        org = str(test_organization["id"])
+        s = await repo.create_schedule(
+            title="DoubleFireTest",
+            org_id=org,
+            schedule_type="interval",
+            interval_seconds=3600,
+        )
+        await _make_due(db_pool, s["id"])
+
+        run1 = await repo.mark_schedule_run(str(s["id"]))
+        assert run1 is not None
+        # Second call: next_run_at is now ~1 hour in the future
+        run2 = await repo.mark_schedule_run(str(s["id"]))
+        assert run2 is None
+        updated = await repo.get_schedule(str(s["id"]), org)
+        assert updated["run_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_null_next_run_at_returns_none(self, repo, test_organization, db_pool):
+        """When next_run_at is NULL, mark_schedule_run returns None."""
+        org = str(test_organization["id"])
+        s = await repo.create_schedule(
+            title="NullNextRun",
+            org_id=org,
+            schedule_type="interval",
+            interval_seconds=3600,
+        )
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE schedules SET next_run_at = NULL WHERE id = $1", s["id"]
+            )
+        result = await repo.mark_schedule_run(str(s["id"]))
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_concurrent_with_force_only_one_fires(self, repo, test_organization, db_pool):
+        """Concurrent force=True calls — only one should succeed (status guard)."""
+        import asyncio
+
+        org = str(test_organization["id"])
+        s = await repo.create_schedule(
+            title="ConcurrentForce",
+            org_id=org,
+            schedule_type="once",
+        )
+        # Both try to force-fire the once schedule
+        results = await asyncio.gather(
+            repo.mark_schedule_run(str(s["id"]), force=True),
+            repo.mark_schedule_run(str(s["id"]), force=True),
+        )
+        successful = [r for r in results if r is not None]
+        # Once schedule: first run completes it, second is blocked by status guard
+        assert len(successful) == 1
+        updated = await repo.get_schedule(str(s["id"]), org)
+        assert updated["status"] == "completed"
+        assert updated["run_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_interval_advances_prevents_duplicate(self, repo, test_organization, db_pool):
+        """After interval run advances next_run_at, get_due_schedules excludes it."""
+        org = str(test_organization["id"])
+        s = await repo.create_schedule(
+            title="IntervalDedup",
+            org_id=org,
+            schedule_type="interval",
+            interval_seconds=3600,
+        )
+        await _make_due(db_pool, s["id"])
+
+        due_before = await repo.get_due_schedules(org)
+        due_ids = [str(d["id"]) for d in due_before]
+        assert str(s["id"]) in due_ids
+
+        await repo.mark_schedule_run(str(s["id"]))
+
+        due_after = await repo.get_due_schedules(org)
+        due_ids_after = [str(d["id"]) for d in due_after]
+        assert str(s["id"]) not in due_ids_after

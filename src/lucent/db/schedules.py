@@ -264,11 +264,12 @@ class ScheduleRepository:
             return [dict(r) for r in rows]
 
     async def mark_schedule_run(
-        self, schedule_id: str, request_id: str | None = None
+        self, schedule_id: str, request_id: str | None = None, *, force: bool = False
     ) -> dict | None:
         """Record a run and advance the schedule's next_run_at.
 
         Returns None if the schedule was already advanced (idempotency guard).
+        Pass force=True to bypass the time check (e.g. manual trigger via API).
         """
         async with self.pool.acquire() as conn:
             async with conn.transaction():
@@ -281,13 +282,16 @@ class ScheduleRepository:
 
                 now = datetime.now(timezone.utc)
 
-                # Idempotency guard: if another cycle already advanced this
-                # schedule, skip to prevent duplicate runs.
-                if (
-                    sched["next_run_at"] is not None
-                    and sched["next_run_at"] > now
-                ):
+                # Idempotency guard: never fire a non-active schedule
+                if sched["status"] != "active":
                     return None
+
+                if not force:
+                    # Time-based guard: if next_run_at is null (no future run
+                    # scheduled) or in the future (already advanced by another
+                    # cycle), skip to prevent duplicate runs.
+                    if sched["next_run_at"] is None or sched["next_run_at"] > now:
+                        return None
                 new_run_count = (sched["run_count"] or 0) + 1
 
                 # Create the run record

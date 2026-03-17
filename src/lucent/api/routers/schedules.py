@@ -193,10 +193,13 @@ async def trigger_now(schedule_id: str, user=Depends(get_current_user), pool=Dep
     if not sched:
         raise HTTPException(404, "Schedule not found")
 
+    if sched.get("status") != "active":
+        raise HTTPException(409, f"Schedule is {sched.get('status')}, cannot trigger")
+
     # Advance the schedule FIRST to prevent runaway retries if task creation fails.
     # Without this, a persistent failure (e.g. FK violation on sandbox_template_id)
     # causes the scheduler loop to re-fire every cycle, creating orphaned requests.
-    run = await sched_repo.mark_schedule_run(schedule_id)
+    run = await sched_repo.mark_schedule_run(schedule_id, force=True)
 
     # Idempotency: if the schedule was already advanced by another cycle, skip.
     if run is None:
