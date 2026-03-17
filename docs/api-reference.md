@@ -319,93 +319,245 @@ Deduplicates by content hash — memories with identical content, type, and user
 
 ---
 
-## Daemon Tasks
+## Requests & Tasks
 
-Base path: `/api/daemon/tasks`
+Base path: `/api/requests`
 
-Requires `daemon-tasks` scope or full `read`+`write` scopes. See the [Agent Integration Guide](agent-integration.md) for a complete walkthrough.
+The request/task system provides structured work tracking with full event timelines.
 
-### Create Task
+### Create Request
 
 ```
-POST /api/daemon/tasks
+POST /api/requests
 ```
 
 ```json
 {
-  "description": "Review auth module for security issues",
-  "agent_type": "code",
-  "priority": "medium",
-  "context": "Focus on timing attacks",
-  "tags": ["security"]
+  "title": "Audit authentication module",
+  "description": "Review for timing attacks and session fixation",
+  "priority": "high",
+  "source": "user"
 }
 ```
 
-| Field | Values |
-|-------|--------|
-| `agent_type` | `research`, `code`, `memory`, `reflection`, `documentation`, `planning` |
-| `priority` | `low`, `medium`, `high` |
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `title` | string | yes | Short description of the work |
+| `description` | string | no | Detailed instructions |
+| `priority` | string | no | `low`, `medium` (default), `high`, `urgent` |
+| `source` | string | no | `user` (default), `schedule`, `daemon` |
 
-### List Tasks
-
-```
-GET /api/daemon/tasks?status=pending&since=2026-03-07T20:00:00Z&limit=20
-```
-
-### Get Task
+### List Requests
 
 ```
-GET /api/daemon/tasks/{task_id}
+GET /api/requests?status=pending&source=user&limit=20
 ```
 
-### Get Task Result (Polling)
+### Get Request Details
 
 ```
-GET /api/daemon/tasks/{task_id}/result
+GET /api/requests/{request_id}
 ```
 
-Returns `200` with result if completed, `202` if still in progress, `404` if not found.
+Returns the request with all tasks and their event timelines.
 
-### Cancel Task
+### Create Task (under a Request)
 
 ```
-DELETE /api/daemon/tasks/{task_id}
+POST /api/requests/{request_id}/tasks
 ```
 
-Only pending tasks owned by the authenticated user can be cancelled.
+```json
+{
+  "title": "Security review",
+  "description": "Check auth.py for timing attacks",
+  "agent_type": "security",
+  "priority": "high",
+  "model": "claude-opus-4.6",
+  "sandbox_template_id": "uuid-of-template"
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `title` | string | yes | Task name |
+| `description` | string | no | Instructions for the agent |
+| `agent_type` | string | no | Agent definition to use (default: `code`) |
+| `model` | string | no | LLM model override |
+| `priority` | string | no | `low`, `medium`, `high`, `urgent` |
+| `sandbox_template_id` | UUID | no | Sandbox template for isolated execution |
+
+### Task Queue (Pending Tasks)
+
+```
+GET /api/requests/queue/pending
+```
+
+Returns tasks with `status = 'pending'`, ordered by priority and creation time.
+
+### Claim/Start/Complete/Fail Task
+
+```
+POST /api/requests/tasks/{task_id}/claim?instance_id=my-instance
+POST /api/requests/tasks/{task_id}/start
+POST /api/requests/tasks/{task_id}/complete?result=...
+POST /api/requests/tasks/{task_id}/fail?error=...
+```
+
+### Task Events
+
+```
+POST /api/requests/tasks/{task_id}/events
+```
+
+```json
+{
+  "event_type": "sandbox_created",
+  "detail": "Sandbox abc123 created for task",
+  "metadata": {"sandbox_id": "abc123"}
+}
+```
+
+Events are appended to the task timeline and visible on the Activity page.
 
 ---
 
-## Daemon Messages
+## Schedules
 
-Base path: `/api/daemon/messages`
+Base path: `/api/schedules`
 
-Requires `daemon-tasks` scope. Provides human-daemon communication.
-
-### List Messages
+### Create Schedule
 
 ```
-GET /api/daemon/messages?pending_only=true&limit=50
-```
-
-### Send Message
-
-```
-POST /api/daemon/messages
+POST /api/schedules
 ```
 
 ```json
 {
-  "content": "Please prioritize the auth review",
-  "in_reply_to": "optional-message-uuid"
+  "title": "Daily weather check",
+  "description": "Fetch weather and recommend outfit",
+  "schedule_type": "cron",
+  "cron_expression": "30 5 * * *",
+  "timezone": "US/Eastern",
+  "agent_type": "weather-advisor",
+  "priority": "low",
+  "prompt": "Fetch weather for West Bloomfield, MI...",
+  "sandbox_template_id": "uuid-of-template"
 }
 ```
 
-### Acknowledge Message
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `title` | string | yes | Schedule name |
+| `schedule_type` | string | yes | `once`, `interval`, or `cron` |
+| `cron_expression` | string | cron only | 5-field cron (min hour dom month dow) |
+| `interval_seconds` | int | interval only | Repeat interval (minimum 60) |
+| `timezone` | string | no | IANA timezone (default: `UTC`) |
+| `agent_type` | string | no | Agent for task dispatch |
+| `model` | string | no | LLM model override |
+| `prompt` | string | no | Instructions sent to the agent |
+| `sandbox_template_id` | UUID | no | Sandbox template for each run |
+| `priority` | string | no | `low`, `medium`, `high`, `urgent` |
+| `max_runs` | int | no | Stop after N runs |
+
+### List Schedules
 
 ```
-POST /api/daemon/messages/{message_id}/acknowledge
+GET /api/schedules?status=active&enabled=true
 ```
+
+### Get Due Schedules
+
+```
+GET /api/schedules/due
+```
+
+Returns schedules where `next_run_at <= now()` and `status = 'active'` and `enabled = true`.
+
+### Update Schedule
+
+```
+PATCH /api/schedules/{schedule_id}
+```
+
+### Toggle Schedule
+
+```
+POST /api/schedules/{schedule_id}/toggle
+```
+
+### Trigger Schedule
+
+```
+POST /api/schedules/{schedule_id}/trigger?force=false
+```
+
+Fires the schedule immediately. Pass `force=true` to bypass the time guard (for manual "Run Now" actions).
+
+### Delete Schedule
+
+```
+DELETE /api/schedules/{schedule_id}
+```
+
+---
+
+## Agent Definitions
+
+Base path: `/api/definitions`
+
+### Agents
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/agents` | Create an agent definition (status: `proposed`) |
+| `GET` | `/agents` | List agents (filter by `?status=active`) |
+| `GET` | `/agents/{id}` | Get agent with linked skills and MCP servers |
+| `PATCH` | `/agents/{id}` | Update an agent definition |
+| `DELETE` | `/agents/{id}` | Delete an agent definition |
+| `POST` | `/agents/{id}/approve` | Approve a proposed agent |
+| `POST` | `/agents/{id}/reject` | Reject a proposed agent |
+
+### Skills
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/skills` | Create a skill definition |
+| `GET` | `/skills` | List skills |
+| `GET` | `/skills/{id}` | Get skill details |
+| `PATCH` | `/skills/{id}` | Update a skill |
+| `DELETE` | `/skills/{id}` | Delete a skill |
+| `POST` | `/skills/{id}/approve` | Approve a proposed skill |
+| `POST` | `/skills/{id}/reject` | Reject a proposed skill |
+
+### MCP Servers
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/mcp-servers` | Register an MCP server |
+| `GET` | `/mcp-servers` | List MCP servers |
+| `PATCH` | `/mcp-servers/{id}` | Update an MCP server |
+| `DELETE` | `/mcp-servers/{id}` | Delete an MCP server |
+| `POST` | `/mcp-servers/{id}/approve` | Approve a proposed MCP server |
+
+---
+
+## Legacy Daemon Endpoints
+
+> **Note:** These endpoints are from the earlier daemon task system and are still functional but superseded by the Request/Task API above.
+
+Base path: `/api/daemon`
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/tasks` | Create a legacy daemon task |
+| `GET` | `/tasks` | List legacy tasks |
+| `GET` | `/tasks/{id}` | Get a legacy task |
+| `GET` | `/tasks/{id}/result` | Poll for task result |
+| `DELETE` | `/tasks/{id}` | Cancel a pending task |
+| `GET` | `/messages` | List daemon messages |
+| `POST` | `/messages` | Send a message to the daemon |
+| `POST` | `/messages/{id}/acknowledge` | Acknowledge a message |
 
 ---
 

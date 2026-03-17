@@ -1,17 +1,34 @@
 # Lucent
 
-An MCP (Model Context Protocol) server providing persistent memory functionality for LLMs. Store, search, and retrieve memories across conversations to enhance AI assistant capabilities.
+An MCP (Model Context Protocol) server that gives AI assistants persistent memory, autonomous task execution, and the ability to work between conversations. More than a memory store — Lucent is the infrastructure for AI teammates that learn, plan, and act independently.
 
 ## Features
 
+### Memory System
 - **Five Memory Types**: Experience, Technical, Procedural, Goal, and Individual memories with type-specific metadata
 - **Fuzzy Search**: PostgreSQL trigram-based similarity search for natural language queries
 - **Dual Search Modes**: Content-only search (`search_memories`) or full-field search (`search_memories_full`)
 - **Tag Management**: Built-in tools to promote tag consistency across memories
+- **Memory Versioning**: Full version history with rollback support
 - **Memory Linking**: Connect related memories for contextual retrieval
-- **User Management**: Pluggable authentication (basic auth, API key), session management, RBAC roles
-- **Soft Delete**: Recoverable deletions with future hard-delete cleanup planned
-- **Docker Ready**: PostgreSQL with persistent storage out of the box
+
+### Autonomous Daemon
+- **Four Independent Loops**: Cognitive reasoning, event-driven task dispatch, cron-like scheduling, and background learning
+- **Request/Task Pipeline**: Structured work decomposition with full event tracking and audit trails
+- **Multi-Model Support**: Per-task model selection from a registry of 20+ LLMs (OpenAI, Anthropic, Google)
+- **Environment Adaptation**: Auto-generates domain-appropriate agents and skills based on workspace assessment
+
+### Execution Infrastructure
+- **Sandboxed Execution**: Docker-based isolated environments with resource limits, network policies, and auto-cleanup
+- **Sandbox Templates**: Reusable environment configs (image, setup commands, repo cloning, env vars) linked to schedules
+- **Scheduling**: Cron, interval, and one-time schedules with timezone support and run history tracking
+- **Agent Definitions**: Approval-gated registry for agent and skill definitions — human-vetted before daemon use
+
+### Platform
+- **Pluggable Auth**: Basic auth, API key auth, session management, RBAC roles
+- **Web Dashboard**: Full management UI for memories, agents, schedules, sandboxes, activity tracking, and review queues
+- **CI/CD**: GitHub Actions with linting (Ruff) and full pytest suite against PostgreSQL
+- **Docker Ready**: Single `docker compose up -d` to run everything
 
 ## Memory Types
 
@@ -124,9 +141,9 @@ export LUCENT_AUTH_PROVIDER=api_key
 - **OAuth**: GitHub/Google authentication
 - **SAML/SCIM**: Enterprise SSO (team mode)
 
-## Available Tools
+## Available MCP Tools
 
-### Memory CRUD
+### Memory Tools
 
 | Tool | Purpose |
 |------|---------|
@@ -135,40 +152,34 @@ export LUCENT_AUTH_PROVIDER=api_key
 | `get_memories` | Retrieve multiple memories by ID in a single call |
 | `update_memory` | Update an existing memory |
 | `delete_memory` | Soft delete a memory (can be recovered) |
-
-### User Context
-
-| Tool | Purpose |
-|------|--------|
-| `get_current_user_context` | Get the current user's info and individual memory — recommended first call in every conversation |
-
-### Search Tools
-
-| Tool | Purpose |
-|------|---------|
-| `search_memories` | Fuzzy search on **content field only** - faster, focused results |
-| `search_memories_full` | Fuzzy search across **all fields** (content, tags, metadata) |
-
-### Tag Management
-
-| Tool | Purpose |
-|------|---------|
-| `get_existing_tags` | List all tags with usage counts - use before creating memories! |
+| `search_memories` | Fuzzy search on content field — faster, focused results |
+| `search_memories_full` | Fuzzy search across all fields (content, tags, metadata) |
+| `get_existing_tags` | List all tags with usage counts |
 | `get_tag_suggestions` | Fuzzy search for similar existing tags |
-
-### Memory Versioning
-
-| Tool | Purpose |
-|------|--------|
 | `get_memory_versions` | Browse version history for a memory |
 | `restore_memory_version` | Restore a memory to a previous version |
+| `get_current_user_context` | Get the current user's info and individual memory |
 
-### Sharing (Team Mode Only)
+### Request & Task Tools
 
 | Tool | Purpose |
-|------|--------|
-| `share_memory` | Share a memory with other users in your organization |
-| `unshare_memory` | Stop sharing a memory with your organization |
+|------|---------|
+| `create_request` | Create a tracked work request |
+| `create_task` | Create a task under a request (agent type, model, sandbox) |
+| `get_request_details` | Get request with tasks and events |
+| `list_pending_requests` | List requests awaiting work |
+| `list_pending_tasks` | List tasks ready for dispatch |
+| `log_task_event` | Record an event in a task's timeline |
+| `link_task_memory` | Link a memory to a task (created/read/updated) |
+
+### Schedule Tools
+
+| Tool | Purpose |
+|------|---------|
+| `create_schedule` | Create a cron, interval, or one-time schedule |
+| `list_schedules` | List schedules with optional status filter |
+| `get_schedule_details` | Get schedule config, run history, and next run time |
+| `toggle_schedule` | Enable or disable a schedule |
 
 ### Tool Parameters
 
@@ -343,6 +354,7 @@ src/lucent/
 ├── auth.py             # User context management (ContextVars)
 ├── auth_providers.py   # Pluggable auth backends + session management
 ├── mode.py             # Deployment mode (personal/team)
+├── model_registry.py   # LLM model catalog (20+ models, providers, categories)
 ├── rate_limit.py       # API key rate limiting
 ├── rbac.py             # Role-based access control
 ├── logging.py          # Structured logging configuration
@@ -351,86 +363,147 @@ src/lucent/
 │   ├── deps.py         # Authentication dependencies
 │   ├── models.py       # API request/response models
 │   └── routers/
-│       ├── memories.py     # Memory CRUD endpoints
-│       ├── search.py       # Search endpoints
-│       ├── users.py        # User management endpoints
+│       ├── memories.py      # Memory CRUD endpoints
+│       ├── search.py        # Search endpoints
+│       ├── requests.py      # Request/task tracking endpoints
+│       ├── schedules.py     # Schedule management endpoints
+│       ├── definitions.py   # Agent/skill definition endpoints
+│       ├── sandboxes.py     # Sandbox instance + template endpoints
+│       ├── users.py         # User management endpoints
 │       ├── organizations.py # Organization endpoints
-│       ├── audit.py        # Audit log endpoints
-│       └── access.py       # Access tracking endpoints
+│       ├── audit.py         # Audit log endpoints
+│       ├── access.py        # Access tracking endpoints
+│       └── chat.py          # Streaming chat endpoint
 ├── web/
-│   ├── routes.py       # Web UI routes
+│   ├── routes.py       # Web UI routes (dashboard, memories, activity, etc.)
 │   ├── static/         # Favicons and logos
 │   └── templates/      # Jinja2 templates
 ├── db/
 │   ├── pool.py         # Connection pool + migration runner
 │   ├── memory.py       # Memory repository (CRUD + search)
+│   ├── requests.py     # Request/task repository + event tracking
+│   ├── schedules.py    # Schedule repository + cron parser
+│   ├── definitions.py  # Agent/skill definition repository
+│   ├── sandbox_template.py # Sandbox template repository
 │   ├── user.py         # User repository
 │   ├── audit.py        # Audit log + versioning repository
 │   ├── api_key.py      # API key repository
 │   ├── access.py       # Access tracking repository
 │   ├── organization.py # Organization repository
-│   ├── types.py        # TypedDict definitions for repository return values
-│   └── migrations/     # SQL migration files
-├── models/
-│   ├── memory.py       # Pydantic models for memory types
-│   ├── validation.py   # Metadata validation
-│   ├── audit.py        # Pydantic models for audit logging
-│   ├── user.py         # Pydantic models for user management
-│   └── organization.py # Pydantic models for organizations
+│   ├── types.py        # TypedDict definitions
+│   └── migrations/     # SQL migration files (auto-applied on startup)
+├── sandbox/
+│   ├── manager.py      # Sandbox lifecycle management
+│   ├── backend.py      # Abstract sandbox backend interface
+│   ├── docker_backend.py # Docker container implementation
+│   ├── k8s_backend.py  # Kubernetes backend (stub)
+│   └── models.py       # SandboxConfig, SandboxInfo, ExecResult
+├── llm/
+│   ├── engine.py       # Abstract LLM engine interface
+│   ├── copilot_engine.py # GitHub Copilot SDK implementation
+│   ├── langchain_engine.py # LangChain fallback
+│   └── factory.py      # Engine selection factory
 ├── tools/
-│   └── memories.py     # MCP tool implementations
-└── prompts/
-    └── memory_usage.py # System prompt templates
+│   ├── memories.py     # Memory MCP tools
+│   ├── requests.py     # Request/task MCP tools
+│   └── schedules.py    # Schedule MCP tools
+├── models/             # Pydantic models
+└── prompts/            # System prompt templates
 
 daemon/
-├── daemon.py           # Autonomous background process (Copilot CLI SDK)
-└── tasks/              # Task module stubs (named tasks are inline prompts in daemon.py)
+├── daemon.py           # Autonomous daemon (4 loops: cognitive, dispatch, scheduler, autonomic)
+├── adaptation.py       # Environment assessment + capability generation
+├── cognitive.md        # Cognitive governance context
+├── agents/             # Runtime agent workspace
+├── tasks/              # Task module stubs
+└── templates/          # Jinja2 templates for domain-specific agents/skills
+    ├── agents/         # Agent definition templates (.md.j2)
+    └── skills/         # Skill definition templates (.md.j2)
 ```
 
 ## Daemon
 
-Lucent includes an autonomous daemon that runs as a background process via the Copilot CLI SDK. It gives Lucent the ability to work between conversations — performing memory maintenance, goal tracking, research, and self-improvement.
+Lucent includes an autonomous daemon that runs as a background process via the GitHub Copilot SDK. It operates four independent loops that give Lucent the ability to reason, execute tasks, run schedules, and learn — all between conversations.
+
+### Architecture
+
+| Loop | Interval | Purpose |
+|------|----------|---------|
+| **Cognitive** | 15 min | Perceive → Reason → Decide → Act cycle. Reads system state, reasons about goals, creates requests/tasks via MCP tools |
+| **Dispatch** | Event-driven | Claims pending tasks, resolves agent definitions, creates sandboxes, runs sub-agent LLM sessions, validates results |
+| **Scheduler** | 60s | Checks for due schedules (cron/interval/once), creates request+task pairs, advances schedule state |
+| **Autonomic** | ~2 hours | Background maintenance: memory cleanup, learning extraction, environment adaptation |
+
+The dispatch loop uses PostgreSQL `LISTEN/NOTIFY` for near-instant task pickup (with 60s polling fallback). Multiple daemon instances can run in parallel — task claims are atomic.
 
 ### Configuration
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LUCENT_MAX_SESSIONS` | `3` | Max concurrent daemon sessions |
-| `LUCENT_DAEMON_INTERVAL` | `15` | Minutes between daemon cycles |
-| `LUCENT_DAEMON_MODEL` | `claude-opus-4.6` | Model for standard tasks |
-| `LUCENT_DAEMON_RESEARCH_MODEL` | `claude-opus-4.6` | Model for research tasks |
+| `LUCENT_MAX_SESSIONS` | `3` | Max concurrent sub-agent sessions |
+| `LUCENT_DAEMON_INTERVAL` | `15` | Minutes between cognitive cycles |
+| `LUCENT_DAEMON_MODEL` | `claude-opus-4.6` | Default model for daemon sessions |
+| `LUCENT_DAEMON_ROLES` | `all` | Enable specific loops: `cognitive`, `dispatcher`, `scheduler`, `autonomic` (comma-separated, or `all`) |
 | `LUCENT_MCP_URL` | `http://localhost:8766/mcp` | MCP server URL for memory access |
 | `LUCENT_MCP_API_KEY` | — | API key for MCP authentication |
+| `LUCENT_REVIEW_MODELS` | — | Comma-separated models for multi-model review (optional) |
 
 ### Running the Daemon
 
 ```bash
-# Run continuously (default: cycles every 15 minutes)
-python daemon/daemon.py
+# Run continuously (all loops)
+python -m daemon.daemon
 
-# Run a single cycle and exit
-python daemon/daemon.py --once
-
-# Run a specific named task and exit
-python daemon/daemon.py --task maintenance
+# Run a single cognitive cycle and exit
+python -m daemon.daemon --once
 
 # Override cycle interval (in minutes)
-python daemon/daemon.py --interval 30
+python -m daemon.daemon --interval 30
 ```
 
-#### Available Tasks
+### Request/Task Pipeline
 
-| Task | Description |
-|------|-------------|
-| `maintenance` | Quick memory maintenance — fix obvious issues in recent memories |
-| `goals` | Review active goals, assess progress, update notes |
-| `reflect` | Deep self-reflection on behavioral patterns and growth |
-| `research` | Research topics relevant to active goals or recent work |
-| `consolidate` | Deep memory consolidation — merge overlapping content, find connections |
+The daemon uses a two-level work hierarchy:
 
-When running continuously, the daemon schedules heavier tasks at fixed intervals (goal review every ~2 hours, deep research every ~3 hours, self-reflection every ~4 hours, memory consolidation every ~6 hours). Non-scheduled cycles rotate through lightweight activities: quick research, code exploration, memory maintenance, documentation review, and web research.
+1. **Requests** — the "what": created by users (MCP), schedules, or the cognitive loop
+2. **Tasks** — the "how": execution units with agent type, model override, and sandbox config
 
-The daemon's status and logs are viewable at http://localhost:8766/daemon.
+Each task flows through: `pending` → `claimed` → `running` → `completed`/`failed`, with full event tracking visible on the Activity page.
+
+### Agent Definitions
+
+The daemon only dispatches tasks to **approved** agent definitions. Definitions are created via the adaptation system or manually, reviewed in the web UI, and must be approved before use. Each definition includes:
+
+- System prompt (role, tools, guardrails)
+- Linked skills and MCP server access
+- Per-agent tool allowlists
+
+### Environment Adaptation
+
+On first run in a new workspace, the daemon assesses the environment (tech stack, tools, domain), classifies it, and auto-generates domain-appropriate agent and skill definitions. These are proposed for human approval before use.
+
+## Schedules
+
+Create recurring or one-time tasks via MCP tools or the web UI:
+
+| Type | Description | Example |
+|------|-------------|---------|
+| `cron` | Standard cron expression (5 fields) | `30 5 * * *` = daily at 5:30 AM |
+| `interval` | Repeat every N seconds (min 60) | Every 5 minutes |
+| `once` | Run once at a specific time | One-shot task |
+
+Schedules support timezone-aware cron (e.g., `US/Eastern`), max run limits, expiration dates, per-schedule model overrides, and sandbox template linking. When a schedule fires, it atomically creates a request + task that flows through the dispatch loop.
+
+## Sandboxes
+
+Isolated Docker containers for task execution:
+
+- **Templates**: Reusable environment configs (image, repo URL, setup commands, env vars, resource limits)
+- **Instances**: Running containers with exec, file read/write, and lifecycle management
+- **Resource Limits**: Memory (default 2GB), CPU (2 cores), disk (10GB), network (none/bridge/allowlist)
+- **Auto-cleanup**: Destroyed after task completion or timeout (default 30 min)
+
+Sandboxes can be linked to schedules via `sandbox_template_id` — every scheduled run creates a fresh container.
 
 ## Endpoints
 
@@ -444,10 +517,13 @@ All services run on a single port (default 8766):
 | `/api/docs` | OpenAPI documentation |
 | `/` | Web dashboard |
 | `/login` | Authentication |
-| `/logout` | End session |
 | `/setup` | First-run account creation |
 | `/memories` | Memory management UI |
-| `/daemon` | Daemon status and management |
+| `/activity` | Request/task tracking and event timeline |
+| `/definitions` | Agent, skill, and MCP server management |
+| `/schedules` | Schedule creation and monitoring |
+| `/sandboxes` | Sandbox template and instance management |
+| `/daemon/review` | Review queue for daemon-generated content |
 | `/audit` | Audit log viewer |
 | `/users` | User management (admin) |
 | `/settings` | API keys, password, profile |

@@ -16,7 +16,11 @@ Open http://localhost:8766 to create your account and get your API key.
 
 ## Architecture Overview
 
-Lucent runs as a single process serving three interfaces on one port (default 8766):
+Lucent has two main components:
+
+### 1. Server (required)
+
+A single process serving three interfaces on one port (default 8766):
 
 | Path | Purpose |
 |------|---------|
@@ -24,7 +28,21 @@ Lucent runs as a single process serving three interfaces on one port (default 87
 | `/api/*` | REST API |
 | `/` | Web dashboard |
 
-The only external dependency is PostgreSQL 16+.
+External dependency: PostgreSQL 16+.
+
+### 2. Daemon (optional)
+
+An autonomous background process that provides:
+- **Cognitive reasoning** — perceive/reason/decide/act cycles
+- **Task dispatch** — claims and executes tasks via sub-agent LLM sessions
+- **Scheduling** — cron, interval, and one-time task firing
+- **Learning** — background memory maintenance and lesson extraction
+
+The daemon connects to the server via MCP and REST API. It requires a GitHub Copilot SDK token (`GITHUB_TOKEN`) for LLM access.
+
+### 3. Sandboxes (optional)
+
+Tasks can run in isolated Docker containers. The server needs access to the Docker socket (`/var/run/docker.sock`) to manage sandbox containers. Sandbox base images must be pre-pulled or built.
 
 ## Docker Deployment
 
@@ -179,12 +197,27 @@ docker run --rm -v lucent_data:/data -v $(pwd):/backup alpine \
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LUCENT_MAX_SESSIONS` | `3` | Max concurrent daemon sessions |
-| `LUCENT_DAEMON_INTERVAL` | `15` | Minutes between daemon cycles |
-| `LUCENT_DAEMON_MODEL` | `claude-opus-4.6` | Model for standard tasks |
-| `LUCENT_DAEMON_RESEARCH_MODEL` | `claude-opus-4.6` | Model for research tasks |
+| `LUCENT_MAX_SESSIONS` | `3` | Max concurrent sub-agent sessions |
+| `LUCENT_DAEMON_INTERVAL` | `15` | Minutes between cognitive cycles |
+| `LUCENT_DAEMON_MODEL` | `claude-opus-4.6` | Default model for daemon sessions |
+| `LUCENT_DAEMON_ROLES` | `all` | Loops to enable: `cognitive`, `dispatcher`, `scheduler`, `autonomic` (comma-separated) |
 | `LUCENT_MCP_URL` | `http://localhost:8766/mcp` | MCP endpoint URL |
 | `LUCENT_MCP_API_KEY` | — | API key for daemon MCP access |
+| `LUCENT_REVIEW_MODELS` | — | Comma-separated models for multi-model task review |
+| `GITHUB_TOKEN` | — | GitHub token for Copilot SDK access |
+
+### Sandbox (Optional)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DOCKER_HOST` | *(system default)* | Docker daemon URL (for sandbox containers) |
+
+The server container needs the Docker socket mounted to manage sandboxes:
+
+```yaml
+volumes:
+  - /var/run/docker.sock:/var/run/docker.sock
+```
 
 ## Production Configuration
 
@@ -245,6 +278,31 @@ The default pool settings (min=2, max=10 connections) work for most single-user 
 - [ ] Use `LUCENT_LOG_FORMAT=json` for log aggregation
 - [ ] Set up regular database backups
 - [ ] Use scoped API keys (`daemon-tasks`) for external agent integrations
+- [ ] Review and approve agent definitions before enabling the daemon dispatcher
+
+### Running the Daemon
+
+The daemon runs as a separate process alongside the server:
+
+```bash
+# Activate your virtual environment
+source .venv/bin/activate
+
+# Run with all loops
+python -m daemon.daemon
+
+# Run specific roles only (e.g., just dispatch and scheduling)
+LUCENT_DAEMON_ROLES=dispatcher,scheduler python -m daemon.daemon
+
+# Run a single cognitive cycle and exit
+python -m daemon.daemon --once
+```
+
+The daemon requires:
+- `LUCENT_MCP_API_KEY` — an API key for accessing Lucent's MCP endpoint
+- `GITHUB_TOKEN` — a GitHub token with Copilot access for LLM sessions
+
+The daemon auto-restarts when source files change (file watcher) and includes a watchdog that kills the process if the event loop freezes for >15 minutes.
 
 ### Running Without Docker
 
@@ -261,6 +319,10 @@ export DATABASE_URL=postgresql://lucent:password@localhost:5432/lucent
 
 # Start the server
 lucent
+
+# In another terminal, start the daemon (optional)
+export LUCENT_MCP_API_KEY=hs_your_key_here
+python -m daemon.daemon
 ```
 
 The `lucent` command is the entry point defined in `pyproject.toml`. It starts uvicorn with the unified server.
