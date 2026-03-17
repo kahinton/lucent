@@ -6,6 +6,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libpq-dev \
+    tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy project files for initial install
@@ -14,6 +15,9 @@ COPY src/ src/
 
 # Install in editable mode so volume-mounted source changes are live
 RUN pip install --no-cache-dir -e ".[dev]" 2>/dev/null || pip install --no-cache-dir -e .
+
+# Install Copilot SDK for chat feature (separate from core deps)
+RUN pip install --no-cache-dir github-copilot-sdk 2>/dev/null || true
 
 EXPOSE 8766
 

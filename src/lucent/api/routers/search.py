@@ -2,7 +2,6 @@
 
 from datetime import datetime
 from typing import Any
-from uuid import UUID
 
 from fastapi import APIRouter, Query
 
@@ -12,8 +11,10 @@ from lucent.api.models import (
     SearchResponse,
     SearchResultMemory,
 )
-from lucent.db import MemoryRepository, AccessRepository, get_pool
-from lucent.rbac import Permission
+from lucent.db import AccessRepository, MemoryRepository, get_pool
+from lucent.logging import get_logger
+
+logger = get_logger("api.search")
 
 
 router = APIRouter()
@@ -53,7 +54,11 @@ async def search_memories(
     pool = await get_pool()
     repo = MemoryRepository(pool)
     access_repo = AccessRepository(pool)
-    
+
+    logger.info(
+        "Search: query=%s, type=%s, tags=%s, user=%s", data.query, data.type, data.tags, user.id
+    )
+
     result = await repo.search(
         query=data.query,
         username=data.username,
@@ -68,7 +73,7 @@ async def search_memories(
         requesting_user_id=user.id,
         requesting_org_id=user.organization_id,
     )
-    
+
     # Log access for returned memories
     if result["memories"]:
         memory_ids = [m["id"] for m in result["memories"]]
@@ -83,7 +88,7 @@ async def search_memories(
                 "tags": data.tags,
             },
         )
-    
+
     return SearchResponse(
         memories=[_memory_to_search_result(m) for m in result["memories"]],
         total_count=result["total_count"],
@@ -143,11 +148,11 @@ async def search_memories_full(
             limit=data.limit,
             has_more=False,
         )
-    
+
     pool = await get_pool()
     repo = MemoryRepository(pool)
     access_repo = AccessRepository(pool)
-    
+
     result = await repo.search_full(
         query=data.query,
         username=data.username,
@@ -159,7 +164,7 @@ async def search_memories_full(
         requesting_user_id=user.id,
         requesting_org_id=user.organization_id,
     )
-    
+
     # Log access for returned memories
     if result["memories"]:
         memory_ids = [m["id"] for m in result["memories"]]
@@ -174,7 +179,7 @@ async def search_memories_full(
                 "type": data.type,
             },
         )
-    
+
     return SearchResponse(
         memories=[_memory_to_search_result(m) for m in result["memories"]],
         total_count=result["total_count"],

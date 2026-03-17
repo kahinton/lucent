@@ -15,10 +15,10 @@ Future providers:
 - saml: Enterprise SAML/SCIM
 """
 
-import os
-import hmac
-import secrets
 import hashlib
+import hmac
+import os
+import secrets
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -27,7 +27,7 @@ from uuid import UUID
 import bcrypt
 from asyncpg import Pool
 
-from lucent.db import UserRepository, ApiKeyRepository, get_pool
+from lucent.db import ApiKeyRepository, UserRepository, get_pool
 from lucent.logging import get_logger
 
 logger = get_logger("auth.providers")
@@ -35,17 +35,22 @@ logger = get_logger("auth.providers")
 # Session configuration
 SESSION_COOKIE_NAME = "lucent_session"
 SESSION_TTL_HOURS = int(os.environ.get("LUCENT_SESSION_TTL_HOURS", "72"))
-SECURE_COOKIES = os.environ.get("LUCENT_SECURE_COOKIES", "false").lower() in ("true", "1", "yes")
+SECURE_COOKIES = os.environ.get("LUCENT_SECURE_COOKIES", "true").lower() in ("true", "1", "yes")
+if not SECURE_COOKIES:
+    logger.warning("LUCENT_SECURE_COOKIES is disabled — only use this for local HTTP development")
 
-# CSRF configuration
+# CSRF configuration — simple double-submit cookie pattern
 CSRF_COOKIE_NAME = "lucent_csrf"
 CSRF_FIELD_NAME = "csrf_token"
-CSRF_SECRET = os.environ.get("LUCENT_CSRF_SECRET", secrets.token_urlsafe(32))
+
+# Signing secret for impersonation cookies — MUST be persistent across restarts
+# If not set, generates a random one (impersonation cookies won't survive restarts)
+SIGNING_SECRET = os.environ.get("LUCENT_SIGNING_SECRET", secrets.token_urlsafe(32))
 
 
 def get_cookie_params() -> dict:
     """Get common cookie security parameters.
-    
+
     Returns:
         Dict with httponly, samesite, secure, path keys.
     """
@@ -58,69 +63,31 @@ def get_cookie_params() -> dict:
 
 
 def generate_csrf_token() -> str:
-    """Generate a CSRF token using HMAC.
-    
-    Returns:
-        A signed token string: {random}.{signature}
-    """
-    random_part = secrets.token_urlsafe(32)
-    signature = hmac.new(
-        CSRF_SECRET.encode(), random_part.encode(), hashlib.sha256
-    ).hexdigest()[:32]
-    return f"{random_part}.{signature}"
+    """Generate a random CSRF token for double-submit cookie pattern."""
+    return secrets.token_urlsafe(32)
 
 
 def validate_csrf_token(token: str | None) -> bool:
-    """Validate a CSRF token's signature.
-    
-    Args:
-        token: The token string to validate ({random}.{signature}).
-        
-    Returns:
-        True if the token is valid.
-    """
-    if not token or "." not in token:
-        return False
-    random_part, signature = token.rsplit(".", 1)
-    expected = hmac.new(
-        CSRF_SECRET.encode(), random_part.encode(), hashlib.sha256
-    ).hexdigest()[:32]
-    return hmac.compare_digest(signature, expected)
+    """Validate a CSRF token is non-empty. Actual security comes from
+    comparing cookie == form field in _check_csrf, not from token validation."""
+    return bool(token and len(token) > 8)
 
 
 def sign_value(value: str) -> str:
     """Sign a value with HMAC for tamper detection.
-    
+
     Used for the impersonation cookie to prevent forgery.
-    
-    Args:
-        value: The plaintext value to sign.
-        
-    Returns:
-        Signed string: {value}.{signature}
     """
-    signature = hmac.new(
-        CSRF_SECRET.encode(), value.encode(), hashlib.sha256
-    ).hexdigest()[:32]
+    signature = hmac.new(SIGNING_SECRET.encode(), value.encode(), hashlib.sha256).hexdigest()
     return f"{value}.{signature}"
 
 
 def verify_signed_value(signed: str | None) -> str | None:
-    """Verify and extract a signed value.
-    
-    Args:
-        signed: The signed string ({value}.{signature}).
-        
-    Returns:
-        The original value if signature is valid, None otherwise.
-    """
+    """Verify and extract a signed value."""
     if not signed or "." not in signed:
         return None
-    # Value could contain dots (e.g. UUIDs don't, but be safe)
     value, signature = signed.rsplit(".", 1)
-    expected = hmac.new(
-        CSRF_SECRET.encode(), value.encode(), hashlib.sha256
-    ).hexdigest()[:32]
+    expected = hmac.new(SIGNING_SECRET.encode(), value.encode(), hashlib.sha256).hexdigest()
     if hmac.compare_digest(signature, expected):
         return value
     return None
@@ -263,7 +230,7 @@ class ApiKeyAuthProvider(AuthProvider):
                 "name": "api_key",
                 "label": "API Key",
                 "type": "password",
-                "placeholder": "Enter your API key (mcp_...)",
+                "placeholder": "Enter your API key (hs_...)",
             },
         ]
 
@@ -370,6 +337,22 @@ def hash_password(password: str) -> str:
     return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
 
+def validate_password_complexity(password: str) -> str | None:
+    """Check password meets complexity requirements.
+
+    Returns None if valid, or a descriptive error message if invalid.
+    """
+    if not password or len(password) < 8:
+        return "Password must be at least 8 characters."
+    if not any(c.isupper() for c in password):
+        return "Password must contain at least one uppercase letter."
+    if not any(c.islower() for c in password):
+        return "Password must contain at least one lowercase letter."
+    if not any(c.isdigit() for c in password):
+        return "Password must contain at least one digit."
+    return None
+
+
 async def set_user_password(pool: Pool, user_id: UUID, password: str) -> None:
     """Set or update a user's password.
 
@@ -378,6 +361,9 @@ async def set_user_password(pool: Pool, user_id: UUID, password: str) -> None:
         user_id: The user's UUID.
         password: The new plaintext password (will be hashed).
     """
+    error = validate_password_complexity(password)
+    if error:
+        raise ValueError(error)
     pw_hash = hash_password(password)
     query = "UPDATE users SET password_hash = $1 WHERE id = $2"
     async with pool.acquire() as conn:
@@ -464,7 +450,7 @@ async def create_initial_user(
     Returns:
         Tuple of (user record, api_key string).
     """
-    from lucent.db import OrganizationRepository, ApiKeyRepository
+    from lucent.db import ApiKeyRepository, OrganizationRepository
 
     # Create organization
     org_repo = OrganizationRepository(pool)

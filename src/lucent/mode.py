@@ -11,6 +11,7 @@ import os
 from enum import Enum
 from functools import lru_cache
 
+from lucent.license import LicenseError, validate_license
 from lucent.logging import get_logger
 
 logger = get_logger("mode")
@@ -18,6 +19,7 @@ logger = get_logger("mode")
 
 class DeploymentMode(str, Enum):
     """Available deployment modes."""
+
     PERSONAL = "personal"
     TEAM = "team"
 
@@ -25,12 +27,12 @@ class DeploymentMode(str, Enum):
 @lru_cache(maxsize=1)
 def get_mode() -> DeploymentMode:
     """Get the current deployment mode.
-    
+
     Returns:
         The configured DeploymentMode, defaulting to PERSONAL.
     """
     mode_str = os.environ.get("LUCENT_MODE", "personal").lower().strip()
-    
+
     try:
         mode = DeploymentMode(mode_str)
     except ValueError:
@@ -39,26 +41,22 @@ def get_mode() -> DeploymentMode:
             f"Valid modes: {', '.join(m.value for m in DeploymentMode)}"
         )
         mode = DeploymentMode.PERSONAL
-    
+
     # Team mode requires a license key
     if mode == DeploymentMode.TEAM:
         license_key = os.environ.get("LUCENT_LICENSE_KEY", "").strip()
         if not license_key:
             logger.error(
-                "LUCENT_MODE=team requires LUCENT_LICENSE_KEY. "
-                "Falling back to personal mode."
+                "LUCENT_MODE=team requires LUCENT_LICENSE_KEY. Falling back to personal mode."
             )
             return DeploymentMode.PERSONAL
-        
+
         if not _validate_license(license_key):
-            logger.error(
-                "Invalid LUCENT_LICENSE_KEY. "
-                "Falling back to personal mode."
-            )
+            logger.error("Invalid LUCENT_LICENSE_KEY. Falling back to personal mode.")
             return DeploymentMode.PERSONAL
-        
+
         logger.info("Team mode enabled with valid license")
-    
+
     return mode
 
 
@@ -74,10 +72,10 @@ def is_team_mode() -> bool:
 
 def require_team_mode(feature_name: str) -> None:
     """Raise an error if a team-only feature is accessed in personal mode.
-    
+
     Args:
         feature_name: Name of the feature for the error message.
-        
+
     Raises:
         PermissionError: If not in team mode.
     """
@@ -89,17 +87,18 @@ def require_team_mode(feature_name: str) -> None:
 
 
 def _validate_license(license_key: str) -> bool:
-    """Validate a license key.
-    
-    NOTE: License validation is not yet implemented. Any non-empty key
-    is accepted. This placeholder will be replaced with cryptographic
-    validation before the team tier is officially available.
-    
+    """Validate a license key using Ed25519 signature verification.
+
     Args:
         license_key: The license key to validate.
-        
+
     Returns:
-        True if the license is valid.
+        True if the license is cryptographically valid and not expired.
     """
-    # Placeholder - will be replaced with actual validation
-    return bool(license_key)
+    try:
+        info = validate_license(license_key)
+        logger.info(f"License validated for org '{info.org}', expires {info.expires_at}")
+        return True
+    except LicenseError as e:
+        logger.warning(f"License validation failed: {e}")
+        return False

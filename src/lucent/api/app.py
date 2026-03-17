@@ -16,14 +16,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from lucent.api.routers import memories, search
-from lucent.logging import get_logger
+from lucent.api.routers import daemon_messages as daemon_messages_router
+from lucent.api.routers import daemon_tasks as daemon_tasks_router
+from lucent.api.routers import export, memories, search
+from lucent.db import close_db, init_db
+from lucent.logging import get_logger, set_correlation_id
 from lucent.mode import is_team_mode
+from lucent.web.routes import router as web_router
 
 # Get logger for this module
 logger = get_logger("api.app")
-from lucent.web.routes import router as web_router
-from lucent.db import init_db, close_db
 
 # Path to static files directory
 STATIC_DIR = Path(__file__).parent.parent / "web" / "static"
@@ -38,22 +40,65 @@ def set_mcp_session_manager(session_manager):
     _mcp_session_manager = session_manager
 
 
+async def _sync_built_in_definitions():
+    """Sync built-in skills and agents from .github/ into the database."""
+    try:
+        from lucent.db import get_pool
+
+        pool = await get_pool()
+        from lucent.db.definitions import DefinitionRepository
+
+        repo = DefinitionRepository(pool)
+        # Get any org to sync into (there's typically one)
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT id FROM organizations LIMIT 1")
+        if not row:
+            return
+        org_id = str(row["id"])
+        # Sync skills from .github/skills/
+        for candidate in [
+            Path("/app/.github/skills"),
+            Path(__file__).resolve().parents[3] / ".github" / "skills",
+        ]:
+            if candidate.is_dir():
+                count = await repo.sync_built_in_skills(org_id, str(candidate))
+                if count:
+                    logger.info(f"Synced {count} built-in skill definitions")
+                break
+        # Sync agents from .github/agents/definitions/
+        for candidate in [
+            Path("/app/.github/agents/definitions"),
+            Path(__file__).resolve().parents[3] / ".github" / "agents" / "definitions",
+        ]:
+            if candidate.is_dir():
+                count = await repo.sync_built_in_agents(org_id, str(candidate))
+                if count:
+                    logger.info(f"Synced {count} built-in agent definitions")
+                break
+    except Exception as e:
+        logger.warning(f"Failed to sync built-in definitions: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifespan - startup and shutdown."""
     # Startup: Initialize database pool
     import os
+
     database_url = os.environ.get("DATABASE_URL")
     if database_url:
         await init_db(database_url)
-    
+
+    # Sync built-in skills from .github/skills/ into the DB
+    await _sync_built_in_definitions()
+
     # Start MCP session manager if configured
     if _mcp_session_manager:
         async with _mcp_session_manager.run():
             yield
     else:
         yield
-    
+
     # Shutdown: Close database pool
     await close_db()
 
@@ -69,41 +114,112 @@ def create_app() -> FastAPI:
         redoc_url="/api/redoc",
         openapi_url="/api/openapi.json",
     )
-    
-    # Configure CORS
-    allowed_origins = os.environ.get("LUCENT_CORS_ORIGINS", "*").split(",")
+
+    # Configure CORS — default is no origins (safe); set LUCENT_CORS_ORIGINS explicitly
+    cors_env = os.environ.get("LUCENT_CORS_ORIGINS", "")
+    if cors_env == "*":
+        logger.warning("=" * 72)
+        logger.warning(
+            "SECURITY WARNING: LUCENT_CORS_ORIGINS is set to '*' — "
+            "this allows ANY origin to make cross-origin requests."
+        )
+        if is_team_mode():
+            logger.warning(
+                "CRITICAL: Wildcard CORS in team mode exposes multi-user data "
+                "to cross-origin attacks. Set explicit origins immediately."
+            )
+        else:
+            logger.warning(
+                "Set explicit origins (e.g. 'http://localhost:8766') for safe operation."
+            )
+        logger.warning("=" * 72)
+    allowed_origins = [o for o in cors_env.split(",") if o] if cors_env and cors_env != "*" else []
+    # Never allow credentials with wildcard — only when explicit origins are set
     app.add_middleware(
         CORSMiddleware,
         allow_origins=allowed_origins,
-        allow_credentials=allowed_origins != ["*"],
+        allow_credentials=bool(allowed_origins),
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    
+
+    @app.middleware("http")
+    async def correlation_id_middleware(request: Request, call_next):
+        """Generate or propagate a correlation ID for every request."""
+        cid = request.headers.get("X-Request-ID")
+        if cid:
+            set_correlation_id(cid)
+        else:
+            cid = set_correlation_id()
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = cid
+        return response
+
     # Include core API routers
+    # Export router must be registered before memories router to avoid
+    # path conflicts with /{memory_id} routes
+    app.include_router(export.router, prefix="/api/memories/export", tags=["Export"])
     app.include_router(memories.router, prefix="/api/memories", tags=["Memories"])
     app.include_router(search.router, prefix="/api/search", tags=["Search"])
-    
+    app.include_router(
+        daemon_tasks_router.router,
+        prefix="/api/daemon/tasks",
+        tags=["Daemon Tasks"],
+    )
+    app.include_router(
+        daemon_messages_router.router,
+        prefix="/api/daemon/messages",
+        tags=["Daemon Messages"],
+    )
+
     # Include team-only API routers
     if is_team_mode():
-        from lucent.api.routers import audit, access, users, organizations
+        from lucent.api.routers import access, audit, organizations, users
+
         app.include_router(audit.router, prefix="/api/audit", tags=["Audit"])
         app.include_router(access.router, prefix="/api/access", tags=["Access"])
         app.include_router(users.router, prefix="/api/users", tags=["Users"])
-        app.include_router(organizations.router, prefix="/api/organizations", tags=["Organizations"])
-    
+        app.include_router(
+            organizations.router, prefix="/api/organizations", tags=["Organizations"]
+        )
+
+    # Include definitions management router
+    from lucent.api.routers import definitions
+
+    app.include_router(definitions.router, prefix="/api", tags=["Definitions"])
+
+    # Include request tracking router
+    from lucent.api.routers import requests as requests_router
+
+    app.include_router(requests_router.router, prefix="/api", tags=["Requests"])
+
+    # Include schedule management router
+    from lucent.api.routers import schedules as schedules_router
+
+    app.include_router(schedules_router.router, prefix="/api", tags=["Schedules"])
+
+    # Include chat router
+    from lucent.api.routers import chat as chat_router
+
+    app.include_router(chat_router.router, prefix="/api", tags=["Chat"])
+
+    # Include sandbox management router
+    from lucent.api.routers import sandboxes as sandboxes_router
+
+    app.include_router(sandboxes_router.router, prefix="/api/sandboxes", tags=["Sandboxes"])
+
     # Include web interface routes (excluded from API docs)
     app.include_router(web_router, include_in_schema=False)
-    
+
     # Mount static files (logo, images, etc.)
     if STATIC_DIR.exists():
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
-    
+
     @app.get("/api/health", include_in_schema=False)
     async def health_check() -> dict[str, str]:
         """Health check endpoint."""
         return {"status": "healthy"}
-    
+
     @app.exception_handler(Exception)
     async def global_exception_handler(request: Request, exc: Exception):
         """Handle unhandled exceptions — log detail, return generic error."""
@@ -112,7 +228,7 @@ def create_app() -> FastAPI:
             status_code=500,
             content={"error": "Internal server error"},
         )
-    
+
     return app
 
 

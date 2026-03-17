@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from enum import Enum
-from typing import Annotated, Any
+from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
@@ -33,22 +33,38 @@ class GoalStatus(str, Enum):
 class ExperienceMetadata(BaseModel):
     """Metadata specific to experience memories."""
 
-    context: str | None = Field(default=None, description="What was happening during this experience")
+    context: str | None = Field(
+        default=None, description="What was happening during this experience"
+    )
     outcome: str | None = Field(default=None, description="What resulted from this experience")
-    lessons_learned: list[str] = Field(default_factory=list, description="Key takeaways from this experience")
-    related_entities: list[str] = Field(default_factory=list, description="People, projects, or things involved")
+    lessons_learned: list[str] = Field(
+        default_factory=list, description="Key takeaways from this experience"
+    )
+    related_entities: list[str] = Field(
+        default_factory=list, description="People, projects, or things involved"
+    )
 
 
 class TechnicalMetadata(BaseModel):
     """Metadata specific to technical memories."""
 
-    category: str | None = Field(default=None, description="Category like 'programming', 'architecture', 'devops'")
+    category: str | None = Field(
+        default=None, description="Category like 'programming', 'architecture', 'devops'"
+    )
     language: str | None = Field(default=None, description="Programming language if applicable")
-    code_snippet: str | None = Field(default=None, description="Example code demonstrating this knowledge")
-    references: list[str] = Field(default_factory=list, description="URLs, documentation links, or other references")
+    code_snippet: str | None = Field(
+        default=None, description="Example code demonstrating this knowledge"
+    )
+    references: list[str] = Field(
+        default_factory=list, description="URLs, documentation links, or other references"
+    )
     version_info: str | None = Field(default=None, description="Version-specific information")
-    repo: str | None = Field(default=None, description="Repository name or URL related to this knowledge")
-    filename: str | None = Field(default=None, description="Specific file this knowledge relates to")
+    repo: str | None = Field(
+        default=None, description="Repository name or URL related to this knowledge"
+    )
+    filename: str | None = Field(
+        default=None, description="Specific file this knowledge relates to"
+    )
 
 
 class ProceduralStep(BaseModel):
@@ -62,19 +78,33 @@ class ProceduralStep(BaseModel):
 class ProceduralMetadata(BaseModel):
     """Metadata specific to procedural memories."""
 
-    steps: list[ProceduralStep] = Field(default_factory=list, description="Ordered steps to complete the procedure")
-    prerequisites: list[str] = Field(default_factory=list, description="Required knowledge, tools, or setup")
-    estimated_time: str | None = Field(default=None, description="How long this procedure typically takes")
-    success_criteria: str | None = Field(default=None, description="How to know the procedure completed successfully")
-    common_pitfalls: list[str] = Field(default_factory=list, description="Things that commonly go wrong")
+    steps: list[ProceduralStep] = Field(
+        default_factory=list, description="Ordered steps to complete the procedure"
+    )
+    prerequisites: list[str] = Field(
+        default_factory=list, description="Required knowledge, tools, or setup"
+    )
+    estimated_time: str | None = Field(
+        default=None, description="How long this procedure typically takes"
+    )
+    success_criteria: str | None = Field(
+        default=None, description="How to know the procedure completed successfully"
+    )
+    common_pitfalls: list[str] = Field(
+        default_factory=list, description="Things that commonly go wrong"
+    )
 
 
 class Milestone(BaseModel):
     """A milestone within a goal."""
 
     description: str = Field(..., description="What this milestone represents")
-    status: GoalStatus = Field(default=GoalStatus.ACTIVE, description="Current status of this milestone")
-    completed_at: datetime | None = Field(default=None, description="When this milestone was completed")
+    status: GoalStatus = Field(
+        default=GoalStatus.ACTIVE, description="Current status of this milestone"
+    )
+    completed_at: datetime | None = Field(
+        default=None, description="When this milestone was completed"
+    )
 
 
 class ProgressNote(BaseModel):
@@ -89,10 +119,16 @@ class GoalMetadata(BaseModel):
 
     status: GoalStatus = Field(default=GoalStatus.ACTIVE, description="Current status of the goal")
     deadline: datetime | None = Field(default=None, description="Target completion date")
-    milestones: list[Milestone] = Field(default_factory=list, description="Milestones to track progress")
+    milestones: list[Milestone] = Field(
+        default_factory=list, description="Milestones to track progress"
+    )
     blockers: list[str] = Field(default_factory=list, description="Current obstacles or blockers")
-    progress_notes: list[ProgressNote] = Field(default_factory=list, description="Progress updates over time")
-    priority: int = Field(default=3, ge=1, le=5, description="Priority level from 1 (low) to 5 (critical)")
+    progress_notes: list[ProgressNote] = Field(
+        default_factory=list, description="Progress updates over time"
+    )
+    priority: int = Field(
+        default=3, ge=1, le=5, description="Priority level from 1 (low) to 5 (critical)"
+    )
 
 
 class ContactInfo(BaseModel):
@@ -108,7 +144,9 @@ class ContactInfo(BaseModel):
 class InteractionRecord(BaseModel):
     """Record of an interaction with an individual."""
 
-    date: datetime = Field(default_factory=datetime.now, description="When the interaction occurred")
+    date: datetime = Field(
+        default_factory=datetime.now, description="When the interaction occurred"
+    )
     context: str = Field(..., description="Context or setting of the interaction")
     notes: str | None = Field(default=None, description="Notes about the interaction")
 
@@ -116,13 +154,21 @@ class InteractionRecord(BaseModel):
 class IndividualMetadata(BaseModel):
     """Metadata specific to individual memories."""
 
-    user_id: UUID | None = Field(default=None, description="ID of the linked user in the system (if they are a system user)")
+    user_id: UUID | None = Field(
+        default=None, description="ID of the linked user in the system (if they are a system user)"
+    )
     name: str = Field(..., description="Person's name")
     relationship: str | None = Field(default=None, description="How you know this person")
-    organization: str | None = Field(default=None, description="Company or organization affiliation")
+    organization: str | None = Field(
+        default=None, description="Company or organization affiliation"
+    )
     role: str | None = Field(default=None, description="Their role or title")
-    contact_info: ContactInfo = Field(default_factory=ContactInfo, description="Contact information")
-    preferences: list[str] = Field(default_factory=list, description="Known preferences or working style")
+    contact_info: ContactInfo = Field(
+        default_factory=ContactInfo, description="Contact information"
+    )
+    preferences: list[str] = Field(
+        default_factory=list, description="Known preferences or working style"
+    )
     interaction_history: list[InteractionRecord] = Field(
         default_factory=list, description="History of interactions"
     )
@@ -130,7 +176,9 @@ class IndividualMetadata(BaseModel):
 
 
 # Union type for all metadata types
-MemoryMetadata = ExperienceMetadata | TechnicalMetadata | ProceduralMetadata | GoalMetadata | IndividualMetadata
+MemoryMetadata = (
+    ExperienceMetadata | TechnicalMetadata | ProceduralMetadata | GoalMetadata | IndividualMetadata
+)
 
 
 class Memory(BaseModel):
@@ -142,7 +190,9 @@ class Memory(BaseModel):
     content: str = Field(..., description="Main content of the memory")
     tags: list[str] = Field(default_factory=list, description="Tags for categorization")
     importance: int = Field(default=5, ge=1, le=10, description="Importance rating 1-10")
-    related_memory_ids: list[UUID] = Field(default_factory=list, description="IDs of related memories")
+    related_memory_ids: list[UUID] = Field(
+        default_factory=list, description="IDs of related memories"
+    )
     metadata: dict[str, Any] = Field(default_factory=dict, description="Type-specific metadata")
     created_at: datetime
     updated_at: datetime
@@ -170,12 +220,16 @@ class TruncatedMemory(BaseModel):
 class CreateMemoryInput(BaseModel):
     """Input for creating a new memory."""
 
-    username: str | None = Field(default=None, description="Username for this memory (defaults to authenticated user)")
+    username: str | None = Field(
+        default=None, description="Username for this memory (defaults to authenticated user)"
+    )
     type: MemoryType = Field(..., description="Type of memory to create")
     content: str = Field(..., min_length=1, description="Main content of the memory")
     tags: list[str] = Field(default_factory=list, description="Tags for categorization")
     importance: int = Field(default=5, ge=1, le=10, description="Importance rating 1-10")
-    related_memory_ids: list[UUID] = Field(default_factory=list, description="IDs of related memories")
+    related_memory_ids: list[UUID] = Field(
+        default_factory=list, description="IDs of related memories"
+    )
     metadata: dict[str, Any] = Field(default_factory=dict, description="Type-specific metadata")
 
     @field_validator("tags", mode="before")
@@ -193,7 +247,9 @@ class UpdateMemoryInput(BaseModel):
     content: str | None = Field(default=None, min_length=1, description="Updated content")
     tags: list[str] | None = Field(default=None, description="Updated tags")
     importance: int | None = Field(default=None, ge=1, le=10, description="Updated importance")
-    related_memory_ids: list[UUID] | None = Field(default=None, description="Updated related memory IDs")
+    related_memory_ids: list[UUID] | None = Field(
+        default=None, description="Updated related memory IDs"
+    )
     metadata: dict[str, Any] | None = Field(default=None, description="Updated metadata")
 
     @field_validator("tags", mode="before")
@@ -214,8 +270,12 @@ class SearchMemoriesInput(BaseModel):
     tags: list[str] | None = Field(default=None, description="Filter by tags (any match)")
     importance_min: int | None = Field(default=None, ge=1, le=10, description="Minimum importance")
     importance_max: int | None = Field(default=None, ge=1, le=10, description="Maximum importance")
-    created_after: datetime | None = Field(default=None, description="Filter memories created after this date")
-    created_before: datetime | None = Field(default=None, description="Filter memories created before this date")
+    created_after: datetime | None = Field(
+        default=None, description="Filter memories created after this date"
+    )
+    created_before: datetime | None = Field(
+        default=None, description="Filter memories created before this date"
+    )
     memory_ids: list[UUID] | None = Field(default=None, description="Filter by specific memory IDs")
     offset: int = Field(default=0, ge=0, description="Pagination offset")
     limit: int = Field(default=5, ge=1, le=50, description="Maximum results to return")
@@ -235,4 +295,6 @@ class MemorySearchResult(BaseModel):
     """Extended search result with similarity scores."""
 
     memory: TruncatedMemory
-    similarity_score: float | None = Field(default=None, description="Similarity score for fuzzy matches")
+    similarity_score: float | None = Field(
+        default=None, description="Similarity score for fuzzy matches"
+    )

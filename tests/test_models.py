@@ -1,24 +1,25 @@
 """Tests for Lucent memory models."""
 
-import pytest
-from uuid import UUID
 from datetime import datetime
+from uuid import UUID
+
+import pytest
 
 from lucent.models.memory import (
+    CreateMemoryInput,
+    ExperienceMetadata,
+    GoalMetadata,
+    GoalStatus,
+    IndividualMetadata,
     Memory,
     MemoryType,
-    GoalStatus,
-    CreateMemoryInput,
-    UpdateMemoryInput,
-    SearchMemoriesInput,
-    TruncatedMemory,
-    SearchResult,
-    ExperienceMetadata,
-    TechnicalMetadata,
     ProceduralMetadata,
     ProceduralStep,
-    GoalMetadata,
-    IndividualMetadata,
+    SearchMemoriesInput,
+    SearchResult,
+    TechnicalMetadata,
+    TruncatedMemory,
+    UpdateMemoryInput,
 )
 
 

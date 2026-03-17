@@ -1,0 +1,74 @@
+---
+name: methodology
+description: 'Research methodology and rigor guidelines'
+---
+
+# Methodology
+
+Research methodology and rigor guidelines
+
+## When to Use
+
+- Investigating a new topic or question
+- Evaluating competing approaches or technologies
+- Building background knowledge for a project
+- Fact-checking claims or assumptions
+
+## Research Process
+
+### Step 1: Define the Question
+
+1. What specifically do we need to know?
+2. What would a good answer look like?
+3. What's the scope — broad survey or deep dive?
+4. What's the deadline or urgency?
+
+### Step 2: Survey Existing Knowledge
+
+1. Search memories for previous research on this topic
+2. Check local documentation and codebase
+3. Review any existing analysis or reports
+
+### Step 3: Gather External Sources
+
+1. Use web_fetch for authoritative sources
+2. Cross-reference multiple sources
+3. Note the date and credibility of each source
+4. Capture key quotes and data points
+
+### Step 4: Analyze and Synthesize
+
+1. Organize findings by theme or question
+2. Note areas of consensus and disagreement
+3. Identify gaps in available information
+4. Draw connections between sources
+
+### Step 5: Produce Output
+
+Structure your findings as:
+
+```
+## Summary
+[Key findings in 2-3 sentences]
+
+## Detailed Findings
+[Organized by theme with citations]
+
+## Confidence Assessment
+[What we know confidently vs. what's uncertain]
+
+## Recommendations
+[Suggested next steps based on findings]
+
+## Sources
+[List of sources consulted with dates]
+```
+
+## Best Practices
+
+- Cite everything — memories, documents, URLs
+- Distinguish fact from interpretation
+- Note confidence levels explicitly
+- Look for contradicting evidence
+- Save key findings as memories for future reference
+- Update previous research memories when new information emerges

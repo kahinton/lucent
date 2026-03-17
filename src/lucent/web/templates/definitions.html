@@ -1,0 +1,223 @@
+{% extends "base.html" %}
+{% block title %}Agents & Skills - Lucent{% endblock %}
+{% block content %}
+<div class="mb-8">
+    <div class="flex items-center justify-between mb-2">
+        <div>
+            <h1 class="text-2xl font-bold text-gray-900">Agents & Skills</h1>
+            <p class="text-sm text-gray-500">Manage Lucent's capabilities — agents, skills, and MCP connections</p>
+        </div>
+    </div>
+</div>
+<div class="border-b border-gray-200 mb-6">
+    <nav class="flex gap-6">
+        <a href="/definitions?tab=agents" class="py-2 px-1 border-b-2 text-sm font-medium {% if tab == 'agents' %}border-primary-500 text-primary-600{% else %}border-transparent text-gray-500 hover:text-gray-700{% endif %}">Agents {% if agents %}({{ agents|length }}){% endif %}</a>
+        <a href="/definitions?tab=skills" class="py-2 px-1 border-b-2 text-sm font-medium {% if tab == 'skills' %}border-primary-500 text-primary-600{% else %}border-transparent text-gray-500 hover:text-gray-700{% endif %}">Skills {% if skills %}({{ skills|length }}){% endif %}</a>
+        <a href="/definitions?tab=mcp" class="py-2 px-1 border-b-2 text-sm font-medium {% if tab == 'mcp' %}border-primary-500 text-primary-600{% else %}border-transparent text-gray-500 hover:text-gray-700{% endif %}">MCP Servers {% if mcp_servers %}({{ mcp_servers|length }}){% endif %}</a>
+        {% if proposals and proposals.total > 0 %}
+        <a href="/definitions?tab=proposals" class="py-2 px-1 border-b-2 text-sm font-medium {% if tab == 'proposals' %}border-primary-500 text-primary-600{% else %}border-transparent text-gray-500 hover:text-gray-700{% endif %}">Pending <span class="ml-1 bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full text-xs">{{ proposals.total }}</span></a>
+        {% endif %}
+    </nav>
+</div>
+
+{% macro status_badge(status) %}
+<span class="px-2 py-0.5 rounded text-xs {% if status == 'active' %}bg-green-100 text-green-700{% elif status == 'proposed' %}bg-amber-100 text-amber-700{% elif status == 'rejected' %}bg-red-100 text-red-700{% else %}bg-gray-100 text-gray-600{% endif %}">{{ status }}</span>
+{% endmacro %}
+
+{% macro scope_badge(item) %}
+{% if item.scope == 'built-in' %}<span class="px-2 py-0.5 rounded text-xs bg-indigo-100 text-indigo-700 font-medium">built-in</span>{% elif item.scope == 'instance' %}<span class="px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-500">instance</span>{% endif %}
+{% endmacro %}
+
+{% macro approval_buttons(type, id) %}
+<div class="flex gap-2 shrink-0">
+    <form method="POST" action="/definitions/{{ type }}/{{ id }}/approve"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit" class="px-3 py-1.5 text-sm bg-green-50 text-green-700 rounded-md hover:bg-green-100 font-medium">Approve</button></form>
+    <form method="POST" action="/definitions/{{ type }}/{{ id }}/reject"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit" class="px-3 py-1.5 text-sm bg-red-50 text-red-700 rounded-md hover:bg-red-100 font-medium">Reject</button></form>
+</div>
+{% endmacro %}
+
+{% if tab == 'agents' %}
+<div class="mb-4 flex justify-end">
+    <button onclick="document.getElementById('create-agent-modal').classList.remove('hidden')" class="px-4 py-2 text-sm bg-primary-600 text-white rounded-md hover:bg-primary-700 font-medium">+ New Agent</button>
+</div>
+<div class="space-y-3">
+    {% for agent in agents %}
+    <details class="bg-white rounded-lg border border-gray-200 group">
+        <summary class="p-4 cursor-pointer list-none flex items-start justify-between gap-4">
+            <div class="flex-1 min-w-0">
+                <div class="flex items-center gap-2 flex-wrap">
+                    <svg class="w-4 h-4 text-gray-400 transition-transform group-open:rotate-90" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5"/></svg>
+                    <a href="/definitions/agents/{{ agent.id }}" class="font-medium text-gray-900 hover:text-primary-600">{{ agent.name }}</a>
+                    {{ status_badge(agent.status) }}
+                    {{ scope_badge(agent) }}
+                    {% if agent.skills %}<span class="text-xs text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded">{{ agent.skills|length }} skill{{ 's' if agent.skills|length != 1 }}</span>{% endif %}
+                    {% if agent.mcp_servers %}<span class="text-xs text-purple-600 bg-purple-50 px-1.5 py-0.5 rounded">{{ agent.mcp_servers|length }} MCP</span>{% endif %}
+                </div>
+                {% if agent.description %}<p class="text-sm text-gray-500 mt-1 ml-6">{{ agent.description }}</p>{% endif %}
+            </div>
+            {% if agent.status == 'proposed' %}{{ approval_buttons('agents', agent.id) }}{% endif %}
+        </summary>
+        <div class="px-4 pb-4 border-t border-gray-100 pt-3 ml-6">
+            {% if agent.skills %}
+            <div class="mb-3">
+                <h4 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1.5">Skills</h4>
+                <div class="space-y-1">
+                {% for skill in agent.skills %}
+                <div class="flex items-center gap-2 text-sm">
+                    <svg class="w-3.5 h-3.5 text-blue-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z"/></svg>
+                    <a href="/definitions/skills/{{ skill.id }}" class="text-gray-700 hover:text-blue-600">{{ skill.name }}</a>
+                    {% if skill.description %}<span class="text-gray-400">— {{ skill.description[:80] }}</span>{% endif %}
+                </div>
+                {% endfor %}
+                </div>
+            </div>
+            {% endif %}
+            {% if agent.mcp_servers %}
+            <div class="mb-3">
+                <h4 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1.5">MCP Servers</h4>
+                <div class="space-y-1">
+                {% for mcp in agent.mcp_servers %}
+                <div class="flex items-center gap-2 text-sm">
+                    <svg class="w-3.5 h-3.5 text-purple-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M5.25 14.25h13.5m-13.5 0a3 3 0 01-3-3m3 3a3 3 0 100 6h13.5a3 3 0 100-6m-16.5-3a3 3 0 013-3h13.5a3 3 0 013 3m-19.5 0a4.5 4.5 0 01.9-2.7L5.737 5.1a3.375 3.375 0 012.7-1.35h7.126c1.062 0 2.062.5 2.7 1.35l2.587 3.45a4.5 4.5 0 01.9 2.7m0 0a3 3 0 01-3 3m0 3h.008v.008h-.008v-.008zm0-6h.008v.008h-.008v-.008zm-3 6h.008v.008h-.008v-.008zm0-6h.008v.008h-.008v-.008z"/></svg>
+                    <a href="/definitions/mcp-servers/{{ mcp.id }}" class="text-gray-700 hover:text-purple-600">{{ mcp.name }}</a>
+                    <span class="text-xs text-gray-400 font-mono">{{ mcp.server_type }}</span>
+                </div>
+                {% endfor %}
+                </div>
+            </div>
+            {% endif %}
+            {% if not agent.skills and not agent.mcp_servers %}<p class="text-sm text-gray-400 italic">No skills or MCP servers granted yet.</p>{% endif %}
+        </div>
+    </details>
+    {% else %}
+    <div class="bg-white rounded-lg border border-gray-200 p-8 text-center text-gray-500"><p>No agents defined yet.</p></div>
+    {% endfor %}
+</div>
+<div id="create-agent-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+    <div class="bg-white rounded-lg shadow-xl w-full max-w-2xl mx-4 max-h-[90vh] overflow-y-auto">
+        <form method="POST" action="/definitions/agents/create">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <div class="p-6 border-b border-gray-200"><div class="flex items-center justify-between"><h2 class="text-lg font-semibold text-gray-900">New Agent</h2><button type="button" onclick="this.closest('.fixed').classList.add('hidden')" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button></div></div>
+            <div class="p-6 space-y-4">
+                <div><label class="block text-sm font-medium text-gray-700 mb-1">Name</label><input name="name" required class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm" placeholder="e.g. my-agent"></div>
+                <div><label class="block text-sm font-medium text-gray-700 mb-1">Description</label><input name="description" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm" placeholder="Brief description"></div>
+                <div><label class="block text-sm font-medium text-gray-700 mb-1">Content (Markdown)</label><textarea name="content" rows="10" required class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono" placeholder="# Agent Name"></textarea></div>
+            </div>
+            <div class="p-6 border-t border-gray-200 flex justify-end gap-3"><button type="button" onclick="this.closest('.fixed').classList.add('hidden')" class="px-4 py-2 text-sm text-gray-600">Cancel</button><button type="submit" class="px-4 py-2 text-sm bg-primary-600 text-white rounded-md hover:bg-primary-700 font-medium">Create Agent</button></div>
+        </form>
+    </div>
+</div>
+
+{% elif tab == 'skills' %}
+<div class="mb-4 flex justify-end">
+    <button onclick="document.getElementById('create-skill-modal').classList.remove('hidden')" class="px-4 py-2 text-sm bg-primary-600 text-white rounded-md hover:bg-primary-700 font-medium">+ New Skill</button>
+</div>
+<div class="space-y-3">
+    {% for skill in skills %}
+    <div class="bg-white rounded-lg border border-gray-200 p-4">
+        <div class="flex items-start justify-between gap-4">
+            <div class="flex-1 min-w-0">
+                <div class="flex items-center gap-2">
+                    <a href="/definitions/skills/{{ skill.id }}" class="font-medium text-gray-900 hover:text-primary-600">{{ skill.name }}</a>
+                    {{ status_badge(skill.status) }}
+                    {{ scope_badge(skill) }}
+                </div>
+                {% if skill.description %}<p class="text-sm text-gray-500 mt-1">{{ skill.description }}</p>{% endif %}
+            </div>
+            {% if skill.status == 'proposed' %}{{ approval_buttons('skills', skill.id) }}{% endif %}
+        </div>
+    </div>
+    {% else %}
+    <div class="bg-white rounded-lg border border-gray-200 p-8 text-center text-gray-500"><p>No skills defined yet.</p></div>
+    {% endfor %}
+</div>
+<div id="create-skill-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+    <div class="bg-white rounded-lg shadow-xl w-full max-w-2xl mx-4 max-h-[90vh] overflow-y-auto">
+        <form method="POST" action="/definitions/skills/create">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <div class="p-6 border-b border-gray-200"><div class="flex items-center justify-between"><h2 class="text-lg font-semibold text-gray-900">New Skill</h2><button type="button" onclick="this.closest('.fixed').classList.add('hidden')" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button></div></div>
+            <div class="p-6 space-y-4">
+                <div><label class="block text-sm font-medium text-gray-700 mb-1">Name</label><input name="name" required class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm" placeholder="e.g. my-skill"></div>
+                <div><label class="block text-sm font-medium text-gray-700 mb-1">Description</label><input name="description" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm" placeholder="Brief description"></div>
+                <div><label class="block text-sm font-medium text-gray-700 mb-1">Content (Markdown)</label><textarea name="content" rows="10" required class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono" placeholder="# Skill Name"></textarea></div>
+            </div>
+            <div class="p-6 border-t border-gray-200 flex justify-end gap-3"><button type="button" onclick="this.closest('.fixed').classList.add('hidden')" class="px-4 py-2 text-sm text-gray-600">Cancel</button><button type="submit" class="px-4 py-2 text-sm bg-primary-600 text-white rounded-md hover:bg-primary-700 font-medium">Create Skill</button></div>
+        </form>
+    </div>
+</div>
+
+{% elif tab == 'mcp' %}
+<div class="mb-4 flex justify-end">
+    <button onclick="document.getElementById('create-mcp-modal').classList.remove('hidden')" class="px-4 py-2 text-sm bg-primary-600 text-white rounded-md hover:bg-primary-700 font-medium">+ New MCP Server</button>
+</div>
+<div class="space-y-3">
+    {% for server in mcp_servers %}
+    <div class="bg-white rounded-lg border border-gray-200 p-4">
+        <div class="flex items-start justify-between gap-4">
+            <div class="flex-1 min-w-0">
+                <div class="flex items-center gap-2">
+                    <a href="/definitions/mcp-servers/{{ server.id }}" class="font-medium text-gray-900 hover:text-primary-600">{{ server.name }}</a>
+                    {{ status_badge(server.status) }}
+                    {{ scope_badge(server) }}
+                    <span class="text-xs text-gray-400 font-mono">{{ server.server_type }}</span>
+                    {% if server.url %}<span class="text-xs text-gray-400 font-mono truncate">{{ server.url }}</span>{% endif %}
+                </div>
+                {% if server.description %}<p class="text-sm text-gray-500 mt-1">{{ server.description }}</p>{% endif %}
+            </div>
+            {% if server.status == 'proposed' %}{{ approval_buttons('mcp-servers', server.id) }}{% endif %}
+        </div>
+    </div>
+    {% else %}
+    <div class="bg-white rounded-lg border border-gray-200 p-8 text-center text-gray-500"><p>No MCP server connections configured.</p></div>
+    {% endfor %}
+</div>
+<div id="create-mcp-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+    <div class="bg-white rounded-lg shadow-xl w-full max-w-2xl mx-4 max-h-[90vh] overflow-y-auto">
+        <form method="POST" action="/definitions/mcp-servers/create">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <div class="p-6 border-b border-gray-200"><div class="flex items-center justify-between"><h2 class="text-lg font-semibold text-gray-900">New MCP Server</h2><button type="button" onclick="this.closest('.fixed').classList.add('hidden')" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button></div></div>
+            <div class="p-6 space-y-4">
+                <div class="grid grid-cols-2 gap-4">
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Name</label><input name="name" required class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm" placeholder="e.g. github-api"></div>
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Type</label><select name="server_type" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"><option value="http">HTTP</option><option value="stdio">stdio</option></select></div>
+                </div>
+                <div><label class="block text-sm font-medium text-gray-700 mb-1">Description</label><input name="description" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm" placeholder="What does this server provide?"></div>
+                <div><label class="block text-sm font-medium text-gray-700 mb-1">URL (HTTP)</label><input name="url" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono" placeholder="http://localhost:3100/mcp"></div>
+                <div><label class="block text-sm font-medium text-gray-700 mb-1">Command (stdio)</label><input name="command" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono" placeholder="npx -y @modelcontextprotocol/server-github"></div>
+                <div><label class="block text-sm font-medium text-gray-700 mb-1">Headers (JSON)</label><textarea name="headers" rows="2" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono">{}</textarea></div>
+            </div>
+            <div class="p-6 border-t border-gray-200 flex justify-end gap-3"><button type="button" onclick="this.closest('.fixed').classList.add('hidden')" class="px-4 py-2 text-sm text-gray-600">Cancel</button><button type="submit" class="px-4 py-2 text-sm bg-primary-600 text-white rounded-md hover:bg-primary-700 font-medium">Create MCP Server</button></div>
+        </form>
+    </div>
+</div>
+
+{% elif tab == 'proposals' %}
+{% if proposals.total == 0 %}
+<div class="bg-white rounded-lg border border-gray-200 p-8 text-center text-gray-500">No pending proposals.</div>
+{% else %}
+{% if proposals.agents %}
+<h3 class="text-sm font-semibold text-gray-700 mb-2">Agents</h3>
+<div class="space-y-3 mb-6">
+    {% for agent in proposals.agents %}
+    <div class="bg-amber-50/50 rounded-lg border border-amber-200 p-4"><div class="flex items-start justify-between gap-4"><div class="flex-1 min-w-0"><a href="/definitions/agents/{{ agent.id }}" class="font-medium text-gray-900 hover:text-primary-600">{{ agent.name }}</a>{% if agent.description %}<p class="text-sm text-gray-600 mt-1">{{ agent.description }}</p>{% endif %}</div>{{ approval_buttons('agents', agent.id) }}</div></div>
+    {% endfor %}
+</div>
+{% endif %}
+{% if proposals.skills %}
+<h3 class="text-sm font-semibold text-gray-700 mb-2">Skills</h3>
+<div class="space-y-3 mb-6">
+    {% for skill in proposals.skills %}
+    <div class="bg-amber-50/50 rounded-lg border border-amber-200 p-4"><div class="flex items-start justify-between gap-4"><div class="flex-1 min-w-0"><a href="/definitions/skills/{{ skill.id }}" class="font-medium text-gray-900 hover:text-primary-600">{{ skill.name }}</a>{% if skill.description %}<p class="text-sm text-gray-600 mt-1">{{ skill.description }}</p>{% endif %}</div>{{ approval_buttons('skills', skill.id) }}</div></div>
+    {% endfor %}
+</div>
+{% endif %}
+{% if proposals.mcp_servers %}
+<h3 class="text-sm font-semibold text-gray-700 mb-2">MCP Servers</h3>
+<div class="space-y-3 mb-6">
+    {% for server in proposals.mcp_servers %}
+    <div class="bg-amber-50/50 rounded-lg border border-amber-200 p-4"><div class="flex items-start justify-between gap-4"><div class="flex-1 min-w-0"><a href="/definitions/mcp-servers/{{ server.id }}" class="font-medium text-gray-900 hover:text-primary-600">{{ server.name }}</a>{% if server.description %}<p class="text-sm text-gray-600 mt-1">{{ server.description }}</p>{% endif %}</div>{{ approval_buttons('mcp-servers', server.id) }}</div></div>
+    {% endfor %}
+</div>
+{% endif %}
+{% endif %}
+{% endif %}
+{% endblock %}

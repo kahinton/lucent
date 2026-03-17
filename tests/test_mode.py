@@ -2,6 +2,7 @@
 
 import pytest
 
+from lucent.license import create_license
 from lucent.mode import (
     DeploymentMode,
     get_mode,
@@ -9,6 +10,14 @@ from lucent.mode import (
     is_team_mode,
     require_team_mode,
 )
+
+# Matches the public key embedded in license.py
+_TEST_PRIVATE_KEY = "eeddca8cb93457f6e6064745285738aef75c9a281d876677c2fb4690fca5b095"
+
+
+def _valid_license_key() -> str:
+    """Generate a valid signed license key for tests."""
+    return create_license(_TEST_PRIVATE_KEY, "test-org", max_users=10)
 
 
 @pytest.fixture(autouse=True)
@@ -43,8 +52,13 @@ class TestGetMode:
 
     def test_team_with_valid_key(self, monkeypatch):
         monkeypatch.setenv("LUCENT_MODE", "team")
-        monkeypatch.setenv("LUCENT_LICENSE_KEY", "test-key-123")
+        monkeypatch.setenv("LUCENT_LICENSE_KEY", _valid_license_key())
         assert get_mode() == DeploymentMode.TEAM
+
+    def test_team_with_invalid_key_falls_back(self, monkeypatch):
+        monkeypatch.setenv("LUCENT_MODE", "team")
+        monkeypatch.setenv("LUCENT_LICENSE_KEY", "not-a-valid-license")
+        assert get_mode() == DeploymentMode.PERSONAL
 
     def test_unknown_mode_defaults_to_personal(self, monkeypatch):
         monkeypatch.setenv("LUCENT_MODE", "enterprise")
@@ -69,7 +83,7 @@ class TestModeHelpers:
 
     def test_is_team_mode(self, monkeypatch):
         monkeypatch.setenv("LUCENT_MODE", "team")
-        monkeypatch.setenv("LUCENT_LICENSE_KEY", "key")
+        monkeypatch.setenv("LUCENT_LICENSE_KEY", _valid_license_key())
         assert is_team_mode() is True
         assert is_personal_mode() is False
 
@@ -80,5 +94,5 @@ class TestModeHelpers:
 
     def test_require_team_mode_passes_in_team(self, monkeypatch):
         monkeypatch.setenv("LUCENT_MODE", "team")
-        monkeypatch.setenv("LUCENT_LICENSE_KEY", "key")
+        monkeypatch.setenv("LUCENT_LICENSE_KEY", _valid_license_key())
         require_team_mode("sharing")  # Should not raise

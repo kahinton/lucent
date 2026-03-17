@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block title %}Edit {{ template.name }} - Lucent{% endblock %}
+{% block content %}
+<div class="max-w-2xl mx-auto space-y-6">
+    <div class="flex items-center gap-3">
+        <a href="/sandboxes" class="text-gray-400 hover:text-gray-600">
+            <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18" /></svg>
+        </a>
+        <h1 class="text-2xl font-bold text-gray-900">Edit Template</h1>
+    </div>
+
+    <div class="bg-white rounded-lg border border-gray-200 p-6">
+        <form method="POST" action="/sandboxes/templates/{{ template.id }}/edit" class="space-y-4">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Name <span class="text-red-400">*</span></label>
+                <input name="name" type="text" required value="{{ template.name }}" class="w-full px-3 py-2 border rounded-lg text-sm">
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Description</label>
+                <input name="description" type="text" value="{{ template.description or '' }}" class="w-full px-3 py-2 border rounded-lg text-sm">
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Image</label>
+                <select name="image" class="w-full px-3 py-2 border rounded-lg text-sm">
+                    {% for img in ['python:3.12-slim', 'node:20-slim', 'golang:1.22-bookworm', 'rust:1.77-slim', 'ubuntu:24.04', 'alpine:3.19'] %}
+                    <option value="{{ img }}" {% if template.image == img %}selected{% endif %}>{{ img }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Repository URL</label>
+                <input name="repo_url" type="text" value="{{ template.repo_url or '' }}" class="w-full px-3 py-2 border rounded-lg text-sm">
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Branch</label>
+                <input name="branch" type="text" value="{{ template.branch or 'main' }}" class="w-full px-3 py-2 border rounded-lg text-sm">
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Setup Commands (one per line)</label>
+                <textarea name="setup_commands" rows="4" class="w-full px-3 py-2 border rounded-lg text-sm font-mono">{% if template.setup_commands %}{% for cmd in template.setup_commands %}{{ cmd }}{% if not loop.last %}
+{% endif %}{% endfor %}{% endif %}</textarea>
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Environment Variables (KEY=VALUE per line)</label>
+                <textarea name="env_vars" rows="2" class="w-full px-3 py-2 border rounded-lg text-sm font-mono">{% if template.env_vars %}{% for k, v in template.env_vars.items() %}{{ k }}={{ v }}{% if not loop.last %}
+{% endif %}{% endfor %}{% endif %}</textarea>
+            </div>
+            <div class="grid grid-cols-3 gap-3">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Memory</label>
+                    <select name="memory_limit" class="w-full px-3 py-2 border rounded-lg text-sm">
+                        {% for val, label in [('512m', '512 MB'), ('1g', '1 GB'), ('2g', '2 GB'), ('4g', '4 GB'), ('8g', '8 GB')] %}
+                        <option value="{{ val }}" {% if template.memory_limit == val %}selected{% endif %}>{{ label }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Network</label>
+                    <select name="network_mode" class="w-full px-3 py-2 border rounded-lg text-sm">
+                        <option value="none" {% if template.network_mode == 'none' %}selected{% endif %}>Isolated</option>
+                        <option value="bridge" {% if template.network_mode == 'bridge' %}selected{% endif %}>Bridge</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Timeout</label>
+                    <select name="timeout_seconds" class="w-full px-3 py-2 border rounded-lg text-sm">
+                        {% for val, label in [(600, '10 min'), (1800, '30 min'), (3600, '1 hour'), (7200, '2 hours'), (0, 'None')] %}
+                        <option value="{{ val }}" {% if template.timeout_seconds == val %}selected{% endif %}>{{ label }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+            </div>
+            <div class="pt-4 border-t flex justify-between">
+                <a href="/sandboxes" class="px-4 py-2 text-sm text-gray-600 hover:text-gray-800">Cancel</a>
+                <button type="submit" class="px-4 py-2 text-sm bg-primary-600 text-white rounded-lg hover:bg-primary-700 font-medium">Save Changes</button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}

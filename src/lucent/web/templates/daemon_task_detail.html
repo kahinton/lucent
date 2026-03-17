@@ -1,0 +1,221 @@
+{% extends "base.html" %}
+
+{% block title %}Task Detail - Lucent{% endblock %}
+
+{% block content %}
+<!-- Breadcrumb -->
+<nav class="mb-6">
+    <a href="/daemon/tasks" class="inline-flex items-center gap-2 text-sm text-gray-500 hover:text-gray-700 transition-colors">
+        <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" />
+        </svg>
+        Back to Tasks
+    </a>
+</nav>
+
+<!-- Task Header -->
+<div class="mb-8">
+    <div class="flex items-start gap-4">
+        <!-- Status icon -->
+        <div class="shrink-0">
+            {% if task.status == 'pending' %}
+            <span class="inline-flex items-center justify-center w-12 h-12 rounded-full bg-amber-100">
+                <svg class="w-6 h-6 text-amber-600" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+            </span>
+            {% elif task.status == 'claimed' %}
+            <span class="inline-flex items-center justify-center w-12 h-12 rounded-full bg-blue-100">
+                <svg class="w-6 h-6 text-blue-600" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182M2.985 19.644l3.181-3.182" />
+                </svg>
+            </span>
+            {% elif task.status == 'completed' %}
+            <span class="inline-flex items-center justify-center w-12 h-12 rounded-full bg-emerald-100">
+                <svg class="w-6 h-6 text-emerald-600" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+            </span>
+            {% else %}
+            <span class="inline-flex items-center justify-center w-12 h-12 rounded-full bg-gray-100">
+                <svg class="w-6 h-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M9.879 7.519c1.171-1.025 3.071-1.025 4.242 0 1.172 1.025 1.172 2.687 0 3.712-.203.179-.43.326-.67.442-.745.361-1.45.999-1.45 1.827v.75M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9 5.25h.008v.008H12v-.008z" />
+                </svg>
+            </span>
+            {% endif %}
+        </div>
+
+        <div class="flex-1">
+            <div class="flex items-center gap-3 mb-2 flex-wrap">
+                <!-- Status badge -->
+                <span class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold
+                    {% if task.status == 'pending' %}bg-amber-100 text-amber-700
+                    {% elif task.status == 'claimed' %}bg-blue-100 text-blue-700
+                    {% elif task.status == 'completed' %}bg-emerald-100 text-emerald-700
+                    {% else %}bg-gray-100 text-gray-600{% endif %}">
+                    {% if task.status == 'claimed' %}In Progress{% else %}{{ task.status | capitalize }}{% endif %}
+                </span>
+                <!-- Priority -->
+                <span class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium
+                    {% if task.priority == 'high' %}bg-red-100 text-red-700
+                    {% elif task.priority == 'medium' %}bg-amber-100 text-amber-700
+                    {% else %}bg-gray-100 text-gray-600{% endif %}">
+                    {{ task.priority | capitalize }} Priority
+                </span>
+                <!-- Agent type -->
+                <span class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-indigo-100 text-indigo-700">
+                    {{ task.agent_type }}
+                </span>
+            </div>
+            <p class="text-xs text-gray-400">
+                ID: {{ task.id }} · Created {{ task.created_at | datetime }}
+                {% if task.claimed_by %} · Claimed by {{ task.claimed_by }}{% endif %}
+            </p>
+        </div>
+
+        <!-- Cancel button for pending tasks -->
+        {% if task.status == 'pending' %}
+        <form method="post" action="/daemon/tasks/{{ task.id }}/cancel" class="shrink-0">
+            <button type="submit" 
+                    onclick="return confirm('Cancel this task?')"
+                    class="px-3 py-1.5 text-sm font-medium text-red-600 bg-red-50 border border-red-200 rounded-lg hover:bg-red-100 transition-colors">
+                Cancel Task
+            </button>
+        </form>
+        {% endif %}
+    </div>
+</div>
+
+<!-- Task Content -->
+<div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+    <!-- Main content -->
+    <div class="lg:col-span-2 space-y-6">
+        <!-- Description -->
+        <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+            <h2 class="text-sm font-semibold text-gray-900 mb-3">Description</h2>
+            <div class="text-sm text-gray-800 whitespace-pre-wrap leading-relaxed">{{ task.description }}</div>
+        </div>
+
+        <!-- Result (if completed) -->
+        {% if task.result %}
+        <div class="bg-white rounded-xl border border-emerald-200 shadow-sm p-6">
+            <h2 class="text-sm font-semibold text-emerald-800 mb-3">Result</h2>
+            <div class="text-sm text-gray-800 whitespace-pre-wrap leading-relaxed">{{ task.result }}</div>
+        </div>
+        {% endif %}
+
+        <!-- Execution History -->
+        <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+            <h2 class="text-sm font-semibold text-gray-900 mb-4">Execution History</h2>
+            {% if versions %}
+            <div class="relative">
+                <!-- Timeline line -->
+                <div class="absolute left-4 top-0 bottom-0 w-0.5 bg-gray-200"></div>
+                
+                <div class="space-y-4">
+                    {% for version in versions %}
+                    <div class="relative flex gap-4">
+                        <!-- Timeline dot -->
+                        <div class="shrink-0 z-10">
+                            <span class="inline-flex items-center justify-center w-8 h-8 rounded-full bg-white border-2
+                                {% if version.action_type == 'create' %}border-emerald-400
+                                {% elif version.action_type == 'update' %}border-blue-400
+                                {% elif version.action_type == 'delete' %}border-red-400
+                                {% else %}border-gray-300{% endif %}">
+                                <span class="text-xs font-bold
+                                    {% if version.action_type == 'create' %}text-emerald-600
+                                    {% elif version.action_type == 'update' %}text-blue-600
+                                    {% elif version.action_type == 'delete' %}text-red-600
+                                    {% else %}text-gray-400{% endif %}">
+                                    v{{ version.version or '?' }}
+                                </span>
+                            </span>
+                        </div>
+                        
+                        <!-- Version content -->
+                        <div class="flex-1 pb-4">
+                            <div class="flex items-center gap-2 mb-1">
+                                <span class="text-sm font-medium text-gray-900 capitalize">{{ version.action_type }}</span>
+                                {% if version.changed_fields %}
+                                <span class="text-xs text-gray-400">— {{ version.changed_fields | join(', ') }}</span>
+                                {% endif %}
+                            </div>
+                            <p class="text-xs text-gray-400">{{ version.created_at | datetime }}</p>
+                            {% if version.notes %}
+                            <p class="text-sm text-gray-600 mt-1">{{ version.notes }}</p>
+                            {% endif %}
+                            {% if version.context and version.context.action %}
+                            <span class="inline-flex items-center px-2 py-0.5 mt-1 rounded text-xs bg-gray-100 text-gray-600">
+                                {{ version.context.action }}
+                            </span>
+                            {% endif %}
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+            {% else %}
+            <p class="text-sm text-gray-400">No execution history recorded yet.</p>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- Sidebar -->
+    <div class="space-y-6">
+        <!-- Metadata -->
+        <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+            <h2 class="text-sm font-semibold text-gray-900 mb-4">Details</h2>
+            <dl class="space-y-3">
+                <div>
+                    <dt class="text-xs font-medium text-gray-500">Status</dt>
+                    <dd class="text-sm text-gray-900 mt-0.5">
+                        {% if task.status == 'claimed' %}In Progress{% else %}{{ task.status | capitalize }}{% endif %}
+                    </dd>
+                </div>
+                <div>
+                    <dt class="text-xs font-medium text-gray-500">Agent Type</dt>
+                    <dd class="text-sm text-gray-900 mt-0.5 capitalize">{{ task.agent_type }}</dd>
+                </div>
+                <div>
+                    <dt class="text-xs font-medium text-gray-500">Priority</dt>
+                    <dd class="text-sm text-gray-900 mt-0.5 capitalize">{{ task.priority }}</dd>
+                </div>
+                {% if task.claimed_by %}
+                <div>
+                    <dt class="text-xs font-medium text-gray-500">Claimed By</dt>
+                    <dd class="text-sm text-gray-900 mt-0.5">{{ task.claimed_by }}</dd>
+                </div>
+                {% endif %}
+                <div>
+                    <dt class="text-xs font-medium text-gray-500">Created</dt>
+                    <dd class="text-sm text-gray-900 mt-0.5">{{ task.created_at | datetime }}</dd>
+                </div>
+                <div>
+                    <dt class="text-xs font-medium text-gray-500">Updated</dt>
+                    <dd class="text-sm text-gray-900 mt-0.5">{{ task.updated_at | datetime }}</dd>
+                </div>
+            </dl>
+        </div>
+
+        <!-- Tags -->
+        {% if task.tags %}
+        <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+            <h2 class="text-sm font-semibold text-gray-900 mb-3">Tags</h2>
+            <div class="flex flex-wrap gap-2">
+                {% for tag in task.tags %}
+                <span class="inline-flex items-center px-2.5 py-1 rounded-full text-xs bg-gray-100 text-gray-700">{{ tag }}</span>
+                {% endfor %}
+            </div>
+        </div>
+        {% endif %}
+
+        <!-- Memory link -->
+        <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+            <h2 class="text-sm font-semibold text-gray-900 mb-3">Underlying Memory</h2>
+            <a href="/memories/{{ task.id }}" class="text-sm text-primary-600 hover:text-primary-700">
+                View raw memory →
+            </a>
+        </div>
+    </div>
+</div>
+{% endblock %}

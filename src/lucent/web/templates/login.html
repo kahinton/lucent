@@ -3,10 +3,12 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="light dark">
     <title>Login - Lucent</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
         tailwind.config = {
+            darkMode: 'media',
             theme: {
                 extend: {
                     colors: {
@@ -20,20 +22,27 @@
             }
         }
     </script>
+    <style>
+        @media (prefers-color-scheme: dark) {
+            input { background-color: #1a2233 !important; color: #e2e8f0 !important; border-color: #334155 !important; }
+            input::placeholder { color: #4b5e78 !important; }
+            input:focus { border-color: #6366f1 !important; box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2) !important; }
+        }
+    </style>
 </head>
-<body class="min-h-screen bg-gray-50 flex items-center justify-center">
+<body class="min-h-screen bg-gray-50 dark:bg-gray-950 flex items-center justify-center">
     <div class="w-full max-w-md">
         <div class="flex flex-col items-center mb-8">
             <img src="/static/lucent_logo_128.png" alt="Lucent" class="h-16 mb-4">
-            <h1 class="text-2xl font-bold text-gray-900">Lucent</h1>
-            <p class="text-sm text-gray-500 mt-1">Memory System</p>
+            <h1 class="text-2xl font-bold text-gray-900 dark:text-gray-100">Lucent</h1>
+            <p class="text-sm text-gray-500 dark:text-gray-400 mt-1">AI Teammate</p>
         </div>
 
-        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-8">
-            <h2 class="text-lg font-semibold text-gray-900 mb-6">Sign In</h2>
+        <div class="bg-white dark:bg-gray-900 rounded-xl shadow-sm border border-gray-200 dark:border-gray-800 p-8">
+            <h2 class="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-6">Sign In</h2>
 
             {% if error %}
-            <div class="mb-4 p-3 bg-red-50 border border-red-200 text-red-700 rounded-lg text-sm">
+            <div class="mb-4 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-400 rounded-lg text-sm">
                 {{ error }}
             </div>
             {% endif %}
@@ -42,7 +51,7 @@
                 <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
                 {% for field in fields %}
                 <div>
-                    <label for="{{ field.name }}" class="block text-sm font-medium text-gray-700 mb-1">
+                    <label for="{{ field.name }}" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
                         {{ field.label }}
                     </label>
                     <input

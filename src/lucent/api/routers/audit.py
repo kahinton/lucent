@@ -4,17 +4,15 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Query, HTTPException, status
+from fastapi import APIRouter, HTTPException, Query, status
 
-from lucent.api.deps import AuthenticatedUser, AdminUser
+from lucent.api.deps import AdminUser, AuthenticatedUser
 from lucent.api.models import (
     AuditLogEntry,
     AuditLogResponse,
-    ErrorResponse,
 )
 from lucent.db import AuditRepository, get_pool
 from lucent.rbac import Permission
-
 
 router = APIRouter()
 
@@ -47,20 +45,20 @@ async def get_memory_audit_log(
     limit: int = Query(default=50, ge=1, le=100),
 ) -> AuditLogResponse:
     """Get audit log for a specific memory.
-    
+
     Users can view audit logs for their own memories.
     Admins can view audit logs for any memory in their organization.
     """
     pool = await get_pool()
     audit_repo = AuditRepository(pool)
-    
+
     # Get the audit log (will include org check)
     result = await audit_repo.get_by_memory_id(
         memory_id=memory_id,
         offset=offset,
         limit=limit,
     )
-    
+
     # Filter to only entries the user can see
     # (own actions or admin viewing org actions)
     entries = result["entries"]
@@ -70,7 +68,7 @@ async def get_memory_audit_log(
     else:
         # Admin: filter to same org
         entries = [e for e in entries if e.get("organization_id") == user.organization_id]
-    
+
     return AuditLogResponse(
         entries=[_entry_to_response(e) for e in entries],
         total_count=len(entries),
@@ -93,7 +91,7 @@ async def get_user_audit_log(
     limit: int = Query(default=50, ge=1, le=100),
 ) -> AuditLogResponse:
     """Get audit log for a specific user's actions.
-    
+
     Users can view their own audit logs.
     Admins can view audit logs for any user in their organization.
     """
@@ -104,10 +102,10 @@ async def get_user_audit_log(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="You can only view your own audit logs",
             )
-    
+
     pool = await get_pool()
     audit_repo = AuditRepository(pool)
-    
+
     result = await audit_repo.get_by_user_id(
         user_id=user_id,
         action_type=action_type,
@@ -115,7 +113,7 @@ async def get_user_audit_log(
         offset=offset,
         limit=limit,
     )
-    
+
     return AuditLogResponse(
         entries=[_entry_to_response(e) for e in result["entries"]],
         total_count=result["total_count"],
@@ -137,7 +135,7 @@ async def get_organization_audit_log(
     limit: int = Query(default=100, ge=1, le=500),
 ) -> AuditLogResponse:
     """Get audit log for the entire organization.
-    
+
     Requires admin or owner role.
     """
     if not user.organization_id:
@@ -145,10 +143,10 @@ async def get_organization_audit_log(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="User is not part of an organization",
         )
-    
+
     pool = await get_pool()
     audit_repo = AuditRepository(pool)
-    
+
     result = await audit_repo.get_by_organization_id(
         organization_id=user.organization_id,
         action_type=action_type,
@@ -156,7 +154,7 @@ async def get_organization_audit_log(
         offset=offset,
         limit=limit,
     )
-    
+
     return AuditLogResponse(
         entries=[_entry_to_response(e) for e in result["entries"]],
         total_count=result["total_count"],
@@ -177,17 +175,17 @@ async def get_recent_audit_entries(
     limit: int = Query(default=100, ge=1, le=500),
 ) -> list[AuditLogEntry]:
     """Get recent audit entries for monitoring.
-    
+
     Requires admin or owner role.
     """
     pool = await get_pool()
     audit_repo = AuditRepository(pool)
-    
+
     entries = await audit_repo.get_recent(
         organization_id=user.organization_id,
         action_types=action_types,
         since=since,
         limit=limit,
     )
-    
+
     return [_entry_to_response(e) for e in entries]

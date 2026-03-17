@@ -3,18 +3,18 @@
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import Depends, HTTPException, Header, status
+from fastapi import Depends, Header, HTTPException, status
 
 from lucent.auth import (
     set_current_user,
 )
-from lucent.db import UserRepository, ApiKeyRepository, get_pool
+from lucent.db import ApiKeyRepository, UserRepository, get_pool
 from lucent.rbac import Permission, Role, has_permission
 
 
 class CurrentUser:
     """Dependency that provides the current authenticated user."""
-    
+
     def __init__(
         self,
         id: UUID,
@@ -24,6 +24,7 @@ class CurrentUser:
         display_name: str | None,
         auth_method: str = "session",  # "session", "api_key", "oauth"
         api_key_id: UUID | None = None,  # Set when authenticated via API key
+        api_key_scopes: list[str] | None = None,  # Scopes from API key
         impersonator_id: UUID | None = None,  # Set when being impersonated
         impersonator_display_name: str | None = None,  # For UI display
     ):
@@ -34,18 +35,19 @@ class CurrentUser:
         self.display_name = display_name
         self.auth_method = auth_method
         self.api_key_id = api_key_id
+        self.api_key_scopes = api_key_scopes or ["read", "write"]
         self.impersonator_id = impersonator_id
         self.impersonator_display_name = impersonator_display_name
-    
+
     @property
     def is_impersonated(self) -> bool:
         """Check if this user is being impersonated by another user."""
         return self.impersonator_id is not None
-    
+
     def has_permission(self, permission: Permission) -> bool:
         """Check if this user has a specific permission."""
         return has_permission(self.role, permission)
-    
+
     def require_permission(self, permission: Permission) -> None:
         """Raise HTTPException if user doesn't have permission."""
         if not self.has_permission(permission):
@@ -53,12 +55,31 @@ class CurrentUser:
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"Permission denied: {permission.value}",
             )
-    
+
+    def has_scope(self, scope: str) -> bool:
+        """Check if the API key has a specific scope.
+
+        Keys with 'read' + 'write' scopes (the default) have full access.
+        Scoped keys (e.g., 'daemon-tasks') are restricted to those operations.
+        """
+        if "read" in self.api_key_scopes and "write" in self.api_key_scopes:
+            return True
+        return scope in self.api_key_scopes
+
+    def require_scope(self, scope: str) -> None:
+        """Raise HTTPException if the API key doesn't have the required scope."""
+        if not self.has_scope(scope):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"API key does not have required scope: {scope}",
+            )
+
     def get_audit_context(self) -> dict[str, Any]:
         """Get context dict for audit logging."""
         ctx = {"auth_method": self.auth_method}
         if self.api_key_id:
             ctx["api_key_id"] = str(self.api_key_id)
+            ctx["api_key_scopes"] = self.api_key_scopes
         if self.impersonator_id:
             ctx["impersonator_id"] = str(self.impersonator_id)
             ctx["impersonator_display_name"] = self.impersonator_display_name
@@ -68,33 +89,33 @@ class CurrentUser:
 
 async def _authenticate_with_api_key(api_key: str) -> CurrentUser | None:
     """Authenticate using an API key.
-    
+
     Args:
         api_key: The API key (with or without 'Bearer ' prefix).
-        
+
     Returns:
         CurrentUser if valid, None otherwise.
     """
     # Strip 'Bearer ' prefix if present
     if api_key.startswith("Bearer "):
         api_key = api_key[7:]
-    
-    if not api_key.startswith("mcp_"):
+
+    if not api_key.startswith("hs_"):
         return None
-    
+
     pool = await get_pool()
     api_key_repo = ApiKeyRepository(pool)
-    
+
     key_info = await api_key_repo.verify(api_key)
     if not key_info:
         return None
-    
+
     # Get the full user record
     user_repo = UserRepository(pool)
     user = await user_repo.get_by_id(key_info["user_id"])
     if not user:
         return None
-    
+
     set_current_user(user)
     return CurrentUser(
         id=user["id"],
@@ -104,6 +125,7 @@ async def _authenticate_with_api_key(api_key: str) -> CurrentUser | None:
         display_name=user.get("display_name"),
         auth_method="api_key",
         api_key_id=key_info["id"],  # Include the API key ID for auditing
+        api_key_scopes=key_info.get("scopes", ["read", "write"]),
     )
 
 
@@ -111,29 +133,29 @@ async def get_current_user(
     authorization: Annotated[str | None, Header()] = None,
 ) -> CurrentUser:
     """Get the current authenticated user for API routes.
-    
+
     API key authentication is always required.
-    
+
     Headers:
-        Authorization: Bearer mcp_... (API key required)
+        Authorization: Bearer hs_... (API key required)
     """
     # Try API key authentication
     if authorization:
         user = await _authenticate_with_api_key(authorization)
         if user:
             return user
-        
+
         # Invalid API key
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired API key",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
+
     # No authorization header - always reject for API routes
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="API key required. Use Authorization: Bearer mcp_your_key_here",
+        detail="API key required. Use Authorization: Bearer hs_your_key_here",
         headers={"WWW-Authenticate": "Bearer"},
     )
 
@@ -150,12 +172,13 @@ async def get_optional_user(
 
 def require_role(minimum_role: Role):
     """Dependency factory that requires a minimum role level.
-    
+
     Usage:
         @router.get("/admin-only")
         async def admin_endpoint(user: CurrentUser = Depends(require_role(Role.ADMIN))):
             ...
     """
+
     async def check_role(
         user: CurrentUser = Depends(get_current_user),
     ) -> CurrentUser:
@@ -165,18 +188,21 @@ def require_role(minimum_role: Role):
                 detail=f"Requires {minimum_role.value} role or higher",
             )
         return user
-    
+
     return check_role
 
 
 def require_permission_dep(permission: Permission):
     """Dependency factory that requires a specific permission.
-    
+
     Usage:
         @router.get("/audit")
-        async def audit_endpoint(user: CurrentUser = Depends(require_permission_dep(Permission.AUDIT_VIEW_ORG))):
+        async def audit_endpoint(
+            user: CurrentUser = Depends(require_permission_dep(Permission.AUDIT_VIEW_ORG)),
+        ):
             ...
     """
+
     async def check_permission(
         user: CurrentUser = Depends(get_current_user),
     ) -> CurrentUser:
@@ -186,8 +212,26 @@ def require_permission_dep(permission: Permission):
                 detail=f"Permission denied: {permission.value}",
             )
         return user
-    
+
     return check_permission
+
+
+def require_scope_dep(scope: str):
+    """Dependency factory that requires a specific API key scope.
+
+    Usage:
+        @router.post("/tasks")
+        async def create_task(user: CurrentUser = Depends(require_scope_dep("daemon-tasks"))):
+            ...
+    """
+
+    async def check_scope(
+        user: CurrentUser = Depends(get_current_user),
+    ) -> CurrentUser:
+        user.require_scope(scope)
+        return user
+
+    return check_scope
 
 
 # Type alias for dependency injection
@@ -195,3 +239,4 @@ AuthenticatedUser = Annotated[CurrentUser, Depends(get_current_user)]
 OptionalUser = Annotated[CurrentUser | None, Depends(get_optional_user)]
 AdminUser = Annotated[CurrentUser, Depends(require_role(Role.ADMIN))]
 OwnerUser = Annotated[CurrentUser, Depends(require_role(Role.OWNER))]
+DaemonTaskUser = Annotated[CurrentUser, Depends(require_scope_dep("daemon-tasks"))]

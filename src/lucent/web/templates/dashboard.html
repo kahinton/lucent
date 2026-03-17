@@ -6,11 +6,11 @@
 <!-- Page Header -->
 <div class="mb-8">
     <h1 class="text-2xl font-bold text-gray-900">Dashboard</h1>
-    <p class="mt-1 text-sm text-gray-500">Overview of your memory system</p>
+    <p class="mt-1 text-sm text-gray-500">What's happening with Lucent</p>
 </div>
 
 <!-- Stats Grid -->
-<div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
     <div class="bg-white rounded-xl border border-gray-200 p-6 shadow-sm hover:shadow-md transition-shadow">
         <div class="flex items-center gap-4">
             <div class="flex items-center justify-center w-12 h-12 rounded-lg bg-primary-100">
@@ -19,26 +19,53 @@
                 </svg>
             </div>
             <div>
-                <p class="text-sm font-medium text-gray-500">Total Memories</p>
+                <p class="text-sm font-medium text-gray-500">Memories</p>
                 <p class="text-3xl font-bold text-gray-900">{{ total_memories }}</p>
             </div>
         </div>
     </div>
     
-    <div class="bg-white rounded-xl border border-gray-200 p-6 shadow-sm hover:shadow-md transition-shadow">
+    <a href="/definitions?tab=agents" class="bg-white rounded-xl border border-gray-200 p-6 shadow-sm hover:shadow-md transition-shadow">
         <div class="flex items-center gap-4">
-            <div class="flex items-center justify-center w-12 h-12 rounded-lg bg-emerald-100">
-                <svg class="w-6 h-6 text-emerald-600" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M9.568 3H5.25A2.25 2.25 0 003 5.25v4.318c0 .597.237 1.17.659 1.591l9.581 9.581c.699.699 1.78.872 2.607.33a18.095 18.095 0 005.223-5.223c.542-.827.369-1.908-.33-2.607L11.16 3.66A2.25 2.25 0 009.568 3z" />
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M6 6h.008v.008H6V6z" />
+            <div class="flex items-center justify-center w-12 h-12 rounded-lg bg-violet-100">
+                <svg class="w-6 h-6 text-violet-600" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
                 </svg>
             </div>
             <div>
-                <p class="text-sm font-medium text-gray-500">Unique Tags</p>
-                <p class="text-3xl font-bold text-gray-900">{{ top_tags | length }}</p>
+                <p class="text-sm font-medium text-gray-500">Active Agents</p>
+                <p class="text-3xl font-bold text-gray-900">{{ active_agents }}</p>
             </div>
         </div>
-    </div>
+    </a>
+    
+    <a href="/definitions?tab=skills" class="bg-white rounded-xl border border-gray-200 p-6 shadow-sm hover:shadow-md transition-shadow">
+        <div class="flex items-center gap-4">
+            <div class="flex items-center justify-center w-12 h-12 rounded-lg bg-emerald-100">
+                <svg class="w-6 h-6 text-emerald-600" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M4.26 10.147a60.438 60.438 0 00-.491 6.347A48.62 48.62 0 0112 20.904a48.62 48.62 0 018.232-4.41 60.46 60.46 0 00-.491-6.347m-15.482 0a50.636 50.636 0 00-2.658-.813A59.906 59.906 0 0112 3.493a59.903 59.903 0 0110.399 5.84c-.896.248-1.783.52-2.658.814m-15.482 0A50.717 50.717 0 0112 13.489a50.702 50.702 0 017.74-3.342" />
+                </svg>
+            </div>
+            <div>
+                <p class="text-sm font-medium text-gray-500">Active Skills</p>
+                <p class="text-3xl font-bold text-gray-900">{{ active_skills }}</p>
+            </div>
+        </div>
+    </a>
+    
+    <a href="/activity" class="bg-white rounded-xl border border-gray-200 p-6 shadow-sm hover:shadow-md transition-shadow">
+        <div class="flex items-center gap-4">
+            <div class="flex items-center justify-center w-12 h-12 rounded-lg bg-amber-100">
+                <svg class="w-6 h-6 text-amber-600" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 12h16.5m-16.5 3.75h16.5M3.75 19.5h16.5M5.625 4.5h12.75a1.875 1.875 0 010 3.75H5.625a1.875 1.875 0 010-3.75z" />
+                </svg>
+            </div>
+            <div>
+                <p class="text-sm font-medium text-gray-500">Active Requests</p>
+                <p class="text-3xl font-bold text-gray-900">{{ active_request_count }}</p>
+            </div>
+        </div>
+    </a>
 </div>
 
 <!-- Two Column Layout -->

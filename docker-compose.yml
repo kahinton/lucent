@@ -31,9 +31,19 @@ services:
       DATABASE_URL: postgresql://lucent:${POSTGRES_PASSWORD:-lucent_dev_password}@postgres:5432/lucent
       LUCENT_MODE: ${LUCENT_MODE:-personal}
       LUCENT_LICENSE_KEY: ${LUCENT_LICENSE_KEY:-}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      LUCENT_CHAT_MODEL: ${LUCENT_CHAT_MODEL:-claude-opus-4.6}
+      # LLM Engine: "copilot" (default, uses GitHub Copilot SDK) or "langchain"
+      LUCENT_LLM_ENGINE: ${LUCENT_LLM_ENGINE:-copilot}
+      # Provider API keys (only needed when LUCENT_LLM_ENGINE=langchain)
+      # ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      # GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
     volumes:
       - ./src:/app/src:cached
       - ./pyproject.toml:/app/pyproject.toml:ro
+      - ./.github/skills:/app/.github/skills:ro
+      - ./.github/agents/definitions:/app/.github/agents/definitions:ro
     ports:
       - "${LUCENT_PORT:-8766}:8766"
     healthcheck:
@@ -44,6 +54,54 @@ services:
       start_period: 15s
     stdin_open: true
     tty: true
+    restart: unless-stopped
+
+  # Multi-instance daemon example (use with: docker compose --profile multi-daemon up)
+  daemon-1:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    profiles: ["multi-daemon"]
+    depends_on:
+      lucent:
+        condition: service_healthy
+    environment:
+      LUCENT_MCP_URL: http://lucent:8766/mcp
+      LUCENT_MCP_API_KEY: ${LUCENT_MCP_API_KEY:-}
+      LUCENT_DAEMON_INTERVAL: ${LUCENT_DAEMON_INTERVAL:-15}
+      LUCENT_DAEMON_MODEL: ${LUCENT_DAEMON_MODEL:-claude-opus-4.6}
+      LUCENT_LLM_ENGINE: ${LUCENT_LLM_ENGINE:-copilot}
+      LUCENT_MAX_SESSIONS: ${LUCENT_MAX_SESSIONS:-3}
+      LUCENT_STALE_HEARTBEAT_MINUTES: ${LUCENT_STALE_HEARTBEAT_MINUTES:-30}
+      # Restricted DB connection for API key provisioning only.
+      # Uses lucent_daemon role with least-privilege grants (see migration 017).
+      DAEMON_DATABASE_URL: postgresql://lucent_daemon:${DAEMON_DB_PASSWORD:-lucent_daemon_dev_password}@postgres:5432/lucent
+    volumes:
+      - ./daemon:/app/daemon:cached
+      - ./src:/app/src:cached
+    command: ["python", "-m", "daemon.daemon"]
+    restart: unless-stopped
+
+  daemon-2:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    profiles: ["multi-daemon"]
+    depends_on:
+      lucent:
+        condition: service_healthy
+    environment:
+      LUCENT_MCP_URL: http://lucent:8766/mcp
+      LUCENT_MCP_API_KEY: ${LUCENT_MCP_API_KEY:-}
+      LUCENT_DAEMON_INTERVAL: ${LUCENT_DAEMON_INTERVAL:-15}
+      LUCENT_DAEMON_MODEL: ${LUCENT_DAEMON_MODEL:-claude-opus-4.6}
+      LUCENT_MAX_SESSIONS: ${LUCENT_MAX_SESSIONS:-3}
+      LUCENT_STALE_HEARTBEAT_MINUTES: ${LUCENT_STALE_HEARTBEAT_MINUTES:-30}
+      DAEMON_DATABASE_URL: postgresql://lucent_daemon:${DAEMON_DB_PASSWORD:-lucent_daemon_dev_password}@postgres:5432/lucent
+    volumes:
+      - ./daemon:/app/daemon:cached
+      - ./src:/app/src:cached
+    command: ["python", "-m", "daemon.daemon"]
     restart: unless-stopped
 
 volumes:
