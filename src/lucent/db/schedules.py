@@ -65,9 +65,25 @@ def _parse_cron(expression: str, after: datetime) -> datetime:
     raise ValueError(f"No next run found within 366 days for: {expression}")
 
 
+# Common timezone aliases that may not be in all tzdata packages
+_TZ_ALIASES = {
+    "US/Eastern": "America/New_York",
+    "US/Central": "America/Chicago",
+    "US/Mountain": "America/Denver",
+    "US/Pacific": "America/Los_Angeles",
+    "US/Alaska": "America/Anchorage",
+    "US/Hawaii": "Pacific/Honolulu",
+}
+
+
 def _next_cron_utc(expression: str, after_utc: datetime, tz_name: str = "UTC") -> datetime:
     """Calculate next cron run in the schedule's timezone, return as UTC."""
-    tz = ZoneInfo(tz_name)
+    try:
+        tz = ZoneInfo(tz_name)
+    except (KeyError, Exception):
+        # Fall back to IANA name if a legacy alias was used
+        canonical = _TZ_ALIASES.get(tz_name, "UTC")
+        tz = ZoneInfo(canonical)
     after_local = after_utc.astimezone(tz)
     next_local = _parse_cron(expression, after_local)
     return next_local.astimezone(timezone.utc).replace(tzinfo=timezone.utc)

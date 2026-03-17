@@ -1655,21 +1655,34 @@ class LucentDaemon:
         log(f"Sandbox {sandbox_id[:12]} destroyed")
 
     async def _resolve_sandbox_template(self, template_id: str) -> dict | None:
-        """Resolve a sandbox template ID to a sandbox_config dict."""
+        """Resolve a sandbox template ID to a sandbox_config dict via the API."""
         try:
-            from lucent.db.pool import get_pool
-            from lucent.db.sandbox_template import SandboxTemplateRepository
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.get(
+                    f"{API_BASE}/sandboxes/templates/{template_id}",
+                    headers=API_HEADERS,
+                )
+                if resp.status_code != 200:
+                    log(f"Sandbox template {template_id[:8]} not found (HTTP {resp.status_code})", "WARN")
+                    return None
 
-            pool = await get_pool()
-            repo = SandboxTemplateRepository(pool)
-            tpl = await repo.get(template_id)
-            if tpl:
-                config = repo.to_sandbox_config(tpl)
-                log(f"Resolved sandbox template '{tpl['name']}' for dispatch")
+                tpl = resp.json()
+                config = {
+                    "image": tpl["image"],
+                    "repo_url": tpl.get("repo_url"),
+                    "branch": tpl.get("branch"),
+                    "setup_commands": tpl.get("setup_commands") or [],
+                    "env_vars": tpl.get("env_vars") or {},
+                    "working_dir": tpl.get("working_dir", "/workspace"),
+                    "memory_limit": tpl.get("memory_limit", "2g"),
+                    "cpu_limit": float(tpl.get("cpu_limit", 2.0)),
+                    "disk_limit": tpl.get("disk_limit", "10g"),
+                    "network_mode": tpl.get("network_mode", "none"),
+                    "allowed_hosts": tpl.get("allowed_hosts") or [],
+                    "timeout_seconds": tpl.get("timeout_seconds", 1800),
+                }
+                log(f"Resolved sandbox template '{tpl.get('name', template_id[:8])}' for dispatch")
                 return config
-            else:
-                log(f"Sandbox template {template_id[:8]} not found", "WARN")
-                return None
         except Exception as e:
             log(f"Failed to resolve sandbox template {template_id[:8]}: {e}", "WARN")
             return None
