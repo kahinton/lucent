@@ -13,6 +13,7 @@ import docker.errors
 
 import docker
 from lucent.sandbox.backend import SandboxBackend
+from lucent.sandbox.devcontainer import DevcontainerConfig, detect_devcontainer
 from lucent.sandbox.models import (
     ExecResult,
     SandboxConfig,
@@ -24,6 +25,29 @@ logger = logging.getLogger(__name__)
 
 # Label prefix for identifying Lucent-managed containers
 LABEL_PREFIX = "io.lucent.sandbox"
+
+
+def _devcontainer_to_dict(dc: DevcontainerConfig) -> dict:
+    """Serialize a DevcontainerConfig for storage in SandboxInfo."""
+    return {
+        "image": dc.image,
+        "build": {
+            "dockerfile": dc.build_dockerfile,
+            "context": dc.build_context,
+            "args": dc.build_args,
+        } if dc.build_dockerfile else None,
+        "features": dc.features or None,
+        "lifecycle_commands": {
+            "onCreateCommand": dc.on_create_command,
+            "postCreateCommand": dc.post_create_command,
+            "updateContentCommand": dc.update_content_command,
+            "postStartCommand": dc.post_start_command,
+            "postAttachCommand": dc.post_attach_command,
+        },
+        "environment": dc.merged_env or None,
+        "forward_ports": dc.forward_ports or None,
+        "remote_user": dc.remote_user,
+    }
 
 
 class DockerBackend(SandboxBackend):
@@ -79,6 +103,8 @@ class DockerBackend(SandboxBackend):
             created_at=datetime.now(timezone.utc),
         )
 
+        dc_config: DevcontainerConfig | None = None
+
         try:
             container = await asyncio.to_thread(self._create_container, sandbox_id, name, config)
             info.container_id = container.id
@@ -95,7 +121,31 @@ class DockerBackend(SandboxBackend):
                     info.error = f"Git clone failed: {clone_result.stderr}"
                     return info
 
-            # Run setup commands
+            # Detect devcontainer.json in the workspace
+            dc_config = await self._detect_devcontainer(sandbox_id)
+            if dc_config:
+                info.devcontainer = _devcontainer_to_dict(dc_config)
+
+                # Handle image override: rebuild with devcontainer image
+                if dc_config.image and dc_config.image != config.image:
+                    info = await self._rebuild_with_image(
+                        sandbox_id, name, config, dc_config.image, info
+                    )
+
+                # Handle Dockerfile build
+                if dc_config.build_dockerfile:
+                    await self._build_devcontainer_image(sandbox_id, config, dc_config)
+
+                # Run devcontainer lifecycle commands (before user setup)
+                for cmd in dc_config.all_setup_commands:
+                    result = await self.exec(sandbox_id, cmd, timeout=300)
+                    if result.exit_code != 0:
+                        logger.warning(
+                            "Devcontainer command failed in %s: %s (exit %d)",
+                            name, cmd, result.exit_code,
+                        )
+
+            # Run user setup commands (after devcontainer commands)
             for cmd in config.setup_commands:
                 result = await self.exec(sandbox_id, cmd, timeout=300)
                 if result.exit_code != 0:
@@ -111,12 +161,89 @@ class DockerBackend(SandboxBackend):
             info.ready_at = datetime.now(timezone.utc)
             logger.info("Sandbox ready: %s (%s)", name, sandbox_id[:12])
 
+            # Run postStartCommand after sandbox is READY
+            if dc_config and dc_config.post_start_command:
+                for cmd in dc_config.post_start_command:
+                    result = await self.exec(sandbox_id, cmd, timeout=300)
+                    if result.exit_code != 0:
+                        logger.warning(
+                            "Devcontainer postStart failed in %s: %s (exit %d)",
+                            name, cmd, result.exit_code,
+                        )
+
         except Exception as e:
             info.status = SandboxStatus.FAILED
             info.error = str(e)
             logger.error("Failed to create sandbox %s: %s", name, e)
 
         return info
+
+    async def _detect_devcontainer(
+        self, sandbox_id: str, working_dir: str = "/workspace",
+    ) -> DevcontainerConfig | None:
+        """Detect devcontainer.json inside the sandbox."""
+        async def exec_fn(command: str, cwd: str | None) -> tuple[int, str, str]:
+            result = await self.exec(sandbox_id, command, cwd=cwd or working_dir, timeout=30)
+            return result.exit_code, result.stdout, result.stderr
+        return await detect_devcontainer(exec_fn, working_dir)
+
+    async def _rebuild_with_image(
+        self,
+        sandbox_id: str,
+        name: str,
+        config: SandboxConfig,
+        image: str,
+        info: SandboxInfo,
+    ) -> SandboxInfo:
+        """Rebuild the sandbox with a different container image."""
+        logger.info("Rebuilding sandbox %s with devcontainer image: %s", name, image)
+        try:
+            # Stop and remove current container
+            container = self._find_container(sandbox_id)
+            if container:
+                await asyncio.to_thread(container.stop, timeout=10)
+                await asyncio.to_thread(container.remove, force=True)
+
+            # Create new container with devcontainer image
+            new_config = SandboxConfig(
+                image=image,
+                name=config.name,
+                repo_url=config.repo_url,
+                repo_branch=config.repo_branch,
+                setup_commands=config.setup_commands,
+                network_mode=config.network_mode,
+                task_id=config.task_id,
+                request_id=config.request_id,
+            )
+            new_container = await asyncio.to_thread(
+                self._create_container, sandbox_id, name, new_config,
+            )
+            info.container_id = new_container.id
+            info.status = SandboxStatus.CREATING
+        except Exception as e:
+            logger.error("Failed to rebuild sandbox %s with image %s: %s", name, image, e)
+        return info
+
+    async def _build_devcontainer_image(
+        self,
+        sandbox_id: str,
+        config: SandboxConfig,
+        dc_config: DevcontainerConfig,
+    ) -> str | None:
+        """Build a Docker image from a devcontainer Dockerfile. Returns image tag or None."""
+        logger.info(
+            "Building devcontainer image from %s for sandbox %s",
+            dc_config.build_dockerfile, sandbox_id[:12],
+        )
+        # Delegate to docker build inside the container
+        context = dc_config.build_context or "."
+        dockerfile = dc_config.build_dockerfile
+        build_cmd = f"docker build -f {dockerfile} -t lucent-dc-{sandbox_id[:12]} {context}"
+        result = await self.exec(sandbox_id, build_cmd, cwd="/workspace", timeout=600)
+        if result.exit_code != 0:
+            logger.warning("Devcontainer Dockerfile build failed: %s", result.stderr[:200])
+            return None
+        return f"lucent-dc-{sandbox_id[:12]}"
 
     def _create_container(
         self, sandbox_id: str, name: str, config: SandboxConfig

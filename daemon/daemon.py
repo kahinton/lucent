@@ -671,6 +671,52 @@ class RequestAPI:
         return []
 
     @staticmethod
+    async def get_request_context(request_id: str) -> tuple[str, str]:
+        """Fetch parent request description and completed sibling task results.
+
+        Returns (request_description, sibling_results_text).
+        """
+        try:
+            async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
+                resp = await client.get(
+                    f"{API_BASE}/requests/{request_id}", headers=API_HEADERS
+                )
+                if resp.status_code != 200:
+                    return "", ""
+                data = resp.json()
+        except Exception as e:
+            log(f"API get_request_context failed: {e}", "WARN")
+            return "", ""
+
+        request_desc = data.get("description", "")
+        tasks = data.get("tasks", [])
+
+        # Collect results from completed sibling tasks
+        sibling_parts = []
+        total_len = 0
+        max_context = 30000  # keep total under ~30KB to avoid blowing context windows
+
+        for t in tasks:
+            if t.get("status") != "completed" or not t.get("result"):
+                continue
+            result_text = t["result"]
+            # Truncate individual results if very long
+            if len(result_text) > 8000:
+                result_text = result_text[:8000] + "\n[... truncated ...]"
+            if total_len + len(result_text) > max_context:
+                sibling_parts.append("[Additional completed task results omitted for space]")
+                break
+            sibling_parts.append(
+                f"## Task: {t.get('title', 'Untitled')} (completed)\n"
+                f"Model: {t.get('model', 'default')} | Agent: {t.get('agent_type', '?')}\n\n"
+                f"{result_text}"
+            )
+            total_len += len(result_text)
+
+        sibling_text = "\n\n".join(sibling_parts) if sibling_parts else ""
+        return request_desc, sibling_text
+
+    @staticmethod
     async def release_stale(stale_minutes: int = 30) -> int:
         try:
             async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
@@ -1528,6 +1574,28 @@ class LucentDaemon:
                 {"agent_type": agent_type, "instance_id": self.instance_id},
             )
 
+            # Fetch parent request context and completed sibling results
+            request_id = str(task.get("request_id", ""))
+            task_context = ""
+            if request_id:
+                req_desc, sibling_results = await RequestAPI.get_request_context(request_id)
+                context_parts = []
+                if req_desc:
+                    req_title = task.get("request_title", "")
+                    context_parts.append(
+                        f"--- PARENT REQUEST ---\n"
+                        f"Title: {req_title}\n"
+                        f"Description: {req_desc}"
+                    )
+                if sibling_results:
+                    context_parts.append(
+                        f"--- COMPLETED SIBLING TASK RESULTS ---\n"
+                        f"The following tasks in this request have already completed. "
+                        f"Use these results directly — do not re-search for this information.\n\n"
+                        f"{sibling_results}"
+                    )
+                task_context = "\n\n".join(context_parts)
+
             # Build and run the sub-agent
             agent_def_id = task.get("agent_definition_id")
             sandbox_config = task.get("sandbox_config")
@@ -1542,6 +1610,7 @@ class LucentDaemon:
                 system_message = await build_subagent_prompt(
                     agent_type,
                     description,
+                    task_context=task_context,
                     agent_definition_id=str(agent_def_id) if agent_def_id else None,
                 )
             except AgentNotFoundError as exc:

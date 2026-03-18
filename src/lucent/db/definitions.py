@@ -244,12 +244,13 @@ class DefinitionRepository:
         headers: dict | None = None,
         command: str | None = None,
         args: list | None = None,
+        env_vars: dict | None = None,
         status: str = "proposed",
     ) -> dict:
         query = """
             INSERT INTO mcp_server_configs (name, description, server_type, url,
-                command, args, headers, status, created_by, organization_id)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                command, args, headers, env_vars, status, created_by, organization_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             RETURNING *
         """
         async with self.pool.acquire() as conn:
@@ -262,6 +263,7 @@ class DefinitionRepository:
                 command,
                 json.dumps(args or []),
                 json.dumps(headers or {}),
+                json.dumps(env_vars or {}),
                 status,
                 created_by,
                 org_id,
@@ -417,7 +419,7 @@ class DefinitionRepository:
             if key in kwargs:
                 params.append(kwargs[key])
                 sets.append(f"{key} = ${len(params)}")
-        for key in ("headers", "args"):
+        for key in ("headers", "args", "env_vars"):
             if key in kwargs:
                 params.append(json.dumps(kwargs[key]) if kwargs[key] else None)
                 sets.append(f"{key} = ${len(params)}")

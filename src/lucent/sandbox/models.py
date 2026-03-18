@@ -92,3 +92,4 @@ class SandboxInfo:
     host: str | None = None  # For network access (MCP bridge, etc.)
     port: int | None = None
     error: str | None = None
+    devcontainer: dict | None = None

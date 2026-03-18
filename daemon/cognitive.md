@@ -59,7 +59,7 @@ Rejected work (tagged `feedback-rejected`):
 - Read the rejection reason carefully
 - Create a self-improvement memory analyzing what went wrong
 - Cancel or revise any dependent pending tasks
-- Mark as `feedback-processed`
+- Mark as `feedback-processed` and `rejection-lesson`
 
 ## Roles (Sub-Agents)
 
