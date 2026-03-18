@@ -70,10 +70,46 @@ async def web_user(db_pool, web_prefix):
         organization_id=org["id"],
         email=f"{web_prefix}user@test.com",
         display_name=f"{web_prefix}User",
+        role="admin",
     )
     await set_user_password(db_pool, user["id"], TEST_PASSWORD)
     token = await create_session(db_pool, user["id"])
     return user, org, token
+
+
+@pytest_asyncio.fixture
+async def member_user(db_pool, web_prefix):
+    """Create a member-role user (no admin/owner privileges)."""
+    org_repo = OrganizationRepository(db_pool)
+    org = await org_repo.create(name=f"{web_prefix}member_org")
+    user_repo = UserRepository(db_pool)
+    user = await user_repo.create(
+        external_id=f"{web_prefix}member",
+        provider="basic",
+        organization_id=org["id"],
+        email=f"{web_prefix}member@test.com",
+        display_name=f"{web_prefix}Member",
+        role="member",
+    )
+    await set_user_password(db_pool, user["id"], TEST_PASSWORD)
+    token = await create_session(db_pool, user["id"])
+    return user, org, token
+
+
+@pytest_asyncio.fixture
+async def member_client(db_pool, member_user):
+    """Client authenticated as a member (non-admin) user."""
+    _user, _org, session_token = member_user
+    csrf_token = "test-csrf-token-set123"
+    app = create_app()
+    transport = ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        cookies={SESSION_COOKIE_NAME: session_token, CSRF_COOKIE_NAME: csrf_token},
+    ) as c:
+        c._csrf_token = csrf_token
+        yield c
 
 
 @pytest_asyncio.fixture
@@ -413,9 +449,11 @@ async def test_launch_sandbox_without_csrf_fails(client, db_pool, web_user, web_
 
 
 @pytest.mark.asyncio
-async def test_stop_sandbox(client):
+async def test_stop_sandbox(client, web_user):
+    _user, org, _token = web_user
     sandbox_id = str(uuid4())
     mock_manager = AsyncMock()
+    mock_manager.get.return_value = {"organization_id": str(org["id"])}
     with patch("lucent.sandbox.manager.get_sandbox_manager", return_value=mock_manager):
         resp = await client.post(
             f"/sandboxes/{sandbox_id}/stop",
@@ -447,9 +485,11 @@ async def test_stop_sandbox_without_csrf_fails(client):
 
 
 @pytest.mark.asyncio
-async def test_destroy_sandbox(client):
+async def test_destroy_sandbox(client, web_user):
+    _user, org, _token = web_user
     sandbox_id = str(uuid4())
     mock_manager = AsyncMock()
+    mock_manager.get.return_value = {"organization_id": str(org["id"])}
     with patch("lucent.sandbox.manager.get_sandbox_manager", return_value=mock_manager):
         resp = await client.post(
             f"/sandboxes/{sandbox_id}/destroy",
@@ -472,6 +512,71 @@ async def test_destroy_sandbox_without_csrf_fails(client):
             follow_redirects=False,
         )
     assert resp.status_code == 403
+    mock_manager.destroy.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Cross-tenant IDOR protection
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_stop_sandbox_wrong_org_returns_404(client):
+    sandbox_id = str(uuid4())
+    mock_manager = AsyncMock()
+    mock_manager.get.return_value = {"organization_id": str(uuid4())}
+    with patch("lucent.sandbox.manager.get_sandbox_manager", return_value=mock_manager):
+        resp = await client.post(
+            f"/sandboxes/{sandbox_id}/stop",
+            data=_csrf_data(client),
+            follow_redirects=False,
+        )
+    assert resp.status_code == 404
+    mock_manager.stop.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_destroy_sandbox_wrong_org_returns_404(client):
+    sandbox_id = str(uuid4())
+    mock_manager = AsyncMock()
+    mock_manager.get.return_value = {"organization_id": str(uuid4())}
+    with patch("lucent.sandbox.manager.get_sandbox_manager", return_value=mock_manager):
+        resp = await client.post(
+            f"/sandboxes/{sandbox_id}/destroy",
+            data=_csrf_data(client),
+            follow_redirects=False,
+        )
+    assert resp.status_code == 404
+    mock_manager.destroy.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_stop_sandbox_nonexistent_returns_404(client):
+    sandbox_id = str(uuid4())
+    mock_manager = AsyncMock()
+    mock_manager.get.return_value = None
+    with patch("lucent.sandbox.manager.get_sandbox_manager", return_value=mock_manager):
+        resp = await client.post(
+            f"/sandboxes/{sandbox_id}/stop",
+            data=_csrf_data(client),
+            follow_redirects=False,
+        )
+    assert resp.status_code == 404
+    mock_manager.stop.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_destroy_sandbox_nonexistent_returns_404(client):
+    sandbox_id = str(uuid4())
+    mock_manager = AsyncMock()
+    mock_manager.get.return_value = None
+    with patch("lucent.sandbox.manager.get_sandbox_manager", return_value=mock_manager):
+        resp = await client.post(
+            f"/sandboxes/{sandbox_id}/destroy",
+            data=_csrf_data(client),
+            follow_redirects=False,
+        )
+    assert resp.status_code == 404
     mock_manager.destroy.assert_not_called()
 
 
@@ -499,3 +604,40 @@ async def test_unauthenticated_post_endpoints_redirect(db_pool):
             assert resp.status_code in (302, 303, 401), (
                 f"POST {path} should require auth, got {resp.status_code}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Authorization: member users denied admin-only endpoints
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_member_cannot_create_template(member_client):
+    resp = await member_client.post(
+        "/sandboxes/templates/create",
+        data=_csrf_data(member_client, {"name": "forbidden-template", "image": "python:3.12-slim"}),
+        follow_redirects=False,
+    )
+    assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_member_cannot_update_template(member_client):
+    fake_id = str(uuid4())
+    resp = await member_client.post(
+        f"/sandboxes/templates/{fake_id}/edit",
+        data=_csrf_data(member_client, {"name": "forbidden-update"}),
+        follow_redirects=False,
+    )
+    assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_member_cannot_delete_template(member_client):
+    fake_id = str(uuid4())
+    resp = await member_client.post(
+        f"/sandboxes/templates/{fake_id}/delete",
+        data=_csrf_data(member_client),
+        follow_redirects=False,
+    )
+    assert resp.status_code == 403

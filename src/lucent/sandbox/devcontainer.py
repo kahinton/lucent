@@ -229,7 +229,10 @@ async def apply_devcontainer_config(
                 if stderr.strip():
                     error_msg += f" — {stderr.strip()[:200]}"
                 result.errors.append(error_msg)
-                logger.warning("Devcontainer command failed in %s: %s (exit %d)", working_dir, cmd, exit_code)
+                logger.warning(
+                    "Devcontainer command failed in %s: %s (exit %d)",
+                    working_dir, cmd, exit_code,
+                )
             else:
                 logger.debug("Devcontainer command succeeded: %s", cmd)
         except Exception as e:
