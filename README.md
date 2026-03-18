@@ -275,7 +275,7 @@ Lucent is configured via environment variables. Copy `.env.example` to `.env` an
 | `LUCENT_LOG_LEVEL` | `INFO` | Logging verbosity |
 | `LUCENT_DB_PORT` | `5433` | Host port for the PostgreSQL container |
 | `LUCENT_RATE_LIMIT_PER_MINUTE` | `100` | Max requests per minute per API key |
-| `LUCENT_SECURE_COOKIES` | `false` | Set to `true` when running behind HTTPS |
+| `LUCENT_SECURE_COOKIES` | `true` | Cookie `Secure` flag. Set to `false` for local HTTP development without HTTPS. |
 | `LUCENT_CORS_ORIGINS` | *(none)* | Allowed CORS origins (comma-separated). `*` allows all but logs a security warning. |
 
 ## Docker Deployment
