@@ -67,6 +67,25 @@ ALL_INTEGRATION_EVENT_TYPES = SECURITY_EVENT_TYPES | OPERATIONAL_EVENT_TYPES
 # The shared action_type used for operational events in the audit log
 INTEGRATION_EVENT = "integration_event"
 
+# -- Definition lifecycle event action_types (7) --
+DEFINITION_CREATE = "definition_create"
+DEFINITION_UPDATE = "definition_update"
+DEFINITION_APPROVE = "definition_approve"
+DEFINITION_REJECT = "definition_reject"
+DEFINITION_DELETE = "definition_delete"
+DEFINITION_GRANT = "definition_grant"
+DEFINITION_REVOKE = "definition_revoke"
+
+DEFINITION_EVENT_TYPES = frozenset({
+    DEFINITION_CREATE,
+    DEFINITION_UPDATE,
+    DEFINITION_APPROVE,
+    DEFINITION_REJECT,
+    DEFINITION_DELETE,
+    DEFINITION_GRANT,
+    DEFINITION_REVOKE,
+})
+
 
 class AuditRepository:
     """Repository for audit log operations."""
@@ -539,6 +558,59 @@ class AuditRepository:
         return await self.log(
             memory_id=sentinel_id,
             action_type=action_type,
+            user_id=user_id,
+            organization_id=organization_id,
+            context=ctx,
+            notes=notes,
+        )
+
+    async def log_definition_event(
+        self,
+        event_type: str,
+        organization_id: UUID,
+        user_id: UUID | None = None,
+        definition_type: str | None = None,
+        definition_id: UUID | None = None,
+        context: dict[str, Any] | None = None,
+        notes: str | None = None,
+    ) -> dict[str, Any]:
+        """Log a definition lifecycle event (agent/skill/MCP server).
+
+        All definition events use their own dedicated action_type for
+        direct queryability.
+
+        Args:
+            event_type: One of the DEFINITION_EVENT_TYPES constants.
+            organization_id: The organization this event belongs to.
+            user_id: The user who triggered the event (if applicable).
+            definition_type: 'agent', 'skill', or 'mcp_server'.
+            definition_id: The UUID of the definition involved.
+            context: Additional event-specific metadata.
+            notes: Optional human-readable notes.
+
+        Returns:
+            The created audit log entry.
+
+        Raises:
+            ValueError: If event_type is not a recognized definition event.
+        """
+        if event_type not in DEFINITION_EVENT_TYPES:
+            raise ValueError(
+                f"Unknown definition event type: {event_type}. "
+                f"Must be one of: {sorted(DEFINITION_EVENT_TYPES)}"
+            )
+
+        ctx = dict(context) if context else {}
+        if definition_type:
+            ctx["definition_type"] = definition_type
+        if definition_id:
+            ctx["definition_id"] = str(definition_id)
+
+        sentinel_id = UUID("00000000-0000-0000-0000-000000000000")
+
+        return await self.log(
+            memory_id=sentinel_id,
+            action_type=event_type,
             user_id=user_id,
             organization_id=organization_id,
             context=ctx,

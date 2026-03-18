@@ -7,8 +7,20 @@ import json
 import logging
 from datetime import datetime, timezone
 from typing import Any
+from uuid import UUID
 
 from asyncpg import Pool
+
+from lucent.db.audit import (
+    DEFINITION_APPROVE,
+    DEFINITION_CREATE,
+    DEFINITION_DELETE,
+    DEFINITION_GRANT,
+    DEFINITION_REJECT,
+    DEFINITION_REVOKE,
+    DEFINITION_UPDATE,
+    AuditRepository,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -16,8 +28,41 @@ logger = logging.getLogger(__name__)
 class DefinitionRepository:
     """Repository for managing agent, skill, and MCP server definitions."""
 
-    def __init__(self, pool: Pool):
+    def __init__(self, pool: Pool, audit_repo: AuditRepository | None = None):
         self.pool = pool
+        self.audit_repo = audit_repo
+
+    async def _audit(
+        self,
+        event_type: str,
+        org_id: str,
+        definition_type: str,
+        definition_id: str,
+        user_id: str | None = None,
+        context: dict[str, Any] | None = None,
+        notes: str | None = None,
+    ) -> None:
+        """Fire-and-forget audit log. Never raises."""
+        if self.audit_repo is None:
+            return
+        try:
+            await self.audit_repo.log_definition_event(
+                event_type=event_type,
+                organization_id=UUID(org_id),
+                user_id=UUID(user_id) if user_id else None,
+                definition_type=definition_type,
+                definition_id=UUID(definition_id),
+                context=context,
+                notes=notes,
+            )
+        except Exception:
+            logger.warning(
+                "Audit log failed for %s on %s %s",
+                event_type,
+                definition_type,
+                definition_id,
+                exc_info=True,
+            )
 
     # ── Agents ────────────────────────────────────────────────────────────
 
@@ -72,7 +117,12 @@ class DefinitionRepository:
         """
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(query, name, description, content, status, created_by, org_id)
-        return dict(row)
+        result = dict(row)
+        await self._audit(
+            DEFINITION_CREATE, org_id, "agent", str(result["id"]),
+            user_id=created_by, notes=f"Created agent '{name}'",
+        )
+        return result
 
     async def update_agent(self, agent_id: str, org_id: str, **kwargs) -> dict | None:
         sets = []
@@ -94,7 +144,19 @@ class DefinitionRepository:
         """
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(query, *params)
-        return dict(row) if row else None
+        result = dict(row) if row else None
+        if result:
+            await self._audit(
+                DEFINITION_UPDATE, org_id, "agent", agent_id,
+                context={
+                    "updated_fields": [
+                        k for k in ("name", "description", "content", "status")
+                        if k in kwargs
+                    ],
+                },
+                notes=f"Updated agent '{agent_id}'",
+            )
+        return result
 
     async def approve_agent(self, agent_id: str, org_id: str, approved_by: str) -> dict | None:
         query = """
@@ -105,7 +167,13 @@ class DefinitionRepository:
         """
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(query, agent_id, org_id, approved_by)
-        return dict(row) if row else None
+        result = dict(row) if row else None
+        if result:
+            await self._audit(
+                DEFINITION_APPROVE, org_id, "agent", agent_id,
+                user_id=approved_by, notes=f"Approved agent '{agent_id}'",
+            )
+        return result
 
     async def reject_agent(self, agent_id: str, org_id: str, approved_by: str) -> dict | None:
         query = """
@@ -116,7 +184,13 @@ class DefinitionRepository:
         """
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(query, agent_id, org_id, approved_by)
-        return dict(row) if row else None
+        result = dict(row) if row else None
+        if result:
+            await self._audit(
+                DEFINITION_REJECT, org_id, "agent", agent_id,
+                user_id=approved_by, notes=f"Rejected agent '{agent_id}'",
+            )
+        return result
 
     async def delete_agent(self, agent_id: str, org_id: str) -> bool:
         async with self.pool.acquire() as conn:
@@ -125,7 +199,13 @@ class DefinitionRepository:
                 agent_id,
                 org_id,
             )
-        return result == "DELETE 1"
+        deleted = result == "DELETE 1"
+        if deleted:
+            await self._audit(
+                DEFINITION_DELETE, org_id, "agent", agent_id,
+                notes=f"Deleted agent '{agent_id}'",
+            )
+        return deleted
 
     # ── Skills ────────────────────────────────────────────────────────────
 
@@ -172,7 +252,12 @@ class DefinitionRepository:
         """
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(query, name, description, content, status, created_by, org_id)
-        return dict(row)
+        result = dict(row)
+        await self._audit(
+            DEFINITION_CREATE, org_id, "skill", str(result["id"]),
+            user_id=created_by, notes=f"Created skill '{name}'",
+        )
+        return result
 
     async def approve_skill(self, skill_id: str, org_id: str, approved_by: str) -> dict | None:
         query = """
@@ -183,7 +268,13 @@ class DefinitionRepository:
         """
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(query, skill_id, org_id, approved_by)
-        return dict(row) if row else None
+        result = dict(row) if row else None
+        if result:
+            await self._audit(
+                DEFINITION_APPROVE, org_id, "skill", skill_id,
+                user_id=approved_by, notes=f"Approved skill '{skill_id}'",
+            )
+        return result
 
     async def reject_skill(self, skill_id: str, org_id: str, approved_by: str) -> dict | None:
         query = """
@@ -194,7 +285,13 @@ class DefinitionRepository:
         """
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(query, skill_id, org_id, approved_by)
-        return dict(row) if row else None
+        result = dict(row) if row else None
+        if result:
+            await self._audit(
+                DEFINITION_REJECT, org_id, "skill", skill_id,
+                user_id=approved_by, notes=f"Rejected skill '{skill_id}'",
+            )
+        return result
 
     async def delete_skill(self, skill_id: str, org_id: str) -> bool:
         async with self.pool.acquire() as conn:
@@ -203,7 +300,13 @@ class DefinitionRepository:
                 skill_id,
                 org_id,
             )
-        return result == "DELETE 1"
+        deleted = result == "DELETE 1"
+        if deleted:
+            await self._audit(
+                DEFINITION_DELETE, org_id, "skill", skill_id,
+                notes=f"Deleted skill '{skill_id}'",
+            )
+        return deleted
 
     # ── MCP Servers ───────────────────────────────────────────────────────
 
@@ -268,7 +371,12 @@ class DefinitionRepository:
                 created_by,
                 org_id,
             )
-        return dict(row)
+        result = dict(row)
+        await self._audit(
+            DEFINITION_CREATE, org_id, "mcp_server", str(result["id"]),
+            user_id=created_by, notes=f"Created MCP server '{name}'",
+        )
+        return result
 
     async def approve_mcp_server(
         self,
@@ -284,7 +392,13 @@ class DefinitionRepository:
         """
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(query, server_id, org_id, approved_by)
-        return dict(row) if row else None
+        result = dict(row) if row else None
+        if result:
+            await self._audit(
+                DEFINITION_APPROVE, org_id, "mcp_server", server_id,
+                user_id=approved_by, notes=f"Approved MCP server '{server_id}'",
+            )
+        return result
 
     async def reject_mcp_server(self, server_id: str, org_id: str, approved_by: str) -> dict | None:
         query = """
@@ -295,11 +409,20 @@ class DefinitionRepository:
         """
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(query, server_id, org_id, approved_by)
-        return dict(row) if row else None
+        result = dict(row) if row else None
+        if result:
+            await self._audit(
+                DEFINITION_REJECT, org_id, "mcp_server", server_id,
+                user_id=approved_by, notes=f"Rejected MCP server '{server_id}'",
+            )
+        return result
 
     # ── Access Grants ─────────────────────────────────────────────────────
 
-    async def grant_skill(self, agent_id: str, skill_id: str) -> bool:
+    async def grant_skill(
+        self, agent_id: str, skill_id: str,
+        org_id: str | None = None, user_id: str | None = None,
+    ) -> bool:
         try:
             async with self.pool.acquire() as conn:
                 await conn.execute(
@@ -308,21 +431,42 @@ class DefinitionRepository:
                     agent_id,
                     skill_id,
                 )
+            if org_id:
+                await self._audit(
+                    DEFINITION_GRANT, org_id, "skill", skill_id,
+                    user_id=user_id,
+                    context={"agent_id": agent_id},
+                    notes=f"Granted skill '{skill_id}' to agent '{agent_id}'",
+                )
             return True
         except Exception:
             logger.error("Failed to grant skill %s to agent %s", skill_id, agent_id, exc_info=True)
             return False
 
-    async def revoke_skill(self, agent_id: str, skill_id: str) -> bool:
+    async def revoke_skill(
+        self, agent_id: str, skill_id: str,
+        org_id: str | None = None, user_id: str | None = None,
+    ) -> bool:
         async with self.pool.acquire() as conn:
             result = await conn.execute(
                 "DELETE FROM agent_skills WHERE agent_id = $1 AND skill_id = $2",
                 agent_id,
                 skill_id,
             )
-        return result == "DELETE 1"
+        revoked = result == "DELETE 1"
+        if revoked and org_id:
+            await self._audit(
+                DEFINITION_REVOKE, org_id, "skill", skill_id,
+                user_id=user_id,
+                context={"agent_id": agent_id},
+                notes=f"Revoked skill '{skill_id}' from agent '{agent_id}'",
+            )
+        return revoked
 
-    async def grant_mcp_server(self, agent_id: str, mcp_server_id: str) -> bool:
+    async def grant_mcp_server(
+        self, agent_id: str, mcp_server_id: str,
+        org_id: str | None = None, user_id: str | None = None,
+    ) -> bool:
         try:
             async with self.pool.acquire() as conn:
                 await conn.execute(
@@ -330,6 +474,13 @@ class DefinitionRepository:
                     "VALUES ($1, $2) ON CONFLICT DO NOTHING",
                     agent_id,
                     mcp_server_id,
+                )
+            if org_id:
+                await self._audit(
+                    DEFINITION_GRANT, org_id, "mcp_server", mcp_server_id,
+                    user_id=user_id,
+                    context={"agent_id": agent_id},
+                    notes=f"Granted MCP server '{mcp_server_id}' to agent '{agent_id}'",
                 )
             return True
         except Exception:
@@ -341,14 +492,25 @@ class DefinitionRepository:
             )
             return False
 
-    async def revoke_mcp_server(self, agent_id: str, mcp_server_id: str) -> bool:
+    async def revoke_mcp_server(
+        self, agent_id: str, mcp_server_id: str,
+        org_id: str | None = None, user_id: str | None = None,
+    ) -> bool:
         async with self.pool.acquire() as conn:
             result = await conn.execute(
                 "DELETE FROM agent_mcp_servers WHERE agent_id = $1 AND mcp_server_id = $2",
                 agent_id,
                 mcp_server_id,
             )
-        return result == "DELETE 1"
+        revoked = result == "DELETE 1"
+        if revoked and org_id:
+            await self._audit(
+                DEFINITION_REVOKE, org_id, "mcp_server", mcp_server_id,
+                user_id=user_id,
+                context={"agent_id": agent_id},
+                notes=f"Revoked MCP server '{mcp_server_id}' from agent '{agent_id}'",
+            )
+        return revoked
 
     async def get_agent_skills(self, agent_id: str) -> list[dict]:
         query = """
@@ -377,6 +539,8 @@ class DefinitionRepository:
         agent_id: str,
         mcp_server_id: str,
         allowed_tools: list[str] | None,
+        org_id: str | None = None,
+        user_id: str | None = None,
     ) -> bool:
         """Set which tools an agent can use from an MCP server. None = all."""
         val = json.dumps(allowed_tools) if allowed_tools is not None else None
@@ -388,7 +552,15 @@ class DefinitionRepository:
                 mcp_server_id,
                 val,
             )
-        return result == "UPDATE 1"
+        updated = result == "UPDATE 1"
+        if updated and org_id:
+            await self._audit(
+                DEFINITION_UPDATE, org_id, "mcp_server", mcp_server_id,
+                user_id=user_id,
+                context={"agent_id": agent_id, "allowed_tools": allowed_tools},
+                notes=f"Updated tool grants for MCP server '{mcp_server_id}' on agent '{agent_id}'",
+            )
+        return updated
 
     async def update_skill(self, skill_id: str, org_id: str, **kwargs) -> dict | None:
         sets = []
@@ -410,7 +582,19 @@ class DefinitionRepository:
         """
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(query, *params)
-        return dict(row) if row else None
+        result = dict(row) if row else None
+        if result:
+            await self._audit(
+                DEFINITION_UPDATE, org_id, "skill", skill_id,
+                context={
+                    "updated_fields": [
+                        k for k in ("name", "description", "content", "status")
+                        if k in kwargs
+                    ],
+                },
+                notes=f"Updated skill '{skill_id}'",
+            )
+        return result
 
     async def update_mcp_server(self, server_id: str, org_id: str, **kwargs) -> dict | None:
         sets = []
@@ -436,7 +620,18 @@ class DefinitionRepository:
         """
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(query, *params)
-        return dict(row) if row else None
+        result = dict(row) if row else None
+        if result:
+            all_keys = (
+                "name", "description", "server_type", "url",
+                "command", "headers", "args", "env_vars",
+            )
+            await self._audit(
+                DEFINITION_UPDATE, org_id, "mcp_server", server_id,
+                context={"updated_fields": [k for k in all_keys if k in kwargs]},
+                notes=f"Updated MCP server '{server_id}'",
+            )
+        return result
 
     async def delete_mcp_server(self, server_id: str, org_id: str) -> bool:
         async with self.pool.acquire() as conn:
@@ -445,7 +640,13 @@ class DefinitionRepository:
                 server_id,
                 org_id,
             )
-        return result == "DELETE 1"
+        deleted = result == "DELETE 1"
+        if deleted:
+            await self._audit(
+                DEFINITION_DELETE, org_id, "mcp_server", server_id,
+                notes=f"Deleted MCP server '{server_id}'",
+            )
+        return deleted
 
     # ── Bulk/convenience ──────────────────────────────────────────────────
 

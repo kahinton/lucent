@@ -31,6 +31,15 @@ class AuditActionType(str, Enum):
     # Integration operational events (use this with context JSONB)
     INTEGRATION_EVENT = "integration_event"
 
+    # Definition lifecycle events
+    DEFINITION_CREATE = "definition_create"
+    DEFINITION_UPDATE = "definition_update"
+    DEFINITION_APPROVE = "definition_approve"
+    DEFINITION_REJECT = "definition_reject"
+    DEFINITION_DELETE = "definition_delete"
+    DEFINITION_GRANT = "definition_grant"
+    DEFINITION_REVOKE = "definition_revoke"
+
 
 class CreateAuditLogInput(BaseModel):
     """Input model for creating an audit log entry."""

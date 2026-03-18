@@ -37,9 +37,10 @@ async def definitions_page(request: Request, tab: str = "agents"):
     """Agent and skill definitions management page."""
     user = await get_user_context(request)
     pool = await get_pool()
+    from lucent.db.audit import AuditRepository
     from lucent.db.definitions import DefinitionRepository
 
-    repo = DefinitionRepository(pool)
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     org_id = str(user.organization_id)
 
     agents = await repo.list_agents(org_id)
@@ -64,9 +65,10 @@ async def agent_detail_page(request: Request, agent_id: str):
     """Agent definition detail page."""
     user = await get_user_context(request)
     pool = await get_pool()
+    from lucent.db.audit import AuditRepository
     from lucent.db.definitions import DefinitionRepository
 
-    repo = DefinitionRepository(pool)
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     org_id = str(user.organization_id)
 
     agent = await repo.get_agent(agent_id, org_id)
@@ -105,9 +107,10 @@ async def skill_detail_page(request: Request, skill_id: str):
     """Skill definition detail page."""
     user = await get_user_context(request)
     pool = await get_pool()
+    from lucent.db.audit import AuditRepository
     from lucent.db.definitions import DefinitionRepository
 
-    repo = DefinitionRepository(pool)
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     org_id = str(user.organization_id)
 
     skill = await repo.get_skill(skill_id, org_id)
@@ -130,9 +133,10 @@ async def mcp_server_detail_page(request: Request, server_id: str):
     """MCP server definition detail page."""
     user = await get_user_context(request)
     pool = await get_pool()
+    from lucent.db.audit import AuditRepository
     from lucent.db.definitions import DefinitionRepository
 
-    repo = DefinitionRepository(pool)
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     org_id = str(user.organization_id)
 
     server = await repo.get_mcp_server(server_id, org_id)
@@ -157,9 +161,10 @@ async def approve_agent_web(request: Request, agent_id: str):
     _require_admin_or_owner(user)
     await _check_csrf(request)
     pool = await get_pool()
+    from lucent.db.audit import AuditRepository
     from lucent.db.definitions import DefinitionRepository
 
-    repo = DefinitionRepository(pool)
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     await repo.approve_agent(agent_id, str(user.organization_id), str(user.id))
     return RedirectResponse(url=f"/definitions/agents/{agent_id}", status_code=303)
 
@@ -171,9 +176,10 @@ async def reject_agent_web(request: Request, agent_id: str):
     _require_admin_or_owner(user)
     await _check_csrf(request)
     pool = await get_pool()
+    from lucent.db.audit import AuditRepository
     from lucent.db.definitions import DefinitionRepository
 
-    repo = DefinitionRepository(pool)
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     await repo.reject_agent(agent_id, str(user.organization_id), str(user.id))
     return RedirectResponse(url=f"/definitions/agents/{agent_id}", status_code=303)
 
@@ -185,9 +191,10 @@ async def approve_skill_web(request: Request, skill_id: str):
     _require_admin_or_owner(user)
     await _check_csrf(request)
     pool = await get_pool()
+    from lucent.db.audit import AuditRepository
     from lucent.db.definitions import DefinitionRepository
 
-    repo = DefinitionRepository(pool)
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     await repo.approve_skill(skill_id, str(user.organization_id), str(user.id))
     return RedirectResponse(url=f"/definitions/skills/{skill_id}", status_code=303)
 
@@ -199,9 +206,10 @@ async def reject_skill_web(request: Request, skill_id: str):
     _require_admin_or_owner(user)
     await _check_csrf(request)
     pool = await get_pool()
+    from lucent.db.audit import AuditRepository
     from lucent.db.definitions import DefinitionRepository
 
-    repo = DefinitionRepository(pool)
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     await repo.reject_skill(skill_id, str(user.organization_id), str(user.id))
     return RedirectResponse(url=f"/definitions/skills/{skill_id}", status_code=303)
 
@@ -213,9 +221,10 @@ async def approve_mcp_web(request: Request, server_id: str):
     _require_admin_or_owner(user)
     await _check_csrf(request)
     pool = await get_pool()
+    from lucent.db.audit import AuditRepository
     from lucent.db.definitions import DefinitionRepository
 
-    repo = DefinitionRepository(pool)
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     await repo.approve_mcp_server(server_id, str(user.organization_id), str(user.id))
     return RedirectResponse(url=f"/definitions/mcp-servers/{server_id}", status_code=303)
 
@@ -227,9 +236,10 @@ async def reject_mcp_web(request: Request, server_id: str):
     _require_admin_or_owner(user)
     await _check_csrf(request)
     pool = await get_pool()
+    from lucent.db.audit import AuditRepository
     from lucent.db.definitions import DefinitionRepository
 
-    repo = DefinitionRepository(pool)
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     await repo.reject_mcp_server(server_id, str(user.organization_id), str(user.id))
     return RedirectResponse(url=f"/definitions/mcp-servers/{server_id}", status_code=303)
 
@@ -242,9 +252,10 @@ async def create_agent_web(request: Request):
     await _check_csrf(request)
     form = await request.form()
     pool = await get_pool()
+    from lucent.db.audit import AuditRepository
     from lucent.db.definitions import DefinitionRepository
 
-    repo = DefinitionRepository(pool)
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     org_id = str(user.organization_id)
 
     agent = await repo.create_agent(
@@ -265,9 +276,10 @@ async def update_agent_web(request: Request, agent_id: str):
     await _check_csrf(request)
     form = await request.form()
     pool = await get_pool()
+    from lucent.db.audit import AuditRepository
     from lucent.db.definitions import DefinitionRepository
 
-    repo = DefinitionRepository(pool)
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     org_id = str(user.organization_id)
 
     await repo.update_agent(
@@ -287,9 +299,10 @@ async def delete_agent_web(request: Request, agent_id: str):
     _require_admin_or_owner(user)
     await _check_csrf(request)
     pool = await get_pool()
+    from lucent.db.audit import AuditRepository
     from lucent.db.definitions import DefinitionRepository
 
-    repo = DefinitionRepository(pool)
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     await repo.delete_agent(agent_id, str(user.organization_id))
     return RedirectResponse(url="/definitions", status_code=303)
 
@@ -302,9 +315,10 @@ async def create_skill_web(request: Request):
     await _check_csrf(request)
     form = await request.form()
     pool = await get_pool()
+    from lucent.db.audit import AuditRepository
     from lucent.db.definitions import DefinitionRepository
 
-    repo = DefinitionRepository(pool)
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     org_id = str(user.organization_id)
 
     skill = await repo.create_skill(
@@ -325,9 +339,10 @@ async def update_skill_web(request: Request, skill_id: str):
     await _check_csrf(request)
     form = await request.form()
     pool = await get_pool()
+    from lucent.db.audit import AuditRepository
     from lucent.db.definitions import DefinitionRepository
 
-    repo = DefinitionRepository(pool)
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     org_id = str(user.organization_id)
 
     await repo.update_skill(
@@ -347,9 +362,10 @@ async def delete_skill_web(request: Request, skill_id: str):
     _require_admin_or_owner(user)
     await _check_csrf(request)
     pool = await get_pool()
+    from lucent.db.audit import AuditRepository
     from lucent.db.definitions import DefinitionRepository
 
-    repo = DefinitionRepository(pool)
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     await repo.delete_skill(skill_id, str(user.organization_id))
     return RedirectResponse(url="/definitions", status_code=303)
 
@@ -362,9 +378,10 @@ async def create_mcp_web(request: Request):
     await _check_csrf(request)
     form = await request.form()
     pool = await get_pool()
+    from lucent.db.audit import AuditRepository
     from lucent.db.definitions import DefinitionRepository
 
-    repo = DefinitionRepository(pool)
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     org_id = str(user.organization_id)
 
     command = str(form.get("command", "")).strip()
@@ -394,9 +411,10 @@ async def update_mcp_web(request: Request, server_id: str):
     await _check_csrf(request)
     form = await request.form()
     pool = await get_pool()
+    from lucent.db.audit import AuditRepository
     from lucent.db.definitions import DefinitionRepository
 
-    repo = DefinitionRepository(pool)
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     org_id = str(user.organization_id)
 
     command = str(form.get("command", "")).strip()
@@ -423,9 +441,10 @@ async def delete_mcp_web(request: Request, server_id: str):
     _require_admin_or_owner(user)
     await _check_csrf(request)
     pool = await get_pool()
+    from lucent.db.audit import AuditRepository
     from lucent.db.definitions import DefinitionRepository
 
-    repo = DefinitionRepository(pool)
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     await repo.delete_mcp_server(server_id, str(user.organization_id))
     return RedirectResponse(url="/definitions?tab=mcp", status_code=303)
 
@@ -438,11 +457,15 @@ async def grant_skill_web(request: Request, agent_id: str):
     await _check_csrf(request)
     form = await request.form()
     pool = await get_pool()
+    from lucent.db.audit import AuditRepository
     from lucent.db.definitions import DefinitionRepository
 
-    repo = DefinitionRepository(pool)
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     skill_id = str(form.get("skill_id", ""))
-    await repo.grant_skill(agent_id, skill_id)
+    await repo.grant_skill(
+        agent_id, skill_id,
+        org_id=str(user.organization_id), user_id=str(user.id),
+    )
     return RedirectResponse(url=f"/definitions/agents/{agent_id}", status_code=303)
 
 
@@ -453,10 +476,14 @@ async def revoke_skill_web(request: Request, agent_id: str, skill_id: str):
     _require_admin_or_owner(user)
     await _check_csrf(request)
     pool = await get_pool()
+    from lucent.db.audit import AuditRepository
     from lucent.db.definitions import DefinitionRepository
 
-    repo = DefinitionRepository(pool)
-    await repo.revoke_skill(agent_id, skill_id)
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    await repo.revoke_skill(
+        agent_id, skill_id,
+        org_id=str(user.organization_id), user_id=str(user.id),
+    )
     return RedirectResponse(url=f"/definitions/agents/{agent_id}", status_code=303)
 
 
@@ -468,12 +495,16 @@ async def grant_mcp_web(request: Request, agent_id: str):
     await _check_csrf(request)
     form = await request.form()
     pool = await get_pool()
+    from lucent.db.audit import AuditRepository
     from lucent.db.definitions import DefinitionRepository
 
-    repo = DefinitionRepository(pool)
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     server_id = str(form.get("mcp_server_id", "") or form.get("server_id", ""))
     if server_id:
-        await repo.grant_mcp_server(agent_id, server_id)
+        await repo.grant_mcp_server(
+            agent_id, server_id,
+            org_id=str(user.organization_id), user_id=str(user.id),
+        )
     return RedirectResponse(url=f"/definitions/agents/{agent_id}", status_code=303)
 
 
@@ -484,10 +515,14 @@ async def revoke_mcp_web(request: Request, agent_id: str, server_id: str):
     _require_admin_or_owner(user)
     await _check_csrf(request)
     pool = await get_pool()
+    from lucent.db.audit import AuditRepository
     from lucent.db.definitions import DefinitionRepository
 
-    repo = DefinitionRepository(pool)
-    await repo.revoke_mcp_server(agent_id, server_id)
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    await repo.revoke_mcp_server(
+        agent_id, server_id,
+        org_id=str(user.organization_id), user_id=str(user.id),
+    )
     return RedirectResponse(url=f"/definitions/agents/{agent_id}", status_code=303)
 
 
@@ -499,11 +534,15 @@ async def update_mcp_tools_web(request: Request, agent_id: str, server_id: str):
     await _check_csrf(request)
     form = await request.form()
     pool = await get_pool()
+    from lucent.db.audit import AuditRepository
     from lucent.db.definitions import DefinitionRepository
 
-    repo = DefinitionRepository(pool)
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     tools_raw = str(form.get("allowed_tools", "")).strip()
     allowed_tools = [t.strip() for t in tools_raw.split(",") if t.strip()] if tools_raw else None
 
-    await repo.update_mcp_tool_grants(agent_id, server_id, allowed_tools=allowed_tools)
+    await repo.update_mcp_tool_grants(
+        agent_id, server_id, allowed_tools=allowed_tools,
+        org_id=str(user.organization_id), user_id=str(user.id),
+    )
     return RedirectResponse(url=f"/definitions/agents/{agent_id}", status_code=303)
