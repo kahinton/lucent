@@ -40,7 +40,23 @@ from lucent.integrations.repositories import (
     PairingChallengeRepo,
     UserLinkRepo,
 )
-from lucent.integrations.service import IntegrationService, ServiceResult
+
+
+def __getattr__(name: str):
+    """Lazy imports to avoid circular dependency (service → auth → db → integrations)."""
+    if name == "IntegrationService":
+        from lucent.integrations.service import IntegrationService
+        return IntegrationService
+    if name == "ServiceResult":
+        from lucent.integrations.service import ServiceResult
+        return ServiceResult
+    if name == "admin_router":
+        from lucent.integrations.router import admin_router
+        return admin_router
+    if name == "webhook_router":
+        from lucent.integrations.router import webhook_router
+        return webhook_router
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 from lucent.integrations.slack_adapter import SlackAdapter
 from lucent.integrations.webhooks import WebhookSignatureMiddleware
 
@@ -82,6 +98,8 @@ __all__ = [
     "UserLinkResponse",
     "UserLinkStatus",
     "VerificationMethod",
+    "admin_router",
     "decrypt_credential",
     "encrypt_credential",
+    "webhook_router",
 ]

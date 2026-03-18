@@ -1,5 +1,7 @@
 """User management and impersonation routes (admin)."""
 
+import secrets
+import time
 from uuid import UUID
 
 from fastapi import APIRouter, Form, HTTPException, Request
@@ -22,6 +24,18 @@ from ._shared import _check_csrf, get_user_context, templates
 logger = get_logger("web.routes.admin")
 
 router = APIRouter()
+
+# In-memory store for temp password reference tokens (M6 security fix)
+_temp_pw_store: dict[str, dict] = {}
+_TEMP_PW_MAX_ENTRIES = 100
+_TEMP_PW_TTL = 60
+
+
+def _cleanup_temp_pw_store():
+    now = time.time()
+    expired = [k for k, v in _temp_pw_store.items() if v["expires"] < now]
+    for k in expired:
+        del _temp_pw_store[k]
 
 
 # =============================================================================
@@ -52,18 +66,9 @@ async def users_list(request: Request):
 
     # Check for one-time temp password display (from user creation)
     temp_pw_display = None
-    temp_pw_cookie = request.cookies.get("lucent_temp_pw", "")
-    if temp_pw_cookie and ":" in temp_pw_cookie:
-        import hashlib
-        import hmac
-
-        pw, sig = temp_pw_cookie.rsplit(":", 1)
-        session_token = request.cookies.get("lucent_session", "")
-        expected_sig = hmac.new(session_token.encode(), pw.encode(), hashlib.sha256).hexdigest()[
-            :16
-        ]
-        if hmac.compare_digest(sig, expected_sig):
-            temp_pw_display = pw
+    ref = request.cookies.get("lucent_temp_pw_ref", "")
+    if ref and ref in _temp_pw_store and _temp_pw_store[ref]["expires"] > time.time():
+        temp_pw_display = _temp_pw_store.pop(ref)["password"]
 
     success = request.query_params.get("success")
     error = request.query_params.get("error")
@@ -81,9 +86,9 @@ async def users_list(request: Request):
             "error": error,
         },
     )
-    # Clear the temp password cookie after reading
-    if temp_pw_cookie:
-        response.delete_cookie("lucent_temp_pw", path="/users")
+    # Clear the temp password ref cookie after reading
+    if ref:
+        response.delete_cookie("lucent_temp_pw_ref", path="/users")
     return response
 
 
@@ -114,8 +119,6 @@ async def create_user(
     user_repo = UserRepository(pool)
 
     # Generate a unique external_id for local users
-    import secrets
-
     external_id = f"local_{secrets.token_hex(8)}"
 
     # Validate role
@@ -156,22 +159,19 @@ async def create_user(
     temp_password = secrets.token_urlsafe(12)
     await set_user_password(pool, new_user["id"], temp_password)
 
-    # Store temp password in session (not the URL) for one-time display
+    # Store temp password server-side with opaque reference token (M6)
     response = RedirectResponse(url="/users?success=user_created", status_code=303)
-    # Use a short-lived signed cookie for the temp password display
-    import hashlib
-    import hmac
-
-    session_token = request.cookies.get("lucent_session", "")
-    sig = hmac.new(session_token.encode(), temp_password.encode(), hashlib.sha256).hexdigest()[:16]
-    params = get_cookie_params()
+    _cleanup_temp_pw_store()
+    if len(_temp_pw_store) >= _TEMP_PW_MAX_ENTRIES:
+        _temp_pw_store.clear()
+    ref_token = secrets.token_urlsafe(32)
+    _temp_pw_store[ref_token] = {"password": temp_password, "expires": time.time() + _TEMP_PW_TTL}
     response.set_cookie(
-        key="lucent_temp_pw",
-        value=f"{temp_password}:{sig}",
+        key="lucent_temp_pw_ref",
+        value=ref_token,
         httponly=True,
-        secure=params["secure"],
         samesite="lax",
-        max_age=60,  # Expires after 60 seconds
+        max_age=60,
         path="/users",
     )
     return response
@@ -217,19 +217,17 @@ async def reset_user_password_web(request: Request, user_id: UUID):
 
     temp_password = await admin_reset_password(pool, user_id)
 
-    # Use same temp password cookie pattern as user creation
-    import hashlib
-    import hmac
-
-    session_token = request.cookies.get("lucent_session", "")
-    sig = hmac.new(session_token.encode(), temp_password.encode(), hashlib.sha256).hexdigest()[:16]
-    params = get_cookie_params()
+    # Store temp password server-side with opaque reference token (M6)
     response = RedirectResponse(url="/users?success=password_reset", status_code=303)
+    _cleanup_temp_pw_store()
+    if len(_temp_pw_store) >= _TEMP_PW_MAX_ENTRIES:
+        _temp_pw_store.clear()
+    ref_token = secrets.token_urlsafe(32)
+    _temp_pw_store[ref_token] = {"password": temp_password, "expires": time.time() + _TEMP_PW_TTL}
     response.set_cookie(
-        key="lucent_temp_pw",
-        value=f"{temp_password}:{sig}",
+        key="lucent_temp_pw_ref",
+        value=ref_token,
         httponly=True,
-        secure=params["secure"],
         samesite="lax",
         max_age=60,
         path="/users",

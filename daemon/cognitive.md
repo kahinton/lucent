@@ -11,7 +11,8 @@ Each cycle: perceive, reason, decide, act.
 - Check for `daemon-message` memories (messages from collaborators)
 - Check for `feedback-approved` and `feedback-rejected` memories (process these FIRST)
 - Search for pending `daemon-task` memories
-- **Call `list_pending_requests` to find requests waiting for task planning**
+- **Call `list_active_work` to see ALL non-completed requests and their task status** — this shows what's already planned, in progress, or queued. Review this BEFORE creating any new requests.
+- Call `list_pending_requests` to find requests waiting for task planning
 - Call `list_pending_tasks` to see what's queued for dispatch
 - Check goal progress
 - Assess what's changed in your environment
@@ -25,6 +26,11 @@ Each cycle: perceive, reason, decide, act.
 
 ### Decide
 Pick 1-3 high-impact actions. Quality over quantity. Don't invent busywork.
+
+**CRITICAL — Deduplication check**: Before creating any new request or task, compare it against the `list_active_work` results. If an existing request already covers the same goal (even partially), do NOT create a duplicate. Instead:
+- If the existing request needs more tasks, add tasks to it
+- If the existing request is already in progress, wait for it to complete
+- If the existing request is stuck/stale, investigate why rather than creating a parallel effort
 
 ### Act
 Use memory tools directly:

@@ -442,7 +442,7 @@ async def grant_skill_web(request: Request, agent_id: str):
 
     repo = DefinitionRepository(pool)
     skill_id = str(form.get("skill_id", ""))
-    await repo.assign_skill_to_agent(agent_id, skill_id, str(user.organization_id))
+    await repo.grant_skill(agent_id, skill_id)
     return RedirectResponse(url=f"/definitions/agents/{agent_id}", status_code=303)
 
 
@@ -456,7 +456,7 @@ async def revoke_skill_web(request: Request, agent_id: str, skill_id: str):
     from lucent.db.definitions import DefinitionRepository
 
     repo = DefinitionRepository(pool)
-    await repo.remove_skill_from_agent(agent_id, skill_id, str(user.organization_id))
+    await repo.revoke_skill(agent_id, skill_id)
     return RedirectResponse(url=f"/definitions/agents/{agent_id}", status_code=303)
 
 
@@ -471,8 +471,9 @@ async def grant_mcp_web(request: Request, agent_id: str):
     from lucent.db.definitions import DefinitionRepository
 
     repo = DefinitionRepository(pool)
-    server_id = str(form.get("server_id", ""))
-    await repo.assign_mcp_to_agent(agent_id, server_id, str(user.organization_id))
+    server_id = str(form.get("mcp_server_id", "") or form.get("server_id", ""))
+    if server_id:
+        await repo.grant_mcp_server(agent_id, server_id)
     return RedirectResponse(url=f"/definitions/agents/{agent_id}", status_code=303)
 
 
@@ -486,7 +487,7 @@ async def revoke_mcp_web(request: Request, agent_id: str, server_id: str):
     from lucent.db.definitions import DefinitionRepository
 
     repo = DefinitionRepository(pool)
-    await repo.remove_mcp_from_agent(agent_id, server_id, str(user.organization_id))
+    await repo.revoke_mcp_server(agent_id, server_id)
     return RedirectResponse(url=f"/definitions/agents/{agent_id}", status_code=303)
 
 
@@ -506,5 +507,5 @@ async def update_mcp_tools_web(request: Request, agent_id: str, server_id: str):
     tools_raw = str(form.get("allowed_tools", "")).strip()
     allowed_tools = [t.strip() for t in tools_raw.split(",") if t.strip()] if tools_raw else None
 
-    await repo.update_agent_mcp_tools(agent_id, server_id, org_id, allowed_tools=allowed_tools)
+    await repo.update_mcp_tool_grants(agent_id, server_id, allowed_tools=allowed_tools)
     return RedirectResponse(url=f"/definitions/agents/{agent_id}", status_code=303)

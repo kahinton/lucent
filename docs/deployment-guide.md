@@ -179,6 +179,12 @@ docker run --rm -v lucent_data:/data -v $(pwd):/backup alpine \
 | `LUCENT_SECURE_COOKIES` | `false` | Set `true` behind HTTPS |
 | `LUCENT_SIGNING_SECRET` | *(random)* | HMAC secret for impersonation cookies — set a fixed value for persistence across restarts |
 
+### Integrations
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LUCENT_CREDENTIAL_KEY` | — | Fernet encryption key for integration credentials. Generate with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`. Required for Slack/Discord integrations. |
+
 ### Rate Limiting & CORS
 
 | Variable | Default | Description |

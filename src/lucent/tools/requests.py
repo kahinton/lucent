@@ -247,6 +247,31 @@ Use this during cognitive cycles to discover new work."""
         return json.dumps(requests, default=serialize)
 
     @mcp.tool(
+        description="""List all active (non-completed) work — requests and their task status summaries.
+
+Returns requests in pending/in_progress/planned status along with task counts
+broken down by status (pending, running, completed, failed). Use this during
+cognitive cycles to understand what's already being worked on BEFORE creating
+new requests. This prevents duplicate work items."""
+    )
+    async def list_active_work() -> str:
+        _, org_id, _ = await _get_current_user_context()
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+
+        repo = await _get_request_repository()
+        work = await repo.list_active_work(str(org_id))
+
+        def serialize(obj):
+            if hasattr(obj, "isoformat"):
+                return obj.isoformat()
+            if isinstance(obj, UUID):
+                return str(obj)
+            return str(obj)
+
+        return json.dumps(work, default=serialize)
+
+    @mcp.tool(
         description="""List pending tracked tasks in the queue.
 
 Returns tasks that are waiting to be claimed and executed, ordered by priority.

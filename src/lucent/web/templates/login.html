@@ -47,6 +47,12 @@
             </div>
             {% endif %}
 
+            {% if session_warning %}
+            <div class="mb-4 p-3 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 text-blue-700 dark:text-blue-400 rounded-lg text-xs">
+                {{ session_warning }}
+            </div>
+            {% endif %}
+
             <form method="POST" action="/login" class="space-y-4">
                 <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
                 {% for field in fields %}

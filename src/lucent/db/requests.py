@@ -268,6 +268,35 @@ class RequestRepository:
             )
         return [dict(r) for r in rows]
 
+    async def list_active_work(self, org_id: str) -> list[dict]:
+        """Get all non-completed requests with task status summaries.
+
+        Returns requests in pending/in_progress/planned status along with
+        counts of tasks by status, so the cognitive loop can see what's
+        already being worked on and avoid creating duplicate work.
+        """
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT r.id, r.title, r.description, r.status, r.priority,
+                          r.source, r.created_at,
+                          count(t.id) FILTER (WHERE t.status = 'pending') AS tasks_pending,
+                          count(t.id) FILTER (WHERE t.status = 'planned') AS tasks_planned,
+                          count(t.id) FILTER (WHERE t.status IN ('claimed', 'running')) AS tasks_running,
+                          count(t.id) FILTER (WHERE t.status = 'completed') AS tasks_completed,
+                          count(t.id) FILTER (WHERE t.status = 'failed') AS tasks_failed,
+                          count(t.id) AS tasks_total
+                   FROM requests r LEFT JOIN tasks t ON t.request_id = r.id
+                   WHERE r.organization_id = $1
+                     AND r.status NOT IN ('completed', 'failed', 'cancelled')
+                   GROUP BY r.id
+                   ORDER BY
+                     CASE r.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1
+                                     WHEN 'medium' THEN 2 ELSE 3 END,
+                     r.created_at""",
+                UUID(org_id),
+            )
+        return [dict(r) for r in rows]
+
     async def list_pending_tasks(self, org_id: str) -> list[dict]:
         """Get all tasks ready to be claimed.
 

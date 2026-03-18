@@ -546,6 +546,44 @@ Base path: `/api/definitions`
 
 > **Note:** These endpoints are from the earlier daemon task system and are still functional but superseded by the Request/Task API above.
 
+## Integrations
+
+See the full [Integrations API Reference](integrations-api-reference.md) for detailed request/response schemas.
+
+Base paths: `/integrations/webhook/*` (webhooks), `/api/v1/integrations` (admin CRUD, linking)
+
+### Webhooks
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `POST` | `/integrations/webhook/{provider}` | Signature | Receive platform webhook (Slack, Discord) |
+
+### Admin (admin+ role)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/v1/integrations` | Create integration |
+| `GET` | `/api/v1/integrations` | List integrations |
+| `GET` | `/api/v1/integrations/{id}` | Get integration |
+| `PATCH` | `/api/v1/integrations/{id}` | Update integration (config, channels, status) |
+| `DELETE` | `/api/v1/integrations/{id}` | Soft-delete integration |
+| `GET` | `/api/v1/integrations/links` | List user links |
+| `POST` | `/api/v1/integrations/links` | Admin-create user link |
+| `DELETE` | `/api/v1/integrations/links/{id}` | Revoke user link |
+
+### Pairing (any authenticated user)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/v1/integrations/link` | Generate pairing code |
+| `POST` | `/api/v1/integrations/verify` | Verify pairing code and activate link |
+
+---
+
+## Legacy Daemon Endpoints
+
+> **Note:** These endpoints are from the earlier daemon task system and are still functional but superseded by the Request/Task API above.
+
 Base path: `/api/daemon`
 
 | Method | Path | Description |

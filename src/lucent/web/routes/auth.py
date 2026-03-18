@@ -65,6 +65,7 @@ async def login_page(request: Request, error: str | None = None):
             "csrf_token": csrf_token,
             "csrf_field_name": CSRF_FIELD_NAME,
             "fields": provider.get_login_fields(),
+            "session_warning": "Logging in will end any other active sessions.",
         },
     )
     _set_csrf_cookie(response, csrf_token)
@@ -93,6 +94,7 @@ async def login_submit(request: Request):
             {
                 "fields": provider.get_login_fields(),
                 "error": f"Too many login attempts. Please try again in {retry_after} seconds.",
+                "session_warning": "Logging in will end any other active sessions.",
             },
             status_code=429,
         )
@@ -112,6 +114,7 @@ async def login_submit(request: Request):
             {
                 "fields": provider.get_login_fields(),
                 "error": "An unexpected error occurred. Please try again later.",
+                "session_warning": "Logging in will end any other active sessions.",
             },
             status_code=500,
         )
@@ -128,6 +131,7 @@ async def login_submit(request: Request):
             {
                 "fields": provider.get_login_fields(),
                 "error": "Invalid credentials. Please try again.",
+                "session_warning": "Logging in will end any other active sessions.",
             },
             status_code=401,
         )
@@ -143,6 +147,7 @@ async def login_submit(request: Request):
             {
                 "fields": provider.get_login_fields(),
                 "error": "An unexpected error occurred. Please try again later.",
+                "session_warning": "Logging in will end any other active sessions.",
             },
             status_code=500,
         )

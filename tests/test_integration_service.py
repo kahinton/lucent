@@ -444,3 +444,397 @@ class TestIntegrationRepository:
         assert result == integration
         repo._integrations.create.assert_awaited_once()
         repo._audit.log_integration_event.assert_awaited_once()
+
+
+# ===========================================================================
+# handle_event pipeline tests
+# ===========================================================================
+
+
+def _make_event(
+    *,
+    event_type: str = "message",
+    platform: str = "slack",
+    external_user_id: str = "U_SLACK_123",
+    channel_id: str = "C_GENERAL",
+    text: str = "hello lucent",
+    thread_id: str | None = None,
+    external_workspace_id: str | None = None,
+) -> "IntegrationEvent":
+    from lucent.integrations.models import EventType, IntegrationEvent
+
+    et = EventType(event_type) if isinstance(event_type, str) else event_type
+    return IntegrationEvent(
+        event_type=et,
+        platform=platform,
+        external_user_id=external_user_id,
+        channel_id=channel_id,
+        text=text,
+        thread_id=thread_id,
+        external_workspace_id=external_workspace_id,
+    )
+
+
+class _MockAdapter:
+    """Mock adapter for pipeline tests."""
+
+    def __init__(self) -> None:
+        self.platform = "slack"
+        self.verify_signature = AsyncMock(return_value=True)
+        self.parse_event = AsyncMock()
+        self.send_message = AsyncMock(return_value="msg_ts_123")
+        self.format_response = AsyncMock(return_value={"text": "response"})
+
+
+def _make_pipeline_service(
+    *,
+    user: dict | None = None,
+    link: dict | None = None,
+    rate_allowed: bool = True,
+    mcp_result: str = "Search results here",
+) -> tuple["IntegrationService", MagicMock]:
+    """Build an IntegrationService with pipeline dependencies mocked."""
+    from lucent.integrations.service import IntegrationService
+
+    pool = _make_pool()
+
+    with (
+        patch("lucent.integrations.service.get_rate_limiter") as mock_rl,
+        patch("lucent.integrations.service.UserRepository") as mock_user_cls,
+        patch("lucent.integrations.service.AuditRepository") as mock_audit_cls,
+        patch("lucent.integrations.service.IntegrationRepo"),
+        patch("lucent.integrations.service.UserLinkRepo"),
+        patch("lucent.integrations.service.PairingChallengeRepo"),
+        patch("lucent.integrations.service.PairingChallengeService"),
+        patch("lucent.integrations.service.IdentityResolver"),
+    ):
+        rl = MagicMock()
+        rl_result = MagicMock()
+        rl_result.allowed = rate_allowed
+        rl_result.headers = {}
+        rl.check_rate_limit = MagicMock(return_value=rl_result)
+        mock_rl.return_value = rl
+
+        svc = IntegrationService(pool)
+
+    # Set up identity resolver
+    if link is not None:
+        identity = IdentityResult(
+            resolved=True,
+            user_id=link.get("user_id", str(uuid4())),
+            organization_id=link.get("organization_id", str(uuid4())),
+            link=link,
+        )
+    else:
+        identity = IdentityResult(resolved=False)
+
+    svc._identity_resolver = MagicMock()
+    svc._identity_resolver.resolve = AsyncMock(return_value=identity)
+
+    # Set up user repo
+    svc._user_repo = MagicMock()
+    svc._user_repo.get_by_id = AsyncMock(return_value=user)
+
+    # Set up rate limiter
+    svc._rate_limiter = MagicMock()
+    rl_result = MagicMock()
+    rl_result.allowed = rate_allowed
+    svc._rate_limiter.check_rate_limit = MagicMock(return_value=rl_result)
+
+    # Set up audit
+    svc._audit_repo = MagicMock()
+    svc._audit_repo.log_integration_event = AsyncMock()
+
+    # Mock MCP dispatch
+    svc._dispatch_to_mcp = AsyncMock(return_value=mcp_result)
+
+    return svc, pool
+
+
+class TestHandleEventSkipNonActionable:
+    """handle_event skips URL verification and unknown events."""
+
+    async def test_url_verification_skipped(self):
+        svc, _ = _make_pipeline_service()
+        event = _make_event(event_type="url_verification")
+        integration = _make_integration()
+        adapter = _MockAdapter()
+
+        result = await svc.handle_event(event, integration, adapter)
+        assert result.success is True
+        assert result.response_text == ""
+
+    async def test_unknown_event_skipped(self):
+        svc, _ = _make_pipeline_service()
+        event = _make_event(event_type="unknown")
+        integration = _make_integration()
+        adapter = _MockAdapter()
+
+        result = await svc.handle_event(event, integration, adapter)
+        assert result.success is True
+        assert result.response_text == ""
+
+
+class TestHandleEventChannelAllowlist:
+    """Step 1: Channel allowlist check."""
+
+    async def test_allowed_channel_passes(self):
+        user = _make_user()
+        link = _make_link(user_id=user["id"], organization_id=str(user["organization_id"]))
+        svc, _ = _make_pipeline_service(user=user, link=link)
+        event = _make_event(channel_id="C_ALLOWED")
+        integration = _make_integration()
+        integration["allowed_channels"] = ["C_ALLOWED"]
+        adapter = _MockAdapter()
+
+        result = await svc.handle_event(event, integration, adapter)
+        assert result.success is True
+
+    async def test_blocked_channel_fails(self):
+        svc, _ = _make_pipeline_service()
+        event = _make_event(channel_id="C_BLOCKED")
+        integration = _make_integration()
+        integration["allowed_channels"] = ["C_ALLOWED_ONLY"]
+        adapter = _MockAdapter()
+
+        result = await svc.handle_event(event, integration, adapter)
+        assert result.success is False
+        assert result.error_stage == "channel_allowlist"
+
+    async def test_empty_allowlist_permits_all(self):
+        user = _make_user()
+        link = _make_link(user_id=user["id"], organization_id=str(user["organization_id"]))
+        svc, _ = _make_pipeline_service(user=user, link=link)
+        event = _make_event(channel_id="C_ANY")
+        integration = _make_integration()
+        integration["allowed_channels"] = []
+        adapter = _MockAdapter()
+
+        result = await svc.handle_event(event, integration, adapter)
+        assert result.success is True
+
+
+class TestHandleEventIdentityResolution:
+    """Step 2: Identity resolution."""
+
+    async def test_unlinked_user_fails(self):
+        svc, _ = _make_pipeline_service(link=None)
+        event = _make_event()
+        integration = _make_integration()
+        adapter = _MockAdapter()
+
+        result = await svc.handle_event(event, integration, adapter)
+        assert result.success is False
+        assert result.error_stage == "identity_resolution"
+        adapter.send_message.assert_awaited()  # Ephemeral error sent
+
+    async def test_linked_user_passes(self):
+        user = _make_user()
+        link = _make_link(user_id=user["id"], organization_id=str(user["organization_id"]))
+        svc, _ = _make_pipeline_service(user=user, link=link)
+        event = _make_event()
+        integration = _make_integration()
+        adapter = _MockAdapter()
+
+        result = await svc.handle_event(event, integration, adapter)
+        assert result.success is True
+        assert result.user_id is not None
+
+
+class TestHandleEventRBAC:
+    """Step 3: RBAC permission check."""
+
+    async def test_inactive_user_denied(self):
+        user = _make_user(is_active=False)
+        link = _make_link(user_id=user["id"], organization_id=str(user["organization_id"]))
+        svc, _ = _make_pipeline_service(user=user, link=link)
+        # Override to return inactive user
+        svc._user_repo.get_by_id = AsyncMock(return_value=user)
+        event = _make_event()
+        integration = _make_integration()
+        adapter = _MockAdapter()
+
+        result = await svc.handle_event(event, integration, adapter)
+        assert result.success is False
+        assert result.error_stage == "rbac"
+
+    async def test_user_not_found_denied(self):
+        link = _make_link()
+        svc, _ = _make_pipeline_service(user=None, link=link)
+        event = _make_event()
+        integration = _make_integration()
+        adapter = _MockAdapter()
+
+        result = await svc.handle_event(event, integration, adapter)
+        assert result.success is False
+        assert result.error_stage == "rbac"
+
+
+class TestHandleEventRateLimit:
+    """Step 4: Rate limit check."""
+
+    async def test_rate_limited_user_denied(self):
+        user = _make_user()
+        link = _make_link(user_id=user["id"], organization_id=str(user["organization_id"]))
+        svc, _ = _make_pipeline_service(user=user, link=link, rate_allowed=False)
+        event = _make_event()
+        integration = _make_integration()
+        adapter = _MockAdapter()
+
+        result = await svc.handle_event(event, integration, adapter)
+        assert result.success is False
+        assert result.error_stage == "rate_limit"
+
+
+class TestHandleEventSanitize:
+    """Step 5: Input sanitization."""
+
+    async def test_empty_text_returns_hint(self):
+        user = _make_user()
+        link = _make_link(user_id=user["id"], organization_id=str(user["organization_id"]))
+        svc, _ = _make_pipeline_service(user=user, link=link)
+        event = _make_event(text="")
+        integration = _make_integration()
+        adapter = _MockAdapter()
+
+        result = await svc.handle_event(event, integration, adapter)
+        assert result.success is True
+        assert "send a message" in result.response_text.lower() or "command" in result.response_text.lower()
+
+    async def test_whitespace_only_returns_hint(self):
+        user = _make_user()
+        link = _make_link(user_id=user["id"], organization_id=str(user["organization_id"]))
+        svc, _ = _make_pipeline_service(user=user, link=link)
+        event = _make_event(text="   \n  \t  ")
+        integration = _make_integration()
+        adapter = _MockAdapter()
+
+        result = await svc.handle_event(event, integration, adapter)
+        assert result.success is True
+
+
+class TestHandleEventDispatch:
+    """Steps 6-9: Dispatch, format, send."""
+
+    async def test_full_pipeline_success(self):
+        user = _make_user()
+        link = _make_link(user_id=user["id"], organization_id=str(user["organization_id"]))
+        svc, _ = _make_pipeline_service(
+            user=user, link=link, mcp_result="Here are your results",
+        )
+        event = _make_event(text="search for something")
+        integration = _make_integration()
+        adapter = _MockAdapter()
+
+        result = await svc.handle_event(event, integration, adapter)
+        assert result.success is True
+        assert result.response_text == "Here are your results"
+        adapter.format_response.assert_awaited_once()
+        adapter.send_message.assert_awaited_once()
+
+    async def test_pipeline_audits_command(self):
+        user = _make_user()
+        link = _make_link(user_id=user["id"], organization_id=str(user["organization_id"]))
+        svc, _ = _make_pipeline_service(user=user, link=link)
+        event = _make_event(text="test command")
+        integration = _make_integration()
+        adapter = _MockAdapter()
+
+        await svc.handle_event(event, integration, adapter)
+        # Should audit identity_resolved and integration_command
+        assert svc._audit_repo.log_integration_event.await_count >= 2
+
+
+class TestHandleEventExceptionHandling:
+    """Pipeline exception handling."""
+
+    async def test_internal_error_sends_ephemeral(self):
+        user = _make_user()
+        link = _make_link(user_id=user["id"], organization_id=str(user["organization_id"]))
+        svc, _ = _make_pipeline_service(user=user, link=link)
+        # Make MCP dispatch blow up
+        svc._dispatch_to_mcp = AsyncMock(side_effect=RuntimeError("MCP down"))
+        event = _make_event(text="trigger error")
+        integration = _make_integration()
+        adapter = _MockAdapter()
+
+        result = await svc.handle_event(event, integration, adapter)
+        assert result.success is False
+        assert result.error_stage == "internal"
+
+    async def test_ephemeral_send_failure_swallowed(self):
+        svc, _ = _make_pipeline_service(link=None)
+        event = _make_event()
+        integration = _make_integration()
+        adapter = _MockAdapter()
+        adapter.send_message = AsyncMock(side_effect=Exception("send failed"))
+
+        # Should not raise even though send fails
+        result = await svc.handle_event(event, integration, adapter)
+        assert result.success is False
+
+
+class TestSanitizeInput:
+    """Tests for IntegrationService._sanitize_input static method."""
+
+    def test_empty_string(self):
+        from lucent.integrations.service import IntegrationService
+
+        assert IntegrationService._sanitize_input("") == ""
+
+    def test_strips_control_chars(self):
+        from lucent.integrations.service import IntegrationService
+
+        result = IntegrationService._sanitize_input("hello\x00\x07world")
+        assert result == "helloworld"
+
+    def test_preserves_newlines_tabs(self):
+        from lucent.integrations.service import IntegrationService
+
+        result = IntegrationService._sanitize_input("line1\nline2\ttab")
+        assert result == "line1\nline2\ttab"
+
+    def test_truncates_to_max_length(self):
+        from lucent.integrations.service import IntegrationService, MAX_INPUT_LENGTH
+
+        long_text = "a" * (MAX_INPUT_LENGTH + 100)
+        result = IntegrationService._sanitize_input(long_text)
+        assert len(result) == MAX_INPUT_LENGTH
+
+    def test_strips_whitespace(self):
+        from lucent.integrations.service import IntegrationService
+
+        result = IntegrationService._sanitize_input("  hello  ")
+        assert result == "hello"
+
+
+class TestServiceResult:
+    """Tests for ServiceResult dataclass."""
+
+    def test_success_result(self):
+        from lucent.integrations.service import ServiceResult
+
+        r = ServiceResult(success=True, response_text="ok")
+        assert r.success is True
+        assert r.response_text == "ok"
+        assert r.user_id is None
+        assert r.error_stage is None
+
+    def test_failure_result(self):
+        from lucent.integrations.service import ServiceResult
+
+        r = ServiceResult(
+            success=False,
+            response_text="error",
+            error_stage="identity_resolution",
+            user_id=uuid4(),
+        )
+        assert r.success is False
+        assert r.error_stage == "identity_resolution"
+
+    def test_frozen(self):
+        from lucent.integrations.service import ServiceResult
+
+        r = ServiceResult(success=True, response_text="ok")
+        with pytest.raises(AttributeError):
+            r.success = False  # type: ignore[misc]
