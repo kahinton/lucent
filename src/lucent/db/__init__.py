@@ -21,6 +21,7 @@ from lucent.db.audit import AuditRepository
 
 # Repositories
 from lucent.db.definitions import DefinitionRepository
+from lucent.db.integrations import IntegrationRepository
 from lucent.db.memory import MemoryRepository, VersionConflictError
 from lucent.db.organization import OrganizationRepository
 from lucent.db.pool import close_db, get_pool, init_db
@@ -54,6 +55,7 @@ __all__ = [
     "MemoryRepository",
     "VersionConflictError",
     "DefinitionRepository",
+    "IntegrationRepository",
     "UserRepository",
     "ApiKeyRepository",
     "OrganizationRepository",

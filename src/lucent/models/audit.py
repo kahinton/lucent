@@ -19,6 +19,18 @@ class AuditActionType(str, Enum):
     UNSHARE = "unshare"
     HARD_DELETE = "hard_delete"
 
+    # Integration security events (dedicated action_types for queryability)
+    SIGNATURE_VERIFICATION_FAILED = "signature_verification_failed"
+    CHANNEL_NOT_ALLOWED = "channel_not_allowed"
+    CHALLENGE_FAILED = "challenge_failed"
+    RESOLUTION_FAILED = "resolution_failed"
+    INTEGRATION_RATE_LIMITED = "integration_rate_limited"
+    INTEGRATION_REVOKED = "integration_revoked"
+    LINK_REVOKED = "link_revoked"
+
+    # Integration operational events (use this with context JSONB)
+    INTEGRATION_EVENT = "integration_event"
+
 
 class CreateAuditLogInput(BaseModel):
     """Input model for creating an audit log entry."""

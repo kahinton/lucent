@@ -228,6 +228,17 @@ async def daemon_feedback(
     updated_metadata = {**existing_metadata, "feedback": feedback}
     await repo.update(memory_id=memory_id, metadata=updated_metadata, tags=updated_tags)
 
+    # Wake the daemon's cognitive loop so it processes the feedback immediately
+    if action in ("approve", "reject"):
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "SELECT pg_notify('request_ready', $1)",
+                    f'{{"type": "feedback", "action": "{action}", "memory_id": "{memory_id}"}}',
+                )
+        except Exception:
+            pass  # Non-critical — daemon will pick it up on next cycle anyway
+
     await audit_repo.log(
         memory_id=memory_id,
         action_type="update",

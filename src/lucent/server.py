@@ -353,8 +353,13 @@ def main() -> None:
     for route in mcp_app.routes:
         app.routes.append(route)
 
+    # Wrap with webhook signature verification (only /integrations/webhook/*)
+    from lucent.integrations.middleware import SignatureVerificationMiddleware
+
+    wrapped_app = SignatureVerificationMiddleware(app)
+
     # Wrap the entire app with our auth middleware (only applies to /mcp paths)
-    wrapped_app = MCPAuthMiddleware(app)
+    wrapped_app = MCPAuthMiddleware(wrapped_app)
 
     logger.info(f"Starting Lucent server on http://{HOST}:{PORT}")
     logger.info(f"  MCP endpoint: http://{HOST}:{PORT}/mcp")

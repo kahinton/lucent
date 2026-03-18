@@ -91,6 +91,9 @@ class Permission(str, Enum):
     ORG_DELETE = "org.delete"
     ORG_TRANSFER = "org.transfer"
 
+    # Integration permissions
+    MANAGE_INTEGRATIONS = "integrations.manage"
+
 
 # Permission matrix: which roles have which permissions
 ROLE_PERMISSIONS: dict[Role, set[Permission]] = {
@@ -130,6 +133,8 @@ ROLE_PERMISSIONS: dict[Role, set[Permission]] = {
         Permission.USERS_MANAGE,
         # Org (view only)
         Permission.ORG_VIEW,
+        # Integrations
+        Permission.MANAGE_INTEGRATIONS,
     },
     Role.OWNER: {
         # All admin permissions plus...
@@ -155,6 +160,8 @@ ROLE_PERMISSIONS: dict[Role, set[Permission]] = {
         Permission.ORG_UPDATE,
         Permission.ORG_DELETE,
         Permission.ORG_TRANSFER,
+        # Integrations
+        Permission.MANAGE_INTEGRATIONS,
     },
 }
 

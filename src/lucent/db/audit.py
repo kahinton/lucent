@@ -1,6 +1,7 @@
 """Audit repository for Lucent.
 
-Handles audit log operations for tracking memory changes.
+Handles audit log operations for tracking memory changes
+and integration lifecycle events.
 """
 
 from datetime import datetime
@@ -9,6 +10,62 @@ from uuid import UUID
 
 import asyncpg
 from asyncpg import Pool
+
+# Integration event type constants (Section 9 of integration design).
+# Security events get dedicated action_types for direct queryability.
+# Operational events use INTEGRATION_EVENT action_type with event_type in context JSONB.
+
+# -- Security action_types (7) --
+SIGNATURE_VERIFICATION_FAILED = "signature_verification_failed"
+CHANNEL_NOT_ALLOWED = "channel_not_allowed"
+CHALLENGE_FAILED = "challenge_failed"
+RESOLUTION_FAILED = "resolution_failed"
+INTEGRATION_RATE_LIMITED = "integration_rate_limited"
+INTEGRATION_REVOKED = "integration_revoked"
+LINK_REVOKED = "link_revoked"
+
+SECURITY_EVENT_TYPES = frozenset({
+    SIGNATURE_VERIFICATION_FAILED,
+    CHANNEL_NOT_ALLOWED,
+    CHALLENGE_FAILED,
+    RESOLUTION_FAILED,
+    INTEGRATION_RATE_LIMITED,
+    INTEGRATION_REVOKED,
+    LINK_REVOKED,
+})
+
+# -- Operational event_type values (11, stored in context JSONB) --
+INTEGRATION_CREATED = "integration_created"
+INTEGRATION_UPDATED = "integration_updated"
+INTEGRATION_DISABLED = "integration_disabled"
+CHALLENGE_ISSUED = "challenge_issued"
+CHALLENGE_SUCCEEDED = "challenge_succeeded"
+LINK_ACTIVATED = "link_activated"
+LINK_SUPERSEDED = "link_superseded"
+LINK_ORPHANED = "link_orphaned"
+LINK_DISABLED = "link_disabled"
+IDENTITY_RESOLVED = "identity_resolved"
+INTEGRATION_COMMAND = "integration_command"
+
+OPERATIONAL_EVENT_TYPES = frozenset({
+    INTEGRATION_CREATED,
+    INTEGRATION_UPDATED,
+    INTEGRATION_DISABLED,
+    CHALLENGE_ISSUED,
+    CHALLENGE_SUCCEEDED,
+    LINK_ACTIVATED,
+    LINK_SUPERSEDED,
+    LINK_ORPHANED,
+    LINK_DISABLED,
+    IDENTITY_RESOLVED,
+    INTEGRATION_COMMAND,
+})
+
+# Union of all 18 integration event types
+ALL_INTEGRATION_EVENT_TYPES = SECURITY_EVENT_TYPES | OPERATIONAL_EVENT_TYPES
+
+# The shared action_type used for operational events in the audit log
+INTEGRATION_EVENT = "integration_event"
 
 
 class AuditRepository:
@@ -428,3 +485,62 @@ class AuditRepository:
             result["snapshot"] = row["snapshot"]
 
         return result
+
+    async def log_integration_event(
+        self,
+        event_type: str,
+        organization_id: UUID,
+        user_id: UUID | None = None,
+        integration_id: UUID | None = None,
+        context: dict[str, Any] | None = None,
+        notes: str | None = None,
+    ) -> dict[str, Any]:
+        """Log an integration lifecycle event.
+
+        Security events (in SECURITY_EVENT_TYPES) are stored with their own
+        action_type for direct queryability. Operational events are stored
+        with action_type='integration_event' and the specific event_type
+        in the context JSONB.
+
+        Args:
+            event_type: One of the 18 integration event type constants.
+            organization_id: The organization this event belongs to.
+            user_id: The user who triggered the event (if applicable).
+            integration_id: The integration involved (if applicable).
+            context: Additional event-specific metadata.
+            notes: Optional human-readable notes.
+
+        Returns:
+            The created audit log entry.
+
+        Raises:
+            ValueError: If event_type is not a recognized integration event.
+        """
+        if event_type not in ALL_INTEGRATION_EVENT_TYPES:
+            raise ValueError(
+                f"Unknown integration event type: {event_type}. "
+                f"Must be one of: {sorted(ALL_INTEGRATION_EVENT_TYPES)}"
+            )
+
+        ctx = dict(context) if context else {}
+        if integration_id:
+            ctx["integration_id"] = str(integration_id)
+
+        if event_type in SECURITY_EVENT_TYPES:
+            action_type = event_type
+        else:
+            action_type = INTEGRATION_EVENT
+            ctx["event_type"] = event_type
+
+        # Integration events use a zero UUID as memory_id since they
+        # are not tied to a specific memory.
+        sentinel_id = UUID("00000000-0000-0000-0000-000000000000")
+
+        return await self.log(
+            memory_id=sentinel_id,
+            action_type=action_type,
+            user_id=user_id,
+            organization_id=organization_id,
+            context=ctx,
+            notes=notes,
+        )
