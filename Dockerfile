@@ -38,5 +38,9 @@ USER lucent
 # Default port
 EXPOSE 8766
 
+# Health check
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=15s \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8766/api/health')" || exit 1
+
 # Run the server
 CMD ["lucent"]

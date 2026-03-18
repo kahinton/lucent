@@ -477,7 +477,7 @@ Returns schedules where `next_run_at <= now()` and `status = 'active'` and `enab
 ### Update Schedule
 
 ```
-PATCH /api/schedules/{schedule_id}
+PUT /api/schedules/{schedule_id}
 ```
 
 ### Toggle Schedule

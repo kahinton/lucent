@@ -44,6 +44,7 @@ services:
       - ./pyproject.toml:/app/pyproject.toml:ro
       - ./.github/skills:/app/.github/skills:ro
       - ./.github/agents/definitions:/app/.github/agents/definitions:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     ports:
       - "${LUCENT_PORT:-8766}:8766"
     healthcheck:
