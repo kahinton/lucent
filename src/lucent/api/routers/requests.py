@@ -2,7 +2,7 @@
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from lucent.api.deps import AuthenticatedUser, get_pool
@@ -222,14 +222,17 @@ async def start_task(task_id: UUID, user: AuthenticatedUser, pool=Depends(get_po
 @router.post("/tasks/{task_id}/complete")
 async def complete_task(
     task_id: UUID,
-    result: str,
     user: AuthenticatedUser,
     pool=Depends(get_pool),
+    result: str | None = None,
+    body: dict | None = Body(None),
 ):
     from lucent.db.requests import RequestRepository
 
+    # Accept result from JSON body (preferred) or query param (legacy fallback)
+    actual_result = (body or {}).get("result", result) or ""
     repo = RequestRepository(pool)
-    task = await repo.complete_task(str(task_id), result, org_id=str(user.organization_id))
+    task = await repo.complete_task(str(task_id), actual_result, org_id=str(user.organization_id))
     if not task:
         raise HTTPException(404, "Task not found")
     return task
@@ -238,14 +241,17 @@ async def complete_task(
 @router.post("/tasks/{task_id}/fail")
 async def fail_task(
     task_id: UUID,
-    error: str,
     user: AuthenticatedUser,
     pool=Depends(get_pool),
+    error: str | None = None,
+    body: dict | None = Body(None),
 ):
     from lucent.db.requests import RequestRepository
 
+    # Accept error from JSON body (preferred) or query param (legacy fallback)
+    actual_error = (body or {}).get("error", error) or ""
     repo = RequestRepository(pool)
-    task = await repo.fail_task(str(task_id), error, org_id=str(user.organization_id))
+    task = await repo.fail_task(str(task_id), actual_error, org_id=str(user.organization_id))
     if not task:
         raise HTTPException(404, "Task not found")
     return task

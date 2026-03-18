@@ -552,7 +552,12 @@ class RequestRepository:
             )
         return dict(row)
 
-    async def list_task_events(self, task_id: str, limit: int = 100, org_id: str | None = None) -> list[dict]:
+    async def list_task_events(
+        self,
+        task_id: str,
+        limit: int = 100,
+        org_id: str | None = None,
+    ) -> list[dict]:
         async with self.pool.acquire() as conn:
             if org_id:
                 rows = await conn.fetch(

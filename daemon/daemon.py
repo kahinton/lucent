@@ -600,11 +600,13 @@ class RequestAPI:
             async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
                 resp = await client.post(
                     f"{API_BASE}/requests/tasks/{task_id}/complete",
-                    params={"result": result[:8000]},
+                    json={"result": result[:50000]},
                     headers=API_HEADERS,
                 )
                 if resp.status_code == 200:
                     return resp.json()
+                else:
+                    log(f"API complete_task returned {resp.status_code}: {resp.text[:200]}", "WARN")
         except Exception as e:
             log(f"API complete_task failed: {e}", "WARN")
         return None
@@ -615,11 +617,13 @@ class RequestAPI:
             async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
                 resp = await client.post(
                     f"{API_BASE}/requests/tasks/{task_id}/fail",
-                    params={"error": error[:2000]},
+                    json={"error": error[:10000]},
                     headers=API_HEADERS,
                 )
                 if resp.status_code == 200:
                     return resp.json()
+                else:
+                    log(f"API fail_task returned {resp.status_code}: {resp.text[:200]}", "WARN")
         except Exception as e:
             log(f"API fail_task failed: {e}", "WARN")
         return None
@@ -1663,7 +1667,10 @@ class LucentDaemon:
                     headers=API_HEADERS,
                 )
                 if resp.status_code != 200:
-                    log(f"Sandbox template {template_id[:8]} not found (HTTP {resp.status_code})", "WARN")
+                    log(
+                        f"Sandbox template {template_id[:8]} not found (HTTP {resp.status_code})",
+                        "WARN",
+                    )
                     return None
 
                 tpl = resp.json()
