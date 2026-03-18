@@ -125,7 +125,7 @@ Lucent uses a pluggable authentication system configured via `LUCENT_AUTH_PROVID
 
 Username/password authentication with bcrypt hashing. Configured automatically during first-run setup.
 
-- Web UI: Session cookie (72-hour TTL)
+- Web UI: Session cookie (24-hour TTL, configurable)
 - MCP/API: API key (`Authorization: Bearer hs_...`)
 
 ### API Key Auth
@@ -270,7 +270,7 @@ Lucent is configured via environment variables. Copy `.env.example` to `.env` an
 | `LUCENT_MODE` | `personal` | Deployment mode (`personal` or `team`; team requires a license key) |
 | `LUCENT_LICENSE_KEY` | — | License key for team mode |
 | `LUCENT_AUTH_PROVIDER` | `basic` | Auth backend (`basic` or `api_key`) |
-| `LUCENT_SESSION_TTL_HOURS` | `72` | Web session cookie lifetime in hours |
+| `LUCENT_SESSION_TTL_HOURS` | `24` | Web session cookie lifetime in hours |
 | `LUCENT_LOG_FORMAT` | `human` | Log output format (`human` or `json`) |
 | `LUCENT_LOG_LEVEL` | `INFO` | Logging verbosity |
 | `LUCENT_DB_PORT` | `5433` | Host port for the PostgreSQL container |

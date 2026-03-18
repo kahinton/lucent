@@ -34,7 +34,7 @@ logger = get_logger("auth.providers")
 
 # Session configuration
 SESSION_COOKIE_NAME = "lucent_session"
-SESSION_TTL_HOURS = int(os.environ.get("LUCENT_SESSION_TTL_HOURS", "72"))
+SESSION_TTL_HOURS = int(os.environ.get("LUCENT_SESSION_TTL_HOURS", "24"))
 SECURE_COOKIES = os.environ.get("LUCENT_SECURE_COOKIES", "true").lower() in ("true", "1", "yes")
 if not SECURE_COOKIES:
     logger.warning("LUCENT_SECURE_COOKIES is disabled — only use this for local HTTP development")
