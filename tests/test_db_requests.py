@@ -917,3 +917,92 @@ class TestCrossOrgIsolation:
         )
         assert result is not None
         assert result["status"] == "in_progress"
+
+
+# ── list_active_work tests ────────────────────────────────────────────────
+
+
+class TestListActiveWork:
+    """Tests for list_active_work() — complex aggregation of active requests + task counts."""
+
+    @pytest.mark.asyncio
+    async def test_empty_when_no_requests(self, repo, test_organization):
+        org = str(test_organization["id"])
+        result = await repo.list_active_work(org)
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_returns_pending_request(self, repo, req, test_organization):
+        org = str(test_organization["id"])
+        result = await repo.list_active_work(org)
+        assert len(result) >= 1
+        ids = [str(r["id"]) for r in result]
+        assert str(req["id"]) in ids
+
+    @pytest.mark.asyncio
+    async def test_excludes_completed_request(self, repo, req, test_organization):
+        org = str(test_organization["id"])
+        await repo.update_request_status(str(req["id"]), "completed", org_id=org)
+        result = await repo.list_active_work(org)
+        ids = [str(r["id"]) for r in result]
+        assert str(req["id"]) not in ids
+
+    @pytest.mark.asyncio
+    async def test_excludes_failed_request(self, repo, req, test_organization):
+        org = str(test_organization["id"])
+        await repo.update_request_status(str(req["id"]), "failed", org_id=org)
+        result = await repo.list_active_work(org)
+        ids = [str(r["id"]) for r in result]
+        assert str(req["id"]) not in ids
+
+    @pytest.mark.asyncio
+    async def test_excludes_cancelled_request(self, repo, req, test_organization):
+        org = str(test_organization["id"])
+        await repo.update_request_status(str(req["id"]), "cancelled", org_id=org)
+        result = await repo.list_active_work(org)
+        ids = [str(r["id"]) for r in result]
+        assert str(req["id"]) not in ids
+
+    @pytest.mark.asyncio
+    async def test_task_count_aggregation(self, repo, req, test_organization):
+        """Verify that task status counts are correctly aggregated."""
+        org = str(test_organization["id"])
+        rid = str(req["id"])
+        # Create 3 tasks in different states
+        t1 = await repo.create_task(request_id=rid, title="Pending", org_id=org)
+        t2 = await repo.create_task(request_id=rid, title="Running", org_id=org)
+        t3 = await repo.create_task(request_id=rid, title="Done", org_id=org)
+        # Move t2 to claimed
+        await repo.claim_task(str(t2["id"]), "daemon-1")
+        # Move t3 to completed
+        await repo.claim_task(str(t3["id"]), "daemon-2")
+        await repo.start_task(str(t3["id"]))
+        await repo.complete_task(str(t3["id"]), result="done")
+
+        result = await repo.list_active_work(org)
+        row = next(r for r in result if str(r["id"]) == rid)
+        assert row["tasks_pending"] >= 1
+        assert row["tasks_running"] >= 1  # claimed counts as running
+        assert row["tasks_completed"] >= 1
+        assert row["tasks_total"] >= 3
+
+    @pytest.mark.asyncio
+    async def test_priority_ordering(self, repo, test_organization):
+        """Urgent requests should appear before medium ones."""
+        org = str(test_organization["id"])
+        medium = await repo.create_request(
+            title="Medium", org_id=org, priority="medium"
+        )
+        urgent = await repo.create_request(
+            title="Urgent", org_id=org, priority="urgent"
+        )
+        result = await repo.list_active_work(org)
+        ids = [str(r["id"]) for r in result]
+        assert ids.index(str(urgent["id"])) < ids.index(str(medium["id"]))
+
+    @pytest.mark.asyncio
+    async def test_cross_org_isolation(self, repo, req, other_org):
+        """list_active_work with wrong org_id returns no data from other org."""
+        result = await repo.list_active_work(str(other_org["id"]))
+        ids = [str(r["id"]) for r in result]
+        assert str(req["id"]) not in ids
