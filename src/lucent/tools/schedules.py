@@ -79,8 +79,8 @@ Returns: JSON with the created schedule including its ID and next_run_at."""
         if cron_expression:
             import re
 
-            # Accept 5 or 6 space-separated fields
-            cron_pattern = re.compile(r"^(\S+\s+){4,5}\S+$")
+            # Accept exactly 5 space-separated fields (standard cron)
+            cron_pattern = re.compile(r"^(\S+\s+){4}\S+$")
             if not cron_pattern.match(cron_expression.strip()):
                 return json.dumps({"error": f"Invalid cron expression format: {cron_expression}"})
 

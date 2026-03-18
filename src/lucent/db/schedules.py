@@ -47,15 +47,25 @@ def _parse_cron(expression: str, after: datetime) -> datetime:
     cron_dows = _expand(parts[4], 0, 6)
     dows = {(d - 1) % 7 for d in cron_dows}
 
+    # Standard cron: when both DOM and DOW are explicitly set (not *),
+    # fire on DOM OR DOW. When either is *, AND is equivalent.
+    dom_restricted = parts[2] != "*"
+    dow_restricted = parts[4] != "*"
+    use_or = dom_restricted and dow_restricted
+
     # Walk forward minute by minute from after, capped at 366 days
     candidate = after.replace(second=0, microsecond=0) + timedelta(minutes=1)
     limit = after + timedelta(days=366)
 
     while candidate < limit:
+        day_match = (
+            (candidate.day in doms or candidate.weekday() in dows)
+            if use_or
+            else (candidate.day in doms and candidate.weekday() in dows)
+        )
         if (
             candidate.month in months
-            and candidate.day in doms
-            and (candidate.weekday()) in dows  # Python weekday: 0=Monday
+            and day_match
             and candidate.hour in hours
             and candidate.minute in minutes
         ):
