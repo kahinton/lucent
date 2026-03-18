@@ -6,8 +6,7 @@ Uses mocked repos and pool to test the service layer in isolation.
 
 from __future__ import annotations
 
-import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
@@ -15,13 +14,10 @@ from uuid import UUID, uuid4
 import pytest
 
 from lucent.integrations.identity import (
-    IdentityResolver,
     IdentityResult,
-    PairingChallengeService,
 )
-from lucent.integrations.models import UserLinkStatus, VerificationMethod
+from lucent.integrations.models import VerificationMethod
 from lucent.integrations.service import IntegrationService
-
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -133,13 +129,13 @@ def _make_service(pool: MagicMock | None = None) -> IntegrationService:
     # Patch external dependencies that IntegrationService.__init__ imports
     with (
         patch("lucent.integrations.service.get_rate_limiter") as mock_rl,
-        patch("lucent.integrations.service.UserRepository") as mock_user_cls,
+        patch("lucent.integrations.service.UserRepository"),
         patch("lucent.integrations.service.AuditRepository"),
-        patch("lucent.integrations.service.IntegrationRepo") as mock_int_cls,
-        patch("lucent.integrations.service.UserLinkRepo") as mock_link_cls,
-        patch("lucent.integrations.service.PairingChallengeRepo") as mock_ch_cls,
-        patch("lucent.integrations.service.IdentityResolver") as mock_resolver_cls,
-        patch("lucent.integrations.service.PairingChallengeService") as mock_pcs_cls,
+        patch("lucent.integrations.service.IntegrationRepo"),
+        patch("lucent.integrations.service.UserLinkRepo"),
+        patch("lucent.integrations.service.PairingChallengeRepo"),
+        patch("lucent.integrations.service.IdentityResolver"),
+        patch("lucent.integrations.service.PairingChallengeService"),
     ):
         mock_rl.return_value = MagicMock()
         svc = IntegrationService(pool)
@@ -460,7 +456,7 @@ def _make_event(
     text: str = "hello lucent",
     thread_id: str | None = None,
     external_workspace_id: str | None = None,
-) -> "IntegrationEvent":
+) -> "IntegrationEvent":  # noqa: F821
     from lucent.integrations.models import EventType, IntegrationEvent
 
     et = EventType(event_type) if isinstance(event_type, str) else event_type
@@ -500,8 +496,8 @@ def _make_pipeline_service(
 
     with (
         patch("lucent.integrations.service.get_rate_limiter") as mock_rl,
-        patch("lucent.integrations.service.UserRepository") as mock_user_cls,
-        patch("lucent.integrations.service.AuditRepository") as mock_audit_cls,
+        patch("lucent.integrations.service.UserRepository"),
+        patch("lucent.integrations.service.AuditRepository"),
         patch("lucent.integrations.service.IntegrationRepo"),
         patch("lucent.integrations.service.UserLinkRepo"),
         patch("lucent.integrations.service.PairingChallengeRepo"),
@@ -795,7 +791,7 @@ class TestSanitizeInput:
         assert result == "line1\nline2\ttab"
 
     def test_truncates_to_max_length(self):
-        from lucent.integrations.service import IntegrationService, MAX_INPUT_LENGTH
+        from lucent.integrations.service import MAX_INPUT_LENGTH, IntegrationService
 
         long_text = "a" * (MAX_INPUT_LENGTH + 100)
         result = IntegrationService._sanitize_input(long_text)

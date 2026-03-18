@@ -17,10 +17,7 @@ import pytest
 from lucent.integrations.models import (
     IntegrationStatus,
     IntegrationType,
-    UserLinkStatus,
-    VerificationMethod,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -192,8 +189,8 @@ class TestCreateIntegration:
 
     @pytest.mark.asyncio
     async def test_create_integration_success(self) -> None:
-        from lucent.integrations.router import create_integration
         from lucent.integrations.models import IntegrationCreate
+        from lucent.integrations.router import create_integration
 
         user = _make_current_user()
         org_id = str(user.organization_id)
@@ -227,8 +224,9 @@ class TestCreateIntegration:
     async def test_create_integration_conflict(self) -> None:
         """409 when active integration already exists."""
         from fastapi import HTTPException
-        from lucent.integrations.router import create_integration
+
         from lucent.integrations.models import IntegrationCreate
+        from lucent.integrations.router import create_integration
 
         user = _make_current_user()
         body = IntegrationCreate(
@@ -255,8 +253,9 @@ class TestCreateIntegration:
     async def test_create_integration_no_org(self) -> None:
         """400 when user has no organization."""
         from fastapi import HTTPException
-        from lucent.integrations.router import create_integration
+
         from lucent.integrations.models import IntegrationCreate
+        from lucent.integrations.router import create_integration
 
         user = _make_current_user()
         user.organization_id = None
@@ -323,6 +322,7 @@ class TestListGetIntegrations:
     @pytest.mark.asyncio
     async def test_get_integration_not_found(self) -> None:
         from fastapi import HTTPException
+
         from lucent.integrations.router import get_integration
 
         user = _make_current_user()
@@ -343,6 +343,7 @@ class TestListGetIntegrations:
     @pytest.mark.asyncio
     async def test_list_integrations_no_org(self) -> None:
         from fastapi import HTTPException
+
         from lucent.integrations.router import list_integrations
 
         user = _make_current_user()
@@ -363,8 +364,8 @@ class TestUpdateIntegration:
 
     @pytest.mark.asyncio
     async def test_update_channels(self) -> None:
-        from lucent.integrations.router import update_integration
         from lucent.integrations.models import IntegrationUpdate
+        from lucent.integrations.router import update_integration
 
         user = _make_current_user()
         int_id = uuid4()
@@ -392,8 +393,9 @@ class TestUpdateIntegration:
     @pytest.mark.asyncio
     async def test_update_not_found(self) -> None:
         from fastapi import HTTPException
-        from lucent.integrations.router import update_integration
+
         from lucent.integrations.models import IntegrationUpdate
+        from lucent.integrations.router import update_integration
 
         user = _make_current_user()
         body = IntegrationUpdate(allowed_channels=["C1"])
@@ -413,8 +415,8 @@ class TestUpdateIntegration:
 
     @pytest.mark.asyncio
     async def test_update_status_disable(self) -> None:
-        from lucent.integrations.router import update_integration
         from lucent.integrations.models import IntegrationUpdate
+        from lucent.integrations.router import update_integration
 
         user = _make_current_user()
         int_id = uuid4()
@@ -448,8 +450,9 @@ class TestUpdateIntegration:
     @pytest.mark.asyncio
     async def test_update_status_invalid_transition(self) -> None:
         from fastapi import HTTPException
-        from lucent.integrations.router import update_integration
+
         from lucent.integrations.models import IntegrationUpdate
+        from lucent.integrations.router import update_integration
 
         user = _make_current_user()
         int_id = uuid4()
@@ -510,6 +513,7 @@ class TestDeleteIntegration:
     @pytest.mark.asyncio
     async def test_delete_not_found(self) -> None:
         from fastapi import HTTPException
+
         from lucent.integrations.router import delete_integration
 
         user = _make_current_user()
@@ -538,8 +542,8 @@ class TestPairingEndpoints:
 
     @pytest.mark.asyncio
     async def test_generate_pairing_code(self) -> None:
-        from lucent.integrations.router import generate_pairing_code
         from lucent.integrations.models import PairingChallengeCreate
+        from lucent.integrations.router import generate_pairing_code
 
         user = _make_current_user(role="member")
         int_id = uuid4()
@@ -570,8 +574,9 @@ class TestPairingEndpoints:
     @pytest.mark.asyncio
     async def test_generate_pairing_code_inactive_integration(self) -> None:
         from fastapi import HTTPException
-        from lucent.integrations.router import generate_pairing_code
+
         from lucent.integrations.models import PairingChallengeCreate
+        from lucent.integrations.router import generate_pairing_code
 
         user = _make_current_user()
         body = PairingChallengeCreate(integration_id=uuid4())
@@ -595,8 +600,9 @@ class TestPairingEndpoints:
     @pytest.mark.asyncio
     async def test_generate_pairing_code_not_found(self) -> None:
         from fastapi import HTTPException
-        from lucent.integrations.router import generate_pairing_code
+
         from lucent.integrations.models import PairingChallengeCreate
+        from lucent.integrations.router import generate_pairing_code
 
         user = _make_current_user()
         body = PairingChallengeCreate(integration_id=uuid4())
@@ -618,8 +624,9 @@ class TestPairingEndpoints:
     @pytest.mark.asyncio
     async def test_generate_pairing_rate_limited(self) -> None:
         from fastapi import HTTPException
-        from lucent.integrations.router import generate_pairing_code
+
         from lucent.integrations.models import PairingChallengeCreate
+        from lucent.integrations.router import generate_pairing_code
 
         user = _make_current_user()
         body = PairingChallengeCreate(integration_id=uuid4())
@@ -675,6 +682,7 @@ class TestPairingEndpoints:
     @pytest.mark.asyncio
     async def test_verify_pairing_code_invalid(self) -> None:
         from fastapi import HTTPException
+
         from lucent.integrations.router import verify_pairing_code
 
         user = _make_current_user()
@@ -704,6 +712,7 @@ class TestPairingEndpoints:
     @pytest.mark.asyncio
     async def test_verify_missing_fields(self) -> None:
         from fastapi import HTTPException
+
         from lucent.integrations.router import verify_pairing_code
 
         user = _make_current_user()
@@ -765,8 +774,8 @@ class TestLinkManagement:
 
     @pytest.mark.asyncio
     async def test_create_user_link(self) -> None:
-        from lucent.integrations.router import create_user_link
         from lucent.integrations.models import UserLinkCreate
+        from lucent.integrations.router import create_user_link
 
         user = _make_current_user()
         int_id = uuid4()
@@ -804,8 +813,9 @@ class TestLinkManagement:
     @pytest.mark.asyncio
     async def test_create_user_link_integration_not_found(self) -> None:
         from fastapi import HTTPException
-        from lucent.integrations.router import create_user_link
+
         from lucent.integrations.models import UserLinkCreate
+        from lucent.integrations.router import create_user_link
 
         user = _make_current_user()
         body = UserLinkCreate(
@@ -852,6 +862,7 @@ class TestLinkManagement:
     @pytest.mark.asyncio
     async def test_revoke_user_link_not_found(self) -> None:
         from fastapi import HTTPException
+
         from lucent.integrations.router import revoke_user_link
 
         user = _make_current_user()
@@ -905,7 +916,6 @@ class TestRouterHelpers:
         assert result.status == "active"
 
     def test_get_encryptor_missing_key(self) -> None:
-        from fastapi import HTTPException
         from lucent.integrations.router import _get_encryptor
 
         with (

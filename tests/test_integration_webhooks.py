@@ -15,14 +15,13 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from lucent.integrations.slack_adapter import SlackAdapter
 from lucent.integrations.webhooks import (
     WebhookSignatureMiddleware,
     _build_request,
     _client_ip,
     _default_get_adapter,
 )
-from lucent.integrations.slack_adapter import SlackAdapter
-
 
 # ---------------------------------------------------------------------------
 # Helpers

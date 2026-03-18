@@ -10,17 +10,14 @@ Run with: pytest tests/test_devcontainer_integration.py -v
 from __future__ import annotations
 
 import json
-from unittest.mock import AsyncMock
 
 import pytest
 
 from lucent.sandbox.devcontainer import (
-    DevcontainerConfig,
     apply_devcontainer_config,
     detect_devcontainer,
     parse_devcontainer_json,
 )
-
 
 # ---------------------------------------------------------------------------
 # Realistic devcontainer.json configs from real-world projects

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -15,7 +15,6 @@ from lucent.integrations.adapters import (
 from lucent.integrations.base import IntegrationAdapter, IntegrationError
 from lucent.integrations.models import EventType, IntegrationEvent
 from lucent.integrations.slack_adapter import SlackAdapter
-
 
 # ---------------------------------------------------------------------------
 # AdapterResponse

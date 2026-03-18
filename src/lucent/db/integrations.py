@@ -9,7 +9,6 @@ For lower-level repo operations, see ``lucent.integrations.repositories``.
 
 from __future__ import annotations
 
-import json
 import logging
 from datetime import datetime
 from typing import Any
@@ -18,7 +17,6 @@ from uuid import UUID
 import asyncpg
 
 from lucent.db.audit import AuditRepository
-from lucent.integrations.models import IntegrationStatus, UserLinkStatus
 from lucent.integrations.repositories import (
     IntegrationRepo,
     PairingChallengeRepo,

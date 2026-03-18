@@ -5,14 +5,13 @@ from __future__ import annotations
 import hashlib
 import hmac as hmac_mod
 import time
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
 
 from lucent.integrations.base import IntegrationAdapter, IntegrationError
-from lucent.integrations.models import EventType, IntegrationEvent
+from lucent.integrations.models import EventType
 from lucent.integrations.slack_adapter import (
     SlackAdapter,
     _chunk_text,
@@ -21,7 +20,6 @@ from lucent.integrations.slack_adapter import (
     _text_to_section_blocks,
     _transform_outside_code,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

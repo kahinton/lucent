@@ -26,7 +26,6 @@ from lucent.sandbox.devcontainer import (
 )
 from lucent.sandbox.models import SandboxConfig, SandboxStatus
 
-
 # ---------------------------------------------------------------------------
 # _normalize_command
 # ---------------------------------------------------------------------------
@@ -534,7 +533,7 @@ class TestDockerBackendDevcontainerIntegration:
         container.id = "container-abc123"
         container.name = "test-sandbox"
         container.status = "running"
-        container.labels = {f"io.lucent.sandbox.id": sandbox_id}
+        container.labels = {"io.lucent.sandbox.id": sandbox_id}
 
         mock_client.containers.run.return_value = container
         mock_client.containers.list.return_value = [container]
@@ -546,7 +545,6 @@ class TestDockerBackendDevcontainerIntegration:
 
         responses: dict of command substring -> (exit_code, stdout, stderr)
         """
-        default_response = (0, "", "")
         if responses is None:
             responses = {}
 
@@ -554,8 +552,6 @@ class TestDockerBackendDevcontainerIntegration:
             return {"Id": "exec-123"}
 
         def start_exec(exec_id, **kwargs):
-            # Find matching response
-            cmd_str = str(cmd) if 'cmd' in dir() else ""
             return (b"", b"")
 
         def inspect_exec(exec_id):
@@ -653,7 +649,6 @@ class TestDockerBackendDevcontainerIntegration:
         )
 
         rebuild_called = False
-        original_rebuild = backend._rebuild_with_image
 
         async def mock_rebuild(sid, name, cfg, img, info):
             nonlocal rebuild_called
@@ -668,7 +663,7 @@ class TestDockerBackendDevcontainerIntegration:
             with patch.object(backend, '_rebuild_with_image', side_effect=mock_rebuild):
                 with patch.object(backend, 'exec', new_callable=AsyncMock) as mock_exec:
                     mock_exec.return_value = ExecResult(exit_code=0, stdout="", stderr="")
-                    info = await backend.create(config)
+                    await backend.create(config)
 
         assert rebuild_called
 

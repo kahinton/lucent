@@ -502,8 +502,6 @@ async def update_mcp_tools_web(request: Request, agent_id: str, server_id: str):
     from lucent.db.definitions import DefinitionRepository
 
     repo = DefinitionRepository(pool)
-    org_id = str(user.organization_id)
-
     tools_raw = str(form.get("allowed_tools", "")).strip()
     allowed_tools = [t.strip() for t in tools_raw.split(",") if t.strip()] if tools_raw else None
 

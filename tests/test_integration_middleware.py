@@ -15,7 +15,7 @@ import hmac as hmac_mod
 import json
 import time
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -25,7 +25,6 @@ from lucent.integrations.middleware import (
     _client_ip,
 )
 from lucent.integrations.slack_adapter import SlackAdapter
-
 
 # ---------------------------------------------------------------------------
 # Helpers

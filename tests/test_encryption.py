@@ -14,7 +14,6 @@ from lucent.integrations.encryption import (
     reset_default_encryptor,
 )
 
-
 # ---------------------------------------------------------------------------
 # String-based encrypt/decrypt
 # ---------------------------------------------------------------------------

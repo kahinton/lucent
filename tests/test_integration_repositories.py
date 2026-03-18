@@ -13,15 +13,13 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from lucent.integrations.models import IntegrationStatus, UserLinkStatus
 from lucent.integrations.repositories import (
+    _INTEGRATION_TRANSITIONS,
+    _USER_LINK_TRANSITIONS,
     IntegrationRepo,
     PairingChallengeRepo,
     UserLinkRepo,
-    _INTEGRATION_TRANSITIONS,
-    _USER_LINK_TRANSITIONS,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers

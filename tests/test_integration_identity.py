@@ -7,10 +7,9 @@ link, redeem_code).
 
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import bcrypt
@@ -28,10 +27,8 @@ from lucent.integrations.identity import (
 )
 from lucent.integrations.models import (
     PairingChallengeStatus,
-    UserLinkStatus,
     VerificationMethod,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers

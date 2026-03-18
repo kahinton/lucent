@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
@@ -27,7 +27,6 @@ from lucent.integrations.models import (
     UserLinkStatus,
     VerificationMethod,
 )
-
 
 # ============================================================================
 # Enums — values must match DB CHECK constraints from migration 028
