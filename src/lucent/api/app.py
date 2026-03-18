@@ -11,7 +11,7 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -308,10 +308,72 @@ def create_app() -> FastAPI:
         """Health check endpoint."""
         return {"status": "healthy"}
 
+    def _is_web_request(request: Request) -> bool:
+        """Check if the request is for the web UI (not API)."""
+        path = request.url.path
+        accept = request.headers.get("accept", "")
+        if path.startswith("/api/") or path.startswith("/mcp"):
+            return False
+        return "text/html" in accept or not path.startswith("/api/")
+
+    def _error_title(status_code: int) -> str:
+        titles = {
+            400: "Bad Request",
+            403: "Forbidden",
+            404: "Page Not Found",
+            405: "Method Not Allowed",
+            500: "Server Error",
+        }
+        return titles.get(status_code, "Something Went Wrong")
+
+    @app.exception_handler(HTTPException)
+    async def http_exception_handler(request: Request, exc: HTTPException):
+        """Render HTML error pages for web UI, JSON for API."""
+        # Pass through redirects (3xx) — don't render error pages for them
+        if 300 <= exc.status_code < 400:
+            headers = getattr(exc, "headers", None) or {}
+            return JSONResponse(
+                status_code=exc.status_code,
+                content={"detail": exc.detail},
+                headers=headers,
+            )
+        if _is_web_request(request):
+            from lucent.web.routes._shared import templates
+
+            ctx = {
+                "request": request,
+                "status_code": exc.status_code,
+                "title": _error_title(exc.status_code),
+                "detail": exc.detail or _error_title(exc.status_code),
+                "user": None,
+                "is_admin": False,
+                "team_mode": is_team_mode,
+            }
+            return templates.TemplateResponse(
+                "error.html", ctx, status_code=exc.status_code
+            )
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.detail},
+        )
+
     @app.exception_handler(Exception)
     async def global_exception_handler(request: Request, exc: Exception):
         """Handle unhandled exceptions — log detail, return generic error."""
         logger.error(f"Unhandled exception on {request.method} {request.url.path}", exc_info=exc)
+        if _is_web_request(request):
+            from lucent.web.routes._shared import templates
+
+            ctx = {
+                "request": request,
+                "status_code": 500,
+                "title": "Server Error",
+                "detail": "An unexpected error occurred. Please try again.",
+                "user": None,
+                "is_admin": False,
+                "team_mode": is_team_mode,
+            }
+            return templates.TemplateResponse("error.html", ctx, status_code=500)
         return JSONResponse(
             status_code=500,
             content={"error": "Internal server error"},
