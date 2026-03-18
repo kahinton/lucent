@@ -236,9 +236,13 @@ class RequestRepository:
         self,
         request_id: str,
         status: str | None = None,
+        org_id: str | None = None,
     ) -> list[dict]:
         query = "SELECT * FROM tasks WHERE request_id = $1"
         params: list[Any] = [UUID(request_id)]
+        if org_id:
+            params.append(UUID(org_id))
+            query += f" AND organization_id = ${len(params)}"
         if status:
             params.append(status)
             query += f" AND status = ${len(params)}"
@@ -548,13 +552,24 @@ class RequestRepository:
             )
         return dict(row)
 
-    async def list_task_events(self, task_id: str, limit: int = 100) -> list[dict]:
+    async def list_task_events(self, task_id: str, limit: int = 100, org_id: str | None = None) -> list[dict]:
         async with self.pool.acquire() as conn:
-            rows = await conn.fetch(
-                "SELECT * FROM task_events WHERE task_id = $1 ORDER BY created_at LIMIT $2",
-                UUID(task_id),
-                limit,
-            )
+            if org_id:
+                rows = await conn.fetch(
+                    """SELECT te.* FROM task_events te
+                       JOIN tasks t ON te.task_id = t.id
+                       WHERE te.task_id = $1 AND t.organization_id = $2
+                       ORDER BY te.created_at LIMIT $3""",
+                    UUID(task_id),
+                    UUID(org_id),
+                    limit,
+                )
+            else:
+                rows = await conn.fetch(
+                    "SELECT * FROM task_events WHERE task_id = $1 ORDER BY created_at LIMIT $2",
+                    UUID(task_id),
+                    limit,
+                )
         return [dict(r) for r in rows]
 
     # ── Task ↔ Memory Links ──────────────────────────────────────────────
@@ -580,16 +595,28 @@ class RequestRepository:
             metadata={"memory_id": memory_id, "relation": relation},
         )
 
-    async def list_task_memories(self, task_id: str) -> list[dict]:
+    async def list_task_memories(self, task_id: str, org_id: str | None = None) -> list[dict]:
         async with self.pool.acquire() as conn:
-            rows = await conn.fetch(
-                """SELECT tm.*, m.content, m.type as memory_type, m.tags
-                   FROM task_memories tm
-                   JOIN memories m ON tm.memory_id = m.id
-                   WHERE tm.task_id = $1
-                   ORDER BY tm.created_at""",
-                UUID(task_id),
-            )
+            if org_id:
+                rows = await conn.fetch(
+                    """SELECT tm.*, m.content, m.type as memory_type, m.tags
+                       FROM task_memories tm
+                       JOIN memories m ON tm.memory_id = m.id
+                       JOIN tasks t ON tm.task_id = t.id
+                       WHERE tm.task_id = $1 AND t.organization_id = $2
+                       ORDER BY tm.created_at""",
+                    UUID(task_id),
+                    UUID(org_id),
+                )
+            else:
+                rows = await conn.fetch(
+                    """SELECT tm.*, m.content, m.type as memory_type, m.tags
+                       FROM task_memories tm
+                       JOIN memories m ON tm.memory_id = m.id
+                       WHERE tm.task_id = $1
+                       ORDER BY tm.created_at""",
+                    UUID(task_id),
+                )
         return [dict(r) for r in rows]
 
     # ── Internal helpers ──────────────────────────────────────────────────

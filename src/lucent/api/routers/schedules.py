@@ -5,7 +5,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from lucent.api.deps import get_current_user, get_pool
+from lucent.api.deps import AuthenticatedUser, get_pool
 
 router = APIRouter(prefix="/schedules", tags=["schedules"])
 
@@ -54,7 +54,7 @@ class ScheduleToggle(BaseModel):
 
 @router.post("")
 async def create_schedule(
-    body: ScheduleCreate, user=Depends(get_current_user), pool=Depends(get_pool)
+    body: ScheduleCreate, user: AuthenticatedUser, pool=Depends(get_pool)
 ):
     from lucent.db.schedules import ScheduleRepository
 
@@ -81,9 +81,9 @@ async def create_schedule(
 
 @router.get("")
 async def list_schedules(
+    user: AuthenticatedUser,
     status: str | None = None,
     enabled: bool | None = None,
-    user=Depends(get_current_user),
     pool=Depends(get_pool),
 ):
     from lucent.db.schedules import ScheduleRepository
@@ -93,7 +93,7 @@ async def list_schedules(
 
 
 @router.get("/summary")
-async def schedule_summary(user=Depends(get_current_user), pool=Depends(get_pool)):
+async def schedule_summary(user: AuthenticatedUser, pool=Depends(get_pool)):
     from lucent.db.schedules import ScheduleRepository
 
     repo = ScheduleRepository(pool)
@@ -101,7 +101,7 @@ async def schedule_summary(user=Depends(get_current_user), pool=Depends(get_pool
 
 
 @router.get("/due")
-async def get_due_schedules(user=Depends(get_current_user), pool=Depends(get_pool)):
+async def get_due_schedules(user: AuthenticatedUser, pool=Depends(get_pool)):
     from lucent.db.schedules import ScheduleRepository
 
     repo = ScheduleRepository(pool)
@@ -109,7 +109,7 @@ async def get_due_schedules(user=Depends(get_current_user), pool=Depends(get_poo
 
 
 @router.get("/{schedule_id}")
-async def get_schedule(schedule_id: str, user=Depends(get_current_user), pool=Depends(get_pool)):
+async def get_schedule(schedule_id: str, user: AuthenticatedUser, pool=Depends(get_pool)):
     from lucent.db.schedules import ScheduleRepository
 
     repo = ScheduleRepository(pool)
@@ -123,7 +123,7 @@ async def get_schedule(schedule_id: str, user=Depends(get_current_user), pool=De
 async def update_schedule(
     schedule_id: str,
     body: ScheduleUpdate,
-    user=Depends(get_current_user),
+    user: AuthenticatedUser,
     pool=Depends(get_pool),
 ):
     from lucent.db.schedules import ScheduleRepository
@@ -142,7 +142,7 @@ async def update_schedule(
 async def toggle_schedule(
     schedule_id: str,
     body: ScheduleToggle,
-    user=Depends(get_current_user),
+    user: AuthenticatedUser,
     pool=Depends(get_pool),
 ):
     from lucent.db.schedules import ScheduleRepository
@@ -155,7 +155,7 @@ async def toggle_schedule(
 
 
 @router.delete("/{schedule_id}")
-async def delete_schedule(schedule_id: str, user=Depends(get_current_user), pool=Depends(get_pool)):
+async def delete_schedule(schedule_id: str, user: AuthenticatedUser, pool=Depends(get_pool)):
     from lucent.db.schedules import ScheduleRepository
 
     repo = ScheduleRepository(pool)
@@ -166,7 +166,7 @@ async def delete_schedule(schedule_id: str, user=Depends(get_current_user), pool
 
 
 @router.get("/{schedule_id}/runs")
-async def list_runs(schedule_id: str, user=Depends(get_current_user), pool=Depends(get_pool)):
+async def list_runs(schedule_id: str, user: AuthenticatedUser, pool=Depends(get_pool)):
     from lucent.db.schedules import ScheduleRepository
 
     repo = ScheduleRepository(pool)
@@ -180,8 +180,8 @@ async def list_runs(schedule_id: str, user=Depends(get_current_user), pool=Depen
 @router.post("/{schedule_id}/trigger")
 async def trigger_now(
     schedule_id: str,
+    user: AuthenticatedUser,
     force: bool = False,
-    user=Depends(get_current_user),
     pool=Depends(get_pool),
 ):
     """Trigger a schedule. Pass force=true to bypass the time guard (manual run)."""

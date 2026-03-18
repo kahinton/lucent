@@ -31,7 +31,7 @@ from lucent.db import AuditRepository, MemoryRepository, OrganizationRepository,
 @pytest.fixture
 def team_mode():
     """Patch is_team_mode to return True for the duration of the test."""
-    with patch("lucent.web.routes.is_team_mode", return_value=True):
+    with patch("lucent.web.routes.audit.is_team_mode", return_value=True):
         yield
 
 

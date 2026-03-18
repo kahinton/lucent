@@ -165,7 +165,7 @@ class BasicAuthProvider(AuthProvider):
         query = """
             SELECT id, external_id, provider, organization_id, email, display_name,
                    avatar_url, provider_metadata, is_active, created_at, updated_at,
-                   last_login_at, role, password_hash
+                   last_login_at, role, password_hash, force_password_change
             FROM users
             WHERE (LOWER(email) = LOWER($1) OR LOWER(display_name) = LOWER($1))
               AND is_active = true
@@ -291,7 +291,7 @@ async def validate_session(pool: Pool, token: str) -> dict[str, Any] | None:
     query = """
         SELECT id, external_id, provider, organization_id, email, display_name,
                avatar_url, provider_metadata, is_active, created_at, updated_at,
-               last_login_at, role, session_expires_at
+               last_login_at, role, session_expires_at, force_password_change
         FROM users
         WHERE session_token = $1
           AND session_expires_at > NOW()
@@ -353,21 +353,50 @@ def validate_password_complexity(password: str) -> str | None:
     return None
 
 
-async def set_user_password(pool: Pool, user_id: UUID, password: str) -> None:
+async def set_user_password(
+    pool: Pool, user_id: UUID, password: str, *, force_change: bool = False
+) -> None:
     """Set or update a user's password.
 
     Args:
         pool: Database connection pool.
         user_id: The user's UUID.
         password: The new plaintext password (will be hashed).
+        force_change: If True, user must change password on next login.
     """
     error = validate_password_complexity(password)
     if error:
         raise ValueError(error)
     pw_hash = hash_password(password)
-    query = "UPDATE users SET password_hash = $1 WHERE id = $2"
+    query = "UPDATE users SET password_hash = $1, force_password_change = $2 WHERE id = $3"
     async with pool.acquire() as conn:
-        await conn.execute(query, pw_hash, str(user_id))
+        await conn.execute(query, pw_hash, force_change, str(user_id))
+
+
+async def admin_reset_password(pool: Pool, user_id: UUID) -> str:
+    """Reset a user's password to a random temporary value (admin action).
+
+    Sets force_password_change so the user must change it on next login.
+
+    Args:
+        pool: Database connection pool.
+        user_id: The user's UUID.
+
+    Returns:
+        The temporary plaintext password.
+    """
+    temp_password = secrets.token_urlsafe(12)
+    await set_user_password(pool, user_id, temp_password, force_change=True)
+    # Invalidate existing sessions so user must re-login
+    await destroy_session(pool, user_id)
+    return temp_password
+
+
+async def clear_force_password_change(pool: Pool, user_id: UUID) -> None:
+    """Clear the force_password_change flag after user sets a new password."""
+    query = "UPDATE users SET force_password_change = false WHERE id = $1"
+    async with pool.acquire() as conn:
+        await conn.execute(query, str(user_id))
 
 
 # --- Provider Factory ---

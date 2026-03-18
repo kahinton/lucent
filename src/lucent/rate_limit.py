@@ -9,12 +9,75 @@ needed for coroutine-safe access. For multi-worker or distributed deployments,
 upgrade to Redis-based rate limiting.
 """
 
+import ipaddress
+import logging
 import os
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import NamedTuple
 from uuid import UUID
+
+from starlette.requests import Request
+
+logger = logging.getLogger(__name__)
+
+
+def _parse_trusted_proxies() -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
+    """Parse LUCENT_TRUSTED_PROXIES env var into a list of network objects."""
+    raw = os.environ.get("LUCENT_TRUSTED_PROXIES", "").strip()
+    if not raw:
+        return []
+    networks = []
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        try:
+            networks.append(ipaddress.ip_network(entry, strict=False))
+        except ValueError:
+            logger.warning("Invalid CIDR/IP in LUCENT_TRUSTED_PROXIES: %s", entry)
+    return networks
+
+
+def _is_trusted(ip_str: str, trusted: list[ipaddress.IPv4Network | ipaddress.IPv6Network]) -> bool:
+    """Check if an IP address falls within any trusted proxy network."""
+    try:
+        addr = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return False
+    return any(addr in net for net in trusted)
+
+
+def get_client_ip(request: Request) -> str:
+    """Extract the real client IP, respecting X-Forwarded-For behind trusted proxies.
+
+    When LUCENT_TRUSTED_PROXIES is configured and the direct connection comes
+    from a trusted proxy, the rightmost untrusted IP in the X-Forwarded-For
+    chain is returned. Otherwise, falls back to the direct connection IP.
+    """
+    direct_ip = request.client.host if request.client else "unknown"
+
+    trusted = _parse_trusted_proxies()
+    if not trusted:
+        return direct_ip
+
+    if not _is_trusted(direct_ip, trusted):
+        return direct_ip
+
+    xff = request.headers.get("x-forwarded-for", "")
+    if not xff:
+        return direct_ip
+
+    # Walk the XFF chain from right to left, skipping trusted proxies.
+    # The rightmost untrusted entry is the real client IP.
+    ips = [ip.strip() for ip in xff.split(",") if ip.strip()]
+    for ip in reversed(ips):
+        if not _is_trusted(ip, trusted):
+            return ip
+
+    # All IPs in the chain are trusted — fall back to direct IP
+    return direct_ip
 
 
 class RateLimitResult(NamedTuple):

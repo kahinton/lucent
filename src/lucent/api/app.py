@@ -107,10 +107,12 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application."""
+    from lucent import __version__
+
     app = FastAPI(
         title="Lucent Admin API",
         description="REST API for managing the Lucent memory system",
-        version="1.0.0",
+        version=__version__,
         lifespan=lifespan,
         docs_url="/api/docs",
         redoc_url="/api/redoc",
@@ -177,7 +179,9 @@ def create_app() -> FastAPI:
         elif auth_header:
             rate_key = f"api:{auth_header}"
         else:
-            client_ip = request.client.host if request.client else "unknown"
+            from lucent.rate_limit import get_client_ip
+
+            client_ip = get_client_ip(request)
             rate_key = f"api:ip:{client_ip}"
 
         rate_result = rate_limiter.check_rate_limit(rate_key)

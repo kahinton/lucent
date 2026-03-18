@@ -213,6 +213,14 @@ class UserRoleUpdate(BaseModel):
     role: str = Field(..., description="New role: member, admin, owner")
 
 
+class PasswordResetResponse(BaseModel):
+    """Response model for admin password reset."""
+
+    success: bool
+    message: str
+    temp_password: str = Field(..., description="Temporary password (share securely)")
+
+
 class UserResponse(BaseModel):
     """Response model for a user."""
 

@@ -5,7 +5,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from lucent.api.deps import get_current_user, get_pool
+from lucent.api.deps import AuthenticatedUser, get_pool
 
 router = APIRouter(prefix="/requests", tags=["requests"])
 
@@ -49,7 +49,7 @@ class MemoryLinkCreate(BaseModel):
 
 @router.post("")
 async def create_request(
-    body: RequestCreate, user=Depends(get_current_user), pool=Depends(get_pool)
+    body: RequestCreate, user: AuthenticatedUser, pool=Depends(get_pool)
 ):
     from lucent.db.requests import RequestRepository
 
@@ -66,10 +66,10 @@ async def create_request(
 
 @router.get("")
 async def list_requests(
+    user: AuthenticatedUser,
     status: str | None = None,
     limit: int = 50,
     offset: int = 0,
-    user=Depends(get_current_user),
     pool=Depends(get_pool),
 ):
     from lucent.db.requests import RequestRepository
@@ -81,7 +81,7 @@ async def list_requests(
 
 
 @router.get("/summary")
-async def request_summary(user=Depends(get_current_user), pool=Depends(get_pool)):
+async def request_summary(user: AuthenticatedUser, pool=Depends(get_pool)):
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
@@ -89,7 +89,7 @@ async def request_summary(user=Depends(get_current_user), pool=Depends(get_pool)
 
 
 @router.get("/events")
-async def recent_events(limit: int = 50, user=Depends(get_current_user), pool=Depends(get_pool)):
+async def recent_events(user: AuthenticatedUser, limit: int = 50, pool=Depends(get_pool)):
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
@@ -97,7 +97,7 @@ async def recent_events(limit: int = 50, user=Depends(get_current_user), pool=De
 
 
 @router.get("/{request_id}")
-async def get_request(request_id: UUID, user=Depends(get_current_user), pool=Depends(get_pool)):
+async def get_request(request_id: UUID, user: AuthenticatedUser, pool=Depends(get_pool)):
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
@@ -111,7 +111,7 @@ async def get_request(request_id: UUID, user=Depends(get_current_user), pool=Dep
 async def update_request_status(
     request_id: UUID,
     status: str,
-    user=Depends(get_current_user),
+    user: AuthenticatedUser,
     pool=Depends(get_pool),
 ):
     from lucent.db.requests import RequestRepository
@@ -132,7 +132,7 @@ async def update_request_status(
 async def create_task(
     request_id: UUID,
     body: TaskCreate,
-    user=Depends(get_current_user),
+    user: AuthenticatedUser,
     pool=Depends(get_pool),
 ):
     from lucent.db.definitions import DefinitionRepository
@@ -182,21 +182,21 @@ async def create_task(
 @router.get("/{request_id}/tasks")
 async def list_tasks(
     request_id: UUID,
+    user: AuthenticatedUser,
     status: str | None = None,
-    user=Depends(get_current_user),
     pool=Depends(get_pool),
 ):
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
-    return await repo.list_tasks(str(request_id), status=status)
+    return await repo.list_tasks(str(request_id), status=status, org_id=str(user.organization_id))
 
 
 @router.post("/tasks/{task_id}/claim")
 async def claim_task(
     task_id: UUID,
     instance_id: str,
-    user=Depends(get_current_user),
+    user: AuthenticatedUser,
     pool=Depends(get_pool),
 ):
     from lucent.db.requests import RequestRepository
@@ -209,7 +209,7 @@ async def claim_task(
 
 
 @router.post("/tasks/{task_id}/start")
-async def start_task(task_id: UUID, user=Depends(get_current_user), pool=Depends(get_pool)):
+async def start_task(task_id: UUID, user: AuthenticatedUser, pool=Depends(get_pool)):
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
@@ -223,7 +223,7 @@ async def start_task(task_id: UUID, user=Depends(get_current_user), pool=Depends
 async def complete_task(
     task_id: UUID,
     result: str,
-    user=Depends(get_current_user),
+    user: AuthenticatedUser,
     pool=Depends(get_pool),
 ):
     from lucent.db.requests import RequestRepository
@@ -239,7 +239,7 @@ async def complete_task(
 async def fail_task(
     task_id: UUID,
     error: str,
-    user=Depends(get_current_user),
+    user: AuthenticatedUser,
     pool=Depends(get_pool),
 ):
     from lucent.db.requests import RequestRepository
@@ -252,7 +252,7 @@ async def fail_task(
 
 
 @router.post("/tasks/{task_id}/release")
-async def release_task(task_id: UUID, user=Depends(get_current_user), pool=Depends(get_pool)):
+async def release_task(task_id: UUID, user: AuthenticatedUser, pool=Depends(get_pool)):
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
@@ -263,7 +263,7 @@ async def release_task(task_id: UUID, user=Depends(get_current_user), pool=Depen
 
 
 @router.post("/tasks/{task_id}/retry")
-async def retry_task(task_id: UUID, user=Depends(get_current_user), pool=Depends(get_pool)):
+async def retry_task(task_id: UUID, user: AuthenticatedUser, pool=Depends(get_pool)):
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
@@ -274,23 +274,26 @@ async def retry_task(task_id: UUID, user=Depends(get_current_user), pool=Depends
 
 
 @router.get("/tasks/{task_id}/events")
-async def task_events(task_id: UUID, user=Depends(get_current_user), pool=Depends(get_pool)):
+async def task_events(task_id: UUID, user: AuthenticatedUser, pool=Depends(get_pool)):
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
-    return await repo.list_task_events(str(task_id))
+    return await repo.list_task_events(str(task_id), org_id=str(user.organization_id))
 
 
 @router.post("/tasks/{task_id}/events")
 async def add_task_event(
     task_id: UUID,
     body: TaskEventCreate,
-    user=Depends(get_current_user),
+    user: AuthenticatedUser,
     pool=Depends(get_pool),
 ):
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
+    task = await repo.get_task(str(task_id), str(user.organization_id))
+    if not task:
+        raise HTTPException(404, "Task not found")
     return await repo.add_task_event(
         str(task_id),
         body.event_type,
@@ -303,29 +306,32 @@ async def add_task_event(
 async def link_memory(
     task_id: UUID,
     body: MemoryLinkCreate,
-    user=Depends(get_current_user),
+    user: AuthenticatedUser,
     pool=Depends(get_pool),
 ):
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
+    task = await repo.get_task(str(task_id), str(user.organization_id))
+    if not task:
+        raise HTTPException(404, "Task not found")
     await repo.link_memory(str(task_id), body.memory_id, body.relation)
     return {"status": "linked"}
 
 
 @router.get("/tasks/{task_id}/memories")
-async def task_memories(task_id: UUID, user=Depends(get_current_user), pool=Depends(get_pool)):
+async def task_memories(task_id: UUID, user: AuthenticatedUser, pool=Depends(get_pool)):
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
-    return await repo.list_task_memories(str(task_id))
+    return await repo.list_task_memories(str(task_id), org_id=str(user.organization_id))
 
 
 # ── Queue management ──────────────────────────────────────────────────────
 
 
 @router.get("/queue/pending")
-async def pending_queue(user=Depends(get_current_user), pool=Depends(get_pool)):
+async def pending_queue(user: AuthenticatedUser, pool=Depends(get_pool)):
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
@@ -334,8 +340,8 @@ async def pending_queue(user=Depends(get_current_user), pool=Depends(get_pool)):
 
 @router.post("/queue/release-stale")
 async def release_stale(
+    user: AuthenticatedUser,
     stale_minutes: int = 30,
-    user=Depends(get_current_user),
     pool=Depends(get_pool),
 ):
     from lucent.db.requests import RequestRepository

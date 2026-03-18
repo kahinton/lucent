@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, status
 from lucent.api.deps import AdminUser, AuthenticatedUser
 from lucent.api.models import (
     ErrorResponse,
+    PasswordResetResponse,
     SuccessResponse,
     UserCreate,
     UserListResponse,
@@ -340,6 +341,63 @@ async def update_user_role(
 
     logger.info("User role changed: user=%s, new_role=%s, by=%s", user_id, data.role, user.id)
     return _user_to_response(result)
+
+
+@router.post(
+    "/{user_id}/reset-password",
+    response_model=PasswordResetResponse,
+    responses={404: {"model": ErrorResponse}},
+)
+async def reset_user_password(
+    user_id: UUID,
+    user: AdminUser,  # Requires admin role
+) -> PasswordResetResponse:
+    """Reset a user's password to a temporary value.
+
+    Requires admin or owner role.
+    The user will be forced to change their password on next login.
+    """
+    user.require_permission(Permission.USERS_MANAGE)
+
+    # Prevent resetting own password via this endpoint
+    if user_id == user.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Use Settings to change your own password",
+        )
+
+    pool = await get_pool()
+    user_repo = UserRepository(pool)
+
+    target = await user_repo.get_by_id(user_id)
+    if target is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
+    if target.get("organization_id") != user.organization_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
+    if not can_manage_user(user.role, target.get("role", "member")):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You cannot manage this user",
+        )
+
+    from lucent.auth_providers import admin_reset_password
+
+    temp_password = await admin_reset_password(pool, user_id)
+
+    logger.info("Password reset: user=%s, by=%s", user_id, user.id)
+    return PasswordResetResponse(
+        success=True,
+        message=f"Password reset for user {user_id}. User must change password on next login.",
+        temp_password=temp_password,
+    )
 
 
 @router.delete(

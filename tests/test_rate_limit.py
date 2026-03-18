@@ -1,11 +1,13 @@
 """Tests for rate limiting module."""
 
 import time
+from unittest.mock import MagicMock
 from uuid import uuid4
 
 from lucent.rate_limit import (
     RateLimitBucket,
     RateLimiter,
+    get_client_ip,
     get_rate_limiter,
     reset_rate_limiter,
 )
@@ -182,3 +184,74 @@ class TestGlobalRateLimiter:
         monkeypatch.delenv("LUCENT_RATE_LIMIT_PER_MINUTE", raising=False)
         limiter = RateLimiter()
         assert limiter.limit == 100
+
+
+def _make_request(host: str = "1.2.3.4", xff: str | None = None) -> MagicMock:
+    """Create a mock Starlette Request with client IP and optional XFF header."""
+    req = MagicMock()
+    req.client.host = host
+    headers = {}
+    if xff is not None:
+        headers["x-forwarded-for"] = xff
+    req.headers = headers
+    return req
+
+
+class TestGetClientIp:
+    """Tests for get_client_ip with trusted proxy support."""
+
+    def test_no_trusted_proxies_returns_direct_ip(self, monkeypatch):
+        monkeypatch.delenv("LUCENT_TRUSTED_PROXIES", raising=False)
+        req = _make_request(host="1.2.3.4", xff="10.0.0.1")
+        assert get_client_ip(req) == "1.2.3.4"
+
+    def test_untrusted_connection_ignores_xff(self, monkeypatch):
+        monkeypatch.setenv("LUCENT_TRUSTED_PROXIES", "192.168.1.0/24")
+        req = _make_request(host="5.6.7.8", xff="10.0.0.1")
+        assert get_client_ip(req) == "5.6.7.8"
+
+    def test_trusted_proxy_extracts_xff(self, monkeypatch):
+        monkeypatch.setenv("LUCENT_TRUSTED_PROXIES", "192.168.1.0/24")
+        req = _make_request(host="192.168.1.10", xff="203.0.113.50")
+        assert get_client_ip(req) == "203.0.113.50"
+
+    def test_trusted_proxy_chain_returns_rightmost_untrusted(self, monkeypatch):
+        monkeypatch.setenv("LUCENT_TRUSTED_PROXIES", "10.0.0.0/8")
+        req = _make_request(host="10.0.0.1", xff="203.0.113.50, 10.0.0.5, 10.0.0.6")
+        assert get_client_ip(req) == "203.0.113.50"
+
+    def test_single_trusted_ip(self, monkeypatch):
+        monkeypatch.setenv("LUCENT_TRUSTED_PROXIES", "172.17.0.2")
+        req = _make_request(host="172.17.0.2", xff="99.99.99.99")
+        assert get_client_ip(req) == "99.99.99.99"
+
+    def test_multiple_trusted_cidrs(self, monkeypatch):
+        monkeypatch.setenv("LUCENT_TRUSTED_PROXIES", "10.0.0.0/8, 172.16.0.0/12")
+        req = _make_request(host="172.16.0.5", xff="8.8.8.8, 10.0.0.3")
+        assert get_client_ip(req) == "8.8.8.8"
+
+    def test_no_xff_header_returns_direct_ip(self, monkeypatch):
+        monkeypatch.setenv("LUCENT_TRUSTED_PROXIES", "192.168.1.0/24")
+        req = _make_request(host="192.168.1.10")
+        assert get_client_ip(req) == "192.168.1.10"
+
+    def test_empty_xff_returns_direct_ip(self, monkeypatch):
+        monkeypatch.setenv("LUCENT_TRUSTED_PROXIES", "192.168.1.0/24")
+        req = _make_request(host="192.168.1.10", xff="")
+        assert get_client_ip(req) == "192.168.1.10"
+
+    def test_all_xff_trusted_returns_direct_ip(self, monkeypatch):
+        monkeypatch.setenv("LUCENT_TRUSTED_PROXIES", "10.0.0.0/8")
+        req = _make_request(host="10.0.0.1", xff="10.0.0.2, 10.0.0.3")
+        assert get_client_ip(req) == "10.0.0.1"
+
+    def test_invalid_cidr_in_config_is_skipped(self, monkeypatch):
+        monkeypatch.setenv("LUCENT_TRUSTED_PROXIES", "not-an-ip, 10.0.0.0/8")
+        req = _make_request(host="10.0.0.1", xff="203.0.113.1")
+        assert get_client_ip(req) == "203.0.113.1"
+
+    def test_no_client_returns_unknown(self, monkeypatch):
+        monkeypatch.delenv("LUCENT_TRUSTED_PROXIES", raising=False)
+        req = MagicMock()
+        req.client = None
+        assert get_client_ip(req) == "unknown"

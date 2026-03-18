@@ -131,6 +131,11 @@ async def delete_agent(agent_id: str, user: AdminUser):
 async def grant_skill_to_agent(agent_id: str, body: GrantAccess, user: AuthenticatedUser):
     pool = await get_pool()
     repo = DefinitionRepository(pool)
+    org_id = str(user.organization_id)
+    if not await repo.get_agent(agent_id, org_id):
+        raise HTTPException(404, "Agent not found")
+    if not await repo.get_skill(body.target_id, org_id):
+        raise HTTPException(404, "Skill not found")
     if not await repo.grant_skill(agent_id, body.target_id):
         raise HTTPException(400, "Failed to grant skill")
     return {"status": "granted"}
@@ -140,6 +145,8 @@ async def grant_skill_to_agent(agent_id: str, body: GrantAccess, user: Authentic
 async def revoke_skill_from_agent(agent_id: str, skill_id: str, user: AuthenticatedUser):
     pool = await get_pool()
     repo = DefinitionRepository(pool)
+    if not await repo.get_agent(agent_id, str(user.organization_id)):
+        raise HTTPException(404, "Agent not found")
     await repo.revoke_skill(agent_id, skill_id)
     return {"status": "revoked"}
 
@@ -148,6 +155,9 @@ async def revoke_skill_from_agent(agent_id: str, skill_id: str, user: Authentica
 async def grant_mcp_to_agent(agent_id: str, body: GrantAccess, user: AuthenticatedUser):
     pool = await get_pool()
     repo = DefinitionRepository(pool)
+    org_id = str(user.organization_id)
+    if not await repo.get_agent(agent_id, org_id):
+        raise HTTPException(404, "Agent not found")
     if not await repo.grant_mcp_server(agent_id, body.target_id):
         raise HTTPException(400, "Failed to grant MCP server")
     return {"status": "granted"}
@@ -157,6 +167,8 @@ async def grant_mcp_to_agent(agent_id: str, body: GrantAccess, user: Authenticat
 async def revoke_mcp_from_agent(agent_id: str, server_id: str, user: AuthenticatedUser):
     pool = await get_pool()
     repo = DefinitionRepository(pool)
+    if not await repo.get_agent(agent_id, str(user.organization_id)):
+        raise HTTPException(404, "Agent not found")
     await repo.revoke_mcp_server(agent_id, server_id)
     return {"status": "revoked"}
 
