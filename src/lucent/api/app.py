@@ -16,14 +16,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from lucent.rate_limit import get_rate_limiter
-
 from lucent.api.routers import daemon_messages as daemon_messages_router
 from lucent.api.routers import daemon_tasks as daemon_tasks_router
 from lucent.api.routers import export, memories, search
 from lucent.db import close_db, init_db
 from lucent.logging import get_logger, set_correlation_id
 from lucent.mode import is_team_mode
+from lucent.rate_limit import get_rate_limiter
 from lucent.web.routes import router as web_router
 
 # Get logger for this module
@@ -146,6 +145,30 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.middleware("http")
+    async def security_headers_middleware(request: Request, call_next):
+        """Add security headers including CSP to all responses."""
+        response = await call_next(request)
+        # Content-Security-Policy: restrict resource loading to same origin.
+        # unsafe-inline required for inline event handlers and Tailwind JIT.
+        csp = (
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline'; "
+            "style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data:; "
+            "font-src 'self'; "
+            "connect-src 'self'; "
+            "frame-ancestors 'none'; "
+            "base-uri 'self'; "
+            "form-action 'self'"
+        )
+        response.headers["Content-Security-Policy"] = csp
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        return response
 
     @app.middleware("http")
     async def correlation_id_middleware(request: Request, call_next):
