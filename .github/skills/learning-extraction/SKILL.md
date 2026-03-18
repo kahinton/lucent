@@ -16,6 +16,9 @@ Transforms raw experience into reusable capability. This is the mechanism that m
 | After a sub-agent completes a non-trivial task | Task dispatch completion |
 | Explicitly requested by cognitive loop | `daemon-task` tagged `learning-extraction` |
 | Batch of 5+ unprocessed `daemon-result` memories accumulate | Autonomic threshold check |
+| **After correction memories are created** | Search for `correction`, `self-correction` tags |
+| **After a task fails** | Check task results with errors or rejections |
+| **During reflection cycles (every 10 daemon cycles)** | Daemon periodic reflection flag |
 
 ## Input: What to Process
 
@@ -26,6 +29,8 @@ Search for candidate memories using these queries, filtered to exclude those alr
 3. **Rejected work**: `rejection-lesson` — approaches that failed (highest learning value)
 4. **Self-improvement notes**: `self-improvement` — behavioral observations
 5. **Experience memories**: type `experience` created in the last 48 hours
+6. **Corrections**: `correction` or `self-correction` — direct behavioral corrections (HIGH priority for extraction)
+7. **Failed tasks**: Search for tasks with `status: failed` or `error` fields in tracked requests
 
 For each candidate, skip if it already has the `lesson-extracted` tag — this prevents reprocessing.
 
@@ -68,6 +73,8 @@ ACTION: [The approach taken was Z...]
 OUTCOME: [This resulted in...]
 PRINCIPLE: [Therefore, when facing similar situations, do/avoid...]
 APPLICABILITY: [This applies when... but NOT when...]
+BEHAVIORAL CHANGE: [Specifically, what I will do differently — concrete action, not aspiration]
+VERIFICATION: [How to confirm the change is being applied — what to look for in future work]
 ```
 
 **Quality criteria for a good principle:**
@@ -76,6 +83,8 @@ APPLICABILITY: [This applies when... but NOT when...]
 - **Actionable**: Someone encountering a similar situation knows what to do
 - **Bounded**: Includes when it does and doesn't apply
 - **Falsifiable**: Could be proven wrong by future experience (this is a feature — it means the principle is specific enough to be useful)
+- **Behavioral**: Specifies a concrete change in action, not just an observation
+- **Verifiable**: Includes criteria for checking whether the lesson was applied
 
 **Bad lesson**: "The code review was rejected"
 **Good lesson**: "When proposing code changes, verify the user's intent by examining recent git history and open issues before assuming what needs fixing. Speculative fixes based on code smell alone get rejected when they don't align with the user's current priorities."
@@ -118,6 +127,10 @@ Before creating a new lesson memory:
 **Context**: [When this applies — situation, domain, task type]
 
 **Principle**: [The transferable lesson — what to do or avoid]
+
+**Behavioral Change**: [Specific action to take differently — not "be more careful" but "run X before Y"]
+
+**Verification**: [How to confirm this lesson is being applied — observable behavior or check to perform]
 
 **Evidence**:
 - [Date]: [Brief description of the experience that taught this]
@@ -168,6 +181,19 @@ This skill works alongside, not in replacement of:
 | Lessons without boundaries | Leads to rigid, context-blind behavior | Every principle MUST include when it does NOT apply |
 | Ignoring contradictions | Allows inconsistent behavior | When principles conflict, explicitly document the conditions that determine which applies |
 | Extracting only from failures | Misses half the learning | Validated work teaches what TO do, which is equally valuable |
+| Lessons without behavioral change | Documents what happened but doesn't change future behavior | Every lesson MUST specify what to do differently — a lesson that doesn't change behavior is just a note |
+| Lessons without verification | No way to know if the lesson was applied | Every lesson MUST include how to verify it's being followed |
+
+## Driving Behavioral Change
+
+Extracted lessons are only valuable if they change future behavior. After creating or updating a lesson:
+
+1. **Check if a skill or agent definition should be updated**: If the lesson describes a repeated mistake that a skill instruction could prevent, update the skill file directly. Don't just create a lesson memory — fix the root cause.
+2. **Check if a procedural memory needs a new step**: If the lesson reveals a missing step in a workflow, update the relevant procedural memory.
+3. **Flag for self-improvement**: If the lesson reveals a pattern of mistakes, create a memory tagged `self-improvement-trigger` to ensure the next self-improvement cycle picks it up.
+4. **Link to goals**: If the lesson relates to an active goal, update the goal with progress notes.
+
+The pipeline should not just produce lesson memories — it should route actionable findings to the systems that can act on them.
 
 ## Example Extraction
 
@@ -186,6 +212,13 @@ This skill works alongside, not in replacement of:
 contain errors, are outdated, or are genuinely unclear. Resist the urge to rewrite
 for style or restructure for preference. The user values stability in working
 documentation over theoretical improvements.
+
+**Behavioral Change**: Before editing any documentation file, read each section and
+mark only the ones with factual errors or outdated information. Skip sections that
+are merely "not how I would write it." Diff should touch only error-containing sections.
+
+**Verification**: After making doc changes, check: does every changed section contain
+a factual correction? If any change is purely stylistic, revert it.
 
 **Evidence**:
 - 2026-03-10: Documentation update rejected — feedback indicated accurate sections
