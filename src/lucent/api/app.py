@@ -151,10 +151,11 @@ def create_app() -> FastAPI:
         """Add security headers including CSP to all responses."""
         response = await call_next(request)
         # Content-Security-Policy: restrict resource loading to same origin.
-        # unsafe-inline required for inline event handlers and Tailwind JIT.
+        # unsafe-inline needed for inline event handlers / <script> blocks in templates.
+        # unsafe-eval needed for Tailwind CSS JIT which uses eval() at runtime.
         csp = (
             "default-src 'self'; "
-            "script-src 'self' 'unsafe-inline'; "
+            "script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
             "style-src 'self' 'unsafe-inline'; "
             "img-src 'self' data:; "
             "font-src 'self'; "
