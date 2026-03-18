@@ -74,20 +74,36 @@ class RequestRepository:
             rows = await conn.fetch(query, *params)
         return [dict(r) for r in rows]
 
-    async def update_request_status(self, request_id: str, status: str) -> dict | None:
+    async def update_request_status(
+        self, request_id: str, status: str, org_id: str | None = None
+    ) -> dict | None:
         now = datetime.now(timezone.utc)
         completed_at = now if status in ("completed", "failed", "cancelled") else None
-        async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """UPDATE requests
-                   SET status = $2, updated_at = $3,
-                       completed_at = COALESCE($4, completed_at)
-                   WHERE id = $1 RETURNING *""",
-                UUID(request_id),
-                status,
-                now,
-                completed_at,
-            )
+        if org_id:
+            async with self.pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """UPDATE requests
+                       SET status = $2, updated_at = $3,
+                           completed_at = COALESCE($4, completed_at)
+                       WHERE id = $1 AND organization_id = $5 RETURNING *""",
+                    UUID(request_id),
+                    status,
+                    now,
+                    completed_at,
+                    UUID(org_id),
+                )
+        else:
+            async with self.pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """UPDATE requests
+                       SET status = $2, updated_at = $3,
+                           completed_at = COALESCE($4, completed_at)
+                       WHERE id = $1 RETURNING *""",
+                    UUID(request_id),
+                    status,
+                    now,
+                    completed_at,
+                )
         return dict(row) if row else None
 
     async def get_request_with_tasks(self, request_id: str, org_id: str) -> dict | None:
@@ -201,9 +217,19 @@ class RequestRepository:
         await self.add_task_event(str(task["id"]), "created", f"Task created: {title}")
         return task
 
-    async def get_task(self, task_id: str) -> dict | None:
-        async with self.pool.acquire() as conn:
-            row = await conn.fetchrow("SELECT * FROM tasks WHERE id = $1", UUID(task_id))
+    async def get_task(self, task_id: str, org_id: str | None = None) -> dict | None:
+        if org_id:
+            async with self.pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT * FROM tasks WHERE id = $1 AND organization_id = $2",
+                    UUID(task_id),
+                    UUID(org_id),
+                )
+        else:
+            async with self.pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT * FROM tasks WHERE id = $1", UUID(task_id)
+                )
         return dict(row) if row else None
 
     async def list_tasks(
@@ -266,19 +292,35 @@ class RequestRepository:
             )
         return [dict(r) for r in rows]
 
-    async def claim_task(self, task_id: str, instance_id: str) -> dict | None:
+    async def claim_task(
+        self, task_id: str, instance_id: str, org_id: str | None = None
+    ) -> dict | None:
         """Atomically claim a pending task. Returns None if already claimed."""
         now = datetime.now(timezone.utc)
-        async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """UPDATE tasks SET status = 'claimed', claimed_by = $2,
-                   claimed_at = $3, updated_at = $3
-                   WHERE id = $1 AND status IN ('pending', 'planned')
-                   RETURNING *""",
-                UUID(task_id),
-                instance_id,
-                now,
-            )
+        if org_id:
+            async with self.pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """UPDATE tasks SET status = 'claimed', claimed_by = $2,
+                       claimed_at = $3, updated_at = $3
+                       WHERE id = $1 AND status IN ('pending', 'planned')
+                       AND organization_id = $4
+                       RETURNING *""",
+                    UUID(task_id),
+                    instance_id,
+                    now,
+                    UUID(org_id),
+                )
+        else:
+            async with self.pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """UPDATE tasks SET status = 'claimed', claimed_by = $2,
+                       claimed_at = $3, updated_at = $3
+                       WHERE id = $1 AND status IN ('pending', 'planned')
+                       RETURNING *""",
+                    UUID(task_id),
+                    instance_id,
+                    now,
+                )
         if row:
             task = dict(row)
             await self.add_task_event(
@@ -292,33 +334,58 @@ class RequestRepository:
             return task
         return None
 
-    async def start_task(self, task_id: str) -> dict | None:
+    async def start_task(self, task_id: str, org_id: str | None = None) -> dict | None:
         """Mark a claimed task as running."""
         now = datetime.now(timezone.utc)
-        async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """UPDATE tasks SET status = 'running', updated_at = $2
-                   WHERE id = $1 AND status = 'claimed' RETURNING *""",
-                UUID(task_id),
-                now,
-            )
+        if org_id:
+            async with self.pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """UPDATE tasks SET status = 'running', updated_at = $2
+                       WHERE id = $1 AND status = 'claimed'
+                       AND organization_id = $3 RETURNING *""",
+                    UUID(task_id),
+                    now,
+                    UUID(org_id),
+                )
+        else:
+            async with self.pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """UPDATE tasks SET status = 'running', updated_at = $2
+                       WHERE id = $1 AND status = 'claimed' RETURNING *""",
+                    UUID(task_id),
+                    now,
+                )
         if row:
             await self.add_task_event(task_id, "running", "Agent started execution")
             return dict(row)
         return None
 
-    async def complete_task(self, task_id: str, result: str) -> dict | None:
+    async def complete_task(
+        self, task_id: str, result: str, org_id: str | None = None
+    ) -> dict | None:
         """Mark task as completed with result."""
         now = datetime.now(timezone.utc)
-        async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """UPDATE tasks SET status = 'completed', result = $2,
-                   completed_at = $3, updated_at = $3
-                   WHERE id = $1 RETURNING *""",
-                UUID(task_id),
-                result,
-                now,
-            )
+        if org_id:
+            async with self.pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """UPDATE tasks SET status = 'completed', result = $2,
+                       completed_at = $3, updated_at = $3
+                       WHERE id = $1 AND organization_id = $4 RETURNING *""",
+                    UUID(task_id),
+                    result,
+                    now,
+                    UUID(org_id),
+                )
+        else:
+            async with self.pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """UPDATE tasks SET status = 'completed', result = $2,
+                       completed_at = $3, updated_at = $3
+                       WHERE id = $1 RETURNING *""",
+                    UUID(task_id),
+                    result,
+                    now,
+                )
         if row:
             task = dict(row)
             await self.add_task_event(
@@ -331,18 +398,32 @@ class RequestRepository:
             return task
         return None
 
-    async def fail_task(self, task_id: str, error: str) -> dict | None:
+    async def fail_task(
+        self, task_id: str, error: str, org_id: str | None = None
+    ) -> dict | None:
         """Mark task as failed."""
         now = datetime.now(timezone.utc)
-        async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """UPDATE tasks SET status = 'failed', error = $2,
-                   completed_at = $3, updated_at = $3
-                   WHERE id = $1 RETURNING *""",
-                UUID(task_id),
-                error,
-                now,
-            )
+        if org_id:
+            async with self.pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """UPDATE tasks SET status = 'failed', error = $2,
+                       completed_at = $3, updated_at = $3
+                       WHERE id = $1 AND organization_id = $4 RETURNING *""",
+                    UUID(task_id),
+                    error,
+                    now,
+                    UUID(org_id),
+                )
+        else:
+            async with self.pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """UPDATE tasks SET status = 'failed', error = $2,
+                       completed_at = $3, updated_at = $3
+                       WHERE id = $1 RETURNING *""",
+                    UUID(task_id),
+                    error,
+                    now,
+                )
         if row:
             task = dict(row)
             await self.add_task_event(task_id, "failed", f"Failed: {error[:200]}")
@@ -350,34 +431,59 @@ class RequestRepository:
             return task
         return None
 
-    async def release_task(self, task_id: str) -> dict | None:
+    async def release_task(self, task_id: str, org_id: str | None = None) -> dict | None:
         """Release a claimed/running task back to pending (for retry/stale recovery)."""
         now = datetime.now(timezone.utc)
-        async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """UPDATE tasks SET status = 'pending', claimed_by = NULL,
-                   claimed_at = NULL, updated_at = $2
-                   WHERE id = $1 AND status IN ('claimed', 'running') RETURNING *""",
-                UUID(task_id),
-                now,
-            )
+        if org_id:
+            async with self.pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """UPDATE tasks SET status = 'pending', claimed_by = NULL,
+                       claimed_at = NULL, updated_at = $2
+                       WHERE id = $1 AND status IN ('claimed', 'running')
+                       AND organization_id = $3 RETURNING *""",
+                    UUID(task_id),
+                    now,
+                    UUID(org_id),
+                )
+        else:
+            async with self.pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """UPDATE tasks SET status = 'pending', claimed_by = NULL,
+                       claimed_at = NULL, updated_at = $2
+                       WHERE id = $1 AND status IN ('claimed', 'running') RETURNING *""",
+                    UUID(task_id),
+                    now,
+                )
         if row:
             await self.add_task_event(task_id, "released", "Task released back to pending")
             return dict(row)
         return None
 
-    async def retry_task(self, task_id: str) -> dict | None:
+    async def retry_task(self, task_id: str, org_id: str | None = None) -> dict | None:
         """Reset a failed task back to pending for retry."""
         now = datetime.now(timezone.utc)
-        async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """UPDATE tasks SET status = 'pending', claimed_by = NULL,
-                   claimed_at = NULL, completed_at = NULL, result = NULL,
-                   error = NULL, updated_at = $2
-                   WHERE id = $1 AND status = 'failed' RETURNING *""",
-                UUID(task_id),
-                now,
-            )
+        if org_id:
+            async with self.pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """UPDATE tasks SET status = 'pending', claimed_by = NULL,
+                       claimed_at = NULL, completed_at = NULL, result = NULL,
+                       error = NULL, updated_at = $2
+                       WHERE id = $1 AND status = 'failed'
+                       AND organization_id = $3 RETURNING *""",
+                    UUID(task_id),
+                    now,
+                    UUID(org_id),
+                )
+        else:
+            async with self.pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """UPDATE tasks SET status = 'pending', claimed_by = NULL,
+                       claimed_at = NULL, completed_at = NULL, result = NULL,
+                       error = NULL, updated_at = $2
+                       WHERE id = $1 AND status = 'failed' RETURNING *""",
+                    UUID(task_id),
+                    now,
+                )
         if row:
             task = dict(row)
             await self.add_task_event(task_id, "retried", "Task queued for retry")
@@ -386,17 +492,32 @@ class RequestRepository:
             return task
         return None
 
-    async def release_stale_tasks(self, stale_minutes: int = 30) -> int:
+    async def release_stale_tasks(
+        self, stale_minutes: int = 30, org_id: str | None = None
+    ) -> int:
         """Release tasks stuck in claimed/running state past the timeout."""
-        async with self.pool.acquire() as conn:
-            rows = await conn.fetch(
-                """UPDATE tasks SET status = 'pending', claimed_by = NULL,
-                   claimed_at = NULL, updated_at = NOW()
-                   WHERE status IN ('claimed', 'running')
-                   AND claimed_at < NOW() - make_interval(mins := $1)
-                   RETURNING id""",
-                stale_minutes,
-            )
+        if org_id:
+            async with self.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """UPDATE tasks SET status = 'pending', claimed_by = NULL,
+                       claimed_at = NULL, updated_at = NOW()
+                       WHERE status IN ('claimed', 'running')
+                       AND claimed_at < NOW() - make_interval(mins := $1)
+                       AND organization_id = $2
+                       RETURNING id""",
+                    stale_minutes,
+                    UUID(org_id),
+                )
+        else:
+            async with self.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """UPDATE tasks SET status = 'pending', claimed_by = NULL,
+                       claimed_at = NULL, updated_at = NOW()
+                       WHERE status IN ('claimed', 'running')
+                       AND claimed_at < NOW() - make_interval(mins := $1)
+                       RETURNING id""",
+                    stale_minutes,
+                )
         for row in rows:
             await self.add_task_event(
                 str(row["id"]),

@@ -16,6 +16,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from lucent.rate_limit import get_rate_limiter
+
 from lucent.api.routers import daemon_messages as daemon_messages_router
 from lucent.api.routers import daemon_tasks as daemon_tasks_router
 from lucent.api.routers import export, memories, search
@@ -153,6 +155,49 @@ def create_app() -> FastAPI:
             cid = set_correlation_id()
         response = await call_next(request)
         response.headers["X-Request-ID"] = cid
+        return response
+
+    @app.middleware("http")
+    async def api_rate_limit_middleware(request: Request, call_next):
+        """Apply per-key rate limiting to all /api/* endpoints.
+
+        Uses the same RateLimiter singleton and LUCENT_RATE_LIMIT_PER_MINUTE
+        config as the MCP rate limiting in server.py.
+        """
+        path = request.url.path
+        if not path.startswith("/api/") or path == "/api/health":
+            return await call_next(request)
+
+        rate_limiter = get_rate_limiter()
+
+        # Determine rate limit key: prefer API key, fall back to client IP
+        auth_header = request.headers.get("authorization", "")
+        if auth_header.startswith("Bearer "):
+            rate_key = f"api:{auth_header[7:]}"
+        elif auth_header:
+            rate_key = f"api:{auth_header}"
+        else:
+            client_ip = request.client.host if request.client else "unknown"
+            rate_key = f"api:ip:{client_ip}"
+
+        rate_result = rate_limiter.check_rate_limit(rate_key)
+
+        if not rate_result.allowed:
+            logger.warning(
+                "API rate limit exceeded: key=%s, path=%s, retry_after=%s",
+                rate_key[:20] + "...",
+                path,
+                rate_result.headers.get("Retry-After"),
+            )
+            return JSONResponse(
+                status_code=429,
+                content={"error": "Rate limit exceeded. Please slow down your requests."},
+                headers=rate_result.headers,
+            )
+
+        response = await call_next(request)
+        for name, value in rate_result.headers.items():
+            response.headers[name] = value
         return response
 
     # Include core API routers

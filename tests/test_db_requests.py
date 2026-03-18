@@ -39,14 +39,33 @@ async def task(repo, req, test_organization):
     )
 
 
+@pytest_asyncio.fixture
+async def other_org(db_pool, clean_test_data):
+    """Create a second organization for cross-org isolation tests."""
+    from lucent.db import OrganizationRepository
+
+    prefix = clean_test_data
+    repo = OrganizationRepository(db_pool)
+    org = await repo.create(name=f"{prefix}other_org")
+    return org
+
+
 @pytest_asyncio.fixture(autouse=True)
-async def cleanup_requests(db_pool, test_organization):
+async def cleanup_requests(db_pool, test_organization, clean_test_data):
     """Clean up request tracking data after each test."""
     yield
-    org_id = test_organization["id"]
+    prefix = clean_test_data
     async with db_pool.acquire() as conn:
         # task_events and task_memories cascade from tasks, tasks cascade from requests
-        await conn.execute("DELETE FROM requests WHERE organization_id = $1", org_id)
+        await conn.execute("DELETE FROM requests WHERE organization_id = $1", test_organization["id"])
+        # Also clean up any other-org requests created during cross-org tests
+        other_orgs = await conn.fetch(
+            "SELECT id FROM organizations WHERE name LIKE $1 AND id != $2",
+            f"{prefix}%",
+            test_organization["id"],
+        )
+        for org in other_orgs:
+            await conn.execute("DELETE FROM requests WHERE organization_id = $1", org["id"])
 
 
 class TestCreateRequest:
@@ -671,3 +690,227 @@ class TestDashboardQueries:
             await repo.add_task_event(tid, "progress", f"step {i}")
         events = await repo.get_recent_events(org, limit=3)
         assert len(events) == 3
+
+
+class TestCrossOrgIsolation:
+    """Verify that org_id filtering prevents cross-org access to tasks and requests.
+
+    Each test creates data in org_A (test_organization), then attempts to
+    access/mutate it using org_B (other_org). The cross-org attempt must fail,
+    while the same-org attempt must succeed.
+    """
+
+    # ── 1. get_task ──────────────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_get_task_cross_org_blocked(self, repo, task, other_org):
+        """get_task with wrong org_id returns None."""
+        result = await repo.get_task(str(task["id"]), org_id=str(other_org["id"]))
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_get_task_same_org_allowed(self, repo, task, test_organization):
+        """get_task with correct org_id returns the task."""
+        result = await repo.get_task(str(task["id"]), org_id=str(test_organization["id"]))
+        assert result is not None
+        assert result["id"] == task["id"]
+
+    # ── 2. claim_task ────────────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_claim_task_cross_org_blocked(self, repo, task, other_org):
+        """claim_task with wrong org_id returns None (task stays pending)."""
+        result = await repo.claim_task(
+            str(task["id"]), "attacker-instance", org_id=str(other_org["id"])
+        )
+        assert result is None
+        # Verify task is still pending (not mutated)
+        original = await repo.get_task(str(task["id"]))
+        assert original["status"] == "pending"
+
+    @pytest.mark.asyncio
+    async def test_claim_task_same_org_allowed(self, repo, task, test_organization):
+        """claim_task with correct org_id succeeds."""
+        result = await repo.claim_task(
+            str(task["id"]), "legit-instance", org_id=str(test_organization["id"])
+        )
+        assert result is not None
+        assert result["status"] == "claimed"
+
+    # ── 3. start_task ────────────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_start_task_cross_org_blocked(self, repo, task, other_org):
+        """start_task with wrong org_id returns None."""
+        await repo.claim_task(str(task["id"]), "daemon-1")
+        result = await repo.start_task(str(task["id"]), org_id=str(other_org["id"]))
+        assert result is None
+        # Verify task is still claimed (not mutated)
+        original = await repo.get_task(str(task["id"]))
+        assert original["status"] == "claimed"
+
+    @pytest.mark.asyncio
+    async def test_start_task_same_org_allowed(self, repo, task, test_organization):
+        """start_task with correct org_id succeeds."""
+        await repo.claim_task(str(task["id"]), "daemon-1")
+        result = await repo.start_task(
+            str(task["id"]), org_id=str(test_organization["id"])
+        )
+        assert result is not None
+        assert result["status"] == "running"
+
+    # ── 4. complete_task ─────────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_complete_task_cross_org_blocked(self, repo, task, other_org):
+        """complete_task with wrong org_id returns None."""
+        await repo.claim_task(str(task["id"]), "daemon-1")
+        result = await repo.complete_task(
+            str(task["id"]), "hacked", org_id=str(other_org["id"])
+        )
+        assert result is None
+        original = await repo.get_task(str(task["id"]))
+        assert original["status"] == "claimed"
+
+    @pytest.mark.asyncio
+    async def test_complete_task_same_org_allowed(self, repo, task, test_organization):
+        """complete_task with correct org_id succeeds."""
+        await repo.claim_task(str(task["id"]), "daemon-1")
+        result = await repo.complete_task(
+            str(task["id"]), "done", org_id=str(test_organization["id"])
+        )
+        assert result is not None
+        assert result["status"] == "completed"
+
+    # ── 5. fail_task ─────────────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_fail_task_cross_org_blocked(self, repo, task, other_org):
+        """fail_task with wrong org_id returns None."""
+        await repo.claim_task(str(task["id"]), "daemon-1")
+        result = await repo.fail_task(
+            str(task["id"]), "sabotage", org_id=str(other_org["id"])
+        )
+        assert result is None
+        original = await repo.get_task(str(task["id"]))
+        assert original["status"] == "claimed"
+
+    @pytest.mark.asyncio
+    async def test_fail_task_same_org_allowed(self, repo, task, test_organization):
+        """fail_task with correct org_id succeeds."""
+        await repo.claim_task(str(task["id"]), "daemon-1")
+        result = await repo.fail_task(
+            str(task["id"]), "real error", org_id=str(test_organization["id"])
+        )
+        assert result is not None
+        assert result["status"] == "failed"
+
+    # ── 6. release_task ──────────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_release_task_cross_org_blocked(self, repo, task, other_org):
+        """release_task with wrong org_id returns None."""
+        await repo.claim_task(str(task["id"]), "daemon-1")
+        result = await repo.release_task(str(task["id"]), org_id=str(other_org["id"]))
+        assert result is None
+        original = await repo.get_task(str(task["id"]))
+        assert original["status"] == "claimed"
+
+    @pytest.mark.asyncio
+    async def test_release_task_same_org_allowed(self, repo, task, test_organization):
+        """release_task with correct org_id succeeds."""
+        await repo.claim_task(str(task["id"]), "daemon-1")
+        result = await repo.release_task(
+            str(task["id"]), org_id=str(test_organization["id"])
+        )
+        assert result is not None
+        assert result["status"] == "pending"
+
+    # ── 7. retry_task ────────────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_retry_task_cross_org_blocked(self, repo, task, other_org):
+        """retry_task with wrong org_id returns None."""
+        await repo.claim_task(str(task["id"]), "daemon-1")
+        await repo.fail_task(str(task["id"]), "error")
+        result = await repo.retry_task(str(task["id"]), org_id=str(other_org["id"]))
+        assert result is None
+        original = await repo.get_task(str(task["id"]))
+        assert original["status"] == "failed"
+
+    @pytest.mark.asyncio
+    async def test_retry_task_same_org_allowed(self, repo, task, test_organization):
+        """retry_task with correct org_id succeeds."""
+        await repo.claim_task(str(task["id"]), "daemon-1")
+        await repo.fail_task(str(task["id"]), "error")
+        result = await repo.retry_task(
+            str(task["id"]), org_id=str(test_organization["id"])
+        )
+        assert result is not None
+        assert result["status"] == "pending"
+
+    # ── 8. release_stale_tasks ───────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_release_stale_tasks_cross_org_blocked(
+        self, repo, task, other_org, db_pool
+    ):
+        """release_stale_tasks with wrong org_id returns 0 affected rows."""
+        await repo.claim_task(str(task["id"]), "daemon-1")
+        # Backdate claimed_at to make it stale
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE tasks SET claimed_at = NOW() - interval '60 minutes' WHERE id = $1",
+                task["id"],
+            )
+        count = await repo.release_stale_tasks(
+            stale_minutes=30, org_id=str(other_org["id"])
+        )
+        assert count == 0
+        # Verify task is still claimed (not released by wrong org)
+        original = await repo.get_task(str(task["id"]))
+        assert original["status"] == "claimed"
+
+    @pytest.mark.asyncio
+    async def test_release_stale_tasks_same_org_allowed(
+        self, repo, task, test_organization, db_pool
+    ):
+        """release_stale_tasks with correct org_id releases the task."""
+        await repo.claim_task(str(task["id"]), "daemon-1")
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE tasks SET claimed_at = NOW() - interval '60 minutes' WHERE id = $1",
+                task["id"],
+            )
+        count = await repo.release_stale_tasks(
+            stale_minutes=30, org_id=str(test_organization["id"])
+        )
+        assert count >= 1
+        refreshed = await repo.get_task(str(task["id"]))
+        assert refreshed["status"] == "pending"
+
+    # ── 9. update_request_status ─────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_update_request_status_cross_org_blocked(self, repo, req, other_org):
+        """update_request_status with wrong org_id returns None."""
+        result = await repo.update_request_status(
+            str(req["id"]), "in_progress", org_id=str(other_org["id"])
+        )
+        assert result is None
+        # Verify request is still pending (not mutated)
+        original = await repo.get_request(
+            str(req["id"]), str(req["organization_id"])
+        )
+        assert original["status"] == "pending"
+
+    @pytest.mark.asyncio
+    async def test_update_request_status_same_org_allowed(
+        self, repo, req, test_organization
+    ):
+        """update_request_status with correct org_id succeeds."""
+        result = await repo.update_request_status(
+            str(req["id"]), "in_progress", org_id=str(test_organization["id"])
+        )
+        assert result is not None
+        assert result["status"] == "in_progress"

@@ -10,6 +10,8 @@ TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL", "postgresql://lucent:lucent_dev_password@localhost:5433/lucent"
 )
 os.environ["DATABASE_URL"] = TEST_DATABASE_URL
+# Disable effective rate limiting during tests
+os.environ.setdefault("LUCENT_RATE_LIMIT_PER_MINUTE", "999999")
 
 
 @pytest_asyncio.fixture(scope="function")

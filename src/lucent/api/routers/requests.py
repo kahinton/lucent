@@ -117,7 +117,9 @@ async def update_request_status(
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
-    result = await repo.update_request_status(str(request_id), status)
+    result = await repo.update_request_status(
+        str(request_id), status, org_id=str(user.organization_id)
+    )
     if not result:
         raise HTTPException(404, "Request not found")
     return result
@@ -200,7 +202,7 @@ async def claim_task(
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
-    result = await repo.claim_task(str(task_id), instance_id)
+    result = await repo.claim_task(str(task_id), instance_id, org_id=str(user.organization_id))
     if not result:
         raise HTTPException(409, "Task already claimed or not pending")
     return result
@@ -211,7 +213,7 @@ async def start_task(task_id: UUID, user=Depends(get_current_user), pool=Depends
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
-    result = await repo.start_task(str(task_id))
+    result = await repo.start_task(str(task_id), org_id=str(user.organization_id))
     if not result:
         raise HTTPException(409, "Task not in claimed state")
     return result
@@ -227,7 +229,7 @@ async def complete_task(
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
-    task = await repo.complete_task(str(task_id), result)
+    task = await repo.complete_task(str(task_id), result, org_id=str(user.organization_id))
     if not task:
         raise HTTPException(404, "Task not found")
     return task
@@ -243,7 +245,7 @@ async def fail_task(
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
-    task = await repo.fail_task(str(task_id), error)
+    task = await repo.fail_task(str(task_id), error, org_id=str(user.organization_id))
     if not task:
         raise HTTPException(404, "Task not found")
     return task
@@ -254,7 +256,7 @@ async def release_task(task_id: UUID, user=Depends(get_current_user), pool=Depen
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
-    task = await repo.release_task(str(task_id))
+    task = await repo.release_task(str(task_id), org_id=str(user.organization_id))
     if not task:
         raise HTTPException(409, "Task not in claimed/running state")
     return task
@@ -265,7 +267,7 @@ async def retry_task(task_id: UUID, user=Depends(get_current_user), pool=Depends
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
-    task = await repo.retry_task(str(task_id))
+    task = await repo.retry_task(str(task_id), org_id=str(user.organization_id))
     if not task:
         raise HTTPException(409, "Task not in failed state")
     return task
@@ -339,5 +341,5 @@ async def release_stale(
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
-    count = await repo.release_stale_tasks(stale_minutes)
+    count = await repo.release_stale_tasks(stale_minutes, org_id=str(user.organization_id))
     return {"released": count}

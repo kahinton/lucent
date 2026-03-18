@@ -346,9 +346,15 @@ async function runCommand() {
     input.value = '';
 
     try {
-        const resp = await fetch('/api/sandboxes/' + currentSandboxId + '/exec', {
+        const csrfCookie = document.cookie.split('; ')
+            .find(c => c.startsWith('lucent_csrf='));
+        const csrfToken = csrfCookie ? csrfCookie.split('=')[1] : '';
+        const resp = await fetch('/sandboxes/' + currentSandboxId + '/exec', {
             method: 'POST',
-            headers: {'Content-Type': 'application/json'},
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRF-Token': csrfToken
+            },
             body: JSON.stringify({command: cmd, timeout: 30})
         });
         const data = await resp.json();

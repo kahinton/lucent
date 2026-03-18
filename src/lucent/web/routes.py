@@ -8,7 +8,7 @@ from uuid import UUID
 
 import bcrypt
 from fastapi import APIRouter, Form, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from lucent.api.deps import CurrentUser
@@ -2632,6 +2632,35 @@ async def destroy_sandbox_web(request: Request, sandbox_id: str):
     return RedirectResponse("/sandboxes?tab=instances", status_code=303)
 
 
+@router.post("/sandboxes/{sandbox_id}/exec")
+async def exec_sandbox_web(request: Request, sandbox_id: str):
+    """Execute a command in a sandbox from the web UI.
+
+    Uses session cookie auth + CSRF validation so the frontend
+    never needs to handle bearer tokens.
+    """
+    await get_user_context(request)
+    csrf_token = request.headers.get("X-CSRF-Token", "")
+    await _check_csrf(request, form_token=csrf_token)
+
+    from lucent.sandbox.manager import get_sandbox_manager
+
+    body = await request.json()
+    command = body.get("command", "")
+    timeout = min(body.get("timeout", 30), 300)
+
+    if not command:
+        return JSONResponse({"error": "No command provided"}, status_code=400)
+
+    manager = get_sandbox_manager()
+    result = await manager.exec(sandbox_id, command, timeout=timeout)
+    return JSONResponse({
+        "exit_code": result.exit_code,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+    })
+
+
 @router.get("/settings", response_class=HTMLResponse)
 async def settings(
     request: Request,
@@ -2901,14 +2930,14 @@ async def request_detail(request: Request, request_id: str):
 @router.post("/requests/tasks/{task_id}/retry", response_class=HTMLResponse)
 async def retry_task(request: Request, task_id: str):
     """Retry a failed task — resets it to pending for the daemon to pick up."""
-    await get_user_context(request)
+    user = await get_user_context(request)
     await _check_csrf(request)
     pool = await get_pool()
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
 
-    task = await repo.retry_task(task_id)
+    task = await repo.retry_task(task_id, org_id=str(user.organization_id))
     if not task:
         raise HTTPException(409, "Task not in failed state")
 
