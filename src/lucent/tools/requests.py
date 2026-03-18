@@ -247,7 +247,8 @@ Use this during cognitive cycles to discover new work."""
         return json.dumps(requests, default=serialize)
 
     @mcp.tool(
-        description="""List all active (non-completed) work — requests and their task status summaries.
+        description="""List all active (non-completed) work \
+— requests and their task status summaries.
 
 Returns requests in pending/in_progress/planned status along with task counts
 broken down by status (pending, running, completed, failed). Use this during

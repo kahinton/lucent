@@ -281,7 +281,9 @@ class RequestRepository:
                           r.source, r.created_at,
                           count(t.id) FILTER (WHERE t.status = 'pending') AS tasks_pending,
                           count(t.id) FILTER (WHERE t.status = 'planned') AS tasks_planned,
-                          count(t.id) FILTER (WHERE t.status IN ('claimed', 'running')) AS tasks_running,
+                          count(t.id) FILTER (
+                              WHERE t.status IN ('claimed', 'running')
+                          ) AS tasks_running,
                           count(t.id) FILTER (WHERE t.status = 'completed') AS tasks_completed,
                           count(t.id) FILTER (WHERE t.status = 'failed') AS tasks_failed,
                           count(t.id) AS tasks_total

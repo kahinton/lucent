@@ -57,8 +57,8 @@ def __getattr__(name: str):
         from lucent.integrations.router import webhook_router
         return webhook_router
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-from lucent.integrations.slack_adapter import SlackAdapter
-from lucent.integrations.webhooks import WebhookSignatureMiddleware
+from lucent.integrations.slack_adapter import SlackAdapter  # noqa: E402
+from lucent.integrations.webhooks import WebhookSignatureMiddleware  # noqa: E402
 
 __all__ = [
     "AdapterRegistry",

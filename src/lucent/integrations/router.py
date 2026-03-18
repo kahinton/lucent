@@ -552,7 +552,7 @@ async def verify_pairing_code(
 
     if not code or not integration_id:
         raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
             "Both 'code' and 'integration_id' are required",
         )
 

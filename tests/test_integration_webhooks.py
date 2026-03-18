@@ -228,7 +228,10 @@ class TestWebhookSignatureVerification:
         app = AsyncMock()
         mw = WebhookSignatureMiddleware(app, get_adapter=get_adapter)
 
-        body = json.dumps({"type": "event_callback", "event": {"type": "message", "text": "hi", "user": "U1", "channel": "C1"}}).encode()
+        body = json.dumps({
+            "type": "event_callback",
+            "event": {"type": "message", "text": "hi", "user": "U1", "channel": "C1"},
+        }).encode()
         scope = _scope_with_slack_headers(body)
         receive = _make_receive(body)
         send = AsyncMock()
@@ -340,7 +343,10 @@ class TestWebhookBodyBuffering:
 
         mw = WebhookSignatureMiddleware(capture_app, get_adapter=get_adapter)
 
-        body = json.dumps({"type": "event_callback", "event": {"type": "message", "text": "test", "user": "U1", "channel": "C1"}}).encode()
+        body = json.dumps({
+            "type": "event_callback",
+            "event": {"type": "message", "text": "test", "user": "U1", "channel": "C1"},
+        }).encode()
         scope = _scope_with_slack_headers(body)
         receive = _make_receive(body)
         send = AsyncMock()
@@ -366,7 +372,10 @@ class TestWebhookBodyBuffering:
 
         mw = WebhookSignatureMiddleware(capture_app, get_adapter=get_adapter)
 
-        full_body = json.dumps({"type": "event_callback", "event": {"type": "message", "text": "hello", "user": "U1", "channel": "C1"}}).encode()
+        full_body = json.dumps({
+            "type": "event_callback",
+            "event": {"type": "message", "text": "hello", "user": "U1", "channel": "C1"},
+        }).encode()
         # Split into chunks but sign the full body
         scope = _scope_with_slack_headers(full_body)
         mid = len(full_body) // 2

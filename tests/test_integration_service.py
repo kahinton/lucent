@@ -695,7 +695,10 @@ class TestHandleEventSanitize:
 
         result = await svc.handle_event(event, integration, adapter)
         assert result.success is True
-        assert "send a message" in result.response_text.lower() or "command" in result.response_text.lower()
+        assert (
+            "send a message" in result.response_text.lower()
+            or "command" in result.response_text.lower()
+        )
 
     async def test_whitespace_only_returns_hint(self):
         user = _make_user()

@@ -57,7 +57,10 @@ async def cleanup_requests(db_pool, test_organization, clean_test_data):
     prefix = clean_test_data
     async with db_pool.acquire() as conn:
         # task_events and task_memories cascade from tasks, tasks cascade from requests
-        await conn.execute("DELETE FROM requests WHERE organization_id = $1", test_organization["id"])
+        await conn.execute(
+            "DELETE FROM requests WHERE organization_id = $1",
+            test_organization["id"],
+        )
         # Also clean up any other-org requests created during cross-org tests
         other_orgs = await conn.fetch(
             "SELECT id FROM organizations WHERE name LIKE $1 AND id != $2",

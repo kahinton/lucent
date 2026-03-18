@@ -481,7 +481,9 @@ class TestConfigSummary:
         assert summary["remote_user"] == "vscode"
         assert summary["forward_ports"] == [3000, 8080]
         assert "ghcr.io/devcontainers/features/git:1" in summary["features"]
-        assert summary["lifecycle_commands"]["onCreateCommand"] == ["pip install -r requirements.txt"]
+        assert summary["lifecycle_commands"]["onCreateCommand"] == [
+            "pip install -r requirements.txt"
+        ]
         assert summary["env_var_count"] == 1
 
     def test_summary_empty_config(self):
@@ -684,7 +686,9 @@ class TestDockerBackendDevcontainerIntegration:
 
         with patch.object(backend, '_detect_devcontainer', new_callable=AsyncMock) as mock_detect:
             mock_detect.return_value = dc_config
-            with patch.object(backend, '_rebuild_with_image', new_callable=AsyncMock) as mock_rebuild:
+            with patch.object(
+                backend, '_rebuild_with_image', new_callable=AsyncMock
+            ) as mock_rebuild:
                 with patch.object(backend, 'exec', new_callable=AsyncMock) as mock_exec:
                     mock_exec.return_value = ExecResult(exit_code=0, stdout="", stderr="")
                     info = await backend.create(config)

@@ -93,7 +93,9 @@ def _link_row(
     }
 
 
-def _challenge_row(*, integration_id: str | None = None, user_id: str | None = None) -> dict[str, Any]:
+def _challenge_row(
+    *, integration_id: str | None = None, user_id: str | None = None
+) -> dict[str, Any]:
     return {
         "id": _uuid(),
         "integration_id": integration_id or _uuid(),
@@ -556,7 +558,10 @@ class TestPairingEndpoints:
             patch("lucent.integrations.router.get_pool", new_callable=AsyncMock) as mock_pool,
             patch("lucent.integrations.router.IntegrationRepo") as mock_repo_cls,
             patch("lucent.integrations.router.PairingChallengeRepo"),
-            patch("lucent.integrations.identity.PairingChallengeService.generate", new_callable=AsyncMock) as mock_gen,
+            patch(
+                "lucent.integrations.identity.PairingChallengeService.generate",
+                new_callable=AsyncMock,
+            ) as mock_gen,
             patch("lucent.integrations.router.AuditRepository"),
         ):
             mock_pool.return_value = MagicMock()
@@ -637,7 +642,10 @@ class TestPairingEndpoints:
             patch("lucent.integrations.router.get_pool", new_callable=AsyncMock) as mock_pool,
             patch("lucent.integrations.router.IntegrationRepo") as mock_repo_cls,
             patch("lucent.integrations.router.PairingChallengeRepo"),
-            patch("lucent.integrations.identity.PairingChallengeService.generate", new_callable=AsyncMock) as mock_gen,
+            patch(
+                "lucent.integrations.identity.PairingChallengeService.generate",
+                new_callable=AsyncMock,
+            ) as mock_gen,
         ):
             mock_pool.return_value = MagicMock()
             repo = MagicMock()
@@ -897,7 +905,10 @@ class TestRouterHelpers:
         assert result.type == row["type"]
         assert result.status == row["status"]
         # Never exposes encrypted_config
-        assert not hasattr(result, "encrypted_config") or getattr(result, "encrypted_config", None) is None
+        assert (
+            not hasattr(result, "encrypted_config")
+            or getattr(result, "encrypted_config", None) is None
+        )
 
     def test_integration_to_response_json_channels(self) -> None:
         from lucent.integrations.router import _integration_to_response
