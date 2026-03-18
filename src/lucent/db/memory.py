@@ -1037,6 +1037,11 @@ class MemoryRepository:
                     if not content or not isinstance(content, str) or not content.strip():
                         errors.append({"index": str(idx), "error": "Missing or empty content"})
                         continue
+                    if len(content) > 100_000:
+                        errors.append(
+                            {"index": str(idx), "error": "Content exceeds 100,000 character limit"}
+                        )
+                        continue
                     if mem_type not in valid_types:
                         errors.append({"index": str(idx), "error": f"Invalid type: {mem_type}"})
                         continue
