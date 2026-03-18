@@ -6,7 +6,6 @@ from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from lucent.auth_providers import (
-    CSRF_COOKIE_NAME,
     SESSION_COOKIE_NAME,
     SESSION_TTL_HOURS,
     create_session,

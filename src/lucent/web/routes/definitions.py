@@ -1,16 +1,30 @@
 """Definition management routes — agents, skills, MCP servers."""
 
-from fastapi import APIRouter, Form, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from lucent.db import get_pool
 from lucent.logging import get_logger
+from lucent.rbac import Role
 
 from ._shared import _check_csrf, _parse_env_vars, get_user_context, templates
 
 logger = get_logger("web.routes.definitions")
 
 router = APIRouter()
+
+
+def _require_admin_or_owner(user) -> None:
+    """Raise 403 if user is not admin or owner."""
+    role_value = user.role if isinstance(user.role, str) else user.role.value
+    if role_value not in ("admin", "owner"):
+        raise HTTPException(status_code=403, detail="Permission denied")
+
+
+def _require_admin(user: object) -> None:
+    """Raise 403 if user is not admin or owner."""
+    if user.role not in (Role.ADMIN, Role.OWNER):
+        raise HTTPException(status_code=403, detail="Permission denied")
 
 
 # =============================================================================
@@ -140,6 +154,7 @@ async def mcp_server_detail_page(request: Request, server_id: str):
 async def approve_agent_web(request: Request, agent_id: str):
     """Approve an agent definition."""
     user = await get_user_context(request)
+    _require_admin_or_owner(user)
     await _check_csrf(request)
     pool = await get_pool()
     from lucent.db.definitions import DefinitionRepository
@@ -153,6 +168,7 @@ async def approve_agent_web(request: Request, agent_id: str):
 async def reject_agent_web(request: Request, agent_id: str):
     """Reject an agent definition."""
     user = await get_user_context(request)
+    _require_admin_or_owner(user)
     await _check_csrf(request)
     pool = await get_pool()
     from lucent.db.definitions import DefinitionRepository
@@ -166,6 +182,7 @@ async def reject_agent_web(request: Request, agent_id: str):
 async def approve_skill_web(request: Request, skill_id: str):
     """Approve a skill definition."""
     user = await get_user_context(request)
+    _require_admin_or_owner(user)
     await _check_csrf(request)
     pool = await get_pool()
     from lucent.db.definitions import DefinitionRepository
@@ -179,6 +196,7 @@ async def approve_skill_web(request: Request, skill_id: str):
 async def reject_skill_web(request: Request, skill_id: str):
     """Reject a skill definition."""
     user = await get_user_context(request)
+    _require_admin_or_owner(user)
     await _check_csrf(request)
     pool = await get_pool()
     from lucent.db.definitions import DefinitionRepository
@@ -192,6 +210,7 @@ async def reject_skill_web(request: Request, skill_id: str):
 async def approve_mcp_web(request: Request, server_id: str):
     """Approve an MCP server definition."""
     user = await get_user_context(request)
+    _require_admin_or_owner(user)
     await _check_csrf(request)
     pool = await get_pool()
     from lucent.db.definitions import DefinitionRepository
@@ -205,6 +224,7 @@ async def approve_mcp_web(request: Request, server_id: str):
 async def reject_mcp_web(request: Request, server_id: str):
     """Reject an MCP server definition."""
     user = await get_user_context(request)
+    _require_admin_or_owner(user)
     await _check_csrf(request)
     pool = await get_pool()
     from lucent.db.definitions import DefinitionRepository
@@ -218,6 +238,7 @@ async def reject_mcp_web(request: Request, server_id: str):
 async def create_agent_web(request: Request):
     """Create a new agent definition."""
     user = await get_user_context(request)
+    _require_admin_or_owner(user)
     await _check_csrf(request)
     form = await request.form()
     pool = await get_pool()
@@ -240,6 +261,7 @@ async def create_agent_web(request: Request):
 async def update_agent_web(request: Request, agent_id: str):
     """Update an agent definition."""
     user = await get_user_context(request)
+    _require_admin_or_owner(user)
     await _check_csrf(request)
     form = await request.form()
     pool = await get_pool()
@@ -262,6 +284,7 @@ async def update_agent_web(request: Request, agent_id: str):
 async def delete_agent_web(request: Request, agent_id: str):
     """Delete an agent definition."""
     user = await get_user_context(request)
+    _require_admin_or_owner(user)
     await _check_csrf(request)
     pool = await get_pool()
     from lucent.db.definitions import DefinitionRepository
@@ -275,6 +298,7 @@ async def delete_agent_web(request: Request, agent_id: str):
 async def create_skill_web(request: Request):
     """Create a new skill definition."""
     user = await get_user_context(request)
+    _require_admin_or_owner(user)
     await _check_csrf(request)
     form = await request.form()
     pool = await get_pool()
@@ -297,6 +321,7 @@ async def create_skill_web(request: Request):
 async def update_skill_web(request: Request, skill_id: str):
     """Update a skill definition."""
     user = await get_user_context(request)
+    _require_admin_or_owner(user)
     await _check_csrf(request)
     form = await request.form()
     pool = await get_pool()
@@ -319,6 +344,7 @@ async def update_skill_web(request: Request, skill_id: str):
 async def delete_skill_web(request: Request, skill_id: str):
     """Delete a skill definition."""
     user = await get_user_context(request)
+    _require_admin_or_owner(user)
     await _check_csrf(request)
     pool = await get_pool()
     from lucent.db.definitions import DefinitionRepository
@@ -332,6 +358,7 @@ async def delete_skill_web(request: Request, skill_id: str):
 async def create_mcp_web(request: Request):
     """Create a new MCP server definition."""
     user = await get_user_context(request)
+    _require_admin_or_owner(user)
     await _check_csrf(request)
     form = await request.form()
     pool = await get_pool()
@@ -363,6 +390,7 @@ async def create_mcp_web(request: Request):
 async def update_mcp_web(request: Request, server_id: str):
     """Update an MCP server definition."""
     user = await get_user_context(request)
+    _require_admin_or_owner(user)
     await _check_csrf(request)
     form = await request.form()
     pool = await get_pool()
@@ -392,6 +420,7 @@ async def update_mcp_web(request: Request, server_id: str):
 async def delete_mcp_web(request: Request, server_id: str):
     """Delete an MCP server definition."""
     user = await get_user_context(request)
+    _require_admin_or_owner(user)
     await _check_csrf(request)
     pool = await get_pool()
     from lucent.db.definitions import DefinitionRepository
@@ -405,6 +434,7 @@ async def delete_mcp_web(request: Request, server_id: str):
 async def grant_skill_web(request: Request, agent_id: str):
     """Grant a skill to an agent."""
     user = await get_user_context(request)
+    _require_admin_or_owner(user)
     await _check_csrf(request)
     form = await request.form()
     pool = await get_pool()
@@ -420,6 +450,7 @@ async def grant_skill_web(request: Request, agent_id: str):
 async def revoke_skill_web(request: Request, agent_id: str, skill_id: str):
     """Revoke a skill from an agent."""
     user = await get_user_context(request)
+    _require_admin_or_owner(user)
     await _check_csrf(request)
     pool = await get_pool()
     from lucent.db.definitions import DefinitionRepository
@@ -433,6 +464,7 @@ async def revoke_skill_web(request: Request, agent_id: str, skill_id: str):
 async def grant_mcp_web(request: Request, agent_id: str):
     """Grant an MCP server to an agent."""
     user = await get_user_context(request)
+    _require_admin_or_owner(user)
     await _check_csrf(request)
     form = await request.form()
     pool = await get_pool()
@@ -448,6 +480,7 @@ async def grant_mcp_web(request: Request, agent_id: str):
 async def revoke_mcp_web(request: Request, agent_id: str, server_id: str):
     """Revoke an MCP server from an agent."""
     user = await get_user_context(request)
+    _require_admin_or_owner(user)
     await _check_csrf(request)
     pool = await get_pool()
     from lucent.db.definitions import DefinitionRepository
@@ -461,6 +494,7 @@ async def revoke_mcp_web(request: Request, agent_id: str, server_id: str):
 async def update_mcp_tools_web(request: Request, agent_id: str, server_id: str):
     """Update allowed tools for an agent's MCP server assignment."""
     user = await get_user_context(request)
+    _require_admin_or_owner(user)
     await _check_csrf(request)
     form = await request.form()
     pool = await get_pool()

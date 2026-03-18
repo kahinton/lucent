@@ -14,6 +14,19 @@ logger = get_logger("web.routes.sandboxes")
 router = APIRouter()
 
 
+def _require_admin_or_owner(user) -> None:
+    """Raise 403 if user is not admin or owner."""
+    role_value = user.role if isinstance(user.role, str) else user.role.value
+    if role_value not in ("admin", "owner"):
+        raise HTTPException(status_code=403, detail="Permission denied")
+
+
+def _require_org_membership(user) -> None:
+    """Raise 403 if user has no organization membership."""
+    if not user.organization_id:
+        raise HTTPException(status_code=403, detail="Organization membership required")
+
+
 # =============================================================================
 # Sandboxes
 # =============================================================================
@@ -94,6 +107,7 @@ async def create_template_web(
 ):
     """Create a new sandbox template."""
     user = await get_user_context(request)
+    _require_admin_or_owner(user)
     await _check_csrf(request, form_token=csrf_token)
     pool = await get_pool()
     from lucent.db.sandbox_template import SandboxTemplateRepository
@@ -162,6 +176,7 @@ async def update_template_web(
 ):
     """Update a sandbox template."""
     user = await get_user_context(request)
+    _require_admin_or_owner(user)
     await _check_csrf(request, form_token=csrf_token)
     pool = await get_pool()
     from lucent.db.sandbox_template import SandboxTemplateRepository
@@ -191,6 +206,7 @@ async def update_template_web(
 async def delete_template_web(request: Request, template_id: str):
     """Delete a sandbox template."""
     user = await get_user_context(request)
+    _require_admin_or_owner(user)
     await _check_csrf(request)
     pool = await get_pool()
     from lucent.db.sandbox_template import SandboxTemplateRepository
@@ -209,6 +225,7 @@ async def launch_sandbox_web(
 ):
     """Launch a sandbox instance from a template."""
     user = await get_user_context(request)
+    _require_org_membership(user)
     await _check_csrf(request, form_token=csrf_token)
     pool = await get_pool()
     from lucent.db.sandbox_template import SandboxTemplateRepository
@@ -243,11 +260,15 @@ async def launch_sandbox_web(
 @router.post("/sandboxes/{sandbox_id}/stop")
 async def stop_sandbox_web(request: Request, sandbox_id: str):
     """Stop a sandbox from the web UI."""
-    await get_user_context(request)
+    user = await get_user_context(request)
+    _require_org_membership(user)
     await _check_csrf(request)
     from lucent.sandbox.manager import get_sandbox_manager
 
     manager = get_sandbox_manager()
+    sandbox = await manager.get(sandbox_id)
+    if not sandbox or str(sandbox.get("organization_id", "")) != str(user.organization_id):
+        raise HTTPException(404, "Sandbox not found")
     await manager.stop(sandbox_id)
     return RedirectResponse("/sandboxes?tab=instances", status_code=303)
 
@@ -255,11 +276,15 @@ async def stop_sandbox_web(request: Request, sandbox_id: str):
 @router.post("/sandboxes/{sandbox_id}/destroy")
 async def destroy_sandbox_web(request: Request, sandbox_id: str):
     """Destroy a sandbox from the web UI."""
-    await get_user_context(request)
+    user = await get_user_context(request)
+    _require_org_membership(user)
     await _check_csrf(request)
     from lucent.sandbox.manager import get_sandbox_manager
 
     manager = get_sandbox_manager()
+    sandbox = await manager.get(sandbox_id)
+    if not sandbox or str(sandbox.get("organization_id", "")) != str(user.organization_id):
+        raise HTTPException(404, "Sandbox not found")
     await manager.destroy(sandbox_id)
     return RedirectResponse("/sandboxes?tab=instances", status_code=303)
 
@@ -271,11 +296,17 @@ async def exec_sandbox_web(request: Request, sandbox_id: str):
     Uses session cookie auth + CSRF validation so the frontend
     never needs to handle bearer tokens.
     """
-    await get_user_context(request)
+    user = await get_user_context(request)
+    _require_admin_or_owner(user)
     csrf_token = request.headers.get("X-CSRF-Token", "")
     await _check_csrf(request, form_token=csrf_token)
 
     from lucent.sandbox.manager import get_sandbox_manager
+
+    manager = get_sandbox_manager()
+    sandbox = await manager.get(sandbox_id)
+    if not sandbox or str(sandbox.get("organization_id", "")) != str(user.organization_id):
+        raise HTTPException(404, "Sandbox not found")
 
     body = await request.json()
     command = body.get("command", "")
@@ -284,7 +315,6 @@ async def exec_sandbox_web(request: Request, sandbox_id: str):
     if not command:
         return JSONResponse({"error": "No command provided"}, status_code=400)
 
-    manager = get_sandbox_manager()
     result = await manager.exec(sandbox_id, command, timeout=timeout)
     return JSONResponse({
         "exit_code": result.exit_code,

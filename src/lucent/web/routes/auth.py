@@ -24,7 +24,6 @@ from ._shared import (
     _check_csrf,
     _get_csrf_for_request,
     _set_csrf_cookie,
-    get_user_context,
     templates,
 )
 

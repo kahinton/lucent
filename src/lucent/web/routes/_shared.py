@@ -1,14 +1,10 @@
 """Shared helpers for web routes — templates, CSRF, user context, form utilities."""
 
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
-from typing import Any
-from urllib.parse import quote
 from uuid import UUID
 
-import bcrypt
-from fastapi import APIRouter, Form, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi import HTTPException, Request
 from fastapi.templating import Jinja2Templates
 
 from lucent.api.deps import CurrentUser
@@ -18,27 +14,14 @@ from lucent.auth_providers import (
     CSRF_FIELD_NAME,
     SESSION_COOKIE_NAME,
     SESSION_TTL_HOURS,
-    create_initial_user,
-    create_session,
-    destroy_session,
     generate_csrf_token,
-    get_auth_provider,
     get_cookie_params,
     hash_session_token,
-    is_first_run,
-    set_user_password,
-    sign_value,
     validate_csrf_token,
-    validate_password_complexity,
     validate_session,
     verify_signed_value,
 )
 from lucent.db import (
-    AccessRepository,
-    ApiKeyRepository,
-    AuditRepository,
-    MemoryRepository,
-    OrganizationRepository,
     UserRepository,
     get_pool,
 )
