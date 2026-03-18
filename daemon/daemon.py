@@ -1001,6 +1001,8 @@ to memory — the dispatch system validates your text output.
 - {"Git push is ALLOWED" if ALLOW_GIT_PUSH else "DO NOT run git push"}
 - DO NOT take irreversible actions without approval
 - Tag all memories with 'daemon' so activity is visible
+- When creating memories that need human review or approval, also tag with 'needs-review'
+  (NOT 'awaiting-approval' or other variants — 'needs-review' is the canonical tag)
 - Write concise, actionable output
 
 --- CURRENT TIME ---

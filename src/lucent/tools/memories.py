@@ -235,6 +235,13 @@ Returns:
             # Get current user context (from auth context or dev mode)
             user_id, org_id, user_role = await _get_current_user_context()
 
+            # Daemon-created memories should always be shared so org members
+            # can see them in the review queue and search results
+            effective_shared = shared
+            current_user = get_current_user()
+            if current_user and current_user.get("external_id") == "daemon-service":
+                effective_shared = True
+
             repo = await _get_repository()
 
             result = await repo.create(
@@ -247,7 +254,7 @@ Returns:
                 metadata=input_data.metadata,
                 user_id=user_id,
                 organization_id=org_id,
-                shared=shared,
+                shared=effective_shared,
             )
 
             # Log the creation in audit log with version snapshot
