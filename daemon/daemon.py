@@ -18,6 +18,7 @@ can run simultaneously, contributing to the same intelligence.
 """
 
 import asyncio
+import contextlib
 import json
 import os
 import platform
@@ -55,6 +56,14 @@ try:
 except (ImportError, Exception):
     AdaptationPipeline = None
     parse_assessment_output = None
+
+# OpenTelemetry instrumentation (optional — graceful when not available)
+try:
+    from lucent.telemetry import get_meter, get_tracer, init_telemetry, shutdown_telemetry
+
+    _TELEMETRY_AVAILABLE = True
+except ImportError:
+    _TELEMETRY_AVAILABLE = False
 
 # ============================================================================
 # Exceptions
@@ -1069,6 +1078,57 @@ class LucentDaemon:
         # Heartbeat memory ID (cached after first create/lookup)
         self._heartbeat_memory_id: str | None = None
 
+        # OTEL instrumentation — create tracer and metrics (no-ops when unavailable)
+        self._init_telemetry_instruments()
+
+    def _init_telemetry_instruments(self):
+        """Create OTEL tracer and metric instruments.
+
+        All instruments are no-ops when telemetry is unavailable or disabled.
+        """
+        if not _TELEMETRY_AVAILABLE:
+            self._tracer = None
+            self._meter = None
+            return
+
+        self._tracer = get_tracer("lucent.daemon")
+        self._meter = get_meter("lucent.daemon")
+
+        # Gauges / UpDownCounters
+        self._sessions_active = self._meter.create_up_down_counter(
+            "daemon.sessions.active",
+            description="Number of currently active LLM sessions",
+        )
+        self._drain_active = self._meter.create_up_down_counter(
+            "daemon.drain.active",
+            description="1 when daemon is draining for restart, 0 otherwise",
+        )
+
+        # Counters
+        self._sessions_total = self._meter.create_counter(
+            "daemon.sessions.total",
+            description="Total sessions run by status (success/error/timeout)",
+        )
+        self._cognitive_cycles_total = self._meter.create_counter(
+            "daemon.cognitive_cycles.total",
+            description="Total cognitive cycles executed",
+        )
+        self._tasks_dispatched_total = self._meter.create_counter(
+            "daemon.tasks.dispatched.total",
+            description="Total tasks dispatched by agent_type",
+        )
+        self._tasks_completed_total = self._meter.create_counter(
+            "daemon.tasks.completed.total",
+            description="Total tasks completed by status (success/failed)",
+        )
+
+        # Histograms
+        self._session_duration = self._meter.create_histogram(
+            "daemon.session.duration_seconds",
+            description="Duration of LLM sessions in seconds",
+            unit="s",
+        )
+
     @staticmethod
     def _parse_roles(roles_str: str) -> set[str]:
         """Parse role configuration into a set of enabled roles."""
@@ -1084,6 +1144,10 @@ class LucentDaemon:
         """Start the daemon."""
         log("Lucent daemon starting...")
         self.running = True
+
+        # Initialize OTEL telemetry (no-op if unavailable or OTEL_ENABLED=false)
+        if _TELEMETRY_AVAILABLE:
+            init_telemetry(service_name="lucent-daemon")
 
         # Ensure we have a valid API key before anything else
         await ensure_valid_api_key(self.instance_id)
@@ -1127,6 +1191,10 @@ class LucentDaemon:
         log(f"Stopping daemon (instance: {self.instance_id})...")
         self.running = False
 
+        # Flush and shut down OTEL telemetry
+        if _TELEMETRY_AVAILABLE:
+            shutdown_telemetry()
+
         # Close PG LISTEN connection
         if self._listen_conn and not self._listen_conn.is_closed():
             try:
@@ -1167,21 +1235,60 @@ class LucentDaemon:
 
         log(f"Starting session: {name}{f' (model: {model})' if model else ''}")
 
+        selected_model = model or MODEL
+        start_time = time.time()
+        status = "success"
+
+        # Start OTEL span for the session
+        span_ctx = (
+            self._tracer.start_as_current_span(
+                "daemon.session",
+                attributes={
+                    "daemon.session.name": name,
+                    "daemon.session.model": selected_model,
+                    "daemon.instance_id": self.instance_id,
+                },
+            )
+            if self._tracer
+            else None
+        )
+        span = span_ctx.__enter__() if span_ctx else None
+
+        if self._tracer:
+            self._sessions_active.add(1)
+
         try:
-            return await asyncio.wait_for(
+            result = await asyncio.wait_for(
                 self._run_session_inner(name, system_message, prompt, model=model),
                 timeout=SESSION_TOTAL_TIMEOUT,
             )
+            if span:
+                span.set_attribute("daemon.session.output_length", len(result) if result else 0)
+            return result
         except asyncio.TimeoutError:
+            status = "timeout"
             log(
                 f"Session '{name}' HARD TIMEOUT after {SESSION_TOTAL_TIMEOUT}s — "
                 "session lifecycle hung (likely during client.start or create_session)",
                 "ERROR",
             )
+            if span:
+                span.set_attribute("daemon.session.error", "timeout")
             return None
         except Exception as e:
+            status = "error"
             log(f"Session '{name}' failed: {e}", "ERROR")
+            if span:
+                span.set_attribute("daemon.session.error", str(e)[:200])
             return None
+        finally:
+            duration = time.time() - start_time
+            if self._tracer:
+                self._sessions_active.add(-1)
+                self._sessions_total.add(1, {"status": status, "model": selected_model})
+                self._session_duration.record(duration, {"session_name": name, "status": status})
+            if span_ctx:
+                span_ctx.__exit__(None, None, None)
 
     async def _run_session_inner(
         self, name: str, system_message: str, prompt: str, model: str | None = None
@@ -1426,31 +1533,41 @@ class LucentDaemon:
         self.cycle_count += 1
         log(f"=== Cognitive cycle #{self.cycle_count} (instance: {self.instance_id}) ===")
 
-        # Verify API key is still valid (handles 24h expiry and revocation)
-        if not await _verify_api_key(MCP_API_KEY):
-            log("API key expired or revoked — re-provisioning...", "WARN")
-            if not await _handle_auth_failure(self.instance_id):
-                log("Cannot proceed without valid API key — skipping cycle", "ERROR")
-                return
+        if self._tracer:
+            self._cognitive_cycles_total.add(1)
 
-        # On first cycle, check if environment adaptation is needed
-        if self.cycle_count == 1:
-            await self._check_environment_adaptation()
+        with self._tracer.start_as_current_span(
+            "daemon.cognitive_cycle",
+            attributes={
+                "daemon.cycle_count": self.cycle_count,
+                "daemon.instance_id": self.instance_id,
+            },
+        ) if self._tracer else contextlib.nullcontext():
+            # Verify API key is still valid (handles 24h expiry and revocation)
+            if not await _verify_api_key(MCP_API_KEY):
+                log("API key expired or revoked — re-provisioning...", "WARN")
+                if not await _handle_auth_failure(self.instance_id):
+                    log("Cannot proceed without valid API key — skipping cycle", "ERROR")
+                    return
 
-        prompt = build_cognitive_prompt()
-        result = await self.run_session(
-            f"cognitive-{self.cycle_count}",
-            prompt,
-            (
-                "Begin your cognitive cycle. Load state, perceive, "
-                "reason, decide. Use memory tools to create tasks "
-                "and update state. Output a brief summary of "
-                "your decisions."
-            ),
-        )
+            # On first cycle, check if environment adaptation is needed
+            if self.cycle_count == 1:
+                await self._check_environment_adaptation()
 
-        if result:
-            log(f"Cognitive cycle #{self.cycle_count} produced output", "INFO")
+            prompt = build_cognitive_prompt()
+            result = await self.run_session(
+                f"cognitive-{self.cycle_count}",
+                prompt,
+                (
+                    "Begin your cognitive cycle. Load state, perceive, "
+                    "reason, decide. Use memory tools to create tasks "
+                    "and update state. Output a brief summary of "
+                    "your decisions."
+                ),
+            )
+
+            if result:
+                log(f"Cognitive cycle #{self.cycle_count} produced output", "INFO")
 
     # --- Distributed Coordination ---
 
@@ -1543,34 +1660,38 @@ class LucentDaemon:
 
             log(f"Found {len(due)} due schedules")
 
-            for sched in due:
-                sched_id = str(sched["id"])
-                title = sched.get("title", "Scheduled task")
+            with self._tracer.start_as_current_span(
+                "daemon.scheduler.check",
+                attributes={"daemon.scheduler.due_count": len(due)},
+            ) if self._tracer else contextlib.nullcontext():
+                for sched in due:
+                    sched_id = str(sched["id"])
+                    title = sched.get("title", "Scheduled task")
 
-                # Trigger the schedule via API (creates request + task + records run)
-                try:
-                    async with httpx.AsyncClient(timeout=15) as client:
-                        resp = await client.post(
-                            f"{API_BASE}/schedules/{sched_id}/trigger",
-                            headers=API_HEADERS,
-                        )
-                        if resp.status_code in (200, 201):
-                            data = resp.json()
-                            if data.get("already_fired"):
-                                log(f"Schedule {sched_id[:8]} '{title}' already fired, skipping")
-                            else:
-                                req_id = data.get("request", {}).get("id", "?")
-                                log(
-                                    f"Triggered schedule {sched_id[:8]} "
-                                    f"'{title}' → request {str(req_id)[:8]}"
-                                )
-                        else:
-                            log(
-                                f"Failed to trigger schedule {sched_id[:8]}: {resp.status_code}",
-                                "WARN",
+                    # Trigger the schedule via API (creates request + task + records run)
+                    try:
+                        async with httpx.AsyncClient(timeout=15) as client:
+                            resp = await client.post(
+                                f"{API_BASE}/schedules/{sched_id}/trigger",
+                                headers=API_HEADERS,
                             )
-                except Exception as e:
-                    log(f"Error triggering schedule {sched_id[:8]}: {e}", "WARN")
+                            if resp.status_code in (200, 201):
+                                data = resp.json()
+                                if data.get("already_fired"):
+                                    log(f"Schedule {sched_id[:8]} '{title}' already fired, skipping")
+                                else:
+                                    req_id = data.get("request", {}).get("id", "?")
+                                    log(
+                                        f"Triggered schedule {sched_id[:8]} "
+                                        f"'{title}' → request {str(req_id)[:8]}"
+                                    )
+                            else:
+                                log(
+                                    f"Failed to trigger schedule {sched_id[:8]}: {resp.status_code}",
+                                    "WARN",
+                                )
+                    except Exception as e:
+                        log(f"Error triggering schedule {sched_id[:8]}: {e}", "WARN")
 
         except Exception as e:
             log(f"Error checking due schedules: {e}", "WARN")
@@ -1601,6 +1722,8 @@ class LucentDaemon:
                 continue
 
             log(f"Dispatching tracked task {task_id[:8]} to {agent_type}: {title[:80]}...")
+            if self._tracer:
+                self._tasks_dispatched_total.add(1, {"agent_type": agent_type})
 
             # Mark running
             await RequestAPI.start_task(task_id)
@@ -1722,9 +1845,13 @@ class LucentDaemon:
 
                 await RequestAPI.complete_task(task_id, result)
                 log(f"Tracked task {task_id[:8]} completed ({len(result) if result else 0} chars)")
+                if self._tracer:
+                    self._tasks_completed_total.add(1, {"status": "success", "agent_type": agent_type})
             else:
                 await RequestAPI.fail_task(task_id, reason)
                 log(f"Tracked task {task_id[:8]} failed: {reason}", "WARN")
+                if self._tracer:
+                    self._tasks_completed_total.add(1, {"status": "failed", "agent_type": agent_type})
 
     async def _create_task_sandbox(self, task_id: str, sandbox_config: dict) -> str | None:
         """Create a sandbox for a task. Returns sandbox_id or None."""
@@ -2172,28 +2299,35 @@ class LucentDaemon:
         )
         self.draining = True
 
-        if active_count > 0:
-            deadline = time.time() + self.DRAIN_TIMEOUT
-            while self.active_sessions and time.time() < deadline:
-                remaining = len(self.active_sessions)
-                wait_left = int(deadline - time.time())
-                log(
-                    f"Drain: waiting for {remaining} session{'s' if remaining != 1 else ''} "
-                    f"({wait_left}s remaining)"
-                )
-                await asyncio.sleep(5)
+        if self._tracer:
+            self._drain_active.add(1)
 
-            if self.active_sessions:
-                log(
-                    f"Drain timeout — {len(self.active_sessions)} session(s) still active, "
-                    "proceeding with restart",
-                    "WARN",
-                )
-            else:
-                log("Drain complete — all sessions finished cleanly")
+        with self._tracer.start_as_current_span(
+            "daemon.drain",
+            attributes={"daemon.drain.active_sessions": active_count},
+        ) if self._tracer else contextlib.nullcontext():
+            if active_count > 0:
+                deadline = time.time() + self.DRAIN_TIMEOUT
+                while self.active_sessions and time.time() < deadline:
+                    remaining = len(self.active_sessions)
+                    wait_left = int(deadline - time.time())
+                    log(
+                        f"Drain: waiting for {remaining} session{'s' if remaining != 1 else ''} "
+                        f"({wait_left}s remaining)"
+                    )
+                    await asyncio.sleep(5)
 
-        self.running = False
-        self._restart_self()
+                if self.active_sessions:
+                    log(
+                        f"Drain timeout — {len(self.active_sessions)} session(s) still active, "
+                        "proceeding with restart",
+                        "WARN",
+                    )
+                else:
+                    log("Drain complete — all sessions finished cleanly")
+
+            self.running = False
+            self._restart_self()
 
     # --- Main Loops ---
 
