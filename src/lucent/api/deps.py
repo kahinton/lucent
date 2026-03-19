@@ -27,6 +27,7 @@ class CurrentUser:
         api_key_scopes: list[str] | None = None,  # Scopes from API key
         impersonator_id: UUID | None = None,  # Set when being impersonated
         impersonator_display_name: str | None = None,  # For UI display
+        external_id: str | None = None,  # External provider ID (e.g. "daemon-service")
     ):
         self.id = id
         self.organization_id = organization_id
@@ -38,6 +39,7 @@ class CurrentUser:
         self.api_key_scopes = api_key_scopes or ["read", "write"]
         self.impersonator_id = impersonator_id
         self.impersonator_display_name = impersonator_display_name
+        self.external_id = external_id
 
     @property
     def is_impersonated(self) -> bool:
@@ -126,6 +128,7 @@ async def _authenticate_with_api_key(api_key: str) -> CurrentUser | None:
         auth_method="api_key",
         api_key_id=key_info["id"],  # Include the API key ID for auditing
         api_key_scopes=key_info.get("scopes", ["read", "write"]),
+        external_id=user.get("external_id"),
     )
 
 

@@ -459,8 +459,14 @@ class MemoryAPI:
     async def create(
         type: str, content: str, tags: list[str], importance: int = 5, metadata: dict | None = None
     ) -> dict | None:
-        """Create a memory via REST API."""
-        body = {"type": type, "content": content, "tags": tags, "importance": importance}
+        """Create a memory via REST API. Always shared for org visibility."""
+        body = {
+            "type": type,
+            "content": content,
+            "tags": tags,
+            "importance": importance,
+            "shared": True,  # Daemon memories must be visible to org members
+        }
         if metadata:
             body["metadata"] = metadata
         try:
@@ -572,7 +578,7 @@ class RequestAPI:
             async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
                 resp = await client.post(
                     f"{API_BASE}/requests/tasks/{task_id}/claim",
-                    params={"instance_id": instance_id},
+                    json={"instance_id": instance_id},
                     headers=API_HEADERS,
                 )
                 if resp.status_code in (200, 201):
@@ -729,6 +735,21 @@ class RequestAPI:
                     return resp.json().get("released", 0)
         except Exception as e:
             log(f"API release_stale failed: {e}", "WARN")
+        return 0
+
+    @staticmethod
+    async def reconcile_statuses() -> int:
+        """Reconcile request statuses that got out of sync with task states."""
+        try:
+            async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
+                resp = await client.post(
+                    f"{API_BASE}/requests/queue/reconcile",
+                    headers=API_HEADERS,
+                )
+                if resp.status_code == 200:
+                    return resp.json().get("reconciled", 0)
+        except Exception as e:
+            log(f"API reconcile_statuses failed: {e}", "WARN")
         return 0
 
 
@@ -1081,6 +1102,16 @@ class LucentDaemon:
             f"Roles: {','.join(sorted(self.roles))}, "
             f"Engine: {engine_name}, Model: {MODEL}, Max sessions: {MAX_CONCURRENT_SESSIONS}"
         )
+
+        # Recover from stale state on startup (workflow-audit/phase-4):
+        # release stuck tasks and fix request statuses that drifted while we were down.
+        try:
+            stale = await RequestAPI.release_stale(STALE_HEARTBEAT_MINUTES)
+            reconciled = await RequestAPI.reconcile_statuses()
+            if stale or reconciled:
+                log(f"Startup recovery: released {stale} stale tasks, reconciled {reconciled} requests")
+        except Exception as e:
+            log(f"Startup recovery failed (non-fatal): {e}", "WARN")
 
     def _handle_shutdown(self):
         """Handle shutdown signal."""

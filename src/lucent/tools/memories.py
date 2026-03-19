@@ -25,7 +25,7 @@ from lucent.models.memory import (
     SearchMemoriesInput,
     UpdateMemoryInput,
 )
-from lucent.models.validation import validate_metadata
+from lucent.models.validation import normalize_tags, validate_metadata
 
 logger = get_logger("tools.memories")
 
@@ -222,24 +222,32 @@ Returns:
 
             logger.info("create_memory: type=%s, user=%s, tags=%s", type, effective_username, tags)
 
+            # Get current user context (from auth context or dev mode)
+            user_id, org_id, user_role = await _get_current_user_context()
+
+            # Detect daemon caller for auto-sharing and auto-tagging
+            current_user = get_current_user()
+            is_daemon = bool(
+                current_user and current_user.get("external_id") == "daemon-service"
+            )
+
+            # Normalize tags: replace prohibited tags, auto-tag daemon content
+            effective_tags = normalize_tags(tags, is_daemon=is_daemon)
+
             input_data = CreateMemoryInput(
                 username=effective_username,
                 type=memory_type,
                 content=content,
-                tags=tags or [],
+                tags=effective_tags,
                 importance=importance,
                 related_memory_ids=[UUID(uid) for uid in (related_memory_ids or [])],
                 metadata=validated_metadata,
             )
 
-            # Get current user context (from auth context or dev mode)
-            user_id, org_id, user_role = await _get_current_user_context()
-
             # Daemon-created memories should always be shared so org members
             # can see them in the review queue and search results
             effective_shared = shared
-            current_user = get_current_user()
-            if current_user and current_user.get("external_id") == "daemon-service":
+            if is_daemon:
                 effective_shared = True
 
             repo = await _get_repository()

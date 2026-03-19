@@ -10,10 +10,10 @@ Each cycle: perceive, reason, decide, act.
 - Load `daemon-state` memory for what happened last cycle
 - Check for `daemon-message` memories (messages from collaborators)
 - Check for `feedback-approved` and `feedback-rejected` memories (process these FIRST)
-- Search for pending `daemon-task` memories
-- **Call `list_active_work` to see ALL non-completed requests and their task status** — this shows what's already planned, in progress, or queued. Review this BEFORE creating any new requests.
-- Call `list_pending_requests` to find requests waiting for task planning
-- Call `list_pending_tasks` to see what's queued for dispatch
+- **Call `list_active_work()` to see ALL active requests and their task status breakdown** — this shows what's already planned, in progress, or queued. **This is the primary deduplication mechanism** — review this data before creating any new requests to avoid duplicates.
+- Call `list_pending_requests()` to find requests waiting for task planning (subset of active work with 0 tasks)
+- Call `list_pending_tasks()` to see what's queued for dispatch
+- Search for pending `daemon-task` memories (legacy task format — prefer tracked requests)
 - Check goal progress
 - Assess what's changed in your environment
 
@@ -27,45 +27,70 @@ Each cycle: perceive, reason, decide, act.
 ### Decide
 Pick 1-3 high-impact actions. Quality over quantity. Don't invent busywork.
 
-**CRITICAL — Deduplication check**: Before creating any new request or task, compare it against the `list_active_work` results. If an existing request already covers the same goal (even partially), do NOT create a duplicate. Instead:
-- If the existing request needs more tasks, add tasks to it
+**CRITICAL — Deduplication check**: Before creating any new request, compare it against the `list_active_work()` results you loaded in the perceive phase. If an existing request already covers the same goal (even partially), do NOT create a duplicate. Instead:
+- If the existing request needs more tasks, add tasks to it via `create_task`
 - If the existing request is already in progress, wait for it to complete
 - If the existing request is stuck/stale, investigate why rather than creating a parallel effort
+- Only create a new request if the work is genuinely distinct from everything in active_work
+
+**Example**: If active_work shows "Fix authentication bugs" with 3 tasks (2 completed, 1 running), don't create "Improve auth system" — the work is already underway. Wait for results or add a new task to the existing request if your new work is complementary.
 
 ### Act
-Use memory tools directly:
-- **Create tasks**: type "procedural", tags include "daemon-task", "pending", and the role type
-- **Update state**: search for and update "daemon-state" memory
-- **Send messages**: type "experience", tags include "daemon-message" and urgency
-- **Save insights**: type "experience", tags include "daemon", "self-improvement"
-
-**For tracked work, prefer the request tracking tools:**
-- **create_request**: Create a tracked request for significant work items
-- **create_task**: Break a request into individual tasks with agent assignments
-- **log_task_event**: Record progress during task execution
-- **link_task_memory**: Connect memories to tasks for full lineage
-- **get_request_details**: Check status of a tracked request
-- **list_pending_tasks**: See what's queued up
+**For tracked work (preferred for significant items), use request tracking tools:**
+- **create_request**: Create a tracked request for significant work items (source: "cognitive")
+- **create_task**: Break a request into individual tasks with agent_type assignments (validates against approved definitions)
+- **log_task_event**: Record progress during task execution (event_type: "progress", "info", "warning", etc.)
+- **link_task_memory**: Connect memories to tasks for full lineage (relation: "created", "read", "updated")
+- **get_request_details**: Check status of a tracked request (returns task tree, events, memory links)
 
 When creating requests, structure them as: request → tasks → events → memory links.
-This creates a visible trail from initial work item through planning, execution, and the memories produced.
+This creates a visible trail from initial work item through planning, execution, and memories produced.
+
+**For lightweight state management, use memory tools directly:**
+- **Update state**: search for and update `daemon-state` memory (type: "procedural")
+- **Send messages**: create memory with tags `daemon-message` and urgency level (type: "experience")
+- **Save insights**: create memory with tags `daemon` and `self-improvement` (type: "experience")
+- **Legacy daemon tasks**: type "procedural", tags `daemon-task` + `pending` + agent type (prefer tracked requests instead)
+
+**Tag conventions** (see workflow-conventions skill for complete list):
+- All daemon-created memories: tag with `daemon`
+- Items needing review: tag with `needs-review` (NOT "awaiting-approval")
+- Validated work: tag with `validated`
+- Processed feedback: tag with `feedback-processed`
+- Daemon memories **MUST** be explicitly shared (`shared=True`) — APIs do not auto-share for you.
+
+**Context Passing**:
+- Agents receive context from previous tasks via `get_request_context()`
+- Agents must return results in a JSON format to populate this context
+- When planning, ensure tasks are sequenced logically so dependencies flow correctly
 
 Output a brief summary of decisions for the log.
 
 ## Feedback Processing
 
-**Before creating new tasks**, process any pending feedback:
+**Before creating new work**, process any pending feedback (search for `feedback-approved` OR `feedback-rejected` tags):
 
-Approved work (tagged `feedback-approved`):
-- Mark as `feedback-processed` and `validated`
-- Note the validated pattern for future reference
-- **If the approved work contains actionable items** (findings to fix, plans to implement, recommendations to act on), **create tasks to execute them**. Approval means "go ahead and do this" — not just "I acknowledge this exists." Decompose the approved content into concrete tasks and queue them via `create_task` under an appropriate request.
+### Approved Feedback (tagged `feedback-approved`)
+1. Read the approved content carefully
+2. **If it contains actionable items** (findings to fix, plans to implement, recommendations to act on):
+   - Create a tracked request via `create_request` with descriptive title
+   - Break into concrete tasks via `create_task` with appropriate agent_type assignments
+   - Approval means "go ahead and do this" — not just acknowledgment
+3. Tag the memory with `feedback-processed` and `validated`
+4. Note the validated pattern for future reference in a separate memory if it's reusable
 
-Rejected work (tagged `feedback-rejected`):
-- Read the rejection reason carefully
-- Create a self-improvement memory analyzing what went wrong
-- Cancel or revise any dependent pending tasks
-- Mark as `feedback-processed` and `rejection-lesson`
+**Wake signal**: Web API fires `pg_notify('request_ready')` on approval → you wake immediately (no 15-min delay)
+
+### Rejected Feedback (tagged `feedback-rejected`)
+1. Read the rejection reason carefully
+2. Create a self-improvement memory (type: `experience`) analyzing:
+   - What went wrong
+   - Why the approach was rejected
+   - What to do differently next time
+3. Cancel or revise any dependent pending tasks
+4. Tag the original memory with `feedback-processed` and `rejection-lesson`
+
+**Wake signal**: Web API fires `pg_notify('request_ready')` on rejection → you wake immediately to course-correct
 
 ## Roles (Sub-Agents)
 

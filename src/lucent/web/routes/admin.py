@@ -309,3 +309,106 @@ async def stop_impersonation(request: Request):
     params = get_cookie_params()
     response.delete_cookie(key="lucent_impersonate", **params)
     return response
+
+
+# =============================================================================
+# Model Management (Admin)
+# =============================================================================
+
+
+async def _require_admin(request: Request):
+    user = await get_user_context(request)
+    role_val = user.role.value if hasattr(user.role, "value") else str(user.role)
+    if role_val not in ("admin", "owner"):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return user
+
+
+@router.get("/models", response_class=HTMLResponse)
+async def models_list(request: Request):
+    """List all models with admin controls."""
+    user = await _require_admin(request)
+    pool = await get_pool()
+    from lucent.db.models import ModelRepository
+
+    repo = ModelRepository(pool)
+    models = await repo.list_models()
+
+    providers = sorted({m["provider"] for m in models})
+    enabled_count = sum(1 for m in models if m["is_enabled"])
+
+    return templates.TemplateResponse(
+        request,
+        "models.html",
+        {
+            "user": user,
+            "models": models,
+            "providers": providers,
+            "enabled_count": enabled_count,
+            "total_count": len(models),
+        },
+    )
+
+
+@router.post("/models/{model_id}/toggle")
+async def toggle_model(request: Request, model_id: str):
+    """Enable or disable a model."""
+    await _require_admin(request)
+    await _check_csrf(request)
+    pool = await get_pool()
+    from lucent.db.models import ModelRepository
+
+    repo = ModelRepository(pool)
+    model = await repo.get_model(model_id)
+    if not model:
+        raise HTTPException(status_code=404, detail="Model not found")
+
+    await repo.toggle_model(model_id, not model["is_enabled"])
+    return RedirectResponse(url="/models", status_code=303)
+
+
+@router.post("/models/add")
+async def add_model(
+    request: Request,
+    model_id: str = Form(...),
+    provider: str = Form(...),
+    name: str = Form(...),
+    category: str = Form("general"),
+    api_model_id: str = Form(""),
+    notes: str = Form(""),
+):
+    """Add a new model."""
+    user = await _require_admin(request)
+    await _check_csrf(request)
+    pool = await get_pool()
+    from lucent.db.models import ModelRepository
+
+    repo = ModelRepository(pool)
+
+    existing = await repo.get_model(model_id)
+    if existing:
+        return RedirectResponse(url="/models?error=Model+ID+already+exists", status_code=303)
+
+    await repo.create_model(
+        model_id=model_id,
+        provider=provider,
+        name=name,
+        category=category,
+        api_model_id=api_model_id or model_id,
+        notes=notes,
+        org_id=str(user.organization_id),
+    )
+    return RedirectResponse(url="/models", status_code=303)
+
+
+@router.post("/models/{model_id}/delete")
+async def delete_model(request: Request, model_id: str):
+    """Remove a model from the registry."""
+    await _require_admin(request)
+    await _check_csrf(request)
+    pool = await get_pool()
+    from lucent.db.models import ModelRepository
+
+    repo = ModelRepository(pool)
+    await repo.delete_model(model_id)
+    return RedirectResponse(url="/models", status_code=303)

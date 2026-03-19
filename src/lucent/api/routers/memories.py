@@ -19,7 +19,7 @@ from lucent.api.models import (
 )
 from lucent.db import AccessRepository, AuditRepository, MemoryRepository, get_pool
 from lucent.logging import get_logger
-from lucent.models.validation import validate_metadata
+from lucent.models.validation import normalize_tags, validate_metadata
 from lucent.rbac import Permission
 
 logger = get_logger("api.memories")
@@ -98,17 +98,29 @@ async def create_memory(
     # Use authenticated user's info if username not provided
     username = data.username or user.display_name or user.email or str(user.id)
 
+    # Detect daemon caller for auto-sharing and auto-tagging
+    is_daemon = user.external_id == "daemon-service"
+
+    # Daemon-created memories must always be shared so org members can see
+    # them in the review queue and search results (workflow-audit/phase-4)
+    effective_shared = data.shared
+    if is_daemon:
+        effective_shared = True
+
+    # Normalize tags: replace prohibited tags, auto-tag daemon content
+    effective_tags = normalize_tags(data.tags, is_daemon=is_daemon)
+
     result = await repo.create(
         username=username,
         type=data.type,
         content=data.content,
-        tags=data.tags,
+        tags=effective_tags,
         importance=data.importance,
         related_memory_ids=data.related_memory_ids,
         metadata=validated_metadata,
         user_id=user.id,
         organization_id=user.organization_id,
-        shared=data.shared,
+        shared=effective_shared,
     )
 
     logger.info("Memory created: id=%s, type=%s, user=%s", result["id"], data.type, user.id)

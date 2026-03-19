@@ -16,7 +16,7 @@ router = APIRouter(prefix="/requests", tags=["requests"])
 class RequestCreate(BaseModel):
     title: str = Field(..., min_length=1, max_length=256)
     description: str | None = None
-    source: str = Field(default="user", pattern=r"^(user|cognitive|api|daemon)$")
+    source: str = Field(default="user", pattern=r"^(user|cognitive|api|daemon|schedule)$")
     priority: str = Field(default="medium", pattern=r"^(low|medium|high|urgent)$")
 
 
@@ -27,7 +27,7 @@ class TaskCreate(BaseModel):
     agent_definition_id: str | None = None
     parent_task_id: str | None = None
     priority: str = Field(default="medium", pattern=r"^(low|medium|high|urgent)$")
-    sequence_order: int = 0
+    sequence_order: int = Field(default=0, ge=0)
     model: str | None = None
     sandbox_template_id: str | None = None  # Reference a saved sandbox template
     sandbox_config: dict | None = None  # Or inline sandbox config (template takes precedence)
@@ -37,6 +37,16 @@ class TaskEventCreate(BaseModel):
     event_type: str = Field(..., min_length=1, max_length=32)
     detail: str | None = None
     metadata: dict | None = None
+
+
+class StatusUpdate(BaseModel):
+    """JSON body for request status updates (not query params)."""
+    status: str = Field(..., min_length=1, max_length=32)
+
+
+class ClaimBody(BaseModel):
+    """JSON body for task claim (not query params)."""
+    instance_id: str = Field(..., min_length=1, max_length=128)
 
 
 class MemoryLinkCreate(BaseModel):
@@ -110,15 +120,15 @@ async def get_request(request_id: UUID, user: AuthenticatedUser, pool=Depends(ge
 @router.patch("/{request_id}/status")
 async def update_request_status(
     request_id: UUID,
-    status: str,
     user: AuthenticatedUser,
+    body: StatusUpdate = Body(...),
     pool=Depends(get_pool),
 ):
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
     result = await repo.update_request_status(
-        str(request_id), status, org_id=str(user.organization_id)
+        str(request_id), body.status, org_id=str(user.organization_id)
     )
     if not result:
         raise HTTPException(404, "Request not found")
@@ -143,6 +153,14 @@ async def create_task(
     req = await repo.get_request(str(request_id), org_id)
     if not req:
         raise HTTPException(404, "Request not found")
+
+    # Validate model against registry (matches MCP create_task behavior)
+    if body.model:
+        from lucent.model_registry import validate_model
+
+        error = validate_model(body.model)
+        if error:
+            raise HTTPException(422, error)
 
     # Validate that agent_type or agent_definition_id resolves to an approved definition
     def_repo = DefinitionRepository(pool)
@@ -195,14 +213,14 @@ async def list_tasks(
 @router.post("/tasks/{task_id}/claim")
 async def claim_task(
     task_id: UUID,
-    instance_id: str,
     user: AuthenticatedUser,
+    body: ClaimBody = Body(...),
     pool=Depends(get_pool),
 ):
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
-    result = await repo.claim_task(str(task_id), instance_id, org_id=str(user.organization_id))
+    result = await repo.claim_task(str(task_id), body.instance_id, org_id=str(user.organization_id))
     if not result:
         raise HTTPException(409, "Task already claimed or not pending")
     return result
@@ -219,39 +237,41 @@ async def start_task(task_id: UUID, user: AuthenticatedUser, pool=Depends(get_po
     return result
 
 
+class TaskCompleteBody(BaseModel):
+    result: str = ""
+
+
 @router.post("/tasks/{task_id}/complete")
 async def complete_task(
     task_id: UUID,
     user: AuthenticatedUser,
+    body: TaskCompleteBody = Body(...),
     pool=Depends(get_pool),
-    result: str | None = None,
-    body: dict | None = Body(None),
 ):
     from lucent.db.requests import RequestRepository
 
-    # Accept result from JSON body (preferred) or query param (legacy fallback)
-    actual_result = (body or {}).get("result", result) or ""
     repo = RequestRepository(pool)
-    task = await repo.complete_task(str(task_id), actual_result, org_id=str(user.organization_id))
+    task = await repo.complete_task(str(task_id), body.result, org_id=str(user.organization_id))
     if not task:
         raise HTTPException(404, "Task not found")
     return task
+
+
+class TaskFailBody(BaseModel):
+    error: str = ""
 
 
 @router.post("/tasks/{task_id}/fail")
 async def fail_task(
     task_id: UUID,
     user: AuthenticatedUser,
+    body: TaskFailBody = Body(...),
     pool=Depends(get_pool),
-    error: str | None = None,
-    body: dict | None = Body(None),
 ):
     from lucent.db.requests import RequestRepository
 
-    # Accept error from JSON body (preferred) or query param (legacy fallback)
-    actual_error = (body or {}).get("error", error) or ""
     repo = RequestRepository(pool)
-    task = await repo.fail_task(str(task_id), actual_error, org_id=str(user.organization_id))
+    task = await repo.fail_task(str(task_id), body.error, org_id=str(user.organization_id))
     if not task:
         raise HTTPException(404, "Task not found")
     return task
@@ -355,3 +375,16 @@ async def release_stale(
     repo = RequestRepository(pool)
     count = await repo.release_stale_tasks(stale_minutes, org_id=str(user.organization_id))
     return {"released": count}
+
+
+@router.post("/queue/reconcile")
+async def reconcile_statuses(
+    user: AuthenticatedUser,
+    pool=Depends(get_pool),
+):
+    """Reconcile request statuses that got out of sync with their tasks."""
+    from lucent.db.requests import RequestRepository
+
+    repo = RequestRepository(pool)
+    fixed = await repo.reconcile_request_statuses(org_id=str(user.organization_id))
+    return {"reconciled": fixed}

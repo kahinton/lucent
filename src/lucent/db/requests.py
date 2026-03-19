@@ -398,14 +398,19 @@ class RequestRepository:
     async def complete_task(
         self, task_id: str, result: str, org_id: str | None = None
     ) -> dict | None:
-        """Mark task as completed with result."""
+        """Mark task as completed with result.
+
+        Only tasks in 'claimed' or 'running' state can be completed
+        (workflow-audit/phase-4: status transition guard).
+        """
         now = datetime.now(timezone.utc)
         if org_id:
             async with self.pool.acquire() as conn:
                 row = await conn.fetchrow(
                     """UPDATE tasks SET status = 'completed', result = $2,
                        completed_at = $3, updated_at = $3
-                       WHERE id = $1 AND organization_id = $4 RETURNING *""",
+                       WHERE id = $1 AND status IN ('claimed', 'running')
+                       AND organization_id = $4 RETURNING *""",
                     UUID(task_id),
                     result,
                     now,
@@ -416,7 +421,8 @@ class RequestRepository:
                 row = await conn.fetchrow(
                     """UPDATE tasks SET status = 'completed', result = $2,
                        completed_at = $3, updated_at = $3
-                       WHERE id = $1 RETURNING *""",
+                       WHERE id = $1 AND status IN ('claimed', 'running')
+                       RETURNING *""",
                     UUID(task_id),
                     result,
                     now,
@@ -436,14 +442,19 @@ class RequestRepository:
     async def fail_task(
         self, task_id: str, error: str, org_id: str | None = None
     ) -> dict | None:
-        """Mark task as failed."""
+        """Mark task as failed.
+
+        Only tasks in 'claimed' or 'running' state can be failed
+        (workflow-audit/phase-4: status transition guard).
+        """
         now = datetime.now(timezone.utc)
         if org_id:
             async with self.pool.acquire() as conn:
                 row = await conn.fetchrow(
                     """UPDATE tasks SET status = 'failed', error = $2,
                        completed_at = $3, updated_at = $3
-                       WHERE id = $1 AND organization_id = $4 RETURNING *""",
+                       WHERE id = $1 AND status IN ('claimed', 'running')
+                       AND organization_id = $4 RETURNING *""",
                     UUID(task_id),
                     error,
                     now,
@@ -454,7 +465,8 @@ class RequestRepository:
                 row = await conn.fetchrow(
                     """UPDATE tasks SET status = 'failed', error = $2,
                        completed_at = $3, updated_at = $3
-                       WHERE id = $1 RETURNING *""",
+                       WHERE id = $1 AND status IN ('claimed', 'running')
+                       RETURNING *""",
                     UUID(task_id),
                     error,
                     now,
@@ -658,11 +670,14 @@ class RequestRepository:
     # ── Internal helpers ──────────────────────────────────────────────────
 
     async def _ensure_request_in_progress(self, request_id: str) -> None:
-        """Move request to in_progress if it's still pending/planning."""
+        """Move request to in_progress if it's not already active.
+
+        Handles pending/planning/planned states AND failed (for retry recovery).
+        """
         async with self.pool.acquire() as conn:
             await conn.execute(
                 """UPDATE requests SET status = 'in_progress', updated_at = NOW()
-                   WHERE id = $1 AND status IN ('pending', 'planning')""",
+                   WHERE id = $1 AND status IN ('pending', 'planning', 'planned', 'failed')""",
                 UUID(request_id),
             )
 
@@ -685,6 +700,50 @@ class RequestRepository:
                 )
             status = "failed" if failed > 0 else "completed"
             await self.update_request_status(request_id, status)
+
+    async def reconcile_request_statuses(self, org_id: str | None = None) -> int:
+        """Fix request statuses that got out of sync with their tasks.
+
+        Handles two cases:
+        1. Request is 'in_progress' but all tasks are terminal → complete/fail it
+        2. Request is 'pending' but has running/completed tasks → mark in_progress
+
+        Returns the number of requests fixed.
+        """
+        fixed = 0
+        org_filter = "AND r.organization_id = $1" if org_id else ""
+        params: list = [UUID(org_id)] if org_id else []
+
+        async with self.pool.acquire() as conn:
+            # Case 1: in_progress requests where all tasks are done
+            rows = await conn.fetch(
+                f"""SELECT r.id FROM requests r
+                   WHERE r.status = 'in_progress' {org_filter}
+                   AND NOT EXISTS (
+                       SELECT 1 FROM tasks t
+                       WHERE t.request_id = r.id
+                       AND t.status NOT IN ('completed', 'failed', 'cancelled')
+                   )
+                   AND EXISTS (SELECT 1 FROM tasks t WHERE t.request_id = r.id)""",
+                *params,
+            )
+            for row in rows:
+                await self._check_request_completion(str(row["id"]))
+                fixed += 1
+
+            # Case 2: pending requests with active/completed tasks
+            rows = await conn.fetch(
+                f"""SELECT DISTINCT r.id FROM requests r
+                   JOIN tasks t ON t.request_id = r.id
+                   WHERE r.status = 'pending' {org_filter}
+                   AND t.status IN ('claimed', 'running', 'completed')""",
+                *params,
+            )
+            for row in rows:
+                await self._ensure_request_in_progress(str(row["id"]))
+                fixed += 1
+
+        return fixed
 
     # ── Dashboard queries ─────────────────────────────────────────────────
 

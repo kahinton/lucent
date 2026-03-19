@@ -34,6 +34,14 @@ You write and maintain documentation that helps developers understand, use, and 
 - Link related docs to each other
 - Date or version-stamp guides that may become stale
 
+## Workflow Integration
+
+When working within tracked requests:
+- Use `log_task_event` to record documentation milestones (files created/updated)
+- Use `link_task_memory` to connect documentation memories to the task
+- Tag documentation work appropriately (`documentation`, `daemon` if autonomous)
+- See the `workflow-conventions` skill for complete tag and status conventions
+
 ## What You Don't Do
 
 - Don't document obvious code (e.g., `# increment counter` above `counter += 1`)

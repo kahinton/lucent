@@ -90,6 +90,18 @@ async def lifespan(app: FastAPI):
     if database_url:
         await init_db(database_url)
 
+    # Load model registry from database
+    try:
+        from lucent.db import get_pool as _get_pool
+
+        _pool = await _get_pool()
+        if _pool:
+            from lucent.model_registry import load_models_from_db
+
+            await load_models_from_db(_pool)
+    except Exception:
+        pass  # Fall back to hardcoded registry
+
     # Sync built-in skills from .github/skills/ into the DB
     await _sync_built_in_definitions()
 

@@ -336,6 +336,7 @@ class TestCompleteTask:
     async def test_complete_task(self, repo, org_id):
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
+        await repo.claim_task(str(task["id"]), "inst-test")
         completed = await repo.complete_task(str(task["id"]), "All done")
         assert completed is not None
         assert completed["status"] == "completed"
@@ -345,6 +346,7 @@ class TestCompleteTask:
     async def test_complete_logs_event(self, repo, org_id):
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
+        await repo.claim_task(str(task["id"]), "inst-test")
         await repo.complete_task(str(task["id"]), "Output text")
         events = await repo.list_task_events(str(task["id"]))
         assert any(e["event_type"] == "completed" for e in events)
@@ -352,6 +354,7 @@ class TestCompleteTask:
     async def test_completing_last_task_completes_request(self, repo, org_id):
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
+        await repo.claim_task(str(task["id"]), "inst-test")
         await repo.complete_task(str(task["id"]), "Done")
         updated = await repo.get_request(str(req["id"]), org_id)
         assert updated["status"] == "completed"
@@ -361,7 +364,9 @@ class TestCompleteTask:
         rid = str(req["id"])
         t1 = await _make_task(repo, rid, org_id, title="T1")
         t2 = await _make_task(repo, rid, org_id, title="T2")
+        await repo.claim_task(str(t1["id"]), "inst-test")
         await repo.fail_task(str(t1["id"]), "Broke")
+        await repo.claim_task(str(t2["id"]), "inst-test")
         await repo.complete_task(str(t2["id"]), "OK")
         updated = await repo.get_request(rid, org_id)
         assert updated["status"] == "failed"
@@ -371,6 +376,7 @@ class TestFailTask:
     async def test_fail_task(self, repo, org_id):
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
+        await repo.claim_task(str(task["id"]), "inst-test")
         failed = await repo.fail_task(str(task["id"]), "Something broke")
         assert failed is not None
         assert failed["status"] == "failed"
@@ -380,6 +386,7 @@ class TestFailTask:
     async def test_fail_logs_event(self, repo, org_id):
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
+        await repo.claim_task(str(task["id"]), "inst-test")
         await repo.fail_task(str(task["id"]), "err")
         events = await repo.list_task_events(str(task["id"]))
         assert any(e["event_type"] == "failed" for e in events)
@@ -423,6 +430,7 @@ class TestRetryTask:
     async def test_retry_failed_task(self, repo, org_id):
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
+        await repo.claim_task(str(task["id"]), "inst-test")
         await repo.fail_task(str(task["id"]), "Oops")
         retried = await repo.retry_task(str(task["id"]))
         assert retried is not None
@@ -440,6 +448,7 @@ class TestRetryTask:
     async def test_retry_resets_failed_request_to_in_progress(self, repo, org_id):
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
+        await repo.claim_task(str(task["id"]), "inst-test")
         await repo.fail_task(str(task["id"]), "err")
         # Mark request as failed manually (simulating _check_request_completion)
         await repo.update_request_status(str(req["id"]), "failed")
@@ -454,6 +463,7 @@ class TestRetryTask:
     async def test_retry_logs_event(self, repo, org_id):
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
+        await repo.claim_task(str(task["id"]), "inst-test")
         await repo.fail_task(str(task["id"]), "err")
         await repo.retry_task(str(task["id"]))
         events = await repo.list_task_events(str(task["id"]))
@@ -629,6 +639,7 @@ class TestGetRequestWithTasks:
         _t3 = await _make_task(repo, rid, org_id, title="T3")
         await repo.claim_task(str(t1["id"]), "inst-1")
         await repo.start_task(str(t1["id"]))
+        await repo.claim_task(str(t2["id"]), "inst-test")
         await repo.complete_task(str(t2["id"]), "Done")
         full = await repo.get_request_with_tasks(rid, org_id)
         assert full["stats"]["running"] == 1  # t1 running
@@ -691,6 +702,7 @@ class TestListPendingTasks:
         rid = str(req["id"])
         t0 = await _make_task(repo, rid, org_id, title="First", sequence_order=0)
         await _make_task(repo, rid, org_id, title="Second", sequence_order=1)
+        await repo.claim_task(str(t0["id"]), "inst-test")
         await repo.complete_task(str(t0["id"]), "Done")
         pending = await repo.list_pending_tasks(org_id)
         titles = [t["title"] for t in pending]

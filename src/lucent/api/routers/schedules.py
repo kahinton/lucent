@@ -232,15 +232,42 @@ async def trigger_now(
             created_by=str(user.id),
         )
 
+        # Validate agent_type against approved definitions (workflow-audit/phase-4)
+        from lucent.db.definitions import DefinitionRepository
+
+        agent_type = sched.get("agent_type", "code")
+        def_repo = DefinitionRepository(pool)
+        agents = await def_repo.list_agents(str(user.organization_id), status="active")
+        active_names = {a["name"] for a in agents}
+        if agent_type and agent_type not in active_names:
+            logger.warning(
+                "Schedule %s references unknown agent_type '%s' — falling back to 'code'",
+                schedule_id, agent_type,
+            )
+            agent_type = "code"
+
+        # Validate model against registry (workflow-audit/phase-4)
+        task_model = sched.get("model")
+        if task_model:
+            from lucent.model_registry import validate_model
+
+            model_error = validate_model(task_model)
+            if model_error:
+                logger.warning(
+                    "Schedule %s has invalid model '%s': %s — clearing override",
+                    schedule_id, task_model, model_error,
+                )
+                task_model = None
+
         # Create the task — use prompt as description if set, else fall back to template/description
         task_description = prompt or template.get("description", sched.get("description", ""))
         await req_repo.create_task(
             request_id=str(req["id"]),
             title=template.get("title", sched["title"]),
             description=task_description,
-            agent_type=sched.get("agent_type", "code"),
+            agent_type=agent_type,
             priority=sched.get("priority", "medium"),
-            model=sched.get("model"),
+            model=task_model,
             sandbox_template_id=str(sched["sandbox_template_id"])
             if sched.get("sandbox_template_id")
             else None,

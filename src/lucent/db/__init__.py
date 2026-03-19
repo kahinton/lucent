@@ -23,6 +23,7 @@ from lucent.db.audit import AuditRepository
 from lucent.db.definitions import DefinitionRepository
 from lucent.db.integrations import IntegrationRepository
 from lucent.db.memory import MemoryRepository, VersionConflictError
+from lucent.db.models import ModelRepository
 from lucent.db.organization import OrganizationRepository
 from lucent.db.pool import close_db, get_pool, init_db
 
@@ -61,6 +62,7 @@ __all__ = [
     "OrganizationRepository",
     "AuditRepository",
     "AccessRepository",
+    "ModelRepository",
     # TypedDict definitions
     "MemoryRecord",
     "MemorySearchRecord",

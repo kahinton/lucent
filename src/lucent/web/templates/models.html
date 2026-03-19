@@ -1,0 +1,144 @@
+{% extends "base.html" %}
+{% block title %}Models - Lucent{% endblock %}
+{% block content %}
+<div class="mb-8">
+    <div class="flex items-center justify-between mb-2">
+        <div>
+            <h1 class="text-2xl font-bold text-gray-900">Models</h1>
+            <p class="text-sm text-gray-500">{{ enabled_count }} of {{ total_count }} models enabled</p>
+        </div>
+        <button onclick="document.getElementById('add-model-modal').classList.remove('hidden')" class="px-4 py-2 text-sm bg-primary-600 text-white rounded-md hover:bg-primary-700 font-medium">+ Add Model</button>
+    </div>
+</div>
+
+{% if request.query_params.get('error') %}
+<div class="mb-4 bg-red-50 border border-red-200 rounded-xl p-4">
+    <p class="text-sm font-medium text-red-800">{{ request.query_params.get('error') }}</p>
+</div>
+{% endif %}
+
+<!-- Group by provider -->
+{% for provider in providers %}
+<div class="mb-8">
+    <h2 class="text-lg font-semibold text-gray-700 mb-3 capitalize">{{ provider }}</h2>
+    <div class="bg-white rounded-xl border border-gray-200 overflow-hidden">
+        <table class="w-full">
+            <thead class="bg-gray-50">
+                <tr>
+                    <th class="text-left text-xs font-medium text-gray-500 uppercase px-4 py-3">Model</th>
+                    <th class="text-left text-xs font-medium text-gray-500 uppercase px-4 py-3">Category</th>
+                    <th class="text-left text-xs font-medium text-gray-500 uppercase px-4 py-3">API ID</th>
+                    <th class="text-left text-xs font-medium text-gray-500 uppercase px-4 py-3">Tags</th>
+                    <th class="text-left text-xs font-medium text-gray-500 uppercase px-4 py-3">Status</th>
+                    <th class="text-right text-xs font-medium text-gray-500 uppercase px-4 py-3">Actions</th>
+                </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-100">
+                {% for model in models if model.provider == provider %}
+                <tr class="{% if not model.is_enabled %}opacity-50{% endif %}">
+                    <td class="px-4 py-3">
+                        <div class="font-medium text-gray-900 text-sm">{{ model.name }}</div>
+                        <div class="text-xs text-gray-500 font-mono">{{ model.id }}</div>
+                    </td>
+                    <td class="px-4 py-3">
+                        <span class="px-2 py-0.5 rounded text-xs
+                            {% if model.category == 'reasoning' %}bg-purple-100 text-purple-700
+                            {% elif model.category == 'agentic' %}bg-blue-100 text-blue-700
+                            {% elif model.category == 'fast' %}bg-green-100 text-green-700
+                            {% elif model.category == 'visual' %}bg-amber-100 text-amber-700
+                            {% else %}bg-gray-100 text-gray-600{% endif %}">{{ model.category }}</span>
+                    </td>
+                    <td class="px-4 py-3 text-xs text-gray-500 font-mono">{{ model.api_model_id or '—' }}</td>
+                    <td class="px-4 py-3">
+                        {% for tag in model.tags[:3] %}
+                        <span class="inline-block px-1.5 py-0.5 rounded text-xs bg-gray-100 text-gray-600 mr-1">{{ tag }}</span>
+                        {% endfor %}
+                        {% if model.tags|length > 3 %}
+                        <span class="text-xs text-gray-400">+{{ model.tags|length - 3 }}</span>
+                        {% endif %}
+                    </td>
+                    <td class="px-4 py-3">
+                        {% if model.is_enabled %}
+                        <span class="px-2 py-0.5 rounded text-xs bg-green-100 text-green-700">enabled</span>
+                        {% else %}
+                        <span class="px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-500">disabled</span>
+                        {% endif %}
+                    </td>
+                    <td class="px-4 py-3 text-right">
+                        <div class="flex items-center justify-end gap-2">
+                            <form method="POST" action="/models/{{ model.id }}/toggle">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                                <button type="submit" class="px-3 py-1 text-xs rounded-md font-medium
+                                    {% if model.is_enabled %}bg-gray-100 text-gray-700 hover:bg-gray-200{% else %}bg-green-50 text-green-700 hover:bg-green-100{% endif %}">
+                                    {% if model.is_enabled %}Disable{% else %}Enable{% endif %}
+                                </button>
+                            </form>
+                            <form method="POST" action="/models/{{ model.id }}/delete" onsubmit="return confirm('Remove {{ model.name }}?')">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                                <button type="submit" class="px-3 py-1 text-xs rounded-md font-medium bg-red-50 text-red-700 hover:bg-red-100">Remove</button>
+                            </form>
+                        </div>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endfor %}
+
+<!-- Add Model Modal -->
+<div id="add-model-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/30">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-lg mx-4 p-6">
+        <div class="flex items-center justify-between mb-4">
+            <h3 class="text-lg font-semibold text-gray-900">Add Model</h3>
+            <button onclick="document.getElementById('add-model-modal').classList.add('hidden')" class="text-gray-400 hover:text-gray-600">&times;</button>
+        </div>
+        <form method="POST" action="/models/add" class="space-y-4">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Model ID</label>
+                    <input name="model_id" required placeholder="e.g. gpt-6-turbo" class="w-full px-3 py-2 border rounded-lg text-sm">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Display Name</label>
+                    <input name="name" required placeholder="e.g. GPT-6 Turbo" class="w-full px-3 py-2 border rounded-lg text-sm">
+                </div>
+            </div>
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Provider</label>
+                    <select name="provider" class="w-full px-3 py-2 border rounded-lg text-sm">
+                        <option value="openai">OpenAI</option>
+                        <option value="anthropic">Anthropic</option>
+                        <option value="google">Google</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Category</label>
+                    <select name="category" class="w-full px-3 py-2 border rounded-lg text-sm">
+                        <option value="general">General</option>
+                        <option value="fast">Fast</option>
+                        <option value="reasoning">Reasoning</option>
+                        <option value="agentic">Agentic</option>
+                        <option value="visual">Visual</option>
+                    </select>
+                </div>
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">API Model ID <span class="text-gray-400 font-normal">(optional — defaults to model ID)</span></label>
+                <input name="api_model_id" placeholder="e.g. gpt-6-turbo-20260401" class="w-full px-3 py-2 border rounded-lg text-sm">
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Notes</label>
+                <input name="notes" placeholder="Brief description of capabilities" class="w-full px-3 py-2 border rounded-lg text-sm">
+            </div>
+            <div class="flex justify-end gap-3 pt-2">
+                <button type="button" onclick="document.getElementById('add-model-modal').classList.add('hidden')" class="px-4 py-2 text-sm text-gray-700 border rounded-lg hover:bg-gray-50">Cancel</button>
+                <button type="submit" class="px-4 py-2 text-sm bg-primary-600 text-white rounded-lg hover:bg-primary-700 font-medium">Add Model</button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}

@@ -132,7 +132,7 @@ if the agent type is not approved."""
             description=description,
             agent_type=agent_type,
             priority=priority,
-            sequence_order=sequence_order,
+            sequence_order=max(0, sequence_order),  # clamp to non-negative
             parent_task_id=parent_task_id,
             model=model,
         )

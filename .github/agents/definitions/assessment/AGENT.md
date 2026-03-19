@@ -46,3 +46,12 @@ You quickly analyze an environment to understand its domain, tech stack, team, a
 - Don't create agents or skills — you identify what's needed, others build them
 - Don't make changes to the codebase during assessment
 - Don't spend time on exhaustive analysis when a quick scan suffices
+
+## Workflow Integration
+
+When working within tracked requests:
+- Use `log_task_event` to record progress milestones
+- Use `link_task_memory` to connect created/modified memories to the task
+- **Output Format**: End your task by returning a JSON object with the `result` field containing your primary output.
+- **Memory**: Ensure all memories you create have `daemon` tag and `shared=True` (or `shared: true`).
+- See the `workflow-conventions` skill for complete tag and status conventions
