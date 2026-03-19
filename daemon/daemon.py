@@ -597,6 +597,21 @@ class RequestAPI:
         return None
 
     @staticmethod
+    async def update_task_model(task_id: str, model: str) -> dict | None:
+        try:
+            async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
+                resp = await client.post(
+                    f"{API_BASE}/requests/tasks/{task_id}/model",
+                    json={"model": model},
+                    headers=API_HEADERS,
+                )
+                if resp.status_code == 200:
+                    return resp.json()
+        except Exception as e:
+            log(f"API update_task_model failed: {e}", "WARN")
+        return None
+
+    @staticmethod
     async def start_task(task_id: str) -> dict | None:
         try:
             async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
@@ -1713,6 +1728,7 @@ class LucentDaemon:
             task_id = str(task["id"])
             agent_type = task.get("agent_type", "code")
             task_model = task.get("model")  # per-task model override
+            selected_model = task_model or MODEL
             title = task.get("title", "")
             description = task.get("description", title)
 
@@ -1721,7 +1737,10 @@ class LucentDaemon:
             if not claimed:
                 continue
 
-            log(f"Dispatching tracked task {task_id[:8]} to {agent_type}: {title[:80]}...")
+            # Persist the resolved model before dispatch so it's recorded even if the task fails
+            await RequestAPI.update_task_model(task_id, selected_model)
+
+            log(f"Dispatching tracked task {task_id[:8]} to {agent_type} model={selected_model}: {title[:80]}...")
             if self._tracer:
                 self._tasks_dispatched_total.add(1, {"agent_type": agent_type})
 
@@ -1813,7 +1832,7 @@ class LucentDaemon:
                 f"{agent_type}-{task_id[:8]}",
                 system_message,
                 f"Execute this task:\n\n{description}",
-                model=task_model,
+                model=selected_model,
             )
             dispatched += 1
 

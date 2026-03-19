@@ -402,6 +402,49 @@ class TestListPendingRequests:
 
 
 # ============================================================================
+# list_available_models
+# ============================================================================
+
+
+class TestListAvailableModels:
+    @pytest.mark.asyncio
+    async def test_returns_models(self, mcp, auth_user):
+        result = await _call(mcp, "list_available_models")
+        assert "models" in result
+        assert isinstance(result["models"], list)
+        assert len(result["models"]) > 0
+
+    @pytest.mark.asyncio
+    async def test_model_fields(self, mcp, auth_user):
+        result = await _call(mcp, "list_available_models")
+        m = result["models"][0]
+        for field in ("id", "name", "provider", "category", "supports_tools", "notes", "tags"):
+            assert field in m
+
+    @pytest.mark.asyncio
+    async def test_category_filter(self, mcp, auth_user):
+        result = await _call(mcp, "list_available_models", {"category": "fast"})
+        assert all(m["category"] == "fast" for m in result["models"])
+
+    @pytest.mark.asyncio
+    async def test_unknown_category_returns_empty(self, mcp, auth_user):
+        result = await _call(mcp, "list_available_models", {"category": "nonexistent"})
+        assert result["models"] == []
+
+    @pytest.mark.asyncio
+    async def test_recommended_included_when_agent_type_given(self, mcp, auth_user):
+        result = await _call(mcp, "list_available_models", {"agent_type": "code"})
+        assert "recommended" in result
+        assert isinstance(result["recommended"], str)
+        assert len(result["recommended"]) > 0
+
+    @pytest.mark.asyncio
+    async def test_no_recommended_without_agent_type(self, mcp, auth_user):
+        result = await _call(mcp, "list_available_models")
+        assert "recommended" not in result
+
+
+# ============================================================================
 # list_pending_tasks
 # ============================================================================
 

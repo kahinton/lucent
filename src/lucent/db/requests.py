@@ -402,6 +402,18 @@ class RequestRepository:
             return task
         return None
 
+    async def update_task_model(self, task_id: str, model: str) -> dict | None:
+        """Write the resolved model back to the task record."""
+        now = datetime.now(timezone.utc)
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "UPDATE tasks SET model = $1, updated_at = $2 WHERE id = $3 RETURNING *",
+                model,
+                now,
+                UUID(task_id),
+            )
+        return dict(row) if row else None
+
     async def start_task(self, task_id: str, org_id: str | None = None) -> dict | None:
         """Mark a claimed task as running."""
         now = datetime.now(timezone.utc)

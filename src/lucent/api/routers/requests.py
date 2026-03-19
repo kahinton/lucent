@@ -231,6 +231,26 @@ async def claim_task(
     return result
 
 
+class TaskModelBody(BaseModel):
+    model: str
+
+
+@router.post("/tasks/{task_id}/model")
+async def update_task_model(
+    task_id: UUID,
+    user: AuthenticatedUser,
+    body: TaskModelBody = Body(...),
+    pool=Depends(get_pool),
+):
+    from lucent.db.requests import RequestRepository
+
+    repo = RequestRepository(pool)
+    result = await repo.update_task_model(str(task_id), body.model)
+    if not result:
+        raise HTTPException(404, "Task not found")
+    return result
+
+
 @router.post("/tasks/{task_id}/start")
 async def start_task(task_id: UUID, user: AuthenticatedUser, pool=Depends(get_pool)):
     from lucent.db.requests import RequestRepository

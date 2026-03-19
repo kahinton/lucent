@@ -280,6 +280,46 @@ new requests. This prevents duplicate work items."""
         return json.dumps(work, default=serialize)
 
     @mcp.tool(
+        description="""List available LLM models for task assignment.
+
+Use this to choose a model when creating tasks. Returns all available models
+with their categories, capabilities, and provider info.
+
+Args:
+    category: Optional filter — one of: general, fast, reasoning, agentic, visual
+    agent_type: Optional agent type to also return the recommended model for
+        (code, research, memory, reflection, documentation, planning, review, fast, agentic)
+
+Returns: JSON with list of models and, if agent_type provided, the recommended model."""
+    )
+    async def list_available_models(
+        category: str | None = None,
+        agent_type: str | None = None,
+    ) -> str:
+        from lucent.model_registry import get_recommended_model, list_models
+
+        models = list_models(category=category)
+        result: dict = {
+            "models": [
+                {
+                    "id": m.id,
+                    "name": m.name,
+                    "provider": m.provider,
+                    "category": m.category,
+                    "supports_tools": m.supports_tools,
+                    "supports_vision": m.supports_vision,
+                    "context_window": m.context_window,
+                    "notes": m.notes,
+                    "tags": m.tags,
+                }
+                for m in models
+            ]
+        }
+        if agent_type:
+            result["recommended"] = get_recommended_model(agent_type)
+        return json.dumps(result)
+
+    @mcp.tool(
         description="""List pending tracked tasks in the queue.
 
 Returns tasks that are waiting to be claimed and executed, ordered by priority.
