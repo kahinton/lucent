@@ -35,8 +35,9 @@
 </div>
 {% endmacro %}
 
-{% if tab == 'agents' %}
 {% from "partials/pagination.html" import pagination_controls %}
+
+{% if tab == 'agents' %}
 <div class="mb-4 flex items-center justify-between">
     {{ pagination_controls(base_url="/definitions", page=page, per_page=per_page, total_pages=total_pages, total_count=total_count, filter_params={"tab": "agents"}, entity_name="agents") }}
     <button onclick="document.getElementById('create-agent-modal').classList.remove('hidden')" class="px-4 py-2 text-sm bg-primary-600 text-white rounded-md hover:bg-primary-700 font-medium">+ New Agent</button>
