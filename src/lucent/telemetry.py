@@ -30,6 +30,62 @@ logger = logging.getLogger("lucent.telemetry")
 _initialized = False
 _otel_enabled = False
 
+
+class _NoOpSpan:
+    """Minimal no-op span for when OTEL packages aren't installed."""
+
+    def is_recording(self) -> bool:
+        return False
+
+    def set_attribute(self, key: str, value: object) -> None:
+        pass
+
+    def __enter__(self) -> _NoOpSpan:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        pass
+
+
+class _NoOpTracer:
+    """Minimal no-op tracer for when OTEL packages aren't installed."""
+
+    def start_span(self, name: str, **kwargs: object) -> _NoOpSpan:
+        return _NoOpSpan()
+
+    def start_as_current_span(self, name: str, **kwargs: object) -> _NoOpSpan:
+        return _NoOpSpan()
+
+
+class _NoOpMeter:
+    """Minimal no-op meter for when OTEL packages aren't installed."""
+
+    def __init__(self, name: str = "") -> None:
+        self._name = name
+
+    def create_counter(self, name: str, **kwargs: object) -> _NoOpInstrument:
+        return _NoOpInstrument()
+
+    def create_histogram(self, name: str, **kwargs: object) -> _NoOpInstrument:
+        return _NoOpInstrument()
+
+    def create_up_down_counter(self, name: str, **kwargs: object) -> _NoOpInstrument:
+        return _NoOpInstrument()
+
+    def create_observable_gauge(self, name: str, **kwargs: object) -> _NoOpInstrument:
+        return _NoOpInstrument()
+
+
+class _NoOpInstrument:
+    """No-op metric instrument."""
+
+    def add(self, amount: float = 1, **kwargs: object) -> None:
+        pass
+
+    def record(self, amount: float = 0, **kwargs: object) -> None:
+        pass
+
+
 # Check if OTEL packages are installed (optional dependency group)
 try:
     from opentelemetry import context as _otel_context  # noqa: F401
@@ -63,7 +119,7 @@ def _get_version() -> str:
         return "0.0.0"
 
 
-def init_telemetry(service_name: str | None = None) -> None:
+def init_telemetry(service_name: str = "lucent") -> None:
     """Initialize OpenTelemetry providers.
 
     Sets up TracerProvider and MeterProvider with OTLP gRPC exporters.
@@ -77,8 +133,8 @@ def init_telemetry(service_name: str | None = None) -> None:
         OTEL_ENVIRONMENT: Deployment environment (default: development)
 
     Args:
-        service_name: Override service name. Defaults to OTEL_SERVICE_NAME
-                      env var, then "lucent".
+        service_name: Service name for resource attributes. Defaults to "lucent".
+                      Can be overridden by OTEL_SERVICE_NAME env var.
     """
     global _initialized, _otel_enabled
     if _initialized:
@@ -112,7 +168,7 @@ def init_telemetry(service_name: str | None = None) -> None:
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
-    name = service_name or os.getenv("OTEL_SERVICE_NAME", "lucent")
+    name = os.getenv("OTEL_SERVICE_NAME", service_name)
     endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
 
     resource = Resource.create({
@@ -178,24 +234,24 @@ def get_tracer(name: str = "lucent") -> trace_api.Tracer:
     """Get a named Tracer instance.
 
     Returns a no-op tracer when OTEL is not enabled or not installed.
+    Safe to call even if opentelemetry packages are not installed.
     """
     if _HAS_OTEL:
         return _otel_trace.get_tracer(name)
-    from opentelemetry.trace import NoOpTracer  # type: ignore[import-not-found]
-
-    return NoOpTracer()
+    # Return a minimal no-op when OTEL packages aren't installed
+    return _NoOpTracer()  # type: ignore[return-value]
 
 
 def get_meter(name: str = "lucent") -> metrics_api.Meter:
     """Get a named Meter instance.
 
     Returns a no-op meter when OTEL is not enabled or not installed.
+    Safe to call even if opentelemetry packages are not installed.
     """
     if _HAS_OTEL:
         return _otel_metrics.get_meter(name)
-    from opentelemetry.metrics import NoOpMeter  # type: ignore[import-not-found]
-
-    return NoOpMeter(name)
+    # Return a minimal no-op when OTEL packages aren't installed
+    return _NoOpMeter(name)  # type: ignore[return-value]
 
 
 def enrich_log_record(record: dict) -> dict:
@@ -251,13 +307,13 @@ def bridge_correlation_id() -> object | None:
         return None
 
     # Set as OTEL baggage for cross-service propagation
-    ctx = _set_baggage("correlation.id", cid)
+    ctx = _set_baggage("lucent.correlation_id", cid)
     token = _attach(ctx)
 
     # Also set as span attribute on the current span
     span = _otel_trace.get_current_span()
     if span.is_recording():
-        span.set_attribute("correlation.id", cid)
+        span.set_attribute("lucent.correlation_id", cid)
 
     return token
 
@@ -271,3 +327,37 @@ def unbind_correlation_id(token: object) -> None:
     if not _HAS_OTEL or token is None:
         return
     _detach(token)
+
+
+def sync_trace_to_correlation_id() -> None:
+    """Propagate the current OTEL trace_id into the correlation ID ContextVar.
+
+    When OTEL is active and a valid trace context exists, this sets the
+    32-char hex trace_id as the correlation ID. If a correlation ID already
+    exists, both are preserved — the trace_id is set as a span attribute
+    ``lucent.trace_id`` and the existing correlation ID is kept.
+
+    Call this in middleware after the OTEL span has been created to ensure
+    log records carry the trace_id for log-trace correlation.
+    """
+    if not _otel_enabled or not _HAS_OTEL:
+        return
+
+    try:
+        span = _otel_trace.get_current_span()
+        ctx = span.get_span_context()
+        if ctx is None or not ctx.is_valid:
+            return
+
+        trace_id_hex = format(ctx.trace_id, "032x")
+        existing_cid = correlation_id_var.get()
+
+        if existing_cid is None:
+            # No correlation ID yet — use trace_id
+            correlation_id_var.set(trace_id_hex)
+        else:
+            # Keep existing correlation ID, but record trace_id on the span
+            if span.is_recording():
+                span.set_attribute("lucent.trace_id", trace_id_hex)
+    except Exception:
+        logger.debug("Failed to sync trace_id to correlation_id", exc_info=True)
