@@ -20,7 +20,7 @@ from lucent.api.routers import daemon_messages as daemon_messages_router
 from lucent.api.routers import daemon_tasks as daemon_tasks_router
 from lucent.api.routers import export, memories, search
 from lucent.db import close_db, init_db
-from lucent.logging import get_logger, set_correlation_id
+from lucent.logging import get_correlation_id, get_logger, set_correlation_id
 from lucent.mode import is_team_mode
 from lucent.rate_limit import get_rate_limiter
 from lucent.web.routes import router as web_router
@@ -44,12 +44,13 @@ def set_mcp_session_manager(session_manager):
 def _instrument_otel(app: FastAPI) -> None:
     """Apply OTEL auto-instrumentation when enabled.
 
-    Instruments FastAPI for automatic HTTP span creation and asyncpg for
-    DB query tracing. Safe to call when OTEL is disabled (no-op).
+    Instruments FastAPI for automatic HTTP span creation. DB query tracing
+    (asyncpg) is handled by the DB layer in pool.py during init_db().
+    Safe to call when OTEL is disabled (no-op).
     """
-    from lucent.telemetry import _is_enabled
+    from lucent.telemetry import is_enabled
 
-    if not _is_enabled():
+    if not is_enabled():
         return
 
     try:
@@ -62,14 +63,6 @@ def _instrument_otel(app: FastAPI) -> None:
         logger.info("OTEL: FastAPI instrumentation enabled")
     except Exception as e:
         logger.warning(f"OTEL: Failed to instrument FastAPI: {e}")
-
-    try:
-        from opentelemetry.instrumentation.asyncpg import AsyncPGInstrumentor
-
-        AsyncPGInstrumentor().instrument()
-        logger.info("OTEL: asyncpg instrumentation enabled")
-    except Exception as e:
-        logger.warning(f"OTEL: Failed to instrument asyncpg: {e}")
 
 
 async def _sync_built_in_definitions():
@@ -117,7 +110,7 @@ async def lifespan(app: FastAPI):
     # Startup: Initialize telemetry (no-op if OTEL_ENABLED is false)
     from lucent.telemetry import init_telemetry, shutdown_telemetry
 
-    init_telemetry(service_name="lucent-server")
+    init_telemetry(service_name="lucent-api")
     _instrument_otel(app)
 
     # Startup: Initialize database pool
@@ -197,6 +190,39 @@ def create_app() -> FastAPI:
     )
 
     @app.middleware("http")
+    async def otel_http_metrics_middleware(request: Request, call_next):
+        """Record HTTP request metrics when OTEL is enabled."""
+        from lucent.telemetry import is_enabled
+
+        if not is_enabled():
+            return await call_next(request)
+
+        import time
+
+        from lucent.metrics import metrics
+
+        start = time.monotonic()
+        response = await call_next(request)
+        duration = time.monotonic() - start
+
+        attrs = {
+            "method": request.method,
+            "route": request.url.path,
+            "status_code": response.status_code,
+        }
+        metrics.http_request_duration.record(duration, attrs)
+        metrics.http_requests_total.add(1, attrs)
+
+        if response.status_code >= 400:
+            error_attrs = {
+                "status_code": response.status_code,
+                "error_category": "5xx" if response.status_code >= 500 else "4xx",
+            }
+            metrics.http_errors_total.add(1, error_attrs)
+
+        return response
+
+    @app.middleware("http")
     async def security_headers_middleware(request: Request, call_next):
         """Add security headers including CSP to all responses."""
         response = await call_next(request)
@@ -225,27 +251,46 @@ def create_app() -> FastAPI:
     async def correlation_id_middleware(request: Request, call_next):
         """Generate or propagate a correlation ID for every request.
 
-        When OTEL is enabled, also sets the correlation ID as a span attribute
-        for linking legacy logs with distributed traces.
+        When OTEL is active, extracts trace_id from the OTEL span context and
+        uses it as the correlation ID for log-trace correlation. Falls back to
+        the X-Request-ID header or generates a 12-char hex ID when OTEL is
+        inactive.
         """
-        cid = request.headers.get("X-Request-ID")
-        if cid:
-            set_correlation_id(cid)
-        else:
-            cid = set_correlation_id()
+        from lucent.telemetry import (
+            bridge_correlation_id,
+            is_enabled,
+            sync_trace_to_correlation_id,
+            unbind_correlation_id,
+        )
 
-        # Bridge correlation ID into OTEL span context when enabled
-        try:
-            from opentelemetry import trace
+        cid = None
+        otel_token = None
 
-            span = trace.get_current_span()
-            if span.is_recording():
-                span.set_attribute("lucent.correlation_id", cid)
-        except Exception:
-            pass
+        # When OTEL is active, extract trace_id as correlation ID
+        if is_enabled():
+            sync_trace_to_correlation_id()
+            cid = get_correlation_id()
+
+        # Fall back to X-Request-ID header or generate a new one
+        if not cid:
+            header_cid = request.headers.get("X-Request-ID")
+            if header_cid:
+                set_correlation_id(header_cid)
+                cid = header_cid
+            else:
+                cid = set_correlation_id()
+
+        # Bridge correlation ID into OTEL baggage and span attributes
+        if is_enabled():
+            otel_token = bridge_correlation_id()
 
         response = await call_next(request)
         response.headers["X-Request-ID"] = cid
+
+        # Clean up OTEL baggage context
+        if otel_token is not None:
+            unbind_correlation_id(otel_token)
+
         return response
 
     @app.middleware("http")
