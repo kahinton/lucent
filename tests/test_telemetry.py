@@ -7,12 +7,10 @@ and verifies no-op behaviour when disabled.
 
 from __future__ import annotations
 
-import importlib
 import os
 from unittest.mock import patch
 
 import pytest
-
 
 # ---------------------------------------------------------------------------
 # Helpers to reset module-level state between tests
