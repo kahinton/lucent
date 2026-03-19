@@ -66,6 +66,10 @@
                 <span class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-indigo-100 text-indigo-700">
                     {{ task.agent_type }}
                 </span>
+                <!-- Model -->
+                {% if task.model %}
+                <span class="px-1.5 py-0.5 rounded text-xs bg-violet-50 text-violet-600 font-mono">{{ task.model }}</span>
+                {% endif %}
             </div>
             <p class="text-xs text-gray-400">
                 ID: {{ task.id }} · Created {{ task.created_at | datetime }}
@@ -176,6 +180,12 @@
                     <dt class="text-xs font-medium text-gray-500">Agent Type</dt>
                     <dd class="text-sm text-gray-900 mt-0.5 capitalize">{{ task.agent_type }}</dd>
                 </div>
+                {% if task.model %}
+                <div>
+                    <dt class="text-xs font-medium text-gray-500">Model</dt>
+                    <dd class="text-sm text-gray-900 mt-0.5 font-mono">{{ task.model }}</dd>
+                </div>
+                {% endif %}
                 <div>
                     <dt class="text-xs font-medium text-gray-500">Priority</dt>
                     <dd class="text-sm text-gray-900 mt-0.5 capitalize">{{ task.priority }}</dd>

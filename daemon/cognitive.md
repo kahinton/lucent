@@ -46,6 +46,22 @@ Pick 1-3 high-impact actions. Quality over quantity. Don't invent busywork.
 When creating requests, structure them as: request → tasks → events → memory links.
 This creates a visible trail from initial work item through planning, execution, and memories produced.
 
+**Model Assignment (MANDATORY for every `create_task` call)**:
+Every task MUST have an explicit `model` field. Never leave `model=null`. Use the `model-selection` skill for the full decision framework. Quick reference:
+
+| agent_type    | Recommended model(s)                                          |
+|---------------|---------------------------------------------------------------|
+| research      | `claude-sonnet-4.6` (default) or `gemini-3-pro-preview` (long context) |
+| code          | `claude-sonnet-4.6` (general) or `gpt-5.1-codex` (agentic/multi-step) |
+| memory        | `claude-haiku-4.5` (fast, lightweight)                        |
+| reflection    | `claude-opus-4.6` (deep reasoning)                            |
+| documentation | `claude-sonnet-4.6`                                           |
+| planning      | `claude-sonnet-4.6`                                           |
+
+- For complex multi-step tasks, prefer agentic models (`gpt-5.1-codex`, `gpt-5.2-codex`).
+- For simple lookups or lightweight ops, prefer fast models (`claude-haiku-4.5`, `gpt-5-mini`).
+- If unsure, call `list_available_models` to see current options and pick the best fit.
+
 **For lightweight state management, use memory tools directly:**
 - **Update state**: search for and update `daemon-state` memory (type: "procedural")
 - **Send messages**: create memory with tags `daemon-message` and urgency level (type: "experience")
