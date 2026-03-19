@@ -177,19 +177,25 @@ def shutdown_telemetry() -> None:
 def get_tracer(name: str = "lucent") -> trace_api.Tracer:
     """Get a named Tracer instance.
 
-    Returns a no-op tracer when OTEL is not enabled.
+    Returns a no-op tracer when OTEL is not enabled or not installed.
     """
-    from opentelemetry import trace
-    return trace.get_tracer(name)
+    if _HAS_OTEL:
+        return _otel_trace.get_tracer(name)
+    from opentelemetry.trace import NoOpTracer  # type: ignore[import-not-found]
+
+    return NoOpTracer()
 
 
 def get_meter(name: str = "lucent") -> metrics_api.Meter:
     """Get a named Meter instance.
 
-    Returns a no-op meter when OTEL is not enabled.
+    Returns a no-op meter when OTEL is not enabled or not installed.
     """
-    from opentelemetry import metrics
-    return metrics.get_meter(name)
+    if _HAS_OTEL:
+        return _otel_metrics.get_meter(name)
+    from opentelemetry.metrics import NoOpMeter  # type: ignore[import-not-found]
+
+    return NoOpMeter(name)
 
 
 def enrich_log_record(record: dict) -> dict:
@@ -197,7 +203,6 @@ def enrich_log_record(record: dict) -> dict:
 
     Bridges OTEL trace context into structured log output. When OTEL is
     active and a span is in context, adds trace_id, span_id, and trace_flags.
-    Also updates the correlation_id to use the trace_id for consistency.
 
     Args:
         record: Mutable log record dict (e.g., from JSONFormatter).
@@ -205,13 +210,11 @@ def enrich_log_record(record: dict) -> dict:
     Returns:
         The same dict, enriched with trace context if available.
     """
-    if not _is_enabled():
+    if not _otel_enabled or not _HAS_OTEL:
         return record
 
     try:
-        from opentelemetry import trace
-
-        span = trace.get_current_span()
+        span = _otel_trace.get_current_span()
         ctx = span.get_span_context()
         if ctx and ctx.is_valid:
             record["trace_id"] = format(ctx.trace_id, "032x")
@@ -221,3 +224,50 @@ def enrich_log_record(record: dict) -> dict:
         pass
 
     return record
+
+
+def bridge_correlation_id() -> object | None:
+    """Bridge the current correlation_id into OTEL baggage and span attributes.
+
+    Reads the correlation ID from logging.correlation_id_var and sets it
+    as OTEL baggage under the key 'correlation.id'. Also sets it as a
+    span attribute on the current active span if one exists.
+
+    Returns a context token that should be passed to unbind_correlation_id()
+    to detach the baggage, or None if OTEL is not active.
+
+    Usage in middleware::
+
+        token = bridge_correlation_id()
+        # ... handle request ...
+        if token is not None:
+            unbind_correlation_id(token)
+    """
+    if not _otel_enabled or not _HAS_OTEL:
+        return None
+
+    cid = correlation_id_var.get()
+    if cid is None:
+        return None
+
+    # Set as OTEL baggage for cross-service propagation
+    ctx = _set_baggage("correlation.id", cid)
+    token = _attach(ctx)
+
+    # Also set as span attribute on the current span
+    span = _otel_trace.get_current_span()
+    if span.is_recording():
+        span.set_attribute("correlation.id", cid)
+
+    return token
+
+
+def unbind_correlation_id(token: object) -> None:
+    """Detach a previously bridged correlation ID from OTEL context.
+
+    Args:
+        token: The token returned by bridge_correlation_id().
+    """
+    if not _HAS_OTEL or token is None:
+        return
+    _detach(token)
