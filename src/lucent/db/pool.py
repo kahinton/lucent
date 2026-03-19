@@ -1,6 +1,7 @@
 """Database connection pool management for Lucent.
 
-This module handles PostgreSQL connection pooling and initialization.
+This module handles PostgreSQL connection pooling, initialization,
+and optional OpenTelemetry instrumentation for query tracing.
 """
 
 import json
@@ -17,6 +18,55 @@ logger = get_logger(__name__)
 
 # Global connection pool
 _pool: Pool | None = None
+_asyncpg_instrumented: bool = False
+
+
+def _instrument_asyncpg() -> None:
+    """Apply OTEL auto-instrumentation to asyncpg when telemetry is enabled.
+
+    Patches asyncpg globally so all connections (including pool connections)
+    produce trace spans with:
+      - db.system = "postgresql"
+      - db.statement (the SQL query)
+      - db.operation (SELECT, INSERT, UPDATE, DELETE)
+      - Parent span from the current OTEL context (e.g. HTTP request span)
+
+    Must be called after init_telemetry() and before pool creation.
+    No-op when OTEL is disabled or packages are not installed.
+    """
+    global _asyncpg_instrumented
+    if _asyncpg_instrumented:
+        return
+
+    from lucent.telemetry import is_enabled
+
+    if not is_enabled():
+        return
+
+    try:
+        from opentelemetry.instrumentation.asyncpg import AsyncPGInstrumentor
+
+        AsyncPGInstrumentor().instrument()
+        _asyncpg_instrumented = True
+        logger.info("OTEL: asyncpg instrumentation enabled")
+    except Exception as e:
+        logger.warning("OTEL: Failed to instrument asyncpg: %s", e)
+
+
+def _uninstrument_asyncpg() -> None:
+    """Remove OTEL instrumentation from asyncpg."""
+    global _asyncpg_instrumented
+    if not _asyncpg_instrumented:
+        return
+
+    try:
+        from opentelemetry.instrumentation.asyncpg import AsyncPGInstrumentor
+
+        AsyncPGInstrumentor().uninstrument()
+        _asyncpg_instrumented = False
+        logger.info("OTEL: asyncpg instrumentation removed")
+    except Exception as e:
+        logger.warning("OTEL: Failed to uninstrument asyncpg: %s", e)
 
 
 async def init_db(database_url: str | None = None) -> Pool:
@@ -36,6 +86,9 @@ async def init_db(database_url: str | None = None) -> Pool:
     url = database_url or os.environ.get("DATABASE_URL")
     if not url:
         raise ValueError("DATABASE_URL environment variable is required")
+
+    # Instrument asyncpg before pool creation so all connections are traced
+    _instrument_asyncpg()
 
     # Create the connection pool
     _pool = await asyncpg.create_pool(
@@ -132,7 +185,7 @@ async def get_pool() -> Pool:
 
 
 async def close_db() -> None:
-    """Close the database connection pool."""
+    """Close the database connection pool and remove instrumentation."""
     global _pool
     if _pool is not None:
         try:
@@ -142,3 +195,4 @@ async def close_db() -> None:
             logger.exception("Error closing database pool")
         finally:
             _pool = None
+    _uninstrument_asyncpg()
