@@ -482,8 +482,8 @@ class TestRetryTask:
         await repo.update_request_status(str(req["id"]), "failed")
         await repo.retry_task(str(task["id"]))
         _updated = await repo.get_request(str(req["id"]), org_id)
-        # _ensure_request_in_progress checks for 'pending' or 'planning',
-        # 'failed' is not in that list so it won't auto-transition
+        # _ensure_request_in_progress checks for 'pending', 'planned', or 'failed'
+        # so a failed request will auto-transition to in_progress on retry
         # Just verify the retry itself worked
         retried_task = await repo.get_task(str(task["id"]))
         assert retried_task["status"] == "pending"

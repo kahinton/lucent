@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS requests (
     description TEXT,
     source VARCHAR(32) NOT NULL DEFAULT 'user',  -- 'user', 'cognitive', 'api', 'daemon'
     status VARCHAR(16) NOT NULL DEFAULT 'pending',
-        -- 'pending', 'planning', 'in_progress', 'completed', 'failed', 'cancelled'
+        -- 'pending', 'planned', 'in_progress', 'completed', 'failed', 'cancelled'
     priority VARCHAR(8) NOT NULL DEFAULT 'medium',  -- 'low', 'medium', 'high', 'urgent'
     created_by UUID REFERENCES users(id),
     organization_id UUID NOT NULL REFERENCES organizations(id),

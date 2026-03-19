@@ -53,7 +53,7 @@ class RequestRepository:
                     organization_id, fingerprint, dependency_policy)
                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                    ON CONFLICT (organization_id, fingerprint)
-                       WHERE status IN ('pending','planning','planned','in_progress')
+                       WHERE status IN ('pending','planned','in_progress')
                    DO UPDATE SET updated_at = NOW()
                    RETURNING *""",
                 title,
@@ -397,7 +397,7 @@ class RequestRepository:
                 f"Claimed by {instance_id}",
                 metadata={"instance_id": instance_id},
             )
-            # Update parent request to in_progress if still pending/planning
+            # Update parent request to in_progress if still pending/planned
             await self._ensure_request_in_progress(str(task["request_id"]))
             return task
         return None
@@ -705,12 +705,12 @@ class RequestRepository:
     async def _ensure_request_in_progress(self, request_id: str) -> None:
         """Move request to in_progress if it's not already active.
 
-        Handles pending/planning/planned states AND failed (for retry recovery).
+        Handles pending/planned states AND failed (for retry recovery).
         """
         async with self.pool.acquire() as conn:
             await conn.execute(
                 """UPDATE requests SET status = 'in_progress', updated_at = NOW()
-                   WHERE id = $1 AND status IN ('pending', 'planning', 'planned', 'failed')""",
+                   WHERE id = $1 AND status IN ('pending', 'planned', 'failed')""",
                 UUID(request_id),
             )
 

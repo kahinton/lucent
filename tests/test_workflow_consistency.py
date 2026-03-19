@@ -724,9 +724,11 @@ class TestSequenceOrderGating:
 
     @pytest.mark.asyncio
     async def test_failed_predecessor_unblocks_successor(self, wf_repo, wf_org):
-        """Failed tasks are terminal, so they unblock subsequent sequence orders."""
+        """Failed tasks unblock subsequent sequence orders under permissive policy."""
         org = str(wf_org["id"])
-        req = await wf_repo.create_request(title="Seq R3", org_id=org)
+        req = await wf_repo.create_request(
+            title="Seq R3", org_id=org, dependency_policy="permissive",
+        )
         req_id = str(req["id"])
 
         t0 = await wf_repo.create_task(
