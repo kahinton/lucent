@@ -34,7 +34,7 @@ The request will appear in the Requests UI and can be broken into tasks.
 Args:
     title: Short descriptive title (e.g. "Improve search performance")
     description: Detailed description of what needs to be done
-    source: Where this request came from — 'cognitive', 'user', 'api', or 'daemon'
+    source: Where this request came from — 'cognitive', 'user', 'api', 'daemon', or 'schedule'
     priority: 'low', 'medium', 'high', or 'urgent'
 
 Returns: JSON with the created request including its ID."""

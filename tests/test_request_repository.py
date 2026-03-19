@@ -100,6 +100,16 @@ class TestCreateRequest:
         r2 = await _make_request(repo, org_id, title="Req B")
         assert r1["id"] != r2["id"]
 
+    @pytest.mark.parametrize("source", ["user", "cognitive", "api", "daemon", "schedule"])
+    async def test_all_valid_sources_accepted(self, repo, org_id, source):
+        req = await _make_request(repo, org_id, title=f"Source {source}", source=source)
+        assert req["source"] == source
+
+    @pytest.mark.parametrize("source", ["invalid", "webhook", "", "USER"])
+    async def test_invalid_source_rejected(self, repo, org_id, source):
+        with pytest.raises(ValueError, match="Invalid source"):
+            await _make_request(repo, org_id, title=f"Bad {source}", source=source)
+
 
 class TestGetRequest:
     async def test_get_existing(self, repo, org_id):

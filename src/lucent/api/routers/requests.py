@@ -6,6 +6,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from lucent.api.deps import AuthenticatedUser, get_pool
+from lucent.constants import REQUEST_SOURCE_PATTERN
 
 router = APIRouter(prefix="/requests", tags=["requests"])
 
@@ -16,7 +17,7 @@ router = APIRouter(prefix="/requests", tags=["requests"])
 class RequestCreate(BaseModel):
     title: str = Field(..., min_length=1, max_length=256)
     description: str | None = None
-    source: str = Field(default="user", pattern=r"^(user|cognitive|api|daemon|schedule)$")
+    source: str = Field(default="user", pattern=REQUEST_SOURCE_PATTERN)
     priority: str = Field(default="medium", pattern=r"^(low|medium|high|urgent)$")
 
 
