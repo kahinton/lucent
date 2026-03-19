@@ -1006,3 +1006,50 @@ class TestListActiveWork:
         result = await repo.list_active_work(str(other_org["id"]))
         ids = [str(r["id"]) for r in result]
         assert str(req["id"]) not in ids
+
+
+class TestRequestDeduplication:
+    """Request creation deduplication via fingerprint."""
+
+    async def test_duplicate_title_returns_existing(self, repo, test_organization):
+        """Two creates with same title in same org return the same request."""
+        org_id = str(test_organization["id"])
+        r1 = await repo.create_request(title="Duplicate Me", org_id=org_id)
+        r2 = await repo.create_request(title="Duplicate Me", org_id=org_id)
+        assert str(r1["id"]) == str(r2["id"])
+
+    async def test_case_insensitive_dedup(self, repo, test_organization):
+        """Dedup is case-insensitive."""
+        org_id = str(test_organization["id"])
+        r1 = await repo.create_request(title="Fix Auth Bug", org_id=org_id)
+        r2 = await repo.create_request(title="fix auth bug", org_id=org_id)
+        assert str(r1["id"]) == str(r2["id"])
+
+    async def test_different_orgs_not_deduped(self, repo, test_organization, other_org):
+        """Same title in different orgs creates separate requests."""
+        r1 = await repo.create_request(
+            title="Same Title", org_id=str(test_organization["id"])
+        )
+        r2 = await repo.create_request(
+            title="Same Title", org_id=str(other_org["id"])
+        )
+        assert str(r1["id"]) != str(r2["id"])
+
+    async def test_completed_request_allows_new_with_same_title(
+        self, repo, test_organization
+    ):
+        """After completing a request, a new one with same title is allowed."""
+        org_id = str(test_organization["id"])
+        r1 = await repo.create_request(title="Repeatable Work", org_id=org_id)
+        await repo.update_request_status(
+            str(r1["id"]), "completed", org_id=org_id
+        )
+        r2 = await repo.create_request(title="Repeatable Work", org_id=org_id)
+        assert str(r1["id"]) != str(r2["id"])
+
+    async def test_different_titles_not_deduped(self, repo, test_organization):
+        """Different titles always create separate requests."""
+        org_id = str(test_organization["id"])
+        r1 = await repo.create_request(title="First Task", org_id=org_id)
+        r2 = await repo.create_request(title="Second Task", org_id=org_id)
+        assert str(r1["id"]) != str(r2["id"])

@@ -3,12 +3,20 @@
 Full lineage: request → tasks → events → memory links.
 """
 
+import hashlib
 import json
 from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
 from asyncpg import Pool
+
+from lucent.constants import VALID_REQUEST_SOURCES
+
+
+def _request_fingerprint(title: str) -> str:
+    """Compute a deduplication fingerprint from a request title."""
+    return hashlib.md5(title.lower().strip().encode()).hexdigest()
 
 
 class RequestRepository:
@@ -28,11 +36,20 @@ class RequestRepository:
         priority: str = "medium",
         created_by: str | None = None,
     ) -> dict:
+        if source not in VALID_REQUEST_SOURCES:
+            raise ValueError(
+                f"Invalid source '{source}'. Must be one of: {', '.join(sorted(VALID_REQUEST_SOURCES))}"
+            )
+        fingerprint = _request_fingerprint(title)
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 """INSERT INTO requests
-                   (title, description, source, priority, created_by, organization_id)
-                   VALUES ($1, $2, $3, $4, $5, $6)
+                   (title, description, source, priority, created_by,
+                    organization_id, fingerprint)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7)
+                   ON CONFLICT (organization_id, fingerprint)
+                       WHERE status IN ('pending','planning','planned','in_progress')
+                   DO UPDATE SET updated_at = NOW()
                    RETURNING *""",
                 title,
                 description,
@@ -40,6 +57,7 @@ class RequestRepository:
                 priority,
                 UUID(created_by) if created_by else None,
                 UUID(org_id),
+                fingerprint,
             )
         return dict(row)
 

@@ -146,6 +146,36 @@ class TestCreateMemory:
         assert result["tags"] == []
         assert result["related_memory_ids"] == []
 
+    async def test_daemon_auto_sharing_via_mcp(self, mcp_tools, test_user, clean_test_data):
+        """Daemon-service identity auto-shares memories even when shared=False."""
+        prefix = clean_test_data
+        set_current_user(
+            {
+                "id": test_user["id"],
+                "organization_id": test_user["organization_id"],
+                "role": "member",
+                "display_name": "Lucent Daemon",
+                "email": "daemon@test.com",
+                "external_id": "daemon-service",
+            }
+        )
+        try:
+            result = await _call(
+                mcp_tools,
+                "create_memory",
+                {
+                    "type": "experience",
+                    "content": f"{prefix} daemon MCP memory",
+                    "username": f"{prefix}daemon",
+                    "tags": ["test"],
+                    "shared": False,
+                },
+            )
+            assert result["shared"] is True
+            assert "daemon" in result["tags"]
+        finally:
+            set_current_user(None)
+
 
 # ============================================================================
 # get_memory
