@@ -151,7 +151,7 @@ class TestCreateTask:
 
     @pytest.mark.asyncio
     async def test_with_model(self, mcp, auth_user, request_id, db_pool):
-        """Model validation accepts any string (new models may exist before registry update)."""
+        """Known model from hardcoded registry is accepted in strict mode."""
         async with db_pool.acquire() as conn:
             await conn.execute(
                 """INSERT INTO agent_definitions (name, organization_id, content, status)
@@ -175,7 +175,30 @@ class TestCreateTask:
         assert result["model"] == "claude-sonnet-4.6"
 
     @pytest.mark.asyncio
-    async def test_no_auth_returns_error(self, mcp, test_user):
+    async def test_unknown_model_rejected(self, mcp, auth_user, request_id, db_pool):
+        """Unknown model ID is rejected with helpful error message."""
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO agent_definitions (name, organization_id, content, status)
+                   VALUES ($1, $2, $3, 'active')
+                   ON CONFLICT (name, organization_id) DO UPDATE SET status = 'active'""",
+                "code",
+                auth_user["organization_id"],
+                "test definition",
+            )
+        result = await _call(
+            mcp,
+            "create_task",
+            {
+                "request_id": request_id,
+                "title": "Bad Model",
+                "agent_type": "code",
+                "model": "totally-fake-model-xyz",
+            },
+        )
+        assert "error" in result
+        assert "Unknown model" in result["error"]
+        assert "list_available_models" in result["error"]
         set_current_user(None)
         result = await _call(
             mcp,

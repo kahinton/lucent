@@ -173,7 +173,7 @@ class TestCreateSchedule:
 
     @pytest.mark.asyncio
     async def test_with_model(self, mcp, auth_user):
-        """Model validation accepts any string (new models may exist before registry update)."""
+        """Known model from hardcoded registry is accepted in strict mode."""
         result = await _call(
             mcp,
             "create_schedule",
@@ -184,6 +184,21 @@ class TestCreateSchedule:
             },
         )
         assert "id" in result
+
+    @pytest.mark.asyncio
+    async def test_unknown_model_rejected(self, mcp, auth_user):
+        """Unknown model ID is rejected with helpful error message."""
+        result = await _call(
+            mcp,
+            "create_schedule",
+            {
+                "title": "Bad Model Schedule",
+                "schedule_type": "once",
+                "model": "totally-fake-model-xyz",
+            },
+        )
+        assert "error" in result
+        assert "Unknown model" in result["error"]
 
     @pytest.mark.asyncio
     async def test_no_auth(self, mcp, test_user):

@@ -157,3 +157,99 @@ class TestModelRegistry:
         assert get_provider("claude-future") == "anthropic"
         assert get_provider("gpt-6") == "openai"
         assert get_provider("gemini-4") == "google"
+
+
+class TestValidateModel:
+    """Tests for validate_model — strict/lenient modes, known/unknown/disabled models."""
+
+    def test_known_hardcoded_model_accepted(self):
+        from lucent import model_registry
+        from lucent.model_registry import validate_model
+
+        # Ensure no DB models loaded (hardcoded path)
+        assert model_registry._db_models is None or "claude-sonnet-4.6" in model_registry._MODEL_BY_ID
+        assert validate_model("claude-sonnet-4.6") is None
+
+    def test_unknown_model_rejected_strict(self, monkeypatch):
+        from lucent import model_registry
+        from lucent.model_registry import validate_model
+
+        monkeypatch.setattr(model_registry, "_db_models", None)
+        monkeypatch.delenv("LUCENT_MODEL_VALIDATION", raising=False)
+        result = validate_model("totally-fake-model-xyz")
+        assert result is not None
+        assert "Unknown model" in result
+        assert "totally-fake-model-xyz" in result
+        assert "list_available_models" in result
+
+    def test_unknown_model_accepted_lenient(self, monkeypatch):
+        from lucent import model_registry
+        from lucent.model_registry import validate_model
+
+        monkeypatch.setattr(model_registry, "_db_models", None)
+        monkeypatch.setenv("LUCENT_MODEL_VALIDATION", "lenient")
+        assert validate_model("totally-fake-model-xyz") is None
+
+    def test_disabled_db_model_rejected(self, monkeypatch):
+        from lucent import model_registry
+        from lucent.model_registry import ModelInfo, validate_model
+
+        disabled = ModelInfo(id="off-model", provider="openai", name="Off", category="general")
+        monkeypatch.setattr(model_registry, "_db_models", [disabled])
+        monkeypatch.setattr(model_registry, "_db_model_by_id", {"off-model": disabled})
+        monkeypatch.setattr(model_registry, "_db_enabled_ids", set())
+        result = validate_model("off-model")
+        assert result is not None
+        assert "disabled" in result.lower()
+
+    def test_enabled_db_model_accepted(self, monkeypatch):
+        from lucent import model_registry
+        from lucent.model_registry import ModelInfo, validate_model
+
+        m = ModelInfo(id="on-model", provider="openai", name="On", category="general")
+        monkeypatch.setattr(model_registry, "_db_models", [m])
+        monkeypatch.setattr(model_registry, "_db_model_by_id", {"on-model": m})
+        monkeypatch.setattr(model_registry, "_db_enabled_ids", {"on-model"})
+        assert validate_model("on-model") is None
+
+    def test_unknown_db_model_rejected_strict(self, monkeypatch):
+        from lucent import model_registry
+        from lucent.model_registry import ModelInfo, validate_model
+
+        m = ModelInfo(id="real-model", provider="openai", name="Real", category="general")
+        monkeypatch.setattr(model_registry, "_db_models", [m])
+        monkeypatch.setattr(model_registry, "_db_model_by_id", {"real-model": m})
+        monkeypatch.setattr(model_registry, "_db_enabled_ids", {"real-model"})
+        monkeypatch.delenv("LUCENT_MODEL_VALIDATION", raising=False)
+        result = validate_model("not-in-db")
+        assert result is not None
+        assert "Unknown model" in result
+        assert "real-model" in result  # listed in available models
+
+    def test_unknown_db_model_accepted_lenient(self, monkeypatch):
+        from lucent import model_registry
+        from lucent.model_registry import ModelInfo, validate_model
+
+        m = ModelInfo(id="real-model", provider="openai", name="Real", category="general")
+        monkeypatch.setattr(model_registry, "_db_models", [m])
+        monkeypatch.setattr(model_registry, "_db_model_by_id", {"real-model": m})
+        monkeypatch.setattr(model_registry, "_db_enabled_ids", {"real-model"})
+        monkeypatch.setenv("LUCENT_MODEL_VALIDATION", "lenient")
+        assert validate_model("not-in-db") is None
+
+    def test_strict_is_default(self, monkeypatch):
+        from lucent import model_registry
+        from lucent.model_registry import validate_model
+
+        monkeypatch.setattr(model_registry, "_db_models", None)
+        monkeypatch.delenv("LUCENT_MODEL_VALIDATION", raising=False)
+        assert validate_model("nonexistent-model") is not None
+
+    def test_error_message_lists_available_models(self, monkeypatch):
+        from lucent import model_registry
+        from lucent.model_registry import validate_model
+
+        monkeypatch.setattr(model_registry, "_db_models", None)
+        monkeypatch.delenv("LUCENT_MODEL_VALIDATION", raising=False)
+        result = validate_model("bad-model")
+        assert "claude-sonnet-4.6" in result  # hardcoded model appears in list

@@ -465,6 +465,24 @@ class TestModelValidation:
         assert resp.status_code == 200
         assert resp.json()["model"] is None
 
+    @pytest.mark.asyncio
+    async def test_unknown_model_rejected_strict(self, wf_client, wf_repo, wf_org, db_pool):
+        """Unknown model ID rejected in strict mode (REST path)."""
+        org = str(wf_org["id"])
+        req = await wf_repo.create_request(title="Model R4", org_id=org)
+        await _create_active_agent_definition(db_pool, wf_org["id"], "code")
+
+        resp = await wf_client.post(
+            f"/api/requests/{req['id']}/tasks",
+            json={
+                "title": "with unknown model",
+                "agent_type": "code",
+                "model": "totally-fake-model-xyz",
+            },
+        )
+        assert resp.status_code == 422
+        assert "unknown model" in resp.json()["detail"].lower()
+
 
 class TestReviewQueueVisibility:
     @pytest.mark.asyncio

@@ -323,11 +323,44 @@ def list_models(
 
 
 def validate_model(model_id: str) -> str | None:
-    """Validate a model selection. Returns an error message, or None if valid."""
-    if _db_models is not None and model_id in _db_model_by_id:
-        if model_id not in _db_enabled_ids:
-            return f"Model '{model_id}' is disabled by admin. Choose an enabled model."
-    return None
+    """Validate a model selection. Returns an error message, or None if valid.
+
+    Checks that the model ID exists in the registry (DB-loaded or hardcoded)
+    and is enabled. In strict mode (default), unknown models are rejected.
+    Set LUCENT_MODEL_VALIDATION=lenient to allow unrecognized model IDs.
+    """
+    import os
+
+    strict = os.environ.get("LUCENT_MODEL_VALIDATION", "strict").lower() != "lenient"
+
+    # DB-loaded registry takes precedence when available
+    if _db_models is not None:
+        if model_id in _db_model_by_id:
+            if model_id not in _db_enabled_ids:
+                return f"Model '{model_id}' is disabled by admin. Choose an enabled model."
+            return None  # Known and enabled
+        # Model not found in DB registry
+        if strict:
+            available = sorted(_db_enabled_ids)
+            return (
+                f"Unknown model '{model_id}'. "
+                f"Available models: {', '.join(available)}. "
+                f"Use list_available_models to see all options."
+            )
+        return None  # Lenient: allow unknown
+
+    # No DB loaded — check against hardcoded registry
+    if model_id in _MODEL_BY_ID:
+        return None  # Known model
+
+    if strict:
+        available = sorted(_MODEL_BY_ID.keys())
+        return (
+            f"Unknown model '{model_id}'. "
+            f"Available models: {', '.join(available)}. "
+            f"Use list_available_models to see all options."
+        )
+    return None  # Lenient: allow unknown
 
 
 def get_recommended_model(task_type: str) -> str:
