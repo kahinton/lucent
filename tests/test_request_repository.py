@@ -245,6 +245,24 @@ class TestCreateTask:
         assert len(events) >= 1
         assert events[0]["event_type"] == "created"
 
+    async def test_sequence_order_zero(self, repo, org_id):
+        req = await _make_request(repo, org_id)
+        task = await _make_task(repo, str(req["id"]), org_id, sequence_order=0)
+        assert task["sequence_order"] == 0
+
+    async def test_sequence_order_positive(self, repo, org_id):
+        req = await _make_request(repo, org_id)
+        task = await _make_task(repo, str(req["id"]), org_id, sequence_order=1)
+        assert task["sequence_order"] == 1
+
+    async def test_sequence_order_negative_rejected(self, repo, org_id, db_pool):
+        """Negative sequence_order should be rejected by the DB CHECK constraint."""
+        import asyncpg
+
+        req = await _make_request(repo, org_id)
+        with pytest.raises(asyncpg.CheckViolationError):
+            await _make_task(repo, str(req["id"]), org_id, sequence_order=-1)
+
 
 class TestListTasks:
     async def test_list_all_tasks_for_request(self, repo, org_id):
@@ -734,6 +752,88 @@ class TestListPendingTasks:
         pending = await repo.list_pending_tasks(org_id)
         matched = [t for t in pending if t["title"] == "My Task"]
         assert matched[0]["request_title"] == "My Request"
+
+    # ── dependency_policy tests ──────────────────────────────────────────
+
+    async def test_strict_blocks_on_failed_predecessor(self, repo, org_id):
+        """Default strict policy: failed predecessor blocks later tasks."""
+        req = await _make_request(repo, org_id)
+        rid = str(req["id"])
+        t0 = await _make_task(repo, rid, org_id, title="Step 0", sequence_order=0)
+        await _make_task(repo, rid, org_id, title="Step 1", sequence_order=1)
+        # Fail step 0
+        await repo.claim_task(str(t0["id"]), "inst-test")
+        await repo.start_task(str(t0["id"]))
+        await repo.fail_task(str(t0["id"]), "boom")
+        pending = await repo.list_pending_tasks(org_id)
+        titles = [t["title"] for t in pending]
+        assert "Step 1" not in titles
+
+    async def test_strict_blocks_on_cancelled_predecessor(self, repo, org_id):
+        """Strict policy: cancelled predecessor blocks later tasks."""
+        req = await _make_request(repo, org_id)
+        rid = str(req["id"])
+        t0 = await _make_task(repo, rid, org_id, title="Step 0", sequence_order=0)
+        await _make_task(repo, rid, org_id, title="Step 1", sequence_order=1)
+        # Manually cancel step 0
+        async with repo.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE tasks SET status = 'cancelled' WHERE id = $1",
+                t0["id"],
+            )
+        pending = await repo.list_pending_tasks(org_id)
+        titles = [t["title"] for t in pending]
+        assert "Step 1" not in titles
+
+    async def test_strict_is_default(self, repo, org_id):
+        """Requests default to strict dependency_policy."""
+        req = await _make_request(repo, org_id)
+        assert req["dependency_policy"] == "strict"
+
+    async def test_permissive_allows_after_failed_predecessor(self, repo, org_id):
+        """Permissive policy: failed predecessor does NOT block later tasks."""
+        req = await _make_request(repo, org_id, dependency_policy="permissive")
+        rid = str(req["id"])
+        t0 = await _make_task(repo, rid, org_id, title="Step 0", sequence_order=0)
+        await _make_task(repo, rid, org_id, title="Step 1", sequence_order=1)
+        await repo.claim_task(str(t0["id"]), "inst-test")
+        await repo.start_task(str(t0["id"]))
+        await repo.fail_task(str(t0["id"]), "boom")
+        pending = await repo.list_pending_tasks(org_id)
+        titles = [t["title"] for t in pending]
+        assert "Step 1" in titles
+
+    async def test_permissive_allows_after_cancelled_predecessor(self, repo, org_id):
+        """Permissive policy: cancelled predecessor does NOT block later tasks."""
+        req = await _make_request(repo, org_id, dependency_policy="permissive")
+        rid = str(req["id"])
+        t0 = await _make_task(repo, rid, org_id, title="Step 0", sequence_order=0)
+        await _make_task(repo, rid, org_id, title="Step 1", sequence_order=1)
+        async with repo.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE tasks SET status = 'cancelled' WHERE id = $1",
+                t0["id"],
+            )
+        pending = await repo.list_pending_tasks(org_id)
+        titles = [t["title"] for t in pending]
+        assert "Step 1" in titles
+
+    async def test_permissive_still_blocks_on_running_predecessor(self, repo, org_id):
+        """Even permissive policy blocks when predecessor is still running."""
+        req = await _make_request(repo, org_id, dependency_policy="permissive")
+        rid = str(req["id"])
+        t0 = await _make_task(repo, rid, org_id, title="Step 0", sequence_order=0)
+        await _make_task(repo, rid, org_id, title="Step 1", sequence_order=1)
+        await repo.claim_task(str(t0["id"]), "inst-test")
+        await repo.start_task(str(t0["id"]))
+        pending = await repo.list_pending_tasks(org_id)
+        titles = [t["title"] for t in pending]
+        assert "Step 1" not in titles
+
+    async def test_invalid_dependency_policy_rejected(self, repo, org_id):
+        """Invalid dependency_policy raises ValueError."""
+        with pytest.raises(ValueError, match="Invalid dependency_policy"):
+            await _make_request(repo, org_id, dependency_policy="invalid")
 
 
 # ── Dashboard ────────────────────────────────────────────────────────────

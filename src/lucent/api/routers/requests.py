@@ -19,6 +19,9 @@ class RequestCreate(BaseModel):
     description: str | None = None
     source: str = Field(default="user", pattern=REQUEST_SOURCE_PATTERN)
     priority: str = Field(default="medium", pattern=r"^(low|medium|high|urgent)$")
+    dependency_policy: str = Field(
+        default="strict", pattern=r"^(strict|permissive)$"
+    )
 
 
 class TaskCreate(BaseModel):
@@ -72,6 +75,7 @@ async def create_request(
         priority=body.priority,
         created_by=str(user.id),
         org_id=str(user.organization_id),
+        dependency_policy=body.dependency_policy,
     )
 
 

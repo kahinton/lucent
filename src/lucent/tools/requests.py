@@ -36,6 +36,8 @@ Args:
     description: Detailed description of what needs to be done
     source: Where this request came from — 'cognitive', 'user', 'api', 'daemon', or 'schedule'
     priority: 'low', 'medium', 'high', or 'urgent'
+    dependency_policy: 'strict' (default) blocks later tasks when a predecessor fails;
+        'permissive' allows continuation past failed/cancelled predecessors.
 
 Returns: JSON with the created request including its ID."""
     )
@@ -44,6 +46,7 @@ Returns: JSON with the created request including its ID."""
         description: str = "",
         source: str = "cognitive",
         priority: str = "medium",
+        dependency_policy: str = "strict",
     ) -> str:
         user_id, org_id, _ = await _get_current_user_context()
         if not org_id:
@@ -57,6 +60,7 @@ Returns: JSON with the created request including its ID."""
             priority=priority,
             created_by=str(user_id) if user_id else None,
             org_id=str(org_id),
+            dependency_policy=dependency_policy,
         )
         return json.dumps({"id": str(req["id"]), "title": req["title"], "status": req["status"]})
 
@@ -98,6 +102,9 @@ if the agent type is not approved."""
         if not org_id:
             return json.dumps({"error": "No organization context"})
 
+        if sequence_order < 0:
+            return json.dumps({"error": "sequence_order must be >= 0"})
+
         # Validate model against registry
         if model:
             from lucent.model_registry import validate_model
@@ -132,7 +139,7 @@ if the agent type is not approved."""
             description=description,
             agent_type=agent_type,
             priority=priority,
-            sequence_order=max(0, sequence_order),  # clamp to non-negative
+            sequence_order=sequence_order,
             parent_task_id=parent_task_id,
             model=model,
         )

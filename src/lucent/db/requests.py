@@ -35,18 +35,23 @@ class RequestRepository:
         source: str = "user",
         priority: str = "medium",
         created_by: str | None = None,
+        dependency_policy: str = "strict",
     ) -> dict:
         if source not in VALID_REQUEST_SOURCES:
             raise ValueError(
                 f"Invalid source '{source}'. Must be one of: {', '.join(sorted(VALID_REQUEST_SOURCES))}"
+            )
+        if dependency_policy not in ("strict", "permissive"):
+            raise ValueError(
+                f"Invalid dependency_policy '{dependency_policy}'. Must be 'strict' or 'permissive'."
             )
         fingerprint = _request_fingerprint(title)
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 """INSERT INTO requests
                    (title, description, source, priority, created_by,
-                    organization_id, fingerprint)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    organization_id, fingerprint, dependency_policy)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                    ON CONFLICT (organization_id, fingerprint)
                        WHERE status IN ('pending','planning','planned','in_progress')
                    DO UPDATE SET updated_at = NOW()
@@ -58,6 +63,7 @@ class RequestRepository:
                 UUID(created_by) if created_by else None,
                 UUID(org_id),
                 fingerprint,
+                dependency_policy,
             )
         return dict(row)
 
@@ -322,8 +328,13 @@ class RequestRepository:
 
         Respects sequence_order as a dependency gate: a task is only
         dispatchable when all lower-sequence tasks in the same request
-        have completed (or been cancelled/failed).  Tasks at the same
-        sequence_order can run in parallel.
+        have completed.
+
+        The request's dependency_policy controls what happens when a
+        predecessor fails or is cancelled:
+          - 'strict' (default): only 'completed' unblocks — failed/cancelled
+            predecessors block all subsequent tasks.
+          - 'permissive': completed, failed, and cancelled all unblock.
         """
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
@@ -335,7 +346,11 @@ class RequestRepository:
                        SELECT 1 FROM tasks earlier
                        WHERE earlier.request_id = t.request_id
                          AND earlier.sequence_order < t.sequence_order
-                         AND earlier.status NOT IN ('completed', 'failed', 'cancelled')
+                         AND CASE COALESCE(r.dependency_policy, 'strict')
+                             WHEN 'permissive'
+                               THEN earlier.status NOT IN ('completed', 'failed', 'cancelled')
+                             ELSE earlier.status != 'completed'
+                             END
                      )
                    ORDER BY
                      CASE t.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1
