@@ -362,7 +362,7 @@ def create_app() -> FastAPI:
                 "team_mode": is_team_mode,
             }
             return templates.TemplateResponse(
-                "error.html", ctx, status_code=exc.status_code
+                request, "error.html", ctx, status_code=exc.status_code
             )
         return JSONResponse(
             status_code=exc.status_code,
@@ -385,7 +385,7 @@ def create_app() -> FastAPI:
                 "is_admin": False,
                 "team_mode": is_team_mode,
             }
-            return templates.TemplateResponse("error.html", ctx, status_code=500)
+            return templates.TemplateResponse(request, "error.html", ctx, status_code=500)
         return JSONResponse(
             status_code=500,
             content={"error": "Internal server error"},

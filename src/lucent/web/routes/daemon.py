@@ -238,7 +238,10 @@ async def daemon_feedback(
                 )
         except Exception as notify_err:
             # Log so failures are observable; daemon will still pick it up on next poll
-            logger.warning("pg_notify failed for feedback %s on %s: %s", action, memory_id, notify_err)
+            logger.warning(
+                "pg_notify failed for feedback %s on %s: %s",
+                action, memory_id, notify_err,
+            )
 
     await audit_repo.log(
         memory_id=memory_id,

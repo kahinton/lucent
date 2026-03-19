@@ -28,7 +28,7 @@ PROVIDER_MODEL_MAP: dict[str, tuple[str, str]] = {
     "claude-sonnet-4.0": ("anthropic", "claude-sonnet-4-20250514"),
     "claude-sonnet-4.5": ("anthropic", "claude-sonnet-4-5-20250620"),
     "claude-sonnet-4.6": ("anthropic", "claude-sonnet-4-6-20260115"),
-    "claude-opus-4.6-fast": ("anthropic", "claude-opus-4-6-20260301"),
+    "claude-opus-4.6-1m": ("anthropic", "claude-opus-4-6-1m-20260301"),
     # OpenAI
     "gpt-4.1": ("openai", "gpt-4.1"),
     "gpt-5-mini": ("openai", "gpt-5-mini"),

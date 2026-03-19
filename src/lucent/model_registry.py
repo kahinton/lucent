@@ -182,13 +182,14 @@ MODELS: list[ModelInfo] = [
         tags=["general", "coding", "agentic", "reasoning"],
     ),
     ModelInfo(
-        id="claude-opus-4.6-fast",
+        id="claude-opus-4.6-1m",
         provider="anthropic",
-        name="Claude Opus 4.6 (fast mode)",
+        name="Claude Opus 4.6 1M",
         category="reasoning",
-        api_model_id="claude-opus-4-6-20260301",
-        notes="Preview. Opus-level reasoning with lower latency.",
-        tags=["reasoning", "fast", "preview"],
+        api_model_id="claude-opus-4-6-1m-20260301",
+        context_window=1000000,
+        notes="Opus 4.6 with 1 million token context window.",
+        tags=["reasoning", "frontier", "large-context"],
     ),
     # ── Google ────────────────────────────────────────────────────────────
     ModelInfo(

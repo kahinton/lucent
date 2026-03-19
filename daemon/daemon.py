@@ -1915,7 +1915,8 @@ class LucentDaemon:
             (
                 "Run the learning extraction pipeline from the learning-extraction skill. "
                 "1. Search for memories tagged 'daemon-result' "
-                "or 'rejection-lesson' or 'validated' that do "
+                "or 'rejection-lesson' or 'feedback-rejected' "
+                "or 'validated' that do "
                 "NOT have the 'lesson-extracted' tag. "
                 "2. For each candidate, classify the experience "
                 "type and extract a transferable principle. "
