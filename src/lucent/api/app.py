@@ -41,6 +41,37 @@ def set_mcp_session_manager(session_manager):
     _mcp_session_manager = session_manager
 
 
+def _instrument_otel(app: FastAPI) -> None:
+    """Apply OTEL auto-instrumentation when enabled.
+
+    Instruments FastAPI for automatic HTTP span creation and asyncpg for
+    DB query tracing. Safe to call when OTEL is disabled (no-op).
+    """
+    from lucent.telemetry import _is_enabled
+
+    if not _is_enabled():
+        return
+
+    try:
+        from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+
+        FastAPIInstrumentor.instrument_app(
+            app,
+            excluded_urls="health",  # skip /api/health from tracing
+        )
+        logger.info("OTEL: FastAPI instrumentation enabled")
+    except Exception as e:
+        logger.warning(f"OTEL: Failed to instrument FastAPI: {e}")
+
+    try:
+        from opentelemetry.instrumentation.asyncpg import AsyncPGInstrumentor
+
+        AsyncPGInstrumentor().instrument()
+        logger.info("OTEL: asyncpg instrumentation enabled")
+    except Exception as e:
+        logger.warning(f"OTEL: Failed to instrument asyncpg: {e}")
+
+
 async def _sync_built_in_definitions():
     """Sync built-in skills and agents from .github/ into the database."""
     try:
@@ -83,6 +114,12 @@ async def _sync_built_in_definitions():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifespan - startup and shutdown."""
+    # Startup: Initialize telemetry (no-op if OTEL_ENABLED is false)
+    from lucent.telemetry import init_telemetry, shutdown_telemetry
+
+    init_telemetry(service_name="lucent-server")
+    _instrument_otel(app)
+
     # Startup: Initialize database pool
     import os
 
@@ -112,8 +149,9 @@ async def lifespan(app: FastAPI):
     else:
         yield
 
-    # Shutdown: Close database pool
+    # Shutdown: Close database pool, then telemetry
     await close_db()
+    shutdown_telemetry()
 
 
 def create_app() -> FastAPI:
@@ -185,12 +223,27 @@ def create_app() -> FastAPI:
 
     @app.middleware("http")
     async def correlation_id_middleware(request: Request, call_next):
-        """Generate or propagate a correlation ID for every request."""
+        """Generate or propagate a correlation ID for every request.
+
+        When OTEL is enabled, also sets the correlation ID as a span attribute
+        for linking legacy logs with distributed traces.
+        """
         cid = request.headers.get("X-Request-ID")
         if cid:
             set_correlation_id(cid)
         else:
             cid = set_correlation_id()
+
+        # Bridge correlation ID into OTEL span context when enabled
+        try:
+            from opentelemetry import trace
+
+            span = trace.get_current_span()
+            if span.is_recording():
+                span.set_attribute("lucent.correlation_id", cid)
+        except Exception:
+            pass
+
         response = await call_next(request)
         response.headers["X-Request-ID"] = cid
         return response
