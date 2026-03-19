@@ -535,6 +535,18 @@ class RequestAPI:
     API_TIMEOUT = 15
 
     @staticmethod
+    async def list_active_work() -> dict | None:
+        """Fetch all non-completed requests with task status summaries."""
+        try:
+            async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
+                resp = await client.get(f"{API_BASE}/requests/active", headers=API_HEADERS)
+                if resp.status_code == 200:
+                    return resp.json()
+        except Exception as e:
+            log(f"API list_active_work failed: {e}", "WARN")
+        return None
+
+    @staticmethod
     async def create_request(
         title: str,
         description: str | None = None,
@@ -864,14 +876,38 @@ def log(message: str, level: str = "INFO"):
 # ============================================================================
 
 
-def build_cognitive_prompt() -> str:
+async def build_cognitive_prompt() -> str:
     """Build the system message for the cognitive loop session."""
     cognitive_md = COGNITIVE_PROMPT_PATH.read_text() if COGNITIVE_PROMPT_PATH.exists() else ""
     agent_def = AGENT_DEF_PATH.read_text() if AGENT_DEF_PATH.exists() else ""
 
+    # Fetch active work snapshot to prevent duplicate request creation
+    active_work_section = ""
+    active_data = await RequestAPI.list_active_work()
+    if active_data and active_data.get("items"):
+        lines = []
+        for req in active_data["items"]:
+            task_summary = (
+                f"tasks: {req.get('tasks_pending', 0)} pending, "
+                f"{req.get('tasks_running', 0)} running, "
+                f"{req.get('tasks_completed', 0)} completed, "
+                f"{req.get('tasks_failed', 0)} failed"
+            )
+            lines.append(
+                f"- [{req.get('priority', 'medium').upper()}] {req['title']} "
+                f"(status: {req['status']}, {task_summary})"
+            )
+        active_work_section = (
+            "\n## Current Active Work (auto-injected)\n"
+            + "\n".join(lines)
+            + "\n\nDo NOT create duplicate requests for any of the above items.\n"
+        )
+    else:
+        active_work_section = "\n## Current Active Work (auto-injected)\nNo active requests.\n"
+
     return f"""
 {cognitive_md}
-
+{active_work_section}
 --- AGENT IDENTITY ---
 {agent_def}
 
@@ -1569,7 +1605,7 @@ class LucentDaemon:
             if self.cycle_count == 1:
                 await self._check_environment_adaptation()
 
-            prompt = build_cognitive_prompt()
+            prompt = await build_cognitive_prompt()
             result = await self.run_session(
                 f"cognitive-{self.cycle_count}",
                 prompt,

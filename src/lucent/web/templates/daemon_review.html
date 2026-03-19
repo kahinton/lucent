@@ -29,6 +29,9 @@
 </div>
 
 {% if review_memories %}
+{% from "partials/pagination.html" import pagination_controls %}
+{{ pagination_controls(base_url="/daemon/review", page=page, per_page=per_page, total_pages=total_pages, total_count=total_count, entity_name="items") }}
+
 <div class="space-y-4">
     {% for memory in review_memories %}
     <div class="bg-white rounded-xl border border-amber-300 shadow-sm overflow-hidden">
@@ -71,6 +74,8 @@
     </div>
     {% endfor %}
 </div>
+
+{{ pagination_controls(base_url="/daemon/review", page=page, per_page=per_page, total_pages=total_pages, total_count=total_count, show_per_page=false, entity_name="items") }}
 {% else %}
 <!-- Empty state -->
 <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-12 text-center">

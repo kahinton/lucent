@@ -237,7 +237,7 @@ async def trigger_now(
 
         agent_type = sched.get("agent_type", "code")
         def_repo = DefinitionRepository(pool)
-        agents = await def_repo.list_agents(str(user.organization_id), status="active")
+        agents = (await def_repo.list_agents(str(user.organization_id), status="active"))["items"]
         active_names = {a["name"] for a in agents}
         if agent_type and agent_type not in active_names:
             logger.warning(

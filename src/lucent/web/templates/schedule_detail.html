@@ -248,6 +248,12 @@
     <div class="px-4 py-3 border-b border-gray-100">
         <h2 class="text-lg font-semibold text-gray-900">Run History</h2>
     </div>
+    {% from "partials/pagination.html" import pagination_controls %}
+    {% if run_total_count is defined and run_total_count > 0 %}
+    <div class="px-4 pt-3">
+        {{ pagination_controls(base_url="/schedules/" ~ sched.id, page=run_page, per_page=run_per_page, total_pages=run_total_pages, total_count=run_total_count, filter_params={}, entity_name="runs") }}
+    </div>
+    {% endif %}
     {% if sched.runs %}
     <div class="divide-y divide-gray-100">
         {% for run in sched.runs %}
@@ -276,7 +282,7 @@
                 {% endif %}
                 <div>
                     <div class="flex items-center gap-2">
-                        <span class="text-sm font-medium text-gray-900">Run #{{ loop.revindex }}</span>
+                        <span class="text-sm font-medium text-gray-900">Run #{{ run_total_count - ((run_page - 1) * run_per_page + loop.index0) if run_total_count is defined else loop.revindex }}</span>
                         <span class="px-2 py-0.5 rounded text-xs {% if run.status == 'completed' %}bg-green-100 text-green-700{% elif run.status == 'failed' %}bg-red-100 text-red-700{% elif run.status == 'running' %}bg-blue-100 text-blue-700{% else %}bg-gray-100 text-gray-600{% endif %}">{{ run.status }}</span>
                     </div>
                     {% if run.result %}
@@ -299,6 +305,11 @@
         </div>
         {% endfor %}
     </div>
+    {% if run_total_pages is defined and run_total_pages > 1 %}
+    <div class="px-4 pb-3">
+        {{ pagination_controls(base_url="/schedules/" ~ sched.id, page=run_page, per_page=run_per_page, total_pages=run_total_pages, total_count=run_total_count, filter_params={}, show_per_page=false, entity_name="runs") }}
+    </div>
+    {% endif %}
     {% else %}
     <div class="px-4 py-8 text-center text-gray-500 text-sm">
         No runs yet. This schedule {% if sched.next_run_at and sched.enabled %}will execute at {{ sched.next_run_at.strftime('%Y-%m-%d %H:%M') }}{% else %}is not currently active{% endif %}.

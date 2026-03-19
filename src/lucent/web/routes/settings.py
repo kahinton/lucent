@@ -68,7 +68,7 @@ async def settings(
     api_key_repo = ApiKeyRepository(pool)
 
     org = await org_repo.get_by_id(user.organization_id)
-    api_keys = await api_key_repo.list_by_user(user.id)
+    api_keys = (await api_key_repo.list_by_user(user.id))["items"]
 
     # Check for newly created key to display (passed via signed query param)
     new_api_key = None

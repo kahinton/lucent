@@ -20,30 +20,43 @@ class ModelRepository:
         category: str | None = None,
         enabled_only: bool = False,
         org_id: str | None = None,
-    ) -> list[dict]:
-        query = "SELECT * FROM models WHERE 1=1"
+        limit: int = 25,
+        offset: int = 0,
+    ) -> dict:
+        base = " FROM models WHERE 1=1"
         params: list = []
         idx = 1
 
         if provider:
-            query += f" AND provider = ${idx}"
+            base += f" AND provider = ${idx}"
             params.append(provider)
             idx += 1
         if category:
-            query += f" AND category = ${idx}"
+            base += f" AND category = ${idx}"
             params.append(category)
             idx += 1
         if enabled_only:
-            query += " AND is_enabled = true"
+            base += " AND is_enabled = true"
         if org_id:
-            query += f" AND (organization_id IS NULL OR organization_id = ${idx})"
+            base += f" AND (organization_id IS NULL OR organization_id = ${idx})"
             params.append(UUID(org_id))
             idx += 1
 
-        query += " ORDER BY provider, name"
+        count_query = f"SELECT COUNT(*) AS total{base}"
+        query = f"SELECT *{base} ORDER BY provider, name LIMIT ${idx} OFFSET ${idx + 1}"
+        params_with_page = [*params, limit, offset]
+
         async with self.pool.acquire() as conn:
-            rows = await conn.fetch(query, *params)
-        return [dict(r) for r in rows]
+            count_row = await conn.fetchrow(count_query, *params)
+            total_count = count_row["total"] if count_row else 0
+            rows = await conn.fetch(query, *params_with_page)
+        return {
+            "items": [dict(r) for r in rows],
+            "total_count": total_count,
+            "offset": offset,
+            "limit": limit,
+            "has_more": offset + len(rows) < total_count,
+        }
 
     async def get_model(self, model_id: str) -> dict | None:
         async with self.pool.acquire() as conn:

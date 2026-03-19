@@ -894,7 +894,8 @@ class TestApiKeyRepository:
             name="List Key 2",
         )
 
-        keys = await repo.list_by_user(test_user["id"])
+        result = await repo.list_by_user(test_user["id"])
+        keys = result["items"]
 
         names = [k["name"] for k in keys]
         assert "List Key 1" in names
@@ -951,8 +952,8 @@ class TestApiKeyRepository:
 
         await repo.revoke(key_record["id"], test_user["id"])
 
-        keys = await repo.list_by_user(test_user["id"])
-        key_ids = [k["id"] for k in keys]
+        result = await repo.list_by_user(test_user["id"])
+        key_ids = [k["id"] for k in result["items"]]
         assert key_record["id"] not in key_ids
 
 

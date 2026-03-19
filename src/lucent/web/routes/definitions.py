@@ -1,5 +1,7 @@
 """Definition management routes — agents, skills, MCP servers."""
 
+from math import ceil
+
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
@@ -12,6 +14,8 @@ from ._shared import _check_csrf, _parse_env_vars, get_user_context, templates
 logger = get_logger("web.routes.definitions")
 
 router = APIRouter()
+
+ALLOWED_PER_PAGE = {10, 25, 50, 100}
 
 
 def _require_admin_or_owner(user) -> None:
@@ -33,7 +37,12 @@ def _require_admin(user: object) -> None:
 
 
 @router.get("/definitions", response_class=HTMLResponse)
-async def definitions_page(request: Request, tab: str = "agents"):
+async def definitions_page(
+    request: Request,
+    tab: str = "agents",
+    page: int = 1,
+    per_page: int = 25,
+):
     """Agent and skill definitions management page."""
     user = await get_user_context(request)
     pool = await get_pool()
@@ -43,19 +52,50 @@ async def definitions_page(request: Request, tab: str = "agents"):
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     org_id = str(user.organization_id)
 
-    agents = await repo.list_agents(org_id)
-    skills = await repo.list_skills(org_id)
-    mcp_servers = await repo.list_mcp_servers(org_id)
+    page = max(1, page)
+    per_page = per_page if per_page in ALLOWED_PER_PAGE else 25
+    offset = (page - 1) * per_page
+
+    # Only paginate the active tab; load others without pagination for counts
+    agents_result = await repo.list_agents(
+        org_id, limit=per_page if tab == "agents" else 1000, offset=offset if tab == "agents" else 0
+    )
+    skills_result = await repo.list_skills(
+        org_id, limit=per_page if tab == "skills" else 1000, offset=offset if tab == "skills" else 0
+    )
+    mcp_result = await repo.list_mcp_servers(
+        org_id, limit=per_page if tab == "mcp" else 1000, offset=offset if tab == "mcp" else 0
+    )
+
+    # Determine total_count and total_pages based on active tab
+    if tab == "agents":
+        total_count = agents_result["total_count"]
+    elif tab == "skills":
+        total_count = skills_result["total_count"]
+    elif tab == "mcp":
+        total_count = mcp_result["total_count"]
+    else:
+        total_count = 0
+
+    total_pages = ceil(total_count / per_page) if total_count > 0 else 1
+    page = min(page, total_pages)
 
     return templates.TemplateResponse(
         request,
         "definitions.html",
         {
             "user": user,
-            "agents": agents,
-            "skills": skills,
-            "mcp_servers": mcp_servers,
+            "agents": agents_result["items"],
+            "skills": skills_result["items"],
+            "mcp_servers": mcp_result["items"],
+            "agents_total": agents_result["total_count"],
+            "skills_total": skills_result["total_count"],
+            "mcp_total": mcp_result["total_count"],
             "tab": tab,
+            "page": page,
+            "per_page": per_page,
+            "total_pages": total_pages,
+            "total_count": total_count,
         },
     )
 
@@ -76,8 +116,8 @@ async def agent_detail_page(request: Request, agent_id: str):
         raise HTTPException(status_code=404, detail="Agent not found")
 
     # Get all skills and MCP servers for the assignment dropdowns
-    all_skills = await repo.list_skills(org_id, status="active")
-    all_mcp = await repo.list_mcp_servers(org_id, status="active")
+    all_skills = (await repo.list_skills(org_id, status="active"))["items"]
+    all_mcp = (await repo.list_mcp_servers(org_id, status="active"))["items"]
     assigned_skills = await repo.get_agent_skills(agent_id)
     assigned_mcp = await repo.get_agent_mcp_servers(agent_id)
 

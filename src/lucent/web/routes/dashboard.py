@@ -53,8 +53,8 @@ async def dashboard(request: Request):
 
     def_repo = DefinitionRepository(pool)
     org_id = str(user.organization_id)
-    agents = await def_repo.list_agents(org_id, status="active")
-    skills = await def_repo.list_skills(org_id, status="active")
+    agents = (await def_repo.list_agents(org_id, status="active"))["items"]
+    skills = (await def_repo.list_skills(org_id, status="active"))["items"]
     active_agents = len(agents)
     active_skills = len(skills)
 
@@ -70,7 +70,7 @@ async def dashboard(request: Request):
         org_id=str(user.organization_id),
         status="pending",
     )
-    active_request_count = len(active_requests) + len(pending_requests)
+    active_request_count = active_requests["total_count"] + pending_requests["total_count"]
 
     return templates.TemplateResponse(
         request,

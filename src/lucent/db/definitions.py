@@ -66,22 +66,36 @@ class DefinitionRepository:
 
     # ── Agents ────────────────────────────────────────────────────────────
 
-    async def list_agents(self, org_id: str, status: str | None = None) -> list[dict]:
-        query = """
-            SELECT id, name, description, status, scope,
-                   created_by, approved_by, approved_at,
-                   created_at, updated_at
+    async def list_agents(self, org_id: str, status: str | None = None, limit: int = 25, offset: int = 0) -> dict:
+        base = """
             FROM agent_definitions
             WHERE organization_id = $1
         """
         params: list[Any] = [org_id]
         if status:
             params.append(status)
-            query += f" AND status = ${len(params)}"
-        query += " ORDER BY name"
+            base += f" AND status = ${len(params)}"
+
+        count_query = f"SELECT COUNT(*) AS total {base}"
+        query = f"""
+            SELECT id, name, description, status, scope,
+                   created_by, approved_by, approved_at,
+                   created_at, updated_at
+            {base} ORDER BY name LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}
+        """
+        params_with_page = [*params, limit, offset]
+
         async with self.pool.acquire() as conn:
-            rows = await conn.fetch(query, *params)
-        return [dict(r) for r in rows]
+            count_row = await conn.fetchrow(count_query, *params)
+            total_count = count_row["total"] if count_row else 0
+            rows = await conn.fetch(query, *params_with_page)
+        return {
+            "items": [dict(r) for r in rows],
+            "total_count": total_count,
+            "offset": offset,
+            "limit": limit,
+            "has_more": offset + len(rows) < total_count,
+        }
 
     async def get_agent(self, agent_id: str, org_id: str) -> dict | None:
         query = """
@@ -209,22 +223,36 @@ class DefinitionRepository:
 
     # ── Skills ────────────────────────────────────────────────────────────
 
-    async def list_skills(self, org_id: str, status: str | None = None) -> list[dict]:
-        query = """
-            SELECT id, name, description, status, scope,
-                   created_by, approved_by, approved_at,
-                   created_at, updated_at
+    async def list_skills(self, org_id: str, status: str | None = None, limit: int = 25, offset: int = 0) -> dict:
+        base = """
             FROM skill_definitions
             WHERE organization_id = $1
         """
         params: list[Any] = [org_id]
         if status:
             params.append(status)
-            query += f" AND status = ${len(params)}"
-        query += " ORDER BY name"
+            base += f" AND status = ${len(params)}"
+
+        count_query = f"SELECT COUNT(*) AS total {base}"
+        query = f"""
+            SELECT id, name, description, status, scope,
+                   created_by, approved_by, approved_at,
+                   created_at, updated_at
+            {base} ORDER BY name LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}
+        """
+        params_with_page = [*params, limit, offset]
+
         async with self.pool.acquire() as conn:
-            rows = await conn.fetch(query, *params)
-        return [dict(r) for r in rows]
+            count_row = await conn.fetchrow(count_query, *params)
+            total_count = count_row["total"] if count_row else 0
+            rows = await conn.fetch(query, *params_with_page)
+        return {
+            "items": [dict(r) for r in rows],
+            "total_count": total_count,
+            "offset": offset,
+            "limit": limit,
+            "has_more": offset + len(rows) < total_count,
+        }
 
     async def get_skill(self, skill_id: str, org_id: str) -> dict | None:
         async with self.pool.acquire() as conn:
@@ -310,22 +338,36 @@ class DefinitionRepository:
 
     # ── MCP Servers ───────────────────────────────────────────────────────
 
-    async def list_mcp_servers(self, org_id: str, status: str | None = None) -> list[dict]:
-        query = """
-            SELECT id, name, description, server_type, url, status, scope,
-                   created_by, approved_by, approved_at,
-                   created_at, updated_at
+    async def list_mcp_servers(self, org_id: str, status: str | None = None, limit: int = 25, offset: int = 0) -> dict:
+        base = """
             FROM mcp_server_configs
             WHERE organization_id = $1
         """
         params: list[Any] = [org_id]
         if status:
             params.append(status)
-            query += f" AND status = ${len(params)}"
-        query += " ORDER BY name"
+            base += f" AND status = ${len(params)}"
+
+        count_query = f"SELECT COUNT(*) AS total {base}"
+        query = f"""
+            SELECT id, name, description, server_type, url, status, scope,
+                   created_by, approved_by, approved_at,
+                   created_at, updated_at
+            {base} ORDER BY name LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}
+        """
+        params_with_page = [*params, limit, offset]
+
         async with self.pool.acquire() as conn:
-            rows = await conn.fetch(query, *params)
-        return [dict(r) for r in rows]
+            count_row = await conn.fetchrow(count_query, *params)
+            total_count = count_row["total"] if count_row else 0
+            rows = await conn.fetch(query, *params_with_page)
+        return {
+            "items": [dict(r) for r in rows],
+            "total_count": total_count,
+            "offset": offset,
+            "limit": limit,
+            "has_more": offset + len(rows) < total_count,
+        }
 
     async def get_mcp_server(self, server_id: str, org_id: str) -> dict | None:
         async with self.pool.acquire() as conn:
@@ -652,9 +694,9 @@ class DefinitionRepository:
 
     async def get_pending_proposals(self, org_id: str) -> dict:
         """Get all proposed (pending approval) definitions."""
-        agents = await self.list_agents(org_id, status="proposed")
-        skills = await self.list_skills(org_id, status="proposed")
-        mcp_servers = await self.list_mcp_servers(org_id, status="proposed")
+        agents = (await self.list_agents(org_id, status="proposed"))["items"]
+        skills = (await self.list_skills(org_id, status="proposed"))["items"]
+        mcp_servers = (await self.list_mcp_servers(org_id, status="proposed"))["items"]
         return {
             "agents": agents,
             "skills": skills,
@@ -678,13 +720,13 @@ class DefinitionRepository:
         agent_dict["mcp_servers"] = await self.get_agent_mcp_servers(str(agent["id"]))
         return agent_dict
 
-    async def list_agents_with_grants(self, org_id: str, status: str | None = None) -> list[dict]:
+    async def list_agents_with_grants(self, org_id: str, status: str | None = None, limit: int = 25, offset: int = 0) -> dict:
         """List agents with their granted skills and MCP servers."""
-        agents = await self.list_agents(org_id, status=status)
-        for agent in agents:
+        result = await self.list_agents(org_id, status=status, limit=limit, offset=offset)
+        for agent in result["items"]:
             agent["skills"] = await self.get_agent_skills(str(agent["id"]))
             agent["mcp_servers"] = await self.get_agent_mcp_servers(str(agent["id"]))
-        return agents
+        return result
 
     async def sync_built_in_skills(self, org_id: str, skills_dir: str) -> int:
         """Sync .github/skills/ into the DB as built-in, active definitions.

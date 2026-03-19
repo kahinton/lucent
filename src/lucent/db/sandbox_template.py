@@ -99,15 +99,28 @@ class SandboxTemplateRepository:
             )
             return self._parse_row(row) if row else None
 
-    async def list_all(self, organization_id: str) -> list[dict]:
+    async def list_all(self, organization_id: str, limit: int = 25, offset: int = 0) -> dict:
         async with self.pool.acquire() as conn:
+            count_row = await conn.fetchrow(
+                "SELECT COUNT(*) AS total FROM sandbox_templates WHERE organization_id = $1",
+                UUID(organization_id),
+            )
+            total_count = count_row["total"] if count_row else 0
             rows = await conn.fetch(
                 """SELECT * FROM sandbox_templates
                    WHERE organization_id = $1
-                   ORDER BY name""",
+                   ORDER BY name LIMIT $2 OFFSET $3""",
                 UUID(organization_id),
+                limit,
+                offset,
             )
-            return [self._parse_row(r) for r in rows]
+            return {
+                "items": [self._parse_row(r) for r in rows],
+                "total_count": total_count,
+                "offset": offset,
+                "limit": limit,
+                "has_more": offset + len(rows) < total_count,
+            }
 
     async def update(self, template_id: str, organization_id: str, **kwargs) -> dict | None:
         """Update template fields. Only non-None kwargs are applied."""

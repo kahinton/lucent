@@ -119,7 +119,7 @@ if the agent type is not approved."""
 
         pool = await get_pool()
         def_repo = DefinitionRepository(pool)
-        agents = await def_repo.list_agents(str(org_id), status="active")
+        agents = (await def_repo.list_agents(str(org_id), status="active"))["items"]
         active_names = {a["name"] for a in agents}
         if agent_type and agent_type not in active_names:
             avail = sorted(active_names) if active_names else "none — approve definitions first"

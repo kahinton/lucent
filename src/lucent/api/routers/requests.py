@@ -95,6 +95,15 @@ async def list_requests(
     )
 
 
+@router.get("/active")
+async def list_active_work(user: AuthenticatedUser, pool=Depends(get_pool)):
+    """Get all non-completed requests with task status summaries for the cognitive loop."""
+    from lucent.db.requests import RequestRepository
+
+    repo = RequestRepository(pool)
+    return await repo.list_active_work(str(user.organization_id))
+
+
 @router.get("/summary")
 async def request_summary(user: AuthenticatedUser, pool=Depends(get_pool)):
     from lucent.db.requests import RequestRepository
@@ -178,7 +187,7 @@ async def create_task(
                 f"Approve it at /definitions before assigning tasks.",
             )
     elif body.agent_type:
-        agents = await def_repo.list_agents(org_id, status="active")
+        agents = (await def_repo.list_agents(org_id, status="active"))["items"]
         if not any(a["name"] == body.agent_type for a in agents):
             raise HTTPException(
                 422,
@@ -278,7 +287,7 @@ async def complete_task(
     repo = RequestRepository(pool)
     task = await repo.complete_task(str(task_id), body.result, org_id=str(user.organization_id))
     if not task:
-        raise HTTPException(404, "Task not found")
+        raise HTTPException(409, "Task not found or not in a transitionable state (must be claimed/running)")
     return task
 
 
@@ -298,7 +307,7 @@ async def fail_task(
     repo = RequestRepository(pool)
     task = await repo.fail_task(str(task_id), body.error, org_id=str(user.organization_id))
     if not task:
-        raise HTTPException(404, "Task not found")
+        raise HTTPException(409, "Task not found or not in a transitionable state (must be claimed/running)")
     return task
 
 

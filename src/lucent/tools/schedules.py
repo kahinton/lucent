@@ -129,13 +129,18 @@ Returns: JSON array of schedules."""
             return json.dumps({"error": "No organization context"})
 
         repo = await _get_schedule_repository()
-        schedules = await repo.list_schedules(
+        result = await repo.list_schedules(
             str(org_id),
             status=status,
             enabled=True if enabled_only else None,
         )
+        serialized_items = [
+            {k: str(v) if hasattr(v, "hex") else str(v) for k, v in s.items()}
+            for s in result["items"]
+        ]
         return json.dumps(
-            [{k: str(v) if hasattr(v, "hex") else str(v) for k, v in s.items()} for s in schedules],
+            {"items": serialized_items, "total_count": result["total_count"],
+             "has_more": result["has_more"]},
             default=str,
         )
 

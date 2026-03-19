@@ -11,7 +11,7 @@ from uuid import UUID
 
 from asyncpg import Pool
 
-from lucent.constants import VALID_REQUEST_SOURCES
+from lucent.constants import VALID_REQUEST_SOURCES, VALID_REQUEST_STATUSES
 
 
 def _request_fingerprint(title: str) -> str:
@@ -81,26 +81,40 @@ class RequestRepository:
         org_id: str,
         status: str | None = None,
         source: str | None = None,
-        limit: int = 50,
+        limit: int = 25,
         offset: int = 0,
-    ) -> list[dict]:
-        query = "SELECT * FROM requests WHERE organization_id = $1"
+    ) -> dict:
+        base = "FROM requests WHERE organization_id = $1"
         params: list[Any] = [UUID(org_id)]
         if status:
             params.append(status)
-            query += f" AND status = ${len(params)}"
+            base += f" AND status = ${len(params)}"
         if source:
             params.append(source)
-            query += f" AND source = ${len(params)}"
-        query += f" ORDER BY created_at DESC LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}"
-        params.extend([limit, offset])
+            base += f" AND source = ${len(params)}"
+
+        count_query = f"SELECT COUNT(*) AS total {base}"
+        query = f"SELECT * {base} ORDER BY created_at DESC LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}"
+        params_with_page = [*params, limit, offset]
+
         async with self.pool.acquire() as conn:
-            rows = await conn.fetch(query, *params)
-        return [dict(r) for r in rows]
+            count_row = await conn.fetchrow(count_query, *params)
+            total_count = count_row["total"] if count_row else 0
+            rows = await conn.fetch(query, *params_with_page)
+        return {
+            "items": [dict(r) for r in rows],
+            "total_count": total_count,
+            "offset": offset,
+            "limit": limit,
+            "has_more": offset + len(rows) < total_count,
+        }
 
     async def update_request_status(
         self, request_id: str, status: str, org_id: str | None = None
     ) -> dict | None:
+        if status not in VALID_REQUEST_STATUSES:
+            valid = ", ".join(sorted(VALID_REQUEST_STATUSES))
+            raise ValueError(f"Invalid status '{status}'. Must be one of: {valid}")
         now = datetime.now(timezone.utc)
         completed_at = now if status in ("completed", "failed", "cancelled") else None
         if org_id:
@@ -135,7 +149,7 @@ class RequestRepository:
         req = await self.get_request(request_id, org_id)
         if not req:
             return None
-        req["tasks"] = await self.list_tasks(request_id)
+        req["tasks"] = (await self.list_tasks(request_id))["items"]
 
         # Batch-load events and memory links for ALL tasks (avoids N+1)
         task_ids = [task["id"] for task in req["tasks"]]
@@ -261,47 +275,84 @@ class RequestRepository:
         request_id: str,
         status: str | None = None,
         org_id: str | None = None,
-    ) -> list[dict]:
-        query = "SELECT * FROM tasks WHERE request_id = $1"
+        limit: int = 25,
+        offset: int = 0,
+    ) -> dict:
+        base = "FROM tasks WHERE request_id = $1"
         params: list[Any] = [UUID(request_id)]
         if org_id:
             params.append(UUID(org_id))
-            query += f" AND organization_id = ${len(params)}"
+            base += f" AND organization_id = ${len(params)}"
         if status:
             params.append(status)
-            query += f" AND status = ${len(params)}"
-        query += " ORDER BY sequence_order, created_at"
-        async with self.pool.acquire() as conn:
-            rows = await conn.fetch(query, *params)
-        return [dict(r) for r in rows]
+            base += f" AND status = ${len(params)}"
 
-    async def list_pending_requests(self, org_id: str) -> list[dict]:
-        """Get pending requests, including those with no tasks yet."""
+        count_query = f"SELECT COUNT(*) AS total {base}"
+        query = f"SELECT * {base} ORDER BY sequence_order, created_at LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}"
+        params_with_page = [*params, limit, offset]
+
         async with self.pool.acquire() as conn:
-            rows = await conn.fetch(
-                """SELECT r.*, count(t.id) as task_count
-                   FROM requests r LEFT JOIN tasks t ON t.request_id = r.id
+            count_row = await conn.fetchrow(count_query, *params)
+            total_count = count_row["total"] if count_row else 0
+            rows = await conn.fetch(query, *params_with_page)
+        return {
+            "items": [dict(r) for r in rows],
+            "total_count": total_count,
+            "offset": offset,
+            "limit": limit,
+            "has_more": offset + len(rows) < total_count,
+        }
+
+    async def list_pending_requests(self, org_id: str, limit: int = 25, offset: int = 0) -> dict:
+        """Get pending requests, including those with no tasks yet."""
+        base = """FROM requests r LEFT JOIN tasks t ON t.request_id = r.id
                    WHERE r.organization_id = $1
-                     AND r.status = 'pending'
+                     AND r.status = 'pending'"""
+        async with self.pool.acquire() as conn:
+            count_row = await conn.fetchrow(
+                f"SELECT COUNT(DISTINCT r.id) AS total {base}",
+                UUID(org_id),
+            )
+            total_count = count_row["total"] if count_row else 0
+            rows = await conn.fetch(
+                f"""SELECT r.*, count(t.id) as task_count
+                   {base}
                    GROUP BY r.id
                    ORDER BY
                      CASE r.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1
                                      WHEN 'medium' THEN 2 ELSE 3 END,
-                     r.created_at""",
+                     r.created_at
+                   LIMIT $2 OFFSET $3""",
                 UUID(org_id),
+                limit,
+                offset,
             )
-        return [dict(r) for r in rows]
+        return {
+            "items": [dict(r) for r in rows],
+            "total_count": total_count,
+            "offset": offset,
+            "limit": limit,
+            "has_more": offset + len(rows) < total_count,
+        }
 
-    async def list_active_work(self, org_id: str) -> list[dict]:
+    async def list_active_work(self, org_id: str, limit: int = 25, offset: int = 0) -> dict:
         """Get all non-completed requests with task status summaries.
 
         Returns requests in pending/in_progress/planned status along with
         counts of tasks by status, so the cognitive loop can see what's
         already being worked on and avoid creating duplicate work.
         """
+        base = """FROM requests r LEFT JOIN tasks t ON t.request_id = r.id
+                   WHERE r.organization_id = $1
+                     AND r.status NOT IN ('completed', 'failed', 'cancelled')"""
         async with self.pool.acquire() as conn:
+            count_row = await conn.fetchrow(
+                f"SELECT COUNT(DISTINCT r.id) AS total {base}",
+                UUID(org_id),
+            )
+            total_count = count_row["total"] if count_row else 0
             rows = await conn.fetch(
-                """SELECT r.id, r.title, r.description, r.status, r.priority,
+                f"""SELECT r.id, r.title, r.description, r.status, r.priority,
                           r.source, r.created_at,
                           count(t.id) FILTER (WHERE t.status = 'pending') AS tasks_pending,
                           count(t.id) FILTER (WHERE t.status = 'planned') AS tasks_planned,
@@ -311,19 +362,26 @@ class RequestRepository:
                           count(t.id) FILTER (WHERE t.status = 'completed') AS tasks_completed,
                           count(t.id) FILTER (WHERE t.status = 'failed') AS tasks_failed,
                           count(t.id) AS tasks_total
-                   FROM requests r LEFT JOIN tasks t ON t.request_id = r.id
-                   WHERE r.organization_id = $1
-                     AND r.status NOT IN ('completed', 'failed', 'cancelled')
+                   {base}
                    GROUP BY r.id
                    ORDER BY
                      CASE r.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1
                                      WHEN 'medium' THEN 2 ELSE 3 END,
-                     r.created_at""",
+                     r.created_at
+                   LIMIT $2 OFFSET $3""",
                 UUID(org_id),
+                limit,
+                offset,
             )
-        return [dict(r) for r in rows]
+        return {
+            "items": [dict(r) for r in rows],
+            "total_count": total_count,
+            "offset": offset,
+            "limit": limit,
+            "has_more": offset + len(rows) < total_count,
+        }
 
-    async def list_pending_tasks(self, org_id: str) -> list[dict]:
+    async def list_pending_tasks(self, org_id: str, limit: int = 25, offset: int = 0) -> dict:
         """Get all tasks ready to be claimed.
 
         Respects sequence_order as a dependency gate: a task is only
@@ -336,10 +394,7 @@ class RequestRepository:
             predecessors block all subsequent tasks.
           - 'permissive': completed, failed, and cancelled all unblock.
         """
-        async with self.pool.acquire() as conn:
-            rows = await conn.fetch(
-                """SELECT t.*, r.title as request_title
-                   FROM tasks t JOIN requests r ON t.request_id = r.id
+        base = """FROM tasks t JOIN requests r ON t.request_id = r.id
                    WHERE t.organization_id = $1
                      AND t.status IN ('pending', 'planned')
                      AND NOT EXISTS (
@@ -351,14 +406,32 @@ class RequestRepository:
                                THEN earlier.status NOT IN ('completed', 'failed', 'cancelled')
                              ELSE earlier.status != 'completed'
                              END
-                     )
+                     )"""
+        async with self.pool.acquire() as conn:
+            count_row = await conn.fetchrow(
+                f"SELECT COUNT(*) AS total {base}",
+                UUID(org_id),
+            )
+            total_count = count_row["total"] if count_row else 0
+            rows = await conn.fetch(
+                f"""SELECT t.*, r.title as request_title
+                   {base}
                    ORDER BY
                      CASE t.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1
                                      WHEN 'medium' THEN 2 ELSE 3 END,
-                     t.sequence_order, t.created_at""",
+                     t.sequence_order, t.created_at
+                   LIMIT $2 OFFSET $3""",
                 UUID(org_id),
+                limit,
+                offset,
             )
-        return [dict(r) for r in rows]
+        return {
+            "items": [dict(r) for r in rows],
+            "total_count": total_count,
+            "offset": offset,
+            "limit": limit,
+            "has_more": offset + len(rows) < total_count,
+        }
 
     async def claim_task(
         self, task_id: str, instance_id: str, org_id: str | None = None
@@ -643,27 +716,49 @@ class RequestRepository:
     async def list_task_events(
         self,
         task_id: str,
-        limit: int = 100,
+        limit: int = 25,
+        offset: int = 0,
         org_id: str | None = None,
-    ) -> list[dict]:
+    ) -> dict:
         async with self.pool.acquire() as conn:
             if org_id:
+                count_row = await conn.fetchrow(
+                    """SELECT COUNT(*) AS total FROM task_events te
+                       JOIN tasks t ON te.task_id = t.id
+                       WHERE te.task_id = $1 AND t.organization_id = $2""",
+                    UUID(task_id),
+                    UUID(org_id),
+                )
+                total_count = count_row["total"] if count_row else 0
                 rows = await conn.fetch(
                     """SELECT te.* FROM task_events te
                        JOIN tasks t ON te.task_id = t.id
                        WHERE te.task_id = $1 AND t.organization_id = $2
-                       ORDER BY te.created_at LIMIT $3""",
+                       ORDER BY te.created_at LIMIT $3 OFFSET $4""",
                     UUID(task_id),
                     UUID(org_id),
                     limit,
+                    offset,
                 )
             else:
+                count_row = await conn.fetchrow(
+                    "SELECT COUNT(*) AS total FROM task_events WHERE task_id = $1",
+                    UUID(task_id),
+                )
+                total_count = count_row["total"] if count_row else 0
                 rows = await conn.fetch(
-                    "SELECT * FROM task_events WHERE task_id = $1 ORDER BY created_at LIMIT $2",
+                    "SELECT * FROM task_events WHERE task_id = $1 ORDER BY created_at LIMIT $2 OFFSET $3",
                     UUID(task_id),
                     limit,
+                    offset,
                 )
-        return [dict(r) for r in rows]
+        return {
+            "items": [dict(r) for r in rows],
+            "total_count": total_count,
+            "offset": offset,
+            "limit": limit,
+            "has_more": offset + len(rows) < total_count,
+        }
 
     # ── Task ↔ Memory Links ──────────────────────────────────────────────
 
@@ -688,29 +783,52 @@ class RequestRepository:
             metadata={"memory_id": memory_id, "relation": relation},
         )
 
-    async def list_task_memories(self, task_id: str, org_id: str | None = None) -> list[dict]:
+    async def list_task_memories(self, task_id: str, org_id: str | None = None, limit: int = 25, offset: int = 0) -> dict:
         async with self.pool.acquire() as conn:
             if org_id:
+                count_row = await conn.fetchrow(
+                    """SELECT COUNT(*) AS total FROM task_memories tm
+                       JOIN tasks t ON tm.task_id = t.id
+                       WHERE tm.task_id = $1 AND t.organization_id = $2""",
+                    UUID(task_id),
+                    UUID(org_id),
+                )
+                total_count = count_row["total"] if count_row else 0
                 rows = await conn.fetch(
                     """SELECT tm.*, m.content, m.type as memory_type, m.tags
                        FROM task_memories tm
                        JOIN memories m ON tm.memory_id = m.id
                        JOIN tasks t ON tm.task_id = t.id
                        WHERE tm.task_id = $1 AND t.organization_id = $2
-                       ORDER BY tm.created_at""",
+                       ORDER BY tm.created_at LIMIT $3 OFFSET $4""",
                     UUID(task_id),
                     UUID(org_id),
+                    limit,
+                    offset,
                 )
             else:
+                count_row = await conn.fetchrow(
+                    "SELECT COUNT(*) AS total FROM task_memories WHERE task_id = $1",
+                    UUID(task_id),
+                )
+                total_count = count_row["total"] if count_row else 0
                 rows = await conn.fetch(
                     """SELECT tm.*, m.content, m.type as memory_type, m.tags
                        FROM task_memories tm
                        JOIN memories m ON tm.memory_id = m.id
                        WHERE tm.task_id = $1
-                       ORDER BY tm.created_at""",
+                       ORDER BY tm.created_at LIMIT $2 OFFSET $3""",
                     UUID(task_id),
+                    limit,
+                    offset,
                 )
-        return [dict(r) for r in rows]
+        return {
+            "items": [dict(r) for r in rows],
+            "total_count": total_count,
+            "offset": offset,
+            "limit": limit,
+            "has_more": offset + len(rows) < total_count,
+        }
 
     # ── Internal helpers ──────────────────────────────────────────────────
 

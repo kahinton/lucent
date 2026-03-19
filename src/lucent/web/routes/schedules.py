@@ -1,5 +1,6 @@
 """Schedule management routes."""
 
+from math import ceil
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -11,6 +12,8 @@ from ._shared import _check_csrf, get_user_context, templates
 
 router = APIRouter()
 
+ALLOWED_PER_PAGE = {10, 25, 50, 100}
+
 
 # =============================================================================
 # Schedules
@@ -18,7 +21,13 @@ router = APIRouter()
 
 
 @router.get("/schedules", response_class=HTMLResponse)
-async def schedules_list(request: Request, status: str | None = None, enabled: str | None = None):
+async def schedules_list(
+    request: Request,
+    status: str | None = None,
+    enabled: str | None = None,
+    page: int = 1,
+    per_page: int = 25,
+):
     """List all scheduled tasks with filtering."""
     user = await get_user_context(request)
     pool = await get_pool()
@@ -26,9 +35,19 @@ async def schedules_list(request: Request, status: str | None = None, enabled: s
 
     repo = ScheduleRepository(pool)
 
+    page = max(1, page)
+    per_page = per_page if per_page in ALLOWED_PER_PAGE else 25
+    offset = (page - 1) * per_page
+
     org_id = str(user.organization_id)
     enabled_filter = True if enabled == "true" else (False if enabled == "false" else None)
-    schedules = await repo.list_schedules(org_id, status=status, enabled=enabled_filter)
+    result = await repo.list_schedules(
+        org_id, status=status, enabled=enabled_filter, limit=per_page, offset=offset
+    )
+    schedules = result["items"]
+    total_count = result["total_count"]
+    total_pages = ceil(total_count / per_page) if total_count > 0 else 1
+    page = min(page, total_pages)
     summary = await repo.get_summary(org_id)
 
     return templates.TemplateResponse(
@@ -40,12 +59,21 @@ async def schedules_list(request: Request, status: str | None = None, enabled: s
             "summary": summary,
             "filter_status": status,
             "filter_enabled": enabled,
+            "page": page,
+            "per_page": per_page,
+            "total_pages": total_pages,
+            "total_count": total_count,
         },
     )
 
 
 @router.get("/schedules/{schedule_id}", response_class=HTMLResponse)
-async def schedule_detail(request: Request, schedule_id: str):
+async def schedule_detail(
+    request: Request,
+    schedule_id: str,
+    page: int = 1,
+    per_page: int = 25,
+):
     """Schedule detail page with run history."""
     user = await get_user_context(request)
     pool = await get_pool()
@@ -54,12 +82,23 @@ async def schedule_detail(request: Request, schedule_id: str):
 
     repo = ScheduleRepository(pool)
 
-    sched = await repo.get_schedule_with_runs(schedule_id, str(user.organization_id))
+    org_id = str(user.organization_id)
+    sched = await repo.get_schedule(schedule_id, org_id)
     if not sched:
         raise HTTPException(404, "Schedule not found")
 
+    # Paginate run history
+    page = max(1, page)
+    per_page = per_page if per_page in ALLOWED_PER_PAGE else 25
+    run_offset = (page - 1) * per_page
+    runs_result = await repo.list_runs(schedule_id, limit=per_page, offset=run_offset)
+    sched["runs"] = runs_result["items"]
+    run_total_count = runs_result["total_count"]
+    run_total_pages = ceil(run_total_count / per_page) if run_total_count > 0 else 1
+    page = min(page, run_total_pages)
+
     def_repo = DefinitionRepository(pool)
-    active_agents = await def_repo.list_agents(str(user.organization_id), status="active")
+    active_agents = (await def_repo.list_agents(org_id, status="active"))["items"]
 
     # Resolve sandbox template name if linked
     sandbox_template = None
@@ -68,7 +107,7 @@ async def schedule_detail(request: Request, schedule_id: str):
 
         tmpl_repo = SandboxTemplateRepository(pool)
         sandbox_template = await tmpl_repo.get(
-            str(sched["sandbox_template_id"]), str(user.organization_id)
+            str(sched["sandbox_template_id"]), org_id
         )
 
     return templates.TemplateResponse(
@@ -79,6 +118,10 @@ async def schedule_detail(request: Request, schedule_id: str):
             "sched": sched,
             "active_agents": active_agents,
             "sandbox_template": sandbox_template,
+            "run_page": page,
+            "run_per_page": per_page,
+            "run_total_pages": run_total_pages,
+            "run_total_count": run_total_count,
         },
     )
 

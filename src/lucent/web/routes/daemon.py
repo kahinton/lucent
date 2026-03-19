@@ -2,6 +2,7 @@
 
 import asyncio
 from datetime import datetime, timezone
+from math import ceil
 from uuid import UUID
 
 from fastapi import APIRouter, Form, HTTPException, Request
@@ -16,6 +17,8 @@ from ._shared import _check_csrf, get_user_context, templates
 logger = get_logger("web.routes.daemon")
 
 router = APIRouter()
+
+ALLOWED_PER_PAGE = {10, 25, 50, 100}
 
 
 # Valid priorities for tasks
@@ -130,18 +133,30 @@ async def send_daemon_message(request: Request):
 
 
 @router.get("/daemon/review", response_class=HTMLResponse)
-async def daemon_review_queue(request: Request):
+async def daemon_review_queue(
+    request: Request,
+    page: int = 1,
+    per_page: int = 25,
+):
     """Show memories tagged 'needs-review' that need human approval."""
     user = await get_user_context(request)
     pool = await get_pool()
     repo = MemoryRepository(pool)
 
+    page = max(1, page)
+    per_page = per_page if per_page in ALLOWED_PER_PAGE else 25
+    offset = (page - 1) * per_page
+
     result = await repo.search(
         tags=["daemon", "needs-review"],
-        limit=50,
+        limit=per_page,
+        offset=offset,
         requesting_user_id=user.id,
         requesting_org_id=user.organization_id,
     )
+    total_count = result.get("total_count", 0)
+    total_pages = ceil(total_count / per_page) if total_count > 0 else 1
+    page = min(page, total_pages)
 
     return templates.TemplateResponse(
         request,
@@ -149,6 +164,10 @@ async def daemon_review_queue(request: Request):
         {
             "user": user,
             "review_memories": result["memories"],
+            "page": page,
+            "per_page": per_page,
+            "total_pages": total_pages,
+            "total_count": total_count,
         },
     )
 

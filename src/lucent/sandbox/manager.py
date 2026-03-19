@@ -163,23 +163,23 @@ class SandboxManager:
 
         logger.info("Destroyed sandbox: %s", sandbox_id[:12])
 
-    async def list_all(self, organization_id: str | None = None) -> list[dict]:
+    async def list_all(self, organization_id: str | None = None, limit: int = 25, offset: int = 0) -> dict:
         """List all sandboxes from DB."""
         try:
             repo = await self._repo()
-            return await repo.list_all(organization_id=organization_id)
+            return await repo.list_all(organization_id=organization_id, limit=limit, offset=offset)
         except Exception as e:
             logger.error("Failed to list sandboxes: %s", e, exc_info=True)
-            return []
+            return {"items": [], "total_count": 0, "offset": offset, "limit": limit, "has_more": False}
 
-    async def list_active(self, organization_id: str | None = None) -> list[dict]:
+    async def list_active(self, organization_id: str | None = None, limit: int = 25, offset: int = 0) -> dict:
         """List non-destroyed sandboxes from DB."""
         try:
             repo = await self._repo()
-            return await repo.list_active(organization_id=organization_id)
+            return await repo.list_active(organization_id=organization_id, limit=limit, offset=offset)
         except Exception as e:
             logger.error("Failed to list active sandboxes: %s", e, exc_info=True)
-            return []
+            return {"items": [], "total_count": 0, "offset": offset, "limit": limit, "has_more": False}
 
     async def cleanup_all(self) -> int:
         """Destroy all managed sandboxes. Returns count destroyed."""

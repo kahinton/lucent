@@ -184,8 +184,9 @@ class ScheduleRepository:
         org_id: str,
         status: str | None = None,
         enabled: bool | None = None,
-        limit: int = 100,
-    ) -> list[dict]:
+        limit: int = 25,
+        offset: int = 0,
+    ) -> dict:
         async with self.pool.acquire() as conn:
             conditions = ["organization_id = $1::uuid"]
             params: list[Any] = [org_id]
@@ -200,17 +201,30 @@ class ScheduleRepository:
                 params.append(enabled)
                 idx += 1
 
-            params.append(limit)
+            where = " AND ".join(conditions)
+            count_row = await conn.fetchrow(
+                f"SELECT COUNT(*) AS total FROM schedules WHERE {where}",
+                *params,
+            )
+            total_count = count_row["total"] if count_row else 0
+
+            params.extend([limit, offset])
             rows = await conn.fetch(
                 f"""SELECT * FROM schedules
-                    WHERE {" AND ".join(conditions)}
+                    WHERE {where}
                     ORDER BY
                         CASE WHEN enabled AND status = 'active' THEN 0 ELSE 1 END,
                         next_run_at ASC NULLS LAST
-                    LIMIT ${idx}""",
+                    LIMIT ${idx} OFFSET ${idx + 1}""",
                 *params,
             )
-            return [dict(r) for r in rows]
+            return {
+                "items": [dict(r) for r in rows],
+                "total_count": total_count,
+                "offset": offset,
+                "limit": limit,
+                "has_more": offset + len(rows) < total_count,
+            }
 
     async def update_schedule(self, schedule_id: str, org_id: str, **fields) -> dict | None:
         if not fields:
@@ -396,23 +410,35 @@ class ScheduleRepository:
 
     # ── Run history ───────────────────────────────────────────────────────
 
-    async def list_runs(self, schedule_id: str, limit: int = 20) -> list[dict]:
+    async def list_runs(self, schedule_id: str, limit: int = 25, offset: int = 0) -> dict:
         async with self.pool.acquire() as conn:
+            count_row = await conn.fetchrow(
+                "SELECT COUNT(*) AS total FROM schedule_runs WHERE schedule_id = $1::uuid",
+                schedule_id,
+            )
+            total_count = count_row["total"] if count_row else 0
             rows = await conn.fetch(
                 """SELECT * FROM schedule_runs
                    WHERE schedule_id = $1::uuid
-                   ORDER BY created_at DESC LIMIT $2""",
+                   ORDER BY created_at DESC LIMIT $2 OFFSET $3""",
                 schedule_id,
                 limit,
+                offset,
             )
-            return [dict(r) for r in rows]
+            return {
+                "items": [dict(r) for r in rows],
+                "total_count": total_count,
+                "offset": offset,
+                "limit": limit,
+                "has_more": offset + len(rows) < total_count,
+            }
 
     async def get_schedule_with_runs(self, schedule_id: str, org_id: str) -> dict | None:
         """Load a schedule with its recent run history."""
         sched = await self.get_schedule(schedule_id, org_id)
         if not sched:
             return None
-        sched["runs"] = await self.list_runs(schedule_id)
+        sched["runs"] = (await self.list_runs(schedule_id))["items"]
         return sched
 
     # ── Summary ───────────────────────────────────────────────────────────

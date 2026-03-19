@@ -1,5 +1,7 @@
 """Request tracking and activity routes."""
 
+from math import ceil
+
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
@@ -8,6 +10,8 @@ from lucent.db import MemoryRepository, get_pool
 from ._shared import _check_csrf, get_user_context, templates
 
 router = APIRouter()
+
+ALLOWED_PER_PAGE = {10, 25, 50, 100}
 
 
 # =============================================================================
@@ -20,6 +24,8 @@ async def activity_list(
     request: Request,
     status: str | None = None,
     source: str | None = None,
+    page: int = 1,
+    per_page: int = 25,
 ):
     """Unified activity page — all requests from users and the daemon."""
     user = await get_user_context(request)
@@ -28,13 +34,25 @@ async def activity_list(
 
     repo = RequestRepository(pool)
 
+    # Sanitize pagination params
+    page = max(1, page)
+    per_page = per_page if per_page in ALLOWED_PER_PAGE else 25
+    offset = (page - 1) * per_page
+
     org_id = str(user.organization_id)
-    requests_data = await repo.list_requests(org_id, status=status, source=source, limit=100)
+    requests_result = await repo.list_requests(
+        org_id, status=status, source=source, limit=per_page, offset=offset
+    )
+    requests_data = requests_result["items"]
+    total_count = requests_result["total_count"]
+    total_pages = ceil(total_count / per_page) if total_count > 0 else 1
+    page = min(page, total_pages)
+
     summary = await repo.get_active_summary(org_id)
 
     # Load task counts for each request
     for req in requests_data:
-        tasks = await repo.list_tasks(str(req["id"]))
+        tasks = (await repo.list_tasks(str(req["id"])))["items"]
         statuses = [t["status"] for t in tasks]
         req["task_count"] = len(tasks)
         req["tasks_completed"] = sum(1 for s in statuses if s == "completed")
@@ -52,17 +70,31 @@ async def activity_list(
     )
     needs_review_count = review_result.get("total_count", 0)
 
+    template_ctx = {
+        "user": user,
+        "requests": requests_data,
+        "summary": summary,
+        "filter_status": status,
+        "filter_source": source,
+        "needs_review_count": needs_review_count,
+        "page": page,
+        "per_page": per_page,
+        "total_pages": total_pages,
+        "total_count": total_count,
+    }
+
+    # For HTMX partial updates (pagination clicks)
+    if request.headers.get("HX-Request"):
+        return templates.TemplateResponse(
+            request,
+            "partials/activity_list.html",
+            template_ctx,
+        )
+
     return templates.TemplateResponse(
         request,
         "requests_list.html",
-        {
-            "user": user,
-            "requests": requests_data,
-            "summary": summary,
-            "filter_status": status,
-            "filter_source": source,
-            "needs_review_count": needs_review_count,
-        },
+        template_ctx,
     )
 
 

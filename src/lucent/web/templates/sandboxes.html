@@ -24,6 +24,8 @@
 
     {% if tab == 'templates' %}
     <!-- ═══════════════ TEMPLATES VIEW ═══════════════ -->
+    {% from "partials/pagination.html" import pagination_controls %}
+    {{ pagination_controls(base_url="/sandboxes", page=page, per_page=per_page, total_pages=total_pages, total_count=total_count, filter_params={"tab": "templates"}, entity_name="templates") }}
     {% if templates %}
     <div class="grid gap-4 grid-cols-1 md:grid-cols-2 lg:grid-cols-3">
         {% for tpl in templates %}
@@ -82,6 +84,7 @@
         </div>
         {% endfor %}
     </div>
+    {{ pagination_controls(base_url="/sandboxes", page=page, per_page=per_page, total_pages=total_pages, total_count=total_count, filter_params={"tab": "templates"}, show_per_page=false, entity_name="templates") }}
     {% else %}
     <div class="bg-white rounded-lg border border-gray-200 p-12 text-center">
         <svg class="w-12 h-12 text-gray-300 mx-auto mb-3" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
@@ -95,9 +98,13 @@
     {% else %}
     <!-- ═══════════════ INSTANCES VIEW ═══════════════ -->
     <div class="flex gap-1 bg-gray-100 rounded-lg p-1 w-fit">
-        <a href="/sandboxes?tab=instances" class="px-3 py-1.5 text-sm rounded-md font-medium transition-colors {% if show_filter == 'all' %}bg-white text-gray-900 shadow-sm{% else %}text-gray-500 hover:text-gray-700{% endif %}">All</a>
-        <a href="/sandboxes?tab=instances&show=active" class="px-3 py-1.5 text-sm rounded-md font-medium transition-colors {% if show_filter == 'active' %}bg-white text-gray-900 shadow-sm{% else %}text-gray-500 hover:text-gray-700{% endif %}">Active</a>
+        <a href="/sandboxes?tab=instances&per_page={{ per_page }}" class="px-3 py-1.5 text-sm rounded-md font-medium transition-colors {% if show_filter == 'all' %}bg-white text-gray-900 shadow-sm{% else %}text-gray-500 hover:text-gray-700{% endif %}">All</a>
+        <a href="/sandboxes?tab=instances&show=active&per_page={{ per_page }}" class="px-3 py-1.5 text-sm rounded-md font-medium transition-colors {% if show_filter == 'active' %}bg-white text-gray-900 shadow-sm{% else %}text-gray-500 hover:text-gray-700{% endif %}">Active</a>
     </div>
+
+    {% set instance_filter_params = {"tab": "instances"} %}
+    {% if show_filter != 'all' %}{% set _ = instance_filter_params.update({"show": show_filter}) %}{% endif %}
+    {{ pagination_controls(base_url="/sandboxes", page=page, per_page=per_page, total_pages=total_pages, total_count=total_count, filter_params=instance_filter_params, entity_name="instances") }}
 
     {% if sandboxes %}
     <div class="bg-white rounded-lg border border-gray-200 overflow-hidden">
@@ -173,6 +180,7 @@
             </tbody>
         </table>
     </div>
+    {{ pagination_controls(base_url="/sandboxes", page=page, per_page=per_page, total_pages=total_pages, total_count=total_count, filter_params=instance_filter_params, show_per_page=false, entity_name="instances") }}
     {% else %}
     <div class="bg-white rounded-lg border border-gray-200 p-12 text-center">
         <svg class="w-12 h-12 text-gray-300 mx-auto mb-3" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">

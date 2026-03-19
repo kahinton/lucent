@@ -256,7 +256,7 @@ async def load_models_from_db(pool) -> list[ModelInfo]:
         from lucent.db.models import ModelRepository
 
         repo = ModelRepository(pool)
-        rows = await repo.list_models()
+        rows = (await repo.list_models())["items"]
         if not rows:
             return MODELS
 

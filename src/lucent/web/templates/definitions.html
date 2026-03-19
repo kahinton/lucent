@@ -11,11 +11,11 @@
 </div>
 <div class="border-b border-gray-200 mb-6">
     <nav class="flex gap-6">
-        <a href="/definitions?tab=agents" class="py-2 px-1 border-b-2 text-sm font-medium {% if tab == 'agents' %}border-primary-500 text-primary-600{% else %}border-transparent text-gray-500 hover:text-gray-700{% endif %}">Agents {% if agents %}({{ agents|length }}){% endif %}</a>
-        <a href="/definitions?tab=skills" class="py-2 px-1 border-b-2 text-sm font-medium {% if tab == 'skills' %}border-primary-500 text-primary-600{% else %}border-transparent text-gray-500 hover:text-gray-700{% endif %}">Skills {% if skills %}({{ skills|length }}){% endif %}</a>
-        <a href="/definitions?tab=mcp" class="py-2 px-1 border-b-2 text-sm font-medium {% if tab == 'mcp' %}border-primary-500 text-primary-600{% else %}border-transparent text-gray-500 hover:text-gray-700{% endif %}">MCP Servers {% if mcp_servers %}({{ mcp_servers|length }}){% endif %}</a>
+        <a href="/definitions?tab=agents&per_page={{ per_page }}" class="py-2 px-1 border-b-2 text-sm font-medium {% if tab == 'agents' %}border-primary-500 text-primary-600{% else %}border-transparent text-gray-500 hover:text-gray-700{% endif %}">Agents {% if agents_total is defined %}({{ agents_total }}){% elif agents %}({{ agents|length }}){% endif %}</a>
+        <a href="/definitions?tab=skills&per_page={{ per_page }}" class="py-2 px-1 border-b-2 text-sm font-medium {% if tab == 'skills' %}border-primary-500 text-primary-600{% else %}border-transparent text-gray-500 hover:text-gray-700{% endif %}">Skills {% if skills_total is defined %}({{ skills_total }}){% elif skills %}({{ skills|length }}){% endif %}</a>
+        <a href="/definitions?tab=mcp&per_page={{ per_page }}" class="py-2 px-1 border-b-2 text-sm font-medium {% if tab == 'mcp' %}border-primary-500 text-primary-600{% else %}border-transparent text-gray-500 hover:text-gray-700{% endif %}">MCP Servers {% if mcp_total is defined %}({{ mcp_total }}){% elif mcp_servers %}({{ mcp_servers|length }}){% endif %}</a>
         {% if proposals and proposals.total > 0 %}
-        <a href="/definitions?tab=proposals" class="py-2 px-1 border-b-2 text-sm font-medium {% if tab == 'proposals' %}border-primary-500 text-primary-600{% else %}border-transparent text-gray-500 hover:text-gray-700{% endif %}">Pending <span class="ml-1 bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full text-xs">{{ proposals.total }}</span></a>
+        <a href="/definitions?tab=proposals&per_page={{ per_page }}" class="py-2 px-1 border-b-2 text-sm font-medium {% if tab == 'proposals' %}border-primary-500 text-primary-600{% else %}border-transparent text-gray-500 hover:text-gray-700{% endif %}">Pending <span class="ml-1 bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full text-xs">{{ proposals.total }}</span></a>
         {% endif %}
     </nav>
 </div>
@@ -36,7 +36,9 @@
 {% endmacro %}
 
 {% if tab == 'agents' %}
-<div class="mb-4 flex justify-end">
+{% from "partials/pagination.html" import pagination_controls %}
+<div class="mb-4 flex items-center justify-between">
+    {{ pagination_controls(base_url="/definitions", page=page, per_page=per_page, total_pages=total_pages, total_count=total_count, filter_params={"tab": "agents"}, entity_name="agents") }}
     <button onclick="document.getElementById('create-agent-modal').classList.remove('hidden')" class="px-4 py-2 text-sm bg-primary-600 text-white rounded-md hover:bg-primary-700 font-medium">+ New Agent</button>
 </div>
 <div class="space-y-3">
@@ -92,6 +94,7 @@
     <div class="bg-white rounded-lg border border-gray-200 p-8 text-center text-gray-500"><p>No agents defined yet.</p></div>
     {% endfor %}
 </div>
+{{ pagination_controls(base_url="/definitions", page=page, per_page=per_page, total_pages=total_pages, total_count=total_count, filter_params={"tab": "agents"}, show_per_page=false, entity_name="agents") }}
 <div id="create-agent-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/40">
     <div class="bg-white rounded-lg shadow-xl w-full max-w-2xl mx-4 max-h-[90vh] overflow-y-auto">
         <form method="POST" action="/definitions/agents/create">
@@ -108,7 +111,8 @@
 </div>
 
 {% elif tab == 'skills' %}
-<div class="mb-4 flex justify-end">
+<div class="mb-4 flex items-center justify-between">
+    {{ pagination_controls(base_url="/definitions", page=page, per_page=per_page, total_pages=total_pages, total_count=total_count, filter_params={"tab": "skills"}, entity_name="skills") }}
     <button onclick="document.getElementById('create-skill-modal').classList.remove('hidden')" class="px-4 py-2 text-sm bg-primary-600 text-white rounded-md hover:bg-primary-700 font-medium">+ New Skill</button>
 </div>
 <div class="space-y-3">
@@ -130,6 +134,7 @@
     <div class="bg-white rounded-lg border border-gray-200 p-8 text-center text-gray-500"><p>No skills defined yet.</p></div>
     {% endfor %}
 </div>
+{{ pagination_controls(base_url="/definitions", page=page, per_page=per_page, total_pages=total_pages, total_count=total_count, filter_params={"tab": "skills"}, show_per_page=false, entity_name="skills") }}
 <div id="create-skill-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/40">
     <div class="bg-white rounded-lg shadow-xl w-full max-w-2xl mx-4 max-h-[90vh] overflow-y-auto">
         <form method="POST" action="/definitions/skills/create">
@@ -146,7 +151,8 @@
 </div>
 
 {% elif tab == 'mcp' %}
-<div class="mb-4 flex justify-end">
+<div class="mb-4 flex items-center justify-between">
+    {{ pagination_controls(base_url="/definitions", page=page, per_page=per_page, total_pages=total_pages, total_count=total_count, filter_params={"tab": "mcp"}, entity_name="MCP servers") }}
     <button onclick="document.getElementById('create-mcp-modal').classList.remove('hidden')" class="px-4 py-2 text-sm bg-primary-600 text-white rounded-md hover:bg-primary-700 font-medium">+ New MCP Server</button>
 </div>
 <div class="space-y-3">
@@ -170,6 +176,7 @@
     <div class="bg-white rounded-lg border border-gray-200 p-8 text-center text-gray-500"><p>No MCP server connections configured.</p></div>
     {% endfor %}
 </div>
+{{ pagination_controls(base_url="/definitions", page=page, per_page=per_page, total_pages=total_pages, total_count=total_count, filter_params={"tab": "mcp"}, show_per_page=false, entity_name="MCP servers") }}
 <div id="create-mcp-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/40">
     <div class="bg-white rounded-lg shadow-xl w-full max-w-2xl mx-4 max-h-[90vh] overflow-y-auto">
         <form method="POST" action="/definitions/mcp-servers/create">

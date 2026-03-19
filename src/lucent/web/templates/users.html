@@ -41,6 +41,8 @@
 <!-- Users Table -->
 <div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden mb-8">
     {% if users %}
+    {% from "partials/pagination.html" import pagination_controls %}
+    {{ pagination_controls(base_url="/users", page=page, per_page=per_page, total_pages=total_pages, total_count=total_count, entity_name="users") }}
     <div class="overflow-x-auto">
         <table class="w-full">
             <thead>
@@ -125,6 +127,7 @@
             </tbody>
         </table>
     </div>
+    {{ pagination_controls(base_url="/users", page=page, per_page=per_page, total_pages=total_pages, total_count=total_count, show_per_page=false, entity_name="users") }}
     {% else %}
     <div class="p-12 text-center">
         <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">

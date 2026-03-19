@@ -185,12 +185,13 @@ async def create_sandbox(
     return _to_response(info)
 
 
-@router.get("", response_model=list[SandboxResponse])
-async def list_sandboxes(user: AuthenticatedUser) -> list[SandboxResponse]:
+@router.get("")
+async def list_sandboxes(user: AuthenticatedUser):
     """List all sandboxes for the caller's organization."""
     manager = get_sandbox_manager()
-    sandboxes = await manager.list_all(str(user.organization_id))
-    return [_to_response(s) for s in sandboxes]
+    result = await manager.list_all(str(user.organization_id))
+    result["items"] = [_to_response(s) for s in result["items"]]
+    return result
 
 
 @router.get("/{sandbox_id}", response_model=SandboxResponse)

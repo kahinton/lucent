@@ -44,12 +44,19 @@
 
 <!-- Status Filter -->
 <div class="flex gap-2 mb-4">
-    <a href="/schedules" class="px-3 py-1 text-sm rounded-md {% if not filter_status and filter_enabled is none %}bg-gray-900 text-white{% else %}bg-gray-100 text-gray-600 hover:bg-gray-200{% endif %}">All</a>
-    <a href="/schedules?status=active" class="px-3 py-1 text-sm rounded-md {% if filter_status == 'active' %}bg-blue-500 text-white{% else %}bg-blue-50 text-blue-700 hover:bg-blue-100{% endif %}">Active</a>
-    <a href="/schedules?status=paused" class="px-3 py-1 text-sm rounded-md {% if filter_status == 'paused' %}bg-gray-500 text-white{% else %}bg-gray-50 text-gray-700 hover:bg-gray-100{% endif %}">Paused</a>
-    <a href="/schedules?status=completed" class="px-3 py-1 text-sm rounded-md {% if filter_status == 'completed' %}bg-green-500 text-white{% else %}bg-green-50 text-green-700 hover:bg-green-100{% endif %}">Completed</a>
-    <a href="/schedules?enabled=true" class="px-3 py-1 text-sm rounded-md {% if filter_enabled == 'true' %}bg-emerald-500 text-white{% else %}bg-emerald-50 text-emerald-700 hover:bg-emerald-100{% endif %}">Enabled</a>
+    <a href="/schedules?per_page={{ per_page }}" class="px-3 py-1 text-sm rounded-md {% if not filter_status and filter_enabled is none %}bg-gray-900 text-white{% else %}bg-gray-100 text-gray-600 hover:bg-gray-200{% endif %}">All</a>
+    <a href="/schedules?status=active&per_page={{ per_page }}" class="px-3 py-1 text-sm rounded-md {% if filter_status == 'active' %}bg-blue-500 text-white{% else %}bg-blue-50 text-blue-700 hover:bg-blue-100{% endif %}">Active</a>
+    <a href="/schedules?status=paused&per_page={{ per_page }}" class="px-3 py-1 text-sm rounded-md {% if filter_status == 'paused' %}bg-gray-500 text-white{% else %}bg-gray-50 text-gray-700 hover:bg-gray-100{% endif %}">Paused</a>
+    <a href="/schedules?status=completed&per_page={{ per_page }}" class="px-3 py-1 text-sm rounded-md {% if filter_status == 'completed' %}bg-green-500 text-white{% else %}bg-green-50 text-green-700 hover:bg-green-100{% endif %}">Completed</a>
+    <a href="/schedules?enabled=true&per_page={{ per_page }}" class="px-3 py-1 text-sm rounded-md {% if filter_enabled == 'true' %}bg-emerald-500 text-white{% else %}bg-emerald-50 text-emerald-700 hover:bg-emerald-100{% endif %}">Enabled</a>
 </div>
+
+{% from "partials/pagination.html" import pagination_controls %}
+{% set filter_params = {} %}
+{% if filter_status %}{% set _ = filter_params.update({"status": filter_status}) %}{% endif %}
+{% if filter_enabled %}{% set _ = filter_params.update({"enabled": filter_enabled}) %}{% endif %}
+
+{{ pagination_controls(base_url="/schedules", page=page, per_page=per_page, total_pages=total_pages, total_count=total_count, filter_params=filter_params, entity_name="schedules") }}
 
 <!-- Schedule List -->
 <div class="space-y-3">
@@ -129,4 +136,6 @@
     <p class="text-gray-500 text-sm py-8 text-center">No schedules yet. Create one via the API or MCP tools.</p>
     {% endfor %}
 </div>
+
+{{ pagination_controls(base_url="/schedules", page=page, per_page=per_page, total_pages=total_pages, total_count=total_count, filter_params=filter_params, show_per_page=false, entity_name="schedules") }}
 {% endblock %}

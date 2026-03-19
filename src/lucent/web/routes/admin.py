@@ -2,6 +2,7 @@
 
 import secrets
 import time
+from math import ceil
 from uuid import UUID
 
 from fastapi import APIRouter, Form, HTTPException, Request
@@ -25,6 +26,8 @@ logger = get_logger("web.routes.admin")
 
 router = APIRouter()
 
+ALLOWED_PER_PAGE = {10, 25, 50, 100}
+
 # In-memory store for temp password reference tokens (M6 security fix)
 _temp_pw_store: dict[str, dict] = {}
 _TEMP_PW_MAX_ENTRIES = 100
@@ -44,7 +47,11 @@ def _cleanup_temp_pw_store():
 
 
 @router.get("/users", response_class=HTMLResponse)
-async def users_list(request: Request):
+async def users_list(
+    request: Request,
+    page: int = 1,
+    per_page: int = 25,
+):
     """List organization users (team mode only)."""
     if not is_team_mode():
         raise HTTPException(status_code=404, detail="User management requires team mode")
@@ -52,7 +59,16 @@ async def users_list(request: Request):
     pool = await get_pool()
     user_repo = UserRepository(pool)
 
-    users = await user_repo.get_by_organization(user.organization_id)
+    all_users = await user_repo.get_by_organization(user.organization_id)
+
+    # In-memory pagination (get_by_organization returns plain list)
+    page = max(1, page)
+    per_page = per_page if per_page in ALLOWED_PER_PAGE else 25
+    total_count = len(all_users)
+    total_pages = ceil(total_count / per_page) if total_count > 0 else 1
+    page = min(page, total_pages)
+    offset = (page - 1) * per_page
+    users = all_users[offset : offset + per_page]
 
     # Check if user can manage users (admin or owner)
     can_manage = (
@@ -84,6 +100,10 @@ async def users_list(request: Request):
             "temp_password": temp_pw_display,
             "success": success,
             "error": error,
+            "page": page,
+            "per_page": per_page,
+            "total_pages": total_pages,
+            "total_count": total_count,
         },
     )
     # Clear the temp password ref cookie after reading
@@ -345,7 +365,7 @@ async def models_list(request: Request):
     from lucent.db.models import ModelRepository
 
     repo = ModelRepository(pool)
-    models = await repo.list_models()
+    models = (await repo.list_models())["items"]
 
     providers = sorted({m["provider"] for m in models})
     enabled_count = sum(1 for m in models if m["is_enabled"])

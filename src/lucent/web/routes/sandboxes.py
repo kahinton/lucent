@@ -1,5 +1,7 @@
 """Sandbox management routes."""
 
+from math import ceil
+
 from fastapi import APIRouter, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
@@ -12,6 +14,8 @@ from ._shared import _check_csrf, _parse_env_vars, get_user_context, templates
 logger = get_logger("web.routes.sandboxes")
 
 router = APIRouter()
+
+ALLOWED_PER_PAGE = {10, 25, 50, 100}
 
 
 def _require_admin_or_owner(user) -> None:
@@ -37,34 +41,53 @@ async def sandboxes_page(
     request: Request,
     tab: str | None = Query(default=None),
     show: str | None = Query(default=None),
+    page: int = 1,
+    per_page: int = 25,
 ):
     """Sandbox templates and instances."""
     user = await get_user_context(request)
     org_id = str(user.organization_id) if user.organization_id else None
+
+    page = max(1, page)
+    per_page = per_page if per_page in ALLOWED_PER_PAGE else 25
+    offset = (page - 1) * per_page
+    active_tab = tab or "templates"
 
     # Always load templates (needed for both tabs and launch modal)
     pool = await get_pool()
     from lucent.db.sandbox_template import SandboxTemplateRepository
 
     tpl_repo = SandboxTemplateRepository(pool)
+    total_count = 0
     try:
-        template_list = await tpl_repo.list_all(org_id) if org_id else []
+        if org_id:
+            if active_tab == "templates":
+                tpl_result = await tpl_repo.list_all(org_id, limit=per_page, offset=offset)
+                template_list = tpl_result["items"]
+                total_count = tpl_result["total_count"]
+            else:
+                # For instances tab, load all templates (for launch modal + name enrichment)
+                tpl_result = await tpl_repo.list_all(org_id, limit=1000, offset=0)
+                template_list = tpl_result["items"]
+        else:
+            template_list = []
     except Exception:
         logger.debug("Failed to load sandbox templates", exc_info=True)
         template_list = []
 
     # Load instances only when on instances tab
     sandbox_list = []
-    active_tab = tab or "templates"
     if active_tab == "instances":
         from lucent.sandbox.manager import get_sandbox_manager
 
         manager = get_sandbox_manager()
         try:
             if show == "active":
-                sandbox_list = await manager.list_active(org_id)
+                sb_result = await manager.list_active(org_id, limit=per_page, offset=offset)
             else:
-                sandbox_list = await manager.list_all(org_id)
+                sb_result = await manager.list_all(org_id, limit=per_page, offset=offset)
+            sandbox_list = sb_result["items"]
+            total_count = sb_result["total_count"]
         except Exception:
             logger.debug("Failed to load sandbox list", exc_info=True)
             sandbox_list = []
@@ -73,6 +96,9 @@ async def sandboxes_page(
         tpl_names = {str(t["id"]): t["name"] for t in template_list}
         for sb in sandbox_list:
             sb["template_name"] = tpl_names.get(str(sb.get("template_id", "")))
+
+    total_pages = ceil(total_count / per_page) if total_count > 0 else 1
+    page = min(page, total_pages)
 
     return templates.TemplateResponse(
         request,
@@ -84,6 +110,10 @@ async def sandboxes_page(
             "show_filter": show or "all",
             "user": user,
             "csrf_token": request.cookies.get(CSRF_COOKIE_NAME, ""),
+            "page": page,
+            "per_page": per_page,
+            "total_pages": total_pages,
+            "total_count": total_count,
         },
     )
 

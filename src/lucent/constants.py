@@ -11,7 +11,21 @@ VALID_REQUEST_SOURCES: frozenset[str] = frozenset(
 # Regex pattern matching any valid request source (for Pydantic Field patterns).
 REQUEST_SOURCE_PATTERN: str = "^(" + "|".join(sorted(VALID_REQUEST_SOURCES)) + ")$"
 
-# Valid status values for requests.
+# Canonical status values for requests.
+REQUEST_STATUS_PENDING = "pending"
+REQUEST_STATUS_PLANNED = "planned"
+REQUEST_STATUS_IN_PROGRESS = "in_progress"
+REQUEST_STATUS_COMPLETED = "completed"
+REQUEST_STATUS_FAILED = "failed"
+REQUEST_STATUS_CANCELLED = "cancelled"
+
 VALID_REQUEST_STATUSES: frozenset[str] = frozenset(
-    {"pending", "planned", "in_progress", "completed", "failed", "cancelled"}
+    {
+        REQUEST_STATUS_PENDING,
+        REQUEST_STATUS_PLANNED,
+        REQUEST_STATUS_IN_PROGRESS,
+        REQUEST_STATUS_COMPLETED,
+        REQUEST_STATUS_FAILED,
+        REQUEST_STATUS_CANCELLED,
+    }
 )

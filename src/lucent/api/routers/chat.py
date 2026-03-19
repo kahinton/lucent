@@ -151,7 +151,7 @@ async def _build_system_prompt(user: dict, pool, page_context: dict | None) -> s
                     parts.append(f"- Status: {req.get('status')}")
                     parts.append(f"- Priority: {req.get('priority')}")
                     parts.append(f"- Source: {req.get('source')}")
-                    tasks = await repo.list_tasks(page_data["request_id"])
+                    tasks = (await repo.list_tasks(page_data["request_id"]))["items"]
                     if tasks:
                         parts.append(f"- Tasks: {len(tasks)}")
                         for t in tasks[:5]:
