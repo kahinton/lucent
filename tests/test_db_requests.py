@@ -969,7 +969,7 @@ class TestListActiveWork:
         org = str(test_organization["id"])
         rid = str(req["id"])
         # Create 3 tasks in different states
-        t1 = await repo.create_task(request_id=rid, title="Pending", org_id=org)
+        await repo.create_task(request_id=rid, title="Pending", org_id=org)
         t2 = await repo.create_task(request_id=rid, title="Running", org_id=org)
         t3 = await repo.create_task(request_id=rid, title="Done", org_id=org)
         # Move t2 to claimed

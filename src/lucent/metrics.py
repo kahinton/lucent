@@ -7,7 +7,9 @@ which returns a no-op meter when OTEL is disabled (zero cost).
 Usage::
 
     from lucent.metrics import metrics
-    metrics.http_request_duration.record(0.5, {"method": "GET", "route": "/api/health", "status_code": 200})
+    metrics.http_request_duration.record(
+        0.5, {"method": "GET", "route": "/api/health", "status_code": 200}
+    )
 """
 
 from __future__ import annotations

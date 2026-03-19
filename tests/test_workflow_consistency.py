@@ -386,7 +386,10 @@ class TestTaskCompletionBody:
         task = await _create_task(wf_repo, org, str(req["id"]))
         await wf_repo.claim_task(str(task["id"]), "d1")
 
-        resp = await wf_client.post(f"/api/requests/tasks/{task['id']}/fail", json={"error": "boom"})
+        task_id = task["id"]
+        resp = await wf_client.post(
+            f"/api/requests/tasks/{task_id}/fail", json={"error": "boom"}
+        )
         assert resp.status_code == 200
         assert resp.json()["status"] == "failed"
         assert resp.json()["error"] == "boom"
@@ -492,7 +495,9 @@ class TestReviewQueueVisibility:
         assert any(f"{wf_prefix}needs review content" in c for c in contents)
 
     @pytest.mark.asyncio
-    async def test_shared_memories_are_visible_to_org_members(self, wf_client, wf_client_b, wf_prefix):
+    async def test_shared_memories_are_visible_to_org_members(
+        self, wf_client, wf_client_b, wf_prefix
+    ):
         created = await wf_client.post(
             "/api/memories",
             json={
@@ -1164,7 +1169,7 @@ class TestWakeSignal:
             import asyncio
 
             try:
-                notification = await asyncio.wait_for(
+                await asyncio.wait_for(
                     listener_conn.fetchrow("SELECT 1"),  # dummy to flush
                     timeout=0.5,
                 )
