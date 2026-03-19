@@ -1,5 +1,6 @@
 """Daemon activity routes — messages, review queue, feedback, legacy redirects."""
 
+import asyncio
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -8,6 +9,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from lucent.db import AuditRepository, MemoryRepository, get_pool
 from lucent.logging import get_logger
+from lucent.metrics import metrics
 
 from ._shared import _check_csrf, get_user_context, templates
 
@@ -228,19 +230,38 @@ async def daemon_feedback(
     updated_metadata = {**existing_metadata, "feedback": feedback}
     await repo.update(memory_id=memory_id, metadata=updated_metadata, tags=updated_tags)
 
-    # Wake the daemon's cognitive loop so it processes the feedback immediately
+    # Wake the daemon's cognitive loop so it processes the feedback immediately.
+    # Retry once on failure — approve/reject are wake-critical events.
     if action in ("approve", "reject"):
-        try:
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    "SELECT pg_notify('request_ready', $1)",
-                    f'{{"type": "feedback", "action": "{action}", "memory_id": "{memory_id}"}}',
+        notify_payload = (
+            f'{{"type": "feedback", "action": "{action}", '
+            f'"memory_id": "{memory_id}"}}'
+        )
+        notify_attrs = {"action": action}
+        sent = False
+        for attempt in range(2):
+            try:
+                metrics.wake_notify_total.add(1, notify_attrs)
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        "SELECT pg_notify('request_ready', $1)",
+                        notify_payload,
+                    )
+                sent = True
+                break
+            except Exception as notify_err:
+                metrics.wake_notify_failures.add(1, notify_attrs)
+                logger.warning(
+                    "pg_notify failed for feedback %s on %s (attempt %d): %s",
+                    action, memory_id, attempt + 1, notify_err,
                 )
-        except Exception as notify_err:
-            # Log so failures are observable; daemon will still pick it up on next poll
-            logger.warning(
-                "pg_notify failed for feedback %s on %s: %s",
-                action, memory_id, notify_err,
+                if attempt == 0:
+                    await asyncio.sleep(0.1)
+        if not sent:
+            logger.error(
+                "pg_notify exhausted retries for feedback %s on %s; "
+                "daemon will pick up on next poll cycle",
+                action, memory_id,
             )
 
     await audit_repo.log(

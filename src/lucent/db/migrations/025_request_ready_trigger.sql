@@ -6,6 +6,26 @@
 --
 -- Background requests (source = 'cognitive', 'schedule', 'daemon') still wait
 -- for the normal cycle interval — they're not urgent.
+--
+-- ═══════════════════════════════════════════════════════════════════════════
+-- WAKE MATRIX — which transitions trigger pg_notify vs rely on polling
+-- ═══════════════════════════════════════════════════════════════════════════
+--
+--  Transition                      | Wake mechanism            | Channel
+--  ────────────────────────────────┼───────────────────────────┼──────────────────
+--  Request created (user/api)      | DB trigger (this file)    | request_ready
+--  Request created (cognitive/     | Poll only                 | —
+--    schedule/daemon)              |                           |
+--  Task status → ready             | DB trigger (mig 018)      | task_ready
+--  Feedback: approve               | App code (daemon.py)      | request_ready
+--  Feedback: reject                | App code (daemon.py)      | request_ready
+--  Feedback: comment               | Poll only                 | —
+--  Feedback: reset                 | Poll only                 | —
+--
+-- Notify failures in app code are retried once then logged at ERROR level.
+-- The daemon's poll cycle (default 15 min) serves as the fallback for all
+-- transitions — notify is an optimization, not a correctness requirement.
+-- ═══════════════════════════════════════════════════════════════════════════
 
 -- Trigger function: emit a JSON payload on the 'request_ready' channel.
 CREATE OR REPLACE FUNCTION notify_request_ready()

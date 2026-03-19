@@ -67,6 +67,16 @@ class _MetricsRegistry:
             description="Task execution duration",
         )
 
+        # Wake / pg_notify metrics
+        self.wake_notify_total = meter.create_counter(
+            "lucent.wake.notify.total",
+            description="pg_notify wake signal attempts",
+        )
+        self.wake_notify_failures = meter.create_counter(
+            "lucent.wake.notify.failures",
+            description="pg_notify wake signal failures",
+        )
+
     def __getattr__(self, name: str) -> object:
         # Trigger lazy init when any instrument attribute is accessed
         if name.startswith("_"):
