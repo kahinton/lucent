@@ -275,6 +275,10 @@ server {
 
 The default pool settings (min=2, max=10 connections) work for most single-user and small team deployments. For larger teams, increase PostgreSQL's `max_connections` accordingly.
 
+### Observability
+
+Lucent includes an OpenTelemetry-based observability stack (OTEL Collector, Prometheus, Jaeger, Grafana) behind a Docker Compose profile. See the [Observability Guide](observability.md) for setup, configuration, and production recommendations.
+
 ### Security Checklist
 
 - [ ] Change `POSTGRES_PASSWORD` from the default
