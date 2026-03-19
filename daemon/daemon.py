@@ -1051,6 +1051,7 @@ class LucentDaemon:
     def __init__(self):
         self.active_sessions: list = []
         self.running = False
+        self.draining = False  # True = stop new work, wait for in-flight sessions
         self.cycle_count = 0
         # Unique instance ID for distributed coordination
         hostname = platform.node() or "unknown"
@@ -1157,6 +1158,9 @@ class LucentDaemon:
             model: Override the default model. If None, uses MODEL config.
         Returns the assistant's final message text, or None on error.
         """
+        if self.draining:
+            log(f"Skipping '{name}' — daemon is draining for restart", "WARN")
+            return None
         if len(self.active_sessions) >= MAX_CONCURRENT_SESSIONS:
             log(f"Skipping '{name}' — at session limit ({MAX_CONCURRENT_SESSIONS})", "WARN")
             return None
@@ -2018,6 +2022,11 @@ class LucentDaemon:
                 if stale:
                     log(f"Released {stale} stale tracked tasks")
 
+                # Skip dispatch if we're draining for restart
+                if self.draining:
+                    await asyncio.sleep(5)
+                    continue
+
                 # Dispatch all available tasks
                 await self._dispatch_tracked_tasks()
 
@@ -2046,6 +2055,9 @@ class LucentDaemon:
 
         while self.running:
             try:
+                if self.draining:
+                    await asyncio.sleep(5)
+                    continue
                 await self.run_cognitive_cycle()
             except asyncio.CancelledError:
                 break
@@ -2129,20 +2141,59 @@ class LucentDaemon:
 
             await asyncio.sleep(60)  # check every minute
 
+    # Maximum time to wait for in-flight sessions during graceful drain (seconds)
+    DRAIN_TIMEOUT = 300  # 5 minutes
+
     async def _reload_watcher(self):
-        """Periodically check for source file changes and trigger auto-reload."""
+        """Periodically check for source file changes and trigger graceful reload.
+
+        On change detection, enters drain mode (like K8s graceful termination):
+          1. Sets draining=True — prevents new sessions from starting
+          2. Waits for all active sessions to complete (up to DRAIN_TIMEOUT)
+          3. Then restarts the process with os.execv
+        """
         while self.running:
             try:
                 if self._should_reload():
-                    log("Source files changed — restarting daemon to pick up new code")
-                    self.running = False
-                    self._restart_self()
+                    await self._graceful_restart()
                     return
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 log(f"Reload watcher error: {e}", "WARN")
             await asyncio.sleep(30)
+
+    async def _graceful_restart(self):
+        """Drain in-flight sessions then restart the process."""
+        active_count = len(self.active_sessions)
+        log(
+            f"Source files changed — entering drain mode "
+            f"({active_count} active session{'s' if active_count != 1 else ''})"
+        )
+        self.draining = True
+
+        if active_count > 0:
+            deadline = time.time() + self.DRAIN_TIMEOUT
+            while self.active_sessions and time.time() < deadline:
+                remaining = len(self.active_sessions)
+                wait_left = int(deadline - time.time())
+                log(
+                    f"Drain: waiting for {remaining} session{'s' if remaining != 1 else ''} "
+                    f"({wait_left}s remaining)"
+                )
+                await asyncio.sleep(5)
+
+            if self.active_sessions:
+                log(
+                    f"Drain timeout — {len(self.active_sessions)} session(s) still active, "
+                    "proceeding with restart",
+                    "WARN",
+                )
+            else:
+                log("Drain complete — all sessions finished cleanly")
+
+        self.running = False
+        self._restart_self()
 
     # --- Main Loops ---
 
