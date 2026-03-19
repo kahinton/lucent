@@ -120,6 +120,13 @@
             <div class="text-right shrink-0">
                 <!-- Task progress -->
                 {% if req.task_count > 0 %}
+                {% if req.models_used %}
+                <div class="flex items-center gap-1 justify-end mb-1 flex-wrap">
+                    {% for m in req.models_used %}
+                    <span class="px-1.5 py-0.5 rounded text-xs bg-violet-50 text-violet-600 font-mono">{{ m }}</span>
+                    {% endfor %}
+                </div>
+                {% endif %}
                 <div class="flex items-center gap-1.5 text-xs text-gray-500 mb-1">
                     <span>{{ req.tasks_completed }}/{{ req.task_count }} tasks</span>
                     {% if req.tasks_running > 0 %}

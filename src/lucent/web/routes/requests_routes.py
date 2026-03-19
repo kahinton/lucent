@@ -40,6 +40,7 @@ async def activity_list(
         req["tasks_completed"] = sum(1 for s in statuses if s == "completed")
         req["tasks_running"] = sum(1 for s in statuses if s in ("claimed", "running"))
         req["tasks_failed"] = sum(1 for s in statuses if s == "failed")
+        req["models_used"] = sorted({t["model"] for t in tasks if t.get("model")})
 
     # Count needs-review items for the badge
     memory_repo = MemoryRepository(pool)
