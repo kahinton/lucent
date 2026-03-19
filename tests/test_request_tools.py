@@ -184,6 +184,43 @@ class TestCreateTask:
         )
         assert "error" in result
 
+    @pytest.mark.asyncio
+    async def test_negative_sequence_order_rejected(self, mcp, auth_user, request_id):
+        result = await _call(
+            mcp,
+            "create_task",
+            {
+                "request_id": request_id,
+                "title": "Negative Seq",
+                "sequence_order": -1,
+            },
+        )
+        assert "error" in result
+        assert "sequence_order" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_sequence_order_zero_accepted(self, mcp, auth_user, request_id, db_pool):
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO agent_definitions (name, organization_id, content, status)
+                   VALUES ($1, $2, $3, 'active')
+                   ON CONFLICT (name, organization_id) DO UPDATE SET status = 'active'""",
+                "code",
+                auth_user["organization_id"],
+                "test definition",
+            )
+        result = await _call(
+            mcp,
+            "create_task",
+            {
+                "request_id": request_id,
+                "title": "Zero Seq",
+                "agent_type": "code",
+                "sequence_order": 0,
+            },
+        )
+        assert "id" in result
+
 
 # ============================================================================
 # log_task_event
