@@ -185,7 +185,7 @@ async def detect_provider(pool) -> str:
             logger.info("Auto-detect: Vault healthy but no Transit key, using vault")
             return "vault"
     except (httpx.ConnectError, httpx.TimeoutException, httpx.RequestError) as exc:
-        logger.info("Auto-detect: Vault/OpenBao unreachable (%s), using builtin", exc)
+        logger.info("Auto-detect: Vault/OpenBao unreachable (%s), using builtin", type(exc).__name__)
         return "builtin"
 
 
