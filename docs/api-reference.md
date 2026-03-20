@@ -542,6 +542,139 @@ Base path: `/api/definitions`
 
 ---
 
+## Secrets
+
+Base path: `/api/secrets`
+
+The secrets API provides secure storage for sensitive values (API keys, tokens, passwords). Secret values are encrypted at rest and access-controlled via ownership. All secret operations are audit-logged.
+
+### Create Secret
+
+```
+POST /api/secrets
+```
+
+**Request Body:**
+
+```json
+{
+  "key": "my-api-key",
+  "value": "sk_live_abc123...",
+  "owner_group_id": "optional-group-uuid"
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `key` | string | yes | Secret key name (1–256 chars) |
+| `value` | string | yes | Secret value (never returned after creation) |
+| `owner_group_id` | string | no | Group to own the secret (defaults to current user) |
+
+**Response:** `201`
+
+```json
+{
+  "key": "my-api-key",
+  "owner_user_id": "uuid",
+  "owner_group_id": null,
+  "created_at": null,
+  "updated_at": null
+}
+```
+
+### List Secrets
+
+```
+GET /api/secrets?owner_group_id=optional-group-uuid
+```
+
+Lists secret key names for the current user or a specified group. **Values are never included.**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `owner_group_id` | string | no | List secrets owned by this group instead of the current user |
+
+**Response:** `200`
+
+```json
+{
+  "keys": [
+    {
+      "key": "my-api-key",
+      "owner_user_id": "uuid",
+      "owner_group_id": null,
+      "created_at": "2026-03-15T10:00:00Z",
+      "updated_at": "2026-03-15T10:00:00Z"
+    }
+  ]
+}
+```
+
+### Get Secret Value
+
+```
+GET /api/secrets/{key}?owner_group_id=optional-group-uuid
+```
+
+Retrieves the decrypted value of a secret. Requires ACL access permission on the secret. Every read is audit-logged.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `key` | path | yes | Secret key name |
+| `owner_group_id` | query | no | Scope to a group-owned secret |
+
+**Response:** `200`
+
+```json
+{
+  "key": "my-api-key",
+  "value": "sk_live_abc123..."
+}
+```
+
+**Errors:** `403` if ACL denies access, `404` if the secret does not exist.
+
+### Delete Secret
+
+```
+DELETE /api/secrets/{key}?owner_group_id=optional-group-uuid
+```
+
+Deletes a secret. Requires ACL modify permission on the secret.
+
+**Response:** `200`
+
+```json
+{
+  "deleted": true,
+  "key": "my-api-key"
+}
+```
+
+**Errors:** `403` if ACL denies modify, `404` if the secret does not exist.
+
+### Migrate Plaintext Configs
+
+```
+POST /api/secrets/migrate-plaintext-configs
+```
+
+Scans MCP server configs, sandbox templates, and integrations for plaintext sensitive values (tokens, passwords, API keys) and migrates them to encrypted secret storage. Original values are replaced with `secret://` references.
+
+**Requires:** admin role or higher.
+
+**Response:** `200`
+
+```json
+{
+  "migrated_mcp_env_vars": 3,
+  "migrated_sandbox_env_vars": 1,
+  "migrated_integration_values": 2
+}
+```
+
+---
+
 ## Legacy Daemon Endpoints
 
 > **Note:** These endpoints are from the earlier daemon task system and are still functional but superseded by the Request/Task API above.
@@ -596,6 +729,233 @@ Base path: `/api/daemon`
 | `GET` | `/messages` | List daemon messages |
 | `POST` | `/messages` | Send a message to the daemon |
 | `POST` | `/messages/{id}/acknowledge` | Acknowledge a message |
+
+---
+
+## Groups
+
+Base path: `/api/groups`
+
+Groups enable shared ownership of resources (agents, skills, MCP servers, secrets) and team-based access control. Groups are scoped to an organization — all group operations require the user to belong to one.
+
+### Create Group
+
+```
+POST /api/groups
+```
+
+**Requires:** `USERS_MANAGE` permission (admin+ role).
+
+**Request Body:**
+
+```json
+{
+  "name": "platform-team",
+  "description": "Core platform engineering team"
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | yes | Group name (1–128 chars, unique within org) |
+| `description` | string | no | Group description |
+
+**Response:** `201`
+
+```json
+{
+  "id": "uuid",
+  "name": "platform-team",
+  "description": "Core platform engineering team",
+  "org_id": "uuid",
+  "member_count": 0,
+  "created_at": "2026-03-15T10:00:00Z",
+  "updated_at": "2026-03-15T10:00:00Z"
+}
+```
+
+**Errors:** `409` if a group with the same name already exists.
+
+### List Groups
+
+```
+GET /api/groups?limit=25&offset=0
+```
+
+Lists all groups in the caller's organization with pagination.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `limit` | int | no | Results per page (1–100, default: 25) |
+| `offset` | int | no | Pagination offset (default: 0) |
+
+**Response:** `200`
+
+```json
+{
+  "items": [
+    {
+      "id": "uuid",
+      "name": "platform-team",
+      "description": "Core platform engineering team",
+      "org_id": "uuid",
+      "member_count": 3,
+      "created_at": "2026-03-15T10:00:00Z",
+      "updated_at": "2026-03-15T10:00:00Z"
+    }
+  ],
+  "total_count": 1,
+  "offset": 0,
+  "limit": 25,
+  "has_more": false
+}
+```
+
+### Get Group
+
+```
+GET /api/groups/{group_id}
+```
+
+Returns group details and its full member list.
+
+**Response:** `200`
+
+```json
+{
+  "group": {
+    "id": "uuid",
+    "name": "platform-team",
+    "description": "Core platform engineering team",
+    "org_id": "uuid",
+    "member_count": 2,
+    "created_at": "2026-03-15T10:00:00Z",
+    "updated_at": "2026-03-15T10:00:00Z"
+  },
+  "members": [
+    {
+      "user_id": "uuid",
+      "display_name": "Alice",
+      "email": "alice@example.com",
+      "role": "admin",
+      "joined_at": "2026-03-15T10:00:00Z"
+    }
+  ]
+}
+```
+
+### Update Group
+
+```
+PUT /api/groups/{group_id}
+```
+
+**Requires:** group admin or org admin+ role.
+
+**Request Body:**
+
+```json
+{
+  "name": "new-name",
+  "description": "Updated description"
+}
+```
+
+Both fields are optional, but at least one must be provided.
+
+**Response:** `200` with the updated group object (same schema as Create Group response).
+
+**Errors:** `409` if the new name conflicts with an existing group, `422` if no fields are provided.
+
+### Delete Group
+
+```
+DELETE /api/groups/{group_id}
+```
+
+**Requires:** org admin+ role.
+
+**Response:** `200`
+
+```json
+{"success": true}
+```
+
+### Add Group Member
+
+```
+POST /api/groups/{group_id}/members
+```
+
+**Requires:** group admin or org admin+ role. The target user must belong to the same organization.
+
+**Request Body:**
+
+```json
+{
+  "user_id": "uuid-of-user",
+  "role": "member"
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `user_id` | UUID | yes | User to add |
+| `role` | string | no | `member` (default) or `admin` |
+
+**Response:** `201`
+
+```json
+{
+  "user_id": "uuid",
+  "display_name": "Bob",
+  "email": "bob@example.com",
+  "role": "member",
+  "joined_at": "2026-03-15T10:00:00Z"
+}
+```
+
+**Errors:** `409` if the user is already a member.
+
+### Remove Group Member
+
+```
+DELETE /api/groups/{group_id}/members/{user_id}
+```
+
+**Requires:** group admin or org admin+ role.
+
+**Response:** `200`
+
+```json
+{"success": true}
+```
+
+### List Group Members
+
+```
+GET /api/groups/{group_id}/members
+```
+
+Returns all members of a group.
+
+**Response:** `200`
+
+```json
+{
+  "group_id": "uuid",
+  "members": [
+    {
+      "user_id": "uuid",
+      "display_name": "Alice",
+      "email": "alice@example.com",
+      "role": "admin",
+      "joined_at": "2026-03-15T10:00:00Z"
+    }
+  ],
+  "total_count": 1
+}
+```
 
 ---
 
