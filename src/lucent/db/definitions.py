@@ -1051,9 +1051,14 @@ class DefinitionRepository:
         status: str | None = None,
         limit: int = 25,
         offset: int = 0,
+        requester_user_id: str | None = None,
+        requester_role: str | None = None,
     ) -> dict:
         """List agents with their granted skills and MCP servers."""
-        result = await self.list_agents(org_id, status=status, limit=limit, offset=offset)
+        result = await self.list_agents(
+            org_id, status=status, limit=limit, offset=offset,
+            requester_user_id=requester_user_id, requester_role=requester_role,
+        )
         for agent in result["items"]:
             agent["skills"] = await self.get_agent_skills(str(agent["id"]))
             agent["mcp_servers"] = await self.get_agent_mcp_servers(str(agent["id"]))

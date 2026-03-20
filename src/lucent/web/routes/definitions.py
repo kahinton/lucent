@@ -128,7 +128,7 @@ async def definitions_page(
     offset = (page - 1) * per_page
 
     # Only paginate the active tab; load others without pagination for counts
-    agents_result = await repo.list_agents(
+    agents_result = await repo.list_agents_with_grants(
         org_id,
         limit=per_page if tab == "agents" else 1000,
         offset=offset if tab == "agents" else 0,
