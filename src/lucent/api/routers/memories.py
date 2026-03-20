@@ -21,6 +21,7 @@ from lucent.db import AccessRepository, AuditRepository, MemoryRepository, get_p
 from lucent.logging import get_logger
 from lucent.models.validation import normalize_tags, validate_metadata
 from lucent.rbac import Permission
+from lucent.security import scan_content_for_injection
 
 logger = get_logger("api.memories")
 
@@ -110,6 +111,17 @@ async def create_memory(
 
     # Normalize tags: replace prohibited tags, auto-tag daemon content
     effective_tags = normalize_tags(data.tags, is_daemon=is_daemon)
+
+    # Scan content for prompt injection patterns (defense-in-depth)
+    injection_matches = scan_content_for_injection(data.content)
+    if injection_matches:
+        logger.warning(
+            "Memory content flagged as suspicious: user=%s, patterns=%s",
+            user.id,
+            injection_matches,
+        )
+        if "suspicious_content" not in effective_tags:
+            effective_tags.append("suspicious_content")
 
     result = await repo.create(
         username=username,

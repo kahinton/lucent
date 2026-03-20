@@ -26,6 +26,7 @@ from lucent.models.memory import (
     UpdateMemoryInput,
 )
 from lucent.models.validation import normalize_tags, validate_metadata
+from lucent.security import scan_content_for_injection
 
 logger = get_logger("tools.memories")
 
@@ -237,6 +238,19 @@ Returns:
 
             # Normalize tags: replace prohibited tags, auto-tag daemon content
             effective_tags = normalize_tags(tags, is_daemon=is_daemon)
+
+            # Scan content for prompt injection patterns (defense-in-depth)
+            injection_matches = scan_content_for_injection(content)
+            if injection_matches:
+                logger.warning(
+                    "Memory content flagged as suspicious: user=%s, patterns=%s",
+                    effective_username,
+                    injection_matches,
+                )
+                if effective_tags is None:
+                    effective_tags = []
+                if "suspicious_content" not in effective_tags:
+                    effective_tags.append("suspicious_content")
 
             input_data = CreateMemoryInput(
                 username=effective_username,
