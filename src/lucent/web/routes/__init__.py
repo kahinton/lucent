@@ -18,6 +18,7 @@ from . import (
     requests_routes,
     sandboxes,
     schedules,
+    secrets,
     settings,
 )
 
@@ -40,3 +41,4 @@ router.include_router(sandboxes.router)
 router.include_router(settings.router)
 router.include_router(requests_routes.router)
 router.include_router(schedules.router)
+router.include_router(secrets.router)

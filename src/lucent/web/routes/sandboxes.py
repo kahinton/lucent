@@ -1,6 +1,7 @@
 """Sandbox management routes."""
 
 from math import ceil
+from uuid import UUID
 
 from fastapi import APIRouter, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -17,6 +18,69 @@ logger = get_logger("web.routes.sandboxes")
 router = APIRouter()
 
 ALLOWED_PER_PAGE = {10, 25, 50, 100}
+
+
+async def _get_user_groups(pool, user_id: str, org_id: str) -> list[dict]:
+    from lucent.db.groups import GroupRepository
+
+    repo = GroupRepository(pool)
+    return await repo.get_user_groups(user_id, org_id)
+
+
+async def _resolve_owner_maps(pool, items: list[dict]) -> tuple[dict[str, str], dict[str, str]]:
+    user_ids = {str(item.get("owner_user_id")) for item in items if item.get("owner_user_id")}
+    group_ids = {str(item.get("owner_group_id")) for item in items if item.get("owner_group_id")}
+    user_map: dict[str, str] = {}
+    group_map: dict[str, str] = {}
+    if not user_ids and not group_ids:
+        return user_map, group_map
+
+    async with pool.acquire() as conn:
+        if user_ids:
+            user_rows = await conn.fetch(
+                """
+                SELECT id, COALESCE(display_name, email, 'Unknown user') AS owner_name
+                FROM users
+                WHERE id = ANY($1::uuid[])
+                """,
+                [UUID(uid) for uid in user_ids],
+            )
+            user_map = {str(row["id"]): row["owner_name"] for row in user_rows}
+        if group_ids:
+            group_rows = await conn.fetch(
+                "SELECT id, name FROM groups WHERE id = ANY($1::uuid[])",
+                [UUID(gid) for gid in group_ids],
+            )
+            group_map = {str(row["id"]): row["name"] for row in group_rows}
+    return user_map, group_map
+
+
+def _attach_owner_names(
+    items: list[dict], user_map: dict[str, str], group_map: dict[str, str]
+) -> list[dict]:
+    enriched: list[dict] = []
+    for item in items:
+        d = dict(item)
+        owner_user_id = str(d.get("owner_user_id")) if d.get("owner_user_id") else None
+        owner_group_id = str(d.get("owner_group_id")) if d.get("owner_group_id") else None
+        d["owner_user_name"] = user_map.get(owner_user_id) if owner_user_id else None
+        d["owner_group_name"] = group_map.get(owner_group_id) if owner_group_id else None
+        enriched.append(d)
+    return enriched
+
+
+async def _resolve_owner_scope(form_data, user, pool) -> tuple[str | None, str | None]:
+    owner_scope = str(form_data.get("owner_scope", "me")).strip()
+    if not owner_scope or owner_scope == "me":
+        return str(user.id), None
+    if owner_scope.startswith("group:"):
+        group_id = owner_scope.replace("group:", "", 1).strip()
+        user_groups = await _get_user_groups(pool, str(user.id), str(user.organization_id))
+        allowed_group_ids = {str(group["id"]) for group in user_groups}
+        if group_id not in allowed_group_ids:
+            raise HTTPException(status_code=403, detail="Permission denied")
+        return None, group_id
+    return str(user.id), None
 
 
 def _require_admin_or_owner(user) -> None:
@@ -88,6 +152,11 @@ async def sandboxes_page(
     except Exception:
         logger.debug("Failed to load sandbox templates", exc_info=True)
         template_list = []
+    owner_groups = (
+        await _get_user_groups(pool, str(user.id), org_id) if org_id else []
+    )
+    user_map, group_map = await _resolve_owner_maps(pool, template_list)
+    template_list = _attach_owner_names(template_list, user_map, group_map)
 
     # Load instances only when on instances tab
     sandbox_list = []
@@ -123,6 +192,7 @@ async def sandboxes_page(
             "sandboxes": sandbox_list,
             "show_filter": show or "all",
             "user": user,
+            "owner_groups": owner_groups,
             "csrf_token": request.cookies.get(CSRF_COOKIE_NAME, ""),
             "page": page,
             "per_page": per_page,
@@ -147,6 +217,7 @@ async def create_template_web(
     disk_limit: str = Form(default="10g"),
     network_mode: str = Form(default="none"),
     timeout_seconds: int = Form(default=1800),
+    owner_scope: str = Form(default="me"),
     csrf_token: str = Form(default=""),
 ):
     """Create a new sandbox template."""
@@ -157,6 +228,11 @@ async def create_template_web(
     from lucent.db.sandbox_template import SandboxTemplateRepository
 
     repo = SandboxTemplateRepository(pool)
+    owner_user_id, owner_group_id = await _resolve_owner_scope(
+        {"owner_scope": owner_scope},
+        user,
+        pool,
+    )
 
     await repo.create(
         name=name.strip(),
@@ -173,6 +249,8 @@ async def create_template_web(
         network_mode=network_mode,
         timeout_seconds=timeout_seconds,
         created_by=str(user.id),
+        owner_user_id=owner_user_id,
+        owner_group_id=owner_group_id,
     )
     return RedirectResponse("/sandboxes", status_code=303)
 
@@ -194,6 +272,9 @@ async def edit_template_page(request: Request, template_id: str):
     )
     if not tpl:
         raise HTTPException(404, "Template not found")
+    user_map, group_map = await _resolve_owner_maps(pool, [tpl])
+    tpl = _attach_owner_names([tpl], user_map, group_map)[0]
+    owner_groups = await _get_user_groups(pool, str(user.id), str(user.organization_id))
 
     return templates.TemplateResponse(
         request,
@@ -201,6 +282,7 @@ async def edit_template_page(request: Request, template_id: str):
         {
             "template": tpl,
             "user": user,
+            "owner_groups": owner_groups,
             "csrf_token": request.cookies.get(CSRF_COOKIE_NAME, ""),
         },
     )
@@ -222,6 +304,7 @@ async def update_template_web(
     disk_limit: str = Form(default="10g"),
     network_mode: str = Form(default="none"),
     timeout_seconds: int = Form(default=1800),
+    owner_scope: str = Form(default="me"),
     csrf_token: str = Form(default=""),
 ):
     """Update a sandbox template."""
@@ -232,6 +315,11 @@ async def update_template_web(
     from lucent.db.sandbox_template import SandboxTemplateRepository
 
     repo = SandboxTemplateRepository(pool)
+    owner_user_id, owner_group_id = await _resolve_owner_scope(
+        {"owner_scope": owner_scope},
+        user,
+        pool,
+    )
 
     await repo.update(
         template_id,
@@ -248,6 +336,8 @@ async def update_template_web(
         disk_limit=disk_limit,
         network_mode=network_mode,
         timeout_seconds=timeout_seconds,
+        owner_user_id=owner_user_id,
+        owner_group_id=owner_group_id,
     )
     return RedirectResponse("/sandboxes", status_code=303)
 
