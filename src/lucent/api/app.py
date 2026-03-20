@@ -123,7 +123,7 @@ async def lifespan(app: FastAPI):
         from lucent.db import get_pool as _get_pool_for_secrets
 
         _secret_pool = await _get_pool_for_secrets()
-        initialize_secret_provider(_secret_pool)
+        await initialize_secret_provider(_secret_pool)
 
     # Load model registry from database
     try:

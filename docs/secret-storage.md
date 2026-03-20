@@ -20,9 +20,32 @@ to an organization and owned by a user or group.
 | Provider  | Status         | Backend                        |
 |-----------|----------------|--------------------------------|
 | `builtin` | ✅ Production  | PostgreSQL + Fernet encryption |
-| `vault`   | 🔧 Planned     | HashiCorp Vault KV v2          |
+| `transit` | ✅ Production  | OpenBao/Vault Transit + PostgreSQL |
+| `vault`   | ✅ Production  | OpenBao/Vault KV v2            |
 | `aws`     | 🔧 Planned     | AWS Secrets Manager            |
 | `azure`   | 🔧 Planned     | Azure Key Vault                |
+
+### Tiered Security Model
+
+| Tier | Provider | Key Location | Use Case |
+|------|----------|-------------|----------|
+| Dev | `builtin` | Same container (Fernet) | Quick local dev, no extra services |
+| Local Secure | `transit` | OpenBao sidecar | Key isolation, zero external dependencies |
+| Enterprise | `vault` | External Vault/OpenBao cluster | Full HSM support, centralized key management |
+
+### Auto-Detection
+
+When `LUCENT_SECRET_PROVIDER` is unset (or set to `auto`), Lucent probes
+the environment at startup and selects the best available provider:
+
+1. If `VAULT_ADDR` and `VAULT_TOKEN` are set and OpenBao/Vault is healthy →
+   check for the Transit encryption key (`lucent-secrets`)
+2. If the Transit key exists → use **transit**
+3. If Vault is healthy but no Transit key → use **vault** (KV v2)
+4. If Vault is unreachable or credentials are missing → fall back to **builtin**
+
+This means new users running the default `docker-compose.yml` get Transit
+encryption automatically — no configuration changes required.
 
 ---
 
@@ -36,8 +59,8 @@ encrypts secret values at rest in PostgreSQL using Fernet symmetric encryption
 
 | Variable                | Required | Default   | Description                            |
 |-------------------------|----------|-----------|----------------------------------------|
-| `LUCENT_SECRET_PROVIDER`| No       | `builtin` | Secret storage backend                 |
-| `LUCENT_SECRET_KEY`     | Yes      | —         | Encryption key (arbitrary high-entropy string) |
+| `LUCENT_SECRET_PROVIDER`| No       | `auto`    | Secret storage backend (`auto`, `builtin`, `transit`, `vault`, `aws`, `azure`) |
+| `LUCENT_SECRET_KEY`     | Conditional | —      | Encryption key (required for `builtin` provider) |
 
 ### Generate an Encryption Key
 
@@ -183,22 +206,106 @@ passes through as-is.
 
 ---
 
-## HashiCorp Vault Configuration
+## OpenBao Transit Provider (Recommended)
 
-> **Status: Planned.** The Vault provider is registered and validates
-> environment variables at startup, but all operations currently raise
-> `NotImplementedError`. Use the built-in provider until Vault support is
-> fully implemented.
+The Transit provider delegates all encryption and decryption to
+[OpenBao](https://openbao.org/)'s Transit secrets engine. Lucent sends
+plaintext to OpenBao, which encrypts it with a key that Lucent never sees,
+and returns ciphertext that is stored in PostgreSQL.
+
+This is more secure than the builtin provider because the encryption key
+is isolated in a separate process. Even if both the Lucent container and the
+database are compromised, an attacker cannot decrypt secrets without access to
+OpenBao's Transit key.
+
+```
+┌──────────────┐   1. plaintext   ┌───────────────┐
+│ Lucent Server │ ──────────────► │   OpenBao      │
+│ (no key)      │                  │ Transit Engine │
+│               │ ◄────────────── │ (holds key)    │
+│               │   2. ciphertext  └───────────────┘
+│               │
+│               │   3. store ciphertext
+│               │ ──────────────► ┌───────────────┐
+│               │                  │  PostgreSQL    │
+└──────────────┘                  │  secrets table │
+                                   └───────────────┘
+```
+
+On read, the flow reverses: Lucent fetches ciphertext from PostgreSQL, sends
+it to OpenBao for decryption, and returns the plaintext to the caller.
+
+### Why Transit over KV?
+
+The `vault` (KV v2) provider stores secret values directly in Vault's
+key-value store. This is fine for centralized secret management, but it means
+Lucent receives the plaintext value from Vault and must handle it in memory.
+
+With Transit, Lucent **never holds the encryption key**. The key stays inside
+OpenBao's process memory and is never exposed via API. This is the
+strongest isolation model available without hardware security modules.
+
+### Setup (Docker Compose)
+
+OpenBao is included in the default `docker-compose.yml` and starts
+automatically. No additional setup is required.
+
+The included init script (`docker/openbao-init.sh`) configures:
+- KV v2 engine at `secret/`
+- Transit engine at `transit/`
+- A `lucent-secrets` Transit encryption key
+- A scoped `lucent-policy` with least-privilege permissions
+
+### Environment Variables
+
+| Variable              | Required | Default | Description                              |
+|-----------------------|----------|---------|------------------------------------------|
+| `LUCENT_SECRET_PROVIDER` | No    | `auto`  | Set to `transit` to force Transit, or leave as `auto` |
+| `VAULT_ADDR`          | Yes      | `http://openbao:8200` (in docker-compose) | OpenBao/Vault API URL |
+| `VAULT_TOKEN`         | Yes      | `root` (dev mode)   | Token with Transit encrypt/decrypt permissions |
+| `VAULT_TRANSIT_MOUNT` | No       | `transit` | Transit engine mount path                |
+| `VAULT_TRANSIT_KEY`   | No       | `lucent-secrets` | Name of the Transit encryption key    |
+
+### Example: Explicit Transit Configuration
+
+If you want to force Transit without auto-detection:
+
+```bash
+export LUCENT_SECRET_PROVIDER=transit
+export VAULT_ADDR=http://openbao:8200
+export VAULT_TOKEN=your-token-here
+```
+
+Or in `docker-compose.yml` (already configured by default):
+
+```yaml
+services:
+  lucent:
+    environment:
+      LUCENT_SECRET_PROVIDER: transit
+      VAULT_ADDR: http://openbao:8200
+      VAULT_TOKEN: ${VAULT_TOKEN:-root}
+```
+
+---
+
+## HashiCorp Vault / OpenBao KV v2 Provider
+
+The `vault` provider stores secrets directly in Vault's KV v2 secrets engine.
+Use this when connecting to an external Vault or OpenBao cluster where you
+want centralized secret management rather than local Transit encryption.
+
+> OpenBao is API-compatible with HashiCorp Vault — the same provider works
+> with both.
 
 ### Environment Variables
 
 | Variable              | Required | Default | Description                              |
 |-----------------------|----------|---------|------------------------------------------|
 | `LUCENT_SECRET_PROVIDER` | Yes   | —       | Set to `vault`                           |
-| `VAULT_ADDR`          | Yes      | —       | Vault API base URL (e.g., `https://vault.example.com`) |
-| `VAULT_TOKEN`         | Yes      | —       | Vault token with read/write access       |
-| `VAULT_MOUNT_PATH`    | No       | —       | KV v2 mount path (planned)               |
-| `VAULT_NAMESPACE`     | No       | —       | Vault namespace (planned)                |
+| `VAULT_ADDR`          | Yes      | —       | Vault/OpenBao API base URL               |
+| `VAULT_TOKEN`         | Yes      | —       | Token with read/write access to the KV mount |
+| `VAULT_KV_MOUNT`      | No       | `secret` | KV v2 mount path                       |
 
 ### Example Setup
 
@@ -208,8 +315,8 @@ export VAULT_ADDR=https://vault.example.com
 export VAULT_TOKEN=hvs.your-vault-token
 ```
 
-When implemented, the provider will map `SecretScope` to Vault KV v2 paths
-and enforce access via Vault policies.
+The provider maps secrets to KV v2 paths:
+`{mount}/data/lucent/{org_id}/{user|group}/{owner_id}/{key}`
 
 ---
 
@@ -523,6 +630,67 @@ for details.
 
 ---
 
+## Migrating from Builtin to Transit
+
+If you have existing secrets encrypted with the builtin (Fernet) provider and
+want to switch to Transit, use the included migration script. It re-encrypts
+each secret through OpenBao's Transit engine in place.
+
+### Prerequisites
+
+- OpenBao running and initialized (the default `docker-compose.yml` handles this)
+- The original `LUCENT_SECRET_KEY` used to encrypt existing secrets
+- Database access (`DATABASE_URL`)
+
+### Run the Migration
+
+```bash
+python scripts/migrate_secrets_to_transit.py \
+  --database-url "$DATABASE_URL" \
+  --vault-addr "$VAULT_ADDR" \
+  --vault-token "$VAULT_TOKEN" \
+  --secret-key "$LUCENT_SECRET_KEY"
+```
+
+### Dry Run
+
+Preview what would be migrated without making changes:
+
+```bash
+python scripts/migrate_secrets_to_transit.py --dry-run \
+  --database-url "$DATABASE_URL" \
+  --vault-addr "$VAULT_ADDR" \
+  --vault-token "$VAULT_TOKEN" \
+  --secret-key "$LUCENT_SECRET_KEY"
+```
+
+### How It Works
+
+1. Connects to PostgreSQL and reads all rows from the `secrets` table
+2. Skips rows already encrypted with Transit (ciphertext starts with `vault:v1:`)
+3. Decrypts each Fernet-encrypted value using `LUCENT_SECRET_KEY`
+4. Re-encrypts via OpenBao's Transit engine
+5. Updates the `encrypted_value` column with Transit ciphertext
+6. Each row is updated in its own transaction for safety
+
+The script is **idempotent** — running it again skips already-migrated secrets.
+After migration, set `LUCENT_SECRET_PROVIDER=transit` (or leave it as `auto`)
+and you can remove `LUCENT_SECRET_KEY` from your environment.
+
+### CLI Options
+
+| Flag | Env Var | Description |
+|------|---------|-------------|
+| `--database-url` | `DATABASE_URL` | PostgreSQL connection string |
+| `--vault-addr` | `VAULT_ADDR` | OpenBao/Vault API URL |
+| `--vault-token` | `VAULT_TOKEN` | OpenBao/Vault token |
+| `--secret-key` | `LUCENT_SECRET_KEY` | Fernet key for decrypting existing secrets |
+| `--transit-mount` | — | Transit engine mount (default: `transit`) |
+| `--transit-key` | — | Transit key name (default: `lucent-secrets`) |
+| `--dry-run` | — | Preview only, no database writes |
+
+---
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
@@ -530,5 +698,7 @@ for details.
 | `SecretKeyError: LUCENT_SECRET_KEY environment variable is not set` | Missing encryption key | Set `LUCENT_SECRET_KEY` in your environment |
 | `SecretKeyError: Decryption failed — wrong key or corrupted data` | Key was changed or data corrupted | Restore the original `LUCENT_SECRET_KEY` value |
 | `KeyError: Secret not found (reference 'my-key')` | Secret doesn't exist or user lacks access | Verify the secret exists and the user/group ownership matches |
-| `Invalid LUCENT_SECRET_PROVIDER` | Typo in provider name | Use one of: `builtin`, `vault`, `aws`, `azure` |
-| `NotImplementedError` from vault/aws/azure | Provider not yet implemented | Switch to `LUCENT_SECRET_PROVIDER=builtin` |
+| `Invalid LUCENT_SECRET_PROVIDER` | Typo in provider name | Use one of: `builtin`, `transit`, `vault`, `aws`, `azure` |
+| `NotImplementedError` from aws/azure | Provider not yet implemented | Switch to `LUCENT_SECRET_PROVIDER=builtin` or `transit` |
+| Transit encrypt/decrypt fails | OpenBao unreachable or wrong token | Check `VAULT_ADDR` connectivity and `VAULT_TOKEN` permissions |
+| Auto-detect picks builtin unexpectedly | OpenBao not running or not healthy | Run `docker compose up openbao` and verify health at `VAULT_ADDR/v1/sys/health` |

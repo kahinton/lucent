@@ -30,7 +30,15 @@ A single process serving three interfaces on one port (default 8766):
 
 External dependency: PostgreSQL 16+.
 
-### 2. Daemon (optional)
+### 2. OpenBao (default sidecar)
+
+An [OpenBao](https://openbao.org/) instance (Vault-compatible, MPL-2.0) runs as a sidecar in the default Docker Compose configuration. It provides the Transit secrets engine for key-isolated encryption — Lucent encrypts and decrypts secrets through OpenBao without ever seeing the encryption key.
+
+OpenBao starts automatically with `docker compose up` and requires no manual configuration. See the [Secret Storage Guide](secret-storage.md) for details on the Transit provider and the tiered security model.
+
+> **Opting out:** If you don't want the OpenBao sidecar, set `LUCENT_SECRET_PROVIDER=builtin` and the builtin Fernet provider will be used instead. You can also remove the `openbao` and `openbao-init` services from your compose file.
+
+### 3. Daemon (optional)
 
 An autonomous background process that provides:
 - **Cognitive reasoning** — perceive/reason/decide/act cycles
@@ -40,7 +48,7 @@ An autonomous background process that provides:
 
 The daemon connects to the server via MCP and REST API. It requires a GitHub Copilot SDK token (`GITHUB_TOKEN`) for LLM access.
 
-### 3. Sandboxes (optional)
+### 4. Sandboxes (optional)
 
 Tasks can run in isolated Docker containers. The server needs access to the Docker socket (`/var/run/docker.sock`) to manage sandbox containers. Sandbox base images must be pre-pulled or built.
 
@@ -93,6 +101,9 @@ Key variables for Docker Compose:
 | `LUCENT_DB_PORT` | `5433` | Host port for PostgreSQL |
 | `LUCENT_PORT` | `8766` | Host port for Lucent |
 | `LUCENT_MODE` | `personal` | `personal` or `team` |
+| `LUCENT_SECRET_PROVIDER` | `auto` | Secret backend: `auto`, `builtin`, `transit`, `vault` |
+| `LUCENT_SECRET_KEY` | dev default | Fernet key (only needed for `builtin` provider) |
+| `VAULT_TOKEN` | `root` | OpenBao/Vault token |
 
 ## PostgreSQL Setup
 

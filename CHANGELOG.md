@@ -4,6 +4,18 @@ All notable changes to Lucent will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+#### Secret Storage — OpenBao Integration
+- OpenBao (Vault-compatible) sidecar in `docker-compose.yml` for key-isolated secret encryption
+- Transit secret provider (`transit`) — encrypts/decrypts via OpenBao's Transit engine; Lucent never sees the encryption key
+- Vault KV v2 secret provider (`vault`) — full implementation for external Vault/OpenBao clusters
+- Auto-detection of available secret providers at startup (`LUCENT_SECRET_PROVIDER=auto`)
+- Migration utility (`scripts/migrate_secrets_to_transit.py`) for re-encrypting builtin (Fernet) secrets through Transit
+- OpenBao init script (`docker/openbao-init.sh`) — configures KV v2, Transit engine, scoped policy, and token
+
 ## [0.2.0] - 2026-03-17
 
 ### Added
@@ -112,5 +124,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Daemon process for autonomous cognitive cycles
 - 687+ tests covering core functionality
 
+[Unreleased]: https://github.com/kahinton/lucent/compare/v0.2.0...HEAD
 [0.2.0]: https://github.com/kahinton/lucent/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/kahinton/lucent/releases/tag/v0.1.0

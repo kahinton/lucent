@@ -327,6 +327,18 @@ LUCENT_SECRET_KEY=<your-strong-random-key>
 
 Run through these steps after upgrading to confirm everything is working.
 
+- [ ] Migrations applied successfully (037–041 in `_migrations` table)
+- [ ] New tables exist (`groups`, `user_groups`, `secrets`)
+- [ ] Ownership columns present on definition tables
+- [ ] Ownership backfill completed for existing resources
+- [ ] Task user tracking backfilled
+- [ ] Secret storage working — create and retrieve a test secret via `/secrets`
+- [ ] Groups page accessible at `/groups`
+- [ ] Secrets page accessible at `/secrets`
+- [ ] Ownership badges visible on `/definitions` and `/sandboxes`
+- [ ] Existing functionality preserved (memories, API keys, sessions)
+- [ ] No errors in server logs
+
 ### Step 1: Verify Migrations Applied
 
 ```bash
@@ -383,8 +395,9 @@ Only if you plan to use secrets:
 # Ensure LUCENT_SECRET_KEY is set
 docker compose exec lucent env | grep LUCENT_SECRET
 
-# Test via the Web UI or API — create a secret through the Secrets page
-# or use the MCP tools
+# Test via the Web UI — navigate to the Secrets page
+# http://localhost:8766/secrets
+# Create a test secret, verify it appears in the list, then delete it
 ```
 
 ### Step 7: Verify Groups UI
@@ -396,8 +409,22 @@ http://localhost:8766/groups
 ```
 
 You should see the groups list page (empty if no groups have been created yet).
+Groups are available in all modes — no team mode requirement.
 
-### Step 8: Check Server Logs
+### Step 8: Verify Ownership Badges
+
+Navigate to the Definitions page:
+
+```
+http://localhost:8766/definitions
+```
+
+Each agent definition, skill, and MCP server config should display an
+**"Owner: username"** or **"Owner: group-name"** badge for non-built-in
+resources. Check the Sandboxes page (`/sandboxes`) for the same badges on
+sandbox templates.
+
+### Step 9: Check Server Logs
 
 ```bash
 docker compose logs lucent --tail=50 | grep -i -E 'migration|secret|error'

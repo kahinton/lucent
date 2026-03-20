@@ -26,6 +26,7 @@ An MCP (Model Context Protocol) server that gives AI assistants persistent memor
 
 ### Platform
 - **Pluggable Auth**: Basic auth, API key auth, session management, RBAC roles
+- **Secret Storage**: Pluggable encryption with [OpenBao Transit](docs/secret-storage.md) (recommended), builtin Fernet, or external Vault — auto-detected at startup
 - **Web Dashboard**: Full management UI for memories, agents, schedules, sandboxes, activity tracking, and review queues
 - **CI/CD**: GitHub Actions with linting (Ruff) and full pytest suite against PostgreSQL
 - **Docker Ready**: Single `docker compose up -d` to run everything
