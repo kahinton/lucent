@@ -43,6 +43,9 @@ services:
       OTEL_ENABLED: ${OTEL_ENABLED:-false}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
       OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-lucent}
+      # Secret storage (builtin provider requires an encryption key)
+      LUCENT_SECRET_PROVIDER: ${LUCENT_SECRET_PROVIDER:-builtin}
+      LUCENT_SECRET_KEY: ${LUCENT_SECRET_KEY:-lucent-dev-secret-key-change-in-production}
     volumes:
       - ./src:/app/src:cached
       - ./pyproject.toml:/app/pyproject.toml:ro
