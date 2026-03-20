@@ -9,7 +9,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from lucent.access_control import AccessControlService
 from lucent.auth_providers import CSRF_COOKIE_NAME
-from lucent.db import get_pool
+from lucent.db import GroupRepository, get_pool
 from lucent.secrets import SecretRegistry, SecretScope
 
 from ._shared import _check_csrf, get_user_context, templates
@@ -89,12 +89,16 @@ async def secrets_page(
     total_pages = ceil(total_count / per_page) if total_count > 0 else 1
     page = min(page, total_pages)
 
+    group_repo = GroupRepository(pool)
+    user_groups = await group_repo.get_user_groups(str(user.id), str(user.organization_id))
+
     return templates.TemplateResponse(
         request,
         "secrets.html",
         {
             "user": user,
             "secrets": [dict(row) for row in rows],
+            "user_groups": user_groups,
             "csrf_token": request.cookies.get(CSRF_COOKIE_NAME, ""),
             "success": request.query_params.get("success"),
             "error": request.query_params.get("error"),
