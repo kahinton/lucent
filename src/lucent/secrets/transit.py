@@ -73,7 +73,7 @@ class TransitSecretProvider(SecretProvider):
             resp = await self._client.post(url, json={"plaintext": encoded})
         except httpx.HTTPError as exc:
             raise RuntimeError(
-                f"Transit encrypt request failed: {exc}"
+                f"Transit encrypt request failed: {type(exc).__name__}"
             ) from exc
         if resp.status_code != 200:
             raise RuntimeError(
@@ -91,7 +91,7 @@ class TransitSecretProvider(SecretProvider):
             resp = await self._client.post(url, json={"ciphertext": ciphertext})
         except httpx.HTTPError as exc:
             raise RuntimeError(
-                f"Transit decrypt request failed: {exc}"
+                f"Transit decrypt request failed: {type(exc).__name__}"
             ) from exc
         if resp.status_code != 200:
             raise RuntimeError(

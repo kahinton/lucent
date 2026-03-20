@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
 
 from lucent.access_control import AccessControlService
@@ -194,7 +194,12 @@ async def list_secrets(user: AuthenticatedUser, owner_group_id: str | None = Non
 
 @router.get("/{key}", response_model=SecretValueResponse)
 async def get_secret(key: str, user: AuthenticatedUser, owner_group_id: str | None = None):
-    """Get a secret value. Requires explicit authorization."""
+    """Get a secret value. Requires explicit authorization via web session only."""
+    if user.auth_method == "api_key":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Secret values cannot be accessed via API key. Use a web session.",
+        )
     scope = _user_scope(user, owner_group_id)
     await _check_secret_access(user, key, scope)
     provider = SecretRegistry.get()

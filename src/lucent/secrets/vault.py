@@ -56,7 +56,7 @@ class VaultSecretProvider(SecretProvider):
             resp = await self._client.get(url)
         except httpx.HTTPError as exc:
             raise RuntimeError(
-                f"Vault connection error reading secret '{key}': {exc}"
+                f"Vault connection error reading secret '{key}': {type(exc).__name__}"
             ) from exc
         if resp.status_code == 404:
             return None
@@ -76,7 +76,7 @@ class VaultSecretProvider(SecretProvider):
             resp = await self._client.post(url, json={"data": {"value": value}})
         except httpx.HTTPError as exc:
             raise RuntimeError(
-                f"Vault connection error writing secret '{key}': {exc}"
+                f"Vault connection error writing secret '{key}': {type(exc).__name__}"
             ) from exc
         if resp.status_code not in (200, 204):
             raise RuntimeError(
@@ -91,7 +91,7 @@ class VaultSecretProvider(SecretProvider):
             resp = await self._client.delete(url)
         except httpx.HTTPError as exc:
             raise RuntimeError(
-                f"Vault connection error deleting secret '{key}': {exc}"
+                f"Vault connection error deleting secret '{key}': {type(exc).__name__}"
             ) from exc
         if resp.status_code == 204:
             return True
@@ -109,7 +109,7 @@ class VaultSecretProvider(SecretProvider):
             resp = await self._client.request("LIST", url)
         except httpx.HTTPError as exc:
             raise RuntimeError(
-                f"Vault connection error listing keys: {exc}"
+                f"Vault connection error listing keys: {type(exc).__name__}"
             ) from exc
         if resp.status_code == 404:
             return []
