@@ -814,8 +814,8 @@ class TestTaskResultStorage:
 
         # Agent for t1 can read completed tasks to get prior results
         completed_tasks = await wf_repo.list_tasks(req_id, status="completed")
-        assert len(completed_tasks) == 1
-        assert completed_tasks[0]["result"] == '{"findings": ["issue1", "issue2"]}'
+        assert len(completed_tasks["items"]) == 1
+        assert completed_tasks["items"][0]["result"] == '{"findings": ["issue1", "issue2"]}'
 
     @pytest.mark.asyncio
     async def test_request_with_tasks_includes_results(self, wf_repo, wf_org):
@@ -926,7 +926,7 @@ class TestTaskEventAuditTrail:
         await wf_repo.complete_task(str(task["id"]), "done")
 
         events = await wf_repo.list_task_events(str(task["id"]))
-        event_types = [e["event_type"] for e in events]
+        event_types = [e["event_type"] for e in events["items"]]
         assert "created" in event_types
         assert "claimed" in event_types
         assert "running" in event_types
@@ -945,7 +945,7 @@ class TestTaskEventAuditTrail:
         await wf_repo.retry_task(str(task["id"]))
 
         events = await wf_repo.list_task_events(str(task["id"]))
-        event_types = [e["event_type"] for e in events]
+        event_types = [e["event_type"] for e in events["items"]]
         assert "released" in event_types
         assert "retried" in event_types
 
@@ -984,9 +984,9 @@ class TestTaskMemoryLinks:
         await wf_repo.link_memory(str(task["id"]), str(memory["id"]), "created")
         links = await wf_repo.list_task_memories(str(task["id"]))
 
-        assert len(links) == 1
-        assert str(links[0]["memory_id"]) == str(memory["id"])
-        assert links[0]["relation"] == "created"
+        assert len(links["items"]) == 1
+        assert str(links["items"][0]["memory_id"]) == str(memory["id"])
+        assert links["items"][0]["relation"] == "created"
 
     @pytest.mark.asyncio
     async def test_memory_links_appear_in_request_details(
