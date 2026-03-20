@@ -372,7 +372,13 @@ async def test_launch_sandbox(client, db_pool, web_user, web_prefix):
     )
     mock_manager = AsyncMock()
     mock_manager.create.return_value = {"id": str(uuid4()), "status": "running"}
-    with patch("lucent.sandbox.manager.get_sandbox_manager", return_value=mock_manager):
+    mock_provider = AsyncMock()
+    with (
+        patch("lucent.sandbox.manager.get_sandbox_manager", return_value=mock_manager),
+        patch("lucent.web.routes.sandboxes.SecretRegistry") as mock_registry,
+        patch("lucent.web.routes.sandboxes.resolve_env_vars", new_callable=AsyncMock, return_value={}),
+    ):
+        mock_registry.get.return_value = mock_provider
         resp = await client.post(
             "/sandboxes/launch",
             data=_csrf_data(client, {"template_id": str(tpl["id"])}),
@@ -396,7 +402,13 @@ async def test_launch_sandbox_with_custom_name(client, db_pool, web_user, web_pr
     )
     mock_manager = AsyncMock()
     mock_manager.create.return_value = {"id": str(uuid4()), "status": "running"}
-    with patch("lucent.sandbox.manager.get_sandbox_manager", return_value=mock_manager):
+    mock_provider = AsyncMock()
+    with (
+        patch("lucent.sandbox.manager.get_sandbox_manager", return_value=mock_manager),
+        patch("lucent.web.routes.sandboxes.SecretRegistry") as mock_registry,
+        patch("lucent.web.routes.sandboxes.resolve_env_vars", new_callable=AsyncMock, return_value={}),
+    ):
+        mock_registry.get.return_value = mock_provider
         resp = await client.post(
             "/sandboxes/launch",
             data=_csrf_data(
