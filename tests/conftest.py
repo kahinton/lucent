@@ -58,6 +58,22 @@ async def clean_test_data(db_pool):
             "(SELECT id FROM memories WHERE username LIKE $1)",
             f"{prefix}%",
         )
+        # Delete definitions owned/created by test users
+        for tbl in (
+            "agent_definitions",
+            "skill_definitions",
+        ):
+            await conn.execute(
+                f"DELETE FROM {tbl} WHERE created_by IN "
+                "(SELECT id FROM users WHERE external_id LIKE $1)",
+                f"{prefix}%",
+            )
+        # Delete user_groups for test users
+        await conn.execute(
+            "DELETE FROM user_groups WHERE user_id IN "
+            "(SELECT id FROM users WHERE external_id LIKE $1)",
+            f"{prefix}%",
+        )
         # Delete API keys
         await conn.execute(
             "DELETE FROM api_keys WHERE user_id IN "
