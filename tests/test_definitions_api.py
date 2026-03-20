@@ -13,10 +13,12 @@ from uuid import uuid4
 import httpx
 import pytest_asyncio
 from httpx import ASGITransport
+from datetime import datetime, timezone
 
 from lucent.api.app import create_app
 from lucent.api.deps import CurrentUser, get_current_user
 from lucent.db import OrganizationRepository, UserRepository
+from lucent.services.mcp_discovery import MCPDiscoveryError
 
 # ============================================================================
 # Fixtures
@@ -457,6 +459,99 @@ class TestMCPServerCRUD:
         resp = await client.post(f"/api/definitions/mcp-servers/{server_id}/reject")
         assert resp.status_code == 200
         assert resp.json()["status"] == "rejected"
+
+    async def test_discover_mcp_tools_uses_cache(self, client, def_prefix, monkeypatch):
+        create_resp = await client.post(
+            "/api/definitions/mcp-servers",
+            json={
+                "name": f"{def_prefix}tools_cached",
+                "description": "Discover tools",
+                "server_type": "http",
+                "url": "http://localhost:8766/mcp",
+            },
+        )
+        server_id = create_resp.json()["id"]
+
+        async def fake_get_tools_cached(server_id_arg, org_id_arg, db_pool, max_age_seconds=60):
+            assert str(server_id_arg) == str(server_id)
+            assert max_age_seconds == 60
+            return ([{"name": "search_memories", "description": "d", "input_schema": {}}], True)
+
+        async def fake_get_discovered_tools(self, server_id_arg, org_id_arg):
+            return {"discovered_tools": [], "tools_discovered_at": datetime.now(timezone.utc)}
+
+        monkeypatch.setattr("lucent.api.routers.definitions.get_tools_cached", fake_get_tools_cached)
+        monkeypatch.setattr(
+            "lucent.api.routers.definitions.DefinitionRepository.get_discovered_tools",
+            fake_get_discovered_tools,
+        )
+
+        resp = await client.get(f"/api/definitions/mcp-servers/{server_id}/tools")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["from_cache"] is True
+        assert data["error"] is None
+        assert len(data["tools"]) == 1
+        assert data["tools"][0]["name"] == "search_memories"
+        assert data["discovered_at"] is not None
+
+    async def test_discover_mcp_tools_refresh_bypasses_cache(self, client, def_prefix, monkeypatch):
+        create_resp = await client.post(
+            "/api/definitions/mcp-servers",
+            json={
+                "name": f"{def_prefix}tools_refresh",
+                "description": "Discover tools",
+                "server_type": "http",
+                "url": "http://localhost:8766/mcp",
+            },
+        )
+        server_id = create_resp.json()["id"]
+
+        async def fake_discover_mcp_tools(server_config, db_pool):
+            assert str(server_config["id"]) == str(server_id)
+            return [{"name": "create_memory", "description": "d", "input_schema": {}}]
+
+        async def fake_get_discovered_tools(self, server_id_arg, org_id_arg):
+            return {"discovered_tools": [], "tools_discovered_at": datetime.now(timezone.utc)}
+
+        monkeypatch.setattr("lucent.api.routers.definitions.discover_mcp_tools", fake_discover_mcp_tools)
+        monkeypatch.setattr(
+            "lucent.api.routers.definitions.DefinitionRepository.get_discovered_tools",
+            fake_get_discovered_tools,
+        )
+
+        resp = await client.get(f"/api/definitions/mcp-servers/{server_id}/tools?refresh=true")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["from_cache"] is False
+        assert data["error"] is None
+        assert len(data["tools"]) == 1
+        assert data["tools"][0]["name"] == "create_memory"
+
+    async def test_discover_mcp_tools_connection_failure_returns_200(
+        self, client, def_prefix, monkeypatch
+    ):
+        create_resp = await client.post(
+            "/api/definitions/mcp-servers",
+            json={
+                "name": f"{def_prefix}tools_error",
+                "description": "Discover tools",
+                "server_type": "http",
+                "url": "http://localhost:8766/mcp",
+            },
+        )
+        server_id = create_resp.json()["id"]
+
+        async def fake_get_tools_cached(server_id_arg, org_id_arg, db_pool, max_age_seconds=60):
+            raise MCPDiscoveryError("boom")
+
+        monkeypatch.setattr("lucent.api.routers.definitions.get_tools_cached", fake_get_tools_cached)
+
+        resp = await client.get(f"/api/definitions/mcp-servers/{server_id}/tools")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["tools"] == []
+        assert data["error"] == "Connection failed: boom"
 
 
 # ============================================================================

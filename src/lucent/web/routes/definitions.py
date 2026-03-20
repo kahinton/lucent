@@ -4,11 +4,13 @@ from math import ceil
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from lucent.db import get_pool
 from lucent.logging import get_logger
 from lucent.rbac import Role
+
+from lucent.auth_providers import CSRF_COOKIE_NAME
 
 from ._shared import _check_csrf, _parse_env_vars, get_user_context, templates
 
@@ -243,10 +245,11 @@ async def agent_detail_page(request: Request, agent_id: str):
             "owner_groups": user_groups,
             "all_skills": all_skills,
             "all_mcp": all_mcp,
-            "assigned_skills": assigned_skills,
-            "assigned_mcp": assigned_mcp,
-            "assigned_skill_ids": assigned_skill_ids,
-            "assigned_mcp_ids": assigned_mcp_ids,
+            "skills": assigned_skills,
+            "mcp_servers": assigned_mcp,
+            "granted_skill_ids": assigned_skill_ids,
+            "granted_mcp_ids": assigned_mcp_ids,
+            "csrf_token": request.cookies.get(CSRF_COOKIE_NAME, ""),
         },
     )
 
@@ -280,6 +283,7 @@ async def skill_detail_page(request: Request, skill_id: str):
             "definition": skill,
             "definition_type": "skill",
             "owner_groups": user_groups,
+            "csrf_token": request.cookies.get(CSRF_COOKIE_NAME, ""),
         },
     )
 
@@ -313,8 +317,54 @@ async def mcp_server_detail_page(request: Request, server_id: str):
             "definition": server,
             "definition_type": "mcp-server",
             "owner_groups": user_groups,
+            "csrf_token": request.cookies.get(CSRF_COOKIE_NAME, ""),
         },
     )
+
+
+@router.get("/definitions/mcp-servers/{server_id}/discover-tools")
+async def discover_tools_ajax(request: Request, server_id: str, refresh: bool = False):
+    """AJAX endpoint: discover tools available on an MCP server."""
+    user = await get_user_context(request)
+    pool = await get_pool()
+    from lucent.db.audit import AuditRepository
+    from lucent.db.definitions import DefinitionRepository
+    from lucent.services.mcp_discovery import MCPDiscoveryError, discover_mcp_tools, get_tools_cached
+
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    org_id = str(user.organization_id)
+    role_value = user.role if isinstance(user.role, str) else user.role.value
+
+    server = await repo.get_mcp_server(
+        server_id, org_id, requester_user_id=str(user.id), requester_role=role_value
+    )
+    if not server:
+        return JSONResponse({"tools": [], "from_cache": False, "discovered_at": None, "error": "MCP server not found"}, status_code=404)
+
+    try:
+        if refresh:
+            tools = await discover_mcp_tools(server, pool)
+            from_cache = False
+        else:
+            tools, from_cache = await get_tools_cached(server_id, org_id, pool)
+    except MCPDiscoveryError as exc:
+        cached = await repo.get_discovered_tools(server_id, org_id)
+        discovered_at = cached.get("tools_discovered_at") if cached else None
+        return JSONResponse({
+            "tools": [],
+            "from_cache": False,
+            "discovered_at": discovered_at.isoformat() if discovered_at else None,
+            "error": f"Connection failed: {exc}",
+        })
+
+    cached = await repo.get_discovered_tools(server_id, org_id)
+    discovered_at = cached.get("tools_discovered_at") if cached else None
+    return JSONResponse({
+        "tools": tools,
+        "from_cache": from_cache,
+        "discovered_at": discovered_at.isoformat() if discovered_at else None,
+        "error": None,
+    })
 
 
 @router.post("/definitions/agents/{agent_id}/approve")

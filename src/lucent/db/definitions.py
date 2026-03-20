@@ -826,6 +826,73 @@ class DefinitionRepository:
             )
         return deleted
 
+    # ── Tool Discovery Cache ─────────────────────────────────────────────
+
+    async def save_discovered_tools(
+        self,
+        server_id: str,
+        tools_list: list[dict],
+        org_id: str,
+    ) -> dict | None:
+        """Cache discovered tools for an MCP server."""
+        query = """
+            UPDATE mcp_server_configs
+            SET discovered_tools = $1, tools_discovered_at = NOW(), updated_at = NOW()
+            WHERE id = $2 AND organization_id = $3
+            RETURNING *
+        """
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                query,
+                json.dumps(tools_list),
+                server_id,
+                org_id,
+            )
+        result = dict(row) if row else None
+        if result:
+            await self._audit(
+                DEFINITION_UPDATE, org_id, "mcp_server", server_id,
+                context={"updated_fields": ["discovered_tools", "tools_discovered_at"],
+                         "tool_count": len(tools_list)},
+                notes=f"Saved {len(tools_list)} discovered tools for MCP server '{server_id}'",
+            )
+        return result
+
+    async def get_discovered_tools(
+        self,
+        server_id: str,
+        org_id: str,
+    ) -> dict | None:
+        """Return cached tools and discovery timestamp for TTL checks."""
+        query = """
+            SELECT discovered_tools, tools_discovered_at
+            FROM mcp_server_configs
+            WHERE id = $1 AND organization_id = $2
+        """
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(query, server_id, org_id)
+        if row is None:
+            return None
+        return {
+            "discovered_tools": json.loads(row["discovered_tools"]) if row["discovered_tools"] else None,
+            "tools_discovered_at": row["tools_discovered_at"],
+        }
+
+    async def clear_discovered_tools(
+        self,
+        server_id: str,
+        org_id: str,
+    ) -> bool:
+        """Clear the cached tools for an MCP server."""
+        query = """
+            UPDATE mcp_server_configs
+            SET discovered_tools = NULL, tools_discovered_at = NULL, updated_at = NOW()
+            WHERE id = $1 AND organization_id = $2
+        """
+        async with self.pool.acquire() as conn:
+            result = await conn.execute(query, server_id, org_id)
+        return result == "UPDATE 1"
+
     # ── Access Control Queries ───────────────────────────────────────────
 
     async def list_agents_accessible_by(

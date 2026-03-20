@@ -13,6 +13,11 @@ from lucent.access_control import AccessControlService
 from lucent.api.deps import AdminUser, AuthenticatedUser
 from lucent.db import DefinitionRepository, get_pool
 from lucent.db.audit import AuditRepository
+from lucent.services.mcp_discovery import (
+    MCPDiscoveryError,
+    discover_mcp_tools,
+    get_tools_cached,
+)
 
 router = APIRouter(prefix="/definitions", tags=["definitions"])
 
@@ -374,6 +379,50 @@ async def reject_mcp_server(server_id: str, user: AdminUser):
     if not result:
         raise HTTPException(404, "MCP server not found or not in proposed status")
     return result
+
+
+@router.get("/mcp-servers/{server_id}/tools")
+async def discover_mcp_server_tools(
+    server_id: str,
+    user: AuthenticatedUser,
+    refresh: bool = False,
+):
+    pool = await get_pool()
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    org_id = str(user.organization_id)
+    server = await repo.get_mcp_server(
+        server_id,
+        org_id,
+        requester_user_id=str(user.id),
+        requester_role=user.role.value,
+    )
+    if not server:
+        raise HTTPException(404, "MCP server not found")
+
+    try:
+        if refresh:
+            tools = await discover_mcp_tools(server, pool)
+            from_cache = False
+        else:
+            tools, from_cache = await get_tools_cached(server_id, org_id, pool)
+    except MCPDiscoveryError as exc:
+        cached = await repo.get_discovered_tools(server_id, org_id)
+        discovered_at = cached.get("tools_discovered_at") if cached else None
+        return {
+            "tools": [],
+            "from_cache": False,
+            "discovered_at": discovered_at.isoformat() if discovered_at else None,
+            "error": f"Connection failed: {exc}",
+        }
+
+    cached = await repo.get_discovered_tools(server_id, org_id)
+    discovered_at = cached.get("tools_discovered_at") if cached else None
+    return {
+        "tools": tools,
+        "from_cache": from_cache,
+        "discovered_at": discovered_at.isoformat() if discovered_at else None,
+        "error": None,
+    }
 
 
 # ── Pending Proposals ─────────────────────────────────────────────────────
