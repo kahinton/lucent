@@ -2654,21 +2654,42 @@ class LucentDaemon:
             await asyncio.sleep(60)  # check every minute
 
     # Maximum time to wait for in-flight sessions during graceful drain (seconds)
-    DRAIN_TIMEOUT = 300  # 5 minutes
+    DRAIN_TIMEOUT = SESSION_TOTAL_TIMEOUT + 60  # session timeout + buffer
 
     async def _reload_watcher(self):
         """Periodically check for source file changes and trigger graceful reload.
 
         On change detection, enters drain mode (like K8s graceful termination):
-          1. Sets draining=True — prevents new sessions from starting
-          2. Waits for all active sessions to complete (up to DRAIN_TIMEOUT)
-          3. Then restarts the process with os.execv
+          1. If sessions are active, defer the reload — update the snapshot
+             and log the deferral. Re-check on the next cycle.
+          2. When no sessions are active and files have changed, sets
+             draining=True to prevent new sessions from starting.
+          3. Waits briefly for any in-flight work, then restarts with os.execv.
+
+        This prevents the daemon from killing its own sub-agent sessions when
+        those sessions edit watched source files (e.g. daemon.py).
         """
+        _pending_reload = False
         while self.running:
             try:
                 if self._should_reload():
-                    await self._graceful_restart()
-                    return
+                    _pending_reload = True
+                    # Snapshot current mtimes so we don't re-trigger on the same change
+                    self._source_mtimes = self._snapshot_source_files()
+
+                if _pending_reload:
+                    if self.active_sessions:
+                        log(
+                            f"Reload deferred — {len(self.active_sessions)} session(s) active. "
+                            "Will restart when sessions complete.",
+                            "DEBUG",
+                        )
+                    else:
+                        # Re-check if files actually differ from what's running
+                        # (the change may have been reverted or was a no-op)
+                        log("No active sessions — proceeding with deferred reload")
+                        await self._graceful_restart()
+                        return
             except asyncio.CancelledError:
                 break
             except Exception as e:
