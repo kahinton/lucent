@@ -8,6 +8,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from lucent.auth_providers import CSRF_COOKIE_NAME
 from lucent.db import get_pool
 from lucent.logging import get_logger
+from lucent.secrets import SecretRegistry, resolve_env_vars
 
 from ._shared import _check_csrf, _parse_env_vars, get_user_context, templates
 
@@ -58,16 +59,29 @@ async def sandboxes_page(
     from lucent.db.sandbox_template import SandboxTemplateRepository
 
     tpl_repo = SandboxTemplateRepository(pool)
+    role_value = user.role if isinstance(user.role, str) else user.role.value
     total_count = 0
     try:
         if org_id:
             if active_tab == "templates":
-                tpl_result = await tpl_repo.list_all(org_id, limit=per_page, offset=offset)
+                tpl_result = await tpl_repo.list_accessible_by(
+                    str(user.id),
+                    org_id,
+                    limit=per_page,
+                    offset=offset,
+                    user_role=role_value,
+                )
                 template_list = tpl_result["items"]
                 total_count = tpl_result["total_count"]
             else:
                 # For instances tab, load all templates (for launch modal + name enrichment)
-                tpl_result = await tpl_repo.list_all(org_id, limit=1000, offset=0)
+                tpl_result = await tpl_repo.list_accessible_by(
+                    str(user.id),
+                    org_id,
+                    limit=1000,
+                    offset=0,
+                    user_role=role_value,
+                )
                 template_list = tpl_result["items"]
         else:
             template_list = []
@@ -171,7 +185,13 @@ async def edit_template_page(request: Request, template_id: str):
     from lucent.db.sandbox_template import SandboxTemplateRepository
 
     repo = SandboxTemplateRepository(pool)
-    tpl = await repo.get(template_id, str(user.organization_id))
+    role_value = user.role if isinstance(user.role, str) else user.role.value
+    tpl = await repo.get_accessible(
+        template_id,
+        str(user.organization_id),
+        str(user.id),
+        user_role=role_value,
+    )
     if not tpl:
         raise HTTPException(404, "Template not found")
 
@@ -263,17 +283,25 @@ async def launch_sandbox_web(
     from lucent.sandbox.models import SandboxConfig
 
     tpl_repo = SandboxTemplateRepository(pool)
-    tpl = await tpl_repo.get(template_id, str(user.organization_id))
+    role_value = user.role if isinstance(user.role, str) else user.role.value
+    tpl = await tpl_repo.get_accessible(
+        template_id,
+        str(user.organization_id),
+        str(user.id),
+        user_role=role_value,
+    )
     if not tpl:
         raise HTTPException(404, "Template not found")
 
+    provider = SecretRegistry.get()
+    resolved_env_vars = await resolve_env_vars(tpl.get("env_vars") or {}, provider)
     config = SandboxConfig(
         name=name.strip() or f"{tpl['name']}-instance",
         image=tpl["image"],
         repo_url=tpl.get("repo_url"),
         branch=tpl.get("branch"),
         setup_commands=tpl.get("setup_commands") or [],
-        env_vars=tpl.get("env_vars") or {},
+        env_vars=resolved_env_vars,
         working_dir=tpl.get("working_dir", "/workspace"),
         memory_limit=tpl.get("memory_limit", "2g"),
         cpu_limit=float(tpl.get("cpu_limit", 2.0)),

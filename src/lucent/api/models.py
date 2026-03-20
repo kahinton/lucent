@@ -246,6 +246,54 @@ class UserListResponse(BaseModel):
 
 
 # =============================================================================
+# Group Models
+# =============================================================================
+
+
+class GroupCreate(BaseModel):
+    """Request model for creating a group."""
+
+    name: str = Field(..., min_length=1, max_length=128)
+    description: str | None = None
+
+
+class GroupUpdate(BaseModel):
+    """Request model for updating a group."""
+
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    description: str | None = None
+
+
+class GroupResponse(BaseModel):
+    """Response model for a group."""
+
+    id: UUID
+    name: str
+    description: str | None
+    org_id: UUID
+    member_count: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class GroupMemberAdd(BaseModel):
+    """Request model for adding a member to a group."""
+
+    user_id: UUID
+    role: str = Field(default="member", pattern=r"^(member|admin)$")
+
+
+class GroupMemberResponse(BaseModel):
+    """Response model for a group member."""
+
+    user_id: UUID
+    display_name: str | None
+    email: str | None
+    role: str
+    joined_at: datetime
+
+
+# =============================================================================
 # Organization Models
 # =============================================================================
 

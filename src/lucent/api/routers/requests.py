@@ -179,7 +179,12 @@ async def create_task(
     # Validate that agent_type or agent_definition_id resolves to an approved definition
     def_repo = DefinitionRepository(pool)
     if body.agent_definition_id:
-        agent_def = await def_repo.get_agent(body.agent_definition_id, org_id)
+        agent_def = await def_repo.get_agent(
+            body.agent_definition_id,
+            org_id,
+            requester_user_id=str(user.id),
+            requester_role=user.role.value,
+        )
         if not agent_def or agent_def.get("status") != "active":
             raise HTTPException(
                 422,
@@ -187,7 +192,14 @@ async def create_task(
                 f"Approve it at /definitions before assigning tasks.",
             )
     elif body.agent_type:
-        agents = (await def_repo.list_agents(org_id, status="active"))["items"]
+        agents = (
+            await def_repo.list_agents(
+                org_id,
+                status="active",
+                requester_user_id=str(user.id),
+                requester_role=user.role.value,
+            )
+        )["items"]
         if not any(a["name"] == body.agent_type for a in agents):
             raise HTTPException(
                 422,
@@ -208,6 +220,7 @@ async def create_task(
         model=body.model,
         sandbox_template_id=body.sandbox_template_id,
         sandbox_config=body.sandbox_config,
+        requesting_user_id=str(req["created_by"]) if req.get("created_by") else None,
     )
 
 
@@ -287,7 +300,10 @@ async def complete_task(
     repo = RequestRepository(pool)
     task = await repo.complete_task(str(task_id), body.result, org_id=str(user.organization_id))
     if not task:
-        raise HTTPException(409, "Task not found or not in a transitionable state (must be claimed/running)")
+        raise HTTPException(
+            409,
+            "Task not found or not in a transitionable state (must be claimed/running)",
+        )
     return task
 
 
@@ -307,7 +323,10 @@ async def fail_task(
     repo = RequestRepository(pool)
     task = await repo.fail_task(str(task_id), body.error, org_id=str(user.organization_id))
     if not task:
-        raise HTTPException(409, "Task not found or not in a transitionable state (must be claimed/running)")
+        raise HTTPException(
+            409,
+            "Task not found or not in a transitionable state (must be claimed/running)",
+        )
     return task
 
 

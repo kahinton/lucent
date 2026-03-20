@@ -383,27 +383,27 @@ class TestGetSchedule:
 class TestListSchedules:
     @pytest.mark.asyncio
     async def test_list_basic(self, repo, schedule, test_organization):
-        results = await repo.list_schedules(str(test_organization["id"]))
-        assert any(s["id"] == schedule["id"] for s in results)
+        result = await repo.list_schedules(str(test_organization["id"]))
+        assert any(s["id"] == schedule["id"] for s in result["items"])
 
     @pytest.mark.asyncio
     async def test_list_filter_status(self, repo, schedule, test_organization):
         org = str(test_organization["id"])
-        results = await repo.list_schedules(org, status="active")
-        assert any(s["id"] == schedule["id"] for s in results)
+        result = await repo.list_schedules(org, status="active")
+        assert any(s["id"] == schedule["id"] for s in result["items"])
 
-        results = await repo.list_schedules(org, status="completed")
-        assert not any(s["id"] == schedule["id"] for s in results)
+        result = await repo.list_schedules(org, status="completed")
+        assert not any(s["id"] == schedule["id"] for s in result["items"])
 
     @pytest.mark.asyncio
     async def test_list_filter_enabled(self, repo, schedule, test_organization):
         org = str(test_organization["id"])
-        results = await repo.list_schedules(org, enabled=True)
-        assert any(s["id"] == schedule["id"] for s in results)
+        result = await repo.list_schedules(org, enabled=True)
+        assert any(s["id"] == schedule["id"] for s in result["items"])
 
         await repo.toggle_schedule(str(schedule["id"]), org, False)
-        results = await repo.list_schedules(org, enabled=True)
-        assert not any(s["id"] == schedule["id"] for s in results)
+        result = await repo.list_schedules(org, enabled=True)
+        assert not any(s["id"] == schedule["id"] for s in result["items"])
 
     @pytest.mark.asyncio
     async def test_list_limit(self, repo, test_organization):
@@ -414,8 +414,8 @@ class TestListSchedules:
                 org_id=org,
                 schedule_type="once",
             )
-        results = await repo.list_schedules(org, limit=3)
-        assert len(results) == 3
+        result = await repo.list_schedules(org, limit=3)
+        assert len(result["items"]) == 3
 
     @pytest.mark.asyncio
     async def test_list_combined_filters(self, repo, test_organization):
@@ -427,12 +427,12 @@ class TestListSchedules:
             schedule_type="interval",
             interval_seconds=60,
         )
-        results = await repo.list_schedules(org, status="active", enabled=True)
-        assert any(r["id"] == s["id"] for r in results)
+        result = await repo.list_schedules(org, status="active", enabled=True)
+        assert any(r["id"] == s["id"] for r in result["items"])
 
         await repo.toggle_schedule(str(s["id"]), org, False)
-        results = await repo.list_schedules(org, status="active", enabled=True)
-        assert not any(r["id"] == s["id"] for r in results)
+        result = await repo.list_schedules(org, status="active", enabled=True)
+        assert not any(r["id"] == s["id"] for r in result["items"])
 
     @pytest.mark.asyncio
     async def test_list_empty_org(self, repo, db_pool, clean_test_data):
@@ -441,8 +441,8 @@ class TestListSchedules:
 
         prefix = clean_test_data
         empty_org = await OrganizationRepository(db_pool).create(name=f"{prefix}empty_org")
-        results = await repo.list_schedules(str(empty_org["id"]))
-        assert results == []
+        result = await repo.list_schedules(str(empty_org["id"]))
+        assert result["items"] == []
 
 
 class TestUpdateSchedule:
@@ -955,8 +955,8 @@ class TestListRuns:
         await repo.mark_schedule_run(str(s["id"]))
         await _make_due(db_pool, s["id"])
         await repo.mark_schedule_run(str(s["id"]))
-        runs = await repo.list_runs(str(s["id"]))
-        assert len(runs) == 2
+        result = await repo.list_runs(str(s["id"]))
+        assert len(result["items"]) == 2
 
     @pytest.mark.asyncio
     async def test_list_runs_limit(self, repo, test_organization, db_pool):
@@ -970,8 +970,8 @@ class TestListRuns:
         for _ in range(5):
             await _make_due(db_pool, s["id"])
             await repo.mark_schedule_run(str(s["id"]))
-        runs = await repo.list_runs(str(s["id"]), limit=3)
-        assert len(runs) == 3
+        result = await repo.list_runs(str(s["id"]), limit=3)
+        assert len(result["items"]) == 3
 
 
 class TestGetScheduleWithRuns:
@@ -1266,8 +1266,8 @@ class TestCrossOrgScheduleIsolation:
         """list_schedules only returns schedules for the requested org."""
         own_list = await repo.list_schedules(str(test_organization["id"]))
         other_list = await repo.list_schedules(str(other_org["id"]))
-        own_ids = [str(s["id"]) for s in own_list]
-        other_ids = [str(s["id"]) for s in other_list]
+        own_ids = [str(s["id"]) for s in own_list["items"]]
+        other_ids = [str(s["id"]) for s in other_list["items"]]
         assert str(schedule["id"]) in own_ids
         assert str(schedule["id"]) not in other_ids
 

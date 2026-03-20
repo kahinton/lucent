@@ -32,6 +32,10 @@ class DefinitionRepository:
         self.pool = pool
         self.audit_repo = audit_repo
 
+    @staticmethod
+    def _role_value(role: str | None) -> str:
+        return role or "member"
+
     async def _audit(
         self,
         event_type: str,
@@ -66,12 +70,31 @@ class DefinitionRepository:
 
     # ── Agents ────────────────────────────────────────────────────────────
 
-    async def list_agents(self, org_id: str, status: str | None = None, limit: int = 25, offset: int = 0) -> dict:
+    async def list_agents(
+        self,
+        org_id: str,
+        status: str | None = None,
+        limit: int = 25,
+        offset: int = 0,
+        requester_user_id: str | None = None,
+        requester_role: str | None = None,
+    ) -> dict:
         base = """
             FROM agent_definitions
             WHERE organization_id = $1
         """
         params: list[Any] = [org_id]
+        if requester_user_id:
+            params.extend([requester_user_id, self._role_value(requester_role)])
+            uid_idx = len(params) - 1
+            role_idx = len(params)
+            base += (
+                f" AND (scope = 'built-in' OR owner_user_id = ${uid_idx} "
+                "OR owner_group_id IN ("
+                f"SELECT group_id FROM user_groups WHERE user_id = ${uid_idx}"
+                ") "
+                f"OR ${role_idx} IN ('admin', 'owner'))"
+            )
         if status:
             params.append(status)
             base += f" AND status = ${len(params)}"
@@ -80,6 +103,7 @@ class DefinitionRepository:
         query = f"""
             SELECT id, name, description, status, scope,
                    created_by, approved_by, approved_at,
+                   owner_user_id, owner_group_id,
                    created_at, updated_at
             {base} ORDER BY name LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}
         """
@@ -97,7 +121,22 @@ class DefinitionRepository:
             "has_more": offset + len(rows) < total_count,
         }
 
-    async def get_agent(self, agent_id: str, org_id: str) -> dict | None:
+    async def get_agent(
+        self,
+        agent_id: str,
+        org_id: str,
+        requester_user_id: str | None = None,
+        requester_role: str | None = None,
+    ) -> dict | None:
+        acl_sql = ""
+        params: list[Any] = [agent_id, org_id]
+        if requester_user_id:
+            params.extend([requester_user_id, self._role_value(requester_role)])
+            acl_sql = (
+                " AND (a.scope = 'built-in' OR a.owner_user_id = $3 "
+                "OR a.owner_group_id IN (SELECT group_id FROM user_groups WHERE user_id = $3) "
+                "OR $4 IN ('admin', 'owner'))"
+            )
         query = """
             SELECT a.*,
                 array_agg(DISTINCT s.name) FILTER (WHERE s.name IS NOT NULL) as skill_names,
@@ -108,10 +147,11 @@ class DefinitionRepository:
             LEFT JOIN agent_mcp_servers agm ON a.id = agm.agent_id
             LEFT JOIN mcp_server_configs m ON agm.mcp_server_id = m.id
             WHERE a.id = $1 AND a.organization_id = $2
+        """ + acl_sql + """
             GROUP BY a.id
         """
         async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(query, agent_id, org_id)
+            row = await conn.fetchrow(query, *params)
         return dict(row) if row else None
 
     async def create_agent(
@@ -122,15 +162,23 @@ class DefinitionRepository:
         org_id: str,
         created_by: str,
         status: str = "proposed",
+        owner_user_id: str | None = None,
+        owner_group_id: str | None = None,
     ) -> dict:
+        # Default owner to creator when no explicit ownership is provided
+        if owner_user_id is None and owner_group_id is None:
+            owner_user_id = created_by
         query = """
             INSERT INTO agent_definitions (name, description, content, status,
-                created_by, organization_id)
-            VALUES ($1, $2, $3, $4, $5, $6)
+                created_by, organization_id, owner_user_id, owner_group_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             RETURNING *
         """
         async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(query, name, description, content, status, created_by, org_id)
+            row = await conn.fetchrow(
+                query, name, description, content, status, created_by, org_id,
+                owner_user_id, owner_group_id,
+            )
         result = dict(row)
         await self._audit(
             DEFINITION_CREATE, org_id, "agent", str(result["id"]),
@@ -141,7 +189,7 @@ class DefinitionRepository:
     async def update_agent(self, agent_id: str, org_id: str, **kwargs) -> dict | None:
         sets = []
         params: list[Any] = []
-        for key in ("name", "description", "content", "status"):
+        for key in ("name", "description", "content", "status", "owner_user_id", "owner_group_id"):
             if key in kwargs:
                 params.append(kwargs[key])
                 sets.append(f"{key} = ${len(params)}")
@@ -164,7 +212,8 @@ class DefinitionRepository:
                 DEFINITION_UPDATE, org_id, "agent", agent_id,
                 context={
                     "updated_fields": [
-                        k for k in ("name", "description", "content", "status")
+                        k for k in ("name", "description", "content", "status",
+                                     "owner_user_id", "owner_group_id")
                         if k in kwargs
                     ],
                 },
@@ -223,12 +272,31 @@ class DefinitionRepository:
 
     # ── Skills ────────────────────────────────────────────────────────────
 
-    async def list_skills(self, org_id: str, status: str | None = None, limit: int = 25, offset: int = 0) -> dict:
+    async def list_skills(
+        self,
+        org_id: str,
+        status: str | None = None,
+        limit: int = 25,
+        offset: int = 0,
+        requester_user_id: str | None = None,
+        requester_role: str | None = None,
+    ) -> dict:
         base = """
             FROM skill_definitions
             WHERE organization_id = $1
         """
         params: list[Any] = [org_id]
+        if requester_user_id:
+            params.extend([requester_user_id, self._role_value(requester_role)])
+            uid_idx = len(params) - 1
+            role_idx = len(params)
+            base += (
+                f" AND (scope = 'built-in' OR owner_user_id = ${uid_idx} "
+                "OR owner_group_id IN ("
+                f"SELECT group_id FROM user_groups WHERE user_id = ${uid_idx}"
+                ") "
+                f"OR ${role_idx} IN ('admin', 'owner'))"
+            )
         if status:
             params.append(status)
             base += f" AND status = ${len(params)}"
@@ -237,6 +305,7 @@ class DefinitionRepository:
         query = f"""
             SELECT id, name, description, status, scope,
                    created_by, approved_by, approved_at,
+                   owner_user_id, owner_group_id,
                    created_at, updated_at
             {base} ORDER BY name LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}
         """
@@ -254,12 +323,26 @@ class DefinitionRepository:
             "has_more": offset + len(rows) < total_count,
         }
 
-    async def get_skill(self, skill_id: str, org_id: str) -> dict | None:
+    async def get_skill(
+        self,
+        skill_id: str,
+        org_id: str,
+        requester_user_id: str | None = None,
+        requester_role: str | None = None,
+    ) -> dict | None:
+        acl_sql = ""
+        params: list[Any] = [skill_id, org_id]
+        if requester_user_id:
+            params.extend([requester_user_id, self._role_value(requester_role)])
+            acl_sql = (
+                " AND (scope = 'built-in' OR owner_user_id = $3 "
+                "OR owner_group_id IN (SELECT group_id FROM user_groups WHERE user_id = $3) "
+                "OR $4 IN ('admin', 'owner'))"
+            )
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT * FROM skill_definitions WHERE id = $1 AND organization_id = $2",
-                skill_id,
-                org_id,
+                "SELECT * FROM skill_definitions WHERE id = $1 AND organization_id = $2" + acl_sql,
+                *params,
             )
         return dict(row) if row else None
 
@@ -271,15 +354,23 @@ class DefinitionRepository:
         org_id: str,
         created_by: str,
         status: str = "proposed",
+        owner_user_id: str | None = None,
+        owner_group_id: str | None = None,
     ) -> dict:
+        # Default owner to creator when no explicit ownership is provided
+        if owner_user_id is None and owner_group_id is None:
+            owner_user_id = created_by
         query = """
             INSERT INTO skill_definitions (name, description, content, status,
-                created_by, organization_id)
-            VALUES ($1, $2, $3, $4, $5, $6)
+                created_by, organization_id, owner_user_id, owner_group_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             RETURNING *
         """
         async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(query, name, description, content, status, created_by, org_id)
+            row = await conn.fetchrow(
+                query, name, description, content, status, created_by, org_id,
+                owner_user_id, owner_group_id,
+            )
         result = dict(row)
         await self._audit(
             DEFINITION_CREATE, org_id, "skill", str(result["id"]),
@@ -338,12 +429,31 @@ class DefinitionRepository:
 
     # ── MCP Servers ───────────────────────────────────────────────────────
 
-    async def list_mcp_servers(self, org_id: str, status: str | None = None, limit: int = 25, offset: int = 0) -> dict:
+    async def list_mcp_servers(
+        self,
+        org_id: str,
+        status: str | None = None,
+        limit: int = 25,
+        offset: int = 0,
+        requester_user_id: str | None = None,
+        requester_role: str | None = None,
+    ) -> dict:
         base = """
             FROM mcp_server_configs
             WHERE organization_id = $1
         """
         params: list[Any] = [org_id]
+        if requester_user_id:
+            params.extend([requester_user_id, self._role_value(requester_role)])
+            uid_idx = len(params) - 1
+            role_idx = len(params)
+            base += (
+                f" AND (scope = 'built-in' OR owner_user_id = ${uid_idx} "
+                "OR owner_group_id IN ("
+                f"SELECT group_id FROM user_groups WHERE user_id = ${uid_idx}"
+                ") "
+                f"OR ${role_idx} IN ('admin', 'owner'))"
+            )
         if status:
             params.append(status)
             base += f" AND status = ${len(params)}"
@@ -352,6 +462,7 @@ class DefinitionRepository:
         query = f"""
             SELECT id, name, description, server_type, url, status, scope,
                    created_by, approved_by, approved_at,
+                   owner_user_id, owner_group_id,
                    created_at, updated_at
             {base} ORDER BY name LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}
         """
@@ -369,12 +480,26 @@ class DefinitionRepository:
             "has_more": offset + len(rows) < total_count,
         }
 
-    async def get_mcp_server(self, server_id: str, org_id: str) -> dict | None:
+    async def get_mcp_server(
+        self,
+        server_id: str,
+        org_id: str,
+        requester_user_id: str | None = None,
+        requester_role: str | None = None,
+    ) -> dict | None:
+        acl_sql = ""
+        params: list[Any] = [server_id, org_id]
+        if requester_user_id:
+            params.extend([requester_user_id, self._role_value(requester_role)])
+            acl_sql = (
+                " AND (scope = 'built-in' OR owner_user_id = $3 "
+                "OR owner_group_id IN (SELECT group_id FROM user_groups WHERE user_id = $3) "
+                "OR $4 IN ('admin', 'owner'))"
+            )
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT * FROM mcp_server_configs WHERE id = $1 AND organization_id = $2",
-                server_id,
-                org_id,
+                "SELECT * FROM mcp_server_configs WHERE id = $1 AND organization_id = $2" + acl_sql,
+                *params,
             )
         return dict(row) if row else None
 
@@ -391,11 +516,17 @@ class DefinitionRepository:
         args: list | None = None,
         env_vars: dict | None = None,
         status: str = "proposed",
+        owner_user_id: str | None = None,
+        owner_group_id: str | None = None,
     ) -> dict:
+        # Default owner to creator when no explicit ownership is provided
+        if owner_user_id is None and owner_group_id is None:
+            owner_user_id = created_by
         query = """
             INSERT INTO mcp_server_configs (name, description, server_type, url,
-                command, args, headers, env_vars, status, created_by, organization_id)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                command, args, headers, env_vars, status, created_by, organization_id,
+                owner_user_id, owner_group_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             RETURNING *
         """
         async with self.pool.acquire() as conn:
@@ -412,6 +543,8 @@ class DefinitionRepository:
                 status,
                 created_by,
                 org_id,
+                owner_user_id,
+                owner_group_id,
             )
         result = dict(row)
         await self._audit(
@@ -607,7 +740,7 @@ class DefinitionRepository:
     async def update_skill(self, skill_id: str, org_id: str, **kwargs) -> dict | None:
         sets = []
         params: list[Any] = []
-        for key in ("name", "description", "content", "status"):
+        for key in ("name", "description", "content", "status", "owner_user_id", "owner_group_id"):
             if key in kwargs:
                 params.append(kwargs[key])
                 sets.append(f"{key} = ${len(params)}")
@@ -630,7 +763,8 @@ class DefinitionRepository:
                 DEFINITION_UPDATE, org_id, "skill", skill_id,
                 context={
                     "updated_fields": [
-                        k for k in ("name", "description", "content", "status")
+                        k for k in ("name", "description", "content", "status",
+                                     "owner_user_id", "owner_group_id")
                         if k in kwargs
                     ],
                 },
@@ -641,7 +775,8 @@ class DefinitionRepository:
     async def update_mcp_server(self, server_id: str, org_id: str, **kwargs) -> dict | None:
         sets = []
         params: list[Any] = []
-        for key in ("name", "description", "server_type", "url", "command"):
+        for key in ("name", "description", "server_type", "url", "command",
+                     "owner_user_id", "owner_group_id"):
             if key in kwargs:
                 params.append(kwargs[key])
                 sets.append(f"{key} = ${len(params)}")
@@ -667,6 +802,7 @@ class DefinitionRepository:
             all_keys = (
                 "name", "description", "server_type", "url",
                 "command", "headers", "args", "env_vars",
+                "owner_user_id", "owner_group_id",
             )
             await self._audit(
                 DEFINITION_UPDATE, org_id, "mcp_server", server_id,
@@ -689,6 +825,128 @@ class DefinitionRepository:
                 notes=f"Deleted MCP server '{server_id}'",
             )
         return deleted
+
+    # ── Access Control Queries ───────────────────────────────────────────
+
+    async def list_agents_accessible_by(
+        self, user_id: str, org_id: str,
+        status: str | None = "active",
+        limit: int = 100,
+        offset: int = 0,
+        requester_role: str | None = None,
+    ) -> dict:
+        """List agents accessible to a user: owned, group-owned, or built-in."""
+        role = self._role_value(requester_role)
+        base = """
+            FROM agent_definitions
+            WHERE organization_id = $1
+            AND (
+                scope = 'built-in'
+                OR owner_user_id = $2
+                OR owner_group_id IN (SELECT group_id FROM user_groups WHERE user_id = $2)
+                OR $3 IN ('admin', 'owner')
+            )
+        """
+        params: list[Any] = [org_id, user_id, role]
+        if status:
+            params.append(status)
+            base += f" AND status = ${len(params)}"
+
+        count_query = f"SELECT COUNT(*) AS total {base}"
+        query = f"SELECT * {base} ORDER BY name LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}"
+        params_with_page = [*params, limit, offset]
+
+        async with self.pool.acquire() as conn:
+            count_row = await conn.fetchrow(count_query, *params)
+            total_count = count_row["total"] if count_row else 0
+            rows = await conn.fetch(query, *params_with_page)
+        return {
+            "items": [dict(r) for r in rows],
+            "total_count": total_count,
+            "offset": offset,
+            "limit": limit,
+            "has_more": offset + len(rows) < total_count,
+        }
+
+    async def list_skills_accessible_by(
+        self, user_id: str, org_id: str,
+        status: str | None = "active",
+        limit: int = 100,
+        offset: int = 0,
+        requester_role: str | None = None,
+    ) -> dict:
+        """List skills accessible to a user: owned, group-owned, or built-in."""
+        role = self._role_value(requester_role)
+        base = """
+            FROM skill_definitions
+            WHERE organization_id = $1
+            AND (
+                scope = 'built-in'
+                OR owner_user_id = $2
+                OR owner_group_id IN (SELECT group_id FROM user_groups WHERE user_id = $2)
+                OR $3 IN ('admin', 'owner')
+            )
+        """
+        params: list[Any] = [org_id, user_id, role]
+        if status:
+            params.append(status)
+            base += f" AND status = ${len(params)}"
+
+        count_query = f"SELECT COUNT(*) AS total {base}"
+        query = f"SELECT * {base} ORDER BY name LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}"
+        params_with_page = [*params, limit, offset]
+
+        async with self.pool.acquire() as conn:
+            count_row = await conn.fetchrow(count_query, *params)
+            total_count = count_row["total"] if count_row else 0
+            rows = await conn.fetch(query, *params_with_page)
+        return {
+            "items": [dict(r) for r in rows],
+            "total_count": total_count,
+            "offset": offset,
+            "limit": limit,
+            "has_more": offset + len(rows) < total_count,
+        }
+
+    async def list_mcp_servers_accessible_by(
+        self, user_id: str, org_id: str,
+        status: str | None = "active",
+        limit: int = 100,
+        offset: int = 0,
+        requester_role: str | None = None,
+    ) -> dict:
+        """List MCP servers accessible to a user: owned, group-owned, or built-in."""
+        role = self._role_value(requester_role)
+        base = """
+            FROM mcp_server_configs
+            WHERE organization_id = $1
+            AND (
+                scope = 'built-in'
+                OR owner_user_id = $2
+                OR owner_group_id IN (SELECT group_id FROM user_groups WHERE user_id = $2)
+                OR $3 IN ('admin', 'owner')
+            )
+        """
+        params: list[Any] = [org_id, user_id, role]
+        if status:
+            params.append(status)
+            base += f" AND status = ${len(params)}"
+
+        count_query = f"SELECT COUNT(*) AS total {base}"
+        query = f"SELECT * {base} ORDER BY name LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}"
+        params_with_page = [*params, limit, offset]
+
+        async with self.pool.acquire() as conn:
+            count_row = await conn.fetchrow(count_query, *params)
+            total_count = count_row["total"] if count_row else 0
+            rows = await conn.fetch(query, *params_with_page)
+        return {
+            "items": [dict(r) for r in rows],
+            "total_count": total_count,
+            "offset": offset,
+            "limit": limit,
+            "has_more": offset + len(rows) < total_count,
+        }
 
     # ── Bulk/convenience ──────────────────────────────────────────────────
 
@@ -720,7 +978,13 @@ class DefinitionRepository:
         agent_dict["mcp_servers"] = await self.get_agent_mcp_servers(str(agent["id"]))
         return agent_dict
 
-    async def list_agents_with_grants(self, org_id: str, status: str | None = None, limit: int = 25, offset: int = 0) -> dict:
+    async def list_agents_with_grants(
+        self,
+        org_id: str,
+        status: str | None = None,
+        limit: int = 25,
+        offset: int = 0,
+    ) -> dict:
         """List agents with their granted skills and MCP servers."""
         result = await self.list_agents(org_id, status=status, limit=limit, offset=offset)
         for agent in result["items"]:

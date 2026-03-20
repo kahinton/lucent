@@ -229,7 +229,9 @@ class TestListSchedules:
     @pytest.mark.asyncio
     async def test_empty_list(self, mcp, auth_user):
         result = await _call(mcp, "list_schedules")
-        assert isinstance(result, list)
+        assert isinstance(result, dict)
+        assert result["items"] == []
+        assert result["total_count"] == 0
 
     @pytest.mark.asyncio
     async def test_returns_schedules(self, mcp, auth_user, schedule_repo, test_organization):
@@ -239,9 +241,10 @@ class TestListSchedules:
             schedule_type="once",
         )
         result = await _call(mcp, "list_schedules")
-        assert isinstance(result, list)
-        assert len(result) >= 1
-        titles = [s["title"] for s in result]
+        assert isinstance(result, dict)
+        items = result["items"]
+        assert len(items) >= 1
+        titles = [s["title"] for s in items]
         assert "Listed Schedule" in titles
 
     @pytest.mark.asyncio
@@ -252,7 +255,8 @@ class TestListSchedules:
             schedule_type="once",
         )
         result = await _call(mcp, "list_schedules", {"status": "active"})
-        assert isinstance(result, list)
+        assert isinstance(result, dict)
+        assert isinstance(result["items"], list)
 
     @pytest.mark.asyncio
     async def test_enabled_only(self, mcp, auth_user, schedule_repo, test_organization):
@@ -262,7 +266,8 @@ class TestListSchedules:
             schedule_type="once",
         )
         result = await _call(mcp, "list_schedules", {"enabled_only": True})
-        assert isinstance(result, list)
+        assert isinstance(result, dict)
+        assert isinstance(result["items"], list)
 
     @pytest.mark.asyncio
     async def test_no_auth(self, mcp, test_user):

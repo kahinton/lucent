@@ -217,8 +217,12 @@ Returns:
             # Validate and normalize metadata for the memory type
             validated_metadata = validate_metadata(memory_type, metadata)
 
-            # Use authenticated user's name if username not provided
-            effective_username = username or _get_current_username() or "unknown"
+            # Always derive username from authenticated user — never trust
+            # caller-supplied username to prevent display-name spoofing
+            # (anti-spoofing: V1/V2). The username parameter is accepted
+            # for backward compatibility but ignored when authenticated.
+            auth_username = _get_current_username()
+            effective_username = auth_username or username or "unknown"
 
             logger.info("create_memory: type=%s, user=%s, tags=%s", type, effective_username, tags)
 
@@ -1435,6 +1439,13 @@ Returns:
             if user_id is None:
                 return _error_response("Authentication required")
 
+            # Anti-spoofing V3: verify task belongs to caller's org before claiming
+            task_memory = await repo.get_accessible(uuid_id, user_id, org_id)
+            if task_memory is None:
+                return _error_response(
+                    f"Could not claim task {memory_id}: not found or not accessible."
+                )
+
             result = await repo.claim_task(
                 memory_id=uuid_id,
                 instance_id=instance_id,
@@ -1497,6 +1508,13 @@ Returns:
             user_id, org_id, _ = await _get_current_user_context()
             if user_id is None:
                 return _error_response("Authentication required")
+
+            # Anti-spoofing V3: verify task belongs to caller's org before releasing
+            task_memory = await repo.get_accessible(uuid_id, user_id, org_id)
+            if task_memory is None:
+                return _error_response(
+                    f"Could not release task {memory_id}: not found or not accessible."
+                )
 
             result = await repo.release_claim(
                 memory_id=uuid_id,

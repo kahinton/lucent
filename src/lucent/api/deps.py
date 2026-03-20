@@ -5,6 +5,7 @@ from uuid import UUID
 
 from fastapi import Depends, Header, HTTPException, status
 
+from lucent.access_control import AccessControlService
 from lucent.auth import (
     set_current_user,
 )
@@ -235,6 +236,12 @@ def require_scope_dep(scope: str):
         return user
 
     return check_scope
+
+
+async def get_access_control() -> AccessControlService:
+    """Get access control service for resource ACL checks."""
+    pool = await get_pool()
+    return AccessControlService(pool)
 
 
 # Type alias for dependency injection

@@ -95,8 +95,9 @@ async def create_memory(
             detail=str(e),
         )
 
-    # Use authenticated user's info if username not provided
-    username = data.username or user.display_name or user.email or str(user.id)
+    # Always derive username from authenticated user — never trust client-supplied
+    # username to prevent display-name spoofing (anti-spoofing: V1/V2)
+    username = user.display_name or user.email or str(user.id)
 
     # Detect daemon caller for auto-sharing and auto-tagging
     is_daemon = user.external_id == "daemon-service"

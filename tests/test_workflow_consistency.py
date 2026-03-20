@@ -176,8 +176,8 @@ async def _create_task(wf_repo, org_id, request_id, title="Task"):
 async def _create_active_agent_definition(db_pool, org_id, name="code"):
     async with db_pool.acquire() as conn:
         await conn.execute(
-            """INSERT INTO agent_definitions (name, organization_id, content, status)
-               VALUES ($1, $2, $3, 'active')
+            """INSERT INTO agent_definitions (name, organization_id, content, status, scope)
+               VALUES ($1, $2, $3, 'active', 'built-in')
                ON CONFLICT (name, organization_id) DO UPDATE SET status = 'active'""",
             name,
             org_id,
@@ -708,7 +708,7 @@ class TestSequenceOrderGating:
 
         # Only t0 should appear in pending since t1 is gated
         pending = await wf_repo.list_pending_tasks(org)
-        pending_ids = {str(t["id"]) for t in pending}
+        pending_ids = {str(t["id"]) for t in pending["items"]}
         assert str(t0["id"]) in pending_ids
         assert str(t1["id"]) not in pending_ids
 
@@ -717,7 +717,7 @@ class TestSequenceOrderGating:
         await wf_repo.complete_task(str(t0["id"]), "done")
 
         pending_after = await wf_repo.list_pending_tasks(org)
-        pending_ids_after = {str(t["id"]) for t in pending_after}
+        pending_ids_after = {str(t["id"]) for t in pending_after["items"]}
         assert str(t1["id"]) in pending_ids_after
 
     @pytest.mark.asyncio
@@ -736,7 +736,7 @@ class TestSequenceOrderGating:
         )
 
         pending = await wf_repo.list_pending_tasks(org)
-        pending_ids = {str(t["id"]) for t in pending}
+        pending_ids = {str(t["id"]) for t in pending["items"]}
         assert str(ta["id"]) in pending_ids
         assert str(tb["id"]) in pending_ids
 
@@ -762,7 +762,7 @@ class TestSequenceOrderGating:
         await wf_repo.fail_task(str(t0["id"]), "crash")
 
         pending = await wf_repo.list_pending_tasks(org)
-        pending_ids = {str(t["id"]) for t in pending}
+        pending_ids = {str(t["id"]) for t in pending["items"]}
         assert str(t1["id"]) in pending_ids
 
 

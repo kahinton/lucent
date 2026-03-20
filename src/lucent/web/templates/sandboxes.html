@@ -22,9 +22,9 @@
         <a href="/sandboxes?tab=instances" class="px-4 py-2.5 text-sm font-medium border-b-2 transition-colors {% if tab == 'instances' %}-mb-px border-primary-600 text-primary-600{% else %}border-transparent text-gray-500 hover:text-gray-700{% endif %}">Instances</a>
     </div>
 
+    {% from "partials/pagination.html" import pagination_controls %}
     {% if tab == 'templates' %}
     <!-- ═══════════════ TEMPLATES VIEW ═══════════════ -->
-    {% from "partials/pagination.html" import pagination_controls %}
     {{ pagination_controls(base_url="/sandboxes", page=page, per_page=per_page, total_pages=total_pages, total_count=total_count, filter_params={"tab": "templates"}, entity_name="templates") }}
     {% if templates %}
     <div class="grid gap-4 grid-cols-1 md:grid-cols-2 lg:grid-cols-3">

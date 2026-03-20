@@ -51,6 +51,7 @@ async def definitions_page(
 
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     org_id = str(user.organization_id)
+    role_value = user.role if isinstance(user.role, str) else user.role.value
 
     page = max(1, page)
     per_page = per_page if per_page in ALLOWED_PER_PAGE else 25
@@ -58,13 +59,25 @@ async def definitions_page(
 
     # Only paginate the active tab; load others without pagination for counts
     agents_result = await repo.list_agents(
-        org_id, limit=per_page if tab == "agents" else 1000, offset=offset if tab == "agents" else 0
+        org_id,
+        limit=per_page if tab == "agents" else 1000,
+        offset=offset if tab == "agents" else 0,
+        requester_user_id=str(user.id),
+        requester_role=role_value,
     )
     skills_result = await repo.list_skills(
-        org_id, limit=per_page if tab == "skills" else 1000, offset=offset if tab == "skills" else 0
+        org_id,
+        limit=per_page if tab == "skills" else 1000,
+        offset=offset if tab == "skills" else 0,
+        requester_user_id=str(user.id),
+        requester_role=role_value,
     )
     mcp_result = await repo.list_mcp_servers(
-        org_id, limit=per_page if tab == "mcp" else 1000, offset=offset if tab == "mcp" else 0
+        org_id,
+        limit=per_page if tab == "mcp" else 1000,
+        offset=offset if tab == "mcp" else 0,
+        requester_user_id=str(user.id),
+        requester_role=role_value,
     )
 
     # Determine total_count and total_pages based on active tab
@@ -111,13 +124,30 @@ async def agent_detail_page(request: Request, agent_id: str):
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     org_id = str(user.organization_id)
 
-    agent = await repo.get_agent(agent_id, org_id)
+    role_value = user.role if isinstance(user.role, str) else user.role.value
+    agent = await repo.get_agent(
+        agent_id, org_id, requester_user_id=str(user.id), requester_role=role_value
+    )
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
 
     # Get all skills and MCP servers for the assignment dropdowns
-    all_skills = (await repo.list_skills(org_id, status="active"))["items"]
-    all_mcp = (await repo.list_mcp_servers(org_id, status="active"))["items"]
+    all_skills = (
+        await repo.list_skills(
+            org_id,
+            status="active",
+            requester_user_id=str(user.id),
+            requester_role=role_value,
+        )
+    )["items"]
+    all_mcp = (
+        await repo.list_mcp_servers(
+            org_id,
+            status="active",
+            requester_user_id=str(user.id),
+            requester_role=role_value,
+        )
+    )["items"]
     assigned_skills = await repo.get_agent_skills(agent_id)
     assigned_mcp = await repo.get_agent_mcp_servers(agent_id)
 
@@ -153,7 +183,10 @@ async def skill_detail_page(request: Request, skill_id: str):
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     org_id = str(user.organization_id)
 
-    skill = await repo.get_skill(skill_id, org_id)
+    role_value = user.role if isinstance(user.role, str) else user.role.value
+    skill = await repo.get_skill(
+        skill_id, org_id, requester_user_id=str(user.id), requester_role=role_value
+    )
     if not skill:
         raise HTTPException(status_code=404, detail="Skill not found")
 
@@ -179,7 +212,10 @@ async def mcp_server_detail_page(request: Request, server_id: str):
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     org_id = str(user.organization_id)
 
-    server = await repo.get_mcp_server(server_id, org_id)
+    role_value = user.role if isinstance(user.role, str) else user.role.value
+    server = await repo.get_mcp_server(
+        server_id, org_id, requester_user_id=str(user.id), requester_role=role_value
+    )
     if not server:
         raise HTTPException(status_code=404, detail="MCP server not found")
 
@@ -304,6 +340,7 @@ async def create_agent_web(request: Request):
         description=str(form.get("description", "")).strip(),
         content=str(form.get("definition", "")).strip(),
         created_by=str(user.id),
+        owner_user_id=str(user.id),
     )
     return RedirectResponse(url=f"/definitions/agents/{agent['id']}", status_code=303)
 
@@ -367,6 +404,7 @@ async def create_skill_web(request: Request):
         description=str(form.get("description", "")).strip(),
         content=str(form.get("definition", "")).strip(),
         created_by=str(user.id),
+        owner_user_id=str(user.id),
     )
     return RedirectResponse(url=f"/definitions/skills/{skill['id']}", status_code=303)
 
@@ -439,6 +477,7 @@ async def create_mcp_web(request: Request):
         command=command,
         args=args,
         env_vars=env_vars,
+        owner_user_id=str(user.id),
     )
     return RedirectResponse(url=f"/definitions/mcp-servers/{server['id']}", status_code=303)
 

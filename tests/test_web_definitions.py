@@ -326,7 +326,8 @@ class TestAgentCreate:
             ),
         )
         repo = DefinitionRepository(db_pool)
-        agents = await repo.list_agents(str(org["id"]))
+        result = await repo.list_agents(str(org["id"]))
+        agents = result["items"] if isinstance(result, dict) else result
         names = [a["name"] for a in agents]
         assert "Persisted Agent" in names
 
@@ -593,7 +594,8 @@ class TestMcpCreate:
             ),
         )
         repo = DefinitionRepository(db_pool)
-        servers = await repo.list_mcp_servers(str(org["id"]))
+        result = await repo.list_mcp_servers(str(org["id"]))
+        servers = result["items"] if isinstance(result, dict) else result
         found = [s for s in servers if s["name"] == "MCP With Headers"]
         assert len(found) == 1
 

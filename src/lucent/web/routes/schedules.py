@@ -98,7 +98,15 @@ async def schedule_detail(
     page = min(page, run_total_pages)
 
     def_repo = DefinitionRepository(pool)
-    active_agents = (await def_repo.list_agents(org_id, status="active"))["items"]
+    role_value = user.role if isinstance(user.role, str) else user.role.value
+    active_agents = (
+        await def_repo.list_agents(
+            org_id,
+            status="active",
+            requester_user_id=str(user.id),
+            requester_role=role_value,
+        )
+    )["items"]
 
     # Resolve sandbox template name if linked
     sandbox_template = None
@@ -106,8 +114,11 @@ async def schedule_detail(
         from lucent.db.sandbox_template import SandboxTemplateRepository
 
         tmpl_repo = SandboxTemplateRepository(pool)
-        sandbox_template = await tmpl_repo.get(
-            str(sched["sandbox_template_id"]), org_id
+        sandbox_template = await tmpl_repo.get_accessible(
+            str(sched["sandbox_template_id"]),
+            org_id,
+            str(user.id),
+            user_role=role_value,
         )
 
     return templates.TemplateResponse(

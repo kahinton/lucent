@@ -157,6 +157,7 @@ async def _create_test_agent(def_repo, org_id, user_id, name="AuditAgent"):
         content="# Agent",
         org_id=str(org_id),
         created_by=str(user_id),
+        owner_user_id=str(user_id),
     )
 
 
@@ -167,6 +168,7 @@ async def _create_test_skill(def_repo, org_id, user_id, name="AuditSkill"):
         content="# Skill",
         org_id=str(org_id),
         created_by=str(user_id),
+        owner_user_id=str(user_id),
     )
 
 
@@ -178,6 +180,7 @@ async def _create_test_mcp(def_repo, org_id, user_id, name="AuditMCP"):
         url="http://localhost:1234",
         org_id=str(org_id),
         created_by=str(user_id),
+        owner_user_id=str(user_id),
     )
 
 

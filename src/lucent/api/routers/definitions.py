@@ -9,6 +9,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from lucent.access_control import AccessControlService
 from lucent.api.deps import AdminUser, AuthenticatedUser
 from lucent.db import DefinitionRepository, get_pool
 from lucent.db.audit import AuditRepository
@@ -39,6 +40,18 @@ class CreateMCPServer(BaseModel):
     command: str | None = None
     args: list[str] | None = None
     headers: dict | None = None
+    env_vars: dict[str, str] | None = None
+
+
+class UpdateMCPServer(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    server_type: str | None = None
+    url: str | None = None
+    command: str | None = None
+    args: list[str] | None = None
+    headers: dict | None = None
+    env_vars: dict[str, str] | None = None
 
 
 class GrantAccess(BaseModel):
@@ -55,7 +68,12 @@ async def list_agents(
 ):
     pool = await get_pool()
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
-    return await repo.list_agents(str(user.organization_id), status=status)
+    return await repo.list_agents(
+        str(user.organization_id),
+        status=status,
+        requester_user_id=str(user.id),
+        requester_role=user.role.value,
+    )
 
 
 @router.post("/agents", status_code=201)
@@ -68,6 +86,7 @@ async def create_agent(body: CreateAgent, user: AuthenticatedUser):
         content=body.content,
         org_id=str(user.organization_id),
         created_by=str(user.id),
+        owner_user_id=str(user.id),
     )
 
 
@@ -75,7 +94,12 @@ async def create_agent(body: CreateAgent, user: AuthenticatedUser):
 async def get_agent(agent_id: str, user: AuthenticatedUser):
     pool = await get_pool()
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
-    agent = await repo.get_agent(agent_id, str(user.organization_id))
+    agent = await repo.get_agent(
+        agent_id,
+        str(user.organization_id),
+        requester_user_id=str(user.id),
+        requester_role=user.role.value,
+    )
     if not agent:
         raise HTTPException(404, "Agent not found")
     return agent
@@ -84,6 +108,9 @@ async def get_agent(agent_id: str, user: AuthenticatedUser):
 @router.patch("/agents/{agent_id}")
 async def update_agent(agent_id: str, body: CreateAgent, user: AuthenticatedUser):
     pool = await get_pool()
+    acl = AccessControlService(pool)
+    if not await acl.can_modify(str(user.id), "agent", agent_id, str(user.organization_id)):
+        raise HTTPException(404, "Agent not found")
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     result = await repo.update_agent(
         agent_id,
@@ -118,8 +145,11 @@ async def reject_agent(agent_id: str, user: AdminUser):
 
 
 @router.delete("/agents/{agent_id}", status_code=204)
-async def delete_agent(agent_id: str, user: AdminUser):
+async def delete_agent(agent_id: str, user: AuthenticatedUser):
     pool = await get_pool()
+    acl = AccessControlService(pool)
+    if not await acl.can_modify(str(user.id), "agent", agent_id, str(user.organization_id)):
+        raise HTTPException(404, "Agent not found")
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     if not await repo.delete_agent(agent_id, str(user.organization_id)):
         raise HTTPException(404, "Agent not found")
@@ -133,9 +163,13 @@ async def grant_skill_to_agent(agent_id: str, body: GrantAccess, user: Authentic
     pool = await get_pool()
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     org_id = str(user.organization_id)
-    if not await repo.get_agent(agent_id, org_id):
+    if not await repo.get_agent(
+        agent_id, org_id, requester_user_id=str(user.id), requester_role=user.role.value
+    ):
         raise HTTPException(404, "Agent not found")
-    if not await repo.get_skill(body.target_id, org_id):
+    if not await repo.get_skill(
+        body.target_id, org_id, requester_user_id=str(user.id), requester_role=user.role.value
+    ):
         raise HTTPException(404, "Skill not found")
     if not await repo.grant_skill(agent_id, body.target_id, org_id=org_id, user_id=str(user.id)):
         raise HTTPException(400, "Failed to grant skill")
@@ -146,7 +180,12 @@ async def grant_skill_to_agent(agent_id: str, body: GrantAccess, user: Authentic
 async def revoke_skill_from_agent(agent_id: str, skill_id: str, user: AuthenticatedUser):
     pool = await get_pool()
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
-    if not await repo.get_agent(agent_id, str(user.organization_id)):
+    if not await repo.get_agent(
+        agent_id,
+        str(user.organization_id),
+        requester_user_id=str(user.id),
+        requester_role=user.role.value,
+    ):
         raise HTTPException(404, "Agent not found")
     await repo.revoke_skill(
         agent_id, skill_id,
@@ -160,7 +199,9 @@ async def grant_mcp_to_agent(agent_id: str, body: GrantAccess, user: Authenticat
     pool = await get_pool()
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     org_id = str(user.organization_id)
-    if not await repo.get_agent(agent_id, org_id):
+    if not await repo.get_agent(
+        agent_id, org_id, requester_user_id=str(user.id), requester_role=user.role.value
+    ):
         raise HTTPException(404, "Agent not found")
     if not await repo.grant_mcp_server(
         agent_id, body.target_id, org_id=org_id, user_id=str(user.id),
@@ -173,7 +214,12 @@ async def grant_mcp_to_agent(agent_id: str, body: GrantAccess, user: Authenticat
 async def revoke_mcp_from_agent(agent_id: str, server_id: str, user: AuthenticatedUser):
     pool = await get_pool()
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
-    if not await repo.get_agent(agent_id, str(user.organization_id)):
+    if not await repo.get_agent(
+        agent_id,
+        str(user.organization_id),
+        requester_user_id=str(user.id),
+        requester_role=user.role.value,
+    ):
         raise HTTPException(404, "Agent not found")
     await repo.revoke_mcp_server(
         agent_id, server_id,
@@ -192,7 +238,12 @@ async def list_skills(
 ):
     pool = await get_pool()
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
-    return await repo.list_skills(str(user.organization_id), status=status)
+    return await repo.list_skills(
+        str(user.organization_id),
+        status=status,
+        requester_user_id=str(user.id),
+        requester_role=user.role.value,
+    )
 
 
 @router.post("/skills", status_code=201)
@@ -205,6 +256,7 @@ async def create_skill(body: CreateSkill, user: AuthenticatedUser):
         content=body.content,
         org_id=str(user.organization_id),
         created_by=str(user.id),
+        owner_user_id=str(user.id),
     )
 
 
@@ -212,7 +264,12 @@ async def create_skill(body: CreateSkill, user: AuthenticatedUser):
 async def get_skill(skill_id: str, user: AuthenticatedUser):
     pool = await get_pool()
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
-    skill = await repo.get_skill(skill_id, str(user.organization_id))
+    skill = await repo.get_skill(
+        skill_id,
+        str(user.organization_id),
+        requester_user_id=str(user.id),
+        requester_role=user.role.value,
+    )
     if not skill:
         raise HTTPException(404, "Skill not found")
     return skill
@@ -239,8 +296,11 @@ async def reject_skill(skill_id: str, user: AdminUser):
 
 
 @router.delete("/skills/{skill_id}", status_code=204)
-async def delete_skill(skill_id: str, user: AdminUser):
+async def delete_skill(skill_id: str, user: AuthenticatedUser):
     pool = await get_pool()
+    acl = AccessControlService(pool)
+    if not await acl.can_modify(str(user.id), "skill", skill_id, str(user.organization_id)):
+        raise HTTPException(404, "Skill not found")
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     if not await repo.delete_skill(skill_id, str(user.organization_id)):
         raise HTTPException(404, "Skill not found")
@@ -255,7 +315,12 @@ async def list_mcp_servers(
 ):
     pool = await get_pool()
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
-    return await repo.list_mcp_servers(str(user.organization_id), status=status)
+    return await repo.list_mcp_servers(
+        str(user.organization_id),
+        status=status,
+        requester_user_id=str(user.id),
+        requester_role=user.role.value,
+    )
 
 
 @router.post("/mcp-servers", status_code=201)
@@ -272,6 +337,8 @@ async def create_mcp_server(body: CreateMCPServer, user: AuthenticatedUser):
         headers=body.headers,
         command=body.command,
         args=body.args,
+        env_vars=body.env_vars,
+        owner_user_id=str(user.id),
     )
 
 
@@ -282,6 +349,20 @@ async def approve_mcp_server(server_id: str, user: AdminUser):
     result = await repo.approve_mcp_server(server_id, str(user.organization_id), str(user.id))
     if not result:
         raise HTTPException(404, "MCP server not found or not in proposed status")
+    return result
+
+
+@router.patch("/mcp-servers/{server_id}")
+async def update_mcp_server(server_id: str, body: UpdateMCPServer, user: AuthenticatedUser):
+    pool = await get_pool()
+    acl = AccessControlService(pool)
+    if not await acl.can_modify(str(user.id), "mcp_server", server_id, str(user.organization_id)):
+        raise HTTPException(404, "MCP server not found")
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    updates = body.model_dump(exclude_none=True)
+    result = await repo.update_mcp_server(server_id, str(user.organization_id), **updates)
+    if not result:
+        raise HTTPException(404, "MCP server not found")
     return result
 
 

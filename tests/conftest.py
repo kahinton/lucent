@@ -12,6 +12,9 @@ TEST_DATABASE_URL = os.environ.get(
 os.environ["DATABASE_URL"] = TEST_DATABASE_URL
 # Disable effective rate limiting during tests
 os.environ.setdefault("LUCENT_RATE_LIMIT_PER_MINUTE", "999999")
+# Ensure secret provider can initialize in tests
+os.environ.setdefault("LUCENT_SECRET_KEY", "test-secret-key-for-testing-only")
+os.environ.setdefault("LUCENT_SECRET_PROVIDER", "builtin")
 
 
 @pytest_asyncio.fixture(scope="function")

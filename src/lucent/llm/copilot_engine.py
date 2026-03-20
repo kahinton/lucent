@@ -7,6 +7,7 @@ This is the default engine and preserves all existing behavior.
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any, Callable
 
 from lucent.llm.engine import LLMEngine, SessionEvent, SessionEventType
@@ -114,9 +115,15 @@ class CopilotEngine(LLMEngine):
         prompt: str,
         mcp_config: dict | None = None,
         on_event: Callable[[SessionEvent], None] | None = None,
-        timeout: int = 600,
+        timeout: int = 3600,
+        idle_timeout: int = 300,
     ) -> str | None:
-        """Run a streaming session using send + event callbacks (daemon pattern)."""
+        """Run a streaming session using send + event callbacks (daemon pattern).
+
+        Uses activity-based timeout: the session stays alive as long as events
+        keep arriving. Only times out after `idle_timeout` seconds of silence.
+        The hard `timeout` is a safety net for runaway sessions.
+        """
         if not _ensure_sdk():
             raise RuntimeError(
                 "Copilot engine requires the github-copilot-sdk package. "
@@ -139,9 +146,13 @@ class CopilotEngine(LLMEngine):
 
             response_parts: list[str] = []
             done = asyncio.Event()
+            last_activity = time.monotonic()
 
             def _on_sdk_event(event: Any) -> None:
                 """Translate Copilot SDK events to normalized SessionEvents."""
+                nonlocal last_activity
+                last_activity = time.monotonic()
+
                 etype = event.type.value if hasattr(event.type, "value") else str(event.type)
 
                 if etype == "assistant.message":
@@ -195,10 +206,42 @@ class CopilotEngine(LLMEngine):
             session.on(_on_sdk_event)
             await session.send({"prompt": prompt})
 
-            try:
-                await asyncio.wait_for(done.wait(), timeout=timeout)
-            except asyncio.TimeoutError:
-                logger.warning("Copilot streaming session timed out after %ds", timeout)
+            # Activity-based timeout loop: keep waiting as long as events arrive
+            start_time = time.monotonic()
+            while not done.is_set():
+                elapsed = time.monotonic() - start_time
+                if elapsed >= timeout:
+                    logger.warning(
+                        "Copilot streaming session hit hard timeout after %ds", int(elapsed)
+                    )
+                    break
+
+                idle_elapsed = time.monotonic() - last_activity
+                wait_time = min(idle_timeout - idle_elapsed, timeout - elapsed, 10.0)
+                if wait_time <= 0:
+                    logger.warning(
+                        "Copilot streaming session idle timeout after %ds of inactivity "
+                        "(total elapsed: %ds)",
+                        idle_timeout,
+                        int(elapsed),
+                    )
+                    break
+
+                try:
+                    await asyncio.wait_for(done.wait(), timeout=max(wait_time, 0.1))
+                except asyncio.TimeoutError:
+                    # Check if we got activity during the wait
+                    idle_elapsed = time.monotonic() - last_activity
+                    if idle_elapsed >= idle_timeout:
+                        logger.warning(
+                            "Copilot streaming session idle timeout after %ds of inactivity "
+                            "(total elapsed: %ds)",
+                            idle_timeout,
+                            int(time.monotonic() - start_time),
+                        )
+                        break
+                    # Activity happened — keep going
+                    continue
 
             # Cleanup session
             try:

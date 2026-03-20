@@ -117,12 +117,13 @@ class TestCreateTask:
         # Need an active agent definition for validation
         async with db_pool.acquire() as conn:
             await conn.execute(
-                """INSERT INTO agent_definitions (name, organization_id, content, status)
-                   VALUES ($1, $2, $3, 'active')
-                   ON CONFLICT (name, organization_id) DO UPDATE SET status = 'active'""",
+                """INSERT INTO agent_definitions (name, organization_id, content, status, owner_user_id)
+                   VALUES ($1, $2, $3, 'active', $4)
+                   ON CONFLICT (name, organization_id) DO UPDATE SET status = 'active', owner_user_id = EXCLUDED.owner_user_id""",
                 "code",
                 auth_user["organization_id"],
                 "test definition",
+                auth_user["id"],
             )
 
         result = await _call(
@@ -154,12 +155,13 @@ class TestCreateTask:
         """Known model from hardcoded registry is accepted in strict mode."""
         async with db_pool.acquire() as conn:
             await conn.execute(
-                """INSERT INTO agent_definitions (name, organization_id, content, status)
-                   VALUES ($1, $2, $3, 'active')
-                   ON CONFLICT (name, organization_id) DO UPDATE SET status = 'active'""",
+                """INSERT INTO agent_definitions (name, organization_id, content, status, owner_user_id)
+                   VALUES ($1, $2, $3, 'active', $4)
+                   ON CONFLICT (name, organization_id) DO UPDATE SET status = 'active', owner_user_id = EXCLUDED.owner_user_id""",
                 "code",
                 auth_user["organization_id"],
                 "test definition",
+                auth_user["id"],
             )
         result = await _call(
             mcp,
@@ -179,12 +181,13 @@ class TestCreateTask:
         """Unknown model ID is rejected with helpful error message."""
         async with db_pool.acquire() as conn:
             await conn.execute(
-                """INSERT INTO agent_definitions (name, organization_id, content, status)
-                   VALUES ($1, $2, $3, 'active')
-                   ON CONFLICT (name, organization_id) DO UPDATE SET status = 'active'""",
+                """INSERT INTO agent_definitions (name, organization_id, content, status, owner_user_id)
+                   VALUES ($1, $2, $3, 'active', $4)
+                   ON CONFLICT (name, organization_id) DO UPDATE SET status = 'active', owner_user_id = EXCLUDED.owner_user_id""",
                 "code",
                 auth_user["organization_id"],
                 "test definition",
+                auth_user["id"],
             )
         result = await _call(
             mcp,
@@ -225,12 +228,13 @@ class TestCreateTask:
     async def test_sequence_order_zero_accepted(self, mcp, auth_user, request_id, db_pool):
         async with db_pool.acquire() as conn:
             await conn.execute(
-                """INSERT INTO agent_definitions (name, organization_id, content, status)
-                   VALUES ($1, $2, $3, 'active')
-                   ON CONFLICT (name, organization_id) DO UPDATE SET status = 'active'""",
+                """INSERT INTO agent_definitions (name, organization_id, content, status, owner_user_id)
+                   VALUES ($1, $2, $3, 'active', $4)
+                   ON CONFLICT (name, organization_id) DO UPDATE SET status = 'active', owner_user_id = EXCLUDED.owner_user_id""",
                 "code",
                 auth_user["organization_id"],
                 "test definition",
+                auth_user["id"],
             )
         result = await _call(
             mcp,
@@ -243,6 +247,33 @@ class TestCreateTask:
             },
         )
         assert "id" in result
+
+    @pytest.mark.asyncio
+    async def test_create_task_inherits_requesting_user_id(self, mcp, auth_user, request_id, db_pool):
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO agent_definitions
+                   (name, organization_id, content, status, owner_user_id)
+                   VALUES ($1, $2, $3, 'active', $4)
+                   ON CONFLICT (name, organization_id) DO UPDATE SET status = 'active', owner_user_id = EXCLUDED.owner_user_id""",
+                "code",
+                auth_user["organization_id"],
+                "test definition",
+                auth_user["id"],
+            )
+        result = await _call(
+            mcp,
+            "create_task",
+            {"request_id": request_id, "title": "Trace requester", "agent_type": "code"},
+        )
+        assert "id" in result
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT requesting_user_id FROM tasks WHERE id = $1",
+                result["id"],
+            )
+        assert row is not None
+        assert row["requesting_user_id"] == auth_user["id"]
 
 
 # ============================================================================
@@ -381,7 +412,8 @@ class TestListPendingRequests:
     @pytest.mark.asyncio
     async def test_empty_list(self, mcp, auth_user):
         result = await _call(mcp, "list_pending_requests")
-        assert isinstance(result, list)
+        assert isinstance(result, dict)
+        assert result["items"] == []
 
     @pytest.mark.asyncio
     async def test_returns_pending(self, mcp, auth_user, repo, test_organization):
@@ -390,8 +422,8 @@ class TestListPendingRequests:
             org_id=str(test_organization["id"]),
         )
         result = await _call(mcp, "list_pending_requests")
-        assert isinstance(result, list)
-        titles = [r["title"] for r in result]
+        assert isinstance(result, dict)
+        titles = [r["title"] for r in result["items"]]
         assert "Pending One" in titles
 
     @pytest.mark.asyncio
@@ -453,7 +485,8 @@ class TestListPendingTasks:
     @pytest.mark.asyncio
     async def test_empty_list(self, mcp, auth_user):
         result = await _call(mcp, "list_pending_tasks")
-        assert isinstance(result, list)
+        assert isinstance(result, dict)
+        assert result["items"] == []
 
     @pytest.mark.asyncio
     async def test_returns_tasks(self, mcp, auth_user, repo, test_organization):
@@ -467,8 +500,8 @@ class TestListPendingTasks:
             org_id=str(test_organization["id"]),
         )
         result = await _call(mcp, "list_pending_tasks")
-        assert isinstance(result, list)
-        titles = [t["title"] for t in result]
+        assert isinstance(result, dict)
+        titles = [t["title"] for t in result["items"]]
         assert "Queued Task" in titles
 
     @pytest.mark.asyncio

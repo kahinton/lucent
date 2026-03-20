@@ -131,7 +131,8 @@ class LangChainEngine(LLMEngine):
         prompt: str,
         mcp_config: dict | None = None,
         on_event: Callable[[SessionEvent], None] | None = None,
-        timeout: int = 600,
+        timeout: int = 3600,
+        idle_timeout: int = 300,
     ) -> str | None:
         """Run a streaming session with event callbacks (daemon pattern)."""
         try:

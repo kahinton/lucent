@@ -23,6 +23,7 @@ from lucent.db import close_db, init_db
 from lucent.logging import get_correlation_id, get_logger, set_correlation_id
 from lucent.mode import is_team_mode
 from lucent.rate_limit import get_rate_limiter
+from lucent.secrets import initialize_secret_provider
 from lucent.web.routes import router as web_router
 
 # Get logger for this module
@@ -119,6 +120,10 @@ async def lifespan(app: FastAPI):
     database_url = os.environ.get("DATABASE_URL")
     if database_url:
         await init_db(database_url)
+        from lucent.db import get_pool as _get_pool_for_secrets
+
+        _secret_pool = await _get_pool_for_secrets()
+        initialize_secret_provider(_secret_pool)
 
     # Load model registry from database
     try:
@@ -357,11 +362,12 @@ def create_app() -> FastAPI:
 
     # Include team-only API routers
     if is_team_mode():
-        from lucent.api.routers import access, audit, organizations, users
+        from lucent.api.routers import access, audit, groups, organizations, users
 
         app.include_router(audit.router, prefix="/api/audit", tags=["Audit"])
         app.include_router(access.router, prefix="/api/access", tags=["Access"])
         app.include_router(users.router, prefix="/api/users", tags=["Users"])
+        app.include_router(groups.router, prefix="/api", tags=["Groups"])
         app.include_router(
             organizations.router, prefix="/api/organizations", tags=["Organizations"]
         )
@@ -405,6 +411,11 @@ def create_app() -> FastAPI:
     from lucent.api.routers import sandboxes as sandboxes_router
 
     app.include_router(sandboxes_router.router, prefix="/api/sandboxes", tags=["Sandboxes"])
+
+    # Include secret storage router
+    from lucent.api.routers import secrets as secrets_router
+
+    app.include_router(secrets_router.router, prefix="/api", tags=["Secrets"])
 
     # Include web interface routes (excluded from API docs)
     app.include_router(web_router, include_in_schema=False)

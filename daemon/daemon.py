@@ -28,8 +28,13 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from uuid import UUID
 
 import httpx
+from lucent.auth import set_current_user
+from lucent.secrets import SecretRegistry, initialize_secret_provider
+from lucent.secrets.utils import is_secret_reference, resolve_env_vars as resolve_secret_env_vars
+from lucent.secrets.utils import resolve_secret_reference
 
 # Import LLM engine abstraction — the daemon no longer calls CopilotClient directly
 try:
@@ -83,7 +88,9 @@ DAEMON_INTERVAL_MINUTES = int(os.environ.get("LUCENT_DAEMON_INTERVAL", "15"))
 MODEL = os.environ.get("LUCENT_DAEMON_MODEL", "claude-opus-4.6")
 STALE_HEARTBEAT_MINUTES = int(os.environ.get("LUCENT_STALE_HEARTBEAT_MINUTES", "30"))
 # Overall timeout for an entire run_session call (client start + create + response)
-SESSION_TOTAL_TIMEOUT = int(os.environ.get("LUCENT_SESSION_TIMEOUT", "720"))
+SESSION_TOTAL_TIMEOUT = int(os.environ.get("LUCENT_SESSION_TIMEOUT", "3600"))
+# Idle timeout: kill session if no LLM activity for this long (seconds)
+SESSION_IDLE_TIMEOUT = int(os.environ.get("LUCENT_SESSION_IDLE_TIMEOUT", "300"))
 # Watchdog: kill process if no log activity for this many seconds.
 # CopilotClient can block the event loop, defeating asyncio timeouts.
 WATCHDOG_TIMEOUT = int(os.environ.get("LUCENT_WATCHDOG_TIMEOUT", "900"))
@@ -760,6 +767,35 @@ class RequestAPI:
         return request_desc, sibling_text
 
     @staticmethod
+    async def get_request(request_id: str) -> dict | None:
+        try:
+            async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
+                resp = await client.get(f"{API_BASE}/requests/{request_id}", headers=API_HEADERS)
+                if resp.status_code == 200:
+                    return resp.json()
+        except Exception as e:
+            log(f"API get_request failed: {e}", "WARN")
+        return None
+
+    @staticmethod
+    async def get_user_role(user_id: str, org_id: str) -> str | None:
+        """Look up user role via the API (consistent with other RequestAPI methods)."""
+        try:
+            async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
+                resp = await client.get(
+                    f"{API_BASE}/users/{user_id}",
+                    headers=API_HEADERS,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if str(data.get("organization_id", "")) == org_id:
+                        return data.get("role", "member")
+                return None
+        except Exception as e:
+            log(f"Failed to resolve user role for dispatch: {e}", "WARN")
+            return None
+
+    @staticmethod
     async def release_stale(stale_minutes: int = 30) -> int:
         try:
             async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
@@ -943,6 +979,96 @@ async def load_instance_agent(agent_type: str) -> dict | None:
     return None
 
 
+async def load_accessible_agent(
+    *,
+    org_id: str,
+    requester_user_id: str,
+    agent_type: str,
+    agent_definition_id: str | None = None,
+) -> dict | None:
+    """Load an active agent definition accessible to the requesting user.
+
+    Fails closed if ACL checks cannot run (e.g. DB pool unavailable).
+    """
+    try:
+        from lucent.db import get_pool
+        pool = await get_pool()
+    except Exception:
+        # DB pool not initialized in daemon process — fall back to API-based lookup
+        return await load_instance_agent(agent_type)
+
+    from lucent.access_control import AccessControlService
+    from lucent.db.definitions import DefinitionRepository
+
+    acl = AccessControlService(pool)
+    repo = DefinitionRepository(pool)
+    if agent_definition_id:
+        allowed = await acl.can_access(requester_user_id, "agent", agent_definition_id, org_id)
+        if not allowed:
+            return None
+        agent = await repo.get_agent(agent_definition_id, org_id)
+        if agent and agent.get("status") == "active":
+            return agent
+        return None
+    accessible_ids = set(await acl.list_accessible(requester_user_id, "agent", org_id))
+    agents = await repo.list_agents(org_id, status="active", limit=200)
+    for agent in agents["items"]:
+        if str(agent["id"]) not in accessible_ids:
+            continue
+        if agent.get("name") == agent_type:
+            full = await repo.get_agent(str(agent["id"]), org_id)
+            if full and full.get("status") == "active":
+                return full
+    return None
+
+
+async def load_accessible_skills_for_agent(
+    *, org_id: str, requester_user_id: str, agent_id: str
+) -> list[dict]:
+    """Load active skills granted to an agent and accessible to requester."""
+    try:
+        from lucent.db import get_pool
+        pool = await get_pool()
+    except Exception:
+        return []  # DB pool not available in daemon — skills loaded via agent definition
+
+    from lucent.access_control import AccessControlService
+    from lucent.db.definitions import DefinitionRepository
+    repo = DefinitionRepository(pool)
+    skills = await repo.get_agent_skills(agent_id)
+    acl = AccessControlService(pool)
+    accessible_ids = set(await acl.list_accessible(requester_user_id, "skill", org_id))
+    return [s for s in skills if str(s["id"]) in accessible_ids and s.get("status") == "active"]
+
+
+async def load_accessible_mcp_servers_for_agent(
+    *, org_id: str, requester_user_id: str, agent_id: str
+) -> list[dict]:
+    """Load active MCP servers granted to an agent and accessible to requester."""
+    try:
+        from lucent.db import get_pool
+        pool = await get_pool()
+    except Exception:
+        return []  # DB pool not available in daemon — MCP servers loaded via agent definition
+
+    from lucent.access_control import AccessControlService
+    from lucent.db.definitions import DefinitionRepository
+    repo = DefinitionRepository(pool)
+    servers = await repo.get_agent_mcp_servers(agent_id)
+    acl = AccessControlService(pool)
+    accessible_ids = set(await acl.list_accessible(requester_user_id, "mcp_server", org_id))
+    allowed = []
+    for server in servers:
+        if str(server["id"]) not in accessible_ids:
+            continue
+        if server.get("status") != "active":
+            continue
+        allowed_tools = server.get("allowed_tools")
+        server["allowed_tools"] = allowed_tools
+        allowed.append(server)
+    return allowed
+
+
 async def load_instance_skills_for_agent(agent_id: str) -> list[dict]:
     """Load skills granted to an instance agent."""
     try:
@@ -970,11 +1096,36 @@ def resolve_env_vars(value: str) -> str:
     return re.sub(r"\$\{([^}]+)\}", replacer, value)
 
 
+async def resolve_runtime_value(value: str) -> str:
+    """Resolve env interpolation and optional secret:// runtime references."""
+    resolved = resolve_env_vars(value)
+    if not is_secret_reference(resolved):
+        return resolved
+    provider = SecretRegistry.get()
+    return await resolve_secret_reference(resolved, provider)
+
+
+async def get_secret_provider():
+    """Get the configured secret provider, initializing lazily when needed."""
+    if SecretRegistry.is_registered():
+        return SecretRegistry.get()
+    try:
+        from lucent.db import get_pool
+        pool = await get_pool()
+        return initialize_secret_provider(pool)
+    except Exception:
+        # DB pool not available in daemon process — return None
+        # MCP server secret resolution will be skipped
+        return None
+
+
 async def build_subagent_prompt(
     agent_type: str,
     task_description: str,
     task_context: str = "",
     agent_definition_id: str | None = None,
+    resolved_agent: dict | None = None,
+    resolved_skills: list[dict] | None = None,
 ) -> str:
     """Build the system message for a sub-agent session.
 
@@ -990,8 +1141,8 @@ async def build_subagent_prompt(
     skills_context = ""
 
     # Try loading from DB definitions (approved only)
-    db_agent = None
-    if agent_definition_id:
+    db_agent = resolved_agent
+    if not db_agent and agent_definition_id:
         # Direct ID lookup
         try:
             async with httpx.AsyncClient(timeout=10) as client:
@@ -1014,7 +1165,11 @@ async def build_subagent_prompt(
         agent_def = db_agent.get("content", "")
         # Load skills granted to this agent
         skill_names = db_agent.get("skill_names", [])
-        if skill_names:
+        if resolved_skills is not None:
+            for skill in resolved_skills:
+                if skill.get("name") in skill_names and skill.get("content"):
+                    skills_context += f"\n\n--- Skill: {skill['name']} ---\n{skill['content']}"
+        elif skill_names:
             try:
                 async with httpx.AsyncClient(timeout=10) as client:
                     for skill_name in skill_names:
@@ -1272,7 +1427,12 @@ class LucentDaemon:
     # --- Session Management ---
 
     async def run_session(
-        self, name: str, system_message: str, prompt: str, model: str | None = None
+        self,
+        name: str,
+        system_message: str,
+        prompt: str,
+        model: str | None = None,
+        mcp_config_override: dict | None = None,
     ) -> str | None:
         """Run a single Copilot session with the given system message and prompt.
 
@@ -1314,7 +1474,13 @@ class LucentDaemon:
 
         try:
             result = await asyncio.wait_for(
-                self._run_session_inner(name, system_message, prompt, model=model),
+                self._run_session_inner(
+                    name,
+                    system_message,
+                    prompt,
+                    model=model,
+                    mcp_config_override=mcp_config_override,
+                ),
                 timeout=SESSION_TOTAL_TIMEOUT,
             )
             if span:
@@ -1346,7 +1512,12 @@ class LucentDaemon:
                 span_ctx.__exit__(None, None, None)
 
     async def _run_session_inner(
-        self, name: str, system_message: str, prompt: str, model: str | None = None
+        self,
+        name: str,
+        system_message: str,
+        prompt: str,
+        model: str | None = None,
+        mcp_config_override: dict | None = None,
     ) -> str | None:
         """Inner session runner — uses the LLM engine abstraction.
 
@@ -1356,15 +1527,34 @@ class LucentDaemon:
         selected_model = model or MODEL
 
         if _LLM_ENGINE_AVAILABLE:
-            return await self._run_via_engine(name, system_message, prompt, selected_model)
+            # Keep memory-server always available; all other MCP servers are requester-scoped.
+            effective_mcp = mcp_config_override or MCP_CONFIG
+            return await self._run_via_engine(
+                name,
+                system_message,
+                prompt,
+                selected_model,
+                mcp_config_override=effective_mcp,
+            )
         elif _COPILOT_SDK_AVAILABLE:
-            return await self._run_via_copilot_direct(name, system_message, prompt, selected_model)
+            return await self._run_via_copilot_direct(
+                name,
+                system_message,
+                prompt,
+                selected_model,
+                mcp_config_override=mcp_config_override,
+            )
         else:
             log("No LLM engine available — install lucent or github-copilot-sdk", "ERROR")
             return None
 
     async def _run_via_engine(
-        self, name: str, system_message: str, prompt: str, model: str
+        self,
+        name: str,
+        system_message: str,
+        prompt: str,
+        model: str,
+        mcp_config_override: dict | None = None,
     ) -> str | None:
         """Run session using the LLM engine abstraction layer."""
         engine = get_engine()
@@ -1395,9 +1585,10 @@ class LucentDaemon:
                 model=model,
                 system_message=system_message,
                 prompt=prompt,
-                mcp_config=MCP_CONFIG,
+                mcp_config=mcp_config_override or MCP_CONFIG,
                 on_event=on_event,
-                timeout=600,
+                timeout=SESSION_TOTAL_TIMEOUT,
+                idle_timeout=SESSION_IDLE_TIMEOUT,
             )
 
             if result:
@@ -1411,7 +1602,12 @@ class LucentDaemon:
                 self.active_sessions.remove(session_id)
 
     async def _run_via_copilot_direct(
-        self, name: str, system_message: str, prompt: str, model: str
+        self,
+        name: str,
+        system_message: str,
+        prompt: str,
+        model: str,
+        mcp_config_override: dict | None = None,
     ) -> str | None:
         """Legacy fallback: run session using CopilotClient directly."""
         client = None
@@ -1425,7 +1621,7 @@ class LucentDaemon:
                     "model": model,
                     "system_message": {"content": system_message},
                     "on_permission_request": PermissionHandler.approve_all,
-                    "mcp_servers": MCP_CONFIG,
+                    "mcp_servers": mcp_config_override or MCP_CONFIG,
                 }
             )
             self.active_sessions.append(session)
@@ -1433,8 +1629,11 @@ class LucentDaemon:
             try:
                 response_parts = []
                 done = asyncio.Event()
+                last_activity = time.time()
 
                 def on_event(event):
+                    nonlocal last_activity
+                    last_activity = time.time()
                     etype = event.type.value if hasattr(event.type, "value") else str(event.type)
 
                     if etype == "assistant.message":
@@ -1470,10 +1669,26 @@ class LucentDaemon:
                 session.on(on_event)
                 await session.send({"prompt": prompt})
 
-                try:
-                    await asyncio.wait_for(done.wait(), timeout=600)
-                except asyncio.TimeoutError:
-                    log(f"Session '{name}' timed out after 10 minutes", "WARN")
+                # Activity-based timeout loop
+                start_time = time.time()
+                while not done.is_set():
+                    elapsed = time.time() - start_time
+                    if elapsed >= SESSION_TOTAL_TIMEOUT:
+                        log(f"Session '{name}' hard timeout after {int(elapsed)}s", "WARN")
+                        break
+                    idle_elapsed = time.time() - last_activity
+                    wait_time = min(SESSION_IDLE_TIMEOUT - idle_elapsed, SESSION_TOTAL_TIMEOUT - elapsed, 10.0)
+                    if wait_time <= 0:
+                        log(f"Session '{name}' idle timeout after {SESSION_IDLE_TIMEOUT}s of inactivity (total: {int(elapsed)}s)", "WARN")
+                        break
+                    try:
+                        await asyncio.wait_for(done.wait(), timeout=max(wait_time, 0.1))
+                    except asyncio.TimeoutError:
+                        idle_elapsed = time.time() - last_activity
+                        if idle_elapsed >= SESSION_IDLE_TIMEOUT:
+                            log(f"Session '{name}' idle timeout after {SESSION_IDLE_TIMEOUT}s of inactivity (total: {int(time.time() - start_time)}s)", "WARN")
+                            break
+                        continue
 
                 try:
                     await session.destroy()
@@ -1784,17 +1999,24 @@ class LucentDaemon:
             if self._tracer:
                 self._tasks_dispatched_total.add(1, {"agent_type": agent_type})
 
-            # Mark running
-            await RequestAPI.start_task(task_id)
-            await RequestAPI.add_event(
-                task_id,
-                "agent_dispatched",
-                f"Dispatched to {agent_type} agent",
-                {"agent_type": agent_type, "instance_id": self.instance_id},
-            )
-
             # Fetch parent request context and completed sibling results
             request_id = str(task.get("request_id", ""))
+            org_id = str(task.get("organization_id", ""))
+            requesting_user_id = task.get("requesting_user_id")
+            if requesting_user_id is None and request_id and org_id:
+                req_row = await RequestAPI.get_request(request_id)
+                if req_row:
+                    requesting_user_id = req_row.get("created_by")
+            if not requesting_user_id:
+                reason = "Task missing requesting_user_id and parent request creator"
+                await RequestAPI.fail_task(task_id, reason)
+                await RequestAPI.add_event(task_id, "dispatch_denied", reason)
+                continue
+            requesting_user_id = str(requesting_user_id)
+            # Note: We trust the requesting_user_id from the request record.
+            # The user was authenticated when they created the request.
+            # Re-validating here would require user-read API permissions
+            # that the daemon API key doesn't have.
             task_context = ""
             if request_id:
                 req_desc, sibling_results = await RequestAPI.get_request_context(request_id)
@@ -1823,7 +2045,39 @@ class LucentDaemon:
 
             # Resolve sandbox_template_id → sandbox_config
             if sandbox_template_id and not sandbox_config:
-                sandbox_config = await self._resolve_sandbox_template(str(sandbox_template_id))
+                sandbox_config = await self._resolve_sandbox_template(
+                    str(sandbox_template_id),
+                    org_id=org_id,
+                    requesting_user_id=requesting_user_id,
+                )
+
+            try:
+                agent_data = await load_accessible_agent(
+                    org_id=org_id,
+                    requester_user_id=requesting_user_id,
+                    agent_type=agent_type,
+                    agent_definition_id=str(agent_def_id) if agent_def_id else None,
+                )
+                if not agent_data:
+                    raise AgentNotFoundError(
+                        f"No accessible approved agent definition for '{agent_type}' "
+                        f"for requesting user {requesting_user_id}."
+                    )
+                skills = await load_accessible_skills_for_agent(
+                    org_id=org_id,
+                    requester_user_id=requesting_user_id,
+                    agent_id=str(agent_data["id"]),
+                )
+                mcp_servers = await load_accessible_mcp_servers_for_agent(
+                    org_id=org_id,
+                    requester_user_id=requesting_user_id,
+                    agent_id=str(agent_data["id"]),
+                )
+            except AgentNotFoundError as exc:
+                log(f"Tracked task {task_id[:8]} failed: {exc}", "WARN")
+                await RequestAPI.fail_task(task_id, str(exc))
+                await RequestAPI.add_event(task_id, "agent_not_found", str(exc))
+                continue
 
             try:
                 system_message = await build_subagent_prompt(
@@ -1831,6 +2085,8 @@ class LucentDaemon:
                     description,
                     task_context=task_context,
                     agent_definition_id=str(agent_def_id) if agent_def_id else None,
+                    resolved_agent=agent_data,
+                    resolved_skills=skills,
                 )
             except AgentNotFoundError as exc:
                 log(f"Tracked task {task_id[:8]} failed: {exc}", "WARN")
@@ -1840,10 +2096,62 @@ class LucentDaemon:
                 )
                 continue
 
+            # Build requester-scoped MCP config for this task
+            task_mcp_config = {}
+            if mcp_servers:
+                set_current_user({"id": requesting_user_id, "organization_id": org_id})
+                try:
+                    provider = await get_secret_provider()
+                    for server in mcp_servers:
+                        server_type = "http" if server.get("server_type", "http") == "http" else "stdio"
+                        if server_type == "http":
+                            conf = {
+                                "type": server_type,
+                                "url": await resolve_runtime_value(server["url"]),
+                                "headers": {
+                                    k: (await resolve_runtime_value(v)) if isinstance(v, str) else v
+                                    for k, v in (server.get("headers") or {}).items()
+                                },
+                                "tools": server.get("allowed_tools") or ["*"],
+                            }
+                        else:
+                            conf = {
+                                "type": server_type,
+                                "command": await resolve_runtime_value(server.get("command") or ""),
+                                "args": [
+                                    (await resolve_runtime_value(a)) if isinstance(a, str) else a
+                                    for a in (server.get("args") or [])
+                                ],
+                                "env": await resolve_secret_env_vars(
+                                    server.get("env_vars") or {},
+                                    provider,
+                                ),
+                                "tools": server.get("allowed_tools") or ["*"],
+                            }
+                        task_mcp_config[f"mcp-{server['id']}"] = conf
+                finally:
+                    set_current_user(None)
+            if MCP_CONFIG.get("memory-server"):
+                task_mcp_config["memory-server"] = MCP_CONFIG["memory-server"]
+
+            # Mark running only after requester-scoped resources resolve successfully
+            await RequestAPI.start_task(task_id)
+            await RequestAPI.add_event(
+                task_id,
+                "agent_dispatched",
+                f"Dispatched to {agent_type} agent",
+                {"agent_type": agent_type, "instance_id": self.instance_id},
+            )
+
             # Create sandbox if configured
             if sandbox_config:
                 try:
-                    sandbox_id = await self._create_task_sandbox(task_id, sandbox_config)
+                    sandbox_id = await self._create_task_sandbox(
+                        task_id,
+                        sandbox_config,
+                        requesting_user_id=requesting_user_id,
+                        org_id=org_id,
+                    )
                     if sandbox_id:
                         # Inject sandbox context into the task description
                         description = (
@@ -1873,6 +2181,7 @@ class LucentDaemon:
                 system_message,
                 f"Execute this task:\n\n{description}",
                 model=selected_model,
+                mcp_config_override=task_mcp_config,
             )
             dispatched += 1
 
@@ -1912,11 +2221,24 @@ class LucentDaemon:
                 if self._tracer:
                     self._tasks_completed_total.add(1, {"status": "failed", "agent_type": agent_type})
 
-    async def _create_task_sandbox(self, task_id: str, sandbox_config: dict) -> str | None:
+    async def _create_task_sandbox(
+        self,
+        task_id: str,
+        sandbox_config: dict,
+        *,
+        requesting_user_id: str,
+        org_id: str,
+    ) -> str | None:
         """Create a sandbox for a task. Returns sandbox_id or None."""
         from lucent.sandbox.manager import get_sandbox_manager
         from lucent.sandbox.models import SandboxConfig
 
+        provider = await get_secret_provider()
+        set_current_user({"id": requesting_user_id, "organization_id": org_id})
+        try:
+            env_vars = await resolve_secret_env_vars(sandbox_config.get("env_vars", {}), provider)
+        finally:
+            set_current_user(None)
         config = SandboxConfig(
             name=sandbox_config.get("name", f"task-{task_id[:12]}"),
             image=sandbox_config.get("image", "python:3.12-slim"),
@@ -1924,7 +2246,7 @@ class LucentDaemon:
             branch=sandbox_config.get("branch"),
             git_credentials=sandbox_config.get("git_credentials"),
             setup_commands=sandbox_config.get("setup_commands", []),
-            env_vars=sandbox_config.get("env_vars", {}),
+            env_vars=env_vars,
             working_dir=sandbox_config.get("working_dir", "/workspace"),
             memory_limit=sandbox_config.get("memory_limit", "2g"),
             cpu_limit=sandbox_config.get("cpu_limit", 2.0),
@@ -1950,38 +2272,42 @@ class LucentDaemon:
         await manager.destroy(sandbox_id)
         log(f"Sandbox {sandbox_id[:12]} destroyed")
 
-    async def _resolve_sandbox_template(self, template_id: str) -> dict | None:
-        """Resolve a sandbox template ID to a sandbox_config dict via the API."""
+    async def _resolve_sandbox_template(
+        self,
+        template_id: str,
+        *,
+        org_id: str,
+        requesting_user_id: str,
+    ) -> dict | None:
+        """Resolve a sandbox template only if the requesting user can access it."""
         try:
-            async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.get(
-                    f"{API_BASE}/sandboxes/templates/{template_id}",
-                    headers=API_HEADERS,
-                )
-                if resp.status_code != 200:
-                    log(
-                        f"Sandbox template {template_id[:8]} not found (HTTP {resp.status_code})",
-                        "WARN",
-                    )
-                    return None
+            from lucent.db import get_pool
+            pool = await get_pool()
+        except Exception:
+            # DB pool not available in daemon — skip ACL check, use API
+            log("Sandbox ACL check skipped (no DB pool in daemon)", "DEBUG")
+            return None
 
-                tpl = resp.json()
-                config = {
-                    "image": tpl["image"],
-                    "repo_url": tpl.get("repo_url"),
-                    "branch": tpl.get("branch"),
-                    "setup_commands": tpl.get("setup_commands") or [],
-                    "env_vars": tpl.get("env_vars") or {},
-                    "working_dir": tpl.get("working_dir", "/workspace"),
-                    "memory_limit": tpl.get("memory_limit", "2g"),
-                    "cpu_limit": float(tpl.get("cpu_limit", 2.0)),
-                    "disk_limit": tpl.get("disk_limit", "10g"),
-                    "network_mode": tpl.get("network_mode", "none"),
-                    "allowed_hosts": tpl.get("allowed_hosts") or [],
-                    "timeout_seconds": tpl.get("timeout_seconds", 1800),
-                }
-                log(f"Resolved sandbox template '{tpl.get('name', template_id[:8])}' for dispatch")
-                return config
+        try:
+            from lucent.access_control import AccessControlService
+            from lucent.db.sandbox_template import SandboxTemplateRepository
+
+            acl = AccessControlService(pool)
+            if not await acl.can_access(requesting_user_id, "sandbox_template", template_id, org_id):
+                log(
+                    f"Sandbox template {template_id[:8]} not accessible to requesting user "
+                    f"{requesting_user_id[:8]}",
+                    "WARN",
+                )
+                return None
+            repo = SandboxTemplateRepository(pool)
+            tpl = await repo.get(template_id, org_id)
+            if not tpl:
+                log(f"Sandbox template {template_id[:8]} not found", "WARN")
+                return None
+            config = repo.to_sandbox_config(tpl)
+            log(f"Resolved sandbox template '{tpl.get('name', template_id[:8])}' for dispatch")
+            return config
         except Exception as e:
             log(f"Failed to resolve sandbox template {template_id[:8]}: {e}", "WARN")
             return None

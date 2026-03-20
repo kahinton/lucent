@@ -228,14 +228,18 @@ class RequestRepository:
         model: str | None = None,
         sandbox_template_id: str | None = None,
         sandbox_config: dict | None = None,
+        requesting_user_id: str | None = None,
     ) -> dict:
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 """INSERT INTO tasks
                    (request_id, parent_task_id, title, description, agent_type,
-                    agent_definition_id, priority, sequence_order, organization_id,
-                    model, sandbox_template_id, sandbox_config)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                     agent_definition_id, priority, sequence_order, organization_id,
+                     model, sandbox_template_id, sandbox_config, requesting_user_id)
+                   VALUES (
+                     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                     COALESCE($13, (SELECT created_by FROM requests WHERE id = $1))
+                   )
                    RETURNING *""",
                 UUID(request_id),
                 UUID(parent_task_id) if parent_task_id else None,
@@ -249,6 +253,7 @@ class RequestRepository:
                 model,
                 UUID(sandbox_template_id) if sandbox_template_id else None,
                 json.dumps(sandbox_config) if sandbox_config else None,
+                UUID(requesting_user_id) if requesting_user_id else None,
             )
         task = dict(row)
         # Log creation event

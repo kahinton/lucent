@@ -130,27 +130,27 @@ class TestGetRequest:
 class TestListRequests:
     @pytest.mark.asyncio
     async def test_list_basic(self, repo, req, test_organization):
-        results = await repo.list_requests(str(test_organization["id"]))
-        assert len(results) >= 1
-        assert any(r["id"] == req["id"] for r in results)
+        result = await repo.list_requests(str(test_organization["id"]))
+        assert len(result["items"]) >= 1
+        assert any(r["id"] == req["id"] for r in result["items"])
 
     @pytest.mark.asyncio
     async def test_list_filter_status(self, repo, req, test_organization):
         org = str(test_organization["id"])
-        results = await repo.list_requests(org, status="pending")
-        assert any(r["id"] == req["id"] for r in results)
+        result = await repo.list_requests(org, status="pending")
+        assert any(r["id"] == req["id"] for r in result["items"])
 
-        results = await repo.list_requests(org, status="completed")
-        assert not any(r["id"] == req["id"] for r in results)
+        result = await repo.list_requests(org, status="completed")
+        assert not any(r["id"] == req["id"] for r in result["items"])
 
     @pytest.mark.asyncio
     async def test_list_filter_source(self, repo, req, test_organization):
         org = str(test_organization["id"])
-        results = await repo.list_requests(org, source="user")
-        assert any(r["id"] == req["id"] for r in results)
+        result = await repo.list_requests(org, source="user")
+        assert any(r["id"] == req["id"] for r in result["items"])
 
-        results = await repo.list_requests(org, source="daemon")
-        assert not any(r["id"] == req["id"] for r in results)
+        result = await repo.list_requests(org, source="daemon")
+        assert not any(r["id"] == req["id"] for r in result["items"])
 
     @pytest.mark.asyncio
     async def test_list_pagination(self, repo, test_organization):
@@ -159,10 +159,10 @@ class TestListRequests:
             await repo.create_request(title=f"Req {i}", org_id=org)
         page1 = await repo.list_requests(org, limit=2, offset=0)
         page2 = await repo.list_requests(org, limit=2, offset=2)
-        assert len(page1) == 2
-        assert len(page2) >= 1
-        ids1 = {r["id"] for r in page1}
-        ids2 = {r["id"] for r in page2}
+        assert len(page1["items"]) == 2
+        assert len(page2["items"]) >= 1
+        ids1 = {r["id"] for r in page1["items"]}
+        ids2 = {r["id"] for r in page2["items"]}
         assert ids1.isdisjoint(ids2)
 
 
@@ -232,8 +232,8 @@ class TestCreateTask:
             org_id=str(test_organization["id"]),
         )
         events = await repo.list_task_events(str(t["id"]))
-        assert len(events) == 1
-        assert events[0]["event_type"] == "created"
+        assert len(events["items"]) == 1
+        assert events["items"][0]["event_type"] == "created"
 
     @pytest.mark.asyncio
     async def test_create_subtask(self, repo, req, task, test_organization):
@@ -244,6 +244,22 @@ class TestCreateTask:
             parent_task_id=str(task["id"]),
         )
         assert sub["parent_task_id"] == task["id"]
+
+    @pytest.mark.asyncio
+    async def test_inherits_requesting_user_from_request_creator(
+        self, repo, test_organization, test_user
+    ):
+        req = await repo.create_request(
+            title="Creator-bound request",
+            org_id=str(test_organization["id"]),
+            created_by=str(test_user["id"]),
+        )
+        task = await repo.create_task(
+            request_id=str(req["id"]),
+            title="Inherited task",
+            org_id=str(test_organization["id"]),
+        )
+        assert task["requesting_user_id"] == test_user["id"]
 
 
 class TestGetTask:
@@ -262,17 +278,17 @@ class TestGetTask:
 class TestListTasks:
     @pytest.mark.asyncio
     async def test_list_by_request(self, repo, req, task, test_organization):
-        tasks = await repo.list_tasks(str(req["id"]))
-        assert len(tasks) >= 1
-        assert any(t["id"] == task["id"] for t in tasks)
+        result = await repo.list_tasks(str(req["id"]))
+        assert len(result["items"]) >= 1
+        assert any(t["id"] == task["id"] for t in result["items"])
 
     @pytest.mark.asyncio
     async def test_list_filter_status(self, repo, req, task, test_organization):
-        tasks = await repo.list_tasks(str(req["id"]), status="pending")
-        assert any(t["id"] == task["id"] for t in tasks)
+        result = await repo.list_tasks(str(req["id"]), status="pending")
+        assert any(t["id"] == task["id"] for t in result["items"])
 
-        tasks = await repo.list_tasks(str(req["id"]), status="completed")
-        assert not any(t["id"] == task["id"] for t in tasks)
+        result = await repo.list_tasks(str(req["id"]), status="completed")
+        assert not any(t["id"] == task["id"] for t in result["items"])
 
     @pytest.mark.asyncio
     async def test_list_ordered_by_sequence(self, repo, req, test_organization):
@@ -283,27 +299,27 @@ class TestListTasks:
         _t1 = await repo.create_task(
             request_id=str(req["id"]), title="Second", org_id=org, sequence_order=1
         )
-        tasks = await repo.list_tasks(str(req["id"]))
-        titles = [t["title"] for t in tasks if t["title"] in ("First", "Second")]
+        result = await repo.list_tasks(str(req["id"]))
+        titles = [t["title"] for t in result["items"] if t["title"] in ("First", "Second")]
         assert titles.index("First") < titles.index("Second")
 
 
 class TestListPendingRequests:
     @pytest.mark.asyncio
     async def test_includes_pending(self, repo, req, test_organization):
-        results = await repo.list_pending_requests(str(test_organization["id"]))
-        assert any(r["id"] == req["id"] for r in results)
+        result = await repo.list_pending_requests(str(test_organization["id"]))
+        assert any(r["id"] == req["id"] for r in result["items"])
 
     @pytest.mark.asyncio
     async def test_excludes_completed(self, repo, req, test_organization):
         await repo.update_request_status(str(req["id"]), "completed")
-        results = await repo.list_pending_requests(str(test_organization["id"]))
-        assert not any(r["id"] == req["id"] for r in results)
+        result = await repo.list_pending_requests(str(test_organization["id"]))
+        assert not any(r["id"] == req["id"] for r in result["items"])
 
     @pytest.mark.asyncio
     async def test_includes_task_count(self, repo, req, task, test_organization):
-        results = await repo.list_pending_requests(str(test_organization["id"]))
-        matching = [r for r in results if r["id"] == req["id"]]
+        result = await repo.list_pending_requests(str(test_organization["id"]))
+        matching = [r for r in result["items"] if r["id"] == req["id"]]
         assert matching[0]["task_count"] >= 1
 
     @pytest.mark.asyncio
@@ -311,22 +327,22 @@ class TestListPendingRequests:
         org = str(test_organization["id"])
         low = await repo.create_request(title="Low", org_id=org, priority="low")
         urgent = await repo.create_request(title="Urgent", org_id=org, priority="urgent")
-        results = await repo.list_pending_requests(org)
-        ids = [r["id"] for r in results]
+        result = await repo.list_pending_requests(org)
+        ids = [r["id"] for r in result["items"]]
         assert ids.index(urgent["id"]) < ids.index(low["id"])
 
 
 class TestListPendingTasks:
     @pytest.mark.asyncio
     async def test_includes_pending_tasks(self, repo, req, task, test_organization):
-        results = await repo.list_pending_tasks(str(test_organization["id"]))
-        assert any(t["id"] == task["id"] for t in results)
+        result = await repo.list_pending_tasks(str(test_organization["id"]))
+        assert any(t["id"] == task["id"] for t in result["items"])
 
     @pytest.mark.asyncio
     async def test_excludes_claimed_tasks(self, repo, req, task, test_organization):
         await repo.claim_task(str(task["id"]), "test-instance")
-        results = await repo.list_pending_tasks(str(test_organization["id"]))
-        assert not any(t["id"] == task["id"] for t in results)
+        result = await repo.list_pending_tasks(str(test_organization["id"]))
+        assert not any(t["id"] == task["id"] for t in result["items"])
 
     @pytest.mark.asyncio
     async def test_sequence_gating(self, repo, req, test_organization):
@@ -339,7 +355,7 @@ class TestListPendingTasks:
             request_id=str(req["id"]), title="Seq1", org_id=org, sequence_order=1
         )
         pending = await repo.list_pending_tasks(org)
-        pending_ids = [t["id"] for t in pending]
+        pending_ids = [t["id"] for t in pending["items"]]
         assert t0["id"] in pending_ids
         assert t1["id"] not in pending_ids
 
@@ -348,13 +364,13 @@ class TestListPendingTasks:
         await repo.start_task(str(t0["id"]))
         await repo.complete_task(str(t0["id"]), "done")
         pending = await repo.list_pending_tasks(org)
-        pending_ids = [t["id"] for t in pending]
+        pending_ids = [t["id"] for t in pending["items"]]
         assert t1["id"] in pending_ids
 
     @pytest.mark.asyncio
     async def test_includes_request_title(self, repo, req, task, test_organization):
-        results = await repo.list_pending_tasks(str(test_organization["id"]))
-        matching = [t for t in results if t["id"] == task["id"]]
+        result = await repo.list_pending_tasks(str(test_organization["id"]))
+        matching = [t for t in result["items"] if t["id"] == task["id"]]
         assert matching[0]["request_title"] == "Test Request"
 
 
@@ -543,8 +559,8 @@ class TestTaskEvents:
         # Task creation already logged one event
         await repo.add_task_event(tid, "info", "extra")
         events = await repo.list_task_events(tid)
-        assert len(events) >= 2
-        types = [e["event_type"] for e in events]
+        assert len(events["items"]) >= 2
+        types = [e["event_type"] for e in events["items"]]
         assert "created" in types
         assert "info" in types
 
@@ -556,7 +572,7 @@ class TestTaskEvents:
         await repo.start_task(tid)
         await repo.complete_task(tid, "done")
         events = await repo.list_task_events(tid)
-        types = [e["event_type"] for e in events]
+        types = [e["event_type"] for e in events["items"]]
         assert "created" in types
         assert "claimed" in types
         assert "running" in types
@@ -567,10 +583,10 @@ class TestTaskMemoryLinks:
     @pytest.mark.asyncio
     async def test_link_memory(self, repo, task, test_memory):
         await repo.link_memory(str(task["id"]), str(test_memory["id"]), relation="created")
-        memories = await repo.list_task_memories(str(task["id"]))
-        assert len(memories) == 1
-        assert memories[0]["relation"] == "created"
-        assert memories[0]["memory_id"] == test_memory["id"]
+        result = await repo.list_task_memories(str(task["id"]))
+        assert len(result["items"]) == 1
+        assert result["items"][0]["relation"] == "created"
+        assert result["items"][0]["memory_id"] == test_memory["id"]
 
     @pytest.mark.asyncio
     async def test_link_memory_idempotent(self, repo, task, test_memory):
@@ -578,8 +594,8 @@ class TestTaskMemoryLinks:
         tid, mid = str(task["id"]), str(test_memory["id"])
         await repo.link_memory(tid, mid, "read")
         await repo.link_memory(tid, mid, "read")
-        memories = await repo.list_task_memories(tid)
-        read_links = [m for m in memories if m["relation"] == "read"]
+        result = await repo.list_task_memories(tid)
+        read_links = [m for m in result["items"] if m["relation"] == "read"]
         assert len(read_links) == 1
 
     @pytest.mark.asyncio
@@ -587,8 +603,8 @@ class TestTaskMemoryLinks:
         tid, mid = str(task["id"]), str(test_memory["id"])
         await repo.link_memory(tid, mid, "read")
         await repo.link_memory(tid, mid, "updated")
-        memories = await repo.list_task_memories(tid)
-        relations = {m["relation"] for m in memories}
+        result = await repo.list_task_memories(tid)
+        relations = {m["relation"] for m in result["items"]}
         assert "read" in relations
         assert "updated" in relations
 
@@ -596,7 +612,7 @@ class TestTaskMemoryLinks:
     async def test_link_creates_event(self, repo, task, test_memory):
         await repo.link_memory(str(task["id"]), str(test_memory["id"]), "created")
         events = await repo.list_task_events(str(task["id"]))
-        link_events = [e for e in events if e["event_type"] == "memory_created"]
+        link_events = [e for e in events["items"] if e["event_type"] == "memory_created"]
         assert len(link_events) == 1
 
 
@@ -929,14 +945,14 @@ class TestListActiveWork:
     async def test_empty_when_no_requests(self, repo, test_organization):
         org = str(test_organization["id"])
         result = await repo.list_active_work(org)
-        assert result == []
+        assert result["items"] == []
 
     @pytest.mark.asyncio
     async def test_returns_pending_request(self, repo, req, test_organization):
         org = str(test_organization["id"])
         result = await repo.list_active_work(org)
-        assert len(result) >= 1
-        ids = [str(r["id"]) for r in result]
+        assert len(result["items"]) >= 1
+        ids = [str(r["id"]) for r in result["items"]]
         assert str(req["id"]) in ids
 
     @pytest.mark.asyncio
@@ -944,7 +960,7 @@ class TestListActiveWork:
         org = str(test_organization["id"])
         await repo.update_request_status(str(req["id"]), "completed", org_id=org)
         result = await repo.list_active_work(org)
-        ids = [str(r["id"]) for r in result]
+        ids = [str(r["id"]) for r in result["items"]]
         assert str(req["id"]) not in ids
 
     @pytest.mark.asyncio
@@ -952,7 +968,7 @@ class TestListActiveWork:
         org = str(test_organization["id"])
         await repo.update_request_status(str(req["id"]), "failed", org_id=org)
         result = await repo.list_active_work(org)
-        ids = [str(r["id"]) for r in result]
+        ids = [str(r["id"]) for r in result["items"]]
         assert str(req["id"]) not in ids
 
     @pytest.mark.asyncio
@@ -960,7 +976,7 @@ class TestListActiveWork:
         org = str(test_organization["id"])
         await repo.update_request_status(str(req["id"]), "cancelled", org_id=org)
         result = await repo.list_active_work(org)
-        ids = [str(r["id"]) for r in result]
+        ids = [str(r["id"]) for r in result["items"]]
         assert str(req["id"]) not in ids
 
     @pytest.mark.asyncio
@@ -980,7 +996,7 @@ class TestListActiveWork:
         await repo.complete_task(str(t3["id"]), result="done")
 
         result = await repo.list_active_work(org)
-        row = next(r for r in result if str(r["id"]) == rid)
+        row = next(r for r in result["items"] if str(r["id"]) == rid)
         assert row["tasks_pending"] >= 1
         assert row["tasks_running"] >= 1  # claimed counts as running
         assert row["tasks_completed"] >= 1
@@ -997,14 +1013,14 @@ class TestListActiveWork:
             title="Urgent", org_id=org, priority="urgent"
         )
         result = await repo.list_active_work(org)
-        ids = [str(r["id"]) for r in result]
+        ids = [str(r["id"]) for r in result["items"]]
         assert ids.index(str(urgent["id"])) < ids.index(str(medium["id"]))
 
     @pytest.mark.asyncio
     async def test_cross_org_isolation(self, repo, req, other_org):
         """list_active_work with wrong org_id returns no data from other org."""
         result = await repo.list_active_work(str(other_org["id"]))
-        ids = [str(r["id"]) for r in result]
+        ids = [str(r["id"]) for r in result["items"]]
         assert str(req["id"]) not in ids
 
 

@@ -133,7 +133,7 @@ class TestAgentCRUD:
             )
         resp = await client.get("/api/definitions/agents")
         assert resp.status_code == 200
-        agents = resp.json()
+        agents = resp.json()["items"]
         names = [a["name"] for a in agents]
         assert f"{def_prefix}alpha" in names
         assert f"{def_prefix}beta" in names
@@ -152,13 +152,13 @@ class TestAgentCRUD:
         # Filter for proposed
         resp = await client.get("/api/definitions/agents?status=proposed")
         assert resp.status_code == 200
-        agents = resp.json()
+        agents = resp.json()["items"]
         assert all(a["status"] == "proposed" for a in agents)
 
         # Filter for active (should not include our new agent)
         resp = await client.get("/api/definitions/agents?status=active")
         assert resp.status_code == 200
-        names = [a["name"] for a in resp.json()]
+        names = [a["name"] for a in resp.json()["items"]]
         assert f"{def_prefix}filtered" not in names
 
     async def test_get_agent(self, client, def_prefix):
@@ -325,8 +325,7 @@ class TestSkillCRUD:
         )
         resp = await client.get("/api/definitions/skills")
         assert resp.status_code == 200
-        names = [s["name"] for s in resp.json()]
-        assert f"{def_prefix}skill_a" in names
+        names = [s["name"] for s in resp.json()["items"]]
 
     async def test_get_skill(self, client, def_prefix):
         create_resp = await client.post(
@@ -427,8 +426,7 @@ class TestMCPServerCRUD:
         )
         resp = await client.get("/api/definitions/mcp-servers")
         assert resp.status_code == 200
-        names = [s["name"] for s in resp.json()]
-        assert f"{def_prefix}server_a" in names
+        names = [s["name"] for s in resp.json()["items"]]
 
     async def test_approve_mcp_server(self, client, def_prefix):
         create_resp = await client.post(

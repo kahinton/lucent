@@ -13,6 +13,7 @@ from . import (
     daemon,
     dashboard,
     definitions,
+    groups,
     memories,
     requests_routes,
     sandboxes,
@@ -34,6 +35,7 @@ router.include_router(daemon.router)
 router.include_router(memories.router)
 router.include_router(audit.router)
 router.include_router(admin.router)
+router.include_router(groups.router)
 router.include_router(sandboxes.router)
 router.include_router(settings.router)
 router.include_router(requests_routes.router)

@@ -50,6 +50,8 @@ from lucent.integrations.repositories import (
     UserLinkRepo,
 )
 from lucent.integrations.service import IntegrationService
+from lucent.secrets import SecretRegistry, SecretScope
+from lucent.secrets.utils import is_secret_reference, secret_key_from_reference
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +122,29 @@ def _link_to_response(row: dict[str, Any]) -> UserLinkResponse:
     )
 
 
+async def _resolve_integration_config_secrets(
+    config: dict[str, Any], integration: dict[str, Any]
+) -> dict[str, Any]:
+    """Resolve secret:// references in integration config at point of use."""
+    provider = SecretRegistry.get()
+    scope = SecretScope(
+        organization_id=str(integration["organization_id"]),
+        owner_user_id=str(integration["created_by"]),
+    )
+    resolved = dict(config)
+    for key, value in config.items():
+        if not (isinstance(value, str) and is_secret_reference(value)):
+            continue
+        secret_key = secret_key_from_reference(value)
+        if not secret_key:
+            raise ValueError(f"Invalid secret reference for config key '{key}'")
+        secret_value = await provider.get(secret_key, scope)
+        if secret_value is None:
+            raise KeyError(f"Secret not found for config key '{key}' (reference '{secret_key}')")
+        resolved[key] = secret_value
+    return resolved
+
+
 # ===========================================================================
 # Webhook endpoint — async ack + background processing
 # ===========================================================================
@@ -184,6 +209,7 @@ async def receive_webhook(
             # Build adapter
             encryptor = FernetEncryptor()
             config = encryptor.decrypt(integration["encrypted_config"])
+            config = await _resolve_integration_config_secrets(config, integration)
 
             if provider == "slack":
                 adapter = SlackAdapter(

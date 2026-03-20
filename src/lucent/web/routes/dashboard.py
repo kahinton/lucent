@@ -53,8 +53,23 @@ async def dashboard(request: Request):
 
     def_repo = DefinitionRepository(pool)
     org_id = str(user.organization_id)
-    agents = (await def_repo.list_agents(org_id, status="active"))["items"]
-    skills = (await def_repo.list_skills(org_id, status="active"))["items"]
+    role_value = user.role if isinstance(user.role, str) else user.role.value
+    agents = (
+        await def_repo.list_agents(
+            org_id,
+            status="active",
+            requester_user_id=str(user.id),
+            requester_role=role_value,
+        )
+    )["items"]
+    skills = (
+        await def_repo.list_skills(
+            org_id,
+            status="active",
+            requester_user_id=str(user.id),
+            requester_role=role_value,
+        )
+    )["items"]
     active_agents = len(agents)
     active_skills = len(skills)
 

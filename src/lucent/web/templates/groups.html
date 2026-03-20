@@ -1,0 +1,136 @@
+{% extends "base.html" %}
+
+{% block title %}Groups - Lucent{% endblock %}
+
+{% block content %}
+<!-- Page Header -->
+<div class="mb-8 flex items-center justify-between">
+    <div>
+        <h1 class="text-2xl font-bold text-gray-900">Groups</h1>
+        <p class="mt-1 text-sm text-gray-500">Manage groups in your organization</p>
+    </div>
+    {% if can_manage %}
+    <button onclick="document.getElementById('createGroupModal').classList.remove('hidden')"
+            class="flex items-center gap-2 px-4 py-2 bg-primary-600 text-white text-sm font-medium rounded-lg hover:bg-primary-700 transition-colors">
+        <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+        </svg>
+        Create Group
+    </button>
+    {% endif %}
+</div>
+
+<!-- Success/Error Messages -->
+{% if success %}
+<div class="mb-6 bg-emerald-50 border border-emerald-200 rounded-xl p-4">
+    <p class="text-sm text-emerald-700">{{ success | replace('+', ' ') | replace('_', ' ') | capitalize }}</p>
+</div>
+{% endif %}
+{% if error %}
+<div class="mb-6 bg-red-50 border border-red-200 rounded-xl p-4">
+    <p class="text-sm text-red-700">{{ error | replace('+', ' ') }}</p>
+</div>
+{% endif %}
+
+<!-- Groups Table -->
+<div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+    {% if groups %}
+    <div class="overflow-x-auto">
+        <table class="w-full">
+            <thead>
+                <tr class="bg-gray-50 border-b border-gray-200">
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Description</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Members</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Created</th>
+                </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-100">
+                {% for g in groups %}
+                <tr class="hover:bg-gray-50 transition-colors cursor-pointer" onclick="window.location.href='/groups/{{ g.id }}'">
+                    <td class="px-6 py-4">
+                        <div class="flex items-center gap-3">
+                            <div class="flex items-center justify-center w-9 h-9 rounded-full bg-gradient-to-br from-indigo-400 to-indigo-600 text-white text-sm font-semibold">
+                                {{ (g.name or 'G')[0] | upper }}
+                            </div>
+                            <a href="/groups/{{ g.id }}" class="text-sm font-medium text-primary-600 hover:text-primary-700">{{ g.name }}</a>
+                        </div>
+                    </td>
+                    <td class="px-6 py-4 text-sm text-gray-500">{{ g.description or '—' }}</td>
+                    <td class="px-6 py-4">
+                        <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-700">
+                            {{ g.member_count }} member{{ 's' if g.member_count != 1 else '' }}
+                        </span>
+                    </td>
+                    <td class="px-6 py-4 text-sm text-gray-500">{{ g.created_at | datetime }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div class="p-12 text-center">
+        <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M18 18.72a9.094 9.094 0 003.741-.479 3 3 0 00-4.682-2.72m.94 3.198l.001.031c0 .225-.012.447-.037.666A11.944 11.944 0 0112 21c-2.17 0-4.207-.576-5.963-1.584A6.062 6.062 0 016 18.719m12 0a5.971 5.971 0 00-.941-3.197m0 0A5.995 5.995 0 0012 12.75a5.995 5.995 0 00-5.058 2.772m0 0a3 3 0 00-4.681 2.72 8.986 8.986 0 003.74.477m.94-3.197a5.971 5.971 0 00-.94 3.197M15 6.75a3 3 0 11-6 0 3 3 0 016 0zm6 3a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0zm-13.5 0a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0z" />
+        </svg>
+        <h3 class="mt-4 text-sm font-medium text-gray-900">No groups</h3>
+        <p class="mt-1 text-sm text-gray-500">Get started by creating a group for your team.</p>
+        {% if can_manage %}
+        <button onclick="document.getElementById('createGroupModal').classList.remove('hidden')"
+                class="mt-4 px-4 py-2 bg-primary-600 text-white text-sm font-medium rounded-lg hover:bg-primary-700 transition-colors">
+            Create Group
+        </button>
+        {% endif %}
+    </div>
+    {% endif %}
+</div>
+
+<!-- Create Group Modal -->
+{% if can_manage %}
+<div id="createGroupModal" class="hidden fixed inset-0 z-50 overflow-y-auto">
+    <div class="flex items-center justify-center min-h-screen px-4">
+        <!-- Backdrop -->
+        <div class="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity" onclick="document.getElementById('createGroupModal').classList.add('hidden')"></div>
+
+        <!-- Modal -->
+        <div class="relative bg-white rounded-xl shadow-xl max-w-md w-full p-6 z-10">
+            <div class="flex items-center justify-between mb-6">
+                <h3 class="text-lg font-semibold text-gray-900">Create Group</h3>
+                <button onclick="document.getElementById('createGroupModal').classList.add('hidden')" class="text-gray-400 hover:text-gray-500">
+                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                </button>
+            </div>
+
+            <form action="/groups/create" method="POST" class="space-y-4">
+                <div>
+                    <label for="group_name" class="block text-sm font-medium text-gray-700 mb-1">Name</label>
+                    <input type="text" id="group_name" name="name" required
+                           class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
+                           placeholder="e.g. Engineering Team">
+                </div>
+
+                <div>
+                    <label for="group_description" class="block text-sm font-medium text-gray-700 mb-1">Description</label>
+                    <textarea id="group_description" name="description" rows="3"
+                              class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
+                              placeholder="Optional description of the group's purpose"></textarea>
+                </div>
+
+                <div class="pt-4 flex justify-end gap-3">
+                    <button type="button" onclick="document.getElementById('createGroupModal').classList.add('hidden')"
+                            class="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors">
+                        Cancel
+                    </button>
+                    <button type="submit"
+                            class="px-4 py-2 text-sm font-medium text-white bg-primary-600 hover:bg-primary-700 rounded-lg transition-colors">
+                        Create Group
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{% endif %}
+{% endblock %}

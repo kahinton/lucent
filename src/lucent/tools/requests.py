@@ -98,9 +98,11 @@ if the agent type is not approved."""
         sequence_order: int = 0,
         parent_task_id: str | None = None,
     ) -> str:
-        _, org_id, _ = await _get_current_user_context()
+        user_id, org_id, user_role = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
+        if not user_id:
+            return json.dumps({"error": "No user context"})
 
         if sequence_order < 0:
             return json.dumps({"error": "sequence_order must be >= 0"})
@@ -119,7 +121,14 @@ if the agent type is not approved."""
 
         pool = await get_pool()
         def_repo = DefinitionRepository(pool)
-        agents = (await def_repo.list_agents(str(org_id), status="active"))["items"]
+        agents = (
+            await def_repo.list_agents(
+                str(org_id),
+                status="active",
+                requester_user_id=str(user_id),
+                requester_role=user_role,
+            )
+        )["items"]
         active_names = {a["name"] for a in agents}
         if agent_type and agent_type not in active_names:
             avail = sorted(active_names) if active_names else "none — approve definitions first"
@@ -132,6 +141,10 @@ if the agent type is not approved."""
             )
 
         repo = await _get_request_repository()
+        parent_request = await repo.get_request(request_id, str(org_id))
+        if not parent_request:
+            return json.dumps({"error": "Request not found"})
+        requesting_user_id = parent_request.get("created_by")
         task = await repo.create_task(
             request_id=request_id,
             title=title,
@@ -142,6 +155,7 @@ if the agent type is not approved."""
             sequence_order=sequence_order,
             parent_task_id=parent_task_id,
             model=model,
+            requesting_user_id=str(requesting_user_id) if requesting_user_id else None,
         )
         return json.dumps(
             {
@@ -172,6 +186,11 @@ Returns: JSON confirmation."""
         event_type: str,
         detail: str = "",
     ) -> str:
+        # Anti-spoofing V6: require authentication
+        user_id, org_id, _ = await _get_current_user_context()
+        if not user_id:
+            return json.dumps({"error": "Authentication required"})
+
         repo = await _get_request_repository()
         event = await repo.add_task_event(task_id, event_type, detail)
         return json.dumps({"id": str(event["id"]), "event_type": event_type})
@@ -195,6 +214,11 @@ Returns: JSON confirmation."""
         memory_id: str,
         relation: str = "created",
     ) -> str:
+        # Anti-spoofing V6: require authentication
+        user_id, org_id, _ = await _get_current_user_context()
+        if not user_id:
+            return json.dumps({"error": "Authentication required"})
+
         repo = await _get_request_repository()
         await repo.link_memory(task_id, memory_id, relation)
         return json.dumps({"status": "linked", "task_id": task_id, "memory_id": memory_id})
