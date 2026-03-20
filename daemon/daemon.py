@@ -707,7 +707,8 @@ class RequestAPI:
             async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
                 resp = await client.get(f"{API_BASE}/requests/queue/pending", headers=API_HEADERS)
                 if resp.status_code == 200:
-                    return resp.json()
+                    data = resp.json()
+                    return data.get("items", data) if isinstance(data, dict) else data
         except Exception as e:
             log(f"API get_pending_tasks failed: {e}", "WARN")
         return []
@@ -926,7 +927,8 @@ async def load_instance_agent(agent_type: str) -> dict | None:
                 headers=API_HEADERS,
             )
             if resp.status_code == 200:
-                agents = resp.json()
+                data = resp.json()
+                agents = data.get("items", data) if isinstance(data, dict) else data
                 for agent in agents:
                     if agent.get("name") == agent_type:
                         # Load full agent with skills and MCP servers
@@ -1022,7 +1024,9 @@ async def build_subagent_prompt(
                             headers=API_HEADERS,
                         )
                         if resp.status_code == 200:
-                            for skill in resp.json():
+                            data = resp.json()
+                            skills = data.get("items", data) if isinstance(data, dict) else data
+                            for skill in skills:
                                 if skill.get("name") in skill_names and skill.get("content"):
                                     skills_context += (
                                         f"\n\n--- Skill: {skill['name']} ---\n{skill['content']}"
