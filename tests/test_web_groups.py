@@ -12,7 +12,7 @@ Tests:
 Uses real DB sessions + CSRF tokens through the full ASGI stack.
 """
 
-from unittest.mock import patch
+
 from uuid import uuid4
 
 import httpx
@@ -142,20 +142,12 @@ def _csrf_data(client: httpx.AsyncClient, extra: dict | None = None) -> dict:
 
 
 @pytest.mark.asyncio
-@patch("lucent.web.routes.groups.is_team_mode", return_value=True)
-async def test_groups_list_renders(_mock_tm, client):
-    """GET /groups returns 200 with HTML."""
+async def test_groups_list_renders(client):
+    """GET /groups returns 200 with HTML (available in all modes)."""
     resp = await client.get("/groups")
     assert resp.status_code == 200
     assert "text/html" in resp.headers["content-type"]
     assert "Groups" in resp.text
-
-
-@pytest.mark.asyncio
-async def test_groups_list_not_team_mode_returns_404(client):
-    """Without team mode, GET /groups returns 404."""
-    resp = await client.get("/groups")
-    assert resp.status_code == 404
 
 
 # ============================================================================
@@ -164,8 +156,7 @@ async def test_groups_list_not_team_mode_returns_404(client):
 
 
 @pytest.mark.asyncio
-@patch("lucent.web.routes.groups.is_team_mode", return_value=True)
-async def test_create_group_as_owner(_mock_tm, client, web_prefix):
+async def test_create_group_as_owner(client, web_prefix):
     """Owner can create a group; expect 303 redirect."""
     resp = await client.post(
         "/groups/create",
@@ -177,8 +168,7 @@ async def test_create_group_as_owner(_mock_tm, client, web_prefix):
 
 
 @pytest.mark.asyncio
-@patch("lucent.web.routes.groups.is_team_mode", return_value=True)
-async def test_create_group_as_member_returns_403(_mock_tm, member_client, web_prefix):
+async def test_create_group_as_member_returns_403(member_client, web_prefix):
     """Members cannot create groups; expect 403."""
     resp = await member_client.post(
         "/groups/create",
@@ -194,8 +184,7 @@ async def test_create_group_as_member_returns_403(_mock_tm, member_client, web_p
 
 
 @pytest.mark.asyncio
-@patch("lucent.web.routes.groups.is_team_mode", return_value=True)
-async def test_group_detail_renders(_mock_tm, client, db_pool, owner_user, web_prefix):
+async def test_group_detail_renders(client, db_pool, owner_user, web_prefix):
     """GET /groups/{id} returns 200 for a valid group."""
     _, org, _ = owner_user
     repo = GroupRepository(db_pool)
@@ -209,8 +198,7 @@ async def test_group_detail_renders(_mock_tm, client, db_pool, owner_user, web_p
 
 
 @pytest.mark.asyncio
-@patch("lucent.web.routes.groups.is_team_mode", return_value=True)
-async def test_group_detail_not_found(_mock_tm, client):
+async def test_group_detail_not_found(client):
     """GET /groups/{nonexistent} returns 404."""
     resp = await client.get(f"/groups/{uuid4()}")
     assert resp.status_code == 404
@@ -222,8 +210,7 @@ async def test_group_detail_not_found(_mock_tm, client):
 
 
 @pytest.mark.asyncio
-@patch("lucent.web.routes.groups.is_team_mode", return_value=True)
-async def test_edit_group(_mock_tm, client, db_pool, owner_user, web_prefix):
+async def test_edit_group(client, db_pool, owner_user, web_prefix):
     """Owner can edit a group; expect 303 redirect."""
     _, org, _ = owner_user
     repo = GroupRepository(db_pool)
@@ -246,8 +233,7 @@ async def test_edit_group(_mock_tm, client, db_pool, owner_user, web_prefix):
 
 
 @pytest.mark.asyncio
-@patch("lucent.web.routes.groups.is_team_mode", return_value=True)
-async def test_delete_group(_mock_tm, client, db_pool, owner_user, web_prefix):
+async def test_delete_group(client, db_pool, owner_user, web_prefix):
     """Owner can delete a group; expect redirect to /groups."""
     _, org, _ = owner_user
     repo = GroupRepository(db_pool)
@@ -265,9 +251,8 @@ async def test_delete_group(_mock_tm, client, db_pool, owner_user, web_prefix):
 
 
 @pytest.mark.asyncio
-@patch("lucent.web.routes.groups.is_team_mode", return_value=True)
 async def test_delete_group_as_member_returns_403(
-    _mock_tm, member_client, db_pool, owner_user, web_prefix,
+    member_client, db_pool, owner_user, web_prefix,
 ):
     """Members cannot delete groups; expect 403."""
     _, org, _ = owner_user
@@ -290,8 +275,7 @@ async def test_delete_group_as_member_returns_403(
 
 
 @pytest.mark.asyncio
-@patch("lucent.web.routes.groups.is_team_mode", return_value=True)
-async def test_add_member(_mock_tm, client, db_pool, owner_user, member_user, web_prefix):
+async def test_add_member(client, db_pool, owner_user, member_user, web_prefix):
     """Owner can add a member to a group."""
     _, org, _ = owner_user
     target, _, _ = member_user
@@ -319,8 +303,7 @@ async def test_add_member(_mock_tm, client, db_pool, owner_user, member_user, we
 
 
 @pytest.mark.asyncio
-@patch("lucent.web.routes.groups.is_team_mode", return_value=True)
-async def test_remove_member(_mock_tm, client, db_pool, owner_user, member_user, web_prefix):
+async def test_remove_member(client, db_pool, owner_user, member_user, web_prefix):
     """Owner can remove a member from a group."""
     _, org, _ = owner_user
     target, _, _ = member_user

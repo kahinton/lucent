@@ -227,6 +227,7 @@
                         </svg>
                         Users
                     </a>
+                    {% endif %}
                     
                     <a href="/groups" class="flex items-center gap-3 px-3 py-2.5 text-sm font-medium rounded-lg transition-colors {% if '/groups' in request.url.path %}bg-primary-50 text-primary-700{% else %}text-gray-700 hover:bg-gray-50{% endif %}">
                         <svg class="w-5 h-5 {% if '/groups' in request.url.path %}text-primary-600{% else %}text-gray-400{% endif %}" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
@@ -234,7 +235,6 @@
                         </svg>
                         Groups
                     </a>
-                    {% endif %}
 
                     <a href="/sandboxes" class="flex items-center gap-3 px-3 py-2.5 text-sm font-medium rounded-lg transition-colors {% if request.url.path.startswith('/sandboxes') %}bg-primary-50 text-primary-700{% else %}text-gray-700 hover:bg-gray-50{% endif %}">
                         <svg class="w-5 h-5 {% if request.url.path.startswith('/sandboxes') %}text-primary-600{% else %}text-gray-400{% endif %}" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">

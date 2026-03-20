@@ -1,4 +1,4 @@
-"""Group management web routes (team mode only)."""
+"""Group management web routes."""
 
 from urllib.parse import quote
 from uuid import UUID
@@ -7,8 +7,6 @@ from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from lucent.db import GroupRepository, UserRepository, get_pool
-from lucent.mode import is_team_mode
-
 from ._shared import _check_csrf, get_user_context, templates
 
 router = APIRouter()
@@ -27,9 +25,7 @@ def _can_manage(user) -> bool:
 
 @router.get("/groups", response_class=HTMLResponse)
 async def groups_list(request: Request):
-    """List all groups in the organization (team mode only)."""
-    if not is_team_mode():
-        raise HTTPException(status_code=404, detail="Group management requires team mode")
+    """List all groups in the organization."""
     user = await get_user_context(request)
     pool = await get_pool()
     repo = GroupRepository(pool)
@@ -61,9 +57,7 @@ async def groups_list(request: Request):
 
 @router.get("/groups/{group_id}", response_class=HTMLResponse)
 async def group_detail(request: Request, group_id: UUID):
-    """View group details with members (team mode only)."""
-    if not is_team_mode():
-        raise HTTPException(status_code=404, detail="Group management requires team mode")
+    """View group details with members."""
     user = await get_user_context(request)
     pool = await get_pool()
     repo = GroupRepository(pool)
@@ -113,8 +107,6 @@ async def create_group(
     description: str = Form(""),
 ):
     """Create a new group (admin/owner only)."""
-    if not is_team_mode():
-        raise HTTPException(status_code=404, detail="Group management requires team mode")
     await _check_csrf(request)
     user = await get_user_context(request)
 
@@ -156,8 +148,6 @@ async def edit_group(
     description: str = Form(""),
 ):
     """Update group name/description (group admin or org admin/owner)."""
-    if not is_team_mode():
-        raise HTTPException(status_code=404, detail="Group management requires team mode")
     await _check_csrf(request)
     user = await get_user_context(request)
     pool = await get_pool()
@@ -196,8 +186,6 @@ async def edit_group(
 @router.post("/groups/{group_id}/delete")
 async def delete_group(request: Request, group_id: UUID):
     """Delete a group (org admin/owner only)."""
-    if not is_team_mode():
-        raise HTTPException(status_code=404, detail="Group management requires team mode")
     await _check_csrf(request)
     user = await get_user_context(request)
 
@@ -227,8 +215,6 @@ async def add_member(
     role: str = Form("member"),
 ):
     """Add a member to a group (group admin or org admin/owner)."""
-    if not is_team_mode():
-        raise HTTPException(status_code=404, detail="Group management requires team mode")
     await _check_csrf(request)
     user = await get_user_context(request)
     pool = await get_pool()
@@ -277,8 +263,6 @@ async def add_member(
 @router.post("/groups/{group_id}/members/{member_id}/remove")
 async def remove_member(request: Request, group_id: UUID, member_id: UUID):
     """Remove a member from a group (group admin or org admin/owner)."""
-    if not is_team_mode():
-        raise HTTPException(status_code=404, detail="Group management requires team mode")
     await _check_csrf(request)
     user = await get_user_context(request)
     pool = await get_pool()
