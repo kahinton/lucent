@@ -2,16 +2,12 @@
 
 from __future__ import annotations
 
-import os
-from unittest.mock import AsyncMock, patch
-
 import pytest
 
 from lucent.auth import set_current_user
 from lucent.secrets.base import SecretProvider, SecretScope
 from lucent.secrets.registry import (
     SecretRegistry,
-    detect_provider,
     get_selected_provider_name,
     initialize_secret_provider,
     validate_provider_env,

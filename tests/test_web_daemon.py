@@ -312,14 +312,12 @@ async def test_feedback_comment_does_not_fire_pg_notify(client, review_memory, d
 async def test_feedback_notify_failure_is_logged(client, review_memory, caplog):
     """When pg_notify fails, the error is logged (not silently swallowed)."""
     import logging
-    from unittest.mock import AsyncMock, patch
 
     memory_id = review_memory["id"]
 
     # Patch get_pool to return a pool whose acquire() raises on the notify call.
     # The route acquires the pool early for MemoryRepository, so we need a
     # targeted patch: replace only the pg_notify execution.
-    orig_execute = None
 
     class _FailNotifyConn:
         """Connection proxy that fails on pg_notify but works otherwise."""

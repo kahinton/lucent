@@ -115,10 +115,8 @@ async def definitions_page(
     pool = await get_pool()
     from lucent.db.audit import AuditRepository
     from lucent.db.definitions import DefinitionRepository
-    from lucent.db.groups import GroupRepository
 
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
-    group_repo = GroupRepository(pool)
     org_id = str(user.organization_id)
     role_value = user.role if isinstance(user.role, str) else user.role.value
 

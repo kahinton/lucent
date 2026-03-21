@@ -12,7 +12,6 @@ import pytest
 from lucent.secrets.base import SecretScope
 from lucent.secrets.transit import TransitSecretProvider
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------

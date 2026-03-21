@@ -8,12 +8,12 @@ Tests /api/definitions endpoints:
 - Proposals: list pending proposals
 """
 
+from datetime import datetime, timezone
 from uuid import uuid4
 
 import httpx
 import pytest_asyncio
 from httpx import ASGITransport
-from datetime import datetime, timezone
 
 from lucent.api.app import create_app
 from lucent.api.deps import CurrentUser, get_current_user
@@ -327,7 +327,7 @@ class TestSkillCRUD:
         )
         resp = await client.get("/api/definitions/skills")
         assert resp.status_code == 200
-        names = [s["name"] for s in resp.json()["items"]]
+        _ = [s["name"] for s in resp.json()["items"]]
 
     async def test_get_skill(self, client, def_prefix):
         create_resp = await client.post(
@@ -428,7 +428,7 @@ class TestMCPServerCRUD:
         )
         resp = await client.get("/api/definitions/mcp-servers")
         assert resp.status_code == 200
-        names = [s["name"] for s in resp.json()["items"]]
+        _ = [s["name"] for s in resp.json()["items"]]
 
     async def test_approve_mcp_server(self, client, def_prefix):
         create_resp = await client.post(

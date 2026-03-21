@@ -15,7 +15,12 @@ from httpx import ASGITransport
 
 from lucent.api.app import create_app
 from lucent.api.deps import CurrentUser, get_current_user
-from lucent.auth_providers import CSRF_COOKIE_NAME, CSRF_FIELD_NAME, SESSION_COOKIE_NAME, create_session
+from lucent.auth_providers import (
+    CSRF_COOKIE_NAME,
+    CSRF_FIELD_NAME,
+    SESSION_COOKIE_NAME,
+    create_session,
+)
 from lucent.db import OrganizationRepository, UserRepository
 from lucent.db.definitions import DefinitionRepository
 from lucent.services import mcp_discovery
