@@ -3,6 +3,7 @@
 import secrets
 import time
 from math import ceil
+from urllib.parse import quote_plus
 from uuid import UUID
 
 from fastapi import APIRouter, Form, HTTPException, Request
@@ -18,6 +19,7 @@ from lucent.auth_providers import (
 )
 from lucent.db import UserRepository, get_pool
 from lucent.logging import get_logger
+from lucent.llm.model_engine_validation import normalize_engine, validate_engine_override
 from lucent.mode import is_team_mode
 
 from ._shared import _check_csrf, get_user_context, templates
@@ -357,6 +359,27 @@ def _parse_tags(raw: str) -> list[str]:
     return [t.strip() for t in raw.split(",") if t.strip()]
 
 
+def _validate_engine_form(provider: str, engine: str | None) -> tuple[str | None, list[str], str | None]:
+    try:
+        normalized = normalize_engine(engine)
+        warnings = validate_engine_override(provider, normalized)
+        return normalized, warnings, None
+    except ValueError as e:
+        return None, [], str(e)
+
+
+def _models_redirect(success: str | None = None, error: str | None = None, warning: str | None = None):
+    params: list[str] = []
+    if success:
+        params.append(f"success={quote_plus(success)}")
+    if error:
+        params.append(f"error={quote_plus(error)}")
+    if warning:
+        params.append(f"warning={quote_plus(warning)}")
+    suffix = f"?{'&'.join(params)}" if params else ""
+    return RedirectResponse(url=f"/models{suffix}", status_code=303)
+
+
 @router.get("/models", response_class=HTMLResponse)
 async def models_list(request: Request):
     """List all models with admin controls."""
@@ -416,11 +439,15 @@ async def edit_model(request: Request, model_id: str):
     model = await repo.get_model(model_id)
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
+    provider = form.get("provider", model["provider"])
+    engine, warnings, error = _validate_engine_form(provider, form.get("engine"))
+    if error:
+        return _models_redirect(error=error)
 
     await repo.update_model(
         model_id,
         name=form.get("name", model["name"]),
-        provider=form.get("provider", model["provider"]),
+        provider=provider,
         category=form.get("category", model["category"]),
         api_model_id=form.get("api_model_id", model["api_model_id"]),
         context_window=int(form.get("context_window") or 0),
@@ -428,8 +455,11 @@ async def edit_model(request: Request, model_id: str):
         tags=_parse_tags(form.get("tags", "")),
         supports_tools="supports_tools" in form,
         supports_vision="supports_vision" in form,
+        engine=engine,
     )
-    return RedirectResponse(url="/models?success=Model+updated", status_code=303)
+    if warnings:
+        return _models_redirect(success="Model updated", warning=warnings[0])
+    return _models_redirect(success="Model updated")
 
 
 @router.post("/models/add")
@@ -449,10 +479,14 @@ async def add_model(request: Request):
     existing = await repo.get_model(model_id)
     if existing:
         return RedirectResponse(url="/models?error=Model+ID+already+exists", status_code=303)
+    provider = form.get("provider", "openai")
+    engine, warnings, error = _validate_engine_form(provider, form.get("engine"))
+    if error:
+        return _models_redirect(error=error)
 
     await repo.create_model(
         model_id=model_id,
-        provider=form.get("provider", "openai"),
+        provider=provider,
         name=form.get("name", model_id),
         category=form.get("category", "general"),
         api_model_id=form.get("api_model_id", "") or model_id,
@@ -462,8 +496,11 @@ async def add_model(request: Request):
         supports_tools="supports_tools" in form,
         supports_vision="supports_vision" in form,
         org_id=str(user.organization_id),
+        engine=engine,
     )
-    return RedirectResponse(url="/models?success=Model+added", status_code=303)
+    if warnings:
+        return _models_redirect(success="Model added", warning=warnings[0])
+    return _models_redirect(success="Model added")
 
 
 @router.post("/models/{model_id:path}/delete")

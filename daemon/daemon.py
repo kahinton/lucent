@@ -1410,11 +1410,17 @@ class LucentDaemon:
                 if resp and resp.get("items"):
                     registered = 0
                     for m in resp["items"]:
-                        if m.get("provider") not in ("anthropic", "openai", "google"):
-                            register_model(m["id"], m["provider"], m.get("api_model_id", ""))
+                        engine = m.get("engine")
+                        if m.get("provider") not in ("anthropic", "openai", "google") or engine:
+                            register_model(
+                                m["id"],
+                                m["provider"],
+                                m.get("api_model_id", ""),
+                                engine=engine,
+                            )
                             registered += 1
                     if registered:
-                        log(f"Registered {registered} custom model(s) in LLM engine")
+                        log(f"Registered {registered} model override(s) in LLM engine")
             except Exception as e:
                 log(f"Model registry sync skipped: {e}", "WARN")
 

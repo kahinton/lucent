@@ -70,13 +70,20 @@ def get_engine() -> LLMEngine:
 
 
 def get_engine_for_model(model_id: str) -> LLMEngine:
-    """Route to the correct engine based on the model's provider.
+    """Route to the correct engine based on explicit override or provider.
 
-    Cloud models (Anthropic, OpenAI, Google) use the default engine.
-    Local/custom models (Ollama) use the LangChain engine.
+    If a model has an explicit runtime engine override ("copilot" or "langchain"),
+    use it directly. Otherwise fall back to provider-based routing:
+    cloud models use the default engine and local/custom models (Ollama) use LangChain.
     """
     try:
-        from lucent.llm.langchain_engine import _resolve_model
+        from lucent.llm.langchain_engine import _resolve_model, get_registered_engine
+
+        engine_override = get_registered_engine(model_id)
+        if engine_override == "copilot":
+            return _get_copilot_engine()
+        if engine_override == "langchain":
+            return _get_langchain_engine()
 
         provider, _ = _resolve_model(model_id)
         if provider in _LANGCHAIN_PROVIDERS:

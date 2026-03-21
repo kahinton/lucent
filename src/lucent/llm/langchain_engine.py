@@ -49,12 +49,41 @@ PROVIDER_MODEL_MAP: dict[str, tuple[str, str]] = {
 
 # Runtime registry for models not in the static map (e.g. Ollama models).
 # Populated from the DB at daemon startup via register_model().
-_runtime_model_registry: dict[str, tuple[str, str]] = {}
+_runtime_model_registry: dict[str, tuple[str, str, str | None]] = {}
 
 
-def register_model(model_id: str, provider: str, api_model_id: str = "") -> None:
+def _normalize_engine(engine: str | None) -> str | None:
+    """Normalize explicit engine override; None means auto-detect."""
+    if engine is None:
+        return None
+    normalized = engine.strip().lower()
+    if normalized in ("", "auto"):
+        return None
+    if normalized in ("copilot", "langchain"):
+        return normalized
+    return None
+
+
+def register_model(
+    model_id: str,
+    provider: str,
+    api_model_id: str = "",
+    engine: str | None = None,
+) -> None:
     """Register a model at runtime for provider resolution."""
-    _runtime_model_registry[model_id] = (provider, api_model_id or model_id)
+    _runtime_model_registry[model_id] = (
+        provider,
+        api_model_id or model_id,
+        _normalize_engine(engine),
+    )
+
+
+def get_registered_engine(model_id: str) -> str | None:
+    """Get explicit runtime engine override for model, if present."""
+    entry = _runtime_model_registry.get(model_id)
+    if not entry:
+        return None
+    return entry[2]
 
 
 def _resolve_model(model_id: str) -> tuple[str, str]:
@@ -67,7 +96,8 @@ def _resolve_model(model_id: str) -> tuple[str, str]:
 
     # Check runtime registry (DB-populated Ollama/custom models)
     if model_id in _runtime_model_registry:
-        return _runtime_model_registry[model_id]
+        provider, api_model_id, _engine = _runtime_model_registry[model_id]
+        return provider, api_model_id
 
     # Infer provider from model name prefix
     if model_id.startswith("claude"):

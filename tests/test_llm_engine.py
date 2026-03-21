@@ -6,7 +6,7 @@ from unittest.mock import patch
 import pytest
 
 from lucent.llm.engine import SessionEvent, SessionEventType
-from lucent.llm.factory import get_engine, get_engine_name, reset_engine
+from lucent.llm.factory import get_engine, get_engine_for_model, get_engine_name, reset_engine
 
 
 class TestSessionEvent:
@@ -135,6 +135,106 @@ class TestModelResolve:
         assert model_id == "some-custom-model"
 
 
+class TestEngineRoutingByModel:
+    def teardown_method(self):
+        from lucent.llm.langchain_engine import _runtime_model_registry
+
+        _runtime_model_registry.clear()
+        reset_engine()
+
+    def test_explicit_langchain_override_wins(self):
+        from lucent.llm.langchain_engine import register_model
+
+        register_model("anthropic-via-langchain", "anthropic", "claude-sonnet-4-6-20260115", "langchain")
+        engine = get_engine_for_model("anthropic-via-langchain")
+        assert engine.name == "langchain"
+
+    def test_explicit_copilot_override_wins(self):
+        from lucent.llm.langchain_engine import register_model
+
+        register_model("ollama-via-copilot", "ollama", "llama3.2", "copilot")
+        engine = get_engine_for_model("ollama-via-copilot")
+        assert engine.name == "copilot"
+
+    def test_auto_override_falls_back_to_provider(self):
+        from lucent.llm.langchain_engine import register_model
+
+        register_model("ollama-auto-routing", "ollama", "llama3.2", "auto")
+        engine = get_engine_for_model("ollama-auto-routing")
+        assert engine.name == "langchain"
+
+    def test_null_engine_preserves_auto_detection(self):
+        from lucent.llm.langchain_engine import register_model
+
+        with patch.dict(os.environ, {"LUCENT_LLM_ENGINE": "copilot"}):
+            register_model("openai-auto-routing", "openai", "gpt-5.2", None)
+            engine = get_engine_for_model("openai-auto-routing")
+            assert engine.name == "copilot"
+
+    def test_copilot_override_openai_uses_copilot_sdk(self):
+        from lucent.llm.langchain_engine import register_model
+
+        register_model("openai-via-copilot", "openai", "gpt-5.2", "copilot")
+        engine = get_engine_for_model("openai-via-copilot")
+        assert engine.name == "copilot"
+
+    def test_register_model_override_replaces_auto_detection(self):
+        from lucent.llm.langchain_engine import register_model
+
+        register_model("switching-model", "ollama", "llama3.2", None)
+        assert get_engine_for_model("switching-model").name == "langchain"
+        register_model("switching-model", "ollama", "llama3.2", "copilot")
+        assert get_engine_for_model("switching-model").name == "copilot"
+
+    def test_registry_update_during_runtime_is_stable(self):
+        from lucent.llm.langchain_engine import register_model
+
+        register_model("runtime-race-model", "ollama", "llama3.2", None)
+        first_engine = get_engine_for_model("runtime-race-model")
+        register_model("runtime-race-model", "ollama", "llama3.2", "copilot")
+        second_engine = get_engine_for_model("runtime-race-model")
+        assert first_engine.name == "langchain"
+        assert second_engine.name == "copilot"
+
+    def test_restart_resync_reloads_engine_preferences(self):
+        from lucent.llm.langchain_engine import _runtime_model_registry, register_model
+
+        register_model("restart-sync-model", "anthropic", "claude-sonnet-4-6-20260115", "langchain")
+        _runtime_model_registry.clear()  # simulate daemon restart
+        register_model("restart-sync-model", "anthropic", "claude-sonnet-4-6-20260115", "langchain")
+        engine = get_engine_for_model("restart-sync-model")
+        assert engine.name == "langchain"
+
+
+class TestModelEngineValidation:
+    def test_invalid_engine_rejected(self):
+        from lucent.llm.model_engine_validation import normalize_engine
+
+        with pytest.raises(ValueError, match="Invalid engine value"):
+            normalize_engine("bad-engine")
+
+    def test_copilot_unsupported_provider_warns(self):
+        from lucent.llm.model_engine_validation import validate_engine_override
+
+        warnings = validate_engine_override("mistral", "copilot")
+        assert warnings
+        assert "may not be supported by Copilot SDK" in warnings[0]
+
+    def test_langchain_missing_provider_package_errors(self, monkeypatch):
+        from lucent.llm import model_engine_validation as mev
+
+        def _fake_find_spec(name: str):
+            if name == "langchain":
+                return object()
+            if name == "langchain_anthropic":
+                return None
+            return object()
+
+        monkeypatch.setattr(mev, "find_spec", _fake_find_spec)
+        with pytest.raises(ValueError, match="requires package 'langchain_anthropic'"):
+            mev.validate_engine_override("anthropic", "langchain")
+
+
 class TestModelRegistry:
     def test_api_model_id(self):
         from lucent.model_registry import get_api_model_id
@@ -157,6 +257,62 @@ class TestModelRegistry:
         assert get_provider("claude-future") == "anthropic"
         assert get_provider("gpt-6") == "openai"
         assert get_provider("gemini-4") == "google"
+
+    @pytest.mark.asyncio
+    async def test_db_load_keeps_null_engine_for_existing_models(self, monkeypatch):
+        from lucent import model_registry
+
+        class _Repo:
+            def __init__(self, _pool):
+                pass
+
+            async def list_models(self):
+                return {
+                    "items": [
+                        {
+                            "id": "legacy-null-engine-model",
+                            "provider": "openai",
+                            "name": "Legacy",
+                            "category": "general",
+                            "api_model_id": "gpt-4.1",
+                            "engine": None,
+                            "is_enabled": True,
+                        }
+                    ]
+                }
+
+        monkeypatch.setattr("lucent.db.models.ModelRepository", _Repo)
+        loaded = await model_registry.load_models_from_db(object())
+        match = next(m for m in loaded if m.id == "legacy-null-engine-model")
+        assert match.engine is None
+
+    @pytest.mark.asyncio
+    async def test_db_reload_resyncs_engine_preferences(self, monkeypatch):
+        from lucent import model_registry
+
+        class _Repo:
+            def __init__(self, _pool):
+                pass
+
+            async def list_models(self):
+                return {
+                    "items": [
+                        {
+                            "id": "resync-model",
+                            "provider": "anthropic",
+                            "name": "Resync",
+                            "category": "general",
+                            "api_model_id": "claude-sonnet-4-6-20260115",
+                            "engine": "langchain",
+                            "is_enabled": True,
+                        }
+                    ]
+                }
+
+        monkeypatch.setattr("lucent.db.models.ModelRepository", _Repo)
+        loaded = await model_registry.load_models_from_db(object())
+        match = next(m for m in loaded if m.id == "resync-model")
+        assert match.engine == "langchain"
 
 
 class TestValidateModel:

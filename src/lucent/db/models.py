@@ -77,14 +77,15 @@ class ModelRepository:
         tags: list[str] | None = None,
         is_enabled: bool = True,
         org_id: str | None = None,
+        engine: str | None = None,
     ) -> dict:
         now = datetime.now(timezone.utc)
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 """INSERT INTO models (id, provider, name, category, api_model_id,
                    context_window, supports_tools, supports_vision, notes, tags,
-                   is_enabled, organization_id, created_at, updated_at)
-                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$13)
+                   is_enabled, organization_id, engine, created_at, updated_at)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14)
                    RETURNING *""",
                 model_id,
                 provider,
@@ -98,6 +99,7 @@ class ModelRepository:
                 tags or [],
                 is_enabled,
                 UUID(org_id) if org_id else None,
+                engine,
                 now,
             )
         return dict(row)
@@ -106,6 +108,7 @@ class ModelRepository:
         allowed = {
             "provider", "name", "category", "api_model_id", "context_window",
             "supports_tools", "supports_vision", "notes", "tags", "is_enabled",
+            "engine",
         }
         updates = {k: v for k, v in kwargs.items() if k in allowed}
         if not updates:

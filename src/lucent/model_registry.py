@@ -23,6 +23,7 @@ class ModelInfo:
     supports_vision: bool = False  # whether the model supports image input
     notes: str = ""  # additional notes about the model
     tags: list[str] = field(default_factory=list)
+    engine: str | None = None  # engine override: None=auto, "copilot", "langchain"
 
 
 # ── Model Registry ────────────────────────────────────────────────────────
@@ -275,6 +276,7 @@ async def load_models_from_db(pool) -> list[ModelInfo]:
                 supports_vision=r.get("supports_vision", False),
                 notes=r.get("notes", ""),
                 tags=list(r.get("tags") or []),
+                engine=r.get("engine"),
             )
             loaded.append(m)
             by_id[m.id] = m
