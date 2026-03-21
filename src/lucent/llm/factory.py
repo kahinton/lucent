@@ -96,5 +96,7 @@ def get_engine_for_model(model_id: str) -> LLMEngine:
 
 def reset_engine() -> None:
     """Reset the engine singleton (for testing)."""
-    global _engine
+    global _engine, _copilot_engine, _langchain_engine
     _engine = None
+    _copilot_engine = None
+    _langchain_engine = None

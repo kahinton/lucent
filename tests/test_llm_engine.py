@@ -318,12 +318,13 @@ class TestModelRegistry:
 class TestValidateModel:
     """Tests for validate_model — strict/lenient modes, known/unknown/disabled models."""
 
-    def test_known_hardcoded_model_accepted(self):
+    def test_known_hardcoded_model_accepted(self, monkeypatch):
         from lucent import model_registry
-        from lucent.model_registry import validate_model
+        from lucent.model_registry import MODELS, validate_model
 
-        # Ensure no DB models loaded (hardcoded path)
-        assert model_registry._db_models is None or "claude-sonnet-4.6" in model_registry._MODEL_BY_ID
+        # Reset to hardcoded models (prior tests may have called load_models_from_db)
+        monkeypatch.setattr(model_registry, "_db_models", None)
+        monkeypatch.setattr(model_registry, "_MODEL_BY_ID", {m.id: m for m in MODELS})
         assert validate_model("claude-sonnet-4.6") is None
 
     def test_unknown_model_rejected_strict(self, monkeypatch):
@@ -403,9 +404,10 @@ class TestValidateModel:
 
     def test_error_message_lists_available_models(self, monkeypatch):
         from lucent import model_registry
-        from lucent.model_registry import validate_model
+        from lucent.model_registry import MODELS, validate_model
 
         monkeypatch.setattr(model_registry, "_db_models", None)
+        monkeypatch.setattr(model_registry, "_MODEL_BY_ID", {m.id: m for m in MODELS})
         monkeypatch.delenv("LUCENT_MODEL_VALIDATION", raising=False)
         result = validate_model("bad-model")
         assert "claude-sonnet-4.6" in result  # hardcoded model appears in list
