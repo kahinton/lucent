@@ -172,8 +172,13 @@ class TestCreateSchedule:
         assert "error" in result
 
     @pytest.mark.asyncio
-    async def test_with_model(self, mcp, auth_user):
+    async def test_with_model(self, mcp, auth_user, monkeypatch):
         """Known model from hardcoded registry is accepted in strict mode."""
+        from lucent import model_registry
+        from lucent.model_registry import MODELS
+
+        monkeypatch.setattr(model_registry, "_db_models", None)
+        monkeypatch.setattr(model_registry, "_MODEL_BY_ID", {m.id: m for m in MODELS})
         result = await _call(
             mcp,
             "create_schedule",

@@ -151,8 +151,13 @@ class TestCreateTask:
         assert "nonexistent_agent_xyz" in result["error"]
 
     @pytest.mark.asyncio
-    async def test_with_model(self, mcp, auth_user, request_id, db_pool):
+    async def test_with_model(self, mcp, auth_user, request_id, db_pool, monkeypatch):
         """Known model from hardcoded registry is accepted in strict mode."""
+        from lucent import model_registry
+        from lucent.model_registry import MODELS
+
+        monkeypatch.setattr(model_registry, "_db_models", None)
+        monkeypatch.setattr(model_registry, "_MODEL_BY_ID", {m.id: m for m in MODELS})
         async with db_pool.acquire() as conn:
             await conn.execute(
                 """INSERT INTO agent_definitions (name, organization_id, content, status, owner_user_id)
