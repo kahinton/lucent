@@ -3,9 +3,22 @@
 Canonical value sets used across API models, DB repositories, and MCP tools.
 """
 
+# Named constants for each valid request source.
+REQUEST_SOURCE_USER = "user"
+REQUEST_SOURCE_COGNITIVE = "cognitive"
+REQUEST_SOURCE_API = "api"
+REQUEST_SOURCE_DAEMON = "daemon"
+REQUEST_SOURCE_SCHEDULE = "schedule"
+
 # Valid source values for requests.
 VALID_REQUEST_SOURCES: frozenset[str] = frozenset(
-    {"user", "cognitive", "api", "daemon", "schedule"}
+    {
+        REQUEST_SOURCE_USER,
+        REQUEST_SOURCE_COGNITIVE,
+        REQUEST_SOURCE_API,
+        REQUEST_SOURCE_DAEMON,
+        REQUEST_SOURCE_SCHEDULE,
+    }
 )
 
 # Regex pattern matching any valid request source (for Pydantic Field patterns).

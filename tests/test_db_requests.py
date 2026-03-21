@@ -3,6 +3,8 @@
 Covers: request CRUD, task lifecycle, events, memory links, dashboard queries.
 """
 
+import asyncio
+
 import pytest
 import pytest_asyncio
 
@@ -1069,3 +1071,15 @@ class TestRequestDeduplication:
         r1 = await repo.create_request(title="First Task", org_id=org_id)
         r2 = await repo.create_request(title="Second Task", org_id=org_id)
         assert str(r1["id"]) != str(r2["id"])
+
+    async def test_concurrent_duplicate_creates_return_same_request(
+        self, repo, test_organization
+    ):
+        """N concurrent create_request calls with the same title return one request."""
+        org_id = str(test_organization["id"])
+        results = await asyncio.gather(*[
+            repo.create_request(title="Concurrent Work", org_id=org_id)
+            for _ in range(5)
+        ])
+        ids = {str(r["id"]) for r in results}
+        assert len(ids) == 1, f"Expected 1 unique request, got {len(ids)}: {ids}"

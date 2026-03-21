@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from lucent.api.deps import AuthenticatedUser, get_pool
+from lucent.constants import REQUEST_SOURCE_SCHEDULE
 
 router = APIRouter(prefix="/schedules", tags=["schedules"])
 
@@ -227,7 +228,7 @@ async def trigger_now(
             title=f"[Scheduled] {sched['title']}",
             org_id=str(user.organization_id),
             description=sched.get("description", ""),
-            source="schedule",
+            source=REQUEST_SOURCE_SCHEDULE,
             priority=sched.get("priority", "medium"),
             created_by=str(user.id),
         )

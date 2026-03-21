@@ -5,6 +5,7 @@ from uuid import UUID, uuid4
 import pytest
 import pytest_asyncio
 
+from lucent.constants import VALID_REQUEST_SOURCES
 from lucent.db.requests import RequestRepository
 
 # ── Fixtures ─────────────────────────────────────────────────────────────
@@ -100,7 +101,7 @@ class TestCreateRequest:
         r2 = await _make_request(repo, org_id, title="Req B")
         assert r1["id"] != r2["id"]
 
-    @pytest.mark.parametrize("source", ["user", "cognitive", "api", "daemon", "schedule"])
+    @pytest.mark.parametrize("source", sorted(VALID_REQUEST_SOURCES))
     async def test_all_valid_sources_accepted(self, repo, org_id, source):
         req = await _make_request(repo, org_id, title=f"Source {source}", source=source)
         assert req["source"] == source
