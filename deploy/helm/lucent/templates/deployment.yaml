@@ -1,0 +1,111 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ printf "%s-server" (include "lucent.fullname" .) }}
+  labels:
+    {{- include "lucent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  replicas: {{ .Values.server.replicaCount }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      {{- include "lucent.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: server
+  template:
+    metadata:
+      labels:
+        {{- include "lucent.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: server
+    spec:
+      serviceAccountName: {{ include "lucent.serviceAccountName" . }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: lucent-server
+          image: {{ printf "%s:%s" .Values.server.image.repository .Values.server.image.tag | quote }}
+          imagePullPolicy: {{ .Values.server.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.server.service.port }}
+              protocol: TCP
+          securityContext:
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            periodSeconds: {{ dig "server" "health" "livenessPeriodSeconds" 10 .Values }}
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            periodSeconds: {{ dig "server" "health" "readinessPeriodSeconds" 10 .Values }}
+          resources:
+            {{- toYaml .Values.server.resources | nindent 12 }}
+          envFrom:
+            - configMapRef:
+                name: {{ printf "%s-config" (include "lucent.fullname" .) }}
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ printf "%s-secrets" (include "lucent.fullname" .) }}
+                  key: DATABASE_URL
+            - name: LUCENT_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ printf "%s-secrets" (include "lucent.fullname" .) }}
+                  key: LUCENT_SECRET_KEY
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ printf "%s-secrets" (include "lucent.fullname" .) }}
+                  key: ANTHROPIC_API_KEY
+                  optional: true
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ printf "%s-secrets" (include "lucent.fullname" .) }}
+                  key: OPENAI_API_KEY
+                  optional: true
+            - name: GOOGLE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ printf "%s-secrets" (include "lucent.fullname" .) }}
+                  key: GOOGLE_API_KEY
+                  optional: true
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ printf "%s-secrets" (include "lucent.fullname" .) }}
+                  key: GITHUB_TOKEN
+                  optional: true
+            - name: VAULT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ printf "%s-secrets" (include "lucent.fullname" .) }}
+                  key: VAULT_TOKEN
+                  optional: true
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

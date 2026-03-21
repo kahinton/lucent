@@ -6,11 +6,10 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
+from lucent.auth_providers import CSRF_COOKIE_NAME
 from lucent.db import get_pool
 from lucent.logging import get_logger
 from lucent.rbac import Role
-
-from lucent.auth_providers import CSRF_COOKIE_NAME
 
 from ._shared import _check_csrf, _parse_env_vars, get_user_context, templates
 
@@ -329,7 +328,11 @@ async def discover_tools_ajax(request: Request, server_id: str, refresh: bool = 
     pool = await get_pool()
     from lucent.db.audit import AuditRepository
     from lucent.db.definitions import DefinitionRepository
-    from lucent.services.mcp_discovery import MCPDiscoveryError, discover_mcp_tools, get_tools_cached
+    from lucent.services.mcp_discovery import (
+        MCPDiscoveryError,
+        discover_mcp_tools,
+        get_tools_cached,
+    )
 
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     org_id = str(user.organization_id)

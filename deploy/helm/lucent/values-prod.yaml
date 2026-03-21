@@ -1,0 +1,66 @@
+server:
+  replicaCount: 3
+  resources:
+    requests:
+      cpu: 1000m
+      memory: 2Gi
+    limits:
+      cpu: 2000m
+      memory: 4Gi
+
+database:
+  embedded: false
+  external:
+    host: lucent-postgres
+    port: 5432
+    secretRef: lucent-db-credentials
+
+openbao:
+  embedded: false
+  external:
+    address: https://openbao.example.com
+    secretRef: lucent-openbao-credentials
+
+llm:
+  engine: copilot
+
+daemon:
+  enabled: true
+  maxConcurrentSessions: 8
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+  hosts:
+    - host: lucent.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: lucent-tls
+      hosts:
+        - lucent.example.com
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 12
+  targetCPU: 70
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2
+
+networkPolicy:
+  enabled: true
+
+observability:
+  enabled: true
+  otelCollector:
+    enabled: true
+  prometheus:
+    serviceMonitor: true
+  grafana:
+    dashboards: true

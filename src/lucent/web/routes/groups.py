@@ -7,6 +7,7 @@ from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from lucent.db import GroupRepository, UserRepository, get_pool
+
 from ._shared import _check_csrf, get_user_context, templates
 
 router = APIRouter()

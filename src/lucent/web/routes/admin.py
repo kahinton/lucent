@@ -18,8 +18,8 @@ from lucent.auth_providers import (
     sign_value,
 )
 from lucent.db import UserRepository, get_pool
-from lucent.logging import get_logger
 from lucent.llm.model_engine_validation import normalize_engine, validate_engine_override
+from lucent.logging import get_logger
 from lucent.mode import is_team_mode
 
 from ._shared import _check_csrf, get_user_context, templates

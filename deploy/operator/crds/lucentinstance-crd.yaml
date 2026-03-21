@@ -1,0 +1,254 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: lucentinstances.lucent.io
+spec:
+  group: lucent.io
+  scope: Namespaced
+  names:
+    plural: lucentinstances
+    singular: lucentinstance
+    kind: LucentInstance
+    shortNames:
+      - li
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Ready
+          type: string
+          jsonPath: .status.phase
+        - name: Replicas
+          type: integer
+          jsonPath: .spec.replicas
+        - name: Version
+          type: string
+          jsonPath: .status.version
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              required:
+                - replicas
+              properties:
+                replicas:
+                  type: integer
+                  minimum: 1
+                  default: 1
+                image:
+                  type: object
+                  properties:
+                    repository:
+                      type: string
+                      default: lucent
+                    tag:
+                      type: string
+                      default: "0.2.0"
+                    pullPolicy:
+                      type: string
+                      enum: ["Always", "IfNotPresent", "Never"]
+                      default: IfNotPresent
+                database:
+                  type: object
+                  properties:
+                    embedded:
+                      type: boolean
+                      default: true
+                    host:
+                      type: string
+                    port:
+                      type: integer
+                      minimum: 1
+                      maximum: 65535
+                      default: 5432
+                    secretRef:
+                      type: string
+                    pvcName:
+                      type: string
+                vault:
+                  type: object
+                  properties:
+                    embedded:
+                      type: boolean
+                      default: true
+                    address:
+                      type: string
+                    secretRef:
+                      type: string
+                    init:
+                      type: boolean
+                      default: true
+                models:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - id
+                      - provider
+                      - engine
+                    properties:
+                      id:
+                        type: string
+                      provider:
+                        type: string
+                        enum: ["anthropic", "openai", "google", "ollama", "copilot"]
+                      engine:
+                        type: string
+                        enum: ["copilot", "langchain"]
+                      temperature:
+                        type: number
+                      maxTokens:
+                        type: integer
+                        minimum: 1
+                daemon:
+                  type: object
+                  properties:
+                    defaultModel:
+                      type: string
+                    maxConcurrentSessions:
+                      type: integer
+                      minimum: 1
+                      maximum: 100
+                      default: 3
+                    intervalMinutes:
+                      type: integer
+                      minimum: 1
+                      default: 15
+                observability:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: false
+                    prometheusMonitor:
+                      type: boolean
+                      default: false
+                    otelEndpoint:
+                      type: string
+                canary:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: false
+                    imageTag:
+                      type: string
+                    replicas:
+                      type: integer
+                      minimum: 1
+                      default: 1
+                    weight:
+                      type: integer
+                      minimum: 0
+                      maximum: 100
+                      default: 10
+                    promotionPolicy:
+                      type: string
+                      enum: ["manual", "auto"]
+                      default: manual
+                backup:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: true
+                    schedule:
+                      type: string
+                      default: "0 2 * * *"
+                    retentionDays:
+                      type: integer
+                      minimum: 1
+                      default: 7
+                    storage:
+                      type: object
+                      properties:
+                        pvcName:
+                          type: string
+                        s3Bucket:
+                          type: string
+                        s3Prefix:
+                          type: string
+                        s3SecretRef:
+                          type: string
+                helm:
+                  type: object
+                  properties:
+                    releaseName:
+                      type: string
+                    chartPath:
+                      type: string
+                      default: deploy/helm/lucent
+                    namespace:
+                      type: string
+                    valuesOverrides:
+                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                observedGeneration:
+                  type: integer
+                  format: int64
+                version:
+                  type: string
+                activeCanary:
+                  type: string
+                readyReplicas:
+                  type: integer
+                lastReconcileTime:
+                  type: string
+                  format: date-time
+                health:
+                  type: object
+                  properties:
+                    server:
+                      type: string
+                    database:
+                      type: string
+                    vault:
+                      type: string
+                    details:
+                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - type
+                      - status
+                      - reason
+                      - message
+                      - lastTransitionTime
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                        enum: ["True", "False", "Unknown"]
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                      observedGeneration:
+                        type: integer
+                        format: int64
+                      lastTransitionTime:
+                        type: string
+                        format: date-time

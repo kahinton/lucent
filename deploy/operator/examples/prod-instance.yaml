@@ -1,0 +1,49 @@
+apiVersion: lucent.io/v1alpha1
+kind: LucentInstance
+metadata:
+  name: production
+  namespace: lucent
+spec:
+  replicas: 3
+  image:
+    repository: ghcr.io/lucent/lucent
+    tag: "0.2.0"
+    pullPolicy: IfNotPresent
+  database:
+    embedded: false
+    host: pg-cluster.default.svc
+    port: 5432
+    secretRef: lucent-db-credentials
+  vault:
+    embedded: true
+    init: true
+  models:
+    - id: claude-opus-4.6
+      provider: anthropic
+      engine: copilot
+    - id: qwen2.5-coder-3b
+      provider: ollama
+      engine: langchain
+  daemon:
+    defaultModel: claude-opus-4.6
+    maxConcurrentSessions: 5
+    intervalMinutes: 10
+  observability:
+    enabled: true
+    prometheusMonitor: true
+    otelEndpoint: http://otel-collector:4317
+  canary:
+    enabled: true
+    imageTag: "0.2.1-rc1"
+    replicas: 1
+    weight: 10
+    promotionPolicy: manual
+  backup:
+    enabled: true
+    schedule: "0 1 * * *"
+    retentionDays: 14
+    storage:
+      pvcName: lucent-db-backups
+      s3Bucket: lucent-prod-backups
+      s3Prefix: db/
+      s3SecretRef: lucent-backup-s3

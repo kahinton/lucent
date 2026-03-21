@@ -1,0 +1,60 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: lucent-db-backup
+  namespace: lucent
+  labels:
+    app.kubernetes.io/name: lucent
+    app.kubernetes.io/component: backup
+spec:
+  schedule: "0 2 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          serviceAccountName: lucent-operator
+          restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: pg-dump
+              image: postgres:16-alpine
+              imagePullPolicy: IfNotPresent
+              command:
+                - /bin/sh
+                - -ec
+                - |
+                  TS="$(date -u +%Y%m%dT%H%M%SZ)"
+                  FILE="/backup/${TS}.sql"
+                  pg_dump -Fc "$DATABASE_URL" > "$FILE"
+                  if [ -n "${S3_BUCKET:-}" ]; then
+                    aws s3 cp "$FILE" "s3://${S3_BUCKET}/${S3_PREFIX:-}${TS}.sql"
+                  fi
+              env:
+                - name: S3_BUCKET
+                  value: ""
+                - name: S3_PREFIX
+                  value: "lucent/"
+              envFrom:
+                - secretRef:
+                    name: lucent-db-credentials
+              volumeMounts:
+                - name: backup-storage
+                  mountPath: /backup
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+                runAsUser: 10001
+                runAsGroup: 10001
+          volumes:
+            - name: backup-storage
+              persistentVolumeClaim:
+                claimName: lucent-db-backups

@@ -16,9 +16,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from lucent.api.routers import admin_models as admin_models_router
 from lucent.api.routers import daemon_messages as daemon_messages_router
 from lucent.api.routers import daemon_tasks as daemon_tasks_router
-from lucent.api.routers import admin_models as admin_models_router
 from lucent.api.routers import export, memories, search
 from lucent.db import close_db, init_db
 from lucent.logging import get_correlation_id, get_logger, set_correlation_id
