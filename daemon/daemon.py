@@ -56,7 +56,7 @@ from lucent.secrets.utils import resolve_secret_reference
 
 # Import LLM engine abstraction — the daemon no longer calls CopilotClient directly
 try:
-    from lucent.llm import SessionEvent, SessionEventType, get_engine, get_engine_name
+    from lucent.llm import SessionEvent, SessionEventType, get_engine, get_engine_for_model, get_engine_name
 
     _LLM_ENGINE_AVAILABLE = True
 except ImportError:
@@ -1398,8 +1398,25 @@ class LucentDaemon:
         log(
             f"Daemon ready. Instance: {self.instance_id}, "
             f"Roles: {','.join(sorted(self.roles))}, "
-            f"Engine: {engine_name}, Model: {MODEL}, Max sessions: {MAX_CONCURRENT_SESSIONS}"
+            f"Engine: {engine_name} (multi-engine routing enabled), "
+            f"Model: {MODEL}, Max sessions: {MAX_CONCURRENT_SESSIONS}"
         )
+
+        # Populate LLM engine model registry from DB (for Ollama/custom providers)
+        if _LLM_ENGINE_AVAILABLE:
+            try:
+                from lucent.llm.langchain_engine import register_model
+                resp = await DaemonAPI._get("/api/admin/models")
+                if resp and resp.get("items"):
+                    registered = 0
+                    for m in resp["items"]:
+                        if m.get("provider") not in ("anthropic", "openai", "google"):
+                            register_model(m["id"], m["provider"], m.get("api_model_id", ""))
+                            registered += 1
+                    if registered:
+                        log(f"Registered {registered} custom model(s) in LLM engine")
+            except Exception as e:
+                log(f"Model registry sync skipped: {e}", "WARN")
 
         # Recover from stale state on startup (workflow-audit/phase-4):
         # release stuck tasks and fix request statuses that drifted while we were down.
@@ -1580,7 +1597,7 @@ class LucentDaemon:
         mcp_config_override: dict | None = None,
     ) -> str | None:
         """Run session using the LLM engine abstraction layer."""
-        engine = get_engine()
+        engine = get_engine_for_model(model) if _LLM_ENGINE_AVAILABLE else get_engine()
         session_id = f"engine-session-{name}"
         self.active_sessions.append(session_id)
 

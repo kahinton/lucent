@@ -342,7 +342,7 @@ MODEL_TAGS = [
     "coding", "frontier", "reasoning", "agentic", "fast", "research", "tools",
     "reflection", "general", "writing", "lightweight", "preview", "default",
 ]
-MODEL_PROVIDERS = ["anthropic", "google", "openai"]
+MODEL_PROVIDERS = ["anthropic", "google", "ollama", "openai"]
 
 
 async def _require_admin(request: Request):

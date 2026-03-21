@@ -84,6 +84,10 @@ services:
       # OpenBao / Vault connectivity
       VAULT_ADDR: http://openbao:8200
       VAULT_TOKEN: ${VAULT_TOKEN:-root}
+      # Ollama (local models) — host.docker.internal points to host machine
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./src:/app/src:cached
       - ./pyproject.toml:/app/pyproject.toml:ro

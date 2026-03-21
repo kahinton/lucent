@@ -15,12 +15,13 @@ Usage:
 """
 
 from lucent.llm.engine import LLMEngine, SessionEvent, SessionEventType
-from lucent.llm.factory import get_engine, get_engine_name
+from lucent.llm.factory import get_engine, get_engine_for_model, get_engine_name
 
 __all__ = [
     "LLMEngine",
     "SessionEvent",
     "SessionEventType",
     "get_engine",
+    "get_engine_for_model",
     "get_engine_name",
 ]

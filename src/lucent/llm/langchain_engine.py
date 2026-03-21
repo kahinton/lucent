@@ -47,6 +47,15 @@ PROVIDER_MODEL_MAP: dict[str, tuple[str, str]] = {
     "gemini-3.1-pro": ("google_genai", "gemini-3.1-pro"),
 }
 
+# Runtime registry for models not in the static map (e.g. Ollama models).
+# Populated from the DB at daemon startup via register_model().
+_runtime_model_registry: dict[str, tuple[str, str]] = {}
+
+
+def register_model(model_id: str, provider: str, api_model_id: str = "") -> None:
+    """Register a model at runtime for provider resolution."""
+    _runtime_model_registry[model_id] = (provider, api_model_id or model_id)
+
 
 def _resolve_model(model_id: str) -> tuple[str, str]:
     """Resolve a Lucent model ID to (provider, provider_model_id).
@@ -56,6 +65,10 @@ def _resolve_model(model_id: str) -> tuple[str, str]:
     if model_id in PROVIDER_MODEL_MAP:
         return PROVIDER_MODEL_MAP[model_id]
 
+    # Check runtime registry (DB-populated Ollama/custom models)
+    if model_id in _runtime_model_registry:
+        return _runtime_model_registry[model_id]
+
     # Infer provider from model name prefix
     if model_id.startswith("claude"):
         return "anthropic", model_id
@@ -64,7 +77,7 @@ def _resolve_model(model_id: str) -> tuple[str, str]:
     elif model_id.startswith("gemini"):
         return "google_genai", model_id
 
-    # Default: try as-is with init_chat_model's auto-detection
+    # Check DB for provider (handles ollama and other custom providers)
     return "", model_id
 
 
@@ -84,6 +97,12 @@ def _get_chat_model(model_id: str, timeout: int = 300) -> Any:
     kwargs: dict[str, Any] = {"timeout": timeout}
     if provider:
         kwargs["model_provider"] = provider
+
+    # Ollama: pass base_url from env so Docker containers can reach the host
+    if provider == "ollama":
+        import os
+        ollama_host = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+        kwargs["base_url"] = ollama_host
 
     return init_chat_model(provider_model, **kwargs)
 
