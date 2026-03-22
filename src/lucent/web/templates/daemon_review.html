@@ -34,7 +34,7 @@
 
 <div class="space-y-4">
     {% for memory in review_memories %}
-    <div class="bg-white rounded-xl border border-amber-300 shadow-sm overflow-hidden">
+    <div id="review-card-{{ memory.id }}" class="bg-white rounded-xl border border-amber-300 shadow-sm overflow-hidden transition-all duration-300">
         <div class="px-6 py-4">
             <div class="flex items-start gap-4">
                 <div class="shrink-0 w-10 h-10 rounded-full flex items-center justify-center bg-amber-100 text-amber-600">
@@ -89,4 +89,30 @@
     </p>
 </div>
 {% endif %}
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+// After HTMX swaps a feedback action, fade out the review card
+document.addEventListener('htmx:afterSwap', function(evt) {
+    var target = evt.detail.target;
+    if (!target || !target.id || !target.id.startsWith('feedback-')) return;
+    var hasResolved = target.querySelector('.bg-emerald-50, .bg-red-50');
+    if (!hasResolved) return;
+    var card = target.closest('[id^="review-card-"]');
+    if (!card) return;
+    setTimeout(function() {
+        card.style.opacity = '0';
+        card.style.maxHeight = card.scrollHeight + 'px';
+        card.style.overflow = 'hidden';
+        setTimeout(function() {
+            card.style.maxHeight = '0';
+            card.style.padding = '0';
+            card.style.margin = '0';
+            card.style.borderWidth = '0';
+        }, 150);
+        setTimeout(function() { card.remove(); }, 450);
+    }, 800);
+});
+</script>
 {% endblock %}

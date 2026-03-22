@@ -5,6 +5,7 @@ from __future__ import annotations
 import enum
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Literal
 
 
 class SandboxStatus(str, enum.Enum):
@@ -31,6 +32,7 @@ class SandboxConfig:
     repo_url: str | None = None
     branch: str | None = None
     git_credentials: str | None = None  # Token for private repos
+    git_credentials_ttl: int = 3600  # Seconds before credential is considered expired (0 = no expiry)
 
     # Setup
     setup_commands: list[str] = field(default_factory=list)  # Run after container start
@@ -49,6 +51,9 @@ class SandboxConfig:
     # Lifecycle
     timeout_seconds: int = 1800  # Max lifetime (30 min default)
     idle_timeout_seconds: int = 300  # Destroy after idle (5 min default)
+    mcp_bridge_port: int = 8765
+    output_mode: Literal["diff", "pr", "review", "commit"] | None = None
+    commit_approved: bool = False
 
     # Linking
     task_id: str | None = None

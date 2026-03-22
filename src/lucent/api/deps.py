@@ -1,9 +1,10 @@
 """Authentication and authorization dependencies for API endpoints."""
 
+import re
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, Request, status
 
 from lucent.access_control import AccessControlService
 from lucent.auth import (
@@ -134,6 +135,7 @@ async def _authenticate_with_api_key(api_key: str) -> CurrentUser | None:
 
 
 async def get_current_user(
+    request: Request,
     authorization: Annotated[str | None, Header()] = None,
 ) -> CurrentUser:
     """Get the current authenticated user for API routes.
@@ -147,6 +149,20 @@ async def get_current_user(
     if authorization:
         user = await _authenticate_with_api_key(authorization)
         if user:
+            # Sandbox bridge scoped keys are restricted to specific API endpoints.
+            has_sandbox_scope = any(scope.startswith("sandbox-") for scope in user.api_key_scopes)
+            if user.auth_method == "api_key" and has_sandbox_scope:
+                allowed_path_patterns = (
+                    r"^/api/memories(?:$|/[^/]+$|/tags/(?:list|suggest)$)",
+                    r"^/api/search(?:$|/full$)",
+                    r"^/api/requests/tasks/[^/]+/(?:events|memories)$",
+                )
+                path = request.url.path
+                if not any(re.match(pattern, path) for pattern in allowed_path_patterns):
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="API key scope does not allow this endpoint",
+                    )
             return user
 
         # Invalid API key

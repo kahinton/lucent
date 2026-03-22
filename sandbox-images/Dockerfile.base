@@ -24,7 +24,8 @@ RUN pip install --no-cache-dir \
     uv \
     ruff \
     pytest \
-    httpx
+    httpx \
+    mcp
 
 # Non-root user for sandbox execution
 RUN useradd -m -s /bin/bash sandbox

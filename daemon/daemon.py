@@ -22,17 +22,15 @@ import contextlib
 import json
 import os
 import platform
+import re
 import signal
 import sys
 import threading
 import time
 from datetime import datetime, timezone
-import re
 from pathlib import Path
-from uuid import UUID
 
 import httpx
-
 
 # ---------------------------------------------------------------------------
 # Redaction helper — strip known secret patterns from logged tool output
@@ -51,12 +49,18 @@ def _redact_secrets(text: str) -> str:
     return _SECRET_PATTERNS.sub("[REDACTED]", text)
 from lucent.auth import set_current_user
 from lucent.secrets import SecretRegistry, initialize_secret_provider
-from lucent.secrets.utils import is_secret_reference, resolve_env_vars as resolve_secret_env_vars
-from lucent.secrets.utils import resolve_secret_reference
+from lucent.secrets.utils import is_secret_reference, resolve_secret_reference
+from lucent.secrets.utils import resolve_env_vars as resolve_secret_env_vars
 
 # Import LLM engine abstraction — the daemon no longer calls CopilotClient directly
 try:
-    from lucent.llm import SessionEvent, SessionEventType, get_engine, get_engine_for_model, get_engine_name
+    from lucent.llm import (
+        SessionEvent,
+        SessionEventType,
+        get_engine,
+        get_engine_for_model,
+        get_engine_name,
+    )
 
     _LLM_ENGINE_AVAILABLE = True
 except ImportError:
@@ -1406,7 +1410,9 @@ class LucentDaemon:
         if _LLM_ENGINE_AVAILABLE:
             try:
                 from lucent.llm.langchain_engine import register_model
-                resp = await DaemonAPI._get("/api/admin/models")
+                async with httpx.AsyncClient(timeout=15) as _c:
+                    _resp = await _c.get(f"{API_BASE}/api/admin/models", headers=API_HEADERS)
+                resp = _resp.json() if _resp.status_code == 200 else None
                 if resp and resp.get("items"):
                     registered = 0
                     for m in resp["items"]:
@@ -2086,8 +2092,11 @@ class LucentDaemon:
             # Build and run the sub-agent
             agent_def_id = task.get("agent_definition_id")
             sandbox_config = task.get("sandbox_config")
+            task_output_mode = task.get("output_mode")
+            task_commit_approved = bool(task.get("commit_approved", False))
             sandbox_template_id = task.get("sandbox_template_id")
             sandbox_id = None
+            task_sandbox_runtime_config = None
 
             # Resolve sandbox_template_id → sandbox_config
             if sandbox_template_id and not sandbox_config:
@@ -2096,6 +2105,12 @@ class LucentDaemon:
                     org_id=org_id,
                     requesting_user_id=requesting_user_id,
                 )
+            if sandbox_config and task_output_mode and not sandbox_config.get("output_mode"):
+                sandbox_config = dict(sandbox_config)
+                sandbox_config["output_mode"] = task_output_mode
+            if sandbox_config and task_commit_approved and not sandbox_config.get("commit_approved"):
+                sandbox_config = dict(sandbox_config)
+                sandbox_config["commit_approved"] = True
 
             try:
                 agent_data = await load_accessible_agent(
@@ -2192,7 +2207,7 @@ class LucentDaemon:
             # Create sandbox if configured
             if sandbox_config:
                 try:
-                    sandbox_id = await self._create_task_sandbox(
+                    sandbox_id, task_sandbox_runtime_config = await self._create_task_sandbox(
                         task_id,
                         sandbox_config,
                         requesting_user_id=requesting_user_id,
@@ -2231,9 +2246,29 @@ class LucentDaemon:
             )
             dispatched += 1
 
-            # Destroy sandbox after task completes
+            # Process and destroy sandbox after task completes
             if sandbox_id:
                 try:
+                    if task_sandbox_runtime_config and task_sandbox_runtime_config.output_mode:
+                        from lucent.sandbox.manager import get_sandbox_manager
+
+                        manager = get_sandbox_manager()
+                        output_result = await manager.process_output(
+                            sandbox_id=sandbox_id,
+                            task_id=task_id,
+                            task_description=description,
+                            config=task_sandbox_runtime_config,
+                            request_api=RequestAPI,
+                            memory_api=MemoryAPI,
+                            log=log,
+                        )
+                        if output_result:
+                            await RequestAPI.add_event(
+                                task_id,
+                                "sandbox_output_processed",
+                                output_result.detail,
+                                {"mode": output_result.mode, **(output_result.metadata or {})},
+                            )
                     await self._destroy_task_sandbox(sandbox_id)
                     await RequestAPI.add_event(
                         task_id,
@@ -2274,8 +2309,8 @@ class LucentDaemon:
         *,
         requesting_user_id: str,
         org_id: str,
-    ) -> str | None:
-        """Create a sandbox for a task. Returns sandbox_id or None."""
+    ) -> tuple[str | None, "SandboxConfig | None"]:
+        """Create a sandbox for a task. Returns (sandbox_id, resolved_config)."""
         from lucent.sandbox.manager import get_sandbox_manager
         from lucent.sandbox.models import SandboxConfig
 
@@ -2299,16 +2334,18 @@ class LucentDaemon:
             network_mode=sandbox_config.get("network_mode", "none"),
             allowed_hosts=sandbox_config.get("allowed_hosts", []),
             timeout_seconds=sandbox_config.get("timeout_seconds", 1800),
+            output_mode=sandbox_config.get("output_mode"),
+            commit_approved=bool(sandbox_config.get("commit_approved", False)),
             task_id=task_id,
         )
         manager = get_sandbox_manager()
         info = await manager.create(config)
         if info.status.value == "ready":
             log(f"Sandbox {info.id[:12]} created for task {task_id[:8]}")
-            return info.id
+            return info.id, config
         else:
             log(f"Sandbox creation failed for task {task_id[:8]}: {info.error}", "WARN")
-            return None
+            return None, None
 
     async def _destroy_task_sandbox(self, sandbox_id: str) -> None:
         """Destroy a task's sandbox."""

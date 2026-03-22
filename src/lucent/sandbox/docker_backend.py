@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import shlex
 import time
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 import docker.errors
 
@@ -157,6 +159,19 @@ class DockerBackend(SandboxBackend):
                     )
                     # Don't fail the sandbox — setup commands are best-effort
 
+            # Start MCP bridge when task-scoped key is present
+            if config.env_vars.get("LUCENT_SANDBOX_MCP_API_KEY"):
+                bridge_started = await self._start_mcp_bridge(sandbox_id, config)
+                if not bridge_started:
+                    info.status = SandboxStatus.FAILED
+                    info.error = "Failed to start sandbox MCP bridge"
+                    return info
+
+            # Apply network allowlist after all setup is complete so clone and
+            # package installation can proceed freely beforehand.
+            if config.network_mode == "allowlist":
+                await self._apply_network_allowlist(sandbox_id, config)
+
             info.status = SandboxStatus.READY
             info.ready_at = datetime.now(timezone.utc)
             logger.info("Sandbox ready: %s (%s)", name, sandbox_id[:12])
@@ -209,11 +224,23 @@ class DockerBackend(SandboxBackend):
                 image=image,
                 name=config.name,
                 repo_url=config.repo_url,
-                repo_branch=config.repo_branch,
+                branch=config.branch,
                 setup_commands=config.setup_commands,
+                env_vars=config.env_vars,
+                working_dir=config.working_dir,
+                memory_limit=config.memory_limit,
+                cpu_limit=config.cpu_limit,
+                disk_limit=config.disk_limit,
                 network_mode=config.network_mode,
+                allowed_hosts=config.allowed_hosts,
+                timeout_seconds=config.timeout_seconds,
+                idle_timeout_seconds=config.idle_timeout_seconds,
+                mcp_bridge_port=config.mcp_bridge_port,
+                git_credentials=config.git_credentials,
+                git_credentials_ttl=config.git_credentials_ttl,
                 task_id=config.task_id,
                 request_id=config.request_id,
+                organization_id=config.organization_id,
             )
             new_container = await asyncio.to_thread(
                 self._create_container, sandbox_id, name, new_config,
@@ -269,16 +296,26 @@ class DockerBackend(SandboxBackend):
         # Network configuration
         network_mode = None
         networking_config = None
+        cap_add = []
         if config.network_mode == "none":
             network_mode = "none"
-        elif config.network_mode == "bridge":
+        elif config.network_mode in ("bridge", "allowlist"):
             self._ensure_network()
             networking_config = client.api.create_networking_config(
                 {self._network_name: client.api.create_endpoint_config()}
             )
+            if config.network_mode == "allowlist":
+                # NET_ADMIN needed to apply iptables rules post-create
+                cap_add = ["NET_ADMIN"]
         # For "allowlist" mode, we use bridge + iptables (handled post-create)
 
-        container = client.containers.run(
+        # Disk quota via storage driver (overlay2 with quota support, btrfs, zfs).
+        # Falls back gracefully when the storage driver does not support it.
+        storage_opt: dict[str, str] | None = None
+        if config.disk_limit:
+            storage_opt = {"size": config.disk_limit}
+
+        container_kwargs: dict = dict(
             image=config.image,
             name=name,
             labels=labels,
@@ -291,14 +328,124 @@ class DockerBackend(SandboxBackend):
             nano_cpus=int(config.cpu_limit * 1e9),
             network_mode=network_mode,
             networking_config=networking_config,
+            cap_add=cap_add or None,
             security_opt=["no-new-privileges"],
             read_only=False,  # Repos need write access
             tmpfs={"/tmp": "size=512m"},
             stop_signal="SIGTERM",
-            # Auto-remove after stop timeout
             auto_remove=False,
         )
+        if storage_opt:
+            try:
+                container_kwargs["storage_opt"] = storage_opt
+                container = client.containers.run(**container_kwargs)
+                return container
+            except docker.errors.APIError as exc:
+                if "storage opt" in str(exc).lower() or "quota" in str(exc).lower():
+                    logger.warning(
+                        "Storage quota not supported by Docker storage driver (%s); "
+                        "creating container without disk limit",
+                        exc,
+                    )
+                    del container_kwargs["storage_opt"]
+                else:
+                    raise
+
+        container = client.containers.run(**container_kwargs)
         return container
+
+    async def _start_mcp_bridge(self, sandbox_id: str, config: SandboxConfig) -> bool:
+        """Inject and start the MCP bridge process inside the container."""
+        bridge_source_path = Path(__file__).with_name("mcp_bridge.py")
+        if not bridge_source_path.exists():
+            logger.error("Sandbox MCP bridge source missing: %s", bridge_source_path)
+            return False
+
+        source = bridge_source_path.read_bytes()
+        bridge_path = "/tmp/lucent_mcp_bridge.py"
+        await self.write_file(sandbox_id, bridge_path, source)
+
+        port = int(config.mcp_bridge_port or 8765)
+        start_cmd = (
+            f"python {shlex.quote(bridge_path)} --host 127.0.0.1 --port {port} "
+            f">/tmp/lucent-mcp-bridge.log 2>&1 &"
+        )
+        result = await self.exec(sandbox_id, start_cmd, timeout=10)
+        if result.exit_code != 0:
+            logger.error("Failed to launch MCP bridge in sandbox %s: %s", sandbox_id[:12], result.stderr)
+            return False
+
+        # Give the process a chance to bind and verify health endpoint.
+        health_cmd = (
+            "python -c \"import urllib.request,sys;"
+            f"resp=urllib.request.urlopen('http://127.0.0.1:{port}/health',timeout=5);"
+            "sys.exit(0 if resp.status==200 else 1)\""
+        )
+        for _ in range(5):
+            await asyncio.sleep(1)
+            probe = await self.exec(sandbox_id, health_cmd, timeout=10)
+            if probe.exit_code == 0:
+                logger.info("Sandbox MCP bridge started on 127.0.0.1:%d (%s)", port, sandbox_id[:12])
+                return True
+
+        logger.error("Sandbox MCP bridge health check failed for %s", sandbox_id[:12])
+        return False
+
+    async def _apply_network_allowlist(
+        self, sandbox_id: str, config: SandboxConfig
+    ) -> None:
+        """Apply iptables egress rules inside the container for allowlist mode.
+
+        Resolves each entry in ``config.allowed_hosts`` to an IP address, then
+        installs OUTPUT chain rules that allow only those destinations (plus
+        loopback and already-established flows) and drop everything else.
+
+        Requires the container to have the NET_ADMIN capability and iptables
+        available in the image.  Failures are logged as warnings rather than
+        surfaced as hard errors so a missing iptables binary doesn't break
+        non-security-sensitive deployments.
+        """
+        # Resolve allowed hosts to IP addresses inside the container.
+        allowed_ips: list[str] = []
+        for host in config.allowed_hosts:
+            if re.match(r"^\d{1,3}(?:\.\d{1,3}){3}(?:/\d+)?$", host):
+                allowed_ips.append(host)
+            else:
+                res = await self.exec(
+                    sandbox_id,
+                    f"getent hosts {shlex.quote(host)} | awk '{{print $1}}' | head -n1",
+                    timeout=10,
+                )
+                ip = res.stdout.strip()
+                if ip:
+                    allowed_ips.append(ip)
+                else:
+                    logger.warning(
+                        "Allowlist: could not resolve host %r in sandbox %s; skipping",
+                        host, sandbox_id[:12],
+                    )
+
+        rules: list[str] = [
+            "iptables -F OUTPUT",
+            "iptables -A OUTPUT -o lo -j ACCEPT",
+            "iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT",
+        ]
+        for ip in allowed_ips:
+            rules.append(f"iptables -A OUTPUT -d {ip} -j ACCEPT")
+        rules.append("iptables -P OUTPUT DROP")
+
+        for rule in rules:
+            res = await self.exec(sandbox_id, rule, timeout=10)
+            if res.exit_code != 0:
+                logger.warning(
+                    "Allowlist iptables rule failed in sandbox %s: %r — %s",
+                    sandbox_id[:12], rule, res.stderr[:200],
+                )
+
+        logger.info(
+            "Applied network allowlist in sandbox %s (%d allowed IPs)",
+            sandbox_id[:12], len(allowed_ips),
+        )
 
     def _build_clone_command(self, config: SandboxConfig) -> str:
         url = config.repo_url
