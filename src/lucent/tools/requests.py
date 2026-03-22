@@ -84,6 +84,9 @@ Args:
     priority: 'low', 'medium', 'high', or 'urgent'
     sequence_order: Execution order (0-based, lower runs first)
     parent_task_id: Optional \u2014 ID of parent task for sub-tasks
+    sandbox_template_id: Optional UUID of a saved sandbox template to use
+    sandbox_config: Optional inline sandbox config dict (keys: image, repo_url,
+        branch, working_dir, timeout_seconds, output_mode, env_vars, etc.)
 
 Returns: JSON with the created task including its ID, or an error
 if the agent type is not approved."""
@@ -97,6 +100,8 @@ if the agent type is not approved."""
         priority: str = "medium",
         sequence_order: int = 0,
         parent_task_id: str | None = None,
+        sandbox_template_id: str | None = None,
+        sandbox_config: dict | None = None,
     ) -> str:
         user_id, org_id, user_role = await _get_current_user_context()
         if not org_id:
@@ -155,6 +160,8 @@ if the agent type is not approved."""
             sequence_order=sequence_order,
             parent_task_id=parent_task_id,
             model=model,
+            sandbox_template_id=sandbox_template_id,
+            sandbox_config=sandbox_config,
             requesting_user_id=str(requesting_user_id) if requesting_user_id else None,
         )
         return json.dumps(
