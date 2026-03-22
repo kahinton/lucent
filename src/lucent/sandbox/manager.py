@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import secrets
 import time
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
@@ -12,7 +13,6 @@ from uuid import UUID
 
 import asyncpg
 import bcrypt
-import secrets
 
 from lucent.sandbox.backend import SandboxBackend
 from lucent.sandbox.models import (

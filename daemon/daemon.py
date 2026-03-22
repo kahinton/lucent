@@ -29,8 +29,12 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import httpx
+
+if TYPE_CHECKING:
+    from lucent.sandbox.models import SandboxConfig
 
 # ---------------------------------------------------------------------------
 # Redaction helper — strip known secret patterns from logged tool output
