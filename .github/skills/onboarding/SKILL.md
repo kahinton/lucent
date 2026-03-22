@@ -26,7 +26,7 @@ Guide new contributors through project setup, architecture overview, coding conv
 
 ```bash
 git clone <repository-url>
-cd hindsight
+cd <project-directory>
 
 # Create a virtual environment
 python3 -m venv .venv

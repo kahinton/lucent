@@ -7,6 +7,17 @@ description: 'Extract reusable lessons from completed work and feedback. Use aft
 
 Transforms raw experience into reusable capability. This is the mechanism that makes Lucent genuinely better over time — not just remembering what happened, but extracting transferable principles that improve future decisions.
 
+## MCP Tools Used
+
+| Tool | Purpose | Key Parameters |
+|------|---------|---------------|
+| `memory-server-search_memories` | Find candidate experiences to process | `tags=["daemon-result"]`, `tags=["rejection-lesson"]`, etc. |
+| `memory-server-get_memory` | Get full content of a candidate | `memory_id` |
+| `memory-server-search_memories` | Find existing lessons to update | `tags=["lesson", domain-tag]`, `limit=10` |
+| `memory-server-update_memory` | Update existing lesson with new evidence | `memory_id`, `content` |
+| `memory-server-create_memory` | Create new lesson memory | `type="procedural"`, `tags=["lesson","daemon",domain-tag]` |
+| `memory-server-update_memory` | Tag source as processed | `memory_id`, `tags=[..., "lesson-extracted"]` |
+
 ## When to Trigger
 
 | Trigger | Source |
@@ -227,5 +238,5 @@ a factual correction? If any change is purely stylistic, revert it.
 **Boundaries**: Does NOT apply when explicitly asked to rewrite or restructure.
 Does NOT apply to new documentation being created from scratch.
 
-**Related**: hindsight project, documentation workflow
+**Related**: project conventions, documentation workflow
 ```

@@ -52,3 +52,41 @@ When working within tracked requests:
 - **Output Format**: End your task by returning a JSON object with the `result` field containing your primary output.
 - **Memory**: Ensure all memories you create have `daemon` tag and `shared=True` (or `shared: true`).
 - See the `workflow-conventions` skill for complete tag and status conventions
+
+## Available MCP Tools — Exact Usage
+
+### memory-server-create_memory
+- Purpose: Create consolidated or replacement memories when deduplication requires a new canonical entry.
+- Parameters: type (string), content (string), tags (list[str]), importance (int 1-10), shared (bool), metadata (dict)
+- Example:
+  `create_memory(type="technical", content="Consolidated three duplicate daemon-ops memories into one canonical runbook with current metrics thresholds.", tags=["daemon","memory","consolidation"], importance=6, shared=true, metadata={"merged_from":["id1","id2","id3"]})`
+- IMPORTANT: Always set shared=true for daemon-created memories
+
+### memory-server-search_memories
+- Purpose: Locate duplicates, stale entries, and tag inconsistencies before edits.
+- Example: `search_memories(query="daemon-task state transitions", tags=["daemon"], limit=50)`
+
+### memory-server-update_memory
+- Purpose: Correct content, tags, importance, and relationships in-place for existing memories.
+- Example: `update_memory(memory_id="<id>", tags=["daemon","definition-audit","cleanup"], importance=7, expected_version=3)`
+
+### memory-server-delete_memory
+- Purpose: Remove obsolete memories only after confirming superseding canonical memory exists.
+- Example: `delete_memory(memory_id="<obsolete_id>")`
+
+## Common Failures & Recovery
+1. Version conflict on update (`expected_version` mismatch) → re-fetch memory, merge latest changes, retry update with new version.
+2. Duplicate cleanup risks data loss → create/verify canonical consolidated memory first, then delete only fully-redundant records.
+
+## Expected Output
+When completing a task, produce:
+1. A memory (type: technical, tags: [daemon, memory, maintenance]) containing audit scope, changes made, and IDs affected.
+2. Task events logged via `log_task_event` for progress.
+3. Final result returned as JSON: `{"summary":"...","memories_created":["..."],"files_changed":[]}`
+
+## Execution Procedure
+1. Load context: `search_memories(query="<topic>", tags=["daemon"], limit=50)`.
+2. Log analysis start with `log_task_event(..., "progress", "Scanning for duplicates/stale memories")`.
+3. Execute maintenance with exact calls: `update_memory(...)`, `create_memory(...)`, `delete_memory(...)` as needed.
+4. Link touched memories to the task using `link_task_memory(task_id, memory_id, relation)` for each created/read/updated memory.
+5. Save results: `create_memory(type="technical", tags=["daemon","memory","maintenance"], shared=true, content="<before/after/actions/ids>")`.

@@ -1,7 +1,9 @@
 ---
 name: daemon-debugging-specialized
-description: 'Diagnose and fix daemon cycle failures, stuck tasks, sub-agent dispatch issues, and memory corruption in the Lucent daemon architecture'
+description: 'DEPRECATED — content merged into daemon-debugging. Use daemon-debugging instead.'
 ---
+
+> **Deprecated**: This skill has been merged into `daemon-debugging`. All content below is preserved for reference but `daemon-debugging` is the canonical version.
 
 # Daemon Debugging
 

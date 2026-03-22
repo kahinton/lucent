@@ -42,7 +42,7 @@ That's it. The daemon picks it up, creates tasks, and dispatches to the appropri
 The description is the sub-agent's **entire prompt context** (plus its agent definition). Write it like instructions for a competent engineer who has never seen the codebase.
 
 **Good description:**
-> Review the test files in `tests/` and identify which core modules in `src/lucent/db/` lack test coverage. List specific functions/methods that have no corresponding tests. Focus on `memory.py`, `search.py`, and `api_key.py`.
+> Review the test files in `tests/` and identify which core modules in the database layer lack test coverage. List specific functions/methods that have no corresponding tests. Focus on memory operations, search, and API key management.
 
 **Bad description:**
 > Improve test coverage.
@@ -91,12 +91,63 @@ After a sub-agent completes, the daemon validates the result (`_validate_task_re
 2. Task required tools the agent_type doesn't have
 3. Task was too large for a single session (>720s timeout)
 
-## Examples
+## Multi-Step Task Decomposition
 
-### Good Task: Code Analysis
+When a task is too large for a single 720s session, decompose it:
+
+### Pattern: Sequential Tasks with Dependencies
+
+Create tasks that build on each other's results:
+
+```
+Task 1 (research): "Analyze test coverage gaps in the database layer"
+  → Result stored in memory
+Task 2 (code): "Write tests for the gaps identified in memory [ID]. Focus on memory CRUD operations."
+  → References Task 1's result
+Task 3 (code): "Run the new tests from Task 2 and fix any failures."
+```
+
+Each task should be independently executable — reference prior results by memory ID or by describing what to search for.
+
+### Pattern: Parallel Independent Tasks
+
+For work that doesn't depend on ordering:
+
+```
+Task A (code, high): "Fix the SQL injection vulnerability in search.py"
+Task B (documentation, low): "Update README.md with the new API endpoints"
+Task C (research, medium): "Investigate asyncpg connection pool sizing best practices"
+```
+
+These can be dispatched in the same cycle (up to `MAX_CONCURRENT_SESSIONS`).
+
+## Memory-Interacting Tasks
+
+Tasks that read/write memories need special care:
+
+### Reading Memories
+```
+"Search for memories tagged 'architecture' and synthesize a summary of the current system design. Create a new memory tagged 'architecture-summary' with the result."
+```
+
+**Important**: The sub-agent uses MCP tools, not the REST API. Reference memory operations by their tool names: `search_memories`, `create_memory`, `get_memory`, etc.
+
+### Writing Memories
+```
+"After completing the analysis, save the findings as a new memory with type 'technical', tags ['test-coverage', 'analysis', 'daemon'], importance 7, and shared=true."
+```
+
+Be explicit about memory type, tags, importance, and shared — the sub-agent won't infer good values.
+
+## Additional Anti-Patterns
+
+1. **Circular tasks**: "Review the last task's output and create a new task" → infinite loop
+2. **Approval-dependent chains**: Task B needs Task A approved first, but approval is async → B sits pending indefinitely
+3. **Environment-dependent tasks**: "Read the .env file" → the sub-agent runs in a Docker container, not the host
+4. **Overly ambitious scope**: "Refactor the entire auth system" → will timeout, produce partial results that fail validation
 ```json
 {
-  "description": "Run `ruff check src/lucent/` and fix any auto-fixable lint errors. Then run `python -m pytest tests/ -x` to verify nothing breaks. Report the number of fixes applied and test results.",
+  "description": "Run `ruff check src/` and fix any auto-fixable lint errors. Then run `python -m pytest tests/ -x` to verify nothing breaks. Report the number of fixes applied and test results.",
   "agent_type": "code",
   "priority": "medium"
 }
@@ -105,7 +156,7 @@ After a sub-agent completes, the daemon validates the result (`_validate_task_re
 ### Good Task: Research
 ```json
 {
-  "description": "Search the codebase for all places where `asyncpg` pool connections are acquired but not properly released. Check for missing `async with` patterns in `src/lucent/db/`. List any connection leak risks found.",
+  "description": "Search the codebase for all places where `asyncpg` pool connections are acquired but not properly released. Check for missing `async with` patterns in the database layer. List any connection leak risks found.",
   "agent_type": "research",
   "priority": "high",
   "context": "We've seen occasional 'too many connections' errors in production logs."

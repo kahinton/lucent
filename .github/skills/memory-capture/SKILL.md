@@ -7,6 +7,15 @@ description: 'Decide what to remember and how to store it. Use after completing 
 
 Ask: **Would future-me benefit from knowing this in a different conversation?** If yes, capture it. If no, skip it.
 
+## MCP Tools Used
+
+| Tool | Purpose | Key Parameters |
+|------|---------|---------------|
+| `memory-server-search_memories` | Find existing memories to update instead of creating | `query="topic"`, `limit=5` |
+| `memory-server-get_existing_tags` | Find consistent tags before creating | `limit=50` |
+| `memory-server-create_memory` | Create new memory | `type`, `content`, `tags`, `importance`, `shared`, `metadata` |
+| `memory-server-update_memory` | Update existing memory with new information | `memory_id`, `content`, `tags`, `importance` |
+
 ## Capture Immediately When...
 
 | Trigger | Action | Type | Importance |
@@ -27,11 +36,46 @@ Ask: **Would future-me benefit from knowing this in a different conversation?** 
 - Minor formatting or style choices for a single file
 - Temporary workarounds you're about to undo
 
-## Before You Create — Search First
+## Procedure: Capture a Memory
 
-**Always search before creating.** Run `search_memories("topic")` to check if a relevant memory already exists. If it does:
-- Call `update_memory(id, content=updated_content)` to add new info
-- Don't create a duplicate
+### Step 1: Search First
+
+Always search before creating:
+```
+memory-server-search_memories(query="[topic of what you're about to save]", limit=5)
+```
+
+If a relevant memory exists → `update_memory`, don't create a duplicate.
+
+### Step 2: Get Consistent Tags
+
+```
+memory-server-get_existing_tags(limit=50)
+```
+
+Reuse existing tags — don't create `bug-fix` if `bugs` already exists.
+
+### Step 3: Create or Update
+
+**Creating a new memory:**
+```
+memory-server-create_memory(
+  type="experience",  # or technical, procedural, goal
+  content="## [Title]\n\n**What happened**: ...\n**Why**: ...\n**Lesson**: ...",
+  tags=["lucent", "bugs"],  # always include project tag
+  importance=7,
+  shared=true,  # always true for daemon work
+  metadata={"repo": "lucent", "category": "debugging"}
+)
+```
+
+**Updating an existing memory:**
+```
+memory-server-update_memory(
+  memory_id="<id from search results>",
+  content="<existing content>\n\n## Update [date]\n[new information]"
+)
+```
 
 ## How to Write Good Memories
 
@@ -62,7 +106,7 @@ What was learned (the transferable insight)
 
 ### Tags — Be Consistent
 
-1. Call `get_existing_tags()` to see what tags already exist
+1. Call `memory-server-get_existing_tags()` to see what tags already exist
 2. Reuse existing tags — don't create `bug-fix` if `bugs` already exists
 3. Format: lowercase, hyphenated: `code-review`, `api-design`, `lucent`
 4. Always include the project/repo name as a tag
@@ -79,4 +123,33 @@ For technical memories, include:
 
 **Capture when the insight is fresh.** Don't wait until the end of a long conversation — by then you'll forget the nuance. The moment you solve something hard, learn something new, or get corrected — that's when to save.
 
-If you're deep in implementation work and realize you should capture something, pause and do it. A 5-second `create_memory` call now saves a full re-investigation later.
+## Example: Good Capture
+
+```
+# Just fixed a tricky asyncpg connection pool issue
+
+1. memory-server-search_memories(query="asyncpg connection pool", limit=5)
+   → No existing memory found
+
+2. memory-server-get_existing_tags(limit=50)
+   → Tags include: "bugs", "database", "lucent", "asyncpg"
+
+3. memory-server-create_memory(
+     type="experience",
+     content="## asyncpg pool: connections held across await boundaries\n\n**Symptom**: 'connection pool exhausted' errors under moderate load\n**Root cause**: Connection held for the full request duration instead of released after each query\n**Fix**: Use 'async with pool.acquire() as conn:' per-query, not per-request\n**Pattern**: Never store conn on self or pass it between async functions",
+     tags=["bugs", "database", "lucent", "asyncpg"],
+     importance=8,
+     shared=true,
+     metadata={"repo": "lucent", "category": "database", "references": ["src/lucent/db/"]}
+   )
+```
+
+## Example: Bad Capture (Anti-Pattern)
+
+```
+❌ Creating a memory for "fixed a typo in README"
+❌ Creating a duplicate instead of searching first
+❌ Not including the "why" — just "I changed X to Y" with no reasoning
+❌ Using importance=9 for a routine code pattern
+❌ Skipping shared=true for daemon work → invisible to other instances
+```

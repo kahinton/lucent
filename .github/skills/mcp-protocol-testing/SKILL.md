@@ -5,88 +5,195 @@ description: 'Validate MCP tool implementations against protocol spec, test edge
 
 # MCP Protocol Testing
 
-Validate MCP tool implementations against the protocol spec, test edge cases in memory operations, and verify search behavior.
+Procedures for validating Lucent's MCP tool implementations, testing edge cases, and verifying search behavior. Tools are defined in `src/lucent/tools/memories.py` and registered via FastMCP in `src/lucent/server.py`.
 
 ## When to Use
 
-- After adding or modifying MCP tool handlers in `src/lucent/tools/`
-- When memory CRUD operations behave unexpectedly
-- When search results are incorrect or incomplete
-- When validating tag filtering, pagination, or error handling
-- Before releasing a new version to ensure protocol compliance
+- After modifying any tool in `src/lucent/tools/memories.py`
+- After changing validation logic in `src/lucent/models/validation.py`
+- After modifying search/database queries in `src/lucent/db/memory.py`
+- When adding new MCP tools
+- When debugging tool behavior reported by LLM clients
+- Before releasing a new version
 
 ## Key Files
 
-- `src/lucent/tools/` — MCP tool implementations (memory create, read, update, delete, search)
-- `tests/` — Test suite (run with `pytest`)
-- `pyproject.toml` — Project configuration and test settings
+| File | Purpose |
+|------|---------|
+| `src/lucent/tools/memories.py` | 16 MCP tool implementations via `@mcp.tool()` |
+| `src/lucent/server.py` | FastMCP server init, auth middleware (`MCPAuthMiddleware`) |
+| `src/lucent/models/validation.py` | Pydantic metadata validation schemas |
+| `src/lucent/models/memory.py` | `MemoryType` enum and memory model |
+| `src/lucent/db/memory.py` | PostgreSQL CRUD + fuzzy search |
+| `tests/test_mcp_tools.py` | Integration test suite |
 
-## Testing Process
+## Tool Inventory
 
-### Step 1: Memory CRUD Operations
+### CRUD Tools
+| Tool | Key Parameters | Validation Points |
+|------|---------------|-------------------|
+| `create_memory` | `type`, `content`, `tags`, `importance` (1-10), `metadata` | Type enum check, metadata schema validation, `individual` type blocked |
+| `get_memory` | `memory_id` | UUID format validation |
+| `get_memories` | `memory_ids` (list) | Batch UUID validation, returns `found` + `not_found` lists |
+| `update_memory` | `memory_id`, `expected_version` | UUID check, ownership check, optimistic locking via `VersionConflictError` |
+| `delete_memory` | `memory_id` | UUID check, ownership check, `individual` type blocked |
 
-Test the full lifecycle of memory objects:
+### Search Tools
+| Tool | Key Parameters | Validation Points |
+|------|---------------|-------------------|
+| `search_memories` | `query` (optional), `tags`, `type`, `importance_min/max`, `created_after/before`, `limit` (max 50) | Datetime ISO parsing, limit capping |
+| `search_memories_full` | `query` (required), `type`, `importance_min/max`, `limit` (max 50) | Empty query check, limit capping |
 
-1. **Create**: Verify a memory can be created with content, tags, and metadata. Confirm the response includes a valid ID and timestamps.
-2. **Read**: Retrieve the created memory by ID. Verify all fields match what was stored.
-3. **Update**: Modify content, tags, or metadata. Confirm the update is persisted and `updated_at` changes.
-4. **Delete**: Remove the memory by ID. Confirm subsequent reads return a 404 or appropriate not-found response.
+### Versioning Tools
+| Tool | Key Parameters | Validation Points |
+|------|---------------|-------------------|
+| `get_memory_versions` | `memory_id`, `limit` (max 50) | UUID check, limit capping |
+| `restore_memory_version` | `memory_id`, `version` | UUID check, version existence |
 
-Edge cases to test:
-- Create with empty content or missing required fields (expect validation error)
-- Read with a non-existent ID (expect not-found response)
-- Update a deleted memory (expect not-found response)
-- Create with very large content or deeply nested metadata
+### Utility Tools
+| Tool | Key Parameters | Validation Points |
+|------|---------------|-------------------|
+| `get_existing_tags` | `limit` (max 100) | Limit capping |
+| `get_tag_suggestions` | `query`, `limit` (max 25) | Partial match behavior |
+| `get_current_user_context` | (none) | Auth context extraction |
+| `share_memory` / `unshare_memory` | `memory_id` | Team mode only (conditional registration) |
+| `create_daemon_task` | `description`, `agent_type`, `priority` | Creates a task in the tasks table (not a memory) |
+| `create_request` | `title`, `description`, `source`, `priority` | Creates a request in the pending queue |
 
-### Step 2: Search Behavior
+## Testing Procedures
 
-1. Create several memories with distinct content and tags
-2. Test keyword search — verify results contain the search term
-3. Test relevance ordering — more relevant results should rank higher
-4. Verify that deleted memories do not appear in search results
-5. Test search with no results — should return empty list, not an error
+### 1. Input Validation Testing
 
-### Step 3: Tag Filtering
+Test each tool with invalid inputs to verify error handling returns JSON `{"error": "..."}` via `_error_response()`:
 
-1. Create memories with various tag combinations
-2. Filter by a single tag — verify only matching memories are returned
-3. Filter by multiple tags — verify AND/OR behavior matches the spec
-4. Filter by a tag that no memory has — expect empty results
-5. Test tag operations: adding tags, removing tags, replacing tags
+**UUID validation** (affects `get_memory`, `update_memory`, `delete_memory`, `get_memory_versions`, `restore_memory_version`):
+- Empty string → should return error
+- Non-UUID string (e.g., `"not-a-uuid"`) → `ValueError` caught, returns error JSON
+- Valid UUID that doesn't exist → "Memory not found or not accessible"
 
-### Step 4: Pagination
+**Type validation** (`create_memory`):
+- Invalid type string (e.g., `"invalid"`) → `MemoryType(type)` raises error
+- `"individual"` type → explicitly blocked, returns error
+- Valid types: `"experience"`, `"technical"`, `"procedural"`, `"goal"`
 
-1. Create enough memories to exceed a single page (check default page size)
-2. Request the first page — verify correct count and presence of pagination metadata
-3. Request subsequent pages — verify no duplicates and all items are eventually returned
-4. Request a page beyond the last — expect empty results or appropriate response
-5. Verify `total` count is accurate across paginated requests
+**Limit capping**:
+- `search_memories(limit=100)` → silently capped to 50 via `min(limit, 50)`
+- `get_existing_tags(limit=200)` → capped to 100
+- `get_tag_suggestions(limit=50)` → capped to 25
+- `get_memory_versions(limit=100)` → capped to 50
 
-### Step 5: Error Handling
+**Datetime validation** (`search_memories`):
+- Invalid ISO format for `created_after`/`created_before` → `datetime.fromisoformat()` fails, caught and returns error
 
-1. Send malformed JSON — expect a clear error response, not a crash
-2. Send requests with invalid field types (e.g., string where number expected)
-3. Send requests with missing required fields
-4. Verify error responses include useful error codes and messages
-5. Confirm the server remains operational after handling errors (no state corruption)
+### 2. Search Behavior Testing
 
-### Step 6: Run the Test Suite
+**`search_memories` (content-only fuzzy search)**:
+- Uses PostgreSQL trigram similarity on content field
+- `query` is optional — can search by tags/type/dates alone
+- Returns results truncated to 1000 chars via `_serialize_truncated_memory()`
+- Response format: `{"memories": [...], "total_count": N, "offset": 0, "limit": 5, "has_more": bool}`
+
+**`search_memories_full` (broad search)**:
+- `query` is required — empty/whitespace returns `{"error": "..."}`
+- Searches across content, tags, AND metadata
+- Same truncation and pagination as `search_memories`
+
+**Pagination**:
+- Test `offset` + `limit` combinations
+- Verify `has_more` is accurate
+- Verify `total_count` reflects all matches, not just the page
+
+**Edge cases**:
+- Search with no results → `{"memories": [], "total_count": 0, ...}`
+- Search with special characters in query (SQL injection safety)
+- Very long query strings
+- Combining multiple filters: `tags` + `type` + `importance_min` + `created_after`
+
+### 3. Optimistic Locking Testing
+
+Test the `expected_version` parameter on `update_memory`:
+
+1. Create a memory → version 1
+2. Update with `expected_version=1` → succeeds, version becomes 2
+3. Update with `expected_version=1` again → `VersionConflictError` with expected vs actual version
+4. Update without `expected_version` → succeeds (no locking enforced)
+
+### 4. Access Control Testing
+
+**Ownership checks**:
+- Create memory as user A → update as user B → should fail with "not accessible"
+- Create memory as user A → delete as user B → should fail
+
+**Team mode** (`is_team_mode()` in `server.py`):
+- `share_memory` and `unshare_memory` tools only registered when team mode is active
+- Shared memories accessible by other org members
+- Unshared memories only accessible by owner
+
+**Auth middleware** (`MCPAuthMiddleware` in `server.py`):
+- Missing `Authorization` header → 401
+- Invalid token format (not `hs_*` prefix) → 401
+- Rate limited → 429 with `Retry-After` header
+
+### 5. Batch Operation Testing
+
+Test `get_memories` with mixed valid/invalid IDs:
+- All valid → all in `found` list
+- All invalid → all in `not_found` list
+- Mix → split correctly between lists
+- Empty list → verify behavior
+
+### 6. Memory Versioning Testing
+
+1. Create memory → `get_memory_versions` → should show version 1
+2. Update memory 3 times → versions list should show 4 entries
+3. `restore_memory_version(version=2)` → content should match version 2
+4. Version count should increment (restore creates a new version)
+
+### 7. Request/Task Creation Testing
+
+`create_request` creates a request in the pending queue:
+- Verify request appears in `GET /api/requests?status=pending`
+- Verify `source` field is preserved (`user`, `cognitive`, `api`, `schedule`)
+- Verify `priority` is preserved
+- Test with all source types
+
+`create_daemon_task` creates a task in the tasks table:
+- Verify task appears linked to its parent request
+- Verify `agent_type` matches an active agent definition
+- Verify `priority` is stored
+- Test with optional `context` and `tags` parameters
+
+## Running the Test Suite
 
 ```bash
+# Ensure PostgreSQL is running
+docker compose up -d postgres
+
+# Set test database URL
+export TEST_DATABASE_URL="postgresql://lucent:lucent_dev_password@localhost:5433/lucent_test"
+
+# Run MCP tool tests
+pytest tests/test_mcp_tools.py -v
+
 # Run all tests
-pytest tests/
-
-# Run with verbose output
-pytest tests/ -v
-
-# Run only MCP-related tests
-pytest tests/ -k "mcp" -v
+pytest
 ```
 
-## Best Practices
+### Test Pattern
 
-- Test each operation in isolation before testing combinations
-- Always clean up test data to avoid polluting state across test runs
-- Use fixtures for common setup (creating test memories, establishing connections)
-- Check both the response body and HTTP status codes
-- When a test fails, verify whether it is a test bug or an implementation bug before filing an issue
+Tests use a mock auth helper and call tools directly:
+```python
+set_current_user({"id": user_id, "organization_id": org_id, "role": "member"})
+result = await _call(mcp_tools, "tool_name", {"param": value})
+parsed = json.loads(result)  # All tool responses are JSON strings
+```
+
+## Common Issues
+
+| Issue | Cause | Check |
+|-------|-------|-------|
+| Tool returns `{"error": "..."}` unexpectedly | Validation failure | Check parameter types and formats |
+| Search returns empty for known content | Trigram similarity threshold too high | Check `src/lucent/db/memory.py` similarity config |
+| Version conflict on update | Concurrent modification | Use `expected_version` or retry |
+| Tool not found by client | Tool not registered | Check `register_tools(mcp)` in `memories.py` |
+| Auth failures on `/mcp` | Token invalid or rate limited | Check `MCPAuthMiddleware` logs |

@@ -5,6 +5,14 @@ description: 'Security review procedures for auth, API keys, rate limiting, RBAC
 
 # Security Audit — Lucent Project
 
+## MCP Tools Used
+
+| Tool | Purpose | Key Parameters |
+|------|---------|---------------|
+| `memory-server-search_memories` | Load past audit findings | `tags=["security", "code-review"]`, `limit=10` |
+| `memory-server-create_memory` | Save audit findings | `type="technical"`, `tags=["security"]`, `importance=8-9` |
+| `memory-server-search_memories` | Find known vulnerabilities | `query="vulnerability [area]"`, `tags=["security"]` |
+
 ## Lucent Security Architecture
 
 | Layer | Implementation | Key Files |
@@ -15,6 +23,72 @@ description: 'Security review procedures for auth, API keys, rate limiting, RBAC
 | Memory isolation | Organization-scoped — users only see their org's memories | `db/` repositories, SQL queries |
 | MCP auth | Session token or API key via Bearer auth in MCP middleware | `server.py` middleware |
 | CSRF | Double-submit cookie pattern on state-changing endpoints | `api/app.py` |
+
+## Procedure: Full Security Audit
+
+### Step 1: Load Past Findings
+
+```
+memory-server-search_memories(tags=["security", "code-review"], limit=10)
+```
+
+Check for: known vulnerabilities, past findings, areas previously flagged.
+
+### Step 2: Read the Auth Chain
+
+Trace the full authentication path:
+```
+auth.py → auth_providers.py → api/deps.py → router endpoints
+```
+
+Verify at each step:
+- Session cookie attributes: `HttpOnly`, `Secure`, `SameSite=Lax`
+- Token validation is not bypassable
+- `get_current_user` dependency is used on every protected endpoint
+
+### Step 3: Check Every Route
+
+```bash
+# Find all router files (adapt path to the project's structure)
+find src/ -path "*/routers/*.py" -o -path "*/routes/*.py"
+
+# Check for routes without auth
+grep -rn "def " src/ --include="*.py" | grep -i "route\|endpoint" | grep -v "get_current_user\|Depends"
+```
+
+Verify auth dependency is present and RBAC is correct for each endpoint.
+
+### Step 4: Grep for Red Flags
+
+```bash
+# SQL injection risk — look for f-string SQL
+grep -rn 'f"SELECT\|f"INSERT\|f"UPDATE\|f"DELETE' src/
+
+# Password logging
+grep -rn 'password' src/ | grep -i 'log\|print'
+
+# Hardcoded secrets
+grep -rn 'secret_key\|api_key\s*=' src/ | grep -v 'os.env\|config\|test'
+```
+
+### Step 5: Test Boundary Conditions
+
+- Expired sessions → should get 401, not 500
+- Revoked API keys → should get 401
+- Wrong org ID in request → should get 404 (not 403, to prevent IDOR)
+- Admin-only endpoints accessed by member → should get 403
+
+### Step 6: Save Findings
+
+```
+memory-server-create_memory(
+  type="technical",
+  content="## Security Audit: [area] — [date]\n\n**Scope**: ...\n**Findings**: ...\n**Status**: [clean|findings]\n**Recommendations**: ...",
+  tags=["security", "code-review"],
+  importance=8,
+  shared=true
+)
+```
 
 ## Audit Checklist
 
@@ -55,11 +129,22 @@ description: 'Security review procedures for auth, API keys, rate limiting, RBAC
 - [ ] Tool operations respect the authenticated user's permissions
 - [ ] No tools expose internal server state or other users' data
 
-## How to Run an Audit
+## Decision: Severity of Finding
 
-1. **Search memories** for past audit results: `search_memories(tags=["security", "code-review"])`
-2. **Read the auth chain**: `auth.py` → `auth_providers.py` → `api/deps.py` → router endpoints
-3. **Check every route** in `api/routers/` — verify auth dependency is present and RBAC is correct
-4. **Grep for red flags**: `f"SELECT`, `f"INSERT`, `f"UPDATE`, `f"DELETE` (SQL injection risk), `password` in logs, hardcoded secrets
-5. **Test boundary conditions**: What happens with expired sessions? Revoked API keys? Wrong org ID?
-6. **Save findings** as a memory tagged `security`, `code-review` with importance 8-9
+- IF auth bypass or privilege escalation possible → **critical**, importance=10, tag `security-critical`
+- ELIF SQL injection or data exfiltration risk → **high**, importance=9
+- ELIF IDOR or cross-org data leak → **high**, importance=9
+- ELIF missing rate limiting on auth endpoints → **medium**, importance=7
+- ELIF information leakage in error messages → **low**, importance=6
+
+## Example: Good Security Finding
+
+```
+memory-server-create_memory(
+  type="technical",
+  content="## Security Finding: IDOR in memory update endpoint\n\n**File**: <router_file> line 84\n**Issue**: update endpoint checks UUID format but does not verify the record belongs to the current user's org before updating. An attacker could update any record if they know its UUID.\n**Exploit**: PUT /api/<resource>/{any_uuid} with modified content\n**Fix**: Add org check: WHERE id = $1 AND organization_id = $2 in the SQL query\n**Status**: Needs fix",
+  tags=["security", "security-critical"],
+  importance=9,
+  shared=true
+)
+```

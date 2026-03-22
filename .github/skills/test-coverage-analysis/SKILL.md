@@ -40,14 +40,14 @@ pytest tests/ -q --tb=short  # Quick pass/fail count
 ### Step 2: Identify coverage gaps
 Run with coverage report:
 ```bash
-pytest --cov=src/lucent --cov-report=term-missing tests/
+pytest --cov=src/ --cov-report=term-missing tests/
 ```
 
 Look for files with low coverage, especially:
-- `src/lucent/api/routers/` — each router should have a corresponding test file
-- `src/lucent/db/` — database repositories need CRUD coverage
-- `src/lucent/tools/` — MCP tool implementations
-- `src/lucent/llm/` — engine abstraction layer
+- API route handlers — each router should have a corresponding test file
+- Database repositories — CRUD operations need coverage
+- Tool implementations — public-facing tools and integrations
+- Core business logic — the abstraction and service layers
 
 ### Step 3: Prioritize what to test
 
@@ -69,12 +69,12 @@ Look for files with low coverage, especially:
 
 ### Step 4: Write tests that matter
 
-Good tests for Lucent:
-- **Use the shared fixtures** in `conftest.py` — `db_pool`, `test_user`, `async_client`
+Good tests for any project:
+- **Use the shared fixtures** in `conftest.py` — reuse database pools, test users, async clients
 - **Test auth boundaries** — verify endpoints reject unauthenticated requests
-- **Test org isolation** — verify user A can't see user B's memories
+- **Test org/tenant isolation** — verify user A can't see user B's data
 - **Test error paths** — not just happy paths
-- **Keep tests fast** — mock external services (LLM calls, Copilot SDK), use in-memory where possible
+- **Keep tests fast** — mock external services, use in-memory where possible
 
 ## Current Test State
 

@@ -2208,8 +2208,17 @@ class LucentDaemon:
                 {"agent_type": agent_type, "instance_id": self.instance_id},
             )
 
-            # Create sandbox if configured
-            if sandbox_config:
+            # Create sandbox if configured.
+            # sandbox-orchestrator manages its own sandbox lifecycle — skip daemon-side
+            # creation and instead inject the config so the orchestrator knows what to build.
+            if sandbox_config and agent_type == "sandbox-orchestrator":
+                import json as _json
+                description = (
+                    f"{description}\n\n"
+                    f"[SANDBOX CONFIG] Provision a sandbox with the following configuration:\n"
+                    f"```json\n{_json.dumps(sandbox_config, indent=2, default=str)}\n```"
+                )
+            elif sandbox_config:
                 try:
                     sandbox_id, task_sandbox_runtime_config = await self._create_task_sandbox(
                         task_id,

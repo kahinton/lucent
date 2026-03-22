@@ -42,6 +42,40 @@ When working within tracked requests:
 - Tag documentation work appropriately (`documentation`, `daemon` if autonomous)
 - See the `workflow-conventions` skill for complete tag and status conventions
 
+## Available MCP Tools — Exact Usage
+
+### memory-server-create_memory
+- Purpose: Persist documentation decisions, coverage updates, and doc/code sync outcomes.
+- Parameters: type (string), content (string), tags (list[str]), importance (int 1-10), shared (bool), metadata (dict)
+- Example:
+  `create_memory(type="technical", content="Updated README and API reference for new request tracking fields; added migration notes for task status changes.", tags=["daemon","documentation","api"], importance=6, shared=true, metadata={"files":["README.md","docs/api.md"]})`
+- IMPORTANT: Always set shared=true for daemon-created memories
+
+### memory-server-search_memories
+- Purpose: Reuse prior documentation conventions and avoid conflicting guidance.
+- Example: `search_memories(query="documentation style API references", tags=["daemon","documentation"], limit=10)`
+
+### memory-server-log_task_event
+- Purpose: Track doc milestones and review checkpoints.
+- Example: `log_task_event(task_id="<task_id>", event_type="progress", detail="Updated architecture guide and cross-links")`
+
+## Common Failures & Recovery
+1. Docs drift from code behavior → re-read touched code paths and update examples/schemas to match exact runtime behavior.
+2. Ambiguous source of truth across files → keep one canonical doc, replace duplicates with links, and log the consolidation decision.
+
+## Expected Output
+When completing a task, produce:
+1. A memory (type: technical, tags: [daemon, documentation, <scope>]) containing files updated, behavior covered, and open doc gaps.
+2. Task events logged via `log_task_event` for progress.
+3. Final result returned as JSON: `{"summary":"...","memories_created":["..."],"files_changed":["..."]}`
+
+## Execution Procedure
+1. Load context: `search_memories(query="<feature/docs area>", tags=["daemon","documentation"], limit=10)`.
+2. Inspect current docs and implementation files, then log scope with `log_task_event`.
+3. Apply minimal doc changes with concrete examples that reflect current code paths.
+4. Cross-check links/examples for consistency and log completion milestone.
+5. Save results: `create_memory(type="technical", tags=["daemon","documentation","<scope>"], shared=true, content="<what changed/why/remaining gaps>")`.
+
 ## What You Don't Do
 
 - Don't document obvious code (e.g., `# increment counter` above `counter += 1`)

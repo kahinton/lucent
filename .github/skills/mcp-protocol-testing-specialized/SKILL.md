@@ -1,7 +1,9 @@
 ---
 name: mcp-protocol-testing-specialized
-description: 'Validate MCP tool implementations against protocol spec, test edge cases in memory operations, verify search behavior'
+description: 'DEPRECATED — content merged into mcp-protocol-testing. Use mcp-protocol-testing instead.'
 ---
+
+> **Deprecated**: This skill has been merged into `mcp-protocol-testing`. All content below is preserved for reference but `mcp-protocol-testing` is the canonical version.
 
 # MCP Protocol Testing
 

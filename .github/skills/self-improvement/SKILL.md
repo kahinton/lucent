@@ -7,6 +7,19 @@ description: 'Meta-analysis for improving agent behavior, skills, and definition
 
 This skill is how I evolve. It's not abstract reflection — it's a concrete process for identifying what's not working and making targeted changes. Every cycle produces either a concrete change or a reasoned assessment that nothing needs changing.
 
+## MCP Tools Used
+
+| Tool | Purpose | Key Parameters |
+|------|---------|---------------|
+| `memory-server-search_memories` | Find correction patterns | `tags=["correction","rejection-lesson","lesson-extracted"]` |
+| `memory-server-search_memories` | Find past improvement records | `tags=["self-improvement","agent-improvement"]` |
+| `memory-server-search_memories` | Check for pending verifications | `tags=["verification-pending"]` |
+| `memory-server-search_memories` | Find procedural memories to update | `type="procedural"`, `query="topic"` |
+| `memory-server-search_memories` | Find goals to update | `type="goal"`, `query="improvement-topic"` |
+| `memory-server-update_memory` | Add guardrail to existing memory | `memory_id`, `content` |
+| `memory-server-create_memory` | Create improvement record | `type="experience"`, `tags=["self-improvement","daemon"]` |
+| `memory-server-create_memory` | Create improvement goal | `type="goal"`, `tags=["self-improvement","goal","daemon"]` |
+
 ## When to Trigger
 
 - User explicitly corrects me more than once on the same type of issue

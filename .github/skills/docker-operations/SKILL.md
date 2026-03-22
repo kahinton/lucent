@@ -5,6 +5,13 @@ description: 'Build, debug, and manage Docker containers and compose services fo
 
 # Docker Operations — Lucent Project
 
+## MCP Tools Used
+
+| Tool | Purpose | Key Parameters |
+|------|---------|---------------|
+| `memory-server-search_memories` | Find past Docker issue resolutions | `query="docker container [service] issue"`, `tags=["docker"]` |
+| `memory-server-create_memory` | Save container debugging findings | `type="technical"`, `tags=["docker", "lucent"]`, `importance=6` |
+
 ## Project Docker Setup
 
 Lucent uses Docker Compose with these services:
@@ -69,19 +76,65 @@ Key env vars in `docker-compose.yml`:
 - `LUCENT_CHAT_MODEL` — default model for chat
 - `LUCENT_DAEMON_MODEL` — default model for daemon sessions
 
-## Debugging Container Issues
+## Decision: What's Wrong with the Container?
 
-1. **Container won't start**: Check `docker compose logs lucent` for Python import errors or missing env vars
-2. **Database connection refused**: Ensure postgres is healthy — `docker compose ps` should show postgres as healthy
-3. **Hot-reload not working**: Source files are volume-mounted (`./src:/app/src:cached`). If changes aren't reflected, the volume mount may be stale — rebuild
-4. **Out of disk space**: `docker system prune -f` to clean unused images/containers
+- IF container not starting → `docker compose logs lucent` for Python import errors or missing env vars
+- ELIF database connection refused → `docker compose ps` — verify postgres shows as "healthy", not just "running"
+- ELIF hot-reload not working → source files are volume-mounted (`./src:/app/src:cached`); if stale, `docker compose build lucent && docker compose up -d lucent`
+- ELIF out of disk space → `docker system prune -f` to clean unused images/containers
+- ELIF container starts but API fails → `curl http://localhost:8766/api/health` to diagnose
 
 ## Database Operations
 
 ```bash
-# Connect to postgres directly
-docker exec -it hindsight-postgres-1 psql -U lucent -d lucent
+# Connect to postgres directly (container name varies — check docker compose ps)
+docker exec -it <postgres-container> psql -U <db_user> -d <db_name>
 
-# Run migrations
-docker exec lucent-server python -c "from lucent.db import run_migrations; import asyncio; asyncio.run(run_migrations())"
+# Run migrations manually
+docker exec <server-container> python -c "from lucent.db import run_migrations; import asyncio; asyncio.run(run_migrations())"
+
+# Check database health
+docker exec <postgres-container> pg_isready -U <db_user>
+```
+
+## Debugging Container Issues
+
+### Procedure: Debug Container Startup Failure
+
+1. Check if it exits immediately: `docker compose up lucent` (foreground)
+2. Check logs: `docker compose logs lucent`
+3. Common causes:
+   - Missing env vars → verify all required vars in `docker-compose.yml`
+   - Import error → check Python syntax in recently changed files
+   - Port conflict → `lsof -i :8766` to see what's using the port
+4. If issue is novel, save findings:
+   ```
+   memory-server-create_memory(
+     type="technical",
+     content="## Docker Issue: [description]\n\n**Symptom**: ...\n**Root cause**: ...\n**Fix**: ...",
+     tags=["docker", "lucent", "debugging"],
+     importance=6,
+     shared=true
+   )
+   ```
+
+## Example: Good Docker Debug Session
+
+```
+1. memory-server-search_memories(query="docker lucent container startup", tags=["docker"])
+   → No past issues found
+
+2. docker compose logs lucent | tail -30
+   → "ModuleNotFoundError: No module named 'httpx'"
+
+3. docker compose build lucent  # Rebuild to pick up new dependency
+4. docker compose up -d lucent
+5. curl http://localhost:8766/api/health → {"status": "ok"}
+
+6. memory-server-create_memory(
+     type="technical",
+     content="## Docker: Module not found after pip install\n\nWhen adding new Python dependencies, must run 'docker compose build' — hot-reload does NOT pick up new packages.",
+     tags=["docker", "lucent"],
+     importance=6
+   )
 ```

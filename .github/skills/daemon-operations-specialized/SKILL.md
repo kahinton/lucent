@@ -1,7 +1,9 @@
 ---
 name: daemon-operations-specialized
-description: 'Monitor, troubleshoot, and optimize daemon cognitive cycles — task throughput, memory usage patterns, cycle timing, health checks'
+description: 'DEPRECATED — content merged into daemon-operations. Use daemon-operations instead.'
 ---
+
+> **Deprecated**: This skill has been merged into `daemon-operations`. All content below is preserved for reference but `daemon-operations` is the canonical version.
 
 # Daemon Operations
 

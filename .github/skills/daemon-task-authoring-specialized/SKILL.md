@@ -1,7 +1,9 @@
 ---
 name: daemon-task-authoring-specialized
-description: 'Advanced daemon task authoring with Lucent-specific patterns, validation tuning, and multi-step task decomposition'
+description: 'DEPRECATED — content merged into daemon-task-authoring. Use daemon-task-authoring instead.'
 ---
+
+> **Deprecated**: This skill has been merged into `daemon-task-authoring`. All content below is preserved for reference but `daemon-task-authoring` is the canonical version.
 
 # Daemon Task Authoring — Specialized
 
@@ -47,9 +49,9 @@ When a task is too large for a single 720s session:
 Create tasks that build on each other's results:
 
 ```
-Task 1 (research): "Analyze test coverage gaps in src/lucent/db/"
+Task 1 (research): "Analyze test coverage gaps in the database layer"
   → Result stored in memory
-Task 2 (code): "Write tests for the gaps identified in memory [ID]. Focus on memory.py CRUD operations."
+Task 2 (code): "Write tests for the gaps identified in memory [ID]. Focus on memory CRUD operations."
   → References Task 1's result
 Task 3 (code): "Run the new tests from Task 2 and fix any failures."
 ```
