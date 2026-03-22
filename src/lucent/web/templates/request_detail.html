@@ -154,7 +154,16 @@
                 {% if task.result %}
                 <div>
                     <h4 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1">Output ({{ task.result | length }} chars)</h4>
-                    <div class="bg-gray-50 rounded p-2 text-sm text-gray-700 max-h-48 overflow-y-auto whitespace-pre-wrap font-mono text-xs">{{ task.result[:4000] }}{% if task.result | length > 4000 %}<span class="text-gray-400">… (truncated)</span>{% endif %}</div>
+                    {% if task.result | length > 2000 %}
+                    <div id="result-preview-{{ task.id }}" class="bg-gray-50 rounded p-2 text-sm text-gray-700 max-h-48 overflow-y-auto whitespace-pre-wrap font-mono text-xs">{{ task.result[:2000] }}<span class="text-gray-400">…</span></div>
+                    <button onclick="document.getElementById('result-preview-{{ task.id }}').style.display='none'; document.getElementById('result-full-{{ task.id }}').style.display='block'; this.style.display='none';"
+                            class="mt-1 text-xs text-primary-600 hover:text-primary-800 font-medium">
+                        Show full output ({{ task.result | length }} chars)
+                    </button>
+                    <div id="result-full-{{ task.id }}" class="bg-gray-50 rounded p-2 text-sm text-gray-700 max-h-[80vh] overflow-y-auto whitespace-pre-wrap font-mono text-xs" style="display:none;">{{ task.result }}</div>
+                    {% else %}
+                    <div class="bg-gray-50 rounded p-2 text-sm text-gray-700 max-h-48 overflow-y-auto whitespace-pre-wrap font-mono text-xs">{{ task.result }}</div>
+                    {% endif %}
                 </div>
                 {% endif %}
 
