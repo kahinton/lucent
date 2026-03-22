@@ -59,6 +59,10 @@ class DockerBackend(SandboxBackend):
         self._client: docker.DockerClient | None = None
         self._network_name = network_name
 
+    def _workspace_volume_name(self, sandbox_id: str) -> str:
+        """Return the named volume used to persist /workspace across rebuilds."""
+        return f"lucent-sandbox-{sandbox_id}-workspace"
+
     def _docker(self) -> docker.DockerClient:
         if self._client is None:
             import os
@@ -85,14 +89,21 @@ class DockerBackend(SandboxBackend):
                 self._client = docker.from_env()
         return self._client
 
-    def _ensure_network(self) -> None:
-        """Create the sandbox network if it doesn't exist."""
+    def _ensure_network(self, *, internal: bool = False) -> None:
+        """Create the sandbox network if it doesn't exist.
+
+        Args:
+            internal: When True the network is isolated from the host (no
+                external routing).  For ``allowlist`` mode this should be
+                False — egress is controlled by iptables rules applied
+                post-create, not by Docker's internal flag.
+        """
         client = self._docker()
         try:
             client.networks.get(self._network_name)
         except docker.errors.NotFound:
-            client.networks.create(self._network_name, driver="bridge", internal=True)
-            logger.info("Created sandbox network: %s", self._network_name)
+            client.networks.create(self._network_name, driver="bridge", internal=internal)
+            logger.info("Created sandbox network: %s (internal=%s)", self._network_name, internal)
 
     async def create(self, config: SandboxConfig) -> SandboxInfo:
         sandbox_id = str(uuid.uuid4())
@@ -297,13 +308,20 @@ class DockerBackend(SandboxBackend):
         network_mode = None
         networking_config = None
         cap_add = []
+        dns: list[str] = []
         if config.network_mode == "none":
             network_mode = "none"
         elif config.network_mode in ("bridge", "allowlist"):
-            self._ensure_network()
+            # Use internal=False for both modes: for allowlist, iptables rules
+            # (applied post-create) control egress rather than Docker's internal
+            # flag, which would block DNS resolution during the setup phase.
+            self._ensure_network(internal=False)
             networking_config = client.api.create_networking_config(
                 {self._network_name: client.api.create_endpoint_config()}
             )
+            # Explicit DNS servers so the custom bridge network resolves external
+            # hostnames correctly on Docker Desktop and Colima.
+            dns = ["8.8.8.8", "1.1.1.1"]
             if config.network_mode == "allowlist":
                 # NET_ADMIN needed to apply iptables rules post-create
                 cap_add = ["NET_ADMIN"]
@@ -315,6 +333,7 @@ class DockerBackend(SandboxBackend):
         if config.disk_limit:
             storage_opt = {"size": config.disk_limit}
 
+        workspace_volume = self._workspace_volume_name(sandbox_id)
         container_kwargs: dict = dict(
             image=config.image,
             name=name,
@@ -327,10 +346,14 @@ class DockerBackend(SandboxBackend):
             mem_limit=config.memory_limit,
             nano_cpus=int(config.cpu_limit * 1e9),
             network_mode=network_mode,
+            # Docker SDK 7.x requires network= alongside networking_config=
+            network=self._network_name if networking_config is not None else None,
             networking_config=networking_config,
+            dns=dns or None,
             cap_add=cap_add or None,
             security_opt=["no-new-privileges"],
             read_only=False,  # Repos need write access
+            volumes={workspace_volume: {"bind": "/workspace", "mode": "rw"}},
             tmpfs={"/tmp": "size=512m"},
             stop_signal="SIGTERM",
             auto_remove=False,
@@ -615,6 +638,18 @@ class DockerBackend(SandboxBackend):
                 )
             await asyncio.to_thread(container.remove, force=True)
             logger.info("Destroyed sandbox: %s", sandbox_id[:12])
+
+        # Remove the named workspace volume so data doesn't persist indefinitely
+        volume_name = self._workspace_volume_name(sandbox_id)
+        try:
+            client = self._docker()
+            volume = await asyncio.to_thread(client.volumes.get, volume_name)
+            await asyncio.to_thread(volume.remove)
+            logger.info("Removed workspace volume: %s", volume_name)
+        except docker.errors.NotFound:
+            pass
+        except Exception:
+            logger.debug("Failed to remove workspace volume %s", volume_name, exc_info=True)
 
     async def list_all(self) -> list[SandboxInfo]:
         client = self._docker()

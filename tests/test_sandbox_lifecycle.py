@@ -906,6 +906,22 @@ class TestSandboxSecurity:
         _, kwargs = client.containers.run.call_args
         assert "NET_ADMIN" in (kwargs.get("cap_add") or [])
 
+    @pytest.mark.parametrize("mode", ["bridge", "allowlist"])
+    def test_bridge_and_allowlist_pass_network_param(self, mode):
+        """Docker SDK 7.x requires network= alongside networking_config= (bridge/allowlist)."""
+        backend = DockerBackend()
+        backend._ensure_network = MagicMock()
+        client = _make_docker_client()
+        backend._client = client
+
+        backend._create_container("sb-net", "test-sb", SandboxConfig(network_mode=mode))
+
+        _, kwargs = client.containers.run.call_args
+        assert kwargs.get("networking_config") is not None, "networking_config must be set"
+        assert kwargs.get("network") == backend._network_name, (
+            "network= must be passed alongside networking_config= for Docker SDK 7.x"
+        )
+
     def test_none_network_mode_no_net_admin(self):
         """Default network_mode='none' does NOT grant NET_ADMIN."""
         backend = DockerBackend()
@@ -962,6 +978,66 @@ class TestSandboxSecurity:
 
         assert manager._last_activity[sandbox_id] > 0
 
+    # --- DNS configuration -----------------------------------------------
+
+    @pytest.mark.parametrize("mode", ["bridge", "allowlist"])
+    def test_dns_servers_set_for_network_modes(self, mode):
+        """bridge and allowlist modes pass explicit DNS servers to containers.run()."""
+        backend = DockerBackend()
+        backend._ensure_network = MagicMock()
+        client = _make_docker_client()
+        backend._client = client
+
+        backend._create_container("sb-dns", "test-sb", SandboxConfig(network_mode=mode))
+
+        _, kwargs = client.containers.run.call_args
+        dns = kwargs.get("dns")
+        assert dns is not None, f"dns must be set for network_mode={mode!r}"
+        assert "8.8.8.8" in dns
+        assert "1.1.1.1" in dns
+
+    def test_no_dns_for_none_network_mode(self):
+        """network_mode='none' does not add DNS servers."""
+        backend = DockerBackend()
+        mock_container = _make_mock_container()
+        client = _make_docker_client(mock_container)
+        backend._client = client
+
+        backend._create_container("sb-dns-none", "test-sb", SandboxConfig(network_mode="none"))
+
+        _, kwargs = client.containers.run.call_args
+        assert kwargs.get("dns") is None
+
+    def test_ensure_network_creates_non_internal_by_default(self):
+        """_ensure_network() creates bridge network with internal=False by default."""
+        import docker.errors
+
+        backend = DockerBackend()
+        client = MagicMock()
+        client.networks.get.side_effect = docker.errors.NotFound("not found")
+        client.networks.create = MagicMock()
+        backend._client = client
+
+        backend._ensure_network()
+
+        _, kwargs = client.networks.create.call_args
+        assert kwargs.get("internal") is False or kwargs.get("internal") is None
+
+    def test_ensure_network_can_create_internal(self):
+        """_ensure_network(internal=True) creates an internal network when requested."""
+        import docker.errors
+
+        backend = DockerBackend()
+        client = MagicMock()
+        client.networks.get.side_effect = docker.errors.NotFound("not found")
+        client.networks.create = MagicMock()
+        backend._client = client
+
+        backend._ensure_network(internal=True)
+
+        _, kwargs = client.networks.create.call_args
+        assert kwargs.get("internal") is True
+
     @pytest.mark.asyncio
     async def test_sandbox_manager_tracks_activity_on_file_ops(self):
         """read_file/write_file/list_files also update last-activity."""
@@ -981,3 +1057,108 @@ class TestSandboxSecurity:
         manager._last_activity[sandbox_id] = 0.0
         await manager.list_files(sandbox_id)
         assert manager._last_activity[sandbox_id] > 0
+
+    # --- Workspace volume persistence ------------------------------------
+
+    def test_workspace_volume_mounted_in_create_container(self):
+        """_create_container() mounts the named workspace volume at /workspace."""
+        backend = DockerBackend()
+        backend._ensure_network = MagicMock()
+        client = _make_docker_client()
+        backend._client = client
+
+        sandbox_id = "sb-vol-test"
+        backend._create_container(sandbox_id, "test-sb", SandboxConfig())
+
+        _, kwargs = client.containers.run.call_args
+        volumes = kwargs.get("volumes", {})
+        volume_name = backend._workspace_volume_name(sandbox_id)
+        assert volume_name in volumes, f"Expected volume {volume_name!r} in volumes={volumes!r}"
+        assert volumes[volume_name]["bind"] == "/workspace"
+        assert volumes[volume_name]["mode"] == "rw"
+
+    @pytest.mark.asyncio
+    async def test_rebuild_with_image_preserves_workspace_volume(self):
+        """_rebuild_with_image() uses the same named volume so /workspace survives."""
+        backend = DockerBackend()
+        backend._ensure_network = MagicMock()
+
+        sandbox_id = "sb-rebuild-vol"
+        name = "test-rebuild"
+        volume_name = backend._workspace_volume_name(sandbox_id)
+
+        old_container = _make_mock_container("old-container-id")
+        new_container = _make_mock_container("new-container-id")
+
+        run_call_count = 0
+
+        def _run(**kwargs):
+            nonlocal run_call_count
+            run_call_count += 1
+            return new_container
+
+        client = _make_docker_client(old_container)
+        client.containers.run = MagicMock(side_effect=_run)
+        client.containers.list = MagicMock(return_value=[old_container])
+        backend._client = client
+
+        config = SandboxConfig(image="base:latest")
+        info = SandboxInfo(
+            id=sandbox_id,
+            name=name,
+            status=SandboxStatus.READY,
+            config=config,
+            container_id=old_container.id,
+        )
+
+        updated_info = await backend._rebuild_with_image(
+            sandbox_id, name, config, "devcontainer:v2", info
+        )
+
+        # New container should be registered
+        assert updated_info.container_id == new_container.id
+
+        # The new container must have the workspace volume mounted
+        _, kwargs = client.containers.run.call_args
+        volumes = kwargs.get("volumes", {})
+        assert volume_name in volumes, (
+            f"Workspace volume {volume_name!r} must be mounted after rebuild; got volumes={volumes!r}"
+        )
+        assert volumes[volume_name]["bind"] == "/workspace"
+
+    @pytest.mark.asyncio
+    async def test_destroy_removes_workspace_volume(self):
+        """destroy() removes the named workspace volume after the container."""
+        backend = DockerBackend()
+        sandbox_id = "sb-destroy-vol"
+
+        container = _make_mock_container()
+        client = _make_docker_client(container)
+        client.containers.list = MagicMock(return_value=[container])
+
+        mock_volume = MagicMock()
+        client.volumes.get = MagicMock(return_value=mock_volume)
+        backend._client = client
+
+        await backend.destroy(sandbox_id)
+
+        volume_name = backend._workspace_volume_name(sandbox_id)
+        client.volumes.get.assert_called_once_with(volume_name)
+        mock_volume.remove.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_destroy_tolerates_missing_workspace_volume(self):
+        """destroy() does not raise if the workspace volume was already removed."""
+        import docker.errors
+
+        backend = DockerBackend()
+        sandbox_id = "sb-destroy-novol"
+
+        container = _make_mock_container()
+        client = _make_docker_client(container)
+        client.containers.list = MagicMock(return_value=[container])
+        client.volumes.get = MagicMock(side_effect=docker.errors.NotFound("not found"))
+        backend._client = client
+
+        # Should not raise
+        await backend.destroy(sandbox_id)
