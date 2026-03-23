@@ -1,140 +1,81 @@
 ---
 name: test-coverage-analysis
-description: 'Identify untested code paths, prioritize test writing, track coverage metrics across the Lucent codebase'
+description: 'Identify untested code paths, prioritize test writing, and track coverage gaps.'
 ---
 
-# Test Coverage Analysis — Lucent Project
+# Test Coverage Analysis
 
-## Test Infrastructure
+## Before Starting
 
-| Tool | Command | Config |
-|------|---------|--------|
-| pytest | `.venv/bin/pytest tests/ -q --tb=short` | `pyproject.toml` `[tool.pytest.ini_options]` |
-| pytest-asyncio | Async test support | `asyncio_mode = "auto"` |
-| ruff | `.venv/bin/ruff check .` | `pyproject.toml` `[tool.ruff]` |
-| coverage | `.venv/bin/pytest --cov=src/lucent tests/` | Optional — install `pytest-cov` |
-
-## Test File Layout
-
-Tests live in `tests/` and mirror the source structure:
+Check for previous coverage assessments:
 ```
-tests/
-  conftest.py          # Shared fixtures (db_pool, test users, etc.)
-  test_auth.py         # Authentication tests
-  test_rbac.py         # RBAC and role checks
-  test_server.py       # MCP server and tools
-  test_memories_api.py # Memory CRUD API
-  test_search_api.py   # Search endpoint tests
-  test_llm_engine.py   # LLM engine abstraction
-  test_daemon_api.py   # Daemon API endpoints
-  ...
+search_memories(query="test coverage gaps", tags=["code-review"], limit=10)
 ```
 
-## How to Assess Coverage
+## Assessment Procedure
 
-### Step 1: Run tests and check current count
+### 1. Run Coverage
+
+Use the project's test runner with coverage reporting:
+
 ```bash
-pytest tests/ -q --tb=short  # Quick pass/fail count
+# Identify the test runner from project config, then run with coverage
+# Examples by ecosystem:
+#   pytest --cov=src/ --cov-report=term-missing tests/
+#   npx jest --coverage
+#   go test ./... -coverprofile=coverage.out && go tool cover -func=coverage.out
+#   cargo tarpaulin --out Stdout
 ```
 
-### Step 2: Identify coverage gaps
-Run with coverage report:
-```bash
-pytest --cov=src/ --cov-report=term-missing tests/
+If no coverage tool is configured, start with a manual audit — read the test directory and compare against the source directory.
+
+### 2. Identify Gaps
+
+From the coverage report, extract:
+- Files with zero or near-zero coverage (completely untested)
+- Functions with partial coverage (some branches untested)
+- New code added without corresponding tests
+
+Cross-reference against the source tree — look especially at:
+- **API route handlers** — each endpoint should have at least a happy-path test
+- **Database operations** — CRUD functions need coverage
+- **Authentication/authorization paths** — every auth check must be tested (both allow and deny)
+- **Error handling paths** — don't just test the happy path
+- **Business logic** — core algorithms and decision functions
+
+### 3. Prioritize
+
+Not all untested code is equally important. Prioritize by risk:
+
+| Priority | What to test | Why |
+|----------|-------------|-----|
+| **Critical** | Auth flows, access control, input validation | Security-sensitive — bugs here are exploits |
+| **High** | Core business logic, data mutations, API endpoints | Correctness-sensitive — bugs here break users |
+| **Medium** | Error handling, edge cases, concurrent access | Reliability-sensitive — bugs here cause incidents |
+| **Lower** | Logging, metrics, admin utilities | Operational — bugs here are annoying, not dangerous |
+
+### 4. Write Tests That Matter
+
+**Good test characteristics:**
+- Tests one specific behavior (not a grab-bag of assertions)
+- Has a descriptive name that explains what's being verified
+- Uses the project's existing test fixtures and patterns
+- Tests both success and failure paths
+- Tests boundary conditions (empty input, maximum sizes, concurrent access)
+- Is fast — mocks external services, avoids unnecessary I/O
+
+**Test the boundaries, not the internals:**
+- Prefer testing public interfaces over private implementation details
+- If a refactor breaks your tests but the behavior hasn't changed, your tests were too tightly coupled
+
+### 5. Record Findings
+
 ```
-
-Look for files with low coverage, especially:
-- API route handlers — each router should have a corresponding test file
-- Database repositories — CRUD operations need coverage
-- Tool implementations — public-facing tools and integrations
-- Core business logic — the abstraction and service layers
-
-### Step 3: Prioritize what to test
-
-**High priority** (security/correctness critical):
-1. Auth flows — login, session validation, API key auth, token expiry
-2. RBAC — role checks on every endpoint, org isolation
-3. Memory operations — CRUD, search, access control, org scoping
-4. Input validation — malformed requests, injection attempts
-
-**Medium priority** (functional correctness):
-5. MCP tools — each tool's happy path and error cases
-6. Database repositories — edge cases, concurrent access
-7. LLM engine — factory selection, error handling, timeout behavior
-
-**Lower priority** (operational):
-8. Rate limiting behavior
-9. Logging and audit trails
-10. Mode/license checks
-
-### Step 4: Write tests that matter
-
-Good tests for any project:
-- **Use the shared fixtures** in `conftest.py` — reuse database pools, test users, async clients
-- **Test auth boundaries** — verify endpoints reject unauthenticated requests
-- **Test org/tenant isolation** — verify user A can't see user B's data
-- **Test error paths** — not just happy paths
-- **Keep tests fast** — mock external services, use in-memory where possible
-
-## Current Test State
-
-Check `search_memories(tags=["code-review", "test-coverage"])` for previous coverage assessments and known gaps.
-
-- Reviewing pull requests or code changes
-- Evaluating code quality during development
-- Performing security-focused code review
-- Checking for python-specific anti-patterns
-
-## Review Process
-
-### Step 1: Understand the Change
-
-1. Read the PR description or task context
-2. Identify what files changed and why
-3. Check if there are related tests
-
-### Step 2: Check Correctness
-
-1. Does the code do what it claims to do?
-2. Are edge cases handled?
-3. Are error paths covered?
-4. Is the logic sound?
-
-### Step 3: Check Style & Conventions
-
-1. Run `ruff check` if available
-2. Verify type hints are present and correct
-3. Check docstrings for public APIs
-4. Ensure imports are organized (stdlib → third-party → local)
-5. Verify `pyproject.toml` conventions are followed
-
-### Step 4: Check Security
-
-1. No hardcoded secrets or credentials
-2. Input validation on external data
-3. Proper authentication/authorization checks
-4. SQL injection, XSS, or injection vulnerabilities
-5. Proper error messages (no internal details leaked)
-
-### Step 5: Check Performance
-
-1. No obvious O(n²) or worse algorithms where O(n) is possible
-2. No unnecessary database queries or API calls
-3. Proper resource management (connections, files, memory)
-4. Caching where appropriate
-
-### Step 6: Summarize
-
-Output a structured review:
-- **Verdict**: approve / request-changes / needs-discussion
-- **Critical issues**: Things that must be fixed
-- **Suggestions**: Things that could be improved
-- **Positive notes**: What was done well
-
-## Best Practices
-
-- Focus on logic and correctness over style (linters handle style)
-- Be specific: "this loop is O(n²) because X" not "performance concern"
-- Suggest alternatives, don't just point out problems
-- Acknowledge good patterns when you see them
-- Check for test coverage on new code paths
+create_memory(
+  type="technical",
+  content="## Coverage Assessment: <date>\n\n**Overall**: X% line coverage\n**Critical gaps**:\n- <module>: <what's untested and why it matters>\n**Tests added**: <count and areas>\n**Remaining gaps**: <what still needs coverage>",
+  tags=["code-review", "testing"],
+  importance=6,
+  shared=true
+)
+```

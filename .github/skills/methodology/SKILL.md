@@ -1,74 +1,70 @@
 ---
 name: methodology
-description: 'Research methodology and rigor guidelines'
+description: 'Research methodology and rigor guidelines — how to investigate questions with evidence, structure, and explicit confidence levels.'
 ---
 
-# Methodology
+# Research Methodology
 
-Research methodology and rigor guidelines
+## Scope Before You Search
 
-## When to Use
+Transform vague questions into specific, answerable sub-questions before gathering evidence. "Research authentication" produces noise. "What are the tradeoffs between JWT and session cookies for multi-tenant APIs?" produces answers.
 
-- Investigating a new topic or question
-- Evaluating competing approaches or technologies
-- Building background knowledge for a project
-- Fact-checking claims or assumptions
+For each sub-question, define:
+- What a good answer looks like (specific enough to act on)
+- What sources would be authoritative (official docs, specs, code)
+- How confident you need to be (rough estimate vs. production decision)
 
-## Research Process
+## Evidence Hierarchy
 
-### Step 1: Define the Question
+Not all sources are equal. Use the most authoritative source available:
 
-1. What specifically do we need to know?
-2. What would a good answer look like?
-3. What's the scope — broad survey or deep dive?
-4. What's the deadline or urgency?
+| Tier | Source type | When to use |
+|------|-----------|-------------|
+| **1 — Primary** | Source code, official docs, RFCs, specs | Always preferred. Verify claims here. |
+| **2 — Authoritative** | Peer-reviewed papers, vendor documentation, benchmark data | When primary sources don't address the question. |
+| **3 — Community** | Blog posts, Stack Overflow, tutorials, forum answers | For patterns and approaches. Always cross-reference. |
+| **4 — Anecdotal** | Personal experience, single reports, unverified claims | Note but don't rely on. State the limitation. |
 
-### Step 2: Survey Existing Knowledge
+## Confidence Levels
 
-1. Search memories for previous research on this topic
-2. Check local documentation and codebase
-3. Review any existing analysis or reports
+Every claim you make gets a confidence level:
 
-### Step 3: Gather External Sources
+| Level | Criteria | Example |
+|-------|----------|---------|
+| **High** | Multiple Tier 1-2 sources agree. Verified in code or docs. | "PostgreSQL uses MVCC for concurrency — documented in official docs and verified in source." |
+| **Medium** | One authoritative source plus supporting evidence. Reasonable inference. | "This library likely handles connection pooling internally based on its API design and one benchmark post." |
+| **Low** | Limited evidence. Single non-authoritative source. Inference from indirect signals. | "This approach may have performance issues at scale based on one blog report." |
 
-1. Use web_fetch for authoritative sources
-2. Cross-reference multiple sources
-3. Note the date and credibility of each source
-4. Capture key quotes and data points
+## Handling Conflicts
 
-### Step 4: Analyze and Synthesize
+When sources disagree:
+1. Present both positions with their evidence
+2. Identify the source of disagreement (different versions? different contexts? different definitions?)
+3. State which you believe is more reliable and why
+4. If you can't resolve it, say so — "These sources conflict and I can't determine which is correct without <specific additional evidence>"
 
-1. Organize findings by theme or question
-2. Note areas of consensus and disagreement
-3. Identify gaps in available information
-4. Draw connections between sources
+## Output Structure
 
-### Step 5: Produce Output
-
-Structure your findings as:
-
-```
+```markdown
 ## Summary
-[Key findings in 2-3 sentences]
+<Key findings in 2-3 sentences — the executive answer>
 
 ## Detailed Findings
-[Organized by theme with citations]
+<Organized by sub-question, with evidence citations>
 
 ## Confidence Assessment
-[What we know confidently vs. what's uncertain]
+<What you know with high confidence vs. what's uncertain>
 
-## Recommendations
-[Suggested next steps based on findings]
+## Recommendation
+<Specific, actionable next step with rationale>
 
 ## Sources
-[List of sources consulted with dates]
+<Every source consulted, with dates and tiers>
+
+## Open Questions
+<What remains unresolved and what would resolve it>
 ```
 
-## Best Practices
+## Save Findings
 
-- Cite everything — memories, documents, URLs
-- Distinguish fact from interpretation
-- Note confidence levels explicitly
-- Look for contradicting evidence
-- Save key findings as memories for future reference
-- Update previous research memories when new information emerges
+Research that isn't persisted is wasted. Save to memory with `type="technical"`, tags including `research`, importance 6-8 depending on how broadly useful the findings are.

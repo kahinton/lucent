@@ -1,61 +1,72 @@
 ---
 name: triage
-description: 'Issue triage and classification process'
+description: 'Issue triage and classification — severity assessment, routing, and initial response.'
 ---
 
 # Triage
 
-Issue triage and classification process
+## Classification
 
-## When to Use
+Every incoming issue gets classified on three dimensions immediately:
 
-- New support ticket or issue arrives
-- Customer reports a problem
-- Escalation from another agent or team member
-- Recurring issue pattern detected
+### Severity
 
-## Triage Process
+| Level | Criteria | Response time |
+|-------|----------|--------------|
+| **Critical** | System down, data loss, security breach, all users affected | Immediate — drop everything |
+| **High** | Major feature broken, significant user impact, no workaround | Within the hour |
+| **Medium** | Feature degraded, workaround exists, limited user impact | Within the day |
+| **Low** | Minor inconvenience, cosmetic, enhancement request | Next planning cycle |
 
-### Step 1: Classify
+### Category
 
-1. **Severity**: Critical (system down) / High (major impact) / Medium (workaround exists) / Low (minor inconvenience)
-2. **Category**: Bug / Feature request / Question / Configuration / Security
-3. **Urgency**: Immediate / Business hours / Next cycle / Backlog
+| Category | Indicators |
+|----------|-----------|
+| **Bug** | "It used to work" / "I expected X but got Y" / error messages |
+| **Security** | Auth bypass, data exposure, injection, unauthorized access |
+| **Feature request** | "It would be nice if..." / "Can you add..." |
+| **Configuration** | Environment setup, deployment, misconfiguration |
+| **Question** | "How do I..." / "What does X do?" |
 
-### Step 2: Research
+### Urgency
 
-1. Search memories for similar past issues
-2. Check knowledge base and documentation
-3. Look for known workarounds or fixes
-4. Identify if this is a new issue or recurrence
+Separate from severity — urgency is about time pressure:
+- **Immediate**: Blocking production, blocking a deadline
+- **Business hours**: Important but can wait for normal working time
+- **Next cycle**: Can be planned into upcoming work
+- **Backlog**: Nice to have, no time pressure
 
-### Step 3: Respond or Escalate
+## Procedure
 
-**If solution is known:**
-1. Provide the solution with clear steps
-2. Include relevant documentation links
-3. Follow up to confirm resolution
+### 1. Research
 
-**If solution is unknown:**
-1. Gather diagnostic information
-2. Escalate with full context and research done so far
-3. Set expectations on timeline
+Before responding:
+```
+search_memories(query="<error message or symptom>", limit=10)
+search_memories(query="<affected module or feature>", tags=["bugs", "incident"], limit=5)
+```
 
-**If security-related:**
-1. Escalate immediately
-2. Do NOT share details broadly
-3. Follow security incident protocol
+Check if this is a known issue with a known fix.
 
-### Step 4: Document
+### 2. Respond or Escalate
 
-1. Save the resolution as a memory for future reference
-2. Update knowledge base if this is a new solution
-3. Note any patterns (3+ similar issues = systemic problem)
+**If solution is known:** Provide it with clear, specific steps. Link to relevant docs or past memory.
 
-## Best Practices
+**If solution is unknown:** Gather diagnostic information, escalate with full context and research done so far. State what you tried and what you ruled out.
 
-- Respond quickly, even if just to acknowledge receipt
-- Be empathetic — the person has a problem they need solved
-- Don't assume technical knowledge — match the audience
-- Follow up on open issues — don't let them go stale
-- Capture resolution patterns for the knowledge base
+**If security-related:** Escalate immediately. Do not share details broadly. Do not attempt to reproduce the exploit.
+
+### 3. Record
+
+Save resolutions for future reference:
+```
+create_memory(
+  type="technical",
+  content="## Issue: <title>\n\n**Symptom**: <what was reported>\n**Root cause**: <what was wrong>\n**Resolution**: <what fixed it>\n**Pattern**: <when to suspect this in the future>",
+  tags=["bugs", "triage"],
+  importance=6,
+  shared=true
+)
+```
+
+If you see 3+ similar issues, flag it as a systemic problem — it needs a root-cause fix, not repeated triage.

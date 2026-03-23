@@ -3,176 +3,141 @@ name: capability-generation
 description: 'Generate domain-appropriate agents and skills from environment assessment results. Use after environment assessment completes, when entering a new domain, or when gap analysis reveals missing capabilities.'
 ---
 
-# Dynamic Capability Generation
+# Capability Generation
 
-Takes structured assessment output and automatically generates domain-appropriate agent definitions and skills. This is the core mechanism that makes Lucent deployable into ANY environment.
+Takes assessment output and generates agent definitions and skills tailored to the detected domain. This is how the system adapts to any environment.
 
-## When to Use
+## Prerequisites
 
-- After an environment assessment completes
-- When entering a new domain (legal, ops, research, etc.)
-- When gap analysis reveals missing agents or skills
-- When the daemon dispatches a `capability-generation` task
+Before running this skill:
+1. An environment assessment must exist — search for `tags=["environment"]`
+2. Existing capabilities must be inventoried — check `GET /api/definitions/agents?status=active` and `GET /api/definitions/skills?status=active`
 
-## MCP Tools Used
-
-| Tool | Purpose | Key Parameters |
-|------|---------|---------------|
-| `memory-server-search_memories` | Check existing capabilities | `tags=["environment", "agent-registry"]`, `limit=10` |
-| `memory-server-search_memories` | Load assessment results | `tags=["environment", "assessment"]`, `limit=5` |
-| `memory-server-create_memory` | Save adaptation summary | `type="technical"`, `tags=["daemon","environment","adaptation","agent-registry"]`, `shared=true` |
-
-### REST API Calls (via `curl` or `httpx`)
-
-| Endpoint | Method | Purpose | Body |
-|----------|--------|---------|------|
-| `GET /api/definitions/agents?status=active` | GET | List existing agents | — |
-| `GET /api/definitions/skills?status=active` | GET | List existing skills | — |
-| `POST /api/definitions/agents` | POST | Create agent definition | `{name, description, system_prompt, scope, status}` |
-| `PATCH /api/definitions/agents/{id}` | PATCH | Update agent definition | `{system_prompt}` |
-
-Example create agent call:
-```python
-import httpx
-response = httpx.post(
-    "http://localhost:8766/api/definitions/agents",
-    headers={"Authorization": f"Bearer {api_key}"},
-    json={
-        "name": "legal-research",
-        "description": "Research legal precedents and compliance requirements",
-        "system_prompt": "You are a legal research specialist...",
-        "scope": "built-in",
-        "status": "active"
-    }
-)
-```
-
-## Pipeline Overview
+## Step 1: Load Assessment and Existing Capabilities
 
 ```
-Assessment Output → Signal Parsing → Domain Classification → Archetype Mapping → Generation → Validation
+search_memories(query="environment assessment", tags=["environment"], limit=5)
 ```
 
-## Phase 1: Parse Domain Signals
-
-### Step 1: Load Assessment and Existing Capabilities
-
-```
-memory-server-search_memories(tags=["environment", "assessment"], limit=5)
-```
-
-Then check what already exists:
 ```bash
-curl -s "http://localhost:8766/api/definitions/agents?status=active" \
-  -H "Authorization: Bearer $API_KEY"
+curl -s http://localhost:<port>/api/definitions/agents?status=active
+curl -s http://localhost:<port>/api/definitions/skills?status=active
 ```
 
-Extract structured signals:
+Identify:
+- The domain (software, legal, research, operations, etc.)
+- Available tools and infrastructure
+- What agents and skills already exist
+- Gaps between what exists and what the domain needs
 
-| Signal Category | Examples | Source |
-|----------------|----------|--------|
-| **Tech Stack** | Languages, frameworks, databases, infrastructure | `tech_stack` field |
-| **Team Roles** | Developer, support engineer, researcher, legal analyst | `collaborators` field |
-| **Workflows** | CI/CD, ticket triage, case management, peer review | Inferred from tools + domain |
-| **Tools** | Git, Docker, Jira, LexisNexis, Slack | `tech_stack.tools` + `mcp_servers` |
-| **Domain Indicators** | File types, directory structures, terminology | Assessment description |
+## Step 2: Determine What's Missing
 
-Key indicators by domain:
-- **Software**: `src/`, `tests/`, `package.json`, `pyproject.toml`, CI configs, linters
-- **Legal**: `contracts/`, `cases/`, `briefs/`, legal databases, compliance tools, regulatory references
-- **Ops/Support**: `runbooks/`, `playbooks/`, ticketing systems, monitoring tools, SLA references
-- **Research**: `papers/`, `data/`, `notebooks/`, citation managers, statistical tools
+Map domain needs to capabilities:
 
-## Phase 2: Map to Domain Archetypes
+| Domain | Typical agents needed | Typical skills needed |
+|--------|----------------------|----------------------|
+| Software engineering | code, research, documentation, security | code-review, testing, deployment, debugging |
+| Legal | research, documentation, analysis | case-analysis, document-review, compliance |
+| Research | research, documentation, planning | methodology, literature-review, data-analysis |
+| Operations / SRE | code, assessment, planning | incident-response, monitoring, runbooks |
+| Support | research, documentation | triage, knowledge-base, escalation |
 
-### Software Domain
-| Agent | Purpose |
-|-------|---------|
-| `code-review` | Review code changes for correctness, security, performance |
-| `testing` | Write and maintain tests, ensure coverage |
-| `security` | Identify vulnerabilities and recommend fixes |
-| `documentation` | Create and maintain docs for code, APIs, processes |
-| `deployment` | Manage CI/CD pipelines and infrastructure |
+Skip anything that already exists and is active.
 
-### Legal Domain
-| Agent | Purpose |
-|-------|---------|
-| `legal-research` | Research precedents, regulations, compliance requirements |
-| `contract-review` | Analyze contracts for risks, obligations, terms |
-| `compliance` | Monitor and ensure regulatory compliance |
+## Step 3: Generate Agent Definitions
 
-### Ops/Support Domain
-| Agent | Purpose |
-|-------|---------|
-| `triage` | Classify and route incoming issues |
-| `incident-response` | Handle and resolve production incidents |
-| `knowledge-base` | Maintain and improve knowledge base |
+For each needed agent, create a definition following the standard structure:
 
-### Research Domain
-| Agent | Purpose |
-|-------|---------|
-| `literature-review` | Survey existing research and synthesize findings |
-| `data-analysis` | Analyze datasets and produce structured insights |
+```markdown
+---
+name: <agent-name>
+description: <one-line purpose>
+---
 
-## Phase 3: Generate Capabilities
+# <Agent Name> Agent
 
-### Decision: Create vs Skip
+<Opening statement: what this agent is and its core function>
 
-- IF agent with same name exists (from existing agents check) → **SKIP**, never overwrite
-- ELIF assessment includes explicit `recommended_agents` → use those
-- ELSE → use archetype recommendations for the detected domain
+## Operating Principles
+<2-3 sentences defining the behavioral contract>
 
-### Generate Agent Definition
+## Execution Sequence
+### 1. <First step>
+<What to do, with exact tool calls>
 
-The generation uses the `AdaptationPipeline` class in `daemon/adaptation.py`. For manual generation:
+### 2. <Second step>
+...
 
-1. Select template based on domain: `daemon/templates/agents/`
-2. Build context with domain-specific parameters (language, framework, tools, guardrails)
-3. Render template via Jinja2
-4. Create via API:
-   ```python
-   httpx.post(
-       "http://localhost:8766/api/definitions/agents",
-       headers={"Authorization": f"Bearer {api_key}"},
-       json={"name": name, "description": desc, "system_prompt": prompt, "scope": "built-in", "status": "active"}
-   )
-   ```
+## Decision Framework
+<If/then rules for ambiguous situations>
 
-## Phase 4: Validate Generated Capabilities
+## Boundaries
+<What the agent does NOT do>
+```
 
-Every generated agent must pass this checklist:
+**Quality criteria:**
+- Every step includes the specific tool calls or actions to take
+- Decision framework covers the 3-5 most common ambiguities
+- Boundaries prevent the most likely failure modes
+- No generic platitudes — every instruction is actionable
 
-- [ ] **Has clear purpose**: The agent's role is specific, not vague
-- [ ] **Has domain context**: Includes relevant domain description
-- [ ] **Has appropriate tools**: Lists tools relevant to its function
-- [ ] **Has guardrails**: Includes safety constraints appropriate to the domain
-- [ ] **Has memory tags**: Specifies tags for organizing its output
-- [ ] **Has feedback protocol**: Includes review/approval workflow
-- [ ] **No conflicting agents**: Doesn't duplicate an existing agent's role
+## Step 4: Generate Skills
 
-Every generated skill must pass this checklist:
+For each needed skill, create with this structure:
 
-- [ ] **Has frontmatter**: Valid `name` and `description` in YAML frontmatter
-- [ ] **Has triggers**: Clearly states when to use this skill
-- [ ] **Has process steps**: Step-by-step instructions, not just goals
-- [ ] **Has best practices**: Domain-relevant guidance
-- [ ] **Has pitfall warnings**: Common mistakes to avoid
+```markdown
+---
+name: <skill-name>
+description: <when to use this skill>
+---
 
-## Phase 5: Store Results
+# <Skill Title>
+
+## Before Starting
+<What context to load — memory searches>
+
+## Procedure
+### 1. <Step>
+<Exact instructions with tool calls>
+...
+
+## Recording Results
+<How to save findings to memory>
+
+## Anti-Patterns
+<What not to do>
+```
+
+**Quality criteria:**
+- Procedures are step-by-step, not paragraph-form
+- Tool calls use the exact MCP tool names and parameters
+- Anti-patterns address real failure modes, not theoretical concerns
+
+## Step 5: Submit for Review
+
+Create new definitions via the REST API with `status="draft"`:
+
+```bash
+curl -X POST http://localhost:<port>/api/definitions/agents \
+  -H "Content-Type: application/json" \
+  -d '{"name": "<name>", "description": "<desc>", "content": "<markdown>", "skill_names": ["<skills>"], "status": "draft"}'
+```
+
+Draft definitions require human approval before they become active. Tag the summary for review:
 
 ```
-memory-server-create_memory(
+create_memory(
   type="technical",
-  content="## Capability Generation: [domain]\n\n**Domain**: [detected domain]\n**Agents generated**: [list]\n**Agents skipped** (already existed): [list]\n**Skills generated**: [list]\n**Validation warnings**: [any issues]",
-  tags=["daemon", "environment", "adaptation", "agent-registry"],
+  content="## Capability Generation: <domain>\n\n**Created agents**: <list>\n**Created skills**: <list>\n**Based on assessment**: <assessment memory ID>\n**Rationale**: <why each was needed>",
+  tags=["daemon", "environment", "adaptation", "needs-review"],
   importance=7,
   shared=true
 )
 ```
 
-## Tips
+## Constraints
 
-- Start with the domain's core archetypes, then add specialized agents as needed
-- Cross-domain environments (e.g., software + legal) should get agents from BOTH domains
-- Always check what already exists before generating — never overwrite existing definitions
-- Validation warnings don't block generation — they're logged for quality improvement
+- Only generate capabilities that the assessment identified as gaps
+- Definitions must be submitted as `draft` — never directly to `active`
+- Check for naming conflicts with existing definitions before creating
+- Don't generate capabilities the domain doesn't need just because they exist as templates

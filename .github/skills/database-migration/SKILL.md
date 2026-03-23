@@ -1,135 +1,112 @@
 ---
 name: database-migration
-description: 'Create, validate, and apply PostgreSQL schema migrations following the existing raw-SQL migration pattern'
+description: 'Create, validate, and apply database schema migrations safely.'
 ---
 
 # Database Migration
 
-Create, validate, and apply PostgreSQL schema migrations using the project's raw-SQL pattern.
+## Before Starting
 
-## When to Use
-
-- Adding or modifying database tables or columns
-- Creating indexes or constraints
-- Changing data types or adding defaults
-- Any schema change that needs to be versioned
-
-## MCP Tools Used
-
-| Tool | Purpose | Key Parameters |
-|------|---------|---------------|
-| `memory-server-search_memories` | Find past migration decisions | `query="database migration schema [table]"`, `tags=["database"]` |
-| `memory-server-create_memory` | Record migration decisions and schema changes | `type="technical"`, `tags=["database", "migration"]`, `importance=7` |
-
-## Procedure: Creating a Migration
-
-### Step 1: Load Context
-
+Check for past migration decisions and existing patterns:
 ```
-memory-server-search_memories(query="database migration schema", tags=["database"], limit=5)
+search_memories(query="database migration schema", tags=["database"], limit=10)
 ```
 
-Check for: past decisions about this table, schema constraints, known gotchas.
+## Migration Procedure
 
-### Step 2: Determine the Next Number
+### 1. Understand the Change
+
+Before writing SQL:
+- What data model change is needed and why?
+- What existing data will be affected?
+- Is this additive (new column/table) or destructive (drop/rename)?
+- Can this be rolled back if something goes wrong?
+
+### 2. Check the Migration Sequence
 
 ```bash
-ls db/migrations/   # or wherever the project keeps migration files
+# List existing migrations to determine the next number
+ls db/migrations/ 2>/dev/null || find . -name "*.sql" -path "*/migration*" | sort
 ```
 
-Find the highest number and increment by 1. Use zero-padded three-digit format (e.g., `013`).
+Follow the project's naming convention. Typical format: `NNN_description.sql` with zero-padded sequence numbers.
 
-### Step 3: Write the Migration
-
-Create `db/migrations/NNN_description.sql`:
+### 3. Write the Migration
 
 ```sql
--- Migration NNN: [What this does and why]
--- Previous state: [What existed before]
--- New state: [What this creates/changes]
+-- Migration NNN: <What this does and why>
+-- Previous state: <What existed before>
+-- New state: <What this creates/changes>
 
--- Add new column with safe default
-ALTER TABLE memories ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
+-- Example: Adding a column
+ALTER TABLE <table> ADD COLUMN IF NOT EXISTS <column> <type> NOT NULL DEFAULT <value>;
 
--- Create index
-CREATE INDEX IF NOT EXISTS idx_memories_version ON memories(version);
+-- Example: Creating an index
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_<table>_<column> ON <table>(<column>);
+
+-- Example: Creating a table
+CREATE TABLE IF NOT EXISTS <table> (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- ... columns ...
+);
 ```
 
-Rules:
-- Use `IF NOT EXISTS` / `IF EXISTS` for idempotency
-- Include both the schema change and any required data migration
-- Add `NOT NULL` constraints with defaults to avoid breaking existing rows
-- Create indexes `CONCURRENTLY` for large tables when possible
-- Add a comment at top describing what and why
+**Rules:**
+- Use `IF NOT EXISTS` / `IF EXISTS` for idempotency — migrations should be safe to run twice
+- Add `NOT NULL` constraints with a `DEFAULT` to avoid breaking existing rows
+- Create indexes `CONCURRENTLY` on large tables to avoid locking
+- Never drop a column or table without explicit approval
+- Comment the migration with what it does and why
 
-### Step 4: Validate
+### 4. Validate
 
 ```bash
-# Check SQL syntax (use the actual postgres container name from docker compose ps)
-docker exec <postgres-container> psql -U <db_user> -d <db_name> -c "\i /path/to/migration.sql" --dry-run
+# Connect to the database (use actual container/service name from docker compose ps)
+docker exec -it <postgres-container> psql -U <db_user> -d <db_name>
 
-# Test against local DB
-docker compose up -d postgres
-docker exec <postgres-container> psql -U <db_user> -d <db_name> -f /path/to/migration.sql
+# Test the migration syntax
+\i /path/to/migration.sql
+
+# Verify the result
+\d <affected_table>
 ```
 
-Verify:
-- SQL syntax is valid PostgreSQL
-- Referenced tables and columns exist (from prior migrations)
-- No destructive changes without explicit approval
-- Existing rows won't be broken by NOT NULL without DEFAULT
+Check:
+- SQL syntax is valid
+- Referenced tables and columns exist
+- Existing data won't be corrupted
+- The migration is idempotent (run it twice — second run should be a no-op)
 
-### Step 5: Apply and Verify
+### 5. Apply
 
-Migrations are applied automatically on server startup. After restart:
+Most projects apply migrations automatically on server startup. After restart:
 
 ```bash
 # Check logs for migration success/failure
-docker logs lucent-server 2>&1 | grep -i "migration"
+docker logs <server-container> 2>&1 | grep -i "migration"
 
-# Verify schema in psql
-docker exec -it <postgres-container> psql -U <db_user> -d <db_name> -c "\d memories"
+# Verify the schema change
+docker exec -it <postgres-container> psql -U <db_user> -d <db_name> -c "\d <table>"
 ```
 
-### Step 6: Save Decision
+### 6. Record the Decision
 
 ```
-memory-server-create_memory(
+create_memory(
   type="technical",
-  content="## Migration NNN: [title]\n\n**Why**: [business/technical reason]\n**Change**: [what was added/modified]\n**Rollback**: [how to reverse if needed]",
+  content="## Migration NNN: <title>\n\n**Why**: <business/technical reason>\n**Change**: <what was added/modified/removed>\n**Rollback**: <how to reverse if needed>\n**Related**: <what code depends on this schema change>",
   tags=["database", "migration"],
   importance=7,
-  metadata={"category": "database", "references": ["db/migrations/NNN_description.sql"]},
   shared=true
 )
 ```
 
-## Decision: Migration Type
+## Destructive Changes
 
-- IF adding a new column to existing table → use `ALTER TABLE ... ADD COLUMN IF NOT EXISTS ... DEFAULT ...`
-- ELIF dropping a column → confirm no code references it, use `ALTER TABLE ... DROP COLUMN IF EXISTS`
-- ELIF creating a new table → use `CREATE TABLE IF NOT EXISTS`
-- ELIF creating an index on large table → use `CREATE INDEX CONCURRENTLY IF NOT EXISTS`
-- ELIF data migration needed → include in same file, use transaction if possible
+Dropping columns, tables, or changing types requires extra caution:
 
-## Best Practices
-
-- **Never modify an existing migration file** — create a new one
-- Prefer additive changes (add columns) over destructive ones (drop columns)
-- Document why the migration is needed, not just what it does
-- Test against local database before pushing
-
-## Example: Good Migration File
-
-```sql
--- Migration 013: Add version column to memories for optimistic locking
--- Why: Needed for update_memory's expected_version parameter to detect concurrent modifications
--- Related: the MCP tool that uses this column (e.g., update_memory's expected_version parameter)
-
-ALTER TABLE memories ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
-
--- Update existing rows to have version = 1 (already handled by DEFAULT)
-
--- Create index for version lookups in optimistic lock queries
-CREATE INDEX IF NOT EXISTS idx_memories_version ON memories(id, version);
-```
+1. **Verify no code references the old schema** — search the codebase
+2. **Consider a two-phase approach:** phase 1 stops using the column, phase 2 drops it (in a later migration)
+3. **Back up** before applying: `pg_dump -Fc > backup_before_migration_NNN.dump`
+4. **Get explicit approval** before applying destructive changes

@@ -1,106 +1,96 @@
 ---
 name: onboarding
-description: 'Guide new contributors through project setup, architecture overview, coding conventions, and first-contribution workflow'
+description: 'Guide new contributors through project setup, architecture overview, and first-contribution workflow.'
 ---
 
 # Onboarding
 
-Guide new contributors through project setup, architecture overview, coding conventions, and first-contribution workflow.
-
-## When to Use
-
-- A new contributor is setting up the project for the first time
-- Someone asks how the project is structured or how to get started
-- A contributor needs help understanding coding conventions or the development workflow
-- Onboarding documentation needs to be reviewed or updated
-
 ## Prerequisites
 
-- **Python 3.12+** installed
-- **Docker** and **Docker Compose** installed
-- **Git** configured with access to the repository
+Before starting, verify:
+- Git installed and configured with repository access
+- Docker and Docker Compose installed
+- Language runtime installed (check project's build config for required version)
 
-## Project Setup
+## Setup
 
-### Step 1: Clone and Install
+### 1. Clone and Install
 
 ```bash
 git clone <repository-url>
 cd <project-directory>
-
-# Create a virtual environment
-python3 -m venv .venv
-source .venv/bin/activate
-
-# Install the project in development mode
-pip install -e ".[dev]"
 ```
 
-### Step 2: Start Local Services
+Check the project root for setup instructions:
+- `README.md` — usually has setup steps
+- `Makefile` / `justfile` — may have a `setup` or `install` target
+- `docker-compose.yml` — may be the primary dev environment
 
-The project uses Docker Compose to run PostgreSQL and the Lucent server locally:
+For local development (if not purely Docker-based):
+```bash
+# Create a virtual environment (Python)
+python3 -m venv .venv && source .venv/bin/activate && pip install -e ".[dev]"
+
+# Or install dependencies (Node)
+npm install
+
+# Or the equivalent for the project's ecosystem
+```
+
+### 2. Start Services
 
 ```bash
 docker compose up -d
 ```
 
-This starts:
-- **PostgreSQL** — data store for memories
-- **Lucent server** — the MCP-compatible memory API
-
-Verify services are running: `docker compose ps`
-
-### Step 3: Run Tests
-
+Wait for health checks to pass:
 ```bash
-pytest tests/
+docker compose ps     # All services should show "healthy" or "running"
+curl http://localhost:<port>/health   # Application health check
 ```
 
-All tests should pass on a clean checkout. If tests fail, check that Docker services are running and healthy.
-
-### Step 4: Verify Code Formatting
-
-The project uses **ruff** for linting and formatting:
+### 3. Run Tests
 
 ```bash
-ruff check .        # Lint
-ruff format --check .  # Check formatting
-ruff format .       # Auto-format
+# Use the project's test runner — check build config for the command
+# Common patterns:
+#   pytest tests/ -v --tb=short
+#   npm test
+#   go test ./...
+#   cargo test
 ```
 
-## Project Structure
+If tests pass, the environment is working.
 
-| Directory | Purpose |
-|---|---|
-| `src/lucent/` | Core application — MCP server, tools, memory operations, API |
-| `daemon/` | Autonomous daemon loop — perceive→reason→decide→act cognitive cycle |
-| `tests/` | Test suite (pytest) |
-| `.github/skills/` | Skill definitions for the AI agent |
-| `.github/agents/` | Agent definitions |
-| `docker/` | Docker configuration files |
-| `docs/` | Project documentation |
-| `examples/` | Usage examples |
+## Architecture Overview
 
-## Coding Conventions
+Read the project structure to understand the codebase:
 
-- **Type hints** are required on all function signatures
-- **Docstrings** are required on public APIs
-- **Import order**: stdlib → third-party → local (enforced by ruff)
-- **Formatting**: enforced by `ruff format` — do not manually override
-- **Tests**: every new feature or bug fix should include tests in `tests/`
-- Configuration lives in `pyproject.toml`
+```bash
+ls -la                     # Root directory layout
+find . -maxdepth 2 -type d | head -30   # Directory structure
+cat README.md              # Project description and setup
+```
+
+Key directories to identify:
+- **Source code** — where the main application lives
+- **Tests** — test suite location and organization
+- **Configuration** — Docker, CI/CD, linter configs
+- **Documentation** — dedicated docs directory if present
+- **Agent definitions and skills** — `.github/agents/` and `.github/skills/`
 
 ## First Contribution Workflow
 
-1. Create a feature branch from `main`
-2. Make your changes with tests
-3. Run `ruff check . && ruff format --check . && pytest tests/` to validate
-4. Commit with a clear, descriptive message
-5. Open a pull request against `main`
+1. Create a branch: `git checkout -b <feature-or-fix-description>`
+2. Make a focused change — one concern per commit
+3. Run tests and linting before committing
+4. Commit with a clear message: `fix: description` or `feat: description`
+5. Push and create a pull request
 
 ## Getting Help
 
-- Read `README.md` for a project overview
-- Read `CONTRIBUTING.md` for detailed contribution guidelines
-- Check `docs/` for architecture and design documentation
-- Review existing tests in `tests/` for examples of how components are used
+```
+search_memories(query="<topic you're confused about>", limit=10)
+```
+
+Check memory for past decisions, conventions, and known gotchas before asking — the answer may already exist.

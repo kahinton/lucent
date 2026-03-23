@@ -1114,6 +1114,10 @@ class DefinitionRepository:
         """Sync .github/agents/definitions/ into the DB as built-in agents.
 
         Reads AGENT.md files from subdirectories. Upserts on (name, org_id).
+        Parses ``skill_names`` from YAML frontmatter and syncs the
+        ``agent_skills`` junction table so skill mappings always reflect the
+        source files.
+
         Returns count of synced agents.
         """
         import pathlib
@@ -1130,13 +1134,25 @@ class DefinitionRepository:
             raw = agent_file.read_text()
             name = agent_dir.name
             description = ""
+            skill_names: list[str] = []
             fm_match = re.match(r"^---\n(.*?)\n---", raw, re.DOTALL)
             if fm_match:
+                in_skill_names = False
                 for line in fm_match.group(1).splitlines():
                     if line.startswith("description:"):
                         description = line.split(":", 1)[1].strip().strip("'\"")
+                        in_skill_names = False
+                    elif line.strip() == "skill_names:":
+                        in_skill_names = True
+                    elif in_skill_names:
+                        m = re.match(r"\s+-\s+(.+)", line)
+                        if m:
+                            skill_names.append(m.group(1).strip())
+                        elif line.strip() and not line.startswith(" "):
+                            in_skill_names = False
             async with self.pool.acquire() as conn:
-                await conn.execute(
+                # Upsert the agent definition
+                agent_row = await conn.fetchrow(
                     """
                     INSERT INTO agent_definitions
                         (name, description, content, status, scope, organization_id)
@@ -1147,11 +1163,67 @@ class DefinitionRepository:
                             scope = 'built-in',
                             updated_at = NOW()
                         WHERE agent_definitions.scope = 'built-in'
+                    RETURNING id
                 """,
                     name,
                     description,
                     raw,
                     org_id,
                 )
+                if not agent_row:
+                    # Agent exists but is not built-in scope (user-created) —
+                    # don't touch its skill mappings.
+                    synced += 1
+                    continue
+                agent_id = str(agent_row["id"])
+
+                # Resolve declared skill names → skill IDs
+                if skill_names:
+                    skill_rows = await conn.fetch(
+                        """
+                        SELECT id, name FROM skill_definitions
+                        WHERE name = ANY($1) AND organization_id = $2
+                            AND status = 'active'
+                        """,
+                        skill_names,
+                        org_id,
+                    )
+                    declared_skill_ids = {str(r["id"]) for r in skill_rows}
+                else:
+                    declared_skill_ids = set()
+
+                # Current skill grants for this agent
+                current_rows = await conn.fetch(
+                    "SELECT skill_id FROM agent_skills WHERE agent_id = $1",
+                    agent_id,
+                )
+                current_skill_ids = {str(r["skill_id"]) for r in current_rows}
+
+                # Add missing grants
+                to_add = declared_skill_ids - current_skill_ids
+                for sid in to_add:
+                    await conn.execute(
+                        "INSERT INTO agent_skills (agent_id, skill_id) "
+                        "VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                        agent_id,
+                        sid,
+                    )
+
+                # Remove stale grants (only for built-in agents)
+                to_remove = current_skill_ids - declared_skill_ids
+                if to_remove:
+                    await conn.execute(
+                        "DELETE FROM agent_skills "
+                        "WHERE agent_id = $1 AND skill_id = ANY($2)",
+                        agent_id,
+                        list(to_remove),
+                    )
+
+                if to_add or to_remove:
+                    logger.info(
+                        "Agent '%s': synced skills (+%d/-%d → %d total)",
+                        name, len(to_add), len(to_remove),
+                        len(declared_skill_ids),
+                    )
             synced += 1
         return synced

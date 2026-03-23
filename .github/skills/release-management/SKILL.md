@@ -1,59 +1,80 @@
 ---
 name: release-management
-description: 'Manage changelog updates, version bumping, Docker image tagging, and release notes generation'
+description: 'Manage changelog updates, version bumping, tagging, and release notes.'
 ---
 
 # Release Management
 
-Manage changelog updates, version bumping, Docker image tagging, and release notes.
+## Release Procedure
 
-## When to Use
+### 1. Update the Changelog
 
-- Preparing a new release
-- Updating the changelog after completing features
-- Bumping version numbers
-- Creating release tags and notes
+Follow [Keep a Changelog](https://keepachangelog.com/) format:
 
-## Release Process
+1. Move items from `[Unreleased]` to a new version section: `[X.Y.Z] - YYYY-MM-DD`
+2. Categorize changes: **Added**, **Changed**, **Deprecated**, **Removed**, **Fixed**, **Security**
+3. Write entries as user-facing descriptions, not commit messages
+4. Include breaking changes prominently at the top of the version section
 
-### Step 1: Update CHANGELOG.md
+### 2. Bump the Version
 
-1. Follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format
-2. Move items from `[Unreleased]` to a new version section
-3. Categorize changes: Added, Changed, Deprecated, Removed, Fixed, Security
-4. Include meaningful descriptions (not just commit messages)
+Follow [Semantic Versioning](https://semver.org/):
 
-### Step 2: Bump Version
+| Change type | Version bump | Example |
+|------------|-------------|---------|
+| Breaking API changes | **MAJOR** | 1.0.0 → 2.0.0 |
+| New features, backward-compatible | **MINOR** | 1.0.0 → 1.1.0 |
+| Bug fixes, backward-compatible | **PATCH** | 1.0.0 → 1.0.1 |
 
-1. Update `version` in `pyproject.toml`
-2. Follow [Semantic Versioning](https://semver.org/):
-   - **MAJOR**: Breaking API changes
-   - **MINOR**: New features, backward-compatible
-   - **PATCH**: Bug fixes, backward-compatible
-3. Search for any other version references that need updating
+Update the version in the project's manifest file (`pyproject.toml`, `package.json`, `Cargo.toml`, etc.). Search the codebase for any other version references that need updating.
 
-### Step 3: Docker Image
+### 3. Build and Verify
 
-1. Build: `docker compose build`
-2. Tag with version: `docker tag lucent:latest lucent:vX.Y.Z`
-3. Verify the image runs correctly: `docker compose up -d`
+```bash
+# Build
+docker compose build                   # or the project's build command
 
-### Step 4: Create Release
+# Tag
+docker tag <image>:latest <image>:vX.Y.Z
 
-1. Commit version bump and changelog: `git commit -m "release: vX.Y.Z"`
-2. Create a git tag: `git tag vX.Y.Z`
-3. Push with tags: `git push origin main --tags`
-4. Create GitHub release with `gh release create vX.Y.Z --notes-file <notes>`
+# Verify — the built artifact should start and pass health checks
+docker compose up -d
+curl -s http://localhost:<port>/health
+```
 
-### Step 5: Post-Release
+### 4. Tag and Publish
 
-1. Add new `[Unreleased]` section to CHANGELOG.md
-2. Verify the release is visible on GitHub
-3. Announce if appropriate
+```bash
+git add -A
+git commit -m "release: vX.Y.Z"
+git tag vX.Y.Z
+git push origin main --tags
+```
 
-## Best Practices
+Create a GitHub release:
+```bash
+gh release create vX.Y.Z --title "vX.Y.Z" --notes-file RELEASE_NOTES.md
+```
+
+### 5. Post-Release
+
+1. Add a new `[Unreleased]` section to the changelog
+2. Verify the release is visible and the artifacts are correct
+3. Record the release:
+
+```
+create_memory(
+  type="technical",
+  content="## Release vX.Y.Z\n\n**Date**: <date>\n**Highlights**: <key changes>\n**Breaking**: <any breaking changes>\n**Notes**: <anything worth remembering for next release>",
+  tags=["release"],
+  importance=6,
+  shared=true
+)
+```
+
+## Rules
 
 - Never skip the changelog — it's the user-facing record of what changed
 - Write changelog entries as you work, not all at release time
-- Test the Docker image before tagging a release
-- Keep release commits minimal (version bump + changelog only)
+- Test the built artifact before tagging — don't tag a broken release
+- Keep release commits minimal: version bump + changelog only

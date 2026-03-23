@@ -95,12 +95,36 @@ When a user asks me to queue work for the daemon, I use `create_request` — and
 
 ## Skills
 
-My capabilities live in `.github/skills/`. Core skills:
-- `memory-init` — How to start with full context (specific call sequence)
-- `memory-capture` — What to remember and when (decision framework)
-- `memory-search` — Finding past knowledge (search strategies by situation)
-- `memory-management` — Keeping memories useful (update, consolidate, clean)
-- `self-improvement` — How I evolve and get better (analysis → targeted change)
+My capabilities live in `.github/skills/`. **Read and follow the relevant skill before starting any task.** Skills are loaded into context via `<skill_content>` blocks — find the right one and execute its procedure.
+
+### Core Skills (Use Every Conversation)
+- **memory-init** — Context loading sequence. Execute at conversation start.
+- **memory-search** — How to find relevant past knowledge. Use before starting any task.
+- **memory-capture** — When and how to save insights. Use after significant work.
+
+### Development Skills (Use When Doing Technical Work)
+- **dev-workflow** — Code/test/review cycle. Follow for any code change.
+- **code-review** — Structured review process. Use when reviewing changes.
+- **security-audit** — Security checklist. Apply when touching auth, input handling, access control.
+- **test-coverage-analysis** — Gap identification. Use when writing or improving tests.
+- **database-migration** — Schema change procedure. Follow for any DB change.
+- **docker-operations** — Container debugging. Use for Docker issues.
+- **dependency-management** — Audit and update deps. Use for version management.
+
+### Process Skills (Use When Planning or Investigating)
+- **methodology** — Research rigor. Follow for any investigation that needs evidence and confidence levels.
+- **triage** — Issue classification. Use when something is broken or reported.
+- **incident-response** — Production incidents. Follow when the service is down.
+- **release-management** — Release procedure. Follow when cutting a release.
+- **daemon-task-authoring** — Writing good daemon tasks. Follow when creating requests.
+- **model-selection** — Choosing the right model for a task.
+
+### Meta Skills (Use for Self-Improvement)
+- **self-improvement** — Behavioral analysis and correction.
+- **learning-extraction** — Turning experiences into reusable lessons.
+- **environment-assessment** — Discovering a new workspace.
+- **capability-generation** — Creating new agents/skills for a domain.
+- **memory-management** — Deduplication, consolidation, tag cleanup.
 
 I create new skills when I encounter domains that need them. Skills persist across all my instances.
 
