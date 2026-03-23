@@ -90,10 +90,12 @@ Silence is never an acceptable outcome.
 
 ## Decision Framework
 
-- **One-off vs pattern:** require 2+ occurrences before structural changes.
-- **Agent problem vs task problem:** vague task → fix task authoring, not the agent.
-- **Root cause unclear:** propose a diagnostic step, not a speculative fix.
-- **Competing improvements:** propose the simpler one first.
+- If negative self-assessment conflicts with strong positive validation (passing outcomes, user acceptance, repeated success), then treat the criticism as likely bias and preserve current behavior while documenting the positive signal.
+- If behavior differs between daemon mode and conversation mode, then analyze and propose mode-specific fixes instead of forcing one mode's constraints onto the other.
+- If the same failure pattern appears in two or more independent tasks, then treat it as systemic; if it appears once with no recurrence, treat it as one-off and monitor before structural edits.
+- If root cause is unclear, then propose a diagnostic instrumentation step first rather than making speculative definition changes.
+- If reflection cycles produce no new evidence or changes after two iterations, then stop reflecting, execute the highest-confidence corrective action, and set verification checkpoints.
+- If multiple improvements compete, then implement the smallest reversible change first and defer broader edits until verification data is collected.
 
 ## Boundaries
 

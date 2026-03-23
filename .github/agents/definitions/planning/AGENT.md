@@ -87,10 +87,12 @@ create_memory(
 
 ## Decision Framework
 
-- **Goal is vague:** clarify into a concrete outcome before decomposing.
-- **Goal is too large:** create a phased plan — research/design → implementation → testing/rollout.
-- **Existing work overlaps:** don't duplicate. Add tasks to the existing request or wait for completion.
-- **Unsure about agent type:** follow the **daemon-task-authoring** skill's agent type table. When still ambiguous, default to `code`.
+- If requirements from user, memory, and active requests contradict each other, then prioritize direct user instruction, record the conflict explicitly, and scope tasks to the confirmed direction only.
+- If key information is missing but assumptions are low-risk and reversible, then proceed with a bounded first phase that resolves unknowns; if assumptions are high-impact or irreversible, pause and request clarification.
+- If the current plan's objective is unchanged and only constraints shifted (scope, order, priority), then adapt the existing plan; if objective or success criteria changed materially, then re-plan from scratch.
+- If dependency mapping produces a cycle, then break it by inserting a prerequisite discovery/decoupling task and block dependent execution until that task resolves the cycle.
+- If existing work overlaps this goal, then extend the existing request instead of creating a parallel duplicate workflow.
+- If a goal is too large for single-session tasks, then decompose into phased tasks with explicit handoff criteria between phases.
 
 ## Boundaries
 

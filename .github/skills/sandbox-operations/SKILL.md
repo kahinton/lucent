@@ -589,3 +589,146 @@ if ttl > 0 and (time.time() - created_at) > ttl * 0.9:
     # Credentials are 90%+ expired — fail fast rather than retry
     raise RuntimeError("Git credentials near expiry — restart task with fresh credentials")
 ```
+
+---
+
+## 8. Orchestrator Lifecycle Procedure (Outside-Container Control Flow)
+
+Use this sequence when acting as the sandbox-orchestrator (not the in-sandbox worker).
+
+### 8.1 Load Context and Announce Start
+
+```python
+await log_task_event(task_id, "progress", "Loading sandbox context and validated workarounds")
+```
+
+Use memory search before provisioning:
+
+```python
+memories = await search_memories(
+    query="sandbox orchestration failures workarounds docker dns storage quota",
+    tags=["validated"],
+    limit=10,
+)
+```
+
+### 8.2 Provision + Validate
+
+```python
+manager = get_sandbox_manager()
+config = SandboxConfig(
+    image="lucent-sandbox:base",
+    task_id=task_id,
+    request_id=request_id,
+    organization_id=organization_id,
+    network_mode=task_config.get("network_mode", "none"),
+    allowed_hosts=task_config.get("allowed_hosts", []),
+    timeout_seconds=task_config.get("timeout_seconds", 1800),
+)
+info = await manager.create(config)
+if info.status != "ready":
+    raise RuntimeError(f"Sandbox failed to become ready: {info.status}")
+live = await manager.get_live(info.sandbox_id)
+if live is None or live.status != "ready":
+    raise RuntimeError("Sandbox container not running after create()")
+```
+
+### 8.3 Verify Workspace Before Dispatch
+
+```python
+probe = await manager.exec(info.sandbox_id, "ls -A /workspace", timeout=30)
+if probe.exit_code != 0:
+    raise RuntimeError(f"Workspace probe failed: {probe.stderr}")
+if not probe.stdout.strip():
+    raise RuntimeError("Workspace is empty; refusing to dispatch work agent")
+```
+
+### 8.4 Dispatch Worker + Monitor
+
+```python
+await log_task_event(task_id, "agent_dispatched", f"Worker running in sandbox {info.sandbox_id}")
+# Dispatch worker with sandbox_id, mcp endpoint (127.0.0.1:8765), and task description.
+# Worker must report progress/final state via log_task_event through MCP bridge.
+```
+
+### 8.5 Collect Outputs Before Teardown
+
+```python
+if config.output_mode:
+    output = await manager.process_output(
+        sandbox_id=info.sandbox_id,
+        task_id=task_id,
+        task_description=task_description,
+        config=config,
+        request_api=request_api,
+        memory_api=memory_api,
+        log=log,
+    )
+```
+
+### 8.6 Unconditional Cleanup
+
+```python
+sandbox_id = None
+try:
+    info = await manager.create(config)
+    sandbox_id = info.sandbox_id
+    # run phases 8.3-8.5
+except Exception as exc:
+    await log_task_event(task_id, "failed", str(exc))
+    raise
+finally:
+    if sandbox_id:
+        await manager.destroy(sandbox_id)
+        await log_task_event(task_id, "progress", f"Sandbox {sandbox_id} destroyed")
+```
+
+---
+
+## 9. Recording Results
+
+Always persist outcomes after teardown. Use daemon-visible tags.
+
+### 9.1 Success Pattern
+
+```python
+memory = await create_memory(
+    type="technical",
+    content=(
+        f"Sandbox orchestration succeeded for task {task_id}. "
+        f"image={config.image}, network_mode={config.network_mode}, output_mode={config.output_mode}."
+    ),
+    tags=["sandbox", "sandbox-operations", "orchestration", "validated", "daemon"],
+    importance=7,
+    shared=True,
+)
+await link_task_memory(task_id, memory["id"], "created")
+```
+
+### 9.2 Failure Pattern
+
+```python
+memory = await create_memory(
+    type="experience",
+    content=(
+        f"Sandbox orchestration failed for task {task_id}. "
+        f"Failure={failure_summary}. Applied_workarounds={applied_workarounds}."
+    ),
+    tags=["sandbox", "sandbox-operations", "failure", "rejection-lesson", "daemon"],
+    importance=8,
+    shared=True,
+)
+await link_task_memory(task_id, memory["id"], "created")
+```
+
+Include: root cause, exact symptom, workaround attempted, and whether cleanup succeeded.
+
+---
+
+## 10. Anti-Patterns
+
+1. **Running with implicit image defaults** (`python:3.12-slim`) instead of setting `image="lucent-sandbox:base"` explicitly.
+2. **Skipping live status checks** after `create()` and assuming DB status implies container health.
+3. **Dispatching workers before workspace validation**, causing empty-repo executions.
+4. **Treating known platform bugs as intermittent**, instead of applying DNS/network/storage workarounds every time.
+5. **Returning success before teardown**, leaving orphaned containers, volumes, or scoped API keys.

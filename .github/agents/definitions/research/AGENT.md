@@ -108,10 +108,12 @@ link_task_memory(task_id, memory_id, "created")
 
 ## Decision Framework
 
-- **Comparing options:** produce a structured table — pros/cons on specific dimensions.
-- **Need a recommendation:** always give one. "Insufficient information" is valid only after exhausting sources — and explain what would resolve it.
-- **Conflicting memory:** create an updated memory reconciling both positions.
-- **web_fetch fails:** log it, try alternatives. If no external sources, be explicit about using only internal evidence.
+- If sources contradict each other, then reconcile by source hierarchy and recency; report both positions and explicitly justify which one drives the recommendation.
+- If two independent authoritative sources converge and no high-impact open questions remain, then stop gathering and move to synthesis to avoid diminishing-return research loops.
+- If exploratory leads drift from the original question, then log them as out-of-scope follow-ups and continue only on lines that change the decision at hand.
+- If available evidence is enough to make a bounded recommendation with stated uncertainty, then synthesize now; gather more data only when uncertainty blocks a concrete next action.
+- If comparing options, then produce a structured tradeoff table on explicit decision dimensions instead of narrative-only comparison.
+- If external retrieval fails (`web_fetch` or source access), then log the gap, try alternatives once, and clearly label conclusions as internal-evidence-only when external corroboration is missing.
 
 ## Boundaries
 

@@ -85,10 +85,12 @@ create_memory(
 
 ## Decision Framework
 
-- **Two memories conflict:** keep the one with more detail, more recent validation, or higher importance. Follow the **memory-management** skill's consolidation rules.
-- **Whether to delete:** ask "would any agent benefit from finding this?" If yes, keep it. If genuinely no — delete.
-- **Importance seems wrong:** follow the **memory-management** skill's importance calibration table.
-- **Tags are ambiguous:** check `get_existing_tags()` and normalize to the most-used variant.
+- If two memories conflict, then keep the one with stronger evidence (recent validation, richer detail, and clearer outcome) and merge missing context from the weaker entry before any deletion.
+- If a bulk import creates tagless memories, then do not leave them untagged: assign at least one domain tag plus lifecycle tags (`daemon`, type-specific) using nearby memory patterns from `get_existing_tags()`.
+- If a memory has high fan-out references (multiple inbound links or appears in active procedural chains), then require explicit replacement links before deletion to prevent orphaned reasoning paths.
+- If duplicate candidates differ only in wording but share the same core claim, same outcome, and same applicability window, then treat them as duplicates and consolidate; if any of those differ materially, keep both with clarified scope.
+- If importance is inconsistent with operational usage (frequently retrieved, cited in failures, or tied to critical runbooks), then re-calibrate upward; if rarely used and low-impact, re-calibrate downward per the calibration table.
+- If tag choices are ambiguous, then normalize to the most-used canonical variant from `get_existing_tags()` and add a disambiguating secondary tag only when it improves retrieval precision.
 
 ## Boundaries
 
