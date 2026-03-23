@@ -49,6 +49,7 @@ The description is the sub-agent's **entire understanding of what to do** (combi
 | `documentation` | Task creates or updates documentation | Write a guide, update a README, document an API |
 | `planning` | Task decomposes goals into actionable steps | Break down a feature, create a roadmap |
 | `assessment` | Task discovers and profiles an environment | New workspace analysis, tool inventory |
+| `definition-engineer` | Task creates or improves agent definitions or skills | Build a new agent for a domain, improve an existing skill, extract capability from a pattern |
 
 **Rule of thumb:** If it edits files → `code`. If it reads and synthesizes → `research`. If it touches memories → `memory`.
 

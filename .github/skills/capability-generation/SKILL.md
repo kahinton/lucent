@@ -7,6 +7,8 @@ description: 'Generate domain-appropriate agents and skills from environment ass
 
 Takes assessment output and generates agent definitions and skills tailored to the detected domain. This is how the system adapts to any environment.
 
+> **For detailed quality standards, structural templates, and evaluation checklists**, see the **definition-engineering** skill. This skill focuses on the gap-analysis-to-generation pipeline. The definition-engineering skill covers HOW to write world-class definitions.
+
 ## Prerequisites
 
 Before running this skill:
