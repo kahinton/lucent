@@ -5,6 +5,15 @@ description: 'Decide what to remember and how to store it. Use after completing 
 
 # Memory Capture
 
+## Disambiguation
+
+This skill is for deciding **what to remember** and **how to store it** — trigger conditions, memory types, importance ratings, and tagging. Use it when you need to persist new knowledge.
+
+- To **find** existing memories before creating new ones → use **memory-search**
+- To **clean up, deduplicate, or reorganize** existing memories → use **memory-management**
+
+## Core Rule
+
 The test: **Would future-me benefit from knowing this in a different conversation?** If yes, capture it. If no, skip it.
 
 ## Capture Triggers

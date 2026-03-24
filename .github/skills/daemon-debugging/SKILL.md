@@ -7,6 +7,12 @@ description: 'Diagnose and fix daemon cycle failures, stuck tasks, sub-agent dis
 
 Procedures for diagnosing failures in the Lucent daemon's three-layer architecture: cognitive loop, task dispatch, and autonomic maintenance.
 
+## Disambiguation
+
+This skill is for **diagnosing and fixing failures** — crashes, stuck tasks, dispatch errors, memory corruption. Use it when something is broken.
+
+- For routine **health monitoring, throughput analysis, or optimization** of a working daemon → use **daemon-operations**
+
 ## When to Use
 
 - Daemon stops producing output or log entries

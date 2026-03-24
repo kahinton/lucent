@@ -5,6 +5,13 @@ description: 'Find relevant past knowledge efficiently. Use when you need contex
 
 # Memory Search
 
+## Disambiguation
+
+This skill is for **finding relevant past knowledge** — search strategies, tool selection, and query patterns. Use it when you need to retrieve context from memory.
+
+- To decide **what to save** and how to structure new memories → use **memory-capture**
+- To **clean up, deduplicate, or reorganize** existing memories → use **memory-management**
+
 ## Which Tool to Use
 
 | Situation | Tool |

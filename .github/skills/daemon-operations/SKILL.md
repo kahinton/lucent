@@ -7,6 +7,12 @@ description: 'Monitor, troubleshoot, and optimize daemon cognitive cycles — ta
 
 Operational monitoring and optimization procedures for the Lucent daemon's cognitive loop, task dispatch, and autonomic layers.
 
+## Disambiguation
+
+This skill is for **monitoring and optimizing** a healthy daemon — throughput, timing, health checks, usage patterns. Use it when the daemon is running and you want to assess or tune its performance.
+
+- For **diagnosing failures** like crashes, stuck tasks, or dispatch errors → use **daemon-debugging**
+
 ## When to Use
 
 - Checking daemon health and throughput

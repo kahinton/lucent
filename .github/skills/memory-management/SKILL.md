@@ -5,6 +5,13 @@ description: 'Maintain memory quality — update, consolidate, deduplicate, and 
 
 # Memory Maintenance
 
+## Disambiguation
+
+This skill is for **maintaining memory quality** — deduplication, consolidation, tag cleanup, and reorganization of existing memories. Use it when the memory store needs housekeeping.
+
+- To decide **what to save** and how to structure new memories → use **memory-capture**
+- To **find** existing memories efficiently → use **memory-search**
+
 ## Core Rule
 
 **Update before create.** Always search before making a new memory:
