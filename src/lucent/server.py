@@ -46,6 +46,11 @@ from lucent.tools.schedules import register_schedule_tools  # noqa: E402
 
 register_schedule_tools(mcp)
 
+# Register definition management tools
+from lucent.tools.definitions import register_definition_tools  # noqa: E402
+
+register_definition_tools(mcp)
+
 # Get logger for this module
 logger = get_logger("server")
 
