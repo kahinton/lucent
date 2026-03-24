@@ -1,6 +1,6 @@
 ---
 name: definition-engineering
-description: 'Deep procedural knowledge for crafting world-class agent definitions and skills. Use when creating or improving agent definitions and skills, auditing definition quality, or designing the agent-skill architecture.'
+description: 'Deep procedural knowledge for crafting world-class agent definitions and skills. Use when creating or improving agent definitions and skills, auditing definition quality, designing the agent-skill architecture, evaluating proposed definitions against the quality checklist, or extracting inlined procedures from agent definitions into skills.'
 ---
 
 # Definition Engineering

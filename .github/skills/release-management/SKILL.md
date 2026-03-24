@@ -1,6 +1,6 @@
 ---
 name: release-management
-description: 'Manage changelog updates, version bumping, tagging, and release notes. Use when preparing a release, updating changelog, bumping versions, or creating release notes.'
+description: 'Manage changelog updates, version bumping, tagging, and release notes. Use when preparing a release, updating changelog, bumping versions, creating release notes, tagging a release commit, or deciding what changes belong in the next release.'
 ---
 
 # Release Management

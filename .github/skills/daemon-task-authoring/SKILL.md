@@ -1,6 +1,6 @@
 ---
 name: daemon-task-authoring
-description: 'Guide creation of well-structured daemon tasks — clear descriptions, appropriate agent_type, priority calibration, and context that leads to high validation rates. Use when creating requests or tasks for the daemon, calibrating priority, or writing task descriptions.'
+description: 'Guide creation of well-structured daemon tasks — clear descriptions, appropriate agent_type, priority calibration, and context that leads to high validation rates. Use when creating requests or tasks for the daemon, calibrating priority, writing task descriptions, task validation rates are low, or restructuring existing tasks that failed or were rejected.'
 ---
 
 # Daemon Task Authoring

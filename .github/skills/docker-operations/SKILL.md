@@ -1,6 +1,6 @@
 ---
 name: docker-operations
-description: 'Build, debug, and manage Docker containers and compose services for local development and deployment. Use when debugging container issues, modifying Docker configs, or troubleshooting compose services.'
+description: 'Build, debug, and manage Docker containers and compose services for local development and deployment. Use when debugging container issues, modifying Docker configs, troubleshooting compose services, containers fail to start or crash on launch, rebuilding images after dependency changes, or investigating networking or volume mount problems.'
 ---
 
 # Docker Operations

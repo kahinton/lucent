@@ -1,6 +1,6 @@
 ---
 name: onboarding
-description: 'Guide new contributors through project setup, architecture overview, and first-contribution workflow. Use when a new contributor needs setup, architecture overview, or guidance on their first contribution.'
+description: 'Guide new contributors through project setup, architecture overview, and first-contribution workflow. Use when a new contributor needs setup, architecture overview, guidance on their first contribution, someone asks how to contribute, or a development environment needs to be configured from scratch.'
 ---
 
 # Onboarding
