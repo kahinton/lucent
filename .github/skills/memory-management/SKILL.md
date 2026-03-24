@@ -28,12 +28,13 @@ If a relevant memory exists, `update_memory` instead of creating a duplicate.
 
 Execute these steps in order when performing a maintenance pass:
 
-1. **Search for duplicates** — Query overlapping topics with `search_memories(query="<topic>", limit=20)`. Flag memories with substantially similar content for consolidation.
-2. **Identify stale memories** — Look for memories with outdated information (old versions, resolved goals, deprecated approaches). Check `created_at` dates and whether content still applies.
-3. **Check tag consistency** — Call `get_existing_tags(limit=100)` and look for synonyms (`bug-fix` vs `bugs`), inconsistent formats, or missing standard tags. Normalize to the conventions in [Tag Conventions](#tag-conventions).
-4. **Consolidate related memories** — For each group of duplicates, follow the [Consolidation Procedure](#consolidation-procedure) below: choose a keeper, merge unique details, delete redundants.
-5. **Recalibrate importance scores** — Review importance ratings against the [Importance Calibration](#importance-calibration) table. Adjust scores that no longer reflect current relevance.
-6. **Report what was changed** — Log a summary: how many memories consolidated, tags normalized, importance scores adjusted, and any issues found that need human review.
+1. **Survey the knowledge base** — Start broad. Call `search_memories(query="<topic>", limit=50)` across the major domains you know about (architecture, bugs, preferences, projects, etc.). The goal is to see the full landscape, not just recent entries.
+2. **Connect new to old** — For each recent memory (last 24-48 hours), search for older memories on the same topic. New observations should strengthen existing long-term knowledge, not sit in isolation. A fresh bug insight should merge into the established understanding of that system area.
+3. **Identify stale memories** — Look for memories with outdated information (old versions, resolved goals, deprecated approaches). Check `created_at` dates and whether content still applies.
+4. **Check tag consistency** — Call `get_existing_tags(limit=100)` and look for synonyms (`bug-fix` vs `bugs`), inconsistent formats, or missing standard tags. Normalize to the conventions in [Tag Conventions](#tag-conventions).
+5. **Consolidate by topic** — Don't just deduplicate identical entries. Look for memories that are fragments of the same understanding — early notes, follow-up observations, corrections, refinements. Weave them into a single authoritative memory per topic. Follow [Consolidation Procedure](#consolidation-procedure).
+6. **Recalibrate importance scores** — Review importance ratings against the [Importance Calibration](#importance-calibration) table. Memories that keep proving useful deserve higher importance. Memories that never get retrieved can be lowered.
+7. **Report what was changed** — Log a summary: how many memories consolidated, tags normalized, importance scores adjusted, and any issues found that need human review.
 
 ## When to Update vs. Create
 
@@ -48,41 +49,54 @@ Execute these steps in order when performing a maintenance pass:
 
 ## Consolidation Procedure
 
-When multiple memories cover the same ground:
+Consolidation isn't just about removing duplicates. It's about building a long-term knowledge base where each memory represents the best current understanding of a topic, enriched over time by new observations.
 
-### 1. Identify Candidates
+### 1. Find Related Memories Across Time
 ```
-search_memories(query="<overlapping topic>", limit=20)
+search_memories(query="<topic>", limit=50)
 ```
+Search broadly. A memory from a month ago and one from yesterday might be two pieces of the same puzzle.
 
 ### 2. Read Full Content
 ```
-get_memories(memory_ids=["id1", "id2", "id3"])
+get_memories(memory_ids=["id1", "id2", "id3", ...])
 ```
 
-### 3. Choose the Keeper
-Pick the most comprehensive or highest-importance memory.
+### 3. Assess the Relationship
 
-### 4. Merge
+| Relationship | Action |
+|-------------|--------|
+| Same topic, same conclusion | **Consolidate** — merge into one authoritative entry |
+| Same topic, evolved understanding | **Consolidate** — the newer insight updates the older knowledge |
+| Same topic, genuinely different angles | **Keep both** — add `related_memory_ids` links |
+| Old memory superseded by new evidence | **Update old** with new understanding, delete the fragment |
+| New memory is just a detail of existing knowledge | **Absorb** into the broader memory, delete the fragment |
+
+### 4. Choose the Keeper
+Pick the memory that serves as the best foundation — usually the most comprehensive one, or the one with the broadest scope. Prefer memories with established structure over recent fragments.
+
+### 5. Merge with Intent
 ```
 update_memory(
   memory_id="<keeper_id>",
-  content="<merged content with unique details from all sources>",
-  importance=<reassessed importance>
+  content="<synthesized content — not just concatenated, but integrated>",
+  importance=<reassessed importance>,
+  expected_version=<current_version>
 )
 ```
+The merged content should read as if it was always a single well-written memory. Don't just concatenate — synthesize. New observations should be woven into the existing narrative.
 
-### 5. Delete Redundants
+### 6. Delete Fragments
 ```
-delete_memory(memory_id="<redundant_id>")
+delete_memory(memory_id="<absorbed_id>")
 ```
 
-### 6. Verify
+### 7. Verify
 ```
 get_memories(memory_ids=["<keeper_id>"])
 ```
 
-**Only consolidate when there's clear redundancy.** Two memories about the same topic from different angles both have value — leave them.
+**The goal is fewer, richer memories** — not a growing pile of notes. Each memory should represent the current best understanding of its topic, built up from many observations over time.
 
 ## Tag Conventions
 

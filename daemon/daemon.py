@@ -2474,30 +2474,97 @@ class LucentDaemon:
         """Run autonomic background task — memory maintenance.
 
         Runs every N cycles without cognitive involvement.
+        Creates a request record so results appear on the Activity page.
         """
         log("Running autonomic: memory maintenance")
         try:
             system_message = await build_subagent_prompt(
                 "memory",
                 (
-                    "Quick memory maintenance pass — check for "
-                    "obvious issues, fix what's straightforward."
+                    "Deep memory consolidation pass — build long-term "
+                    "knowledge by integrating recent observations into "
+                    "established understanding."
                 ),
                 ("This is an autonomic background task, not a cognitive decision."),
             )
         except AgentNotFoundError:
             log("No approved 'memory' agent — skipping autonomic maintenance", "WARN")
             return
-        await self.run_session(
+
+        # Create a request record so the run appears on the Activity page
+        from lucent.db import get_pool
+        from lucent.db.requests import RequestRepository
+
+        pool = await get_pool()
+        req_repo = RequestRepository(pool)
+
+        # Look up daemon user's org_id
+        org_id = None
+        task_id = None
+        request_id = None
+        try:
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT organization_id FROM users WHERE external_id = 'lucent-daemon' LIMIT 1"
+                )
+                if row and row["organization_id"]:
+                    org_id = str(row["organization_id"])
+        except Exception:
+            pass
+
+        if org_id:
+            try:
+                request_record = await req_repo.create_request(
+                    title="Memory consolidation",
+                    org_id=org_id,
+                    description="Autonomic memory maintenance — consolidating fragments into long-term knowledge.",
+                    source="daemon",
+                    priority="low",
+                )
+                request_id = str(request_record["id"])
+                task_record = await req_repo.create_task(
+                    request_id=request_id,
+                    title="Consolidate memories",
+                    org_id=org_id,
+                    description="Search across all memory domains, integrate recent observations into established knowledge, deduplicate, normalize tags, recalibrate importance.",
+                    agent_type="memory",
+                    model=MODEL,
+                )
+                task_id = str(task_record["id"])
+                await req_repo.claim_task(task_id, self.instance_id)
+                await req_repo.start_task(task_id)
+                await req_repo.update_request_status(request_id, "in_progress")
+            except Exception as e:
+                log(f"Failed to create request record for autonomic run: {e}", "WARN")
+                task_id = None
+
+        result = await self.run_session(
             "autonomic-maintenance",
             system_message,
             (
-                "Quick maintenance scan. Search recent memories "
-                "for duplicates, missing tags, or miscalibrated "
-                "importance. Fix obvious issues. Only save a "
-                "summary if you actually changed something."
+                "Run a full consolidation pass. Do NOT limit yourself to recent memories.\n\n"
+                "1. Survey the major knowledge domains — search broadly with limit=50 "
+                "across topics like architecture, bugs, preferences, projects, security, "
+                "daemon operations, and any other domains present.\n\n"
+                "2. For each topic cluster, look for fragments that should be merged "
+                "into a single authoritative memory. A recent bug note and an older "
+                "debugging lesson about the same area should become one rich memory.\n\n"
+                "3. Integrate new with old — recent observations should strengthen "
+                "established knowledge, not sit as isolated entries.\n\n"
+                "4. Fix tags and importance along the way.\n\n"
+                "5. Create a summary of what you changed."
             ),
         )
+
+        # Update the request/task records with the outcome
+        if task_id:
+            try:
+                if result:
+                    await req_repo.complete_task(task_id, result[:4000])
+                else:
+                    await req_repo.fail_task(task_id, "No output from maintenance session")
+            except Exception as e:
+                log(f"Failed to update request record for autonomic run: {e}", "WARN")
 
     async def run_learning_extraction(self):
         """Run autonomic learning extraction — process recent results into reusable lessons.
