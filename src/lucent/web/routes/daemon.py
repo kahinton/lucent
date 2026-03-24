@@ -260,7 +260,7 @@ async def daemon_feedback(
         sent = False
         for attempt in range(2):
             try:
-                metrics.wake_notify_total.add(1, notify_attrs)
+                metrics.wake_notify_total.add(1, attributes=notify_attrs)
                 async with pool.acquire() as conn:
                     await conn.execute(
                         "SELECT pg_notify('request_ready', $1)",
@@ -269,7 +269,7 @@ async def daemon_feedback(
                 sent = True
                 break
             except Exception as notify_err:
-                metrics.wake_notify_failures.add(1, notify_attrs)
+                metrics.wake_notify_failures.add(1, attributes=notify_attrs)
                 logger.warning(
                     "pg_notify failed for feedback %s on %s (attempt %d): %s",
                     action, memory_id, attempt + 1, notify_err,
