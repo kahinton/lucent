@@ -12,6 +12,17 @@ description: 'Assess a new environment to understand tools, domain, collaborator
 - Environment has changed significantly (new tools, new domain, new team)
 - Dispatched as a daemon `assessment` task
 
+## Procedure
+
+Execute these steps in order:
+
+1. **Scan directory structure** — Map the project layout, top-level files, and directory hierarchy. See [Phase 1](#phase-1-discover-tools) for commands.
+2. **Identify languages and frameworks** — Detect language runtimes, package managers, and core frameworks. See [Phase 1](#phase-1-discover-tools) and [Phase 2](#phase-2-understand-the-domain).
+3. **Check for existing configs** — Look for CI/CD, linters, Docker, MCP servers, and existing agent/skill definitions. See [Phase 1](#phase-1-discover-tools) and [Phase 4](#phase-4-inventory-capabilities).
+4. **Identify collaboration patterns** — Discover contributors and check for individual memories. See [Phase 3](#phase-3-map-collaborators).
+5. **Assess capability gaps** — Compare existing agents/skills against domain requirements, prioritized Critical > High > Medium > Low. See [Phase 5](#phase-5-gap-analysis).
+6. **Produce structured profile** — Save or update an environment profile memory with domain, tools, collaborators, capabilities, and gaps. See [Phase 6](#phase-6-save-the-profile).
+
 ## Phase 1: Discover Tools
 
 ```bash

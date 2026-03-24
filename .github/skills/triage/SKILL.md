@@ -5,20 +5,37 @@ description: 'Issue triage and classification — severity assessment, routing, 
 
 # Triage
 
-## Classification
+## Severity Matrix
 
-Every incoming issue gets classified on three dimensions immediately:
+| Priority | Label | Criteria | User Impact | Response Time |
+|----------|-------|----------|-------------|---------------|
+| **P0** | Critical | System down, data loss, active security breach | All users blocked, data at risk | Immediate — drop everything |
+| **P1** | High | Major feature broken, no workaround available | Many users affected, workflow blocked | Within 1 hour |
+| **P2** | Medium | Feature degraded, workaround exists | Limited users affected, productivity reduced | Within 1 business day |
+| **P3** | Low | Cosmetic issue, minor inconvenience, enhancement | Minimal impact, no workflow disruption | Next planning cycle |
 
-### Severity
+**Escalation triggers** — upgrade one priority level if:
+- Multiple independent reports of the same issue
+- Issue is worsening over time (progressive data loss, spreading failure)
+- A deadline or SLA is at risk
 
-| Level | Criteria | Response time |
-|-------|----------|--------------|
-| **Critical** | System down, data loss, security breach, all users affected | Immediate — drop everything |
-| **High** | Major feature broken, significant user impact, no workaround | Within the hour |
-| **Medium** | Feature degraded, workaround exists, limited user impact | Within the day |
-| **Low** | Minor inconvenience, cosmetic, enhancement request | Next planning cycle |
+## Procedure
 
-### Category
+### Step 1: Identify Symptoms
+
+Collect the raw facts before classifying:
+
+1. **What is the reported behavior?** — exact error messages, screenshots, logs
+2. **What is the expected behavior?** — what should have happened instead
+3. **When did it start?** — timestamp, recent deployment, config change
+4. **Who is affected?** — one user, a group, all users
+5. **Is there a workaround?** — can users continue working another way
+
+### Step 2: Classify Severity
+
+Use the Severity Matrix above. Assign a priority (P0–P3) by matching the symptoms to the criteria.
+
+Also classify the **category**:
 
 | Category | Indicators |
 |----------|-----------|
@@ -28,42 +45,45 @@ Every incoming issue gets classified on three dimensions immediately:
 | **Configuration** | Environment setup, deployment, misconfiguration |
 | **Question** | "How do I..." / "What does X do?" |
 
-### Urgency
+If category is **Security**, immediately set to P0 and go to Step 4 (escalate — do not reproduce the exploit).
 
-Separate from severity — urgency is about time pressure:
-- **Immediate**: Blocking production, blocking a deadline
-- **Business hours**: Important but can wait for normal working time
-- **Next cycle**: Can be planned into upcoming work
-- **Backlog**: Nice to have, no time pressure
+### Step 3: Determine Scope
 
-## Procedure
+Search memory for prior occurrences and related context:
 
-### 1. Research
-
-Before responding:
 ```
 search_memories(query="<error message or symptom>", limit=10)
 search_memories(query="<affected module or feature>", tags=["bugs", "incident"], limit=5)
 ```
 
-Check if this is a known issue with a known fix.
+Determine:
+- **Known issue?** — If a prior resolution exists, skip to Step 4 with the known fix.
+- **Systemic or isolated?** — 3+ similar reports indicates a systemic problem needing root-cause fix.
+- **Regression?** — Check if this worked before a recent change.
 
-### 2. Respond or Escalate
+### Step 4: Assign and Route
 
-**If solution is known:** Provide it with clear, specific steps. Link to relevant docs or past memory.
+| Priority | Action |
+|----------|--------|
+| **P0** | Escalate immediately. Invoke the **incident-response** skill. Alert the team. |
+| **P1** | If solution is known, provide it with specific steps. If unknown, gather diagnostics and escalate with full context. |
+| **P2** | Provide solution or workaround. Create a tracked request if a code fix is needed. |
+| **P3** | Acknowledge, document, and add to backlog for next planning cycle. |
 
-**If solution is unknown:** Gather diagnostic information, escalate with full context and research done so far. State what you tried and what you ruled out.
+### Step 5: Communicate and Record
 
-**If security-related:** Escalate immediately. Do not share details broadly. Do not attempt to reproduce the exploit.
+**Communicate** — respond to the reporter with: priority assigned, what action is being taken, and expected timeline.
+
+**Record** — save the resolution for future triage:
 
 ## Anti-Patterns
 
-- Don't escalate everything as high severity — severity inflation causes alert fatigue and trains responders to ignore escalations; use the classification table strictly and push back on pressure to over-classify.
+- Don't escalate everything as high severity — severity inflation causes alert fatigue and trains responders to ignore escalations; use the Severity Matrix strictly and push back on pressure to over-classify.
 - Never triage without reproduction steps — a bug report with no reproducible case can't be meaningfully diagnosed or prioritized; collect steps to reproduce before assigning severity or routing.
 - Don't close issues without documenting root cause — closing without a root cause means the next occurrence starts from zero; even "couldn't reproduce" should note what was checked and under what conditions.
 - Never skip the memory search before responding — the issue may be a known pattern with a documented fix; searching first avoids duplicating investigation work and gets users a faster, more accurate answer.
 
-### 3. Record
+## Recording Results
 
 Save resolutions for future reference:
 ```

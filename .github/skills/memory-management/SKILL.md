@@ -12,6 +12,10 @@ This skill is for **maintaining memory quality** — deduplication, consolidatio
 - To decide **what to save** and how to structure new memories → use **memory-capture**
 - To **find** existing memories efficiently → use **memory-search**
 
+## Boundary
+
+**Use memory-management** when maintaining existing memories — deduplication, consolidation, tag normalization, importance recalibration, and staleness cleanup. **Use memory-capture** when deciding what new knowledge to persist and how to structure it. Maintenance vs. creation.
+
 ## Core Rule
 
 **Update before create.** Always search before making a new memory:
@@ -19,6 +23,17 @@ This skill is for **maintaining memory quality** — deduplication, consolidatio
 search_memories(query="<topic>", limit=10)
 ```
 If a relevant memory exists, `update_memory` instead of creating a duplicate.
+
+## Maintenance Procedure
+
+Execute these steps in order when performing a maintenance pass:
+
+1. **Search for duplicates** — Query overlapping topics with `search_memories(query="<topic>", limit=20)`. Flag memories with substantially similar content for consolidation.
+2. **Identify stale memories** — Look for memories with outdated information (old versions, resolved goals, deprecated approaches). Check `created_at` dates and whether content still applies.
+3. **Check tag consistency** — Call `get_existing_tags(limit=100)` and look for synonyms (`bug-fix` vs `bugs`), inconsistent formats, or missing standard tags. Normalize to the conventions in [Tag Conventions](#tag-conventions).
+4. **Consolidate related memories** — For each group of duplicates, follow the [Consolidation Procedure](#consolidation-procedure) below: choose a keeper, merge unique details, delete redundants.
+5. **Recalibrate importance scores** — Review importance ratings against the [Importance Calibration](#importance-calibration) table. Adjust scores that no longer reflect current relevance.
+6. **Report what was changed** — Log a summary: how many memories consolidated, tags normalized, importance scores adjusted, and any issues found that need human review.
 
 ## When to Update vs. Create
 

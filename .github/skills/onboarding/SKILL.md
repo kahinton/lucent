@@ -5,16 +5,45 @@ description: 'Guide new contributors through project setup, architecture overvie
 
 # Onboarding
 
-## Prerequisites
+## Procedure
 
-Before starting, verify:
-- Git installed and configured with repository access
-- Docker and Docker Compose installed
-- Language runtime installed (check project's build config for required version)
+### Step 1: Verify Environment
 
-## Setup
+Confirm all prerequisites before proceeding — missing tools cause cryptic failures later.
 
-### 1. Clone and Install
+| Prerequisite | How to verify | If missing |
+|-------------|---------------|------------|
+| Git + repo access | `git --version` and `git ls-remote <repo-url>` | Install git, configure SSH keys or token |
+| Docker + Compose | `docker --version && docker compose version` | Install Docker Desktop or engine |
+| Language runtime | Check `pyproject.toml`, `package.json`, or build config for version | Install the required version |
+
+If any prerequisite fails, stop and resolve it before continuing.
+
+### Step 2: Explain Architecture
+
+Read the project structure and explain the codebase layout to the contributor:
+
+```bash
+ls -la                     # Root directory layout
+find . -maxdepth 2 -type d | head -30   # Directory structure
+cat README.md              # Project description and setup
+```
+
+Identify and explain these key directories:
+
+| Directory type | What to look for | Why it matters |
+|---------------|-----------------|----------------|
+| **Source code** | `src/`, `lib/`, `app/` | Where the main application lives |
+| **Tests** | `tests/`, `test/`, `__tests__/` | Test suite location and organization |
+| **Configuration** | `docker-compose.yml`, CI configs, linter configs | How the project is built and deployed |
+| **Documentation** | `docs/`, `README.md` | Existing guides and references |
+| **Agent definitions** | `.github/agents/`, `.github/skills/` | AI agent and skill definitions |
+
+Search memory for architecture context: `search_memories(query="architecture", tags=["environment"], limit=5)`
+
+### Step 3: Set Up Dev Environment
+
+#### 3a. Clone and Install
 
 ```bash
 git clone <repository-url>
@@ -28,16 +57,16 @@ Check the project root for setup instructions:
 
 For local development (if not purely Docker-based):
 ```bash
-# Create a virtual environment (Python)
+# Python
 python3 -m venv .venv && source .venv/bin/activate && pip install -e ".[dev]"
 
-# Or install dependencies (Node)
+# Node
 npm install
 
 # Or the equivalent for the project's ecosystem
 ```
 
-### 2. Start Services
+#### 3b. Start Services
 
 ```bash
 docker compose up -d
@@ -49,37 +78,18 @@ docker compose ps     # All services should show "healthy" or "running"
 curl http://localhost:<port>/health   # Application health check
 ```
 
-### 3. Run Tests
+#### 3c. Run Tests
 
 ```bash
 # Use the project's test runner — check build config for the command
-# Common patterns:
-#   pytest tests/ -v --tb=short
-#   npm test
-#   go test ./...
-#   cargo test
+# Common: pytest tests/ -v --tb=short | npm test | go test ./... | cargo test
 ```
 
-If tests pass, the environment is working.
+**Tests passing is the only reliable signal that setup succeeded.** "Services running" is not sufficient. If tests fail, debug before proceeding.
 
-## Architecture Overview
+### Step 4: Guide First Contribution
 
-Read the project structure to understand the codebase:
-
-```bash
-ls -la                     # Root directory layout
-find . -maxdepth 2 -type d | head -30   # Directory structure
-cat README.md              # Project description and setup
-```
-
-Key directories to identify:
-- **Source code** — where the main application lives
-- **Tests** — test suite location and organization
-- **Configuration** — Docker, CI/CD, linter configs
-- **Documentation** — dedicated docs directory if present
-- **Agent definitions and skills** — `.github/agents/` and `.github/skills/`
-
-## First Contribution Workflow
+Walk the contributor through the full cycle:
 
 1. Create a branch: `git checkout -b <feature-or-fix-description>`
 2. Make a focused change — one concern per commit
@@ -87,13 +97,16 @@ Key directories to identify:
 4. Commit with a clear message: `fix: description` or `feat: description`
 5. Push and create a pull request
 
-## Getting Help
+Confirm project-specific conventions — branch naming, commit message format, and PR requirements vary by project. Check `CONTRIBUTING.md` if present.
 
-```
-search_memories(query="<topic you're confused about>", limit=10)
-```
+### Step 5: Establish Communication Patterns
 
-Check memory for past decisions, conventions, and known gotchas before asking — the answer may already exist.
+Set the contributor up for ongoing success:
+
+1. **Show how to search memory** — `search_memories(query="<topic>", limit=10)` for past decisions, conventions, and known gotchas
+2. **Identify key contacts** — who reviews PRs, who owns which modules
+3. **Point to documentation** — where to find guides, API docs, architectural decision records
+4. **Explain the workflow** — how issues are triaged, how work is planned, how the daemon operates (if applicable)
 
 ## Anti-Patterns
 

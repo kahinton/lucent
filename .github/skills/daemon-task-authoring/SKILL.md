@@ -13,9 +13,20 @@ Follow these steps in order when creating daemon work items.
 2. **Define the request** — Write a clear title (under 80 chars) and a description following the [Description Checklist](#description-checklist). The description is the daemon's entire brief — make it self-contained.
 3. **Set priority** — Follow the [Priority Calibration](#priority-calibration) rules (high = blocks other work, medium = standard, low = nice-to-have).
 4. **Submit the request** — Call `create_request()` with title, description, source, and priority. See [Creating a Request](#creating-a-request) for the API shape.
-5. **Break into tasks** — Decompose the request into tasks. Each task gets: title, description (following the [Description Checklist](#description-checklist)), agent_type (from the [Agent Type Selection](#agent-type-selection) table), model (MANDATORY — follow the model-selection skill), sequence_order, and priority. Keep each task completable within a single 720-second session (see [Task Size](#task-size)).
+5. **Break into tasks** — Decompose the request into individual tasks. For each task, follow the [Per-Task Authoring](#per-task-authoring) steps below. Keep each task completable within a single 720-second session (see [Task Size](#task-size)).
 6. **Verify task descriptions** — Each task description must be self-contained. An agent reading only the description should understand what to do without external context. Run every description through the [Description Checklist](#description-checklist).
 7. **Submit tasks** — Call `create_task()` for each task, setting `request_id` to the ID returned in step 4.
+
+## Per-Task Authoring
+
+For each task within a request, follow these steps:
+
+1. **Define the goal** — State the single, specific outcome this task must produce. One task = one deliverable.
+2. **Write the description** — Follow the [Description Checklist](#description-checklist). The description must be self-contained — an agent reading only this should know exactly what to do.
+3. **Choose agent_type** — Match the task to an agent using the [Agent Type Selection](#agent-type-selection) table. If it edits files → `code`. If it reads and synthesizes → `research`.
+4. **Set priority and size** — Use [Priority Calibration](#priority-calibration) for priority. Ensure the task fits within a single 720-second session (see [Task Size](#task-size)); decompose if too large.
+5. **Add context** — Include specific file paths, search terms, constraints, and references to prior task results stored in memory. Omit nothing the agent would need.
+6. **Submit** — Call `create_task(request_id=..., title=..., description=..., agent_type=..., model=..., priority=..., sequence_order=...)`. Set `model` per the model-selection skill (MANDATORY).
 
 ## Creating a Request
 

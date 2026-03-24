@@ -12,6 +12,10 @@ This skill is for deciding **what to remember** and **how to store it** — trig
 - To **find** existing memories before creating new ones → use **memory-search**
 - To **clean up, deduplicate, or reorganize** existing memories → use **memory-management**
 
+## Boundary
+
+**Use memory-capture** when you have a fresh insight, correction, or outcome to persist — the decision is *what* to save and *how* to structure it. **Use memory-management** when working with memories that already exist — deduplication, consolidation, tag cleanup, importance recalibration. Creation vs. maintenance.
+
 ## Core Rule
 
 The test: **Would future-me benefit from knowing this in a different conversation?** If yes, capture it. If no, skip it.

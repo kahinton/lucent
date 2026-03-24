@@ -13,6 +13,10 @@ This skill is for **monitoring and optimizing** a healthy daemon — throughput,
 
 - For **diagnosing failures** like crashes, stuck tasks, or dispatch errors → use **daemon-debugging**
 
+## Boundary
+
+**Use daemon-operations** when the daemon is running and you want to monitor health, measure throughput, tune timing, or analyze usage patterns. **Use daemon-debugging** when something is broken — crashes, stuck tasks, dispatch errors, or memory corruption. Healthy vs. broken.
+
 ## When to Use
 
 - Checking daemon health and throughput
