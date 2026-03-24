@@ -117,3 +117,13 @@ Dropping columns, tables, or changing types requires extra caution:
 2. **Consider a two-phase approach:** phase 1 stops using the column, phase 2 drops it (in a later migration)
 3. **Back up** before applying: `pg_dump -Fc > backup_before_migration_NNN.dump`
 4. **Get explicit approval** before applying destructive changes
+
+## Anti-Patterns
+
+| Anti-Pattern | Why It Fails | What To Do Instead |
+|---|---|---|
+| **Not testing the rollback path** | A migration that can't be reversed safely turns a recoverable mistake into a production incident. You discover the rollback is broken during an emergency. | Write and test the `downgrade()` function. Run `upgrade` then `downgrade` then `upgrade` again in a test environment before applying. |
+| **Mixing DDL and DML in the same migration** | Schema changes (DDL) and data changes (DML) have different failure modes and rollback characteristics. A failed data transform mid-migration leaves the schema in an inconsistent state. | Separate structural changes from data migrations. Apply DDL first, verify, then apply DML in a subsequent migration. |
+| **Deploying without a pre-migration backup** | If the migration corrupts data or the rollback fails, there is no recovery point. "It worked in staging" is not a backup strategy. | Always `pg_dump` before applying. Verify the backup is restorable. Keep it until the migration is confirmed stable in production. |
+| **Applying migrations directly to production without staging verification** | Schema differences between environments mean a migration that passes locally can fail on production data volumes, constraints, or concurrent access patterns. | Apply to a staging environment with production-like data first. Check for lock contention, execution time, and constraint violations. |
+| **Adding NOT NULL columns without defaults to populated tables** | The migration fails immediately on any table with existing rows because the database can't fill the column retroactively. | Add the column as nullable first, backfill data, then add the NOT NULL constraint in a separate migration. |

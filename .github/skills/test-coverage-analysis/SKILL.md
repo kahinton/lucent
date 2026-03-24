@@ -86,3 +86,13 @@ create_memory(
   shared=true
 )
 ```
+
+## Anti-Patterns
+
+| Anti-Pattern | Why It Fails | What To Do Instead |
+|---|---|---|
+| **Chasing line coverage percentage over branch coverage** | 95% line coverage can still miss every error path and every `else` branch. Line coverage rewards touching code, not testing it. | Measure branch coverage (`--cov-branch`). Prioritize covering conditional branches, especially error handling and edge cases. |
+| **Writing tests that mirror implementation instead of behavior** | Tests break on every refactor even when behavior is unchanged, creating maintenance burden and false negatives. | Test public interfaces and observable behavior. Ask "what should happen?" not "what does the code do?" |
+| **Ignoring error paths and exception handling** | Happy-path-only tests miss the code that runs during failures — exactly when correctness matters most. | For every function, write at least one test for each documented exception and one for invalid input. |
+| **Adding tests without checking what's already covered** | Duplicate tests inflate count without improving coverage. New tests may cover the same paths as existing ones. | Run coverage *before* writing tests. Identify the specific uncovered lines/branches, then target those. |
+| **Treating coverage as a gate instead of a guide** | Teams game coverage metrics with trivial assertions that technically cover lines but verify nothing meaningful. | Review test *quality* alongside coverage numbers. A test that asserts nothing is worse than no test — it gives false confidence. |
