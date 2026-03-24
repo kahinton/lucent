@@ -39,30 +39,13 @@ You have detailed procedural skills loaded alongside this definition. **Use them
 
 ### 1. Orient
 
-```bash
-cd /workspace
-git log --oneline -10
-git status
-ls -la
-```
-
-Follow the **memory-search** skill to load context:
-```
-search_memories(query="<repo name or task topic>", limit=10)
-```
-
-```
-log_task_event(task_id, "progress", "Oriented. Repo: <name>, Language: <lang>, Last commit: <hash>")
-```
+Inspect `/workspace` — check `git log`, `git status`, directory structure. Follow the **memory-search** skill to load context about the repo or task topic. Log what you find via `log_task_event`.
 
 ### 2. Establish Baseline
 
 Run the existing test suite to know what passes before you touch anything. Follow the **dev-workflow** skill's "Validate" section to identify the project's test runner and execute it.
 
-If tests fail before your changes, log that immediately:
-```
-log_task_event(task_id, "progress", "Pre-existing test failures: N. Failures: <summary>")
-```
+If tests fail before your changes, log pre-existing failures immediately via `log_task_event`.
 
 ### 3. Implement
 
@@ -77,22 +60,11 @@ If the change is **security-sensitive** (auth, input handling, access control), 
 
 ### 4. Validate
 
-Follow the **dev-workflow** skill's "Validate" section — run the test suite and linter. Fix failures your changes caused. Note pre-existing failures.
-
-```
-log_task_event(task_id, "progress", "Tests passing. N passed, M failed (M pre-existing).")
-```
+Follow the **dev-workflow** skill's "Validate" section — run the test suite and linter. Fix failures your changes caused. Log test results via `log_task_event`.
 
 ### 5. Review Your Diff
 
-Apply the **code-review** skill's Pass 1-3 (Understand, Correctness, Security) to your own diff:
-
-```bash
-git diff HEAD
-git diff --stat HEAD
-```
-
-Verify:
+Apply the **code-review** skill's Pass 1-3 (Understand, Correctness, Security) to your own `git diff HEAD`. Verify:
 - Only task-related changes in the diff
 - No accidental whitespace changes, debug prints, or stale imports
 - No secrets, tokens, or credentials
@@ -106,26 +78,13 @@ Verify:
 | `pr` | Stage, commit, push to a feature branch. |
 | `commit` | Stage, commit, push to target branch. Only when explicitly approved. |
 
-For any commit:
-```bash
-git add -p                 # Stage interactively — review each hunk
-git commit -m "type: concise description"
-```
-
-Use conventional commits: `feat:`, `fix:`, `refactor:`, `test:`, `docs:`, `chore:`.
+For any commit, stage interactively (`git add -p`), review each hunk, and use conventional commits (`feat:`, `fix:`, `refactor:`, `test:`, `docs:`, `chore:`).
 
 ### 7. Signal Completion
 
-```
-log_task_event(task_id, "completed", "Changed N files. Tests: X passed, Y failed (Y pre-existing). Output mode: <mode>. Summary: <what and why>")
-```
+Use `log_task_event(task_id, "completed", "<summary of changes, test results, output mode>")`. If blocked, use `log_task_event(task_id, "blocked", "<reason, what was attempted, what's needed>")`.
 
-Follow the **memory-capture** skill to save any lessons learned from this sandbox session — especially non-obvious environment issues or workarounds.
-
-If blocked:
-```
-log_task_event(task_id, "blocked", "Cannot complete: <reason>. Attempted: <what>. Needed: <what's missing>")
-```
+Follow the **memory-capture** skill to save any lessons learned — especially non-obvious environment issues or workarounds.
 
 ## Decision Framework
 
