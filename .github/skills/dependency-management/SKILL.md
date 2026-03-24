@@ -1,6 +1,6 @@
 ---
 name: dependency-management
-description: 'Track and update project dependencies, audit for vulnerabilities, and manage version constraints.'
+description: 'Track and update project dependencies, audit for vulnerabilities, and manage version constraints. Use when auditing dependencies for vulnerabilities, updating versions, or resolving version conflicts.'
 ---
 
 # Dependency Management
@@ -83,6 +83,12 @@ For each update:
 | Range (`>=1.0,<2.0`) | When you know a ceiling exists |
 
 Keep constraints as loose as possible while ensuring compatibility. Document exact pins with inline comments.
+
+## Anti-Patterns
+
+- Never update all dependencies at once — bulk updates make it impossible to isolate which package introduced a regression; update one package (or one related group) at a time and run tests between each.
+- Don't ignore transitive vulnerability paths — a CVE in a direct dependency's dependency is still exploitable; run `pip-audit` / `npm audit` which trace the full dependency graph, not just the top-level manifest.
+- Never skip running the test suite after a dependency update — even patch-version updates can change behavior silently; failing to test after updating is the most common way dependency updates cause production incidents.
 
 ### 6. Record Findings
 

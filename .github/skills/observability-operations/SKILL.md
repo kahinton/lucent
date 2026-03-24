@@ -494,6 +494,13 @@ docker compose logs daemon-1 --since 1h | grep "Session.*completed"
 # Connection refused — DB or MCP server unreachable
 ```
 
+## Anti-Patterns
+
+- Don't alert on symptoms without tracing to causes — alerting on "high error rate" without knowing which route or operation is the source leads to alert fatigue and slow diagnosis; use labels and Jaeger traces to make alerts actionable.
+- Never create dashboards without actionable thresholds — a dashboard full of graphs with no "what does bad look like" annotations is decorative, not operational; every panel should have a reference line or annotation showing the acceptable range.
+- Don't add high-cardinality values (user IDs, request IDs, free-form strings) as metric label attributes — each unique label combination creates a new time series in Prometheus, causing cardinality explosion that degrades query performance and increases storage costs.
+- Never disable telemetry in production to fix a performance problem without first measuring the overhead — OTEL no-op stubs are near-zero cost; the bottleneck is almost always elsewhere.
+
 ## Quick Reference
 
 | Action | Command |

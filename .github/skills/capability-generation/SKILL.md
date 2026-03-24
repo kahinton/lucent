@@ -137,9 +137,10 @@ create_memory(
 )
 ```
 
-## Constraints
+## Anti-Patterns
 
-- Only generate capabilities that the assessment identified as gaps
-- Definitions must be submitted as `draft` — never directly to `active`
-- Check for naming conflicts with existing definitions before creating
-- Don't generate capabilities the domain doesn't need just because they exist as templates
+- Don't generate capabilities without a gap analysis because you'll create redundant or irrelevant definitions that clutter the system.
+- Don't submit definitions directly as `active` because unreviewed definitions can introduce unstable or incorrect agent behavior — always use `draft`.
+- Don't skip checking for naming conflicts before creating because duplicate names cause ambiguity and may silently shadow existing definitions.
+- Don't generate capabilities the domain doesn't need just because templates exist — template availability is not justification for creation.
+- Don't create agents without defining their matching skills because a capable agent with no procedural knowledge produces inconsistent, unpredictable results.

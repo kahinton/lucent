@@ -1,6 +1,6 @@
 ---
 name: test-coverage-analysis
-description: 'Identify untested code paths, prioritize test writing, and track coverage gaps.'
+description: 'Identify untested code paths, prioritize test writing, and track coverage gaps. Use when assessing test coverage gaps, prioritizing test writing, or evaluating test suite health.'
 ---
 
 # Test Coverage Analysis
@@ -67,6 +67,13 @@ Not all untested code is equally important. Prioritize by risk:
 **Test the boundaries, not the internals:**
 - Prefer testing public interfaces over private implementation details
 - If a refactor breaks your tests but the behavior hasn't changed, your tests were too tightly coupled
+
+## Anti-Patterns
+
+- Don't chase a coverage percentage target — 90% line coverage with tests that never assert anything meaningful is worse than 60% coverage with tests that catch real regressions; coverage is a signal, not a goal.
+- Never ignore branch coverage in favor of line coverage — a function can show 100% line coverage with only the happy path tested; branch coverage reveals the untested `if/else` and error paths that actually matter.
+- Don't count tests that make no assertions — a test that calls code and doesn't assert on the result only verifies "it didn't throw," which catches almost nothing; every test must assert a specific expected outcome.
+- Never prioritize testing utilities and logging over auth and business logic — the prioritization table exists for a reason; low-risk code with high coverage is less valuable than critical-path code with any coverage gap.
 
 ### 5. Record Findings
 

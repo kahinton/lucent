@@ -133,10 +133,10 @@ Evidence reviewed: <N memories across M categories>
 Finding: <why no change needed>
 ```
 
-## Constraints
+## Anti-Patterns
 
-- Require 2+ occurrences before making structural changes — a single correction is not a pattern
-- Changes should be minimal and targeted
-- Don't over-engineer for edge cases
-- Get user confirmation before major restructuring (multi-file changes)
-- Every instruction you write must be specific enough to change behavior — if it's too vague to act on, it's not specific enough
+- Don't make structural changes based on a single correction because one data point is noise, not a pattern — require 2+ occurrences before modifying a definition or skill.
+- Don't make speculative changes without evidence because improvements without corroborating signals are as likely to break working behavior as to fix broken behavior.
+- Don't over-engineer changes for edge cases because a targeted one-line fix that addresses the root cause is always better than a sweeping rewrite that introduces new failure modes.
+- Don't modify definitions during active task execution because changes to agent behavior mid-task create inconsistencies between what was planned and what executes.
+- Don't write improvement instructions that are too vague to act on because a directive like "be better at memory" changes nothing — every instruction must be specific enough to change observable behavior.

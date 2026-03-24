@@ -1,6 +1,6 @@
 ---
 name: onboarding
-description: 'Guide new contributors through project setup, architecture overview, and first-contribution workflow.'
+description: 'Guide new contributors through project setup, architecture overview, and first-contribution workflow. Use when a new contributor needs setup, architecture overview, or guidance on their first contribution.'
 ---
 
 # Onboarding
@@ -94,3 +94,10 @@ search_memories(query="<topic you're confused about>", limit=10)
 ```
 
 Check memory for past decisions, conventions, and known gotchas before asking — the answer may already exist.
+
+## Anti-Patterns
+
+- Don't skip prerequisite verification before setup because missing Docker, the correct language runtime, or repository access will cause cryptic failures mid-onboarding.
+- Don't rush through the architecture overview because a contributor who doesn't understand the codebase structure will make changes in the wrong place and miss existing conventions.
+- Don't skip running tests after setup because passing tests are the only reliable signal that the environment is actually working — "services running" is not sufficient.
+- Don't assume the first contribution workflow is obvious because branch naming, commit conventions, and PR requirements vary by project and must be explicitly confirmed.

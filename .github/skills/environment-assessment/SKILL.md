@@ -96,3 +96,10 @@ If a previous profile exists, `update_memory` instead of creating a duplicate.
 - Start broad, narrow down — better to discover too much than too little
 - Update the profile when things change — don't recreate from scratch
 - If you can't determine the domain from the environment, say so
+
+## Anti-Patterns
+
+- Don't spend more than 5 minutes on assessment because deep investigation belongs in later tasks — the goal here is a useful profile, not a complete audit.
+- Don't recreate the environment profile from scratch when it already exists because you'll overwrite accumulated knowledge — use `update_memory` instead.
+- Don't skip the gap analysis phase because generating capabilities without knowing what's missing leads to duplication and misaligned tooling.
+- Don't assume the domain from the file structure alone because surface-level signals mislead — read the README and recent git history to confirm.

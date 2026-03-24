@@ -1,6 +1,6 @@
 ---
 name: code-review
-description: 'Structured code review process — correctness, security, performance, and conventions.'
+description: 'Structured code review process — correctness, security, performance, and conventions. Use when reviewing code changes, PRs, or diffs for correctness, security, and quality.'
 ---
 
 # Code Review

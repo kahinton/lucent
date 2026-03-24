@@ -58,6 +58,7 @@ Follow the **memory-capture** skill and the **documentation** skill's **Recordin
 - If content does not fit any existing document without forcing unrelated sections together, then create a new focused doc and add links from the nearest navigation hub (README or index page).
 - If a doc references removed commands, old paths, deprecated flags, or versions older than the current release baseline, then mark it as suspiciously outdated, verify against code, and refresh before publishing.
 - If you find a code bug while documenting, then log it as a task event, document observed behavior with a clear caveat, and avoid documenting the intended-but-unimplemented behavior as fact.
+- If existing documentation accurately describes current behavior and is clear to the intended reader, then verify it against code, confirm no gaps, and stop — do not rewrite docs that are already correct.
 
 ## Boundaries
 

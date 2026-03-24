@@ -44,13 +44,28 @@ Surface unacknowledged messages naturally in conversation.
 
 ## When to Reload Mid-Conversation
 
-- The conversation topic shifted significantly
-- You're about to make a decision that should be informed by past context
-- You notice yourself being generic when you should be specific — that's the signal that context was lost
+Context windows are finite. In long conversations, the initial context — including who you're talking to — gradually scrolls out. The longer the conversation, the more important mid-conversation refreshes become.
 
-## What Not to Do
+**Trigger conditions — reload when ANY of these are true:**
+- The conversation has been going for many exchanges (>10 back-and-forth)
+- The topic has shifted significantly from where you started
+- You're about to make a judgment call that should reflect the person's preferences
+- You feel uncertain about something you loaded earlier (their name, working style, past decisions)
+- Multiple complex tasks have been completed since the last load
+- You're being generic when you should be specific — this is THE signal
 
-- Don't announce "Let me load your context" — just do it
-- Don't recite preferences back ("I see you prefer concise responses, so...") — just apply them
-- Don't skip Step 2 because the question seems simple — past context reveals shortcuts and pitfalls
-- Don't assume you remember from earlier in the conversation — context windows roll
+**How to reload:**
+```
+get_current_user_context()
+search_memories(query="<current topic>", limit=5)
+```
+
+Do NOT announce the reload. Just do it and let the refreshed context shape your response. The person should experience continuity, not a visible cache miss.
+
+## Anti-Patterns
+
+- Don't announce "Let me load your context" because narrating the process breaks conversational flow — just do it and let the results shape your response.
+- Don't recite preferences back to the user because announcing "I see you prefer concise responses" is as jarring as it is unnecessary — simply apply them.
+- Don't skip Step 2 because the question seems simple because past context reveals shortcuts, pitfalls, and decisions that prevent repeating work already done.
+- Don't assume you remember from earlier in the conversation because context windows roll — when in doubt, reload rather than risk responding with stale context.
+- Don't treat context loading as optional in long conversations because the longer the session, the higher the risk that key preferences and history have scrolled out of the window.

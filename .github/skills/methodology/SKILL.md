@@ -65,6 +65,13 @@ When sources disagree:
 <What remains unresolved and what would resolve it>
 ```
 
+## Anti-Patterns
+
+- Don't gather evidence that only supports your initial hypothesis — confirmation bias produces confident-sounding but wrong conclusions; actively seek disconfirming evidence and sources that challenge your current model.
+- Never treat absence of evidence as evidence of absence — "I found no docs saying X fails" is not the same as "X is confirmed to work"; distinguish between "not found" and "confirmed not present."
+- Don't state conclusions without confidence levels — a finding presented without uncertainty assessment misleads decision-makers; every claim should be tagged High/Medium/Low confidence with the reasoning behind it.
+- Never skip the Open Questions section — unresolved uncertainties that aren't surfaced become hidden assumptions; documenting what you don't know is as important as documenting what you do.
+
 ## Save Findings
 
 Research that isn't persisted is wasted. Save to memory with `type="technical"`, tags including `research`, importance 6-8 depending on how broadly useful the findings are.

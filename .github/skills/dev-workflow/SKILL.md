@@ -1,6 +1,6 @@
 ---
 name: dev-workflow
-description: 'Standard development workflow — code, test, review cycle with memory integration at every step.'
+description: 'Standard development workflow — code, test, review cycle with memory integration at every step. Use when implementing code changes, running test/review cycles, or following the code-test-commit workflow.'
 ---
 
 # Development Workflow

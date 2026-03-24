@@ -1,6 +1,6 @@
 ---
 name: docker-operations
-description: 'Build, debug, and manage Docker containers and compose services for local development and deployment.'
+description: 'Build, debug, and manage Docker containers and compose services for local development and deployment. Use when debugging container issues, modifying Docker configs, or troubleshooting compose services.'
 ---
 
 # Docker Operations
@@ -67,6 +67,13 @@ docker system df                        # See what's using space
 | Dockerfile changed | `docker compose build <service> && docker compose up -d <service>` |
 | docker-compose.yml changed | `docker compose up -d <service>` (recreates with new config) |
 | Environment variable changed | `docker compose up -d <service>` (recreates with new env) |
+
+## Anti-Patterns
+
+- Don't debug by making changes inside a running container — any edits are lost on the next restart or rebuild; always make changes to source files or Dockerfiles so fixes persist.
+- Never ignore image layer caching when builds behave unexpectedly — a cached layer may be serving stale code or dependencies; use `docker compose build --no-cache <service>` to force a clean build when diagnosing strange behavior.
+- Don't skip checking resource limits when containers crash or slow down — OOM kills and CPU throttling often manifest as mysterious crashes or timeouts; check `docker stats` and container logs before assuming it's a code bug.
+- Never use `docker volume prune -f` as a routine cleanup step — it irreversibly destroys database volumes and persistent data; always check `docker volume ls` and confirm volumes are truly unused before pruning.
 
 ## Recording Issues
 

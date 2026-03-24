@@ -1,6 +1,6 @@
 ---
 name: triage
-description: 'Issue triage and classification — severity assessment, routing, and initial response.'
+description: 'Issue triage and classification — severity assessment, routing, and initial response. Use when a new issue or bug report arrives and needs severity assessment and routing.'
 ---
 
 # Triage
@@ -55,6 +55,13 @@ Check if this is a known issue with a known fix.
 **If solution is unknown:** Gather diagnostic information, escalate with full context and research done so far. State what you tried and what you ruled out.
 
 **If security-related:** Escalate immediately. Do not share details broadly. Do not attempt to reproduce the exploit.
+
+## Anti-Patterns
+
+- Don't escalate everything as high severity — severity inflation causes alert fatigue and trains responders to ignore escalations; use the classification table strictly and push back on pressure to over-classify.
+- Never triage without reproduction steps — a bug report with no reproducible case can't be meaningfully diagnosed or prioritized; collect steps to reproduce before assigning severity or routing.
+- Don't close issues without documenting root cause — closing without a root cause means the next occurrence starts from zero; even "couldn't reproduce" should note what was checked and under what conditions.
+- Never skip the memory search before responding — the issue may be a known pattern with a documented fix; searching first avoids duplicating investigation work and gets users a faster, more accurate answer.
 
 ### 3. Record
 

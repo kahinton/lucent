@@ -1,6 +1,6 @@
 ---
 name: api-testing
-description: 'Procedures for testing REST API endpoints and MCP protocol compliance — pairs with the existing api-testing agent'
+description: 'Procedures for testing REST API endpoints and MCP protocol compliance. Use when validating API changes, testing new endpoints, or verifying MCP protocol compliance after code changes.'
 ---
 
 # API Testing — Lucent Project
@@ -142,6 +142,13 @@ Verify each step returns expected data. Test optimistic locking: update with wro
 - ELIF code change to memory CRUD → run test_mcp_tools.py and test_memories_api.py
 - ELIF code change to search → run test_search_api.py with edge case queries
 - ELIF full regression before release → run full test suite in order above
+
+## Anti-Patterns
+
+- Don't test only happy paths — the most critical bugs live in error handling, auth failures, and edge cases that only appear when things go wrong.
+- Never ignore auth token expiry edge cases — expired sessions and API keys that should return 401 are a common source of security regressions; test them explicitly.
+- Don't skip validating error response formats — callers depend on consistent error shapes (status code, message structure); a 500 with an HTML body instead of JSON silently breaks clients.
+- Don't run the full test suite every time for a targeted change — use the Decision section to run only the relevant tests, otherwise feedback loops slow down and failures become hard to localize.
 
 ## Key Test Files
 - `tests/conftest.py` — shared fixtures (db_pool, test users, async client)

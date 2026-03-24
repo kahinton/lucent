@@ -211,6 +211,13 @@ The daemon watches source files for changes and auto-reloads (`run_forever()` wa
 2. Manual restart may be needed for breaking changes
 3. Verify the `adaptation.py` templates still render correctly if agent/skill templates changed
 
+## Anti-Patterns
+
+- Never restart a daemon without first checking the task queue state — in-flight claimed tasks will be abandoned and may stay in `claimed` state indefinitely, blocking future dispatch until stale-release runs.
+- Don't ignore cycle timing drift — if actual time between cycle starts grows well beyond `DAEMON_INTERVAL_MINUTES + typical cycle duration`, it signals a bottleneck (LLM timeout, session saturation) that will compound if left unaddressed.
+- Don't correlate memory growth in isolation from cycle count — a rising memory count is only a problem if it scales faster than expected per cycle; check the autonomic interval and learning extraction frequency before concluding there's a leak.
+- Never kill and restart a daemon instance without noting its `instance_id` — stale heartbeat memories from the dead instance will mislead health checks until they expire.
+
 ## Environment Variables Reference
 
 | Env Var | Default | Effect |

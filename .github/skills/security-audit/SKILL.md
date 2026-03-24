@@ -1,6 +1,6 @@
 ---
 name: security-audit
-description: 'Security review procedures — authentication, authorization, input validation, secrets management, and access control.'
+description: 'Security review procedures — authentication, authorization, input validation, secrets management, and access control. Use when reviewing authentication, authorization, input validation, or access control code for vulnerabilities.'
 ---
 
 # Security Audit

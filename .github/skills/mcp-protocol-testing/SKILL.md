@@ -188,6 +188,14 @@ result = await _call(mcp_tools, "tool_name", {"param": value})
 parsed = json.loads(result)  # All tool responses are JSON strings
 ```
 
+## Anti-Patterns
+
+- Don't assume a tool succeeded without checking the response format because all MCP tools return JSON strings — a `{"error": "..."}` response looks like success at the transport layer.
+- Don't assume search returns all matches because trigram similarity has a threshold — an empty result for known content means the similarity config may need tuning, not that the data is missing.
+- Don't update a memory without checking `expected_version` in concurrent scenarios because silent overwrites from race conditions corrupt version history in ways that are hard to detect.
+- Don't assume a tool is registered just because it's implemented because `register_tools(mcp)` must explicitly include it — verify registration when a client reports a tool as not found.
+- Don't bypass auth testing because `MCPAuthMiddleware` rate limits and token validation are common failure points that won't surface in unit tests without explicit coverage.
+
 ## Common Issues
 
 | Issue | Cause | Check |

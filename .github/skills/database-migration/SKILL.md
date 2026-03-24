@@ -1,6 +1,6 @@
 ---
 name: database-migration
-description: 'Create, validate, and apply database schema migrations safely.'
+description: 'Create, validate, and apply database schema migrations safely. Use when adding, altering, or removing database tables/columns, or when applying schema changes across environments.'
 ---
 
 # Database Migration
@@ -101,6 +101,13 @@ create_memory(
   shared=true
 )
 ```
+
+## Anti-Patterns
+
+- Never run a destructive migration (DROP, ALTER TYPE, column removal) without a verified backup — even with `IF EXISTS` guards, data loss from a bad migration is irreversible without one.
+- Don't mix schema changes and data backfills in the same migration — combining them makes rollback harder and increases the window where the schema is in an inconsistent state; run them as separate sequential migrations.
+- Never skip testing rollback before applying to production — an untested rollback plan is no rollback plan; run the reverse SQL in a staging environment to confirm it works.
+- Don't apply migrations manually to production without verifying they've passed in staging first — the "it worked locally" assumption has caused more production incidents than almost any other pattern.
 
 ## Destructive Changes
 

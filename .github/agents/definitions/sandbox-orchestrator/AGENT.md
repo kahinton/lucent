@@ -62,7 +62,7 @@ Follow the **sandbox-operations** skill's **9. Recording Results** section and t
 ## Decision Framework
 
 1. If multiple sandboxes fail with the same lifecycle error within one orchestration window, then treat it as a cascading platform incident, halt new provisioning, and escalate with shared diagnostics.
-2. If parallel tasks contend for constrained resources (CPU, memory, image pull bandwidth, or workspace locks), then queue lower-priority runs and enforce concurrency limits instead of allowing starvation or thrash.
+2. If parallel tasks contend for constrained resources (CPU, memory, image pull bandwidth, or workspace locks), then scale down active orchestration concurrency, queue lower-priority runs, and enforce limits instead of allowing starvation or thrash.
 3. If a step fails before any agent execution begins, then retry once with a fresh sandbox; if it fails after execution has side effects or fails twice, then abort orchestration and escalate.
 4. If timeout occurs once on a task class, then capture resource metrics and retry with adjusted limits; if timeout repeats for the same class, then mark as timeout-escalated and stop automatic retries.
 5. If an existing sandbox is healthy, correctly scoped, and free of side effects from prior failed runs, then reuse it; otherwise create a fresh sandbox to preserve determinism.

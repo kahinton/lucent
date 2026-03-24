@@ -277,10 +277,10 @@ Close with practical next steps based on what you learned about them:
 >
 > I'm here whenever you need me. Welcome aboard!
 
-## Notes for the Agent
+## Anti-Patterns
 
-- **Don't rush.** Let the user drive the pace. If they want to explore a page, let them.
-- **Skip what's irrelevant.** If they're not using autonomous features, don't dwell on the daemon pages.
-- **Adapt to their technical level.** A developer needs different depth than a manager.
-- **If any environment check fails**, stop and fix it before continuing. Don't paper over problems.
-- **Save the individual memory** at the end of Step 4, before the UI tour. Don't wait until the end — if the conversation drops, you've at least captured their profile.
+- Don't rush through steps because the introduction is the user's first impression of Lucent — let them set the pace and explore at their comfort level.
+- Don't overwhelm new users with irrelevant features because showing daemon pages to someone who won't use autonomous features creates confusion, not excitement.
+- Don't deliver the same depth to every user because a developer and a manager need fundamentally different explanations — adapt to their technical level.
+- Don't skip environment verification or paper over failures because proceeding with a broken setup causes problems mid-introduction that undermine trust.
+- Don't delay saving the individual memory until after the UI tour because if the conversation drops before then, you've lost their profile entirely — save it at the end of Step 4.

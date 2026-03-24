@@ -1,6 +1,6 @@
 ---
 name: incident-response
-description: 'Handle production incidents — diagnose failures, restore service, and conduct post-mortem analysis.'
+description: 'Handle production incidents — diagnose failures, restore service, and conduct post-mortem analysis. Use when the service is down, degraded, or exhibiting unexpected behavior in production.'
 ---
 
 # Incident Response
@@ -76,9 +76,9 @@ create_memory(
 )
 ```
 
-## Rules
+## Anti-Patterns
 
-- Don't make speculative fixes — diagnose before changing code
-- Don't investigate root cause while the service is down — restore first
-- Escalate if data loss is possible — don't attempt heroics alone
-- Every incident gets a post-mortem memory — even if the fix was trivial
+- Don't make speculative fixes because applying undiagnosed changes risks making the incident worse and obscures the real root cause.
+- Don't investigate root cause while the service is down because every minute of downtime has user impact — restore first, investigate after.
+- Don't attempt heroics alone when data loss is possible because irreversible data operations require a second set of eyes — escalate immediately.
+- Don't skip the post-mortem memory because even trivial incidents carry lessons that prevent future recurrence — the record is the institutional memory.
