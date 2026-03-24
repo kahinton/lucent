@@ -1,9 +1,21 @@
 ---
 name: daemon-task-authoring
-description: 'Guide creation of well-structured daemon tasks — clear descriptions, appropriate agent_type, priority calibration, and context that leads to high validation rates.'
+description: 'Guide creation of well-structured daemon tasks — clear descriptions, appropriate agent_type, priority calibration, and context that leads to high validation rates. Use when creating requests or tasks for the daemon, calibrating priority, or writing task descriptions.'
 ---
 
 # Daemon Task Authoring
+
+## Procedure
+
+Follow these steps in order when creating daemon work items.
+
+1. **Check active work** — Call `list_active_work()` to see what already exists. Do not create duplicate requests. If an existing request covers the same intent, add tasks to it instead.
+2. **Define the request** — Write a clear title (under 80 chars) and a description following the [Description Checklist](#description-checklist). The description is the daemon's entire brief — make it self-contained.
+3. **Set priority** — Follow the [Priority Calibration](#priority-calibration) rules (high = blocks other work, medium = standard, low = nice-to-have).
+4. **Submit the request** — Call `create_request()` with title, description, source, and priority. See [Creating a Request](#creating-a-request) for the API shape.
+5. **Break into tasks** — Decompose the request into tasks. Each task gets: title, description (following the [Description Checklist](#description-checklist)), agent_type (from the [Agent Type Selection](#agent-type-selection) table), model (MANDATORY — follow the model-selection skill), sequence_order, and priority. Keep each task completable within a single 720-second session (see [Task Size](#task-size)).
+6. **Verify task descriptions** — Each task description must be self-contained. An agent reading only the description should understand what to do without external context. Run every description through the [Description Checklist](#description-checklist).
+7. **Submit tasks** — Call `create_task()` for each task, setting `request_id` to the ID returned in step 4.
 
 ## Creating a Request
 

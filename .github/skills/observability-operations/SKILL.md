@@ -1,6 +1,6 @@
 ---
 name: observability-operations
-description: 'OTEL-based observability for Lucent — traces, metrics, dashboards, and troubleshooting via OpenTelemetry Collector, Prometheus, Jaeger, and Grafana'
+description: 'OTEL-based observability for Lucent — traces, metrics, dashboards, and troubleshooting via OpenTelemetry Collector, Prometheus, Jaeger, and Grafana. Use when configuring traces, metrics, or dashboards, troubleshooting via OpenTelemetry Collector, Prometheus, Jaeger, or Grafana.'
 ---
 
 # Observability Operations — Lucent OTEL Stack

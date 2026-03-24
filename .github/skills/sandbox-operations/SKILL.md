@@ -1,6 +1,6 @@
 ---
 name: sandbox-operations
-description: 'Create, configure, and manage sandbox environments — SandboxManager API, DockerBackend specifics, MCP bridge setup, known bugs, and operational procedures'
+description: 'Create, configure, and manage sandbox environments — SandboxManager API, DockerBackend specifics, MCP bridge setup, known bugs, and operational procedures. Use when creating sandboxes, configuring Docker backends, setting up MCP bridges, or debugging sandbox lifecycle issues.'
 ---
 
 # Sandbox Operations

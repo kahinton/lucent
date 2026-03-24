@@ -1,6 +1,6 @@
 ---
 name: methodology
-description: 'Research methodology and rigor guidelines — how to investigate questions with evidence, structure, and explicit confidence levels.'
+description: 'Research methodology and rigor guidelines — how to investigate questions with evidence, structure, and explicit confidence levels. Use when conducting research that requires evidence-based reasoning, structured investigation, or explicit confidence assessments.'
 ---
 
 # Research Methodology

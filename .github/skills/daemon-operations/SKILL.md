@@ -1,6 +1,6 @@
 ---
 name: daemon-operations
-description: 'Monitor, troubleshoot, and optimize daemon cognitive cycles — task throughput, memory usage patterns, cycle timing, health checks'
+description: 'Monitor, troubleshoot, and optimize daemon cognitive cycles — task throughput, memory usage patterns, cycle timing, health checks. Use when monitoring daemon health, investigating slow cycles, analyzing task throughput, or checking memory usage patterns.'
 ---
 
 # Daemon Operations

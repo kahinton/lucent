@@ -78,3 +78,13 @@ create_memory(
 - Write changelog entries as you work, not all at release time
 - Test the built artifact before tagging — don't tag a broken release
 - Keep release commits minimal: version bump + changelog only
+
+## Anti-Patterns
+
+| Anti-Pattern | Why It Fails | What To Do Instead |
+|---|---|---|
+| **Cutting a release without running the full test suite** | Broken artifacts reach users; rollback costs more than the time saved skipping tests. | Always run the complete build-and-verify step (§3) before tagging. Treat a passing test suite as a gate, not a suggestion. |
+| **Forgetting to update CHANGELOG.md before tagging** | The tag is immutable — you can't retroactively add changelog entries to a published release without re-tagging or amending release notes. | Update the changelog *first* (§1), then bump, then tag. The changelog commit must precede the tag. |
+| **Bumping version in one place but not all** | Mismatched versions between `pyproject.toml`, `__init__.py`, Docker tags, or docs cause confusing runtime errors and broken installs. | After bumping the manifest, grep the entire repo for the old version string and update every occurrence. |
+| **Tagging a release from a dirty working tree** | Uncommitted changes mean the tagged commit doesn't match what was actually tested, creating irreproducible builds. | Run `git status` before tagging. The working tree must be clean and on the correct branch with all release commits pushed. |
+| **Skipping the release notes review** | Typos, missing breaking-change callouts, or leaked internal details end up in the public release. | Read the rendered release notes end-to-end before publishing. A two-minute review prevents embarrassing post-release edits. |

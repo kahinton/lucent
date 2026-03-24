@@ -1,6 +1,6 @@
 ---
 name: daemon-debugging
-description: 'Diagnose and fix daemon cycle failures, stuck tasks, sub-agent dispatch issues, and memory corruption in the Lucent daemon architecture'
+description: 'Diagnose and fix daemon cycle failures, stuck tasks, sub-agent dispatch issues, and memory corruption in the Lucent daemon architecture. Use when daemon cycles fail, tasks get stuck, sub-agent dispatch breaks, or memory corruption is suspected.'
 ---
 
 # Daemon Debugging

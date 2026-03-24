@@ -1,6 +1,6 @@
 ---
 name: mcp-protocol-testing
-description: 'Validate MCP tool implementations against protocol spec, test edge cases in memory operations, verify search behavior'
+description: 'Validate MCP tool implementations against protocol spec, test edge cases in memory operations, verify search behavior. Use when testing MCP tool implementations, validating protocol compliance, or verifying search and memory operation behavior.'
 ---
 
 # MCP Protocol Testing

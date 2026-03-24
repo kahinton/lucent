@@ -84,3 +84,13 @@ When creating tasks (`create_task`), choose the model based on complexity:
 | **Routine / Simple Tasks** | `claude-sonnet-4.6` | Cost-effective for well-defined, lower-risk tasks. |
 
 **Note**: Do not use "preview" or "legacy" models for critical daemon workflows unless explicitly requested.
+
+## Anti-Patterns
+
+| Anti-Pattern | Why It Fails | What To Do Instead |
+|---|---|---|
+| **Using prohibited tag names** (e.g., `awaiting-approval` instead of `needs-review`) | The Review Queue and automation filters match on canonical tags only. Non-canonical tags make work invisible to reviewers and the daemon. | Consult the Prohibited Tags table (§1) before tagging. Use exactly the canonical tag name. |
+| **Forgetting to share daemon-created memories** (`shared=false`) | The daemon runs as `daemon-service`. Unshared memories are invisible to every other user in the organization, silently losing knowledge. | Always set `shared=true` on daemon and sub-agent memories. Treat sharing as the default; only omit it for rare private scratchpad entries. |
+| **Creating duplicate requests instead of extending existing ones** | Parallel requests for the same goal fragment work across task trees, cause duplicate effort, and make progress harder to track. | Search `list_active_work` before creating a request. If a matching request exists, add tasks to it or update its description. |
+| **Skipping status transitions** (e.g., jumping from `pending` to `completed` without `in_progress`) | The state machine (§2) drives the Requests UI, daemon scheduling, and progress reporting. Skipped states break dashboards and can leave dependent tasks stuck. | Always transition through each intermediate status in order: pending → in_progress → completed (or failed). |
+| **Creating tasks without explicit model assignment** | The daemon falls back to a default model that may be wrong for the task's complexity, wasting tokens on simple tasks or producing low-quality output on hard ones. | Consult the Model Selection table (§4) and set the `model` parameter on every `create_task` call. |
