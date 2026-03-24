@@ -64,6 +64,9 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: postgresql://lucent:${POSTGRES_PASSWORD:-lucent_dev_password}@postgres:5432/lucent
+      # Restricted DB connection for daemon API key provisioning only.
+      # Uses lucent_daemon role with least-privilege grants (see migration 017).
+      DAEMON_DATABASE_URL: postgresql://lucent_daemon:${DAEMON_DB_PASSWORD:-lucent_daemon_dev_password}@postgres:5432/lucent
       LUCENT_MODE: ${LUCENT_MODE:-personal}
       LUCENT_LICENSE_KEY: ${LUCENT_LICENSE_KEY:-}
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
