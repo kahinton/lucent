@@ -18,19 +18,24 @@ logger = get_logger("llm.copilot")
 # Lazy import — only loaded when this engine is actually used
 _CopilotClient: Any = None
 _PermissionHandler: Any = None
+_SubprocessConfig: Any = None
+_SystemMessageReplaceConfig: Any = None
 _sdk_available: bool | None = None
 
 
 def _ensure_sdk() -> bool:
     """Lazily import the Copilot SDK. Returns True if available."""
-    global _CopilotClient, _PermissionHandler, _sdk_available
+    global _CopilotClient, _PermissionHandler, _SubprocessConfig, _SystemMessageReplaceConfig, _sdk_available
     if _sdk_available is not None:
         return _sdk_available
     try:
         from copilot import CopilotClient, PermissionHandler
+        from copilot.types import SubprocessConfig, SystemMessageReplaceConfig
 
         _CopilotClient = CopilotClient
         _PermissionHandler = PermissionHandler
+        _SubprocessConfig = SubprocessConfig
+        _SystemMessageReplaceConfig = SystemMessageReplaceConfig
         _sdk_available = True
     except ImportError:
         _sdk_available = False
@@ -69,24 +74,24 @@ class CopilotEngine(LLMEngine):
 
         client = None
         try:
-            client_opts: dict[str, Any] = {"log_level": self._log_level}
+            config_kwargs: dict[str, Any] = {"log_level": self._log_level}
             if self._github_token:
-                client_opts["github_token"] = self._github_token
+                config_kwargs["github_token"] = self._github_token
 
-            client = _CopilotClient(client_opts)
+            client = _CopilotClient(config=_SubprocessConfig(**config_kwargs))
             await client.start()
 
             session = await client.create_session(
-                {
-                    "model": model,
-                    "system_message": {"content": system_message},
-                    "on_permission_request": _PermissionHandler.approve_all,
-                    "mcp_servers": mcp_config or {},
-                }
+                on_permission_request=_PermissionHandler.approve_all,
+                model=model,
+                system_message=_SystemMessageReplaceConfig(
+                    mode="replace", content=system_message
+                ),
+                mcp_servers=mcp_config or {},
             )
 
             response = await session.send_and_wait(
-                {"prompt": prompt},
+                prompt,
                 timeout=timeout,
             )
 
@@ -132,16 +137,20 @@ class CopilotEngine(LLMEngine):
 
         client = None
         try:
-            client = _CopilotClient({"log_level": self._log_level})
+            config_kwargs: dict[str, Any] = {"log_level": self._log_level}
+            if self._github_token:
+                config_kwargs["github_token"] = self._github_token
+
+            client = _CopilotClient(config=_SubprocessConfig(**config_kwargs))
             await client.start()
 
             session = await client.create_session(
-                {
-                    "model": model,
-                    "system_message": {"content": system_message},
-                    "on_permission_request": _PermissionHandler.approve_all,
-                    "mcp_servers": mcp_config or {},
-                }
+                on_permission_request=_PermissionHandler.approve_all,
+                model=model,
+                system_message=_SystemMessageReplaceConfig(
+                    mode="replace", content=system_message
+                ),
+                mcp_servers=mcp_config or {},
             )
 
             response_parts: list[str] = []
@@ -204,7 +213,7 @@ class CopilotEngine(LLMEngine):
                     on_event(normalized)
 
             session.on(_on_sdk_event)
-            await session.send({"prompt": prompt})
+            await session.send(prompt)
 
             # Activity-based timeout loop: keep waiting as long as events arrive
             start_time = time.monotonic()

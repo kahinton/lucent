@@ -1669,16 +1669,18 @@ class LucentDaemon:
         client = None
 
         try:
-            client = CopilotClient({"log_level": "warning"})
+            from copilot.types import SubprocessConfig, SystemMessageReplaceConfig
+
+            client = CopilotClient(config=SubprocessConfig(log_level="warning"))
             await client.start()
 
             session = await client.create_session(
-                {
-                    "model": model,
-                    "system_message": {"content": system_message},
-                    "on_permission_request": PermissionHandler.approve_all,
-                    "mcp_servers": mcp_config_override or MCP_CONFIG,
-                }
+                on_permission_request=PermissionHandler.approve_all,
+                model=model,
+                system_message=SystemMessageReplaceConfig(
+                    mode="replace", content=system_message
+                ),
+                mcp_servers=mcp_config_override or MCP_CONFIG,
             )
             self.active_sessions.append(session)
 
@@ -1723,7 +1725,7 @@ class LucentDaemon:
                         log(f"  [{name}] event: {etype}{detail}", "STREAM")
 
                 session.on(on_event)
-                await session.send({"prompt": prompt})
+                await session.send(prompt)
 
                 # Activity-based timeout loop
                 start_time = time.time()

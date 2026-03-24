@@ -10,6 +10,7 @@ from . import (
     admin,
     audit,
     auth,
+    chat,
     daemon,
     dashboard,
     definitions,
@@ -30,6 +31,7 @@ router = APIRouter()
 
 # Mount all sub-routers (order matters for route matching)
 router.include_router(auth.router)
+router.include_router(chat.router)
 router.include_router(dashboard.router)
 router.include_router(definitions.router)
 router.include_router(daemon.router)
