@@ -70,10 +70,13 @@ Not all untested code is equally important. Prioritize by risk:
 
 ## Anti-Patterns
 
-- Don't chase a coverage percentage target — 90% line coverage with tests that never assert anything meaningful is worse than 60% coverage with tests that catch real regressions; coverage is a signal, not a goal.
-- Never ignore branch coverage in favor of line coverage — a function can show 100% line coverage with only the happy path tested; branch coverage reveals the untested `if/else` and error paths that actually matter.
-- Don't count tests that make no assertions — a test that calls code and doesn't assert on the result only verifies "it didn't throw," which catches almost nothing; every test must assert a specific expected outcome.
-- Never prioritize testing utilities and logging over auth and business logic — the prioritization table exists for a reason; low-risk code with high coverage is less valuable than critical-path code with any coverage gap.
+| Anti-Pattern | Why It Fails | What To Do Instead |
+|---|---|---|
+| **Chasing line coverage percentage as a goal** | 90% line coverage with meaningless assertions is worse than 60% with tests that catch real regressions — high numbers create false confidence that masks untested critical paths. | Treat coverage as a diagnostic signal, not a target. Focus on whether critical paths (auth, data mutation, business logic) have meaningful assertions. |
+| **Ignoring branch coverage in favor of line coverage** | A function can show 100% line coverage with only the happy path tested — untested `if/else` branches and error handlers hide the bugs that actually reach production. | Check branch coverage alongside line coverage. Every conditional and error path should have at least one test exercising it. |
+| **Testing implementation details instead of behavior** | Tests coupled to internal structure (private methods, specific call sequences) break on every refactor even when behavior is unchanged, creating maintenance burden and noisy CI. | Test public interfaces and observable behavior. If a refactor breaks your test but not the functionality, the test was wrong. |
+| **Ignoring error and exception paths** | Happy-path-only testing means the first time your error handling runs is in production — when it fails, you get cascading failures instead of graceful degradation. | For every operation that can fail (I/O, network, parsing, auth), write a test that triggers the failure and asserts the error is handled correctly. |
+| **Writing assertion-free "smoke" tests** | A test that calls code without asserting on the result only verifies "it didn't throw" — it catches almost nothing and inflates coverage numbers with false confidence. | Every test must assert a specific expected outcome. If you can't state what the test verifies, it isn't a test. |
 
 ### 5. Record Findings
 

@@ -82,10 +82,10 @@ create_memory(
 
 ## Anti-Patterns
 
-| Pattern | Problem |
-|---------|---------|
-| Skip memory search before starting | You repeat a mistake that's already documented |
-| Touch 5 unrelated modules in one change | Impossible to review, easy to introduce regressions |
-| "I'll save the memory later" | Context is lost, the memory never gets created |
-| Skip tests because "it's a small change" | Small changes cause large regressions |
-| Refactor while fixing a bug | Two concerns in one change — if the refactor breaks something, you can't tell which change caused it |
+| Anti-Pattern | Why It Fails | What To Do Instead |
+|---|---|---|
+| **Committing without running tests** | "Small changes" cause large regressions — untested commits break CI, block other developers, and erode trust in the main branch. | Run the project's full test suite before every commit. If tests are slow, at minimum run the tests for the affected module. |
+| **Skipping code review for "small" changes** | Small changes have a disproportionate error rate because reviewers (and authors) let their guard down — a one-line auth bypass is small but catastrophic. | Every change gets reviewed regardless of size. Small changes are fast to review, so there's no valid reason to skip. |
+| **Not searching memory before starting work** | Without checking for past attempts, documented decisions, and known pitfalls, you repeat mistakes that are already recorded and waste time rediscovering what's known. | Run `search_memories` for the module, feature area, and related past bugs before writing any code. Prior context shapes better solutions. |
+| **Bundling multiple concerns in one commit** | Mixing a bug fix with a refactor in one commit makes it impossible to isolate which change caused a regression, and makes code review ineffective. | One concern per commit. If you discover a refactoring opportunity while fixing a bug, commit the fix first, then refactor separately. |
+| **Deferring memory capture to "later"** | Context evaporates rapidly — the root cause you understood perfectly while debugging will be a vague recollection by tomorrow, and the memory never gets created. | Create the memory immediately after the insight, while you're still in context. If it takes more than 30 seconds, you're over-thinking it. |

@@ -78,7 +78,10 @@ create_memory(
 
 ## Anti-Patterns
 
-- Don't make speculative fixes because applying undiagnosed changes risks making the incident worse and obscures the real root cause.
-- Don't investigate root cause while the service is down because every minute of downtime has user impact — restore first, investigate after.
-- Don't attempt heroics alone when data loss is possible because irreversible data operations require a second set of eyes — escalate immediately.
-- Don't skip the post-mortem memory because even trivial incidents carry lessons that prevent future recurrence — the record is the institutional memory.
+| Anti-Pattern | Why It Fails | What To Do Instead |
+|---|---|---|
+| **Investigating root cause while the service is down** | Every minute spent debugging is a minute of user-facing downtime — the root cause can wait, but the users can't. | Restore service first using known-good rollback or restart procedures. Investigate root cause only after service is stable. |
+| **Applying speculative fixes without diagnosis** | Untested changes during an incident risk making things worse and obscure the actual root cause — you end up debugging your fix on top of the original failure. | Follow the triage checklist (§Triage) to identify the failure point before changing anything. If a fix isn't obvious, rollback to the last known-good state. |
+| **Skipping the post-mortem memory** | Without a documented post-mortem, the same incident will recur — institutional knowledge lives in memory, not in people's heads. | Create an incident memory (§Post-Mortem) within 24 hours of resolution. Include timeline, root cause, resolution, and prevention steps. |
+| **Expanding blast radius with heroic manual fixes** | Running ad-hoc SQL, restarting unrelated services, or deploying untested hotfixes during an incident can turn a single-service outage into a system-wide failure. | Limit changes to the minimum required to restore the affected service. Don't touch anything outside the blast radius of the original failure. |
+| **Not checking memory for similar past incidents** | The same failure pattern often recurs — skipping the memory search means you're debugging from scratch instead of applying a known fix in minutes. | Search `search_memories(query="<symptom>", tags=["incident"])` immediately during triage. Past incidents often contain the exact resolution steps needed. |

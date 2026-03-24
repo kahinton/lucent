@@ -115,7 +115,11 @@ create_memory(
 
 ## Anti-Patterns
 
-- Scanning only for the vulnerabilities you already know about — follow the checklist systematically
-- Reporting "possible" vulnerabilities without tracing the actual code path to confirm
-- Skipping the auth check on "internal" endpoints — if it's reachable over HTTP, it needs auth
-- Not recording findings — an unfixed vulnerability forgotten is as dangerous as one never found
+| Anti-Pattern | Why It Fails | What To Do Instead |
+|---|---|---|
+| **Testing only happy-path inputs** | Attackers don't send well-formed requests — if you only verify that valid input works, you miss how the system handles malicious, malformed, or boundary-value input. | For every input field, test with null, empty string, maximum-length values, special characters, and known injection payloads. |
+| **Ignoring transitive dependencies** | A direct dependency may be secure, but its transitive dependencies can introduce vulnerabilities — supply-chain attacks target deep deps that nobody audits. | Run `pip audit`, `npm audit`, or equivalent on the full dependency tree. Don't stop at direct dependencies. |
+| **Missing TOCTOU race conditions** | Time-of-check-to-time-of-use gaps allow attackers to change state between an authorization check and the authorized action, bypassing access control. | Use atomic operations or database-level constraints where possible. If a check-then-act pattern is unavoidable, re-verify inside the transaction. |
+| **Treating internal endpoints as safe** | Any endpoint reachable over HTTP — even "internal" ones behind a reverse proxy — can be reached by an attacker who compromises any part of the network. | Apply authentication and authorization to every HTTP-accessible endpoint regardless of its intended audience. Internal is a network topology, not a security boundary. |
+| **Scanning for known CVEs but not logic flaws** | Automated scanners catch known vulnerability patterns but miss business logic issues like broken access control, insecure direct object references, and privilege escalation. | Use automated tools as a baseline, then manually trace every auth decision and data flow against the audit checklist (§§2–3). |
+| **Reporting "possible" vulnerabilities without confirming** | Unverified findings waste remediation time and erode trust in the audit — teams start ignoring findings if too many turn out to be false positives. | Trace the actual code path to confirm exploitability before reporting. State the severity, the exploit scenario, and whether you verified it. |

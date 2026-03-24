@@ -104,10 +104,13 @@ create_memory(
 
 ## Anti-Patterns
 
-- Never run a destructive migration (DROP, ALTER TYPE, column removal) without a verified backup — even with `IF EXISTS` guards, data loss from a bad migration is irreversible without one.
-- Don't mix schema changes and data backfills in the same migration — combining them makes rollback harder and increases the window where the schema is in an inconsistent state; run them as separate sequential migrations.
-- Never skip testing rollback before applying to production — an untested rollback plan is no rollback plan; run the reverse SQL in a staging environment to confirm it works.
-- Don't apply migrations manually to production without verifying they've passed in staging first — the "it worked locally" assumption has caused more production incidents than almost any other pattern.
+| Anti-Pattern | Why It Fails | What To Do Instead |
+|---|---|---|
+| **Deploying without a verified backup** | Even with `IF EXISTS` guards, a bad migration can corrupt or delete data irreversibly — without a backup, recovery is impossible. | Run `pg_dump` (or equivalent) immediately before applying any migration. Verify the backup is restorable, not just that the dump completed. |
+| **Mixing DDL and DML in the same migration** | Schema changes and data backfills in one migration make rollback nearly impossible — if the backfill fails mid-way, the schema is changed but data is inconsistent. | Split into two sequential migrations: one for the schema change, one for the data backfill. Each can be rolled back independently. |
+| **Skipping rollback testing** | An untested rollback plan is no rollback plan — discovering your reverse SQL doesn't work while production is broken turns a minor incident into a major one. | Write and test the rollback SQL in staging before applying the forward migration to production. Include it as a comment in the migration file. |
+| **Applying directly to production without staging** | "It worked locally" is the most common preamble to a production incident — local databases have different data volumes, constraints, and concurrent access patterns. | Always apply migrations to a staging environment with production-like data first. Verify it completes, performs acceptably, and the application still works. |
+| **Adding NOT NULL columns without defaults** | Adding a `NOT NULL` column to an existing table without a `DEFAULT` value fails immediately on tables with existing rows, breaking the migration in production where data exists. | Always include a `DEFAULT` clause when adding `NOT NULL` columns, or add as nullable first, backfill, then add the constraint. |
 
 ## Destructive Changes
 

@@ -86,8 +86,11 @@ Categories: `security`, `performance`, `correctness`, `architecture`
 
 ## Anti-Patterns
 
-- "LGTM" without reading the code
-- Rejecting for style issues a linter would auto-fix
-- Reviewing without checking memory for past findings in this area
-- Finding a critical issue but not saving it — the same mistake will happen again
-- Being vague: "this could be improved" — say specifically what and how
+| Anti-Pattern | Why It Fails | What To Do Instead |
+|---|---|---|
+| **Reviewing style instead of logic** | Formatting issues are a linter's job — spending review cycles on whitespace and naming means logic errors, race conditions, and auth bypasses sail through unnoticed. | Run the project's linter first. Focus human review time on correctness, security, and edge cases (Passes 2–4). |
+| **Rubber-stamping large diffs** | Diffs over 400 lines overwhelm reviewers, causing fatigue-driven "LGTM" responses that miss critical issues buried in the middle. | Ask the author to split large changes into smaller, reviewable PRs. If that's not possible, review in multiple focused sessions, not one marathon pass. |
+| **Giving vague feedback without specifics** | Comments like "this could be improved" or "consider refactoring" are unactionable — the author doesn't know what to change or why. | Name the specific problem, explain the impact, and suggest a concrete fix: "This query is vulnerable to SQL injection because of string interpolation on line 42 — use parameterized queries instead." |
+| **Missing auth checks on new endpoints** | New routes often copy-paste from existing ones but forget the auth middleware/decorator, creating unauthenticated access to protected resources. | For every new endpoint, explicitly verify the auth check is applied by tracing the middleware chain — don't assume it's inherited. |
+| **Skipping memory search before reviewing** | Reviewing without checking for past findings in the same module means you'll miss recurring issues that were already caught and documented. | Run `search_memories` for the module/feature area before starting — past review findings are your best checklist for known problem spots. |
+| **Finding a critical issue but not saving it** | An undocumented finding will be forgotten and the same mistake will recur in the next PR touching this module. | Create a memory with `create_memory` for any non-trivial finding — the 30-second investment prevents the next reviewer from missing the same issue. |
