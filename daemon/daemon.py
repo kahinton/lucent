@@ -2491,52 +2491,31 @@ class LucentDaemon:
             log("No approved 'memory' agent — skipping autonomic maintenance", "WARN")
             return
 
-        # Create a request record so the run appears on the Activity page
-        from lucent.db import get_pool
-        from lucent.db.requests import RequestRepository
-
-        pool = await get_pool()
-        req_repo = RequestRepository(pool)
-
-        # Look up daemon user's org_id
-        org_id = None
+        # Create a request/task record via the HTTP API so it appears on Activity
         task_id = None
-        request_id = None
         try:
-            async with pool.acquire() as conn:
-                row = await conn.fetchrow(
-                    "SELECT organization_id FROM users WHERE external_id = 'lucent-daemon' LIMIT 1"
-                )
-                if row and row["organization_id"]:
-                    org_id = str(row["organization_id"])
-        except Exception:
-            pass
-
-        if org_id:
-            try:
-                request_record = await req_repo.create_request(
-                    title="Memory consolidation",
-                    org_id=org_id,
-                    description="Autonomic memory maintenance — consolidating fragments into long-term knowledge.",
-                    source="daemon",
-                    priority="low",
-                )
+            request_record = await RequestAPI.create_request(
+                title="Memory consolidation",
+                description="Autonomic memory maintenance — consolidating fragments into long-term knowledge.",
+                source="daemon",
+                priority="low",
+            )
+            if request_record:
                 request_id = str(request_record["id"])
-                task_record = await req_repo.create_task(
+                task_record = await RequestAPI.create_task(
                     request_id=request_id,
                     title="Consolidate memories",
-                    org_id=org_id,
-                    description="Search across all memory domains, integrate recent observations into established knowledge, deduplicate, normalize tags, recalibrate importance.",
                     agent_type="memory",
+                    description="Search across all memory domains, integrate recent observations into established knowledge, deduplicate, normalize tags, recalibrate importance.",
                     model=MODEL,
                 )
-                task_id = str(task_record["id"])
-                await req_repo.claim_task(task_id, self.instance_id)
-                await req_repo.start_task(task_id)
-                await req_repo.update_request_status(request_id, "in_progress")
-            except Exception as e:
-                log(f"Failed to create request record for autonomic run: {e}", "WARN")
-                task_id = None
+                if task_record:
+                    task_id = str(task_record["id"])
+                    await RequestAPI.claim_task(task_id, self.instance_id)
+                    await RequestAPI.start_task(task_id)
+        except Exception as e:
+            log(f"Failed to create request record for autonomic run: {e}", "WARN")
+            task_id = None
 
         result = await self.run_session(
             "autonomic-maintenance",
@@ -2560,9 +2539,9 @@ class LucentDaemon:
         if task_id:
             try:
                 if result:
-                    await req_repo.complete_task(task_id, result[:4000])
+                    await RequestAPI.complete_task(task_id, result[:4000])
                 else:
-                    await req_repo.fail_task(task_id, "No output from maintenance session")
+                    await RequestAPI.fail_task(task_id, "No output from maintenance session")
             except Exception as e:
                 log(f"Failed to update request record for autonomic run: {e}", "WARN")
 
