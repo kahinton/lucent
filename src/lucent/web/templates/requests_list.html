@@ -59,7 +59,7 @@
             </svg>
             You
         </a>
-        <a href="/activity?source=cognitive&per_page={{ per_page }}{% if filter_status %}&status={{ filter_status }}{% endif %}" class="px-3 py-1.5 text-sm rounded-md flex items-center gap-1.5 {% if filter_source == 'cognitive' %}bg-gray-900 text-white{% else %}bg-gray-100 text-gray-600 hover:bg-gray-200{% endif %}">
+        <a href="/activity?source=cognitive,daemon&per_page={{ per_page }}{% if filter_status %}&status={{ filter_status }}{% endif %}" class="px-3 py-1.5 text-sm rounded-md flex items-center gap-1.5 {% if filter_source in ('cognitive', 'cognitive,daemon') %}bg-gray-900 text-white{% else %}bg-gray-100 text-gray-600 hover:bg-gray-200{% endif %}">
             <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
             </svg>

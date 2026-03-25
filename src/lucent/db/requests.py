@@ -90,8 +90,14 @@ class RequestRepository:
             params.append(status)
             base += f" AND status = ${len(params)}"
         if source:
-            params.append(source)
-            base += f" AND source = ${len(params)}"
+            sources = [s.strip() for s in source.split(",") if s.strip()]
+            if len(sources) == 1:
+                params.append(sources[0])
+                base += f" AND source = ${len(params)}"
+            else:
+                placeholders = ", ".join(f"${len(params) + i + 1}" for i in range(len(sources)))
+                params.extend(sources)
+                base += f" AND source IN ({placeholders})"
 
         count_query = f"SELECT COUNT(*) AS total {base}"
         query = f"SELECT * {base} ORDER BY created_at DESC LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}"
