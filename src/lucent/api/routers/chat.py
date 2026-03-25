@@ -426,6 +426,11 @@ async def chat_stream_v2(
                 "type": "error",
                 "error": event.content or "Unknown error",
             })
+        elif event.type == SessionEventType.OTHER and event.tool_name == "_reasoning":
+            event_queue.put_nowait({
+                "type": "reasoning",
+                "text": event.content or "",
+            })
         elif event.type == SessionEventType.SESSION_IDLE:
             pass  # We'll handle done when the task completes
 

@@ -53,6 +53,24 @@ class CopilotEngine(LLMEngine):
         self._github_token = github_token
         self._log_level = log_level
 
+    def _make_client(self) -> Any:
+        """Create a CopilotClient with typed SubprocessConfig."""
+        config_kwargs: dict[str, Any] = {"log_level": self._log_level}
+        if self._github_token:
+            config_kwargs["github_token"] = self._github_token
+        return _CopilotClient(config=_SubprocessConfig(**config_kwargs))
+
+    def _make_session_kwargs(self, model: str, system_message: str, mcp_config: dict | None) -> dict:
+        """Build create_session kwargs."""
+        return {
+            "on_permission_request": _PermissionHandler.approve_all,
+            "model": model,
+            "system_message": _SystemMessageReplaceConfig(
+                mode="replace", content=system_message
+            ),
+            "mcp_servers": mcp_config or {},
+        }
+
     @property
     def name(self) -> str:
         return "copilot"
@@ -74,21 +92,11 @@ class CopilotEngine(LLMEngine):
 
         client = None
         try:
-            config_kwargs: dict[str, Any] = {"log_level": self._log_level}
-            if self._github_token:
-                config_kwargs["github_token"] = self._github_token
-
-            client = _CopilotClient(config=_SubprocessConfig(**config_kwargs))
+            client = self._make_client()
             await client.start()
 
-            session = await client.create_session(
-                on_permission_request=_PermissionHandler.approve_all,
-                model=model,
-                system_message=_SystemMessageReplaceConfig(
-                    mode="replace", content=system_message
-                ),
-                mcp_servers=mcp_config or {},
-            )
+            session_kwargs = self._make_session_kwargs(model, system_message, mcp_config)
+            session = await client.create_session(**session_kwargs)
 
             response = await session.send_and_wait(
                 prompt,
@@ -137,25 +145,17 @@ class CopilotEngine(LLMEngine):
 
         client = None
         try:
-            config_kwargs: dict[str, Any] = {"log_level": self._log_level}
-            if self._github_token:
-                config_kwargs["github_token"] = self._github_token
-
-            client = _CopilotClient(config=_SubprocessConfig(**config_kwargs))
+            client = self._make_client()
             await client.start()
 
-            session = await client.create_session(
-                on_permission_request=_PermissionHandler.approve_all,
-                model=model,
-                system_message=_SystemMessageReplaceConfig(
-                    mode="replace", content=system_message
-                ),
-                mcp_servers=mcp_config or {},
-            )
+            session_kwargs = self._make_session_kwargs(model, system_message, mcp_config)
+            session = await client.create_session(**session_kwargs)
 
             response_parts: list[str] = []
             done = asyncio.Event()
             last_activity = time.monotonic()
+            # Map tool_call_id → tool_name for matching start/complete events
+            _tool_call_names: dict[str, str] = {}
 
             def _on_sdk_event(event: Any) -> None:
                 """Translate Copilot SDK events to normalized SessionEvents."""
@@ -179,6 +179,68 @@ class CopilotEngine(LLMEngine):
                         content=getattr(event.data, "content", None),
                         raw=event,
                     )
+                elif etype == "tool.execution_start":
+                    tool_name = (
+                        getattr(event.data, "tool_name", None)
+                        or getattr(event.data, "mcp_tool_name", None)
+                        or getattr(event.data, "name", None)
+                    )
+                    # Track tool_call_id → name for matching with completion
+                    call_id = getattr(event.data, "tool_call_id", None)
+                    if call_id and tool_name:
+                        _tool_call_names[str(call_id)] = tool_name
+                    # Extract input/arguments
+                    tool_input = (
+                        getattr(event.data, "arguments", None)
+                        or getattr(event.data, "input", None)
+                    )
+                    if tool_input and not isinstance(tool_input, str):
+                        import json as _json
+                        try:
+                            tool_input = _json.dumps(tool_input)
+                        except Exception:
+                            tool_input = str(tool_input)[:500]
+                    normalized = SessionEvent(
+                        type=SessionEventType.TOOL_CALL,
+                        tool_name=tool_name,
+                        content=tool_input if isinstance(tool_input, str) else str(tool_input or "")[:500],
+                        raw=event,
+                    )
+                elif etype == "tool.execution_complete":
+                    # Recover tool name via tool_call_id mapping
+                    call_id = getattr(event.data, "tool_call_id", None)
+                    tool_name = None
+                    if call_id:
+                        tool_name = _tool_call_names.pop(str(call_id), None)
+                    if not tool_name:
+                        tool_name = (
+                            getattr(event.data, "tool_name", None)
+                            or getattr(event.data, "mcp_tool_name", None)
+                            or getattr(event.data, "name", None)
+                        )
+                    # Extract result content from Result object
+                    raw_result = getattr(event.data, "result", None)
+                    tool_output = None
+                    if raw_result is not None:
+                        # SDK Result objects have a .content field
+                        content_val = getattr(raw_result, "content", None)
+                        if content_val is not None:
+                            tool_output = str(content_val)[:2000]
+                        else:
+                            tool_output = str(raw_result)[:2000]
+                    normalized = SessionEvent(
+                        type=SessionEventType.TOOL_RESULT,
+                        tool_name=tool_name,
+                        tool_output=tool_output,
+                        raw=event,
+                    )
+                elif etype in ("assistant.reasoning", "assistant.reasoning_delta"):
+                    normalized = SessionEvent(
+                        type=SessionEventType.OTHER,
+                        content=getattr(event.data, "content", None),
+                        tool_name="_reasoning",
+                        raw=event,
+                    )
                 elif etype == "session.idle":
                     done.set()
                     normalized = SessionEvent(
@@ -193,19 +255,13 @@ class CopilotEngine(LLMEngine):
                         raw=event,
                     )
                 else:
-                    # Tool calls and other events
+                    # Other events (turn boundaries, etc.)
                     tool_name = getattr(event.data, "tool_name", None) or getattr(
                         event.data, "name", None
                     )
-                    tool_output = None
-                    if hasattr(event.data, "output"):
-                        tool_output = str(event.data.output)[:300]
-                    elif hasattr(event.data, "result"):
-                        tool_output = str(event.data.result)[:300]
                     normalized = SessionEvent(
                         type=SessionEventType.OTHER,
                         tool_name=tool_name,
-                        tool_output=tool_output,
                         raw=event,
                     )
 
