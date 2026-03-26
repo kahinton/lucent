@@ -386,7 +386,7 @@ class TestCompleteTask:
         await repo.claim_task(str(task["id"]), "inst-test")
         await repo.complete_task(str(task["id"]), "Done")
         updated = await repo.get_request(str(req["id"]), org_id)
-        assert updated["status"] == "completed"
+        assert updated["status"] == "review"
 
     async def test_completing_with_failed_sibling_fails_request(self, repo, org_id):
         req = await _make_request(repo, org_id)
@@ -853,6 +853,34 @@ class TestGetActiveSummary:
         summary = await repo.get_active_summary(org_id)
         assert summary["requests"]["active"] >= 1  # in_progress from claim
         assert summary["tasks"]["running"] >= 1
+
+
+class TestReviewLifecycle:
+    async def test_get_requests_in_review(self, repo, org_id):
+        req = await _make_request(repo, org_id, title="Needs review")
+        task = await _make_task(repo, str(req["id"]), org_id)
+        await repo.claim_task(str(task["id"]), "inst-test")
+        await repo.complete_task(str(task["id"]), "Done")
+        items = await repo.get_requests_in_review(org_id)
+        ids = [str(r["id"]) for r in items["items"]]
+        assert str(req["id"]) in ids
+
+    async def test_retry_task_with_feedback(self, repo, org_id):
+        req = await _make_request(repo, org_id, title="Rework path")
+        task = await _make_task(repo, str(req["id"]), org_id)
+        await repo.claim_task(str(task["id"]), "inst-test")
+        await repo.fail_task(str(task["id"]), "oops")
+        retried = await repo.retry_task_with_feedback(
+            str(task["id"]),
+            "Please include tests and handle edge case",
+            org_id=org_id,
+        )
+        assert retried is not None
+        refreshed_req = await repo.get_request(str(req["id"]), org_id)
+        assert refreshed_req is not None
+        assert refreshed_req["status"] == "in_progress"
+        assert refreshed_req["review_feedback"] == "Please include tests and handle edge case"
+        assert refreshed_req["review_count"] >= 1
 
 
 class TestGetRecentEvents:

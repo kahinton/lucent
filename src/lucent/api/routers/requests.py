@@ -1,8 +1,10 @@
 """API router for request tracking and task queue."""
 
+import json
 from uuid import UUID
 
 from fastapi import APIRouter, Body, Depends, HTTPException
+from jsonschema import ValidationError, validate
 from pydantic import BaseModel, Field
 
 from lucent.api.deps import AuthenticatedUser, get_pool
@@ -35,6 +37,8 @@ class TaskCreate(BaseModel):
     model: str | None = None
     sandbox_template_id: str | None = None  # Reference a saved sandbox template
     sandbox_config: dict | None = None  # Or inline sandbox config (template takes precedence)
+    output_contract: dict | None = None  # Optional structured output contract (JSON Schema)
+    output_schema: dict | None = None  # Backwards-compatible alias for output_contract.json_schema
 
 
 class TaskEventCreate(BaseModel):
@@ -45,7 +49,14 @@ class TaskEventCreate(BaseModel):
 
 class StatusUpdate(BaseModel):
     """JSON body for request status updates (not query params)."""
-    status: str = Field(..., min_length=1, max_length=32)
+    status: str = Field(
+        ...,
+        pattern=r"^(pending|planned|in_progress|review|needs_rework|completed|failed|cancelled)$",
+    )
+
+
+class ReviewRejectBody(BaseModel):
+    feedback: str = Field(..., min_length=1)
 
 
 class ClaimBody(BaseModel):
@@ -83,6 +94,7 @@ async def create_request(
 async def list_requests(
     user: AuthenticatedUser,
     status: str | None = None,
+    source: str | None = None,
     limit: int = 50,
     offset: int = 0,
     pool=Depends(get_pool),
@@ -91,7 +103,7 @@ async def list_requests(
 
     repo = RequestRepository(pool)
     return await repo.list_requests(
-        str(user.organization_id), status=status, limit=limit, offset=offset
+        str(user.organization_id), status=status, source=source, limit=limit, offset=offset
     )
 
 
@@ -102,6 +114,22 @@ async def list_active_work(user: AuthenticatedUser, pool=Depends(get_pool)):
 
     repo = RequestRepository(pool)
     return await repo.list_active_work(str(user.organization_id))
+
+
+@router.get("/review")
+async def list_requests_in_review(
+    user: AuthenticatedUser,
+    limit: int = 50,
+    offset: int = 0,
+    pool=Depends(get_pool),
+):
+    """List requests in review or rework states."""
+    from lucent.db.requests import RequestRepository
+
+    repo = RequestRepository(pool)
+    return await repo.get_requests_in_review(
+        str(user.organization_id), limit=limit, offset=offset
+    )
 
 
 @router.get("/summary")
@@ -146,6 +174,57 @@ async def update_request_status(
     )
     if not result:
         raise HTTPException(404, "Request not found")
+    return result
+
+
+@router.post("/{request_id}/review/approve")
+async def approve_request_review(
+    request_id: UUID,
+    user: AuthenticatedUser,
+    pool=Depends(get_pool),
+):
+    from lucent.db.requests import RequestRepository
+
+    repo = RequestRepository(pool)
+    req = await repo.get_request(str(request_id), str(user.organization_id))
+    if not req:
+        raise HTTPException(404, "Request not found")
+    if req["status"] != "review":
+        raise HTTPException(409, "Request not in review state")
+    return await repo.update_request_status(
+        str(request_id), "completed", org_id=str(user.organization_id)
+    )
+
+
+@router.post("/{request_id}/review/reject")
+async def reject_request_review(
+    request_id: UUID,
+    user: AuthenticatedUser,
+    body: ReviewRejectBody = Body(...),
+    pool=Depends(get_pool),
+):
+    from lucent.db.requests import RequestRepository
+
+    repo = RequestRepository(pool)
+    req = await repo.get_request(str(request_id), str(user.organization_id))
+    if not req:
+        raise HTTPException(404, "Request not found")
+    if req["status"] != "review":
+        raise HTTPException(409, "Request not in review state")
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """UPDATE requests
+               SET status = 'needs_rework',
+                   review_feedback = $2,
+                   review_count = review_count + 1,
+                   reviewed_at = NOW(),
+                   updated_at = NOW()
+               WHERE id = $1 AND organization_id = $3""",
+            request_id,
+            body.feedback,
+            user.organization_id,
+        )
+    result = await repo.get_request(str(request_id), str(user.organization_id))
     return result
 
 
@@ -207,21 +286,36 @@ async def create_task(
                 f"Create and approve one at /definitions before assigning tasks.",
             )
 
-    return await repo.create_task(
-        request_id=str(request_id),
-        title=body.title,
-        org_id=org_id,
-        description=body.description,
-        agent_type=body.agent_type,
-        agent_definition_id=body.agent_definition_id,
-        parent_task_id=body.parent_task_id,
-        priority=body.priority,
-        sequence_order=body.sequence_order,
-        model=body.model,
-        sandbox_template_id=body.sandbox_template_id,
-        sandbox_config=body.sandbox_config,
-        requesting_user_id=str(req["created_by"]) if req.get("created_by") else None,
-    )
+    if body.output_contract and body.output_schema:
+        raise HTTPException(422, "Provide either output_contract or output_schema, not both")
+    output_contract = body.output_contract
+    if body.output_schema:
+        # Compatibility shim: accept output_schema and normalize to the contract shape.
+        output_contract = {
+            "json_schema": body.output_schema,
+            "on_failure": "fallback",
+            "max_retries": 1,
+        }
+
+    try:
+        return await repo.create_task(
+            request_id=str(request_id),
+            title=body.title,
+            org_id=org_id,
+            description=body.description,
+            agent_type=body.agent_type,
+            agent_definition_id=body.agent_definition_id,
+            parent_task_id=body.parent_task_id,
+            priority=body.priority,
+            sequence_order=body.sequence_order,
+            model=body.model,
+            sandbox_template_id=body.sandbox_template_id,
+            sandbox_config=body.sandbox_config,
+            requesting_user_id=str(req["created_by"]) if req.get("created_by") else None,
+            output_contract=output_contract,
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 @router.get("/{request_id}/tasks")
@@ -286,6 +380,13 @@ async def start_task(task_id: UUID, user: AuthenticatedUser, pool=Depends(get_po
 
 class TaskCompleteBody(BaseModel):
     result: str = ""
+    result_structured: dict | None = None
+    result_summary: str | None = None
+    validation_status: str = Field(
+        default="not_applicable",
+        pattern=r"^(not_applicable|valid|invalid|extraction_failed|fallback_used|repair_succeeded)$",
+    )
+    validation_errors: list | None = None
 
 
 @router.post("/tasks/{task_id}/complete")
@@ -298,7 +399,38 @@ async def complete_task(
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
-    task = await repo.complete_task(str(task_id), body.result, org_id=str(user.organization_id))
+    task_row = await repo.get_task(str(task_id), org_id=str(user.organization_id))
+    if not task_row:
+        raise HTTPException(404, "Task not found")
+
+    output_contract = task_row.get("output_contract")
+    if isinstance(output_contract, str):
+        output_contract = json.loads(output_contract)
+    if output_contract and body.validation_status in ("valid", "repair_succeeded"):
+        if body.result_structured is None:
+            raise HTTPException(
+                422,
+                "result_structured is required when validation_status is valid/repair_succeeded",
+            )
+        try:
+            validate(instance=body.result_structured, schema=output_contract.get("json_schema", {}))
+        except ValidationError as exc:
+            raise HTTPException(
+                422, f"result_structured failed schema validation: {exc.message}"
+            ) from exc
+
+    try:
+        task = await repo.complete_task(
+            str(task_id),
+            body.result,
+            org_id=str(user.organization_id),
+            result_structured=body.result_structured,
+            result_summary=body.result_summary,
+            validation_status=body.validation_status,
+            validation_errors=body.validation_errors,
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     if not task:
         raise HTTPException(
             409,
@@ -347,6 +479,24 @@ async def retry_task(task_id: UUID, user: AuthenticatedUser, pool=Depends(get_po
 
     repo = RequestRepository(pool)
     task = await repo.retry_task(str(task_id), org_id=str(user.organization_id))
+    if not task:
+        raise HTTPException(409, "Task not in failed state")
+    return task
+
+
+@router.post("/tasks/{task_id}/retry-with-feedback")
+async def retry_task_with_feedback(
+    task_id: UUID,
+    user: AuthenticatedUser,
+    body: ReviewRejectBody = Body(...),
+    pool=Depends(get_pool),
+):
+    from lucent.db.requests import RequestRepository
+
+    repo = RequestRepository(pool)
+    task = await repo.retry_task_with_feedback(
+        str(task_id), body.feedback, org_id=str(user.organization_id)
+    )
     if not task:
         raise HTTPException(409, "Task not in failed state")
     return task

@@ -503,12 +503,12 @@ class TestReleaseStale:
 class TestRequestCompletion:
     @pytest.mark.asyncio
     async def test_auto_complete_when_all_tasks_done(self, repo, req, task):
-        """Request auto-completes when all tasks are completed."""
+        """Request moves to review when all tasks are completed."""
         await repo.claim_task(str(task["id"]), "d1")
         await repo.complete_task(str(task["id"]), "done")
         org_id = str(req["organization_id"])
         updated = await repo.get_request(str(req["id"]), org_id)
-        assert updated["status"] == "completed"
+        assert updated["status"] == "review"
 
     @pytest.mark.asyncio
     async def test_auto_fail_when_any_task_failed(self, repo, test_organization):
@@ -980,6 +980,14 @@ class TestListActiveWork:
         result = await repo.list_active_work(org)
         ids = [str(r["id"]) for r in result["items"]]
         assert str(req["id"]) not in ids
+
+    @pytest.mark.asyncio
+    async def test_includes_review_request(self, repo, req, test_organization):
+        org = str(test_organization["id"])
+        await repo.update_request_status(str(req["id"]), "review", org_id=org)
+        result = await repo.list_active_work(org)
+        ids = [str(r["id"]) for r in result["items"]]
+        assert str(req["id"]) in ids
 
     @pytest.mark.asyncio
     async def test_task_count_aggregation(self, repo, req, test_organization):

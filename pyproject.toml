@@ -33,6 +33,7 @@ dependencies = [
     "langchain-openai>=1.0.0",
     "langchain-google-genai>=4.0.0",
     "langchain-ollama>=1.0.0",
+    "jsonschema>=4.23.0",
 ]
 
 [project.urls]

@@ -899,9 +899,12 @@ Returns:
             if old_memory is None:
                 return _error_response(f"Memory not found or not accessible: {memory_id}")
 
-            # Check ownership - only the owner can delete a memory
+            # Check ownership OR MEMORY_DELETE_ANY permission
             if old_memory.get("user_id") != user_id:
-                return _error_response("Permission denied: only the owner can delete this memory")
+                from lucent.rbac import Permission, has_permission, Role
+                role = Role.from_string(user_role or "member")
+                if not has_permission(role, Permission.MEMORY_DELETE_ANY):
+                    return _error_response("Permission denied: only the owner can delete this memory")
 
             # Individual memories cannot be deleted via MCP
             # - they are deleted when users are removed

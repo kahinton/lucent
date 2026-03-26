@@ -10,13 +10,75 @@ from typing import Any
 from uuid import UUID
 
 from asyncpg import Pool
+from jsonschema import SchemaError
+from jsonschema.validators import validator_for
 
-from lucent.constants import VALID_REQUEST_SOURCES, VALID_REQUEST_STATUSES
+from lucent.constants import (
+    REQUEST_STATUS_CANCELLED,
+    REQUEST_STATUS_COMPLETED,
+    REQUEST_STATUS_FAILED,
+    REQUEST_STATUS_IN_PROGRESS,
+    REQUEST_STATUS_NEEDS_REWORK,
+    REQUEST_STATUS_REVIEW,
+    VALID_REQUEST_SOURCES,
+    VALID_REQUEST_STATUSES,
+)
 
 
 def _request_fingerprint(title: str) -> str:
     """Compute a deduplication fingerprint from a request title."""
     return hashlib.md5(title.lower().strip().encode()).hexdigest()
+
+
+_VALID_OUTPUT_FAILURE_POLICIES = {"fail", "fallback", "retry_then_fallback"}
+_VALID_VALIDATION_STATUSES = {
+    "not_applicable",
+    "valid",
+    "invalid",
+    "extraction_failed",
+    "fallback_used",
+    "repair_succeeded",
+}
+
+
+def _validate_output_contract(output_contract: dict | None) -> None:
+    """Validate output_contract shape and JSON Schema structure.
+
+    Contract format:
+      {
+        "json_schema": {...},
+        "on_failure": "fail|fallback|retry_then_fallback",  # optional
+        "max_retries": 1,                                   # optional
+      }
+    """
+    if output_contract is None:
+        return
+    if not isinstance(output_contract, dict):
+        raise ValueError("output_contract must be an object")
+
+    json_schema = output_contract.get("json_schema")
+    if json_schema is None:
+        raise ValueError("output_contract must include 'json_schema'")
+    if not isinstance(json_schema, dict):
+        raise ValueError("output_contract.json_schema must be an object")
+
+    try:
+        validator_cls = validator_for(json_schema)
+        validator_cls.check_schema(json_schema)
+    except SchemaError as exc:
+        raise ValueError(f"Invalid output_contract.json_schema: {exc.message}") from exc
+
+    on_failure = output_contract.get("on_failure", "fallback")
+    if on_failure not in _VALID_OUTPUT_FAILURE_POLICIES:
+        valid = ", ".join(sorted(_VALID_OUTPUT_FAILURE_POLICIES))
+        raise ValueError(
+            f"Invalid output_contract.on_failure '{on_failure}'. "
+            f"Must be one of: {valid}"
+        )
+
+    max_retries = output_contract.get("max_retries", 1)
+    if not isinstance(max_retries, int) or max_retries < 0:
+        raise ValueError("output_contract.max_retries must be an integer >= 0")
 
 
 class RequestRepository:
@@ -38,12 +100,14 @@ class RequestRepository:
         dependency_policy: str = "strict",
     ) -> dict:
         if source not in VALID_REQUEST_SOURCES:
+            valid_sources = ", ".join(sorted(VALID_REQUEST_SOURCES))
             raise ValueError(
-                f"Invalid source '{source}'. Must be one of: {', '.join(sorted(VALID_REQUEST_SOURCES))}"
+                f"Invalid source '{source}'. Must be one of: {valid_sources}"
             )
         if dependency_policy not in ("strict", "permissive"):
             raise ValueError(
-                f"Invalid dependency_policy '{dependency_policy}'. Must be 'strict' or 'permissive'."
+                "Invalid dependency_policy "
+                f"'{dependency_policy}'. Must be 'strict' or 'permissive'."
             )
         fingerprint = _request_fingerprint(title)
         async with self.pool.acquire() as conn:
@@ -53,9 +117,9 @@ class RequestRepository:
                     organization_id, fingerprint, dependency_policy)
                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                    ON CONFLICT (organization_id, fingerprint)
-                       WHERE status IN ('pending','planned','in_progress')
-                   DO UPDATE SET updated_at = NOW()
-                   RETURNING *""",
+                       WHERE status IN ('pending','planned','in_progress','review','needs_rework')
+                    DO UPDATE SET updated_at = NOW()
+                    RETURNING *""",
                 title,
                 description,
                 source,
@@ -100,7 +164,10 @@ class RequestRepository:
                 base += f" AND source IN ({placeholders})"
 
         count_query = f"SELECT COUNT(*) AS total {base}"
-        query = f"SELECT * {base} ORDER BY created_at DESC LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}"
+        query = (
+            f"SELECT * {base} ORDER BY created_at DESC "
+            f"LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}"
+        )
         params_with_page = [*params, limit, offset]
 
         async with self.pool.acquire() as conn:
@@ -122,18 +189,28 @@ class RequestRepository:
             valid = ", ".join(sorted(VALID_REQUEST_STATUSES))
             raise ValueError(f"Invalid status '{status}'. Must be one of: {valid}")
         now = datetime.now(timezone.utc)
-        completed_at = now if status in ("completed", "failed", "cancelled") else None
+        completed_at = (
+            now
+            if status
+            in (REQUEST_STATUS_COMPLETED, REQUEST_STATUS_FAILED, REQUEST_STATUS_CANCELLED)
+            else None
+        )
+        reviewed_at = (
+            now if status in (REQUEST_STATUS_REVIEW, REQUEST_STATUS_NEEDS_REWORK) else None
+        )
         if org_id:
             async with self.pool.acquire() as conn:
                 row = await conn.fetchrow(
                     """UPDATE requests
                        SET status = $2, updated_at = $3,
-                           completed_at = COALESCE($4, completed_at)
-                       WHERE id = $1 AND organization_id = $5 RETURNING *""",
+                           completed_at = COALESCE($4, completed_at),
+                           reviewed_at = COALESCE($5, reviewed_at)
+                       WHERE id = $1 AND organization_id = $6 RETURNING *""",
                     UUID(request_id),
                     status,
                     now,
                     completed_at,
+                    reviewed_at,
                     UUID(org_id),
                 )
         else:
@@ -141,14 +218,47 @@ class RequestRepository:
                 row = await conn.fetchrow(
                     """UPDATE requests
                        SET status = $2, updated_at = $3,
-                           completed_at = COALESCE($4, completed_at)
+                           completed_at = COALESCE($4, completed_at),
+                           reviewed_at = COALESCE($5, reviewed_at)
                        WHERE id = $1 RETURNING *""",
                     UUID(request_id),
                     status,
                     now,
                     completed_at,
+                    reviewed_at,
                 )
         return dict(row) if row else None
+
+    async def get_requests_in_review(
+        self, org_id: str, limit: int = 25, offset: int = 0
+    ) -> dict:
+        """List requests currently awaiting or undergoing review."""
+        base = """FROM requests
+                   WHERE organization_id = $1
+                     AND status IN ('review', 'needs_rework')"""
+        async with self.pool.acquire() as conn:
+            count_row = await conn.fetchrow(
+                f"SELECT COUNT(*) AS total {base}",
+                UUID(org_id),
+            )
+            total_count = count_row["total"] if count_row else 0
+            rows = await conn.fetch(
+                f"""SELECT * {base}
+                    ORDER BY
+                      CASE status WHEN 'review' THEN 0 ELSE 1 END,
+                      updated_at DESC
+                    LIMIT $2 OFFSET $3""",
+                UUID(org_id),
+                limit,
+                offset,
+            )
+        return {
+            "items": [dict(r) for r in rows],
+            "total_count": total_count,
+            "offset": offset,
+            "limit": limit,
+            "has_more": offset + len(rows) < total_count,
+        }
 
     async def get_request_with_tasks(self, request_id: str, org_id: str) -> dict | None:
         """Load a request with its full task tree, events, and memory links."""
@@ -235,18 +345,23 @@ class RequestRepository:
         sandbox_template_id: str | None = None,
         sandbox_config: dict | None = None,
         requesting_user_id: str | None = None,
+        output_contract: dict | None = None,
     ) -> dict:
+        _validate_output_contract(output_contract)
+
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 """INSERT INTO tasks
                    (request_id, parent_task_id, title, description, agent_type,
                      agent_definition_id, priority, sequence_order, organization_id,
-                     model, sandbox_template_id, sandbox_config, requesting_user_id)
+                     model, sandbox_template_id, sandbox_config, requesting_user_id,
+                     output_contract)
                    VALUES (
                      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-                     COALESCE($13, (SELECT created_by FROM requests WHERE id = $1))
-                   )
-                   RETURNING *""",
+                     COALESCE($13, (SELECT created_by FROM requests WHERE id = $1)),
+                     $14
+                    )
+                    RETURNING *""",
                 UUID(request_id),
                 UUID(parent_task_id) if parent_task_id else None,
                 title,
@@ -260,6 +375,7 @@ class RequestRepository:
                 UUID(sandbox_template_id) if sandbox_template_id else None,
                 json.dumps(sandbox_config) if sandbox_config else None,
                 UUID(requesting_user_id) if requesting_user_id else None,
+                json.dumps(output_contract) if output_contract else None,
             )
         task = dict(row)
         # Log creation event
@@ -299,7 +415,10 @@ class RequestRepository:
             base += f" AND status = ${len(params)}"
 
         count_query = f"SELECT COUNT(*) AS total {base}"
-        query = f"SELECT * {base} ORDER BY sequence_order, created_at LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}"
+        query = (
+            f"SELECT * {base} ORDER BY sequence_order, created_at "
+            f"LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}"
+        )
         params_with_page = [*params, limit, offset]
 
         async with self.pool.acquire() as conn:
@@ -525,23 +644,43 @@ class RequestRepository:
         return None
 
     async def complete_task(
-        self, task_id: str, result: str, org_id: str | None = None
+        self,
+        task_id: str,
+        result: str,
+        org_id: str | None = None,
+        result_structured: dict | None = None,
+        result_summary: str | None = None,
+        validation_status: str = "not_applicable",
+        validation_errors: list | None = None,
     ) -> dict | None:
         """Mark task as completed with result.
 
         Only tasks in 'claimed' or 'running' state can be completed
         (workflow-audit/phase-4: status transition guard).
         """
+        if validation_status not in _VALID_VALIDATION_STATUSES:
+            valid = ", ".join(sorted(_VALID_VALIDATION_STATUSES))
+            raise ValueError(
+                f"Invalid validation_status '{validation_status}'. Must be one of: {valid}"
+            )
         now = datetime.now(timezone.utc)
         if org_id:
             async with self.pool.acquire() as conn:
                 row = await conn.fetchrow(
                     """UPDATE tasks SET status = 'completed', result = $2,
-                       completed_at = $3, updated_at = $3
+                       result_structured = $3,
+                       result_summary = $4,
+                       validation_status = $5,
+                       validation_errors = $6,
+                       completed_at = $7, updated_at = $7
                        WHERE id = $1 AND status IN ('claimed', 'running')
-                       AND organization_id = $4 RETURNING *""",
+                       AND organization_id = $8 RETURNING *""",
                     UUID(task_id),
                     result,
+                    json.dumps(result_structured) if result_structured is not None else None,
+                    result_summary,
+                    validation_status,
+                    json.dumps(validation_errors) if validation_errors is not None else None,
                     now,
                     UUID(org_id),
                 )
@@ -549,11 +688,19 @@ class RequestRepository:
             async with self.pool.acquire() as conn:
                 row = await conn.fetchrow(
                     """UPDATE tasks SET status = 'completed', result = $2,
-                       completed_at = $3, updated_at = $3
+                       result_structured = $3,
+                       result_summary = $4,
+                       validation_status = $5,
+                       validation_errors = $6,
+                       completed_at = $7, updated_at = $7
                        WHERE id = $1 AND status IN ('claimed', 'running')
                        RETURNING *""",
                     UUID(task_id),
                     result,
+                    json.dumps(result_structured) if result_structured is not None else None,
+                    result_summary,
+                    validation_status,
+                    json.dumps(validation_errors) if validation_errors is not None else None,
                     now,
                 )
         if row:
@@ -668,6 +815,54 @@ class RequestRepository:
             return task
         return None
 
+    async def retry_task_with_feedback(
+        self, task_id: str, feedback: str, org_id: str | None = None
+    ) -> dict | None:
+        """Retry a failed task and persist corrective feedback on the parent request."""
+        task = await self.retry_task(task_id, org_id=org_id)
+        if not task:
+            return None
+
+        now = datetime.now(timezone.utc)
+        request_id = str(task["request_id"])
+        async with self.pool.acquire() as conn:
+            if org_id:
+                await conn.execute(
+                    """UPDATE requests
+                       SET status = $2,
+                           review_feedback = $3,
+                           review_count = review_count + 1,
+                           updated_at = $4
+                       WHERE id = $1 AND organization_id = $5""",
+                    UUID(request_id),
+                    REQUEST_STATUS_IN_PROGRESS,
+                    feedback,
+                    now,
+                    UUID(org_id),
+                )
+            else:
+                await conn.execute(
+                    """UPDATE requests
+                       SET status = $2,
+                           review_feedback = $3,
+                           review_count = review_count + 1,
+                           updated_at = $4
+                       WHERE id = $1""",
+                    UUID(request_id),
+                    REQUEST_STATUS_IN_PROGRESS,
+                    feedback,
+                    now,
+                )
+
+        await self.add_task_event(
+            task_id,
+            "review_feedback",
+            "Retry queued with review feedback",
+            metadata={"feedback": feedback},
+        )
+        refreshed = await self.get_task(task_id, org_id=org_id)
+        return refreshed
+
     async def release_stale_tasks(
         self, stale_minutes: int = 30, org_id: str | None = None
     ) -> int:
@@ -758,7 +953,8 @@ class RequestRepository:
                 )
                 total_count = count_row["total"] if count_row else 0
                 rows = await conn.fetch(
-                    "SELECT * FROM task_events WHERE task_id = $1 ORDER BY created_at LIMIT $2 OFFSET $3",
+                    "SELECT * FROM task_events WHERE task_id = $1 "
+                    "ORDER BY created_at LIMIT $2 OFFSET $3",
                     UUID(task_id),
                     limit,
                     offset,
@@ -794,7 +990,13 @@ class RequestRepository:
             metadata={"memory_id": memory_id, "relation": relation},
         )
 
-    async def list_task_memories(self, task_id: str, org_id: str | None = None, limit: int = 25, offset: int = 0) -> dict:
+    async def list_task_memories(
+        self,
+        task_id: str,
+        org_id: str | None = None,
+        limit: int = 25,
+        offset: int = 0,
+    ) -> dict:
         async with self.pool.acquire() as conn:
             if org_id:
                 count_row = await conn.fetchrow(
@@ -851,12 +1053,12 @@ class RequestRepository:
         async with self.pool.acquire() as conn:
             await conn.execute(
                 """UPDATE requests SET status = 'in_progress', updated_at = NOW()
-                   WHERE id = $1 AND status IN ('pending', 'planned', 'failed')""",
+                   WHERE id = $1 AND status IN ('pending', 'planned', 'failed', 'needs_rework')""",
                 UUID(request_id),
             )
 
     async def _check_request_completion(self, request_id: str) -> None:
-        """If all tasks are done (completed/failed/cancelled), complete the request."""
+        """If all tasks are done, move request to review (or failed if task failed)."""
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 """SELECT
@@ -872,7 +1074,7 @@ class RequestRepository:
                     "SELECT COUNT(*) FROM tasks WHERE request_id = $1 AND status = 'failed'",
                     UUID(request_id),
                 )
-            status = "failed" if failed > 0 else "completed"
+            status = REQUEST_STATUS_FAILED if failed > 0 else REQUEST_STATUS_REVIEW
             await self.update_request_status(request_id, status)
 
     async def reconcile_request_statuses(self, org_id: str | None = None) -> int:
@@ -892,7 +1094,7 @@ class RequestRepository:
             # Case 1: in_progress requests where all tasks are done
             rows = await conn.fetch(
                 f"""SELECT r.id FROM requests r
-                   WHERE r.status = 'in_progress' {org_filter}
+                   WHERE r.status IN ('in_progress', 'needs_rework') {org_filter}
                    AND NOT EXISTS (
                        SELECT 1 FROM tasks t
                        WHERE t.request_id = r.id
@@ -909,7 +1111,7 @@ class RequestRepository:
             rows = await conn.fetch(
                 f"""SELECT DISTINCT r.id FROM requests r
                    JOIN tasks t ON t.request_id = r.id
-                   WHERE r.status = 'pending' {org_filter}
+                   WHERE r.status IN ('pending', 'planned', 'needs_rework') {org_filter}
                    AND t.status IN ('claimed', 'running', 'completed')""",
                 *params,
             )
@@ -927,7 +1129,9 @@ class RequestRepository:
             req_stats = await conn.fetchrow(
                 """SELECT
                      COUNT(*) as total,
-                     COUNT(*) FILTER (WHERE status = 'in_progress') as active,
+                     COUNT(*) FILTER (
+                         WHERE status IN ('in_progress', 'review', 'needs_rework')
+                     ) as active,
                      COUNT(*) FILTER (WHERE status = 'pending') as pending,
                      COUNT(*) FILTER (WHERE status = 'completed') as completed
                    FROM requests WHERE organization_id = $1""",

@@ -302,7 +302,7 @@ class TestRequestStatusReconciliation:
         fixed = await wf_repo.reconcile_request_statuses(org_id=org)
         updated = await wf_repo.get_request(str(req["id"]), org)
         assert fixed >= 1
-        assert updated["status"] == "completed"
+        assert updated["status"] == "review"
 
     @pytest.mark.asyncio
     async def test_in_progress_all_failed_becomes_failed(self, wf_repo, wf_org):
@@ -641,8 +641,7 @@ class TestRequestLifecycleStateMachine:
         await wf_repo.complete_task(str(t2["id"]), "result 2")
 
         final = await wf_repo.get_request(str(req["id"]), org)
-        assert final["status"] == "completed"
-        assert final["completed_at"] is not None
+        assert final["status"] == "review"
 
     @pytest.mark.asyncio
     async def test_request_auto_fails_when_all_tasks_terminal_with_failure(

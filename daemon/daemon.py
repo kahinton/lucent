@@ -88,6 +88,12 @@ except (ImportError, Exception):
     AdaptationPipeline = None
     parse_assessment_output = None
 
+# Structured output contract validation/extraction helpers.
+try:
+    from output_validation import process_task_output
+except ImportError:
+    from daemon.output_validation import process_task_output
+
 # OpenTelemetry instrumentation (optional — graceful when not available)
 try:
     from lucent.telemetry import get_meter, get_tracer, init_telemetry, shutdown_telemetry
@@ -159,6 +165,12 @@ REQUIRE_APPROVAL = os.environ.get("LUCENT_REQUIRE_APPROVAL", "false").lower() in
 REVIEW_MODELS = [
     m.strip() for m in os.environ.get("LUCENT_REVIEW_MODELS", "").split(",") if m.strip()
 ]
+
+# Request-level post-completion review configuration.
+REQUEST_REVIEW_AGENT_TYPE = os.environ.get("LUCENT_REQUEST_REVIEW_AGENT_TYPE", "request-review")
+REQUEST_REVIEW_FALLBACK_AGENT_TYPE = os.environ.get("LUCENT_REQUEST_REVIEW_FALLBACK_AGENT_TYPE", "code")
+REQUEST_REVIEW_MODEL = os.environ.get("LUCENT_REQUEST_REVIEW_MODEL", MODEL)
+REQUEST_REVIEW_TASK_TITLE = "Post-completion review"
 
 # Git operations: daemon can commit (but never push without ALLOW_GIT_PUSH)
 _git_commit_val = os.environ.get("LUCENT_ALLOW_GIT_COMMIT", "false")
@@ -269,7 +281,7 @@ async def _provision_daemon_api_key(instance_id: str) -> str | None:
                     "INSERT INTO users (external_id, provider, organization_id, "
                     "  email, display_name, role) "
                     "VALUES ('daemon-service', 'local', $1, "
-                    "  'daemon@lucent.local', 'Lucent Daemon', 'member') "
+                    "  'daemon@lucent.local', 'Lucent Daemon', 'admin') "
                     "RETURNING id, organization_id",
                     org_id,
                 )
@@ -567,6 +579,36 @@ class RequestAPI:
         return None
 
     @staticmethod
+    async def list_requests(status: str | None = None) -> dict | None:
+        params = {}
+        if status:
+            params["status"] = status
+        try:
+            async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
+                resp = await client.get(
+                    f"{API_BASE}/requests",
+                    params=params if params else None,
+                    headers=API_HEADERS,
+                )
+                if resp.status_code == 200:
+                    return resp.json()
+        except Exception as e:
+            log(f"API list_requests failed: {e}", "WARN")
+        return None
+
+    @staticmethod
+    async def list_requests_in_review() -> list[dict]:
+        try:
+            async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
+                resp = await client.get(f"{API_BASE}/requests/review", headers=API_HEADERS)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    return data.get("items", data) if isinstance(data, dict) else data
+        except Exception as e:
+            log(f"API list_requests_in_review failed: {e}", "WARN")
+        return []
+
+    @staticmethod
     async def create_request(
         title: str,
         description: str | None = None,
@@ -594,6 +636,7 @@ class RequestAPI:
         priority: str = "medium",
         sequence_order: int = 0,
         model: str | None = None,
+        output_contract: dict | None = None,
     ) -> dict | None:
         body = {"title": title, "priority": priority, "sequence_order": sequence_order}
         if agent_type:
@@ -602,6 +645,8 @@ class RequestAPI:
             body["description"] = description
         if model:
             body["model"] = model
+        if output_contract:
+            body["output_contract"] = output_contract
         try:
             async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
                 resp = await client.post(
@@ -611,6 +656,59 @@ class RequestAPI:
                     return resp.json()
         except Exception as e:
             log(f"API create_task failed: {e}", "WARN")
+        return None
+
+    @staticmethod
+    async def update_request_status(request_id: str, status: str) -> dict | None:
+        try:
+            async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
+                resp = await client.patch(
+                    f"{API_BASE}/requests/{request_id}/status",
+                    json={"status": status},
+                    headers=API_HEADERS,
+                )
+                if resp.status_code == 200:
+                    return resp.json()
+                log(
+                    f"API update_request_status returned {resp.status_code}: {resp.text[:200]}",
+                    "WARN",
+                )
+        except Exception as e:
+            log(f"API update_request_status failed: {e}", "WARN")
+        return None
+
+    @staticmethod
+    async def retry_task(task_id: str) -> dict | None:
+        try:
+            async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
+                resp = await client.post(
+                    f"{API_BASE}/requests/tasks/{task_id}/retry",
+                    headers=API_HEADERS,
+                )
+                if resp.status_code == 200:
+                    return resp.json()
+                log(f"API retry_task returned {resp.status_code}: {resp.text[:200]}", "WARN")
+        except Exception as e:
+            log(f"API retry_task failed: {e}", "WARN")
+        return None
+
+    @staticmethod
+    async def reject_request_review(request_id: str, feedback: str) -> dict | None:
+        try:
+            async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
+                resp = await client.post(
+                    f"{API_BASE}/requests/{request_id}/review/reject",
+                    json={"feedback": feedback[:10000]},
+                    headers=API_HEADERS,
+                )
+                if resp.status_code == 200:
+                    return resp.json()
+                log(
+                    f"API reject_request_review returned {resp.status_code}: {resp.text[:200]}",
+                    "WARN",
+                )
+        except Exception as e:
+            log(f"API reject_request_review failed: {e}", "WARN")
         return None
 
     @staticmethod
@@ -657,12 +755,25 @@ class RequestAPI:
         return None
 
     @staticmethod
-    async def complete_task(task_id: str, result: str) -> dict | None:
+    async def complete_task(
+        task_id: str,
+        result: str,
+        result_structured: dict | None = None,
+        result_summary: str | None = None,
+        validation_status: str = "not_applicable",
+        validation_errors: list | None = None,
+    ) -> dict | None:
         try:
             async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
                 resp = await client.post(
                     f"{API_BASE}/requests/tasks/{task_id}/complete",
-                    json={"result": result[:50000]},
+                    json={
+                        "result": result[:50000],
+                        "result_structured": result_structured,
+                        "result_summary": result_summary[:2000] if result_summary else None,
+                        "validation_status": validation_status,
+                        "validation_errors": validation_errors,
+                    },
                     headers=API_HEADERS,
                 )
                 if resp.status_code == 200:
@@ -752,6 +863,14 @@ class RequestAPI:
             return "", ""
 
         request_desc = data.get("description", "")
+        review_feedback = (data.get("review_feedback") or "").strip()
+        if review_feedback:
+            request_desc = (
+                f"{request_desc}\n\n"
+                "--- REVIEW FEEDBACK (REWORK REQUIRED) ---\n"
+                f"{review_feedback}\n"
+                "This feedback is mandatory context for retried/rework tasks."
+            ).strip()
         tasks = data.get("tasks", [])
 
         # Collect results from completed sibling tasks
@@ -760,21 +879,43 @@ class RequestAPI:
         max_context = 30000  # keep total under ~30KB to avoid blowing context windows
 
         for t in tasks:
-            if t.get("status") != "completed" or not t.get("result"):
+            if t.get("status") != "completed":
                 continue
-            result_text = t["result"]
-            # Truncate individual results if very long
-            if len(result_text) > 8000:
-                result_text = result_text[:8000] + "\n[... truncated ...]"
-            if total_len + len(result_text) > max_context:
+
+            parts = [
+                (
+                    f"## Task: {t.get('title', 'Untitled')} (completed)\n"
+                    f"Model: {t.get('model', 'default')} | Agent: {t.get('agent_type', '?')}"
+                )
+            ]
+
+            # Structured contract path (preferred): pass validated JSON output for reliable
+            # inter-task transfer, with summary text for compact context.
+            result_structured = t.get("result_structured")
+            validation_status = t.get("validation_status", "not_applicable")
+            if result_structured and validation_status in ("valid", "repair_succeeded"):
+                structured_json = json.dumps(result_structured, indent=2)
+                if len(structured_json) > 6000:
+                    structured_json = structured_json[:6000] + "\n... truncated ..."
+                parts.append(f"\n### Structured Output\n```json\n{structured_json}\n```")
+                summary = t.get("result_summary")
+                if summary:
+                    parts.append(f"\n### Summary\n{summary}")
+            else:
+                # Backward-compatible text fallback for legacy tasks or failed validation.
+                result_text = t.get("result") or ""
+                if not result_text:
+                    continue
+                if len(result_text) > 8000:
+                    result_text = result_text[:8000] + "\n[... truncated ...]"
+                parts.append(f"\n{result_text}")
+
+            sibling_text = "\n".join(parts)
+            if total_len + len(sibling_text) > max_context:
                 sibling_parts.append("[Additional completed task results omitted for space]")
                 break
-            sibling_parts.append(
-                f"## Task: {t.get('title', 'Untitled')} (completed)\n"
-                f"Model: {t.get('model', 'default')} | Agent: {t.get('agent_type', '?')}\n\n"
-                f"{result_text}"
-            )
-            total_len += len(result_text)
+            sibling_parts.append(sibling_text)
+            total_len += len(sibling_text)
 
         sibling_text = "\n\n".join(sibling_parts) if sibling_parts else ""
         return request_desc, sibling_text
@@ -2026,6 +2167,9 @@ class LucentDaemon:
 
     async def _dispatch_tracked_tasks(self, max_tasks: int = 2):
         """Dispatch tasks from the new request tracking queue."""
+        # Ensure requests that reached review status have a review task queued.
+        await self._ensure_request_review_tasks()
+
         pending = await RequestAPI.get_pending_tasks()
         if not pending:
             return
@@ -2092,6 +2236,24 @@ class LucentDaemon:
                         f"The following tasks in this request have already completed. "
                         f"Use these results directly — do not re-search for this information.\n\n"
                         f"{sibling_results}"
+                    )
+                output_contract = task.get("output_contract")
+                if output_contract:
+                    schema_str = json.dumps(output_contract.get("json_schema", {}), indent=2)
+                    context_parts.append(
+                        "--- OUTPUT CONTRACT ---\n"
+                        "This task requires structured output. After your analysis and work, "
+                        "you MUST include a JSON block wrapped in <task_output> tags that "
+                        "conforms to the following schema:\n\n"
+                        f"```json\n{schema_str}\n```\n\n"
+                        "Format your response as normal prose/analysis, then include the "
+                        "structured output at the end of your response:\n\n"
+                        "<task_output>\n"
+                        "{... your JSON output matching the schema above ...}\n"
+                        "</task_output>\n\n"
+                        "The structured output will be validated against the schema and passed "
+                        "to downstream tasks. Include a 'summary' field in your JSON if the "
+                        "schema allows it — this helps downstream tasks get context efficiently."
                     )
                 task_context = "\n\n".join(context_parts)
 
@@ -2297,6 +2459,40 @@ class LucentDaemon:
             success, reason = self._validate_task_result(result)
 
             if success:
+                output_contract = task.get("output_contract")
+                output_result = process_task_output(result, output_contract)
+
+                if output_result["validation_status"] in ("invalid", "extraction_failed"):
+                    on_failure = (output_contract or {}).get("on_failure", "fallback")
+                    max_retries = int((output_contract or {}).get("max_retries", 1) or 0)
+
+                    if on_failure == "retry_then_fallback" and max_retries > 0:
+                        repair_text = await self._repair_structured_output(
+                            task_id,
+                            result,
+                            output_contract,
+                            selected_model,
+                        )
+                        if repair_text:
+                            repair_result = process_task_output(repair_text, output_contract)
+                            if repair_result["validation_status"] == "valid":
+                                output_result = repair_result
+                                output_result["validation_status"] = "repair_succeeded"
+                                result = repair_text
+
+                    # If validation still failed after policy actions, either fail or fallback.
+                    if output_result["validation_status"] not in ("valid", "repair_succeeded"):
+                        if on_failure == "fail":
+                            await RequestAPI.fail_task(
+                                task_id,
+                                "Output validation failed: "
+                                f"{output_result.get('validation_errors')}",
+                            )
+                            continue
+                        output_result["validation_status"] = "fallback_used"
+                        output_result["result_structured"] = None
+                        log(f"Task {task_id[:8]}: validation failed, using text fallback", "WARN")
+
                 # Multi-model review if configured
                 if REVIEW_MODELS:
                     review_passed = await self._multi_model_review(
@@ -2307,15 +2503,50 @@ class LucentDaemon:
                         await RequestAPI.fail_task(task_id, "Failed multi-model review")
                         continue
 
-                await RequestAPI.complete_task(task_id, result)
+                await RequestAPI.complete_task(
+                    task_id,
+                    result,
+                    result_structured=output_result.get("result_structured"),
+                    result_summary=output_result.get("result_summary"),
+                    validation_status=output_result.get("validation_status", "not_applicable"),
+                    validation_errors=output_result.get("validation_errors"),
+                )
+
+                if self._is_request_review_task(task):
+                    try:
+                        await self._process_request_review_task(task, result or "")
+                    except Exception as review_err:
+                        log(
+                            f"Review processing failed for task {task_id[:8]}: {review_err}; "
+                            "marking request for manual review",
+                            "WARN",
+                        )
+                        request_id = str(task.get("request_id", ""))
+                        if request_id:
+                            await RequestAPI.update_request_status(request_id, "needs_rework")
+                        await RequestAPI.add_event(
+                            task_id,
+                            "request_review_processing_failed",
+                            f"Automatic review processing failed: {review_err}",
+                        )
+
                 log(f"Tracked task {task_id[:8]} completed ({len(result) if result else 0} chars)")
                 if self._tracer:
                     self._tasks_completed_total.add(1, {"status": "success", "agent_type": agent_type})
             else:
-                await RequestAPI.fail_task(task_id, reason)
-                log(f"Tracked task {task_id[:8]} failed: {reason}", "WARN")
-                if self._tracer:
-                    self._tasks_completed_total.add(1, {"status": "failed", "agent_type": agent_type})
+                if self._is_request_review_task(task):
+                    await self._handle_review_task_failure(task, reason)
+                    if self._tracer:
+                        self._tasks_completed_total.add(
+                            1, {"status": "manual_review", "agent_type": agent_type}
+                        )
+                else:
+                    await RequestAPI.fail_task(task_id, reason)
+                    log(f"Tracked task {task_id[:8]} failed: {reason}", "WARN")
+                    if self._tracer:
+                        self._tasks_completed_total.add(
+                            1, {"status": "failed", "agent_type": agent_type}
+                        )
 
     async def _create_task_sandbox(
         self,
@@ -2468,15 +2699,410 @@ class LucentDaemon:
         )
         return passed
 
+    def _is_request_review_task(self, task: dict) -> bool:
+        """Identify daemon-created post-completion review tasks."""
+        title = (task.get("title") or "").strip().lower()
+        desc = task.get("description") or ""
+        return title == REQUEST_REVIEW_TASK_TITLE.lower() or "REQUEST_REVIEW_DECISION:" in desc
+
+    def _parse_review_decision(self, text: str) -> dict:
+        """Parse review output into a structured decision.
+
+        Accepted formats:
+        - REQUEST_REVIEW_DECISION: APPROVED|NEEDS_REWORK
+        - Decision: APPROVED|NEEDS_REWORK
+        Plus optional sections:
+        - TASK_IDS_TO_REWORK: <id1>, <id2>, ...
+        - FEEDBACK: ...
+        """
+        raw = (text or "").strip()
+        upper = raw.upper()
+        decision = "APPROVED" if "NEEDS_REWORK" not in upper else "NEEDS_REWORK"
+        recognized = False
+
+        m = re.search(
+            r"(?:REQUEST_REVIEW_DECISION|DECISION)\s*:\s*(APPROVED|NEEDS_REWORK)",
+            raw,
+            flags=re.IGNORECASE,
+        )
+        if m:
+            decision = m.group(1).upper()
+            recognized = True
+        elif "NEEDS_REWORK" in upper:
+            decision = "NEEDS_REWORK"
+            recognized = True
+        elif "APPROVED" in upper:
+            decision = "APPROVED"
+            recognized = True
+
+        task_ids: list[str] = []
+        mt = re.search(
+            r"TASK_IDS_TO_REWORK\s*:\s*(.+?)(?:\n[A-Z_ ]+\s*:|\Z)",
+            raw,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if mt:
+            candidates = re.split(r"[\s,]+", mt.group(1).strip())
+            task_ids = [
+                c.strip().strip("[](){}")
+                for c in candidates
+                if c.strip() and re.fullmatch(r"[0-9a-fA-F-]{8,64}", c.strip().strip("[](){}"))
+            ]
+
+        mf = re.search(
+            r"FEEDBACK\s*:\s*(.+?)(?:\n[A-Z_ ]+\s*:|\Z)",
+            raw,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        feedback = (mf.group(1).strip() if mf else raw)[:10000]
+        return {
+            "decision": decision,
+            "task_ids": task_ids,
+            "feedback": feedback,
+            "recognized": recognized,
+        }
+
+    async def _find_review_agent_type(
+        self, org_id: str, requesting_user_id: str
+    ) -> tuple[str | None, str]:
+        """Choose request-level review agent type with fallback."""
+        primary = REQUEST_REVIEW_AGENT_TYPE
+        fallback = REQUEST_REVIEW_FALLBACK_AGENT_TYPE
+
+        primary_agent = await load_accessible_agent(
+            org_id=org_id,
+            requester_user_id=requesting_user_id,
+            agent_type=primary,
+        )
+        if primary_agent:
+            return primary, "primary"
+
+        fallback_agent = await load_accessible_agent(
+            org_id=org_id,
+            requester_user_id=requesting_user_id,
+            agent_type=fallback,
+        )
+        if fallback_agent:
+            log(
+                f"Request review fallback: using '{fallback}' because '{primary}' is unavailable",
+                "WARN",
+            )
+            return fallback, "fallback"
+
+        return None, "none"
+
+    async def _create_request_review_task(self, request_id: str, request_data: dict) -> dict | None:
+        """Create a review task when a request enters review state."""
+        tasks = request_data.get("tasks", []) or []
+        if any(
+            self._is_request_review_task(t)
+            and t.get("status") in ("pending", "planned", "claimed", "running")
+            for t in tasks
+        ):
+            return None
+
+        org_id = str(request_data.get("organization_id", ""))
+        requester = request_data.get("created_by")
+        if not requester or not org_id:
+            log(
+                f"Request {request_id[:8]} in review but missing created_by/org_id; manual review needed",
+                "WARN",
+            )
+            return None
+        requesting_user_id = str(requester)
+
+        agent_type, mode = await self._find_review_agent_type(org_id, requesting_user_id)
+        if not agent_type:
+            log(
+                f"Request {request_id[:8]} has no accessible review agent; manual review required",
+                "WARN",
+            )
+            return None
+
+        non_review_tasks = [t for t in tasks if not self._is_request_review_task(t)]
+        done_tasks = [t for t in non_review_tasks if t.get("status") in ("completed", "failed", "cancelled")]
+        task_summaries = []
+        for idx, t in enumerate(done_tasks, 1):
+            tid = str(t.get("id", ""))
+            status = t.get("status", "unknown")
+            title = t.get("title", "Untitled")
+            result = (t.get("result") or t.get("error") or "")[:1500]
+            if not result:
+                result = "(no output)"
+            task_summaries.append(
+                f"{idx}. [{status}] {title}\n"
+                f"   task_id: {tid}\n"
+                f"   output:\n{result}"
+            )
+        if not task_summaries:
+            task_summaries.append("No terminal tasks found.")
+
+        dep_policy = request_data.get("dependency_policy", "strict")
+        failed_count = sum(1 for t in non_review_tasks if t.get("status") == "failed")
+        cancelled_count = sum(1 for t in non_review_tasks if t.get("status") == "cancelled")
+        incomplete_note = ""
+        if dep_policy == "permissive" and (failed_count > 0 or cancelled_count > 0):
+            incomplete_note = (
+                "\n\nNOTE: dependency_policy is permissive and some tasks are incomplete/failed. "
+                "Account for this in your review and require rework if needed."
+            )
+
+        review_description = (
+            "Perform post-completion request review.\n\n"
+            "You are validating whether the request outcomes satisfy the original request goals.\n\n"
+            f"Original request title: {request_data.get('title', '')}\n"
+            f"Original request description:\n{request_data.get('description', '')}\n\n"
+            "Task outcomes:\n"
+            f"{chr(10).join(task_summaries)}"
+            f"{incomplete_note}\n\n"
+            "Return your decision in this exact machine-readable shape:\n"
+            "REQUEST_REVIEW_DECISION: APPROVED|NEEDS_REWORK\n"
+            "TASK_IDS_TO_REWORK: <comma-separated task ids, optional when approved>\n"
+            "FEEDBACK: <actionable rationale and correction guidance>"
+        )
+
+        review_task = await RequestAPI.create_task(
+            request_id=request_id,
+            title=REQUEST_REVIEW_TASK_TITLE,
+            agent_type=agent_type,
+            description=review_description,
+            priority=request_data.get("priority", "medium"),
+            sequence_order=10_000_000,
+            model=REQUEST_REVIEW_MODEL,
+        )
+        if review_task:
+            log(
+                f"Request {request_id[:8]} moved to review; created review task {str(review_task.get('id', ''))[:8]} "
+                f"agent={agent_type} mode={mode}",
+            )
+        else:
+            log(
+                f"Failed to create review task for request {request_id[:8]}; manual review required",
+                "WARN",
+            )
+        return review_task
+
+    async def _ensure_request_review_tasks(self) -> None:
+        """Ensure each request in review has a queued review task."""
+        review_requests = await RequestAPI.list_requests_in_review()
+        if not review_requests:
+            return
+
+        for req in review_requests:
+            req_id = str(req.get("id", ""))
+            status = req.get("status")
+            if not req_id or status != "review":
+                continue
+            full = await RequestAPI.get_request(req_id)
+            if not full:
+                continue
+            created = await self._create_request_review_task(req_id, full)
+            if created:
+                await RequestAPI.add_event(
+                    str(created.get("id")),
+                    "request_review_started",
+                    f"Auto-created review task for request {req_id[:8]}",
+                )
+
+    async def _process_request_review_task(self, task: dict, review_result: str) -> None:
+        """Apply request-level review decision (approve or trigger rework)."""
+        request_id = str(task.get("request_id", ""))
+        if not request_id:
+            return
+        request_data = await RequestAPI.get_request(request_id)
+        if not request_data:
+            return
+
+        parsed = self._parse_review_decision(review_result or "")
+        decision = parsed["decision"]
+        feedback = parsed["feedback"]
+        task_ids = parsed["task_ids"]
+        recognized = bool(parsed.get("recognized"))
+
+        if not recognized:
+            log(
+                f"Request review output for {request_id[:8]} not parseable; manual review required",
+                "WARN",
+            )
+            await RequestAPI.update_request_status(request_id, "needs_rework")
+            await RequestAPI.add_event(
+                str(task["id"]),
+                "request_review_parse_error",
+                "Could not parse review decision output; marked needs_rework for manual intervention.",
+            )
+            return
+
+        if decision == "APPROVED":
+            await RequestAPI.update_request_status(request_id, "completed")
+            await RequestAPI.add_event(
+                str(task["id"]),
+                "request_review_approved",
+                "Review approved request completion",
+            )
+            log(f"Request {request_id[:8]} review approved -> completed")
+            return
+
+        # NEEDS_REWORK path
+        review_count = int(request_data.get("review_count") or 0)
+        max_reviews = int(request_data.get("max_reviews") or 3)
+        if review_count >= max_reviews:
+            log(
+                f"Request {request_id[:8]} reached max_reviews ({review_count}/{max_reviews}); "
+                "manual review required",
+                "WARN",
+            )
+            await RequestAPI.update_request_status(request_id, "needs_rework")
+            await RequestAPI.add_event(
+                str(task["id"]),
+                "request_review_manual_required",
+                f"Max reviews reached ({review_count}/{max_reviews}). {feedback[:500]}",
+            )
+            return
+
+        await RequestAPI.reject_request_review(request_id, feedback)
+        all_tasks = request_data.get("tasks", []) or []
+        non_review_tasks = [t for t in all_tasks if not self._is_request_review_task(t)]
+        by_id = {str(t.get("id")): t for t in non_review_tasks}
+        dependency_policy = request_data.get("dependency_policy", "strict")
+
+        selected: list[dict] = []
+        for tid in task_ids:
+            t = by_id.get(tid)
+            if t and t.get("status") in ("failed", "completed"):
+                selected.append(t)
+
+        if not selected:
+            failed = [t for t in non_review_tasks if t.get("status") == "failed"]
+            if failed:
+                selected = failed
+            elif dependency_policy == "permissive":
+                selected = [t for t in non_review_tasks if t.get("status") == "completed"]
+
+        if not selected:
+            await RequestAPI.add_event(
+                str(task["id"]),
+                "request_review_no_rework_targets",
+                "NEEDS_REWORK returned but no failed tasks to retry automatically; manual review required.",
+            )
+            log(
+                f"Request {request_id[:8]} NEEDS_REWORK but no failed tasks found; manual review required",
+                "WARN",
+            )
+            return
+
+        retried = 0
+        feedback_payload = (
+            "Review feedback for rework:\n"
+            f"{feedback}\n\n"
+            "Address this feedback explicitly in your implementation."
+        )
+        for target in selected:
+            target_id = str(target.get("id"))
+            if target.get("status") == "failed":
+                out = await RequestAPI.retry_task(target_id)
+                if out:
+                    retried += 1
+                continue
+
+            # Completed tasks can't be retried in-place via current API; create rework task clone.
+            rework_desc = (
+                f"{target.get('description') or target.get('title') or ''}\n\n"
+                "--- REVIEW REWORK FEEDBACK ---\n"
+                f"{feedback_payload}"
+            )
+            created = await RequestAPI.create_task(
+                request_id=request_id,
+                title=f"Rework: {target.get('title', 'Task')}",
+                agent_type=target.get("agent_type") or "code",
+                description=rework_desc,
+                priority=target.get("priority", "high"),
+                sequence_order=int(target.get("sequence_order") or 0) + 1,
+                model=target.get("model") or MODEL,
+                output_contract=target.get("output_contract"),
+            )
+            if created:
+                retried += 1
+
+        await RequestAPI.add_event(
+            str(task["id"]),
+            "request_review_needs_rework",
+            f"Review requested rework. Retried {retried} task(s).",
+            {"retried_task_ids": [str(t.get("id")) for t in selected], "decision": decision},
+        )
+        log(
+            f"Request {request_id[:8]} review needs_rework -> retried {retried} task(s); "
+            "request will return to review after retries complete",
+        )
+
+    async def _handle_review_task_failure(self, task: dict, reason: str) -> None:
+        """Do not hard-fail a request when the review task itself fails.
+
+        Complete the review task with a manual-review marker and move request to needs_rework.
+        """
+        task_id = str(task.get("id", ""))
+        request_id = str(task.get("request_id", ""))
+        note = (
+            "Automatic request review failed; manual review required.\n\n"
+            f"Reason: {reason}"
+        )
+        await RequestAPI.complete_task(task_id, note)
+        if request_id:
+            await RequestAPI.update_request_status(request_id, "needs_rework")
+        await RequestAPI.add_event(
+            task_id,
+            "request_review_manual_required",
+            note[:1500],
+        )
+        log(
+            f"Review task {task_id[:8]} failed non-fatally; request {request_id[:8]} marked needs_rework",
+            "WARN",
+        )
+
+    async def _repair_structured_output(
+        self,
+        task_id: str,
+        original_result: str,
+        output_contract: dict | None,
+        model: str,
+    ) -> str | None:
+        """Ask a model to reformat output to match the task's JSON Schema contract."""
+        if not output_contract:
+            return None
+        schema = output_contract.get("json_schema", {})
+        schema_str = json.dumps(schema, indent=2)
+        repair_prompt = (
+            "The following agent response was supposed to include structured output "
+            "matching a JSON Schema, but validation failed.\n\n"
+            f"Schema:\n```json\n{schema_str}\n```\n\n"
+            "Original response (first 10000 chars):\n"
+            f"{(original_result or '')[:10000]}\n\n"
+            "Extract relevant data from the response and produce a valid JSON object "
+            "matching the schema. Wrap it in <task_output> tags.\n\n"
+            "<task_output>\n"
+            "{...your JSON here...}\n"
+            "</task_output>"
+        )
+        try:
+            return await self.run_session(
+                f"repair-{task_id[:8]}",
+                (
+                    "You are a data extraction assistant. Extract structured data from text "
+                    "and format it as JSON matching the given schema. Output ONLY the "
+                    "<task_output> block."
+                ),
+                repair_prompt,
+                model=model,
+            )
+        except Exception as exc:
+            log(f"Repair session failed for {task_id[:8]}: {exc}", "WARN")
+            return None
+
     # --- Autonomic Layer ---
 
     async def run_autonomic(self):
-        """Run autonomic background task — memory maintenance.
-
-        Runs every N cycles without cognitive involvement.
-        Creates a request record so results appear on the Activity page.
-        """
+        """Run autonomic background task — memory maintenance."""
         log("Running autonomic: memory maintenance")
+
         try:
             system_message = await build_subagent_prompt(
                 "memory",
@@ -2547,11 +3173,12 @@ class LucentDaemon:
                 "5. **Daemon heartbeat memories** (tagged 'daemon-heartbeat'): Leave these alone, they're transient.\n\n"
                 "6. **Non-technical memories** (experience, procedural, etc.): Leave these alone.\n\n"
                 "7. Create a summary of what you changed.\n\n"
-                "## Important\n"
-                "- Do NOT create new memories unless merging requires it\n"
-                "- Prefer updating existing memories over creating new ones\n"
-                "- The goal is FEWER, RICHER memories — not more\n"
-                "- Each scope should have AT MOST one technical memory\n"
+                "## Important — STRICT RULES\n"
+                "- NEVER create new memories. Only update existing ones or delete duplicates.\n"
+                "- The ONLY valid operations are: update_memory and delete_memory.\n"
+                "- If two memories cover the same scope, update the better one and delete the other.\n"
+                "- The total memory count must go DOWN or stay the same, never up.\n"
+                "- Each scope should have AT MOST one technical memory.\n"
                 "- Content should be practical: what does a developer need to know to work here?"
             ),
         )
@@ -2602,12 +3229,18 @@ class LucentDaemon:
                 "2. For each candidate, classify the experience "
                 "type and extract a transferable principle. "
                 "3. Compare against existing 'lesson' tagged "
-                "procedural memories — update if "
-                "reinforcing/refining, create new if novel. "
+                "procedural memories — UPDATE the existing one if "
+                "reinforcing/refining. Do NOT create new lesson memories "
+                "if a similar lesson already exists. "
                 "4. Tag processed memories with 'lesson-extracted'. "
                 "5. Save a brief summary of what was extracted. "
                 "Only process the most recent 10 unprocessed "
-                "memories per run. Skip trivial results."
+                "memories per run. Skip trivial results. "
+                "\n\nSTRICT RULES:\n"
+                "- NEVER create 'Learning Extraction Run' summary memories.\n"
+                "- NEVER create a new lesson if an existing lesson covers the same topic — update it instead.\n"
+                "- The total memory count must go DOWN or stay the same, never up.\n"
+                "- Only use update_memory and delete_memory. Do not use create_memory."
             ),
         )
 
@@ -2779,44 +3412,53 @@ class LucentDaemon:
     async def _autonomic_loop(self):
         """Periodic maintenance: memory consolidation, learning extraction.
 
-        Runs on longer intervals since these are background housekeeping tasks.
+        Uses a timestamp file to track last run, surviving daemon restarts.
         """
         log(
             f"Autonomic loop started (maintenance: {AUTONOMIC_MINUTES}m, "
             f"learning: {LEARNING_MINUTES}m)"
         )
 
-        # Give cognitive loop a head start on first boot
-        await asyncio.sleep(min(300, AUTONOMIC_MINUTES * 60))
+        ts_file = Path("/tmp/lucent_last_consolidation")
+        learning_ts_file = Path("/tmp/lucent_last_learning")
 
-        last_maintenance = time.time()
-        last_learning = time.time()
+        def _minutes_since(path: Path) -> float:
+            """Return minutes since the timestamp in the file, or infinity if missing."""
+            try:
+                return (time.time() - float(path.read_text().strip())) / 60
+            except (FileNotFoundError, ValueError):
+                return float("inf")
+
+        def _touch(path: Path):
+            path.write_text(str(time.time()))
+
+        # Initial delay — short, just to let the server stabilize
+        await asyncio.sleep(60)
 
         while self.running:
             try:
-                now = time.time()
-
-                if now - last_maintenance >= AUTONOMIC_MINUTES * 60:
-                    # Verify API key
+                # Memory consolidation
+                if _minutes_since(ts_file) >= AUTONOMIC_MINUTES:
                     if await _verify_api_key(MCP_API_KEY) or await _handle_auth_failure(
                         self.instance_id
                     ):
+                        _touch(ts_file)
                         await self.run_autonomic()
-                        last_maintenance = now
 
-                if now - last_learning >= LEARNING_MINUTES * 60:
+                # Learning extraction
+                if _minutes_since(learning_ts_file) >= LEARNING_MINUTES:
                     if await _verify_api_key(MCP_API_KEY) or await _handle_auth_failure(
                         self.instance_id
                     ):
+                        _touch(learning_ts_file)
                         await self.run_learning_extraction()
-                        last_learning = now
 
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 log(f"Autonomic loop error: {e}", "ERROR")
 
-            await asyncio.sleep(60)  # check every minute
+            await asyncio.sleep(60)
 
     # Maximum time to wait for in-flight sessions during graceful drain (seconds)
     DRAIN_TIMEOUT = SESSION_TOTAL_TIMEOUT + 60  # session timeout + buffer

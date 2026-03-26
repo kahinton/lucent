@@ -31,7 +31,7 @@ that will be broken into tasks.
 Use this when you identify new work to do (during cognitive cycles, from user messages, etc.).
 The request will appear in the Requests UI and can be broken into tasks.
 
-Args:
+    Args:
     title: Short descriptive title (e.g. "Improve search performance")
     description: Detailed description of what needs to be done
     source: Where this request came from — 'cognitive', 'user', 'api', 'daemon', or 'schedule'
@@ -87,6 +87,8 @@ Args:
     sandbox_template_id: Optional UUID of a saved sandbox template to use
     sandbox_config: Optional inline sandbox config dict (keys: image, repo_url,
         branch, working_dir, timeout_seconds, output_mode, env_vars, etc.)
+    output_contract: Optional structured output contract dict:
+        {json_schema: {...}, on_failure: fail|fallback|retry_then_fallback, max_retries: int}
 
 Returns: JSON with the created task including its ID, or an error
 if the agent type is not approved."""
@@ -102,6 +104,7 @@ if the agent type is not approved."""
         parent_task_id: str | None = None,
         sandbox_template_id: str | None = None,
         sandbox_config: dict | None = None,
+        output_contract: dict | None = None,
     ) -> str:
         user_id, org_id, user_role = await _get_current_user_context()
         if not org_id:
@@ -150,20 +153,24 @@ if the agent type is not approved."""
         if not parent_request:
             return json.dumps({"error": "Request not found"})
         requesting_user_id = parent_request.get("created_by")
-        task = await repo.create_task(
-            request_id=request_id,
-            title=title,
-            org_id=str(org_id),
-            description=description,
-            agent_type=agent_type,
-            priority=priority,
-            sequence_order=sequence_order,
-            parent_task_id=parent_task_id,
-            model=model,
-            sandbox_template_id=sandbox_template_id,
-            sandbox_config=sandbox_config,
-            requesting_user_id=str(requesting_user_id) if requesting_user_id else None,
-        )
+        try:
+            task = await repo.create_task(
+                request_id=request_id,
+                title=title,
+                org_id=str(org_id),
+                description=description,
+                agent_type=agent_type,
+                priority=priority,
+                sequence_order=sequence_order,
+                parent_task_id=parent_task_id,
+                model=model,
+                sandbox_template_id=sandbox_template_id,
+                sandbox_config=sandbox_config,
+                requesting_user_id=str(requesting_user_id) if requesting_user_id else None,
+                output_contract=output_contract,
+            )
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)})
         return json.dumps(
             {
                 "id": str(task["id"]),

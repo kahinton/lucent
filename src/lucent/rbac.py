@@ -121,6 +121,7 @@ ROLE_PERMISSIONS: dict[Role, set[Permission]] = {
         Permission.MEMORY_READ_ALL,  # Admin can see all org memories
         Permission.MEMORY_UPDATE_OWN,
         Permission.MEMORY_DELETE_OWN,
+        Permission.MEMORY_DELETE_ANY,  # Admin can delete any org memory (for consolidation)
         Permission.MEMORY_SHARE,
         # Audit (org-wide)
         Permission.AUDIT_VIEW_OWN,
