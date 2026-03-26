@@ -2506,7 +2506,7 @@ class LucentDaemon:
                     request_id=request_id,
                     title="Consolidate memories",
                     agent_type="memory",
-                    description="Search across all memory domains, integrate recent observations into established knowledge, deduplicate, normalize tags, recalibrate importance.",
+                    description="Enforce one-memory-per-scope hierarchy for technical memories. Merge duplicates, set metadata.repo and metadata.filename correctly, ensure fewer but richer memories.",
                     model=MODEL,
                 )
                 if task_record:
@@ -2521,17 +2521,38 @@ class LucentDaemon:
             "autonomic-maintenance",
             system_message,
             (
-                "Run a full consolidation pass. Do NOT limit yourself to recent memories.\n\n"
-                "1. Survey the major knowledge domains — search broadly with limit=50 "
-                "across topics like architecture, bugs, preferences, projects, security, "
-                "daemon operations, and any other domains present.\n\n"
-                "2. For each topic cluster, look for fragments that should be merged "
-                "into a single authoritative memory. A recent bug note and an older "
-                "debugging lesson about the same area should become one rich memory.\n\n"
-                "3. Integrate new with old — recent observations should strengthen "
-                "established knowledge, not sit as isolated entries.\n\n"
-                "4. Fix tags and importance along the way.\n\n"
-                "5. Create a summary of what you changed."
+                "Run a memory consolidation pass focused on TECHNICAL memories.\n\n"
+                "## Goal: One Technical Memory Per Scope\n\n"
+                "Technical memories must follow a strict hierarchy:\n"
+                "- **Repo-level**: One memory per repo (metadata.repo='hindsight', metadata.filename=null)\n"
+                "  Contains: general architecture, conventions, build/test commands, key patterns\n"
+                "- **Directory-level**: One memory per significant directory (metadata.repo='hindsight', metadata.filename='src/lucent/api/')\n"
+                "  Contains: what this directory does, key files, patterns specific to this area\n"
+                "- **File-level**: One memory per file that has enough knowledge to warrant it (metadata.repo='hindsight', metadata.filename='src/lucent/db/memory.py')\n"
+                "  Contains: what this file does, key functions, gotchas, patterns\n\n"
+                "## Process\n\n"
+                "1. Search for all technical memories (use search_memories with type='technical', limit=50).\n"
+                "   Also search with search_memories_full for broader coverage.\n\n"
+                "2. For each memory, determine its correct scope:\n"
+                "   - If it's about a specific file → file-level (set metadata.filename to the file path)\n"
+                "   - If it's about a directory/module → directory-level (set metadata.filename to the dir path ending in /)\n"
+                "   - If it's about the repo generally → repo-level (set metadata.repo, clear metadata.filename)\n\n"
+                "3. **Merge duplicates**: If two memories belong to the same scope, merge them into one.\n"
+                "   Update the better one with combined content, delete the other.\n"
+                "   The surviving memory should be comprehensive but concise.\n\n"
+                "4. **Set metadata correctly on every technical memory**:\n"
+                "   - metadata.repo: always set (e.g. 'hindsight')\n"
+                "   - metadata.filename: set for directory/file scope, null for repo scope\n"
+                "   - metadata.category: a short category like 'architecture', 'api', 'database', 'testing'\n\n"
+                "5. **Daemon heartbeat memories** (tagged 'daemon-heartbeat'): Leave these alone, they're transient.\n\n"
+                "6. **Non-technical memories** (experience, procedural, etc.): Leave these alone.\n\n"
+                "7. Create a summary of what you changed.\n\n"
+                "## Important\n"
+                "- Do NOT create new memories unless merging requires it\n"
+                "- Prefer updating existing memories over creating new ones\n"
+                "- The goal is FEWER, RICHER memories — not more\n"
+                "- Each scope should have AT MOST one technical memory\n"
+                "- Content should be practical: what does a developer need to know to work here?"
             ),
         )
 

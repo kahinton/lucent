@@ -60,10 +60,10 @@ class TechnicalMetadata(BaseModel):
     )
     version_info: str | None = Field(default=None, description="Version-specific information")
     repo: str | None = Field(
-        default=None, description="Repository name or URL related to this knowledge"
+        default=None, description="Repository name this knowledge relates to (e.g. 'hindsight')"
     )
     filename: str | None = Field(
-        default=None, description="Specific file this knowledge relates to"
+        default=None, description="File or directory path this knowledge relates to (e.g. 'src/lucent/api/' for directory, 'src/lucent/db/memory.py' for file). Null for repo-level knowledge."
     )
 
 
