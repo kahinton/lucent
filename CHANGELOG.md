@@ -157,7 +157,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Cron expression validation: corrected DOM/DOW semantics for proper scheduling
 - MCP URL port corrected from 8767 to 8766 in setup completion page
 - API key prefix examples updated from `mcp_` to `hs_` in settings page
-- RBAC matrix corrected: Admin role cannot delete arbitrary org memories (only own)
 - `SECURE_COOKIES` default documentation corrected (true, not false)
 - Stale task recovery and multiple lint fixes (unused imports, unsorted imports, undefined names)
 - Test isolation: model registry and engine singletons properly reset between tests
