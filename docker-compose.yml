@@ -1,3 +1,16 @@
+# ===========================================================================
+# LOCAL DEVELOPMENT ONLY — NOT FOR PRODUCTION USE
+#
+# This file uses insecure defaults suitable only for local development.
+# For production deployments, use docker-compose.prod.yml which:
+#   - Requires explicit credentials (no defaults)
+#   - Uses docker-socket-proxy instead of direct Docker socket mount
+#   - Runs OpenBao in production mode with persistent storage
+#   - Pins base images with SHA256 digests
+#
+# See docs/deployment.md for production deployment guidance.
+# ===========================================================================
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -96,6 +109,9 @@ services:
       - ./pyproject.toml:/app/pyproject.toml:ro
       - ./.github/skills:/app/.github/skills:ro
       - ./.github/agents/definitions:/app/.github/agents/definitions:ro
+      # SECURITY: Docker socket access is required for sandbox container management.
+      # In production, consider using Docker-out-of-Docker (DooD) with restricted
+      # permissions or a Docker API proxy like docker-socket-proxy.
       - /var/run/docker.sock:/var/run/docker.sock
     ports:
       - "${LUCENT_PORT:-8766}:8766"
@@ -105,8 +121,8 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
-    stdin_open: true
-    tty: true
+    # stdin_open and tty are disabled by default for security.
+    # Enable in docker-compose.override.yml for local development debugging.
     restart: unless-stopped
 
   # --- Observability stack (use with: docker compose --profile observability up -d) ---

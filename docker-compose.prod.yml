@@ -1,0 +1,168 @@
+# docker-compose.prod.yml — Production-hardened Lucent configuration
+#
+# SECURITY NOTES:
+#   - All credentials MUST be provided via environment variables (no defaults)
+#   - Docker socket is proxied through docker-socket-proxy (not mounted directly)
+#   - OpenBao runs in production mode with file storage
+#   - Base images should be pinned and scanned before deployment
+#
+# Usage:
+#   export POSTGRES_PASSWORD=$(openssl rand -base64 32)
+#   export LUCENT_SECRET_KEY=$(openssl rand -base64 32)
+#   export VAULT_TOKEN=$(openssl rand -base64 32)
+#   export DAEMON_DB_PASSWORD=$(openssl rand -base64 32)
+#   docker compose -f docker-compose.prod.yml up -d
+#
+# Required environment variables (will fail to start without these):
+#   POSTGRES_PASSWORD      — PostgreSQL password
+#   LUCENT_SECRET_KEY      — Encryption key for builtin secret provider
+#   VAULT_TOKEN            — OpenBao authentication token (generated during init)
+#   DAEMON_DB_PASSWORD     — Password for daemon's restricted DB role
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: lucent-db
+    environment:
+      POSTGRES_DB: lucent
+      POSTGRES_USER: lucent
+      # REQUIRED: No default — must be explicitly set
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - lucent_data:/var/lib/postgresql/data
+      - ./docker/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    # No ports exposed to host — internal network only
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lucent -d lucent"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - internal
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /run/postgresql
+
+  openbao:
+    image: openbao/openbao:2.1.0
+    container_name: lucent-openbao
+    # Production mode: proper storage backend, TLS-ready
+    command: server -config=/openbao/config/config.hcl
+    environment:
+      BAO_ADDR: http://127.0.0.1:8200
+    volumes:
+      - ./docker/openbao-prod-config.hcl:/openbao/config/config.hcl:ro
+      - openbao_data:/openbao/data
+      - openbao_shared:/shared
+    cap_add:
+      - IPC_LOCK
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "--quiet", "http://127.0.0.1:8200/v1/sys/health?standbyok=true&sealedcode=200&uninitcode=200"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - internal
+    # No ports exposed to host
+
+  # Docker socket proxy — restricts which Docker API endpoints are accessible.
+  # Only allows container lifecycle operations needed for sandbox management.
+  # See: https://github.com/Tecnativa/docker-socket-proxy
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:0.2
+    container_name: lucent-docker-proxy
+    environment:
+      # Deny everything by default, allow only what's needed for sandboxes
+      CONTAINERS: 1      # List/inspect/create/start/stop/remove containers
+      IMAGES: 1           # List/inspect images (for sandbox image management)
+      NETWORKS: 1         # Create/manage sandbox networks
+      VOLUMES: 1          # Create/manage sandbox volumes
+      POST: 1             # Allow POST requests (needed for create/start/stop)
+      # Explicitly deny dangerous operations
+      AUTH: 0
+      SECRETS: 0
+      SERVICES: 0
+      SWARM: 0
+      NODES: 0
+      BUILD: 0
+      COMMIT: 0
+      EXEC: 0
+      PLUGINS: 0
+      SYSTEM: 0
+      TASKS: 0
+      INFO: 0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - internal
+    read_only: true
+    restart: unless-stopped
+
+  lucent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: lucent-server
+    depends_on:
+      postgres:
+        condition: service_healthy
+      openbao:
+        condition: service_healthy
+      docker-socket-proxy:
+        condition: service_started
+    environment:
+      DATABASE_URL: postgresql://lucent:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/lucent
+      DAEMON_DATABASE_URL: postgresql://lucent_daemon:${DAEMON_DB_PASSWORD:?DAEMON_DB_PASSWORD is required}@postgres:5432/lucent
+      LUCENT_MODE: ${LUCENT_MODE:-team}
+      LUCENT_LICENSE_KEY: ${LUCENT_LICENSE_KEY:?LUCENT_LICENSE_KEY is required for team mode}
+      LUCENT_CHAT_MODEL: ${LUCENT_CHAT_MODEL:-claude-opus-4.6}
+      LUCENT_LLM_ENGINE: ${LUCENT_LLM_ENGINE:-copilot}
+      # Secret storage
+      LUCENT_SECRET_PROVIDER: ${LUCENT_SECRET_PROVIDER:-builtin}
+      LUCENT_SECRET_KEY: ${LUCENT_SECRET_KEY:?LUCENT_SECRET_KEY is required}
+      # OpenBao connectivity
+      VAULT_ADDR: http://openbao:8200
+      VAULT_TOKEN: ${VAULT_TOKEN:?VAULT_TOKEN is required}
+      # Docker API via socket proxy (NOT direct socket mount)
+      DOCKER_HOST: tcp://docker-socket-proxy:2375
+      # Security hardening
+      LUCENT_SECURE_COOKIES: "true"
+      LUCENT_LOG_FORMAT: json
+    # No Docker socket mount — uses docker-socket-proxy instead
+    volumes:
+      - ./.github/skills:/app/.github/skills:ro
+      - ./.github/agents/definitions:/app/.github/agents/definitions:ro
+    ports:
+      - "${LUCENT_PORT:-8766}:8766"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8766/api/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - internal
+    # Security: no interactive terminal
+    # Security: read-only root filesystem where possible
+    read_only: true
+    tmpfs:
+      - /tmp
+
+volumes:
+  lucent_data:
+    driver: local
+  openbao_data:
+    driver: local
+  openbao_shared:
+    driver: local
+
+networks:
+  internal:
+    driver: bridge
+    internal: false  # Allow outbound (needed for LLM API calls), but restrict inbound

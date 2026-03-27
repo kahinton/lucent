@@ -10,6 +10,7 @@ from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from lucent.auth_providers import (
+    SECURE_COOKIES,
     SESSION_COOKIE_NAME,
     SESSION_TTL_HOURS,
     create_session,
@@ -193,6 +194,7 @@ async def create_user(
         value=ref_token,
         httponly=True,
         samesite="lax",
+        secure=SECURE_COOKIES,
         max_age=60,
         path="/users",
     )
@@ -251,6 +253,7 @@ async def reset_user_password_web(request: Request, user_id: UUID):
         value=ref_token,
         httponly=True,
         samesite="lax",
+        secure=SECURE_COOKIES,
         max_age=60,
         path="/users",
     )

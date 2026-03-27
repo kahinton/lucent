@@ -198,6 +198,11 @@ DATABASE_URL = os.environ.get(
 # Key expiry — daemon keys auto-expire and are refreshed each cycle
 KEY_TTL_HOURS = 24
 
+# Daemon API key scopes — currently broad ("read" + "write" = full access).
+# TODO(security): Narrow to daemon-specific scopes once MCP tool-level scope
+# enforcement is implemented. See security audit finding M3.
+DAEMON_KEY_SCOPES = ["read", "write"]
+
 # These are set dynamically after key provisioning in LucentDaemon.start()
 MCP_CONFIG: dict = {}
 API_BASE = MCP_URL.replace("/mcp", "/api")
@@ -337,7 +342,7 @@ async def _provision_daemon_api_key(instance_id: str) -> str | None:
             key_name,
             key_prefix,
             key_hash,
-            ["read", "write"],
+            DAEMON_KEY_SCOPES,
             KEY_TTL_HOURS,
         )
         _current_key_db_id = str(row["id"])

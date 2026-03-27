@@ -79,10 +79,10 @@ async def login_submit(request: Request):
     csrf_form_token = str(form.get(CSRF_FIELD_NAME, ""))
     await _check_csrf(request, form_token=csrf_form_token)
 
-    # Rate limit login attempts by IP
-    from lucent.rate_limit import get_login_limiter
+    # Rate limit login attempts by IP (proxy-aware)
+    from lucent.rate_limit import get_client_ip, get_login_limiter
 
-    client_ip = request.client.host if request.client else "unknown"
+    client_ip = get_client_ip(request)
     limiter = get_login_limiter()
     allowed, retry_after = limiter.check(client_ip)
     if not allowed:

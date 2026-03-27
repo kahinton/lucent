@@ -2,22 +2,22 @@
 
 Lucent exposes a REST API that allows external AI agents to submit tasks to the daemon, poll for completion, and retrieve results. This guide covers authentication, endpoints, and the integration flow.
 
+> **Note:** This guide documents the legacy daemon task API (`/api/daemon/tasks`). For new integrations, prefer the [Request/Task API](api-reference.md#requests--tasks) which provides structured work tracking, output contracts, and review workflows.
+
 ## Authentication
 
 External agents authenticate using **scoped API keys**. A key with the `daemon-tasks` scope can only interact with daemon task endpoints — it cannot read or modify general memories.
 
 ### Creating a Scoped Key
 
-Create an API key with restricted scopes via the Lucent API:
+Create API keys via the Lucent web UI at `/settings`. Navigate to the API Keys section to create keys with restricted scopes.
 
-```bash
+```
 # Full-access key (existing behavior)
-POST /api/keys
-{"name": "my-agent", "scopes": ["read", "write"]}
+Scopes: ["read", "write"]
 
 # Task-only key (recommended for external agents)
-POST /api/keys
-{"name": "my-agent", "scopes": ["daemon-tasks"]}
+Scopes: ["daemon-tasks"]
 ```
 
 All requests must include the key in the `Authorization` header:

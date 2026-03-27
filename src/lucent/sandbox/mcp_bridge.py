@@ -168,7 +168,8 @@ class BridgeServer:
                 return json.loads(body) if body else {}
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"API error {exc.code}: {detail}") from exc
+            logger.error("API error %d: %s", exc.code, detail)
+            raise RuntimeError(f"API error {exc.code}") from exc
         except urllib.error.URLError as exc:
             raise RuntimeError(f"Connection error: {exc.reason}") from exc
 
@@ -231,7 +232,7 @@ class MCPBridgeHandler(BaseHTTPRequestHandler):
                 {
                     "jsonrpc": "2.0",
                     "id": None,
-                    "error": {"code": -32000, "message": str(exc)},
+                    "error": {"code": -32000, "message": "Internal server error"},
                 }
             )
 

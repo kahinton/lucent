@@ -106,9 +106,48 @@ async def _sync_built_in_definitions():
         logger.warning(f"Failed to sync built-in definitions: {e}")
 
 
+# Known insecure default values that must not be used in production.
+_INSECURE_DEFAULTS = {
+    "LUCENT_SECRET_KEY": "lucent-dev-secret-key-change-in-production",
+    "POSTGRES_PASSWORD": "lucent_dev_password",
+    "VAULT_TOKEN": "root",
+}
+
+
+def _check_security_defaults() -> None:
+    """Emit warnings when insecure default credentials are detected.
+
+    In team mode (multi-user), insecure defaults are treated as errors
+    logged at CRITICAL level. In personal mode they produce warnings.
+    """
+    import os
+
+    mode = os.environ.get("LUCENT_MODE", "personal")
+    issues: list[str] = []
+
+    for var, insecure_value in _INSECURE_DEFAULTS.items():
+        current = os.environ.get(var, "")
+        if current == insecure_value:
+            issues.append(var)
+
+    if issues:
+        msg = (
+            "SECURITY: Insecure default values detected for: %s. "
+            "These MUST be changed before production deployment. "
+            "Generate strong values with: openssl rand -base64 32"
+        )
+        if mode == "team":
+            logger.critical(msg, ", ".join(issues))
+        else:
+            logger.warning(msg, ", ".join(issues))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifespan - startup and shutdown."""
+    # Security: warn about insecure defaults at startup
+    _check_security_defaults()
+
     # Startup: Initialize telemetry (no-op if OTEL_ENABLED is false)
     from lucent.telemetry import init_telemetry, shutdown_telemetry
 
@@ -312,16 +351,20 @@ def create_app() -> FastAPI:
 
         rate_limiter = get_rate_limiter()
 
-        # Determine rate limit key: prefer API key, fall back to client IP
-        auth_header = request.headers.get("authorization", "")
-        if auth_header.startswith("Bearer "):
-            rate_key = f"api:{auth_header[7:]}"
-        elif auth_header:
-            rate_key = f"api:{auth_header}"
-        else:
-            from lucent.rate_limit import get_client_ip
+        # Determine rate limit key: always include client IP to prevent
+        # bypass via rotating Authorization header values (security fix).
+        # For Bearer tokens, use the key prefix (stable per-key) + IP.
+        from lucent.rate_limit import get_client_ip
 
-            client_ip = get_client_ip(request)
+        client_ip = get_client_ip(request)
+        auth_header = request.headers.get("authorization", "")
+        if auth_header.startswith("Bearer ") and len(auth_header) > 18:
+            # Use key prefix (e.g. "hs_XXXXXXXX") + IP to rate limit.
+            # Same key from same IP shares a bucket; rotating bogus tokens
+            # still hits the same IP-anchored bucket.
+            key_prefix = auth_header[7:18]
+            rate_key = f"api:{key_prefix}:{client_ip}"
+        else:
             rate_key = f"api:ip:{client_ip}"
 
         rate_result = rate_limiter.check_rate_limit(rate_key)

@@ -57,19 +57,19 @@ docker ps --filter "name=lucent-server" --format "{{.Names}} {{.Status}}"
 ### 2c: Database
 
 ```bash
-docker ps --filter "name=postgres" --format "{{.Names}} {{.Status}}"
+docker ps --filter "name=lucent-db" --format "{{.Names}} {{.Status}}"
 ```
 
-- **Pass**: PostgreSQL is running.
+- **Pass**: `lucent-db` (PostgreSQL) is running.
 - **Fail**: Database isn't running. `docker compose up -d` should start it.
 
 ### 2d: Server Health
 
 ```bash
-docker exec lucent-server python -c "import httpx; r = httpx.get('http://localhost:8766/api/health'); print(r.status_code, r.text)"
+curl -s http://localhost:8766/api/health
 ```
 
-- **Pass**: Returns 200 with healthy status.
+- **Pass**: Returns `{"status":"healthy"}`.
 - **Fail**: Server is running but not healthy. Check logs: `docker logs lucent-server --tail 20`
 
 ### 2e: GitHub Copilot (for VS Code users)
@@ -101,7 +101,7 @@ After all checks, give a clear summary:
 > **Environment Check Results:**
 > - Docker: ✓ Running
 > - Lucent Server: ✓ Healthy (up 2 hours)
-> - Database: ✓ Running
+> - Database (lucent-db): ✓ Running
 > - Copilot: ✓ Installed
 > - MCP Config: ✗ Not configured yet
 >
@@ -118,9 +118,14 @@ Guide them through account creation AND MCP configuration. There are two paths:
 If the server redirects to `/setup`, they need to create the first account:
 
 1. Open `http://localhost:8766` in a browser — it will redirect to the setup page
-2. Fill in: Display Name, Email (optional), Password
+2. Fill in:
+   - **Display Name** (required)
+   - **Email** (optional)
+   - **Password** (min 8 characters, must include uppercase, lowercase, and a digit)
+   - **Confirm Password**
 3. **Critical**: Copy the API key shown on the completion page — it won't be shown again
-4. Help them configure MCP (see below)
+4. The completion page also shows the MCP configuration snippet — copy that too
+5. Help them configure MCP (see below)
 
 ### Path B: Account Already Exists
 
@@ -241,7 +246,18 @@ Explain:
 
 Ask: **"Want to see the review queue, or should we wrap up the tour?"**
 
-#### 5e: Review Queue (`/daemon/review`)
+#### 5e: Schedules (`/schedules`)
+
+Navigate to `http://localhost:8766/schedules` and take a screenshot.
+
+Explain:
+> This is the Schedules page — where you set up recurring or one-time automated work.
+>
+> You can schedule things like periodic memory cleanup, weekly code reviews, or any task you want me to handle on a timer. Each schedule creates a tracked request when it fires, so the results show up in Activity and the Review Queue just like any other work.
+
+Ask: **"Ready to see the review queue?"**
+
+#### 5f: Review Queue (`/daemon/review`)
 
 Navigate to `http://localhost:8766/daemon/review` and take a screenshot.
 
@@ -252,7 +268,7 @@ Explain:
 >
 > Your feedback directly shapes how I work. It's one of the main ways I improve over time.
 
-#### 5f: Settings (`/settings`)
+#### 5g: Settings (`/settings`)
 
 Navigate to `http://localhost:8766/settings` and take a screenshot.
 
@@ -262,7 +278,15 @@ Explain:
 > You can generate new API keys here if you need to connect from additional tools or environments. Each key is shown once and then hashed — I never store them in plaintext.
 
 End the tour:
-> That's the full tour! The web UI is one way to interact with me. Most of the time you'll probably just talk to me here in the chat. Everything in the UI is also available through our conversation — I can search memories, submit requests, manage agents, all through chat.
+> That's the main tour! There are a few more pages in the sidebar worth knowing about:
+>
+> - **Chat** (`/chat`) — a web-based chat interface for talking to me directly in the browser
+> - **Sandboxes** (`/sandboxes`) — isolated Docker environments I use for running code safely during autonomous work
+> - **Secrets** (`/secrets`) — encrypted credential storage for API keys and tokens I might need
+> - **Models** (`/models`) — configure which LLM models are available and their settings
+> - **Groups** (`/groups`) — organize permissions (more relevant in team mode)
+>
+> Everything in the UI is also available through our conversation — I can search memories, submit requests, manage agents, all through chat.
 
 ## Step 6: What's Next
 
