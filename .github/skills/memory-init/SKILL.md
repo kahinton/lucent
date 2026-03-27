@@ -20,7 +20,22 @@ Returns:
 
 **Read the individual memory carefully.** It contains what this person cares about, what they dislike, and how they like to work. Apply these immediately — do not announce them.
 
-## Step 2: Search for Task-Relevant Context
+## Step 2: Load Recent Context
+
+Search for recent experience memories to understand what's been happening. You have the current date — use it.
+
+```
+search_memories(query="daily digest", tags=["daily-digest"], limit=5)
+search_memories(type="experience", limit=10)
+```
+
+Scan for:
+- **Daily digests**: Compressed summaries of recent days. These are your best source for "what's been going on."
+- **Recent experiences**: What happened in the last few interactions. Sort mentally by recency.
+
+This gives you temporal context — not just *what* you know, but *when* things happened and what the current trajectory looks like.
+
+## Step 3: Search for Task-Relevant Context
 
 Based on what the user is asking about:
 
@@ -34,7 +49,7 @@ Based on what the user is asking about:
 
 **Always do at least one search.** Even finding nothing is informative — it means this is new territory.
 
-## Step 3: Check for Daemon Messages
+## Step 4: Check for Daemon Messages
 
 ```
 search_memories(tags=["daemon-message"], limit=10)

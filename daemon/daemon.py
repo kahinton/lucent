@@ -150,6 +150,8 @@ AUTONOMIC_MINUTES = int(
 LEARNING_MINUTES = int(
     os.environ.get("LUCENT_LEARNING_MINUTES", str(LEARNING_INTERVAL * DAEMON_INTERVAL_MINUTES))
 )
+# Daily experience compression: runs once per day (default 1440 minutes = 24 hours)
+COMPRESSION_MINUTES = int(os.environ.get("LUCENT_COMPRESSION_MINUTES", "1440"))
 
 # Approval flow: when enabled, tasks go to needs-review before completing.
 # When disabled, tasks complete immediately after successful execution.
@@ -3227,25 +3229,82 @@ class LucentDaemon:
             system_message,
             (
                 "Run the learning extraction pipeline from the learning-extraction skill. "
+                "Core principle: INTEGRATE, don't accumulate. Lessons get folded into "
+                "existing memories, not stored as standalone 'Lesson:' entries.\n\n"
                 "1. Search for memories tagged 'daemon-result' "
                 "or 'rejection-lesson' or 'feedback-rejected' "
                 "or 'validated' that do "
-                "NOT have the 'lesson-extracted' tag. "
-                "2. For each candidate, classify the experience "
-                "type and extract a transferable principle. "
-                "3. Compare against existing 'lesson' tagged "
-                "procedural memories — UPDATE the existing one if "
-                "reinforcing/refining. Do NOT create new lesson memories "
-                "if a similar lesson already exists. "
-                "4. Tag processed memories with 'lesson-extracted'. "
-                "5. Save a brief summary of what was extracted. "
-                "Only process the most recent 10 unprocessed "
-                "memories per run. Skip trivial results. "
+                "NOT have the 'lesson-extracted' tag. Cap at 10.\n"
+                "2. For each non-routine experience, find the existing memory "
+                "that this lesson is ABOUT (the technical or procedural memory "
+                "for that module/system/workflow).\n"
+                "3. Update that existing memory with the new knowledge. "
+                "If no related memory exists, create ONE well-scoped memory "
+                "that includes the lesson as part of its content.\n"
+                "4. Tag processed source memories with 'lesson-extracted'.\n"
+                "5. Delete source experience memories that are now redundant "
+                "(their knowledge has been absorbed).\n"
                 "\n\nSTRICT RULES:\n"
-                "- NEVER create 'Learning Extraction Run' summary memories.\n"
-                "- NEVER create a new lesson if an existing lesson covers the same topic — update it instead.\n"
+                "- NEVER create standalone 'Lesson:' or 'Learning Extraction Run' memories.\n"
+                "- NEVER create a new memory if an existing one covers the same scope — update it.\n"
                 "- The total memory count must go DOWN or stay the same, never up.\n"
-                "- Only use update_memory and delete_memory. Do not use create_memory."
+                "- Prefer update_memory and delete_memory. Only use create_memory for genuine gaps.\n"
+                "- Skip anything tagged 'daemon-heartbeat'."
+            ),
+        )
+
+    async def run_experience_compression(self):
+        """Compress granular experience memories into daily digests.
+
+        Runs once per day. Finds experience memories older than 24 hours
+        that haven't been compressed yet, groups by date, and merges into
+        one digest per day.
+        """
+        log("Running autonomic: daily experience compression")
+        try:
+            system_message = await build_subagent_prompt(
+                "memory",
+                (
+                    "Daily experience compression — merge granular "
+                    "experience memories into daily digests."
+                ),
+                (
+                    "This is an autonomic background task. "
+                    "Compress old experience memories into "
+                    "concise daily summaries."
+                ),
+            )
+        except AgentNotFoundError:
+            log("No approved 'memory' agent — skipping experience compression", "WARN")
+            return
+
+        from datetime import datetime, timezone
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+        await self.run_session(
+            "autonomic-compression",
+            system_message,
+            (
+                "Compress experience memories into daily digests.\n\n"
+                "## Process\n\n"
+                "1. Search for experience memories that are NOT tagged 'daily-digest' "
+                "and NOT tagged 'daemon-heartbeat' (use search_memories with type='experience', limit=50).\n\n"
+                "2. Group the results by date (use the created_at or updated_at field). "
+                f"Skip memories from today ({today}) — only compress older ones.\n\n"
+                "3. For each date that has 2+ experience memories:\n"
+                "   a. Write a concise narrative digest of what happened that day. "
+                "Include: what was worked on, key decisions made, outcomes, who was involved.\n"
+                "   b. Create ONE experience memory tagged 'daily-digest' with the date in the content title. "
+                "Format: '## Daily Digest — YYYY-MM-DD\\n\\n<narrative>'\n"
+                "   c. Delete the individual experience memories that were merged into the digest.\n\n"
+                "4. For dates with only 1 experience memory, just tag it 'daily-digest' to prevent "
+                "reprocessing. Don't create a new memory for a single entry.\n\n"
+                "## Rules\n"
+                "- Each day gets AT MOST one digest memory.\n"
+                "- If a daily digest already exists for a date, update it instead of creating a new one.\n"
+                "- The narrative should be practical: what happened and why it matters, not raw logs.\n"
+                "- Total memory count must go DOWN.\n"
+                "- Keep digests concise — aim for 200-500 words per day, not a transcript."
             ),
         )
 
@@ -3421,11 +3480,12 @@ class LucentDaemon:
         """
         log(
             f"Autonomic loop started (maintenance: {AUTONOMIC_MINUTES}m, "
-            f"learning: {LEARNING_MINUTES}m)"
+            f"learning: {LEARNING_MINUTES}m, compression: {COMPRESSION_MINUTES}m)"
         )
 
         ts_file = Path("/tmp/lucent_last_consolidation")
         learning_ts_file = Path("/tmp/lucent_last_learning")
+        compression_ts_file = Path("/tmp/lucent_last_compression")
 
         def _minutes_since(path: Path) -> float:
             """Return minutes since the timestamp in the file, or infinity if missing."""
@@ -3457,6 +3517,14 @@ class LucentDaemon:
                     ):
                         _touch(learning_ts_file)
                         await self.run_learning_extraction()
+
+                # Daily experience compression
+                if _minutes_since(compression_ts_file) >= COMPRESSION_MINUTES:
+                    if await _verify_api_key(MCP_API_KEY) or await _handle_auth_failure(
+                        self.instance_id
+                    ):
+                        _touch(compression_ts_file)
+                        await self.run_experience_compression()
 
             except asyncio.CancelledError:
                 break
