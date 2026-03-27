@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-03-27
+
 ### Added
 
 #### Secret Storage — OpenBao Integration
@@ -15,6 +17,160 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Auto-detection of available secret providers at startup (`LUCENT_SECRET_PROVIDER=auto`)
 - Migration utility (`scripts/migrate_secrets_to_transit.py`) for re-encrypting builtin (Fernet) secrets through Transit
 - OpenBao init script (`docker/openbao-init.sh`) — configures KV v2, Transit engine, scoped policy, and token
+- Secrets management Web UI and REST API (`/api/secrets`)
+
+#### OpenTelemetry Observability
+- Full OpenTelemetry integration: traces, metrics, and log correlation
+- FastAPI and asyncpg auto-instrumentation for HTTP and database spans
+- Central metrics registry (`lucent.metrics`) with HTTP request duration, error counters, and daemon session gauges
+- Daemon instrumented with spans for cognitive cycles, dispatch, and LLM sessions
+- Docker Compose observability profile: OpenTelemetry Collector, Prometheus, Jaeger, and Grafana with pre-built dashboards
+- Opt-in via `OTEL_ENABLED=true` — zero overhead when disabled (no-op providers)
+
+#### Integrations Framework
+- Slack and Discord integration adapters with full test coverage
+- Identity resolution: link external platform users to Lucent accounts via pairing challenges
+- Signature verification middleware for webhook security
+- Credential encryption for stored integration secrets
+- Rate limiting per user, organization, webhook IP, and pairing challenge
+- REST API (`/api/integrations`) for managing integrations, user links, and webhooks
+- Database schema for integration configs, user links, events, and pairing challenges (migrations 028–030)
+
+#### Request Review Lifecycle
+- Post-completion review workflow: requests transition through `review` and `needs_rework` states
+- Dedicated `request-review` agent definition for structured post-completion reviews (replaces generic `code-review`)
+- Review count tracking, feedback storage, and configurable max review rounds
+- API endpoints for review queue: `GET /api/requests/review`, `POST /api/requests/{id}/review-approve`, `POST /api/requests/{id}/review-reject`
+- Database migration 044 for review lifecycle columns and indexes
+
+#### Task Output Contracts
+- Structured output validation for daemon tasks via JSON Schema contracts
+- Tasks can declare an `output_contract` with a JSON Schema, failure policy (`fail`/`fallback`/`retry_then_fallback`), and max retries
+- Agent results are extracted from `<task_output>` blocks, validated, and stored as structured JSONB
+- Validation status tracking: `valid`, `invalid`, `extraction_failed`, `fallback_used`, `repair_succeeded`
+- Database migration 045 for output contract and structured result columns
+
+#### Groups and Resource Ownership
+- Group management: create groups, add/remove members, assign group admin roles
+- Resource ownership model: agents, skills, MCP servers, sandbox templates, and secrets have owner users and groups
+- Access control service resolving visibility by built-in scope → owner → group → admin role
+- REST API (`/api/groups`) and Web UI for group CRUD and membership management
+- Database migrations 037–039 for groups, resource ownership columns, and requesting user tracking
+
+#### Model Registry and Multi-Engine Support
+- Database-backed model registry with 20+ seeded models across OpenAI, Anthropic, and Google
+- Admin API (`/api/admin/models`) for enabling, disabling, adding, and removing models
+- Model management Web UI page
+- Multi-engine LLM support: configure different engines (Copilot, LangChain) per model
+- `list_available_models` MCP tool for daemon task model selection
+- Model validation with strict and lenient modes
+- Database migrations 031 and 043 for model registry and engine overrides
+
+#### Sandbox Enhancements
+- MCP bridge server for sandbox containers — proxies memory tools back to Lucent's REST API
+- Devcontainer.json detection and parsing: lifecycle commands, env vars, image overrides, forwarded ports
+- Sandbox output capture modes for structured result extraction
+- `sandbox_config` and `sandbox_template_id` parameters on `create_task` MCP tool
+- `sandbox-orchestrator` and `sandbox` agent definitions
+
+#### Chat Improvements
+- Enhanced streaming chat endpoint (`/api/chat/stream-v2`) with granular SSE events: text deltas, tool calls, tool results, reasoning
+- Agent-aware chat: select an agent definition to shape the chat system prompt and load its granted skills
+- Web UI chat page with full conversation interface
+
+#### Kubernetes Deployment
+- Helm chart (`deploy/helm/lucent/`) with templates for deployment, services, ingress, HPA, PDB, network policies, and ServiceMonitor
+- Environment-specific values files: dev, staging, production
+- Kubernetes operator (`deploy/operator/`) with CRD for `LucentInstance` custom resources
+- Operator handles reconciliation, backup CronJobs, and air-gapped deployment examples
+- Comprehensive Kubernetes deployment documentation
+
+#### Security Hardening
+- Content Security Policy (CSP) and security headers middleware (X-Content-Type-Options, X-Frame-Options, Referrer-Policy, Permissions-Policy)
+- Bundled Tailwind CSS, HTMX, and DOMPurify locally — eliminates CDN dependencies
+- Memory content scanning for prompt injection patterns
+- RBAC enforcement on web definition, sandbox, and auth routes
+- Insecure default credential detection at startup with critical-level warnings in team mode
+- Docker image base pinned with SHA256 digests for supply chain security
+- Dockerfile `HEALTHCHECK` instruction added
+- `docker-compose.prod.yml` for production deployment: no default credentials, docker-socket-proxy, production OpenBao mode
+- Upper-bound version pins on security-sensitive dependencies (`cryptography`, `PyJWT`, `python-multipart`)
+- Secret pattern redaction in daemon log output
+- Restricted secrets API with scoped access
+- Org list endpoint scoped to user's own organization
+- 100K character limit on memory content
+
+#### Agent and Skill System
+- Built-in agent and skill definitions synced from `.github/` to database on startup
+- `definition-engineer` agent and `definition-engineering` skill for crafting agent/skill definitions
+- Consolidated deprecated specialized skills into their parent skills (removed `-specialized` variants)
+- MCP tools for agent and skill definition management (full CRUD parity with REST API)
+- Pagination support for definition listing endpoints
+- Anti-pattern sections added to 6 critical skills
+- Disambiguation sections added to 5 overlapping skills
+- Numbered procedures and boundary sections across all skills
+
+#### Daemon Improvements
+- Graceful daemon restart: defers reload when LLM sessions are active (drain mode)
+- Session idle timeout (`LUCENT_SESSION_IDLE_TIMEOUT`, default 300s) kills sessions with no LLM activity
+- Request dependency policy: `strict` (default) blocks later tasks on predecessor failure; `permissive` allows continuation
+- Sequence order validation with database CHECK constraint for task ordering
+- Request deduplication via content fingerprinting (prevents duplicate requests in active states)
+- Daemon memories automatically shared for org visibility
+- `list_active_work` API for daemon to check existing work before creating duplicates
+
+#### API Enhancements
+- `/api/requests` endpoint accepts `source` query parameter for filtering by request origin
+- `/api/requests/active` endpoint returns all non-completed requests with task status summaries
+- Paginated responses across all list endpoints (definitions, tasks, requests, schedules)
+- `list_active_work` MCP tool for checking in-progress work
+- Force password change flag on user accounts (migration 026)
+- HTML error pages for web UI
+- MCP tool discovery and caching for server definitions (migration 042)
+- `schedule` added as valid request source
+
+#### Infrastructure
+- DevContainer support for VS Code development environments
+- Production Docker Compose (`docker-compose.prod.yml`) with hardened security defaults
+- Comprehensive documentation: architecture guide, security model, configuration reference, troubleshooting, getting started, sandbox guide, observability guide, Kubernetes deployment, operator guide, Slack setup and security guides, migration guide for security changes
+
+### Changed
+- New `daemon` RBAC role for service accounts — scoped to memory operations (read all, update own, delete any, share) without admin privileges like user management or integration access
+- Daemon service account uses `daemon` role instead of `member` for proper memory consolidation permissions (migration 046)
+- Daemon API key provisioning no longer caches keys to `.daemon_api_key` file — keys are provisioned fresh each startup
+- Request status lifecycle standardized: `planning` renamed to `planned` across all code paths
+- Request source enum expanded from 4 to 5 values (`schedule` added) with shared constants module and DB CHECK constraint
+- Session timeout increased from 600s to 3600s default (`LUCENT_SESSION_TIMEOUT`)
+- Session cookie TTL reduced from 72 hours to 24 hours
+- Task completion/failure endpoints now accept JSON body instead of query parameters (supports larger payloads)
+- Definition listing endpoints return paginated response format (`{items, total_count, offset, limit, has_more}`)
+- Removed team_mode gate from groups routes — groups available in all modes
+- Lucent identity definition updated with conversation mode boundaries (no direct task creation from conversation)
+- README streamlined; detailed content moved to dedicated docs
+- Version bumped to 0.2.0 in package metadata
+
+### Fixed
+- Memory consolidation bloat: tightened daemon prompts to prevent memory creation during consolidation and learning extraction runs
+- Learning extraction prompt hardened against creating duplicate memories
+- Request deduplication prevents identical requests from being created while one is already active
+- Pagination format mismatch in daemon definition and task lookups
+- Cron expression validation: corrected DOM/DOW semantics for proper scheduling
+- MCP URL port corrected from 8767 to 8766 in setup completion page
+- API key prefix examples updated from `mcp_` to `hs_` in settings page
+- RBAC matrix corrected: Admin role cannot delete arbitrary org memories (only own)
+- `SECURE_COOKIES` default documentation corrected (true, not false)
+- Stale task recovery and multiple lint fixes (unused imports, unsorted imports, undefined names)
+- Test isolation: model registry and engine singletons properly reset between tests
+- Definition table cleanup in test teardown to avoid FK violations
+- Mock SecretRegistry in sandbox launch tests
+
+### Security
+- Admin and daemon roles granted `MEMORY_DELETE_ANY` permission — admins can manage org memories, daemon uses it for consolidation
+- `MANAGE_INTEGRATIONS` permission added to admin and owner roles
+- Docker socket access documented with security guidance; production config uses docker-socket-proxy
+- Prompt injection scanning on memory content
+- Secrets redacted from daemon log output using pattern matching
+- API key file caching removed — eliminates credential persistence on disk
 
 ## [0.2.0] - 2026-03-17
 
@@ -124,6 +280,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Daemon process for autonomous cognitive cycles
 - 687+ tests covering core functionality
 
-[Unreleased]: https://github.com/kahinton/lucent/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/kahinton/lucent/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/kahinton/lucent/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/kahinton/lucent/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/kahinton/lucent/releases/tag/v0.1.0

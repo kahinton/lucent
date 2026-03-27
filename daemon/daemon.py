@@ -286,7 +286,7 @@ async def _provision_daemon_api_key(instance_id: str) -> str | None:
                     "INSERT INTO users (external_id, provider, organization_id, "
                     "  email, display_name, role) "
                     "VALUES ('daemon-service', 'local', $1, "
-                    "  'daemon@lucent.local', 'Lucent Daemon', 'admin') "
+                    "  'daemon@lucent.local', 'Lucent Daemon', 'daemon') "
                     "RETURNING id, organization_id",
                     org_id,
                 )
