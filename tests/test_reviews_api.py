@@ -4,6 +4,7 @@ Covers: CRUD, authentication, authorization, input validation,
 pagination, HTTP status codes, cross-org isolation, and side effects.
 """
 
+import asyncio
 from uuid import UUID, uuid4
 
 import httpx
@@ -73,6 +74,19 @@ async def rv_api_user(db_pool, rv_api_org, rv_api_prefix):
 
 
 @pytest_asyncio.fixture
+async def rv_api_admin_user(db_pool, rv_api_org, rv_api_prefix):
+    repo = UserRepository(db_pool)
+    return await repo.create(
+        external_id=f"{rv_api_prefix}admin_user",
+        provider="local",
+        organization_id=rv_api_org["id"],
+        email=f"{rv_api_prefix}admin@test.com",
+        display_name=f"{rv_api_prefix}Admin",
+        role="admin",
+    )
+
+
+@pytest_asyncio.fixture
 async def rv_api_other_org(db_pool, rv_api_prefix):
     repo = OrganizationRepository(db_pool)
     return await repo.create(name=f"{rv_api_prefix}other_org")
@@ -90,7 +104,26 @@ async def rv_api_other_user(db_pool, rv_api_other_org, rv_api_prefix):
     )
 
 
-async def _make_api_client(user, scopes=None):
+@pytest_asyncio.fixture
+async def rv_api_other_admin_user(db_pool, rv_api_other_org, rv_api_prefix):
+    repo = UserRepository(db_pool)
+    return await repo.create(
+        external_id=f"{rv_api_prefix}other_admin",
+        provider="local",
+        organization_id=rv_api_other_org["id"],
+        email=f"{rv_api_prefix}other_admin@test.com",
+        display_name=f"{rv_api_prefix}Other Admin",
+        role="admin",
+    )
+
+
+async def _make_api_client(
+    user,
+    scopes=None,
+    *,
+    auth_method: str = "api_key",
+    external_id: str | None = None,
+):
     """Build httpx client with dependency-override auth."""
     app = create_app()
     fake_user = CurrentUser(
@@ -99,8 +132,9 @@ async def _make_api_client(user, scopes=None):
         role=user.get("role", "member"),
         email=user.get("email"),
         display_name=user.get("display_name"),
-        auth_method="api_key",
+        auth_method=auth_method,
         api_key_scopes=scopes or ["read", "write"],
+        external_id=external_id,
     )
 
     async def override():
@@ -113,8 +147,47 @@ async def _make_api_client(user, scopes=None):
 
 
 @pytest_asyncio.fixture
-async def client(rv_api_user):
+async def client(rv_api_admin_user):
+    c, app = await _make_api_client(rv_api_admin_user)
+    async with c:
+        yield c
+    app.dependency_overrides.clear()
+
+
+@pytest_asyncio.fixture
+async def member_client(rv_api_user):
     c, app = await _make_api_client(rv_api_user)
+    async with c:
+        yield c
+    app.dependency_overrides.clear()
+
+
+@pytest_asyncio.fixture
+async def admin_client(rv_api_admin_user):
+    c, app = await _make_api_client(rv_api_admin_user)
+    async with c:
+        yield c
+    app.dependency_overrides.clear()
+
+
+@pytest_asyncio.fixture
+async def daemon_client(rv_api_user):
+    c, app = await _make_api_client(
+        rv_api_user,
+        auth_method="api_key",
+        external_id="daemon-service",
+    )
+    async with c:
+        yield c
+    app.dependency_overrides.clear()
+
+
+@pytest_asyncio.fixture
+async def human_client(rv_api_admin_user):
+    c, app = await _make_api_client(
+        rv_api_admin_user,
+        auth_method="session",
+    )
     async with c:
         yield c
     app.dependency_overrides.clear()
@@ -123,6 +196,14 @@ async def client(rv_api_user):
 @pytest_asyncio.fixture
 async def other_client(rv_api_other_user):
     c, app = await _make_api_client(rv_api_other_user)
+    async with c:
+        yield c
+    app.dependency_overrides.clear()
+
+
+@pytest_asyncio.fixture
+async def other_admin_client(rv_api_other_admin_user):
+    c, app = await _make_api_client(rv_api_other_admin_user)
     async with c:
         yield c
     app.dependency_overrides.clear()
@@ -195,14 +276,14 @@ class TestCreateReviewEndpoint:
         assert resp.status_code == 201
         assert resp.json()["task_id"] == str(api_task["id"])
 
-    async def test_create_with_source(self, client, api_request):
+    async def test_create_with_source_is_server_derived(self, client, api_request):
         resp = await client.post("/api/reviews", json={
             "request_id": str(api_request["id"]),
             "status": "approved",
             "source": "daemon",
         })
         assert resp.status_code == 201
-        assert resp.json()["source"] == "daemon"
+        assert resp.json()["source"] == "agent"
 
     async def test_rejection_without_comments_422(self, client, api_request):
         """Rejections require comments."""
@@ -264,7 +345,7 @@ class TestCreateReviewEndpoint:
         })
         assert resp.status_code == 422
 
-    async def test_reviewer_info_populated(self, client, api_request, rv_api_user):
+    async def test_reviewer_info_populated(self, client, api_request, rv_api_admin_user):
         """Review should have the authenticated user as reviewer."""
         resp = await client.post("/api/reviews", json={
             "request_id": str(api_request["id"]),
@@ -272,7 +353,15 @@ class TestCreateReviewEndpoint:
         })
         assert resp.status_code == 201
         data = resp.json()
-        assert data["reviewer_user_id"] == str(rv_api_user["id"])
+        assert data["reviewer_user_id"] == str(rv_api_admin_user["id"])
+
+    async def test_comments_max_length_enforced(self, client, api_request):
+        resp = await client.post("/api/reviews", json={
+            "request_id": str(api_request["id"]),
+            "status": "approved",
+            "comments": "x" * 10001,
+        })
+        assert resp.status_code == 422
 
 
 # ── Authentication ───────────────────────────────────────────────────────
@@ -318,15 +407,54 @@ class TestReviewAuthentication:
 
 class TestReviewAuthorization:
     async def test_cross_org_create_404(
-        self, other_client, api_request
+        self, other_admin_client, api_request
     ):
         """User from org B cannot create review on org A's request (gets 404)."""
-        resp = await other_client.post("/api/reviews", json={
+        resp = await other_admin_client.post("/api/reviews", json={
             "request_id": str(api_request["id"]),
             "status": "approved",
         })
         # Request doesn't exist in org B, so 404
         assert resp.status_code == 404
+
+    async def test_member_cannot_create_review(self, member_client, api_request):
+        resp = await member_client.post("/api/reviews", json={
+            "request_id": str(api_request["id"]),
+            "status": "approved",
+        })
+        assert resp.status_code == 403
+
+    async def test_creator_cannot_self_review(
+        self, admin_client, req_repo, org_id, rv_api_admin_user
+    ):
+        created = await req_repo.create_request(
+            title="Self review request",
+            org_id=org_id,
+            created_by=str(rv_api_admin_user["id"]),
+        )
+        resp = await admin_client.post("/api/reviews", json={
+            "request_id": str(created["id"]),
+            "status": "approved",
+        })
+        assert resp.status_code == 403
+
+    async def test_source_derived_daemon(self, daemon_client, api_request):
+        resp = await daemon_client.post("/api/reviews", json={
+            "request_id": str(api_request["id"]),
+            "status": "approved",
+            "source": "human",
+        })
+        assert resp.status_code == 201
+        assert resp.json()["source"] == "daemon"
+
+    async def test_source_derived_human(self, human_client, api_request):
+        resp = await human_client.post("/api/reviews", json={
+            "request_id": str(api_request["id"]),
+            "status": "approved",
+            "source": "daemon",
+        })
+        assert resp.status_code == 201
+        assert resp.json()["source"] == "human"
 
     async def test_cross_org_get_review_404(
         self, client, other_client, api_request, org_id, review_repo
@@ -810,3 +938,105 @@ class TestReviewSideEffects:
                 UUID(org_id),
             )
         assert after_count == before_count  # No new memory created
+
+    async def test_atomicity_conflict_rolls_back_review_insert(
+        self, client, req_repo, api_request, org_id, db_pool, monkeypatch
+    ):
+        """If status transition fails mid-transaction, review insert rolls back."""
+        from lucent.db.requests import RequestRepository
+        from lucent.db.reviews import ReviewRepository
+
+        # Put request in review status so approval attempts transition.
+        task = await req_repo.create_task(
+            request_id=str(api_request["id"]),
+            title="Atomicity rollback task",
+            org_id=org_id,
+        )
+        await req_repo.claim_task(str(task["id"]), "test")
+        await req_repo.complete_task(str(task["id"]), "Done")
+
+        # Force a transition conflict (simulates TOCTOU race loser branch).
+        async def fail_mark_completed(self, request_id, organization_id, conn=None):
+            return False
+
+        monkeypatch.setattr(
+            ReviewRepository,
+            "mark_request_completed",
+            fail_mark_completed,
+        )
+
+        async with db_pool.acquire() as conn:
+            before = await conn.fetchval(
+                "SELECT COUNT(*) FROM reviews WHERE request_id = $1",
+                UUID(str(api_request["id"])),
+            )
+
+        resp = await client.post("/api/reviews", json={
+            "request_id": str(api_request["id"]),
+            "status": "approved",
+            "comments": "atomicity",
+        })
+        assert resp.status_code == 409
+
+        async with db_pool.acquire() as conn:
+            after = await conn.fetchval(
+                "SELECT COUNT(*) FROM reviews WHERE request_id = $1",
+                UUID(str(api_request["id"])),
+            )
+            current_status = await conn.fetchval(
+                "SELECT status FROM requests WHERE id = $1",
+                UUID(str(api_request["id"])),
+            )
+
+        # No partial review insert and no request state drift.
+        assert after == before
+        assert current_status == "review"
+
+    async def test_double_approval_conflict_single_winner(
+        self, req_repo, api_request, org_id, rv_api_admin_user, db_pool
+    ):
+        """Concurrent approvals produce one success and one conflict (no duplicate writes)."""
+        # Put request in review status so approvals try transition.
+        task = await req_repo.create_task(
+            request_id=str(api_request["id"]),
+            title="Race condition task",
+            org_id=org_id,
+        )
+        await req_repo.claim_task(str(task["id"]), "test")
+        await req_repo.complete_task(str(task["id"]), "Done")
+
+        client_a, app_a = await _make_api_client(rv_api_admin_user)
+        client_b, app_b = await _make_api_client(rv_api_admin_user)
+        try:
+            async with client_a, client_b:
+                r1, r2 = await asyncio.gather(
+                    client_a.post("/api/reviews", json={
+                        "request_id": str(api_request["id"]),
+                        "status": "approved",
+                        "comments": "approve-a",
+                    }),
+                    client_b.post("/api/reviews", json={
+                        "request_id": str(api_request["id"]),
+                        "status": "approved",
+                        "comments": "approve-b",
+                    }),
+                )
+        finally:
+            app_a.dependency_overrides.clear()
+            app_b.dependency_overrides.clear()
+
+        statuses = sorted([r1.status_code, r2.status_code])
+        assert statuses == [201, 409]
+
+        async with db_pool.acquire() as conn:
+            review_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM reviews WHERE request_id = $1",
+                UUID(str(api_request["id"])),
+            )
+            request_status = await conn.fetchval(
+                "SELECT status FROM requests WHERE id = $1",
+                UUID(str(api_request["id"])),
+            )
+
+        assert review_count == 1
+        assert request_status == "completed"

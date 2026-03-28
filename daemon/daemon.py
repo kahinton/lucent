@@ -3061,7 +3061,6 @@ class LucentDaemon:
             comments=feedback,
             source="daemon",
         )
-        await RequestAPI.reject_request_review(request_id, feedback)
         all_tasks = request_data.get("tasks", []) or []
         non_review_tasks = [t for t in all_tasks if not self._is_request_review_task(t)]
         by_id = {str(t.get("id")): t for t in non_review_tasks}

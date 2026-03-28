@@ -124,13 +124,13 @@ class TestCreateReviewTool:
         })
         assert result["task_id"] == str(test_task["id"])
 
-    async def test_create_with_custom_source(self, mcp, auth_user, test_request):
+    async def test_create_with_custom_source_ignored(self, mcp, auth_user, test_request):
         result = await _call(mcp, "create_review", {
             "request_id": str(test_request["id"]),
             "status": "approved",
             "source": "daemon",
         })
-        assert result["source"] == "daemon"
+        assert result["source"] == "agent"
 
     async def test_invalid_status_returns_error(self, mcp, auth_user, test_request):
         result = await _call(mcp, "create_review", {
@@ -163,6 +163,68 @@ class TestCreateReviewTool:
             "status": "approved",
         })
         assert "error" in result
+
+    async def test_cross_org_request_returns_not_found(
+        self, mcp, auth_user, repo, db_pool
+    ):
+        """MCP create_review cannot access requests from another organization."""
+        from lucent.db import OrganizationRepository, UserRepository
+
+        org_repo = OrganizationRepository(db_pool)
+        user_repo = UserRepository(db_pool)
+        other_org = await org_repo.create(name=f"mcp_other_{uuid4().hex[:8]}")
+        other_user = await user_repo.create(
+            external_id=f"mcp_other_user_{uuid4().hex[:8]}",
+            provider="local",
+            organization_id=other_org["id"],
+            email=f"mcp_other_{uuid4().hex[:8]}@test.com",
+            display_name="MCP Other User",
+        )
+        other_req = await repo.create_request(
+            title="Other org request",
+            org_id=str(other_org["id"]),
+            created_by=str(other_user["id"]),
+        )
+
+        result = await _call(mcp, "create_review", {
+            "request_id": str(other_req["id"]),
+            "status": "approved",
+        })
+        assert result.get("error") == "Request not found"
+
+    async def test_task_wrong_request_returns_error(self, mcp, auth_user, test_request, repo, test_organization, test_task):
+        other_request = await repo.create_request(
+            title="Different request",
+            org_id=str(test_organization["id"]),
+        )
+        result = await _call(mcp, "create_review", {
+            "request_id": str(other_request["id"]),
+            "task_id": str(test_task["id"]),
+            "status": "approved",
+        })
+        assert result.get("error") == "Task does not belong to the specified request"
+
+    async def test_invalid_source_returns_error(self, mcp, auth_user, test_request):
+        result = await _call(mcp, "create_review", {
+            "request_id": str(test_request["id"]),
+            "status": "approved",
+            "source": "bot",
+        })
+        assert result.get("error") == "source must be one of: 'human', 'daemon', 'agent'"
+
+    async def test_db_exceptions_are_not_leaked(self, mcp, auth_user, monkeypatch, test_request):
+        from lucent.db.reviews import ReviewRepository
+
+        async def boom(*args, **kwargs):
+            raise RuntimeError("SQLSTATE 23505 duplicate key details")
+
+        monkeypatch.setattr(ReviewRepository, "create_review", boom)
+        result = await _call(mcp, "create_review", {
+            "request_id": str(test_request["id"]),
+            "status": "approved",
+        })
+        assert result.get("error") == "Failed to create review"
+        assert "SQLSTATE" not in json.dumps(result)
 
     async def test_json_serialization(self, mcp, auth_user, test_request):
         """Verify UUID and datetime are properly serialized to strings."""
@@ -262,6 +324,29 @@ class TestListReviewsTool:
         set_current_user(None)
         result = await _call(mcp, "list_reviews", {})
         assert "error" in result
+
+    async def test_cross_org_reviews_not_visible(
+        self, mcp, auth_user, repo, review_repo, db_pool
+    ):
+        from lucent.db import OrganizationRepository
+
+        org_repo = OrganizationRepository(db_pool)
+        other_org = await org_repo.create(name=f"mcp_other_list_{uuid4().hex[:8]}")
+        other_req = await repo.create_request(
+            title="Other org hidden request",
+            org_id=str(other_org["id"]),
+        )
+        await review_repo.create_review(
+            request_id=str(other_req["id"]),
+            organization_id=str(other_org["id"]),
+            status="approved",
+            comments="hidden",
+            source="agent",
+        )
+
+        result = await _call(mcp, "list_reviews", {})
+        comments = [r.get("comments") for r in result["items"]]
+        assert "hidden" not in comments
 
 
 # ── get_request_details includes reviews ─────────────────────────────────

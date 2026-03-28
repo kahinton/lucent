@@ -429,12 +429,33 @@ Returns: JSON with the created review including its ID."""
             return json.dumps({"error": "status must be 'approved' or 'rejected'"})
         if status == "rejected" and not comments:
             return json.dumps({"error": "comments are required when rejecting"})
+        if source not in ("human", "daemon", "agent"):
+            return json.dumps(
+                {"error": "source must be one of: 'human', 'daemon', 'agent'"}
+            )
 
         from lucent.db.reviews import ReviewRepository
 
-        pool = await _get_pool()
-        repo = ReviewRepository(pool)
         try:
+            req_repo = await _get_request_repository()
+            request = await req_repo.get_request(request_id, str(org_id))
+            if not request:
+                return json.dumps({"error": "Request not found"})
+
+            if task_id:
+                task = await req_repo.get_task(task_id, str(org_id))
+                if not task:
+                    return json.dumps({"error": "Task not found"})
+                if str(task.get("request_id")) != request_id:
+                    return json.dumps(
+                        {"error": "Task does not belong to the specified request"}
+                    )
+
+            # MCP tools are agent-originated; do not trust caller-provided source.
+            source = "agent"
+
+            pool = await _get_pool()
+            repo = ReviewRepository(pool)
             review = await repo.create_review(
                 request_id=request_id,
                 organization_id=str(org_id),
@@ -444,8 +465,8 @@ Returns: JSON with the created review including its ID."""
                 comments=comments,
                 source=source,
             )
-        except Exception as exc:
-            return json.dumps({"error": str(exc)})
+        except Exception:
+            return json.dumps({"error": "Failed to create review"})
 
         def serialize(obj):
             if hasattr(obj, "isoformat"):

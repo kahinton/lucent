@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
+from asyncpg import Connection
 from asyncpg import Pool
 
 
@@ -29,6 +30,7 @@ class ReviewRepository:
         reviewer_display_name: str | None = None,
         comments: str | None = None,
         source: str = "human",
+        conn: Connection | None = None,
     ) -> dict:
         """Create a new review record.
 
@@ -50,7 +52,24 @@ class ReviewRepository:
         if source not in ("human", "daemon", "agent"):
             raise ValueError(f"Invalid review source '{source}'. Must be 'human', 'daemon', or 'agent'.")
 
-        async with self.pool.acquire() as conn:
+        if conn is None:
+            async with self.pool.acquire() as acquired:
+                row = await acquired.fetchrow(
+                    """INSERT INTO reviews
+                       (request_id, task_id, organization_id, reviewer_user_id,
+                        reviewer_display_name, status, comments, source)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                       RETURNING *""",
+                    UUID(request_id),
+                    UUID(task_id) if task_id else None,
+                    UUID(organization_id),
+                    UUID(reviewer_user_id) if reviewer_user_id else None,
+                    reviewer_display_name,
+                    status,
+                    comments,
+                    source,
+                )
+        else:
             row = await conn.fetchrow(
                 """INSERT INTO reviews
                    (request_id, task_id, organization_id, reviewer_user_id,
@@ -67,6 +86,63 @@ class ReviewRepository:
                 source,
             )
         return dict(row)
+
+    async def mark_request_needs_rework(
+        self,
+        request_id: str,
+        organization_id: str,
+        feedback: str | None,
+        *,
+        conn: Connection | None = None,
+    ) -> dict | None:
+        """Transition a request to needs_rework and persist review feedback."""
+        params = (
+            UUID(request_id),
+            feedback,
+            UUID(organization_id),
+            datetime.now(timezone.utc),
+        )
+        query = """UPDATE requests
+                   SET status = 'needs_rework',
+                       review_feedback = $2,
+                       review_count = review_count + 1,
+                       reviewed_at = $4,
+                       updated_at = $4
+                   WHERE id = $1 AND organization_id = $3 AND status = 'review'
+                   RETURNING *"""
+        if conn is None:
+            async with self.pool.acquire() as acquired:
+                row = await acquired.fetchrow(query, *params)
+        else:
+            row = await conn.fetchrow(query, *params)
+        return dict(row) if row else None
+
+    async def mark_request_completed(
+        self,
+        request_id: str,
+        organization_id: str,
+        *,
+        conn: Connection | None = None,
+    ) -> dict | None:
+        """Transition a request from review to completed."""
+        now = datetime.now(timezone.utc)
+        params = (
+            UUID(request_id),
+            UUID(organization_id),
+            now,
+        )
+        query = """UPDATE requests
+                   SET status = 'completed',
+                       completed_at = COALESCE(completed_at, $3),
+                       updated_at = $3
+                   WHERE id = $1 AND organization_id = $2 AND status = 'review'
+                   RETURNING *"""
+        if conn is None:
+            async with self.pool.acquire() as acquired:
+                row = await acquired.fetchrow(query, *params)
+        else:
+            row = await conn.fetchrow(query, *params)
+        return dict(row) if row else None
 
     async def get_review(
         self, review_id: str, organization_id: str

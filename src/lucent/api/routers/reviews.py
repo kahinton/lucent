@@ -20,7 +20,8 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from lucent.api.deps import AdminUser, AuthenticatedUser, get_pool
+from lucent.api.deps import AuthenticatedUser, get_pool
+from lucent.rbac import Role
 
 logger = logging.getLogger("lucent.api.reviews")
 
@@ -41,7 +42,7 @@ class ReviewCreate(BaseModel):
         ..., pattern=r"^(approved|rejected)$", description="Review decision"
     )
     comments: str | None = Field(
-        default=None, description="Review comments/feedback"
+        default=None, max_length=10000, description="Review comments/feedback"
     )
     source: str = Field(
         default="human",
@@ -102,6 +103,13 @@ async def create_review(
     from lucent.db.requests import RequestRepository
     from lucent.db.reviews import ReviewRepository
 
+    if (
+        user.role < Role.ADMIN
+        and user.role != Role.DAEMON
+        and user.external_id != "daemon-service"
+    ):
+        raise HTTPException(403, "Admin or owner role required")
+
     org_id = str(user.organization_id)
 
     # Validate request exists in this org
@@ -109,6 +117,11 @@ async def create_review(
     request = await req_repo.get_request(body.request_id, org_id)
     if not request:
         raise HTTPException(404, "Request not found")
+
+    # Prevent request creators from approving/rejecting their own request
+    request_creator = request.get("created_by")
+    if request_creator and str(request_creator) == str(user.id):
+        raise HTTPException(403, "Request creators cannot review their own requests")
 
     # Validate task exists if specified
     if body.task_id:
@@ -124,52 +137,63 @@ async def create_review(
     if body.status == "rejected" and not body.comments:
         raise HTTPException(422, "Comments are required when rejecting")
 
+    # Server-side source derivation to prevent spoofing
+    if user.external_id == "daemon-service" or user.role == Role.DAEMON:
+        resolved_source = "daemon"
+    elif user.auth_method in ("session", "oauth"):
+        resolved_source = "human"
+    else:
+        resolved_source = "agent"
+
     repo = ReviewRepository(pool)
-    review = await repo.create_review(
-        request_id=body.request_id,
-        organization_id=org_id,
-        status=body.status,
-        task_id=body.task_id,
-        reviewer_user_id=str(user.id),
-        reviewer_display_name=user.display_name or user.email,
-        comments=body.comments,
-        source=body.source,
-    )
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            review = await repo.create_review(
+                request_id=body.request_id,
+                organization_id=org_id,
+                status=body.status,
+                task_id=body.task_id,
+                reviewer_user_id=str(user.id),
+                reviewer_display_name=user.display_name or user.email,
+                comments=body.comments,
+                source=resolved_source,
+                conn=conn,
+            )
+
+            # Side effects based on review status (transactional)
+            if body.status == "approved" and request["status"] == "review":
+                # Auto-transition request to completed on approval
+                updated = await repo.mark_request_completed(
+                    request_id=body.request_id,
+                    organization_id=org_id,
+                    conn=conn,
+                )
+                if not updated:
+                    raise HTTPException(409, "Request is not in review status")
+
+            elif body.status == "rejected" and request["status"] == "review":
+                # Transition request to needs_rework on rejection
+                updated = await repo.mark_request_needs_rework(
+                    request_id=body.request_id,
+                    organization_id=org_id,
+                    feedback=body.comments,
+                    conn=conn,
+                )
+                if not updated:
+                    raise HTTPException(409, "Request is not in review status")
 
     review_id = str(review["id"])
 
-    # Side effects based on review status
+    # Non-transactional follow-up effects after durable state change
     if body.status == "approved" and request["status"] == "review":
-        # 1. Auto-transition request to completed on approval
-        await req_repo.update_request_status(
-            body.request_id, "completed", org_id=org_id
-        )
-
-        # 2. Create a tracked request from the approved content so it enters
-        #    the processing pipeline. Uses a fingerprint derived from the
-        #    review ID so retrying the same approval is idempotent.
-        await _create_approved_request(
-            req_repo, request, review_id, org_id, user
-        )
-
-    elif body.status == "rejected" and request["status"] == "review":
-        # 1. Transition request to needs_rework on rejection
-        async with pool.acquire() as conn:
-            await conn.execute(
-                """UPDATE requests
-                   SET status = 'needs_rework',
-                       review_feedback = $2,
-                       review_count = review_count + 1,
-                       reviewed_at = NOW(),
-                       updated_at = NOW()
-                   WHERE id = $1 AND organization_id = $3""",
-                UUID(body.request_id),
-                body.comments,
-                user.organization_id,
+        # Create a tracked request from approved content so it enters pipeline.
+        # Guard: don't create recursive requests from auto-created approvals.
+        if not (request.get("title") or "").startswith("Approved:"):
+            await _create_approved_request(
+                req_repo, request, review_id, org_id, user
             )
-
-        # 2. Create a learning memory from the rejection so the learning
-        #    extraction system can find and process it.
+    elif body.status == "rejected" and request["status"] == "review":
+        # Create learning memory from rejection for extraction pipeline.
         await _create_rejection_memory(
             pool, request, body.comments, org_id, user
         )
