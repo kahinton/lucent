@@ -3,6 +3,78 @@
 
 {% block extra_head %}
 <style>
+    /* Lucent fluid vaporwave orb */
+    .lucent-orb {
+        aspect-ratio: 1;
+        background:
+            radial-gradient(circle at 25% 25%, rgba(255,255,255,0.35) 0%, transparent 35%),
+            radial-gradient(circle at 70% 30%, #00d4ff 0%, transparent 50%),
+            radial-gradient(circle at 30% 70%, #ff2d95 0%, transparent 50%),
+            radial-gradient(circle at 65% 75%, #7b2dff 0%, transparent 45%),
+            radial-gradient(circle at 50% 50%, #00d4ff 0%, #ff2d95 50%, #7b2dff 100%);
+        background-size: 200% 200%;
+        animation:
+            amoeba 12s ease-in-out infinite,
+            swirl 8s ease-in-out infinite alternate,
+            glow-pulse 4s ease-in-out infinite alternate;
+        box-shadow:
+            inset -2px -2px 6px rgba(0, 0, 0, 0.15),
+            inset 2px 2px 6px rgba(255, 255, 255, 0.25),
+            0 0 12px rgba(255, 45, 149, 0.35),
+            0 0 24px rgba(0, 212, 255, 0.25),
+            0 0 40px rgba(123, 45, 255, 0.15);
+    }
+    .lucent-orb-lg { width: 52px; height: 52px; }
+    .lucent-orb-sm { width: 28px; height: 28px; min-width: 28px; min-height: 28px; }
+
+    @keyframes amoeba {
+        0%    { border-radius: 54% 46% 42% 58% / 48% 44% 56% 52%; }
+        5%    { border-radius: 48% 52% 46% 54% / 52% 48% 50% 50%; }
+        10%   { border-radius: 46% 54% 50% 50% / 56% 44% 46% 54%; }
+        15%   { border-radius: 50% 50% 54% 46% / 44% 52% 54% 46%; }
+        20%   { border-radius: 44% 56% 48% 52% / 50% 46% 48% 54%; }
+        25%   { border-radius: 52% 48% 44% 56% / 46% 54% 52% 48%; }
+        30%   { border-radius: 56% 44% 50% 50% / 54% 42% 46% 58%; }
+        35%   { border-radius: 48% 52% 56% 44% / 42% 56% 50% 48%; }
+        40%   { border-radius: 44% 56% 52% 48% / 56% 48% 44% 52%; }
+        45%   { border-radius: 52% 48% 46% 54% / 48% 44% 56% 50%; }
+        50%   { border-radius: 46% 54% 56% 44% / 54% 50% 42% 56%; }
+        55%   { border-radius: 54% 46% 48% 52% / 46% 56% 52% 44%; }
+        60%   { border-radius: 50% 50% 42% 58% / 52% 42% 56% 48%; }
+        65%   { border-radius: 42% 58% 54% 46% / 48% 54% 44% 54%; }
+        70%   { border-radius: 56% 44% 46% 54% / 44% 48% 58% 46%; }
+        75%   { border-radius: 48% 52% 52% 48% / 56% 46% 46% 52%; }
+        80%   { border-radius: 52% 48% 44% 56% / 42% 52% 50% 54%; }
+        85%   { border-radius: 46% 54% 56% 44% / 54% 44% 48% 50%; }
+        90%   { border-radius: 50% 50% 48% 52% / 48% 56% 44% 52%; }
+        95%   { border-radius: 44% 56% 52% 48% / 52% 46% 54% 46%; }
+        100%  { border-radius: 54% 46% 42% 58% / 48% 44% 56% 52%; }
+    }
+
+    @keyframes swirl {
+        0%   { background-position: 0% 0%; }
+        25%  { background-position: 100% 50%; }
+        50%  { background-position: 50% 100%; }
+        75%  { background-position: 0% 50%; }
+        100% { background-position: 100% 0%; }
+    }
+
+    @keyframes glow-pulse {
+        0%   { box-shadow: inset -2px -2px 6px rgba(0,0,0,0.15), inset 2px 2px 6px rgba(255,255,255,0.25), 0 0 12px rgba(255,45,149,0.35), 0 0 24px rgba(0,212,255,0.25), 0 0 40px rgba(123,45,255,0.15); }
+        100% { box-shadow: inset -2px -2px 6px rgba(0,0,0,0.15), inset 2px 2px 6px rgba(255,255,255,0.25), 0 0 16px rgba(0,212,255,0.4), 0 0 30px rgba(255,45,149,0.3), 0 0 50px rgba(123,45,255,0.2); }
+    }
+
+    @media (prefers-color-scheme: dark) {
+        .lucent-orb {
+            box-shadow:
+                inset -2px -2px 6px rgba(0, 0, 0, 0.35),
+                inset 2px 2px 4px rgba(255, 255, 255, 0.1),
+                0 0 16px rgba(255, 45, 149, 0.4),
+                0 0 32px rgba(0, 212, 255, 0.3),
+                0 0 52px rgba(123, 45, 255, 0.2);
+        }
+    }
+
     /* Override main content to be full-height for chat */
     main { padding: 0 !important; height: 100vh; }
     main > div { max-width: none !important; height: 100%; }
@@ -105,11 +177,11 @@
     /* Dark mode overrides for chat-specific elements */
     @media (prefers-color-scheme: dark) {
         .chat-user-bubble { background-color: #4338ca !important; }
-        .chat-assistant-bg { background-color: rgba(30, 41, 59, 0.5) !important; }
+        .chat-assistant-bg { background-color: transparent !important; }
         .tool-chip { background-color: #1e293b !important; border-color: #334155 !important; color: #94a3b8 !important; }
         .tool-chip:hover { background-color: #334155 !important; }
         .tool-details-content { background-color: #111827 !important; border-color: #1e293b !important; }
-        .chat-input-area { background-color: #111827 !important; border-color: #1e293b !important; }
+        .chat-input-area { background-color: transparent !important; border-color: #1e293b !important; }
         .chat-input-field { background-color: #1a2233 !important; border-color: #334155 !important; color: #e2e8f0 !important; }
         .chat-input-field::placeholder { color: #64748b !important; }
         .config-select { background-color: #1a2233 !important; border-color: #334155 !important; color: #e2e8f0 !important; }
@@ -124,11 +196,7 @@
     <div id="messages" class="messages-area">
         <!-- Empty state -->
         <div id="empty-state" class="flex flex-col items-center px-6">
-            <div class="w-16 h-16 rounded-2xl bg-gradient-to-br from-primary-100 to-primary-200 flex items-center justify-center mb-6 shadow-sm">
-                <svg class="w-8 h-8 text-primary-600" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.455 2.456L21.75 6l-1.036.259a3.375 3.375 0 00-2.455 2.456z" />
-                </svg>
-            </div>
+            <div class="lucent-orb lucent-orb-lg mb-6"></div>
             <h2 class="text-lg font-semibold text-gray-900 mb-2">Hey — what's on your mind?</h2>
             <p class="empty-state-text text-sm text-gray-500 text-center max-w-md mb-8">
                 Pick up where we left off, start something new, or just think out loud.
@@ -490,11 +558,7 @@ function createAssistantMessage() {
     div.id = id;
     div.innerHTML = `
         <div class="max-w-3xl mx-auto flex gap-3">
-            <div class="w-7 h-7 rounded-full bg-gradient-to-br from-primary-400 to-primary-600 flex items-center justify-center shrink-0 mt-1 shadow-sm">
-                <svg class="w-3.5 h-3.5 text-white" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
-                </svg>
-            </div>
+            <div class="lucent-orb lucent-orb-sm shrink-0 mt-1"></div>
             <div class="flex-1 min-w-0">
                 <div class="tools-container mb-3 space-y-2"></div>
                 <div class="assistant-content text-sm text-gray-800 leading-relaxed prose prose-sm prose-gray max-w-none">
@@ -685,11 +749,7 @@ function clearConversation() {
     document.getElementById('chat-root').classList.add('empty-mode');
     msgs.innerHTML = `
         <div id="empty-state" class="flex flex-col items-center px-6">
-            <div class="w-16 h-16 rounded-2xl bg-gradient-to-br from-primary-100 to-primary-200 flex items-center justify-center mb-6 shadow-sm">
-                <svg class="w-8 h-8 text-primary-600" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.455 2.456L21.75 6l-1.036.259a3.375 3.375 0 00-2.455 2.456z" />
-                </svg>
-            </div>
+            <div class="lucent-orb lucent-orb-lg mb-6"></div>
             <h2 class="text-lg font-semibold text-gray-900 mb-2">Hey — what's on your mind?</h2>
             <p class="empty-state-text text-sm text-gray-500 text-center max-w-md mb-8">
                 Pick up where we left off, start something new, or just think out loud.
