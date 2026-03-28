@@ -92,7 +92,7 @@
 {% endblock %}
 
 {% block extra_scripts %}
-<script>
+<script nonce="{{ request.state.csp_nonce }}">
 // After HTMX swaps a feedback action, fade out the review card
 document.addEventListener('htmx:afterSwap', function(evt) {
     var target = evt.detail.target;

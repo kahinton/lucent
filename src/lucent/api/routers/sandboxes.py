@@ -113,12 +113,18 @@ async def _get_sandbox_for_user(sandbox_id: str, user: AuthenticatedUser) -> dic
 
 def _validate_sandbox_path(path: str) -> str:
     """Validate and normalize a sandbox file path to prevent traversal."""
+    import os
     import posixpath
 
     normalized = posixpath.normpath(path)
-    if ".." in normalized.split("/"):
+    workspace_root = "/workspace"
+    candidate = normalized if normalized.startswith("/") else posixpath.join(workspace_root, normalized)
+    resolved_candidate = os.path.realpath(candidate)
+    resolved_root = os.path.realpath(workspace_root)
+    root_prefix = resolved_root.rstrip("/") + "/"
+    if resolved_candidate != resolved_root and not resolved_candidate.startswith(root_prefix):
         raise HTTPException(status_code=400, detail="Invalid path")
-    return normalized
+    return resolved_candidate
 
 
 def _to_response(info) -> SandboxResponse:

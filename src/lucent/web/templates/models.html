@@ -262,7 +262,7 @@
     </div>
 </div>
 
-<script>
+<script nonce="{{ request.state.csp_nonce }}">
 function openEditModal(btn) {
     const d = btn.dataset;
     document.getElementById('edit-model-id').value = d.id;

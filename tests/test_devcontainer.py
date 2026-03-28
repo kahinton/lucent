@@ -10,6 +10,7 @@ Covers:
 from __future__ import annotations
 
 import json
+import shlex
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -787,6 +788,32 @@ class TestDockerBackendDevcontainerIntegration:
         assert info.status == SandboxStatus.FAILED
         assert "Git clone failed" in info.error
 
+    def test_build_clone_command_does_not_embed_credentials(self):
+        """Clone command must never include user/token in URL."""
+        backend, _ = self._make_backend()
+        config = SandboxConfig(
+            repo_url="https://user:ghp_secret123@github.com/private/repo.git",
+            branch="main",
+        )
+
+        cmd = backend._build_clone_command(config)
+
+        assert "ghp_secret123" not in cmd
+        assert "user:" not in cmd
+        assert "https://github.com/private/repo.git" in cmd
+        assert "git clone --depth=1 -b main" in cmd
+
+    def test_build_git_auth_env_uses_askpass(self):
+        """Git auth env should provide credentials via GIT_ASKPASS, not command args."""
+        backend, _ = self._make_backend()
+
+        env = backend._build_git_auth_env("x-access-token:ghp_secret123")
+
+        assert env["GIT_ASKPASS"] == "/tmp/lucent-git-askpass.sh"
+        assert env["GIT_TERMINAL_PROMPT"] == "0"
+        assert env["LUCENT_GIT_USERNAME"] == "x-access-token"
+        assert env["LUCENT_GIT_TOKEN"] == "ghp_secret123"
+
     @pytest.mark.asyncio
     async def test_devcontainer_with_dockerfile_attempts_build(self):
         """A devcontainer with Dockerfile should attempt to build."""
@@ -822,3 +849,33 @@ class TestDockerBackendDevcontainerIntegration:
         assert build_attempted
         # Should still succeed (Dockerfile build failure is non-fatal)
         assert info.status == SandboxStatus.READY
+
+    @pytest.mark.asyncio
+    async def test_build_devcontainer_image_quotes_user_controlled_values(self):
+        """Dockerfile/context values must be shell-quoted to prevent injection."""
+        backend, mock_client = self._make_backend()
+        container = self._mock_container(mock_client)
+        self._mock_exec(container)
+
+        dc_config = DevcontainerConfig(
+            build_dockerfile="Dockerfile;echo PWNED",
+            build_context='."; touch /tmp/pwned #',
+        )
+        config = SandboxConfig(image="base:latest")
+
+        from lucent.sandbox.models import ExecResult
+
+        async def mock_exec(_sid, command, **kwargs):
+            return ExecResult(exit_code=0, stdout=command, stderr="")
+
+        with patch.object(backend, "exec", side_effect=mock_exec) as exec_mock:
+            image = await backend._build_devcontainer_image("sandbox1234567890", config, dc_config)
+
+        assert image == "lucent-dc-sandbox12345"
+        cmd = exec_mock.call_args.args[1]
+        # Inputs must be wrapped as quoted shell literals.
+        assert f"-f {shlex.quote('Dockerfile;echo PWNED')}" in cmd
+        assert cmd.endswith(shlex.quote('."; touch /tmp/pwned #'))
+        # Ensure the dangerous tokens are not interpreted as standalone operators.
+        assert " -f Dockerfile;echo PWNED " not in cmd
+        assert " touch /tmp/pwned " not in cmd.split(" -f ", 1)[0]

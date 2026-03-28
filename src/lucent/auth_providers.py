@@ -43,9 +43,28 @@ if not SECURE_COOKIES:
 CSRF_COOKIE_NAME = "lucent_csrf"
 CSRF_FIELD_NAME = "csrf_token"
 
-# Signing secret for impersonation cookies — MUST be persistent across restarts
-# If not set, generates a random one (impersonation cookies won't survive restarts)
-SIGNING_SECRET = os.environ.get("LUCENT_SIGNING_SECRET", secrets.token_urlsafe(32))
+# Signing secret for impersonation cookies — MUST be persistent across restarts.
+# In team mode, a missing signing secret is a configuration error because
+# impersonation cookies become invalid after every restart.
+_signing_secret_from_env = os.environ.get("LUCENT_SIGNING_SECRET")
+if _signing_secret_from_env:
+    SIGNING_SECRET = _signing_secret_from_env
+else:
+    SIGNING_SECRET = secrets.token_urlsafe(32)
+    _mode = os.environ.get("LUCENT_MODE", "personal")
+    if _mode == "team":
+        logger.critical(
+            "LUCENT_SIGNING_SECRET is not set — a random secret was generated. "
+            "Impersonation cookies will NOT survive restarts. "
+            "Set LUCENT_SIGNING_SECRET to a stable value: "
+            "openssl rand -base64 32"
+        )
+    else:
+        logger.warning(
+            "LUCENT_SIGNING_SECRET is not set — using an ephemeral random value. "
+            "Set this env var for cookie persistence across restarts. "
+            "Generate with: openssl rand -base64 32"
+        )
 
 
 def get_cookie_params() -> dict:

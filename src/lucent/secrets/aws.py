@@ -1,4 +1,13 @@
-"""AWS Secrets Manager secret provider stub."""
+"""AWS Secrets Manager secret provider — PLANNED, NOT YET IMPLEMENTED.
+
+This module defines the interface for a future AWS Secrets Manager
+integration.  All methods raise ``NotImplementedError`` with guidance
+on which provider to use instead.
+
+Status: PLANNED
+Available alternatives: builtin, vault, transit
+Tracking: OWASP Finding 15
+"""
 
 from __future__ import annotations
 
@@ -6,39 +15,38 @@ from lucent.secrets.base import SecretProvider, SecretScope
 
 
 class AWSSecretProvider(SecretProvider):
-    """AWS Secrets Manager integration. Requires AWS credentials.
+    """AWS Secrets Manager integration — **not yet implemented**.
 
-    TODO:
-    - Initialize boto3/botocore client with region and credentials.
-    - Map SecretScope to deterministic secret naming/path strategy.
-    - Implement get/set/delete/list via Secrets Manager APIs.
+    This provider is planned for a future release.  Selecting
+    ``LUCENT_SECRET_PROVIDER=aws`` will fail at startup with a clear
+    error message directing you to use ``builtin``, ``vault``, or
+    ``transit`` instead.
 
-    Expected environment configuration:
-    - AWS_REGION (or AWS_DEFAULT_REGION)
-    - AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (or IAM role)
-    - Optional (future): AWS_SESSION_TOKEN, custom endpoint
+    When implemented, it will require:
+    - ``AWS_REGION`` (or ``AWS_DEFAULT_REGION``)
+    - AWS credentials (IAM role, access key, or web identity)
     """
 
     async def get(self, key: str, scope: SecretScope) -> str | None:
         raise NotImplementedError(
-            "AWSSecretProvider.get is not implemented. "
-            "Set LUCENT_SECRET_PROVIDER=builtin for now, or implement AWS Secrets Manager reads."
+            "AWS Secrets Manager provider is not yet implemented. "
+            "Use LUCENT_SECRET_PROVIDER=builtin, vault, or transit."
         )
 
     async def set(self, key: str, value: str, scope: SecretScope) -> None:
         raise NotImplementedError(
-            "AWSSecretProvider.set is not implemented. "
-            "Implement AWS Secrets Manager writes before enabling LUCENT_SECRET_PROVIDER=aws."
+            "AWS Secrets Manager provider is not yet implemented. "
+            "Use LUCENT_SECRET_PROVIDER=builtin, vault, or transit."
         )
 
     async def delete(self, key: str, scope: SecretScope) -> bool:
         raise NotImplementedError(
-            "AWSSecretProvider.delete is not implemented. "
-            "Implement AWS Secrets Manager delete before enabling LUCENT_SECRET_PROVIDER=aws."
+            "AWS Secrets Manager provider is not yet implemented. "
+            "Use LUCENT_SECRET_PROVIDER=builtin, vault, or transit."
         )
 
     async def list_keys(self, scope: SecretScope) -> list[str]:
         raise NotImplementedError(
-            "AWSSecretProvider.list_keys is not implemented. "
-            "Implement AWS Secrets Manager list before enabling LUCENT_SECRET_PROVIDER=aws."
+            "AWS Secrets Manager provider is not yet implemented. "
+            "Use LUCENT_SECRET_PROVIDER=builtin, vault, or transit."
         )

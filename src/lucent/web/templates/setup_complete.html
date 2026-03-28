@@ -6,7 +6,7 @@
     <meta name="color-scheme" content="light dark">
     <title>Setup Complete - Lucent</title>
     <script src="/static/vendor/tailwindcss-3.4.17.js"></script>
-    <script>
+    <script nonce="{{ request.state.csp_nonce }}">
         tailwind.config = {
             darkMode: 'media',
             theme: {

@@ -381,8 +381,8 @@ class TestAgentACLWrite:
 
         app.dependency_overrides.clear()
 
-    async def test_owner_can_delete_own_agent(self, db_pool, acl_prefix, org_and_users):
-        """Owner of agent can delete it."""
+    async def test_member_owner_cannot_delete_own_agent(self, db_pool, acl_prefix, org_and_users):
+        """Member owner cannot delete agent (admin/owner role required)."""
         app = create_app()
         owner = org_and_users["owner"]
 
@@ -394,12 +394,12 @@ class TestAgentACLWrite:
             agent_id = resp.json()["id"]
 
             resp = await client.delete(f"/api/definitions/agents/{agent_id}")
-            assert resp.status_code == 204
+            assert resp.status_code == 403
 
         app.dependency_overrides.clear()
 
     async def test_non_owner_member_cannot_delete_agent(self, db_pool, acl_prefix, org_and_users):
-        """Non-owner member cannot delete another user's agent (gets 404)."""
+        """Non-owner member cannot delete another user's agent (gets 403)."""
         app = create_app()
         owner = org_and_users["owner"]
         other = org_and_users["other"]
@@ -413,7 +413,7 @@ class TestAgentACLWrite:
 
         async with _make_client(app, other) as client:
             resp = await client.delete(f"/api/definitions/agents/{agent_id}")
-            assert resp.status_code == 404
+            assert resp.status_code == 403
 
         # Verify it still exists (owner can see it)
         async with _make_client(app, owner) as client:
@@ -479,7 +479,7 @@ class TestSkillACL:
 
         app.dependency_overrides.clear()
 
-    async def test_owner_can_delete_own_skill(self, db_pool, acl_prefix, org_and_users):
+    async def test_member_owner_cannot_delete_own_skill(self, db_pool, acl_prefix, org_and_users):
         app = create_app()
         owner = org_and_users["owner"]
 
@@ -491,7 +491,7 @@ class TestSkillACL:
             skill_id = resp.json()["id"]
 
             resp = await client.delete(f"/api/definitions/skills/{skill_id}")
-            assert resp.status_code == 204
+            assert resp.status_code == 403
 
         app.dependency_overrides.clear()
 
@@ -509,7 +509,7 @@ class TestSkillACL:
 
         async with _make_client(app, other) as client:
             resp = await client.delete(f"/api/definitions/skills/{skill_id}")
-            assert resp.status_code == 404
+            assert resp.status_code == 403
 
         app.dependency_overrides.clear()
 
@@ -831,6 +831,6 @@ class TestAntiSpoofing:
             assert resp.status_code == 404
 
             resp = await client.delete(f"/api/definitions/agents/{fake_id}")
-            assert resp.status_code == 404
+            assert resp.status_code == 403
 
         app.dependency_overrides.clear()

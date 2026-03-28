@@ -261,7 +261,7 @@ class RequestRepository:
         }
 
     async def get_request_with_tasks(self, request_id: str, org_id: str) -> dict | None:
-        """Load a request with its full task tree, events, and memory links."""
+        """Load a request with its full task tree, events, memory links, and reviews."""
         req = await self.get_request(request_id, org_id)
         if not req:
             return None
@@ -303,6 +303,17 @@ class RequestRepository:
             for task in req["tasks"]:
                 task["events"] = []
                 task["memories"] = []
+
+        # Load reviews for this request (batch, no N+1)
+        async with self.pool.acquire() as conn:
+            review_rows = await conn.fetch(
+                """SELECT * FROM reviews
+                   WHERE request_id = $1 AND organization_id = $2
+                   ORDER BY created_at DESC""",
+                UUID(request_id),
+                UUID(org_id),
+            )
+        req["reviews"] = [dict(r) for r in review_rows]
 
         # Build task tree (nest sub-tasks under parents)
         task_map = {str(t["id"]): t for t in req["tasks"]}

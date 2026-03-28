@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
-import re
+import os
 import shlex
 import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 import docker.errors
 
@@ -27,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 # Label prefix for identifying Lucent-managed containers
 LABEL_PREFIX = "io.lucent.sandbox"
+_GIT_ASKPASS_PATH = "/tmp/lucent-git-askpass.sh"
 
 
 def _devcontainer_to_dict(dc: DevcontainerConfig) -> dict:
@@ -124,14 +127,19 @@ class DockerBackend(SandboxBackend):
 
             # Clone repo if configured
             if config.repo_url:
+                clone_env = None
+                if config.git_credentials and config.repo_url.startswith("https://"):
+                    await self._ensure_git_askpass_script(sandbox_id)
+                    clone_env = self._build_git_auth_env(config.git_credentials)
                 clone_result = await self.exec(
                     sandbox_id,
                     self._build_clone_command(config),
+                    env=clone_env,
                     timeout=120,
                 )
                 if clone_result.exit_code != 0:
                     info.status = SandboxStatus.FAILED
-                    info.error = f"Git clone failed: {clone_result.stderr}"
+                    info.error = f"Git clone failed: {self._sanitize_git_output(clone_result.stderr, config)}"
                     return info
 
             # Detect devcontainer.json in the workspace
@@ -276,7 +284,11 @@ class DockerBackend(SandboxBackend):
         # Delegate to docker build inside the container
         context = dc_config.build_context or "."
         dockerfile = dc_config.build_dockerfile
-        build_cmd = f"docker build -f {dockerfile} -t lucent-dc-{sandbox_id[:12]} {context}"
+        image_tag = f"lucent-dc-{sandbox_id[:12]}"
+        build_cmd = (
+            f"docker build -f {shlex.quote(dockerfile)} "
+            f"-t {shlex.quote(image_tag)} {shlex.quote(context)}"
+        )
         result = await self.exec(sandbox_id, build_cmd, cwd="/workspace", timeout=600)
         if result.exit_code != 0:
             logger.warning("Devcontainer Dockerfile build failed: %s", result.stderr[:200])
@@ -431,20 +443,21 @@ class DockerBackend(SandboxBackend):
         # Resolve allowed hosts to IP addresses inside the container.
         allowed_ips: list[str] = []
         for host in config.allowed_hosts:
-            if re.match(r"^\d{1,3}(?:\.\d{1,3}){3}(?:/\d+)?$", host):
-                allowed_ips.append(host)
+            literal_ip = self._validate_iptables_destination(host)
+            if literal_ip is not None:
+                allowed_ips.append(literal_ip)
             else:
                 res = await self.exec(
                     sandbox_id,
                     f"getent hosts {shlex.quote(host)} | awk '{{print $1}}' | head -n1",
                     timeout=10,
                 )
-                ip = res.stdout.strip()
+                ip = self._validate_iptables_destination(res.stdout.strip())
                 if ip:
                     allowed_ips.append(ip)
                 else:
                     logger.warning(
-                        "Allowlist: could not resolve host %r in sandbox %s; skipping",
+                        "Allowlist: invalid or unresolvable host %r in sandbox %s; skipping",
                         host, sandbox_id[:12],
                     )
 
@@ -454,7 +467,7 @@ class DockerBackend(SandboxBackend):
             "iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT",
         ]
         for ip in allowed_ips:
-            rules.append(f"iptables -A OUTPUT -d {ip} -j ACCEPT")
+            rules.append(f"iptables -A OUTPUT -d {shlex.quote(ip)} -j ACCEPT")
         rules.append("iptables -P OUTPUT DROP")
 
         for rule in rules:
@@ -471,19 +484,71 @@ class DockerBackend(SandboxBackend):
         )
 
     def _build_clone_command(self, config: SandboxConfig) -> str:
-        url = config.repo_url
-        # Inject credentials for HTTPS URLs
-        if config.git_credentials and url and url.startswith("https://"):
-            # Insert token into URL: https://token@github.com/...
-            url = url.replace("https://", f"https://{config.git_credentials}@")
-
-        parts = ["git", "clone", "--depth=1"]
+        url = self._sanitize_repo_url(config.repo_url)
+        parts: list[str] = ["git", "clone", "--depth=1"]
         if config.branch:
             parts.extend(["-b", config.branch])
-        parts.append(url or "")
+        if url:
+            parts.append(url)
         # Clone directly into working_dir (which starts empty)
         parts.append(".")
-        return " ".join(parts)
+        return " ".join(shlex.quote(part) for part in parts)
+
+    async def _ensure_git_askpass_script(self, sandbox_id: str) -> None:
+        script = (
+            "#!/bin/sh\n"
+            'case "$1" in\n'
+            '  *Username*) printf "%s\\n" "${LUCENT_GIT_USERNAME:-x-access-token}" ;;\n'
+            '  *Password*) printf "%s\\n" "${LUCENT_GIT_TOKEN:-}" ;;\n'
+            '  *) printf "\\n" ;;\n'
+            "esac\n"
+        )
+        await self.write_file(sandbox_id, _GIT_ASKPASS_PATH, script.encode("utf-8"))
+        await self.exec(sandbox_id, f"chmod 700 {shlex.quote(_GIT_ASKPASS_PATH)}", timeout=10)
+
+    @staticmethod
+    def _parse_git_credentials(credentials: str) -> tuple[str, str]:
+        if ":" in credentials:
+            username, password = credentials.split(":", 1)
+            if username and password:
+                return username, password
+        return "x-access-token", credentials
+
+    def _build_git_auth_env(self, credentials: str) -> dict[str, str]:
+        username, token = self._parse_git_credentials(credentials)
+        return {
+            "GIT_ASKPASS": _GIT_ASKPASS_PATH,
+            "GIT_TERMINAL_PROMPT": "0",
+            "LUCENT_GIT_USERNAME": username,
+            "LUCENT_GIT_TOKEN": token,
+        }
+
+    @staticmethod
+    def _sanitize_repo_url(repo_url: str | None) -> str | None:
+        if not repo_url:
+            return repo_url
+        try:
+            parsed = urlsplit(repo_url)
+            if not parsed.scheme or not parsed.netloc or "@" not in parsed.netloc:
+                return repo_url
+            host = parsed.hostname or ""
+            if parsed.port:
+                host = f"{host}:{parsed.port}"
+            return urlunsplit((parsed.scheme, host, parsed.path, parsed.query, parsed.fragment))
+        except Exception:
+            return repo_url
+
+    def _sanitize_git_output(self, text: str, config: SandboxConfig) -> str:
+        sanitized = text
+        if config.git_credentials:
+            sanitized = sanitized.replace(config.git_credentials, "***")
+            _, token = self._parse_git_credentials(config.git_credentials)
+            sanitized = sanitized.replace(token, "***")
+        if config.repo_url:
+            clean_url = self._sanitize_repo_url(config.repo_url)
+            if clean_url and clean_url != config.repo_url:
+                sanitized = sanitized.replace(config.repo_url, clean_url)
+        return sanitized
 
     async def exec(
         self,
@@ -566,15 +631,58 @@ class DockerBackend(SandboxBackend):
         import io
         import tarfile
 
+        safe_path = self._validate_workspace_path(path)
+
         # Create a tar archive with the file
         tar_stream = io.BytesIO()
         with tarfile.open(fileobj=tar_stream, mode="w") as tar:
-            file_info = tarfile.TarInfo(name=path.lstrip("/"))
+            file_info = tarfile.TarInfo(name=safe_path.lstrip("/"))
             file_info.size = len(content)
             tar.addfile(file_info, io.BytesIO(content))
         tar_stream.seek(0)
 
         await asyncio.to_thread(container.put_archive, "/", tar_stream.read())
+
+    @staticmethod
+    def _validate_iptables_destination(value: str) -> str | None:
+        """Validate IPv4 destination used in iptables commands."""
+        value = value.strip()
+        if not value:
+            return None
+        try:
+            addr = ipaddress.ip_address(value)
+            if isinstance(addr, ipaddress.IPv4Address):
+                return str(addr)
+            logger.warning("Allowlist: IPv6 destination %r is not supported by iptables", value)
+            return None
+        except ValueError:
+            pass
+        try:
+            net = ipaddress.ip_network(value, strict=False)
+            if isinstance(net, ipaddress.IPv4Network):
+                return str(net)
+            logger.warning("Allowlist: IPv6 network %r is not supported by iptables", value)
+            return None
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _validate_workspace_path(path: str, workspace_root: str = "/workspace") -> str:
+        """Resolve and validate path is contained inside workspace_root."""
+        if not path:
+            raise ValueError("Path must not be empty")
+
+        normalized = os.path.normpath(path)
+        if os.path.isabs(normalized):
+            candidate = normalized
+        else:
+            candidate = os.path.join(workspace_root, normalized)
+        resolved_candidate = os.path.realpath(candidate)
+        resolved_root = os.path.realpath(workspace_root)
+        root_prefix = resolved_root.rstrip("/") + "/"
+        if resolved_candidate != resolved_root and not resolved_candidate.startswith(root_prefix):
+            raise ValueError(f"Path escapes workspace root: {path}")
+        return resolved_candidate
 
     async def list_files(self, sandbox_id: str, path: str = "/workspace") -> list[dict]:
         result = await self.exec(

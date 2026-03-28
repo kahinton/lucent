@@ -341,7 +341,7 @@
 </div>
 {% endblock %}
 {% block extra_scripts %}
-<script>
+<script nonce="{{ request.state.csp_nonce }}">
 let currentSandboxId = null;
 
 function openTerminal(sandboxId) {

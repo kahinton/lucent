@@ -264,6 +264,10 @@ Returns: JSON with status 'granted', or an error if either is not found."""
             return json.dumps({"error": "No organization context"})
         if not user_id:
             return json.dumps({"error": "No user context"})
+        if role not in ("admin", "owner"):
+            return json.dumps(
+                {"error": "Forbidden: admin or owner role required", "code": 403}
+            )
 
         repo = await _get_definition_repository()
 
@@ -392,11 +396,15 @@ Args:
 Returns: JSON with status 'deleted', or an error if not found."""
     )
     async def delete_agent_definition(agent_id: str) -> str:
-        user_id, org_id, _ = await _get_current_user_context()
+        user_id, org_id, user_role = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         if not user_id:
             return json.dumps({"error": "No user context"})
+        if user_role not in ("admin", "owner"):
+            return json.dumps(
+                {"error": "Forbidden: admin or owner role required", "code": 403}
+            )
 
         repo = await _get_definition_repository()
         success = await repo.delete_agent(agent_id, str(org_id))
@@ -419,6 +427,10 @@ Returns: JSON with status 'revoked', or an error if not found."""
             return json.dumps({"error": "No organization context"})
         if not user_id:
             return json.dumps({"error": "No user context"})
+        if role not in ("admin", "owner"):
+            return json.dumps(
+                {"error": "Forbidden: admin or owner role required", "code": 403}
+            )
 
         repo = await _get_definition_repository()
         agent = await repo.get_agent(
@@ -447,6 +459,10 @@ Returns: JSON with status 'granted', or an error if not found."""
             return json.dumps({"error": "No organization context"})
         if not user_id:
             return json.dumps({"error": "No user context"})
+        if role not in ("admin", "owner"):
+            return json.dumps(
+                {"error": "Forbidden: admin or owner role required", "code": 403}
+            )
 
         repo = await _get_definition_repository()
         agent = await repo.get_agent(
@@ -479,6 +495,10 @@ Returns: JSON with status 'revoked', or an error if not found."""
             return json.dumps({"error": "No organization context"})
         if not user_id:
             return json.dumps({"error": "No user context"})
+        if role not in ("admin", "owner"):
+            return json.dumps(
+                {"error": "Forbidden: admin or owner role required", "code": 403}
+            )
 
         repo = await _get_definition_repository()
         agent = await repo.get_agent(
@@ -553,11 +573,15 @@ Args:
 Returns: JSON with status 'deleted', or an error if not found."""
     )
     async def delete_skill_definition(skill_id: str) -> str:
-        user_id, org_id, _ = await _get_current_user_context()
+        user_id, org_id, user_role = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         if not user_id:
             return json.dumps({"error": "No user context"})
+        if user_role not in ("admin", "owner"):
+            return json.dumps(
+                {"error": "Forbidden: admin or owner role required", "code": 403}
+            )
 
         repo = await _get_definition_repository()
         success = await repo.delete_skill(skill_id, str(org_id))

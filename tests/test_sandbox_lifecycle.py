@@ -255,6 +255,33 @@ class TestDockerSandboxLifecycle:
         assert result is not None
 
     @pytest.mark.asyncio
+    async def test_write_file_rejects_path_traversal(self):
+        """write_file() must reject paths that escape /workspace."""
+        client = _make_docker_client()
+        backend = self._backend_with_client(client)
+        sandbox_id = "sb-traversal"
+
+        with pytest.raises(ValueError, match="escapes workspace root"):
+            await backend.write_file(sandbox_id, "../../../etc/passwd", b"nope")
+
+        client.containers.run.return_value.put_archive.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_write_file_rejects_workspace_symlink_escape(self):
+        """realpath-based validation blocks symlink escapes from /workspace."""
+        client = _make_docker_client()
+        backend = self._backend_with_client(client)
+        sandbox_id = "sb-symlink"
+
+        with patch("lucent.sandbox.docker_backend.os.path.realpath") as mock_realpath:
+            # First call resolves candidate path, second resolves workspace root.
+            mock_realpath.side_effect = ["/etc/passwd", "/workspace"]
+            with pytest.raises(ValueError, match="escapes workspace root"):
+                await backend.write_file(sandbox_id, "/workspace/link/passwd", b"blocked")
+
+        client.containers.run.return_value.put_archive.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_list_files_returns_entries(self):
         """list_files() returns a list of file dicts."""
         backend = _make_backend_mock()
@@ -784,10 +811,11 @@ class TestOutputModes:
     async def test_pr_mode_pushes_branch_and_logs_event(self):
         """pr mode pushes branch and logs sandbox_output_pr event."""
         handler, manager, request_api, _ = self._handler()
-        # exec calls: git diff (from _extract_diff), git rev-parse, git remote set-url, git push
+        # exec calls: git diff (from _extract_diff), git rev-parse, chmod askpass, git remote set-url, git push
         exec_responses = [
             _make_exec_ok(stdout="+added line\n"),  # git diff
             _make_exec_ok(stdout="main\n"),          # git rev-parse
+            _make_exec_ok(),                          # chmod askpass
             _make_exec_ok(),                          # git remote set-url
             _make_exec_ok(),                          # git push
         ]
@@ -812,6 +840,44 @@ class TestOutputModes:
         request_api.add_event.assert_called()
         event_calls = [str(c) for c in request_api.add_event.call_args_list]
         assert any("sandbox_output_pr" in c for c in event_calls)
+        manager.write_file.assert_called_once()
+        assert b"LUCENT_GIT_TOKEN" in manager.write_file.call_args[0][2]
+        set_url_call = manager.exec.call_args_list[3]
+        assert set_url_call.kwargs.get("env", {}).get("GIT_ASKPASS") == "/tmp/lucent-git-askpass.sh"
+        assert "ghp_token@" not in str(set_url_call)
+
+    @pytest.mark.asyncio
+    async def test_commit_mode_uses_askpass_env_for_https_push(self):
+        """commit mode should use askpass env and keep credentials out of git args."""
+        handler, manager, _, _ = self._handler()
+        manager.exec.side_effect = [
+            _make_exec_ok(stdout="+added line\n"),  # git diff
+            _make_exec_ok(),                        # chmod askpass
+            _make_exec_ok(),                        # git remote set-url
+            _make_exec_ok(),                        # git push
+        ]
+        config = SandboxConfig(
+            output_mode="commit",
+            git_credentials="token-secret",
+            repo_url="https://github.com/org/repo.git",
+            branch="main",
+            commit_approved=True,
+        )
+
+        result = await handler.process(
+            sandbox_id="sb-commit",
+            task_id="task-commit",
+            task_description="work",
+            config=config,
+        )
+
+        assert result.mode == "commit"
+        manager.write_file.assert_called_once()
+        set_url_call = manager.exec.call_args_list[2]
+        push_call = manager.exec.call_args_list[3]
+        assert set_url_call.kwargs.get("env", {}).get("LUCENT_GIT_TOKEN") == "token-secret"
+        assert push_call.kwargs.get("env", {}).get("GIT_ASKPASS") == "/tmp/lucent-git-askpass.sh"
+        assert "token-secret@" not in str(set_url_call)
 
     # --- Commit mode -----------------------------------------------------
 

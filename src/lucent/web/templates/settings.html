@@ -319,7 +319,7 @@ curl -X POST "http://localhost:8766/api/memories" \
     </div>
 </div>
 
-<script>
+<script nonce="{{ request.state.csp_nonce }}">
 function copyApiKey() {
     const keyElement = document.getElementById('new-api-key');
     navigator.clipboard.writeText(keyElement.textContent).then(() => {

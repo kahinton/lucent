@@ -192,10 +192,45 @@ MCP_API_KEY = os.environ.get("LUCENT_MCP_API_KEY", "")
 # Database URL for direct key provisioning.
 # Prefers DAEMON_DATABASE_URL (restricted lucent_daemon role) over DATABASE_URL
 # (full-privilege server role). The restricted role can only manage api_keys.
-DATABASE_URL = os.environ.get(
-    "DAEMON_DATABASE_URL",
-    os.environ.get("DATABASE_URL", "postgresql://lucent:lucent_dev_password@localhost:5433/lucent"),
-)
+def _resolve_daemon_database_url() -> str:
+    """Resolve daemon DB URL from environment with safe local-dev fallback.
+
+    Resolution order:
+    1. DAEMON_DATABASE_URL (preferred least-privilege role)
+    2. DATABASE_URL
+    3. LUCENT_INSECURE_DAEMON_DATABASE_URL (explicitly insecure dev fallback)
+
+    If no secure URL is provided, we continue with an obviously insecure local
+    fallback to preserve docker-compose local workflow, but emit a warning.
+    """
+    daemon_url = os.environ.get("DAEMON_DATABASE_URL")
+    if daemon_url:
+        return daemon_url
+
+    database_url = os.environ.get("DATABASE_URL")
+    if database_url:
+        return database_url
+
+    mode = os.environ.get("LUCENT_MODE", "personal").lower()
+    insecure_fallback = os.environ.get(
+        "LUCENT_INSECURE_DAEMON_DATABASE_URL",
+        "postgresql://lucent:change-me-insecure-dev-password@localhost:5433/lucent",
+    )
+    if mode == "team":
+        raise RuntimeError(
+            "DAEMON_DATABASE_URL or DATABASE_URL must be set in team mode. "
+            "Refusing insecure fallback."
+        )
+    print(
+        "WARNING: Neither DAEMON_DATABASE_URL nor DATABASE_URL is set. "
+        "Falling back to LUCENT_INSECURE_DAEMON_DATABASE_URL for local development. "
+        "Set DAEMON_DATABASE_URL in production.",
+        file=sys.stderr,
+    )
+    return insecure_fallback
+
+
+DATABASE_URL = _resolve_daemon_database_url()
 
 # Key expiry — daemon keys auto-expire and are refreshed each cycle
 KEY_TTL_HOURS = 24
@@ -716,6 +751,42 @@ class RequestAPI:
                 )
         except Exception as e:
             log(f"API reject_request_review failed: {e}", "WARN")
+        return None
+
+    @staticmethod
+    async def create_review(
+        request_id: str,
+        status: str,
+        *,
+        task_id: str | None = None,
+        comments: str | None = None,
+        source: str = "daemon",
+    ) -> dict | None:
+        """Create a first-class review record via the reviews API."""
+        payload: dict = {
+            "request_id": request_id,
+            "status": status,
+            "source": source,
+        }
+        if task_id:
+            payload["task_id"] = task_id
+        if comments:
+            payload["comments"] = comments[:10000]
+        try:
+            async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
+                resp = await client.post(
+                    f"{API_BASE}/reviews",
+                    json=payload,
+                    headers=API_HEADERS,
+                )
+                if resp.status_code in (200, 201):
+                    return resp.json()
+                log(
+                    f"API create_review returned {resp.status_code}: {resp.text[:200]}",
+                    "WARN",
+                )
+        except Exception as e:
+            log(f"API create_review failed: {e}", "WARN")
         return None
 
     @staticmethod
@@ -2940,6 +3011,14 @@ class LucentDaemon:
             return
 
         if decision == "APPROVED":
+            # Create first-class review record
+            await RequestAPI.create_review(
+                request_id,
+                "approved",
+                task_id=str(task["id"]),
+                comments=feedback or "Review approved request completion",
+                source="daemon",
+            )
             await RequestAPI.update_request_status(request_id, "completed")
             await RequestAPI.add_event(
                 str(task["id"]),
@@ -2958,6 +3037,14 @@ class LucentDaemon:
                 "manual review required",
                 "WARN",
             )
+            # Create review record even for max-review escalation
+            await RequestAPI.create_review(
+                request_id,
+                "rejected",
+                task_id=str(task["id"]),
+                comments=f"Max reviews reached ({review_count}/{max_reviews}). {feedback[:500]}",
+                source="daemon",
+            )
             await RequestAPI.update_request_status(request_id, "needs_rework")
             await RequestAPI.add_event(
                 str(task["id"]),
@@ -2966,6 +3053,14 @@ class LucentDaemon:
             )
             return
 
+        # Create rejection review record
+        await RequestAPI.create_review(
+            request_id,
+            "rejected",
+            task_id=str(task["id"]),
+            comments=feedback,
+            source="daemon",
+        )
         await RequestAPI.reject_request_review(request_id, feedback)
         all_tasks = request_data.get("tasks", []) or []
         non_review_tasks = [t for t in all_tasks if not self._is_request_review_task(t)]

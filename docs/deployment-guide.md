@@ -50,7 +50,11 @@ The daemon connects to the server via MCP and REST API. It requires a GitHub Cop
 
 ### 4. Sandboxes (optional)
 
-Tasks can run in isolated Docker containers. The server needs access to the Docker socket (`/var/run/docker.sock`) to manage sandbox containers. Sandbox base images must be pre-pulled or built.
+Tasks can run in isolated Docker containers.
+
+For security, prefer a Docker socket proxy (for example `docker-socket-proxy`) instead of mounting `/var/run/docker.sock` directly into the Lucent app container. Direct socket mounts allow broad Docker API access and can become a container-escape path if the app is compromised.
+
+Sandbox base images must be pre-pulled or built.
 
 ## Docker Deployment
 
@@ -97,13 +101,13 @@ Key variables for Docker Compose:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `POSTGRES_PASSWORD` | `lucent_dev_password` | Database password |
+| `POSTGRES_PASSWORD` | `change-me-insecure-dev-password` | Database password |
 | `LUCENT_DB_PORT` | `5433` | Host port for PostgreSQL |
 | `LUCENT_PORT` | `8766` | Host port for Lucent |
 | `LUCENT_MODE` | `personal` | `personal` or `team` |
 | `LUCENT_SECRET_PROVIDER` | `auto` | Secret backend: `auto`, `builtin`, `transit`, `vault` |
-| `LUCENT_SECRET_KEY` | dev default | Fernet key (only needed for `builtin` provider) |
-| `VAULT_TOKEN` | `root` | OpenBao/Vault token |
+| `LUCENT_SECRET_KEY` | `lucent-dev-secret-key-change-in-production` | Fernet key (only needed for `builtin` provider) |
+| `VAULT_TOKEN` | `change-me-insecure-dev-root-token` | OpenBao/Vault token |
 
 ## PostgreSQL Setup
 
@@ -229,12 +233,14 @@ docker run --rm -v lucent_data:/data -v $(pwd):/backup alpine \
 |----------|---------|-------------|
 | `DOCKER_HOST` | *(system default)* | Docker daemon URL (for sandbox containers) |
 
-The server container needs the Docker socket mounted to manage sandboxes:
+Use a socket proxy endpoint when running Lucent in a container:
 
 ```yaml
-volumes:
-  - /var/run/docker.sock:/var/run/docker.sock
+environment:
+  DOCKER_HOST: tcp://docker-socket-proxy:2375
 ```
+
+If you must mount `/var/run/docker.sock`, treat it as highly privileged host access, mount it read-only where possible, and isolate the service aggressively (non-root, seccomp, network policy, minimal capabilities).
 
 ## Production Configuration
 

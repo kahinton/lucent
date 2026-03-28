@@ -62,23 +62,25 @@ class TestProviderSelection:
         assert SecretRegistry.get() is provider
 
     @pytest.mark.asyncio
-    async def test_initialize_aws_selected(self, monkeypatch):
+    async def test_initialize_aws_rejected_as_planned(self, monkeypatch):
+        """AWS provider is planned but not implemented — must fail at startup."""
         monkeypatch.setenv("LUCENT_SECRET_PROVIDER", "aws")
         monkeypatch.setenv("AWS_REGION", "us-east-1")
         monkeypatch.setenv("AWS_ACCESS_KEY_ID", "x")
         monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "y")
-        provider = await initialize_secret_provider(object())
-        assert SecretRegistry.get() is provider
+        with pytest.raises(ValueError, match="not yet implemented"):
+            await initialize_secret_provider(object())
 
     @pytest.mark.asyncio
-    async def test_initialize_azure_selected(self, monkeypatch):
+    async def test_initialize_azure_rejected_as_planned(self, monkeypatch):
+        """Azure provider is planned but not implemented — must fail at startup."""
         monkeypatch.setenv("LUCENT_SECRET_PROVIDER", "azure")
         monkeypatch.setenv("AZURE_KEY_VAULT_URL", "https://example.vault.azure.net")
         monkeypatch.setenv("AZURE_TENANT_ID", "tid")
         monkeypatch.setenv("AZURE_CLIENT_ID", "cid")
         monkeypatch.setenv("AZURE_CLIENT_SECRET", "secret")
-        provider = await initialize_secret_provider(object())
-        assert SecretRegistry.get() is provider
+        with pytest.raises(ValueError, match="not yet implemented"):
+            await initialize_secret_provider(object())
 
     @pytest.mark.asyncio
     async def test_auto_detect_falls_back_to_builtin(self, monkeypatch):

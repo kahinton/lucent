@@ -167,7 +167,7 @@ class MCPAuthMiddleware:
                                     set_current_api_key_id(None)
                                 return
                 except Exception as e:
-                    logger.error("API key auth error", exc_info=e)
+                    logger.error("API key auth error: %s", type(e).__name__)
 
             # Not an hs_ key — try session token auth
             # This allows the chat agent to pass the user's web session
@@ -241,7 +241,7 @@ class MCPAuthMiddleware:
                     else:
                         logger.warning("MCP session token auth: no pool available")
                 except Exception as e:
-                    logger.error("Session token auth error on MCP", exc_info=e)
+                    logger.error("Session token auth error on MCP: %s", type(e).__name__)
 
             # Auth failed
             logger.warning("MCP auth failed: invalid credentials on %s", path)

@@ -12,6 +12,8 @@ from typing import Any
 
 import httpx
 
+from lucent.url_validation import SSRFError, validate_url
+
 logger = logging.getLogger(__name__)
 
 
@@ -23,7 +25,15 @@ class MCPToolBridge:
     2. Execute tool calls by forwarding them to the MCP server
     """
 
-    def __init__(self, mcp_url: str, headers: dict[str, str] | None = None):
+    def __init__(
+        self,
+        mcp_url: str,
+        headers: dict[str, str] | None = None,
+        *,
+        skip_url_validation: bool = False,
+    ):
+        if not skip_url_validation:
+            validate_url(mcp_url, purpose="MCP bridge")
         self._mcp_url = mcp_url
         self._headers = headers or {}
         self._tools: list[dict[str, Any]] = []

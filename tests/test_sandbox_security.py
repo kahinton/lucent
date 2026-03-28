@@ -73,7 +73,47 @@ class TestApplyNetworkAllowlist:
         assert not any("getent" in c for c in exec_calls)
         # Both IPs should appear as ACCEPT rules.
         assert any("1.2.3.4" in c for c in exec_calls)
-        assert any("10.0.0.1/24" in c for c in exec_calls)
+        assert any("10.0.0.0/24" in c for c in exec_calls)
+
+    @pytest.mark.asyncio
+    async def test_malformed_ip_in_allowlist_is_rejected(self, backend):
+        """Malformed allowlist entries must not be injected into iptables rules."""
+        config = SandboxConfig(
+            network_mode="allowlist",
+            allowed_hosts=["1.2.3.4; echo PWNED"],
+        )
+        exec_calls: list[str] = []
+
+        async def fake_exec(sandbox_id, cmd, **kwargs):
+            exec_calls.append(cmd)
+            if "getent" in cmd:
+                return _make_exec_ok(stdout="")
+            return _make_exec_ok()
+
+        backend.exec = fake_exec
+        await backend._apply_network_allowlist("sb-test", config)
+
+        # Hostname lookup may run, but no rule should include the malicious token.
+        assert not any("PWNED" in c for c in exec_calls if "iptables -A OUTPUT -d" in c)
+        assert not any("1.2.3.4; echo PWNED" in c for c in exec_calls if "iptables -A OUTPUT -d" in c)
+
+    @pytest.mark.asyncio
+    async def test_dns_resolution_result_validated_before_iptables(self, backend):
+        """Resolved output must be validated so command fragments cannot be injected."""
+        config = SandboxConfig(network_mode="allowlist", allowed_hosts=["safe.example"])
+        exec_calls: list[str] = []
+
+        async def fake_exec(sandbox_id, cmd, **kwargs):
+            exec_calls.append(cmd)
+            if "getent" in cmd:
+                return _make_exec_ok(stdout="8.8.8.8; touch /tmp/pwned\n")
+            return _make_exec_ok()
+
+        backend.exec = fake_exec
+        await backend._apply_network_allowlist("sb-test", config)
+
+        assert not any("touch /tmp/pwned" in c for c in exec_calls if "iptables -A OUTPUT -d" in c)
+        assert not any("8.8.8.8; touch /tmp/pwned" in c for c in exec_calls if "iptables -A OUTPUT -d" in c)
 
     @pytest.mark.asyncio
     async def test_hostname_resolved_via_getent(self, backend):

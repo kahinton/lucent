@@ -1,6 +1,7 @@
 """API router for request tracking and task queue."""
 
 import json
+import logging
 from uuid import UUID
 
 from fastapi import APIRouter, Body, Depends, HTTPException
@@ -11,6 +12,8 @@ from lucent.api.deps import AuthenticatedUser, get_pool
 from lucent.constants import REQUEST_SOURCE_PATTERN
 
 router = APIRouter(prefix="/requests", tags=["requests"])
+
+_deprecation_logger = logging.getLogger("lucent.api.deprecation")
 
 
 # ── Models ────────────────────────────────────────────────────────────────
@@ -183,6 +186,17 @@ async def approve_request_review(
     user: AuthenticatedUser,
     pool=Depends(get_pool),
 ):
+    """Approve a request in review state.
+
+    .. deprecated::
+        Use POST /api/reviews instead for first-class review records.
+        This endpoint will be removed in a future version.
+    """
+    _deprecation_logger.warning(
+        "Deprecated endpoint POST /requests/%s/review/approve called. "
+        "Use POST /api/reviews instead.",
+        request_id,
+    )
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
@@ -191,6 +205,20 @@ async def approve_request_review(
         raise HTTPException(404, "Request not found")
     if req["status"] != "review":
         raise HTTPException(409, "Request not in review state")
+
+    # Create a review record for backward compatibility
+    from lucent.db.reviews import ReviewRepository
+
+    review_repo = ReviewRepository(pool)
+    await review_repo.create_review(
+        request_id=str(request_id),
+        organization_id=str(user.organization_id),
+        status="approved",
+        reviewer_user_id=str(user.id),
+        reviewer_display_name=user.display_name or user.email,
+        source="human",
+    )
+
     return await repo.update_request_status(
         str(request_id), "completed", org_id=str(user.organization_id)
     )
@@ -203,6 +231,17 @@ async def reject_request_review(
     body: ReviewRejectBody = Body(...),
     pool=Depends(get_pool),
 ):
+    """Reject a request in review state with feedback.
+
+    .. deprecated::
+        Use POST /api/reviews instead for first-class review records.
+        This endpoint will be removed in a future version.
+    """
+    _deprecation_logger.warning(
+        "Deprecated endpoint POST /requests/%s/review/reject called. "
+        "Use POST /api/reviews instead.",
+        request_id,
+    )
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
@@ -211,6 +250,21 @@ async def reject_request_review(
         raise HTTPException(404, "Request not found")
     if req["status"] != "review":
         raise HTTPException(409, "Request not in review state")
+
+    # Create a review record for backward compatibility
+    from lucent.db.reviews import ReviewRepository
+
+    review_repo = ReviewRepository(pool)
+    await review_repo.create_review(
+        request_id=str(request_id),
+        organization_id=str(user.organization_id),
+        status="rejected",
+        reviewer_user_id=str(user.id),
+        reviewer_display_name=user.display_name or user.email,
+        comments=body.feedback,
+        source="human",
+    )
+
     async with pool.acquire() as conn:
         await conn.execute(
             """UPDATE requests
@@ -275,6 +329,7 @@ async def create_task(
             await def_repo.list_agents(
                 org_id,
                 status="active",
+                limit=200,
                 requester_user_id=str(user.id),
                 requester_role=user.role.value,
             )

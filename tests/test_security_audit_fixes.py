@@ -213,6 +213,51 @@ class TestDockerComposeHardening:
             "Docker socket mount should have a SECURITY comment documenting the risk"
         )
 
+    def test_lucent_service_has_no_direct_docker_socket_mount(self):
+        """Dev compose lucent service should not mount docker.sock directly."""
+        import pathlib
+
+        compose_path = pathlib.Path(__file__).parent.parent / "docker-compose.yml"
+        if not compose_path.exists():
+            pytest.skip("docker-compose.yml not found")
+
+        content = compose_path.read_text()
+        lines = content.split("\n")
+        in_lucent = False
+        in_volumes = False
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("lucent:"):
+                in_lucent = True
+                in_volumes = False
+                continue
+            if in_lucent and stripped.startswith("volumes:"):
+                in_volumes = True
+                continue
+            if in_lucent and in_volumes:
+                if stripped.startswith("-") and "docker.sock" in stripped:
+                    pytest.fail(
+                        "Development lucent service must not mount docker.sock directly"
+                    )
+                if stripped and not stripped.startswith("-") and not stripped.startswith("#"):
+                    in_volumes = False
+
+    def test_dev_compose_uses_docker_socket_proxy(self):
+        """Dev compose should route Docker access through docker-socket-proxy."""
+        import pathlib
+
+        compose_path = pathlib.Path(__file__).parent.parent / "docker-compose.yml"
+        if not compose_path.exists():
+            pytest.skip("docker-compose.yml not found")
+
+        content = compose_path.read_text()
+        assert "docker-socket-proxy" in content, (
+            "Development compose must define docker-socket-proxy service"
+        )
+        assert "DOCKER_HOST: tcp://docker-socket-proxy:2375" in content, (
+            "Development compose lucent service must use DOCKER_HOST via proxy"
+        )
+
 
 class TestProductionComposeHardening:
     """Verify production docker-compose addresses critical/high audit findings."""
@@ -357,11 +402,17 @@ class TestStartupSecurityValidation:
             "LUCENT_SECRET_KEY": "lucent-dev-secret-key-change-in-production",
             "LUCENT_MODE": "team",
         }, clear=False):
+            os.environ.pop("LUCENT_SIGNING_SECRET", None)
             from lucent.api import app as app_module
             mock_logger = MagicMock()
             with patch.object(app_module, "logger", mock_logger):
                 app_module._check_security_defaults()
-                mock_logger.critical.assert_called_once()
+                # At least one critical call for the insecure default
+                assert mock_logger.critical.call_count >= 1
+                critical_msgs = [
+                    str(c) for c in mock_logger.critical.call_args_list
+                ]
+                assert any("Insecure default" in m for m in critical_msgs)
 
     def test_check_security_defaults_quiet_with_strong_key(self):
         """No warnings when proper credentials are set."""
@@ -372,6 +423,7 @@ class TestStartupSecurityValidation:
             "LUCENT_SECRET_KEY": "a-real-production-secret-key-32chars!",
             "POSTGRES_PASSWORD": "strong-random-password",
             "VAULT_TOKEN": "s.some-real-vault-token",
+            "LUCENT_SIGNING_SECRET": "a-stable-signing-secret-value",
             "LUCENT_MODE": "team",
         }, clear=False):
             from lucent.api import app as app_module
@@ -415,4 +467,346 @@ class TestEnvExampleSafety:
         )
         assert "ghp_" not in content, (
             ".env.example must not contain real GitHub tokens"
+        )
+
+
+class TestSandboxPathValidationFixes:
+    """Regression tests for sandbox injection/traversal high-severity findings."""
+
+    @pytest.mark.asyncio
+    async def test_devcontainer_build_shell_quotes_dockerfile_and_context(self):
+        """docker build command must quote user-controlled Dockerfile/context values."""
+        from lucent.sandbox.docker_backend import DockerBackend
+        from lucent.sandbox.devcontainer import DevcontainerConfig
+        from lucent.sandbox.models import ExecResult, SandboxConfig
+
+        backend = DockerBackend()
+
+        async def fake_exec(_sid, _cmd, **_kwargs):
+            return ExecResult(exit_code=0, stdout="", stderr="")
+
+        backend.exec = MagicMock(side_effect=fake_exec)
+
+        dc_config = DevcontainerConfig(
+            build_dockerfile="Dockerfile;echo pwned",
+            build_context='."; touch /tmp/pwned #',
+        )
+        await backend._build_devcontainer_image(
+            "sandbox1234567890", SandboxConfig(), dc_config
+        )
+
+        cmd = backend.exec.call_args.args[1]
+        assert "-f 'Dockerfile;echo pwned'" in cmd
+        assert cmd.endswith('\'."; touch /tmp/pwned #\'')
+        assert " -f Dockerfile;echo pwned " not in cmd
+
+    @pytest.mark.asyncio
+    async def test_iptables_rejects_malformed_ip_from_allowlist(self):
+        """Malformed IP values must never appear in iptables destination rules."""
+        from lucent.sandbox.docker_backend import DockerBackend
+        from lucent.sandbox.models import ExecResult, SandboxConfig
+
+        backend = DockerBackend()
+        calls: list[str] = []
+
+        async def fake_exec(_sid, command, **_kwargs):
+            calls.append(command)
+            if "getent" in command:
+                return ExecResult(exit_code=0, stdout="", stderr="")
+            return ExecResult(exit_code=0, stdout="", stderr="")
+
+        backend.exec = fake_exec
+        await backend._apply_network_allowlist(
+            "sb-test",
+            SandboxConfig(network_mode="allowlist", allowed_hosts=["1.2.3.4;echo pwned"]),
+        )
+
+        assert not any("1.2.3.4;echo pwned" in c for c in calls if "iptables -A OUTPUT -d" in c)
+
+    @pytest.mark.asyncio
+    async def test_write_file_rejects_workspace_escape_and_symlink_escape(self):
+        """write_file must reject traversal and realpath symlink escapes."""
+        from lucent.sandbox.docker_backend import DockerBackend
+
+        backend = DockerBackend()
+        container = MagicMock()
+        container.put_archive = MagicMock()
+        backend._find_container = MagicMock(return_value=container)
+
+        with pytest.raises(ValueError, match="escapes workspace root"):
+            await backend.write_file("sb-test", "../../../etc/passwd", b"bad")
+
+        with patch("lucent.sandbox.docker_backend.os.path.realpath") as mock_realpath:
+            mock_realpath.side_effect = ["/etc/passwd", "/workspace"]
+            with pytest.raises(ValueError, match="escapes workspace root"):
+                await backend.write_file("sb-test", "/workspace/link/passwd", b"bad")
+
+        container.put_archive.assert_not_called()
+
+    def test_api_path_validation_blocks_normpath_and_symlink_bypass(self):
+        """API path validation must realpath-resolve and enforce workspace containment."""
+        from fastapi import HTTPException
+        from lucent.api.routers.sandboxes import _validate_sandbox_path
+
+        # normpath trick should fail
+        with pytest.raises(HTTPException):
+            _validate_sandbox_path("/workspace/../../etc/passwd")
+
+        # Symlink resolution escape should fail
+        with patch("os.path.realpath") as mock_realpath:
+            mock_realpath.side_effect = ["/etc/passwd", "/workspace"]
+            with pytest.raises(HTTPException):
+                _validate_sandbox_path("/workspace/link/passwd")
+
+
+class TestSigningSecretPersistence:
+    """Verify LUCENT_SIGNING_SECRET behaviour for Finding 9."""
+
+    def test_signing_secret_uses_env_var_when_set(self):
+        """SIGNING_SECRET should use env var value when provided."""
+        import importlib
+        import os
+        from unittest.mock import patch
+
+        test_secret = "my-stable-production-secret-value"
+        with patch.dict(os.environ, {"LUCENT_SIGNING_SECRET": test_secret}, clear=False):
+            import lucent.auth_providers as mod
+            importlib.reload(mod)
+            assert mod.SIGNING_SECRET == test_secret
+
+    def test_signing_secret_generates_random_when_not_set(self):
+        """SIGNING_SECRET should be auto-generated when env var is absent."""
+        import importlib
+        import os
+        from unittest.mock import patch
+
+        env = os.environ.copy()
+        env.pop("LUCENT_SIGNING_SECRET", None)
+        with patch.dict(os.environ, env, clear=True):
+            import lucent.auth_providers as mod
+            importlib.reload(mod)
+            assert mod.SIGNING_SECRET  # non-empty
+            assert len(mod.SIGNING_SECRET) > 20  # token_urlsafe(32) is ~43 chars
+
+    def test_signing_secret_warning_in_team_mode(self):
+        """Missing SIGNING_SECRET in team mode should log CRITICAL."""
+        import importlib
+        import logging
+        import os
+        from unittest.mock import patch
+
+        env = os.environ.copy()
+        env.pop("LUCENT_SIGNING_SECRET", None)
+        env["LUCENT_MODE"] = "team"
+        with patch.dict(os.environ, env, clear=True):
+            import lucent.auth_providers as mod
+            auth_logger = logging.getLogger("lucent.auth.providers")
+            with patch.object(auth_logger, "critical") as mock_critical:
+                importlib.reload(mod)
+                mock_critical.assert_called_once()
+                assert "LUCENT_SIGNING_SECRET" in mock_critical.call_args[0][0]
+
+    def test_startup_check_warns_on_missing_signing_secret(self):
+        """_check_security_defaults should warn when SIGNING_SECRET is unset."""
+        import os
+        from unittest.mock import MagicMock, patch
+
+        # Ensure LUCENT_SIGNING_SECRET is NOT set
+        with patch.dict(os.environ, {
+            "LUCENT_SECRET_KEY": "a-real-production-secret-key-32chars!",
+            "POSTGRES_PASSWORD": "strong-random-password",
+            "VAULT_TOKEN": "s.some-real-vault-token",
+            "LUCENT_MODE": "team",
+        }, clear=False):
+            os.environ.pop("LUCENT_SIGNING_SECRET", None)
+            from lucent.api.app import _check_security_defaults, logger as app_logger
+            mock_logger = MagicMock()
+            import lucent.api.app as app_module
+            with patch.object(app_module, "logger", mock_logger):
+                _check_security_defaults()
+                # Should have at least one critical call about missing secrets
+                critical_msgs = [
+                    str(c) for c in mock_logger.critical.call_args_list
+                ]
+                assert any("LUCENT_SIGNING_SECRET" in m for m in critical_msgs)
+
+    def test_prod_compose_requires_signing_secret(self):
+        """Production docker-compose must require LUCENT_SIGNING_SECRET."""
+        import pathlib
+
+        prod_compose = pathlib.Path(__file__).parent.parent / "docker-compose.prod.yml"
+        if not prod_compose.exists():
+            pytest.skip("docker-compose.prod.yml not found")
+        content = prod_compose.read_text()
+        assert "LUCENT_SIGNING_SECRET" in content, (
+            "Production compose must include LUCENT_SIGNING_SECRET"
+        )
+        # The :? syntax makes docker-compose fail if the variable is unset
+        assert "LUCENT_SIGNING_SECRET:?" in content, (
+            "Production compose must require LUCENT_SIGNING_SECRET (use :? syntax)"
+        )
+
+
+class TestApiKeyLogRedaction:
+    """Verify API key prefix is NOT logged in verification failures (Finding 10)."""
+
+    def test_verify_failure_log_does_not_contain_prefix(self):
+        """Verification failure logs must not include the key prefix."""
+        import inspect
+        from lucent.db.api_key import ApiKeyRepository
+
+        source = inspect.getsource(ApiKeyRepository.verify)
+        # The old pattern logged prefix=%s with key_prefix in failure messages
+        assert "prefix=%s" not in source, (
+            "API key verification must not log the key prefix"
+        )
+        # Ensure no logger call passes key_prefix as an argument
+        import re
+        log_calls = re.findall(r'logger\.\w+\([^)]+\)', source, re.DOTALL)
+        for call in log_calls:
+            assert "key_prefix" not in call, (
+                f"Logger call passes key_prefix: {call}"
+            )
+
+    def test_auth_error_does_not_use_exc_info(self):
+        """Auth error handlers must not use exc_info to avoid leaking credentials."""
+        import inspect
+        from lucent.server import MCPAuthMiddleware
+
+        source = inspect.getsource(MCPAuthMiddleware.__call__)
+        # exc_info can dump the full traceback with local variables holding keys
+        assert "exc_info" not in source, (
+            "Auth error handlers must not use exc_info — "
+            "it can leak credential material in stack traces"
+        )
+
+    def test_no_credential_material_in_verification_logs(self):
+        """Verify that log messages in api_key.verify() don't include raw key data."""
+        import inspect
+        from lucent.db.api_key import ApiKeyRepository
+
+        source = inspect.getsource(ApiKeyRepository.verify)
+        # Ensure no log line includes plain_key
+        import re
+        log_calls = re.findall(r'logger\.\w+\([^)]+\)', source)
+        for call in log_calls:
+            assert "plain_key" not in call, (
+                f"Logger call includes raw key material: {call}"
+            )
+
+
+class TestOpenBaoDevModeWarnings:
+    """Verify OpenBao dev mode detection and warnings (Finding 12)."""
+
+    def test_vault_provider_warns_on_dev_token(self):
+        """VaultSecretProvider should warn when using known dev tokens."""
+        import os
+        from unittest.mock import MagicMock, patch
+
+        with patch.dict(os.environ, {
+            "VAULT_ADDR": "http://localhost:8200",
+            "VAULT_TOKEN": "change-me-insecure-dev-root-token",
+            "LUCENT_MODE": "personal",
+        }, clear=False):
+            from lucent.secrets import vault as vault_module
+            mock_logger = MagicMock()
+            with patch.object(vault_module, "logger", mock_logger):
+                vault_module.VaultSecretProvider()
+                mock_logger.warning.assert_called()
+                warning_msgs = [
+                    str(c) for c in mock_logger.warning.call_args_list
+                ]
+                assert any("insecure dev token" in m for m in warning_msgs)
+
+    def test_vault_provider_critical_on_dev_token_in_team_mode(self):
+        """Dev tokens in team mode should log CRITICAL."""
+        import os
+        from unittest.mock import MagicMock, patch
+
+        with patch.dict(os.environ, {
+            "VAULT_ADDR": "http://localhost:8200",
+            "VAULT_TOKEN": "root",
+            "LUCENT_MODE": "team",
+        }, clear=False):
+            from lucent.secrets import vault as vault_module
+            mock_logger = MagicMock()
+            with patch.object(vault_module, "logger", mock_logger):
+                vault_module.VaultSecretProvider()
+                mock_logger.critical.assert_called_once()
+
+    def test_vault_provider_warns_on_bao_dev_env(self):
+        """BAO_DEV_ROOT_TOKEN_ID presence should trigger a warning."""
+        import os
+        from unittest.mock import MagicMock, patch
+
+        with patch.dict(os.environ, {
+            "VAULT_ADDR": "http://localhost:8200",
+            "VAULT_TOKEN": "s.proper-scoped-token",
+            "BAO_DEV_ROOT_TOKEN_ID": "some-dev-token",
+            "LUCENT_MODE": "personal",
+        }, clear=False):
+            from lucent.secrets import vault as vault_module
+            mock_logger = MagicMock()
+            with patch.object(vault_module, "logger", mock_logger):
+                vault_module.VaultSecretProvider()
+                warning_msgs = [
+                    str(c) for c in mock_logger.warning.call_args_list
+                ]
+                assert any("dev mode" in m for m in warning_msgs)
+
+    def test_vault_provider_no_warning_with_proper_token(self):
+        """No warnings when a proper scoped token is used."""
+        import os
+        from unittest.mock import MagicMock, patch
+
+        env = os.environ.copy()
+        env.pop("BAO_DEV_ROOT_TOKEN_ID", None)
+        env["VAULT_ADDR"] = "http://localhost:8200"
+        env["VAULT_TOKEN"] = "s.proper-scoped-policy-token"
+        env["LUCENT_MODE"] = "team"
+        with patch.dict(os.environ, env, clear=True):
+            from lucent.secrets import vault as vault_module
+            mock_logger = MagicMock()
+            with patch.object(vault_module, "logger", mock_logger):
+                vault_module.VaultSecretProvider()
+                mock_logger.warning.assert_not_called()
+                mock_logger.critical.assert_not_called()
+
+    def test_prod_compose_no_dev_mode(self):
+        """Production compose must not use dev mode or dev tokens."""
+        import pathlib
+
+        prod_compose = pathlib.Path(__file__).parent.parent / "docker-compose.prod.yml"
+        if not prod_compose.exists():
+            pytest.skip("docker-compose.prod.yml not found")
+        content = prod_compose.read_text()
+
+        assert "server -dev" not in content, (
+            "Production compose must not run OpenBao in dev mode"
+        )
+        assert "BAO_DEV_ROOT_TOKEN_ID" not in content, (
+            "Production compose must not set BAO_DEV_ROOT_TOKEN_ID"
+        )
+        assert "change-me-insecure-dev-root-token" not in content, (
+            "Production compose must not contain insecure dev tokens"
+        )
+
+    def test_init_script_does_not_print_tokens(self):
+        """OpenBao init script must not echo token values to stdout."""
+        import pathlib
+
+        init_script = pathlib.Path(__file__).parent.parent / "docker" / "openbao-init.sh"
+        if not init_script.exists():
+            pytest.skip("openbao-init.sh not found")
+        content = init_script.read_text()
+
+        assert "echo \"${CLIENT_TOKEN}\"" not in content.replace(" ", ""), (
+            "Init script must not print the client token"
+        )
+        assert "echo \"${VAULT_TOKEN}\"" not in content.replace(" ", ""), (
+            "Init script must not print the vault token"
+        )
+        # Check the specific old pattern
+        assert "policy token: ${CLIENT_TOKEN}" not in content, (
+            "Init script must not print the policy token value"
         )

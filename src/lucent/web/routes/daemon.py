@@ -15,6 +15,7 @@ from lucent.metrics import metrics
 from ._shared import _check_csrf, get_user_context, templates
 
 logger = get_logger("web.routes.daemon")
+_deprecation_logger = get_logger("web.routes.daemon.deprecation")
 
 router = APIRouter()
 
@@ -248,6 +249,42 @@ async def daemon_feedback(
 
     updated_metadata = {**existing_metadata, "feedback": feedback}
     await repo.update(memory_id=memory_id, metadata=updated_metadata, tags=updated_tags)
+
+    # Create a first-class review record for approve/reject actions.
+    # This bridges the legacy memory-based feedback UI with the new reviews table.
+    if action in ("approve", "reject"):
+        try:
+            from lucent.db.reviews import ReviewRepository
+
+            review_repo = ReviewRepository(pool)
+            # Try to find a request linked to this memory via metadata
+            request_id = (existing_metadata.get("request_id")
+                          or existing_metadata.get("related_entities", [None])[0]
+                          if isinstance(existing_metadata.get("related_entities"), list)
+                          and existing_metadata.get("related_entities")
+                          else None)
+            if request_id:
+                await review_repo.create_review(
+                    request_id=str(request_id),
+                    organization_id=str(user.organization_id),
+                    status=action + "d" if action == "approve" else "rejected",
+                    reviewer_user_id=str(user.id),
+                    reviewer_display_name=user.display_name or user.email,
+                    comments=comment or None,
+                    source="human",
+                )
+                _deprecation_logger.info(
+                    "Created first-class review record from legacy feedback "
+                    "action=%s memory=%s request=%s",
+                    action, memory_id, request_id,
+                )
+        except Exception:
+            # Non-fatal: the legacy tag-based flow still works as fallback.
+            # The review record is a bonus for forward compatibility.
+            logger.warning(
+                "Could not create review record from feedback %s on %s",
+                action, memory_id, exc_info=True,
+            )
 
     # Wake the daemon's cognitive loop so it processes the feedback immediately.
     # Retry once on failure — approve/reject are wake-critical events.

@@ -5,13 +5,14 @@ from __future__ import annotations
 import shlex
 from dataclasses import dataclass
 from typing import Literal
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit
 
 import httpx
 
 from lucent.sandbox.models import SandboxConfig
 
 OutputMode = Literal["diff", "pr", "review", "commit"]
+_GIT_ASKPASS_PATH = "/tmp/lucent-git-askpass.sh"
 
 
 @dataclass
@@ -118,18 +119,23 @@ class SandboxOutputHandler:
                 f"failed to resolve current branch: {branch_res.stderr.strip() or branch_res.stdout.strip()}"
             )
         head_branch = (branch_res.stdout or "").strip() or base_branch
-        remote_url = config.repo_url
-        if remote_url.startswith("https://"):
-            remote_url = remote_url.replace("https://", f"https://{config.git_credentials}@")
+        sanitized_repo_url = self._sanitize_repo_url(config.repo_url)
+        remote_url = sanitized_repo_url
+        push_env = None
+        if remote_url and remote_url.startswith("https://"):
+            await self._ensure_git_askpass_script(sandbox_id)
+            push_env = self._build_git_auth_env(config.git_credentials)
 
         set_remote = await self._manager.exec(
             sandbox_id,
             f"git remote set-url origin {shlex.quote(remote_url)}",
             cwd=config.working_dir,
+            env=push_env,
             timeout=30,
         )
         if set_remote.exit_code != 0:
-            raise RuntimeError(f"failed to set remote: {set_remote.stderr.strip() or set_remote.stdout.strip()}")
+            detail = self._sanitize_git_output(set_remote.stderr.strip() or set_remote.stdout.strip(), config)
+            raise RuntimeError(f"failed to set remote: {detail}")
         if head_branch == base_branch:
             head_branch = f"lucent/task-{task_id[:8]}"
             push_ref = f"HEAD:refs/heads/{head_branch}"
@@ -139,12 +145,14 @@ class SandboxOutputHandler:
             sandbox_id,
             f"git push -u origin {shlex.quote(push_ref)}",
             cwd=config.working_dir,
+            env=push_env,
             timeout=120,
         )
         if push.exit_code != 0:
-            raise RuntimeError(f"git push failed: {push.stderr.strip() or push.stdout.strip()}")
+            detail = self._sanitize_git_output(push.stderr.strip() or push.stdout.strip(), config)
+            raise RuntimeError(f"git push failed: {detail}")
 
-        owner_repo = self._parse_github_repo(config.repo_url)
+        owner_repo = self._parse_github_repo(sanitized_repo_url)
         pr_url = None
         detail = "PR branch pushed."
         if owner_repo:
@@ -166,13 +174,13 @@ class SandboxOutputHandler:
             task_id,
             "sandbox_output_pr",
             detail,
-            {"branch": head_branch, "base": base_branch, "repo_url": config.repo_url, "pr_url": pr_url},
+            {"branch": head_branch, "base": base_branch, "repo_url": sanitized_repo_url, "pr_url": pr_url},
         )
         return OutputResult(
             mode="pr",
             diff=diff,
             detail=detail,
-            metadata={"branch": head_branch, "base": base_branch, "repo_url": config.repo_url, "pr_url": pr_url},
+            metadata={"branch": head_branch, "base": base_branch, "repo_url": sanitized_repo_url, "pr_url": pr_url},
         )
 
     async def _handle_commit(
@@ -188,23 +196,28 @@ class SandboxOutputHandler:
             raise RuntimeError("output_mode=commit requires git_credentials")
 
         branch = config.branch or "main"
-        remote_url = config.repo_url or ""
+        remote_url = self._sanitize_repo_url(config.repo_url) or ""
+        push_env = None
         if remote_url.startswith("https://"):
-            remote_url = remote_url.replace("https://", f"https://{config.git_credentials}@")
+            await self._ensure_git_askpass_script(sandbox_id)
+            push_env = self._build_git_auth_env(config.git_credentials)
             await self._manager.exec(
                 sandbox_id,
                 f"git remote set-url origin {shlex.quote(remote_url)}",
                 cwd=config.working_dir,
+                env=push_env,
                 timeout=30,
             )
         push = await self._manager.exec(
             sandbox_id,
             f"git push origin {shlex.quote(branch)}",
             cwd=config.working_dir,
+            env=push_env,
             timeout=120,
         )
         if push.exit_code != 0:
-            raise RuntimeError(f"git push failed: {push.stderr.strip() or push.stdout.strip()}")
+            detail = self._sanitize_git_output(push.stderr.strip() or push.stdout.strip(), config)
+            raise RuntimeError(f"git push failed: {detail}")
 
         detail = f"Pushed commits to {branch}."
         await self._request_api.add_event(task_id, "sandbox_output_commit", detail, {"branch": branch})
@@ -227,6 +240,62 @@ class SandboxOutputHandler:
         if len(parts) < 2 or not parts[0] or not parts[1]:
             return None
         return f"{parts[0]}/{parts[1]}"
+
+    async def _ensure_git_askpass_script(self, sandbox_id: str) -> None:
+        script = (
+            "#!/bin/sh\n"
+            'case "$1" in\n'
+            '  *Username*) printf "%s\\n" "${LUCENT_GIT_USERNAME:-x-access-token}" ;;\n'
+            '  *Password*) printf "%s\\n" "${LUCENT_GIT_TOKEN:-}" ;;\n'
+            '  *) printf "\\n" ;;\n'
+            "esac\n"
+        )
+        await self._manager.write_file(sandbox_id, _GIT_ASKPASS_PATH, script.encode("utf-8"))
+        await self._manager.exec(sandbox_id, f"chmod 700 {shlex.quote(_GIT_ASKPASS_PATH)}", timeout=10)
+
+    @staticmethod
+    def _parse_git_credentials(credentials: str) -> tuple[str, str]:
+        if ":" in credentials:
+            username, password = credentials.split(":", 1)
+            if username and password:
+                return username, password
+        return "x-access-token", credentials
+
+    def _build_git_auth_env(self, credentials: str) -> dict[str, str]:
+        username, token = self._parse_git_credentials(credentials)
+        return {
+            "GIT_ASKPASS": _GIT_ASKPASS_PATH,
+            "GIT_TERMINAL_PROMPT": "0",
+            "LUCENT_GIT_USERNAME": username,
+            "LUCENT_GIT_TOKEN": token,
+        }
+
+    @staticmethod
+    def _sanitize_repo_url(repo_url: str | None) -> str | None:
+        if not repo_url:
+            return repo_url
+        try:
+            parsed = urlsplit(repo_url)
+            if not parsed.scheme or not parsed.netloc or "@" not in parsed.netloc:
+                return repo_url
+            host = parsed.hostname or ""
+            if parsed.port:
+                host = f"{host}:{parsed.port}"
+            return urlunsplit((parsed.scheme, host, parsed.path, parsed.query, parsed.fragment))
+        except Exception:
+            return repo_url
+
+    def _sanitize_git_output(self, text: str, config: SandboxConfig) -> str:
+        sanitized = text
+        if config.git_credentials:
+            sanitized = sanitized.replace(config.git_credentials, "***")
+            _, token = self._parse_git_credentials(config.git_credentials)
+            sanitized = sanitized.replace(token, "***")
+        if config.repo_url:
+            clean_url = self._sanitize_repo_url(config.repo_url)
+            if clean_url and clean_url != config.repo_url:
+                sanitized = sanitized.replace(config.repo_url, clean_url)
+        return sanitized
 
     async def _create_github_pr(
         self,

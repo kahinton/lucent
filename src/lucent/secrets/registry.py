@@ -8,8 +8,6 @@ from urllib.parse import urlparse
 
 import httpx
 
-from lucent.secrets.aws import AWSSecretProvider
-from lucent.secrets.azure import AzureSecretProvider
 from lucent.secrets.base import SecretProvider
 from lucent.secrets.builtin import BuiltinSecretProvider
 from lucent.secrets.transit import TransitSecretProvider
@@ -17,7 +15,13 @@ from lucent.secrets.vault import VaultSecretProvider
 
 logger = logging.getLogger(__name__)
 
-_SUPPORTED_PROVIDERS = {"builtin", "vault", "transit", "aws", "azure"}
+# Providers that are fully implemented and available for use.
+_SUPPORTED_PROVIDERS = {"builtin", "vault", "transit"}
+
+# Providers that are planned but not yet implemented.  Selecting one of
+# these produces a clear error at startup rather than a confusing
+# ``NotImplementedError`` at runtime.
+_PLANNED_PROVIDERS = {"aws", "azure"}
 
 
 class SecretRegistry:
@@ -73,6 +77,12 @@ def get_selected_provider_name() -> str:
     raw = os.environ.get("LUCENT_SECRET_PROVIDER", "").strip().lower()
     if not raw or raw == "auto":
         return "auto"
+    if raw in _PLANNED_PROVIDERS:
+        raise ValueError(
+            f"LUCENT_SECRET_PROVIDER='{raw}' is not yet implemented. "
+            f"The '{raw}' provider is planned for a future release. "
+            f"Available providers: {sorted(_SUPPORTED_PROVIDERS)}."
+        )
     if raw not in _SUPPORTED_PROVIDERS:
         raise ValueError(
             "Invalid LUCENT_SECRET_PROVIDER. "
@@ -82,7 +92,11 @@ def get_selected_provider_name() -> str:
 
 
 def validate_provider_env(provider_name: str) -> None:
-    """Validate required env vars for selected provider."""
+    """Validate required env vars for selected provider.
+
+    Only validates implemented providers (builtin, vault, transit).
+    AWS and Azure are rejected at the ``get_selected_provider_name`` stage.
+    """
     if provider_name == "builtin":
         if not os.environ.get("LUCENT_SECRET_KEY"):
             raise ValueError(
@@ -105,39 +119,6 @@ def validate_provider_env(provider_name: str) -> None:
             )
         _validate_vault_addr()
         return
-    if provider_name == "aws":
-        if not (os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")):
-            raise ValueError(
-                "LUCENT_SECRET_PROVIDER=aws requires AWS_REGION or AWS_DEFAULT_REGION."
-            )
-        if not (
-            (os.environ.get("AWS_ACCESS_KEY_ID") and os.environ.get("AWS_SECRET_ACCESS_KEY"))
-            or os.environ.get("AWS_PROFILE")
-            or os.environ.get("AWS_WEB_IDENTITY_TOKEN_FILE")
-        ):
-            raise ValueError(
-                "LUCENT_SECRET_PROVIDER=aws requires AWS credentials "
-                "(AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, AWS_PROFILE, or AWS_WEB_IDENTITY_TOKEN_FILE)."
-            )
-        return
-    if provider_name == "azure":
-        missing = [k for k in ("AZURE_KEY_VAULT_URL",) if not os.environ.get(k)]
-        if missing:
-            raise ValueError(
-                f"LUCENT_SECRET_PROVIDER=azure requires env vars: {', '.join(missing)}"
-            )
-        if not (
-            (
-                os.environ.get("AZURE_TENANT_ID")
-                and os.environ.get("AZURE_CLIENT_ID")
-                and os.environ.get("AZURE_CLIENT_SECRET")
-            )
-            or os.environ.get("AZURE_CLIENT_CERTIFICATE_PATH")
-            or os.environ.get("AZURE_FEDERATED_TOKEN_FILE")
-        ):
-            raise ValueError(
-                "LUCENT_SECRET_PROVIDER=azure requires AZURE client credentials."
-            )
 
 
 def _validate_vault_addr() -> None:
@@ -215,10 +196,10 @@ async def initialize_secret_provider(pool) -> SecretProvider:
             vault_addr=os.environ["VAULT_ADDR"],
             vault_token=os.environ["VAULT_TOKEN"],
         )
-    elif provider_name == "aws":
-        provider = AWSSecretProvider()
     else:
-        provider = AzureSecretProvider()
+        # Should not reach here — get_selected_provider_name rejects
+        # unknown and planned providers before we get to this point.
+        raise ValueError(f"Unknown secret provider: {provider_name}")
     SecretRegistry.register(provider_name, provider)
     SecretRegistry.set_default(provider_name)
     return provider

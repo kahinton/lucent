@@ -21,6 +21,16 @@ async def _get_request_repository() -> RequestRepository:
     return RequestRepository(pool)
 
 
+async def _get_pool():
+    """Get the database connection pool."""
+    from lucent.db import init_db
+
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url:
+        raise RuntimeError("DATABASE_URL environment variable is required")
+    return await init_db(database_url)
+
+
 def register_request_tools(mcp: FastMCP) -> None:
     """Register request tracking tools with the MCP server."""
 
@@ -133,6 +143,7 @@ if the agent type is not approved."""
             await def_repo.list_agents(
                 str(org_id),
                 status="active",
+                limit=200,
                 requester_user_id=str(user_id),
                 requester_role=user_role,
             )
@@ -239,12 +250,12 @@ Returns: JSON confirmation."""
 
     @mcp.tool(
         description="""Get the full details of a tracked request
-including its task tree, events, and memory links.
+including its task tree, events, memory links, and review history.
 
 Args:
     request_id: ID of the request
 
-Returns: JSON with request details, task breakdown, events timeline, and memory links."""
+Returns: JSON with request details, task breakdown, events timeline, memory links, and reviews."""
     )
     async def get_request_details(request_id: str) -> str:
         _, org_id, _ = await _get_current_user_context()
@@ -255,6 +266,14 @@ Returns: JSON with request details, task breakdown, events timeline, and memory 
         req = await repo.get_request_with_tasks(request_id, str(org_id))
         if not req:
             return json.dumps({"error": "Request not found"})
+
+        # Include review history
+        from lucent.db.reviews import ReviewRepository
+
+        pool = await _get_pool()
+        review_repo = ReviewRepository(pool)
+        reviews = await review_repo.get_reviews_for_request(request_id, str(org_id))
+        req["reviews"] = reviews
 
         # Serialize for JSON
         def serialize(obj):
@@ -379,3 +398,110 @@ Use this to see what work is queued up."""
             return str(obj)
 
         return json.dumps(tasks, default=serialize)
+
+    @mcp.tool(
+        description="""Create a review for a request or task.
+
+Reviews are first-class approval/rejection decisions. Use this when a request
+or task has been reviewed and a decision needs to be recorded.
+
+Args:
+    request_id: UUID of the request being reviewed
+    status: Review decision — 'approved' or 'rejected'
+    task_id: Optional UUID of the specific task being reviewed
+    comments: Review comments/feedback (required for rejections)
+    source: Origin of the review — 'human', 'daemon', or 'agent' (default: 'agent')
+
+Returns: JSON with the created review including its ID."""
+    )
+    async def create_review(
+        request_id: str,
+        status: str,
+        task_id: str | None = None,
+        comments: str | None = None,
+        source: str = "agent",
+    ) -> str:
+        user_id, org_id, _ = await _get_current_user_context()
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+
+        if status not in ("approved", "rejected"):
+            return json.dumps({"error": "status must be 'approved' or 'rejected'"})
+        if status == "rejected" and not comments:
+            return json.dumps({"error": "comments are required when rejecting"})
+
+        from lucent.db.reviews import ReviewRepository
+
+        pool = await _get_pool()
+        repo = ReviewRepository(pool)
+        try:
+            review = await repo.create_review(
+                request_id=request_id,
+                organization_id=str(org_id),
+                status=status,
+                task_id=task_id,
+                reviewer_user_id=str(user_id) if user_id else None,
+                comments=comments,
+                source=source,
+            )
+        except Exception as exc:
+            return json.dumps({"error": str(exc)})
+
+        def serialize(obj):
+            if hasattr(obj, "isoformat"):
+                return obj.isoformat()
+            if isinstance(obj, UUID):
+                return str(obj)
+            return str(obj)
+
+        return json.dumps(review, default=serialize)
+
+    @mcp.tool(
+        description="""List reviews with optional filters.
+
+Query reviews by request, task, status, or source. Returns paginated results.
+
+Args:
+    request_id: Optional — filter to reviews for a specific request
+    task_id: Optional — filter to reviews for a specific task
+    status: Optional — 'approved' or 'rejected'
+    source: Optional — 'human', 'daemon', or 'agent'
+    limit: Max results (default 25, max 100)
+    offset: Pagination offset (default 0)
+
+Returns: JSON with paginated review list."""
+    )
+    async def list_reviews(
+        request_id: str | None = None,
+        task_id: str | None = None,
+        status: str | None = None,
+        source: str | None = None,
+        limit: int = 25,
+        offset: int = 0,
+    ) -> str:
+        _, org_id, _ = await _get_current_user_context()
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+
+        from lucent.db.reviews import ReviewRepository
+
+        pool = await _get_pool()
+        repo = ReviewRepository(pool)
+        result = await repo.list_reviews(
+            str(org_id),
+            request_id=request_id,
+            task_id=task_id,
+            status=status,
+            source=source,
+            limit=min(limit, 100),
+            offset=offset,
+        )
+
+        def serialize(obj):
+            if hasattr(obj, "isoformat"):
+                return obj.isoformat()
+            if isinstance(obj, UUID):
+                return str(obj)
+            return str(obj)
+
+        return json.dumps(result, default=serialize)

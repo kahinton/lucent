@@ -593,6 +593,7 @@ class IntegrationService:
                 "X-User-Id": str(user["id"]),
                 "X-Organization-Id": str(user["organization_id"]),
             },
+            skip_url_validation=True,  # Internal URL, not user-controllable
         )
         try:
             result = await bridge.call_tool(

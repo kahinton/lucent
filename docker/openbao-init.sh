@@ -4,7 +4,7 @@
 set -e
 
 VAULT_ADDR="${VAULT_ADDR:-http://openbao:8200}"
-VAULT_TOKEN="${VAULT_TOKEN:-root}"
+VAULT_TOKEN="${VAULT_TOKEN:-change-me-insecure-dev-root-token}"
 export VAULT_ADDR VAULT_TOKEN
 
 echo "Waiting for OpenBao at ${VAULT_ADDR}..."
@@ -42,15 +42,18 @@ RESPONSE=$(curl -sf -X POST "${VAULT_ADDR}/v1/auth/token/create" \
 CLIENT_TOKEN=$(echo "${RESPONSE}" | sed -n 's/.*"client_token":"\([^"]*\)".*/\1/p')
 
 if [ -n "${CLIENT_TOKEN}" ]; then
-  echo "Lucent policy token: ${CLIENT_TOKEN}"
+  echo "Lucent policy token created successfully (not printed for security)"
   # Write to shared volume so Lucent can read it
   mkdir -p /shared
   echo "${CLIENT_TOKEN}" > /shared/vault-token
+  chmod 600 /shared/vault-token
   echo "Token written to /shared/vault-token"
 else
-  echo "WARNING: Could not create policy token, using root token for dev"
+  echo "WARNING: Could not create policy token, using VAULT_TOKEN fallback for dev"
+  echo "WARNING: The fallback token has root privileges — do NOT use in production"
   mkdir -p /shared
-  echo "root" > /shared/vault-token
+  echo "${VAULT_TOKEN}" > /shared/vault-token
+  chmod 600 /shared/vault-token
 fi
 
 echo "OpenBao initialization complete."

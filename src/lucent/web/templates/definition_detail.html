@@ -313,7 +313,7 @@
 {% endblock %}
 
 {% block extra_scripts %}
-<script>
+<script nonce="{{ request.state.csp_nonce }}">
     document.addEventListener('DOMContentLoaded', function() {
         var raw = document.querySelector('#content-raw pre');
         var rendered = document.getElementById('content-rendered');

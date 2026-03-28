@@ -21,6 +21,12 @@ class VaultSecretProvider(SecretProvider):
     - VAULT_KV_MOUNT: KV v2 mount path (default: "secret")
     """
 
+    # Known insecure dev tokens that must not be used in production.
+    _DEV_TOKENS = frozenset({
+        "root",
+        "change-me-insecure-dev-root-token",
+    })
+
     def __init__(self) -> None:
         addr = os.environ.get("VAULT_ADDR")
         token = os.environ.get("VAULT_TOKEN")
@@ -29,6 +35,26 @@ class VaultSecretProvider(SecretProvider):
                 "VaultSecretProvider requires VAULT_ADDR and VAULT_TOKEN "
                 "environment variables to be set."
             )
+
+        # Warn about dev-mode indicators
+        mode = os.environ.get("LUCENT_MODE", "personal")
+        if token in self._DEV_TOKENS:
+            msg = (
+                "SECURITY: VAULT_TOKEN is set to a known insecure dev token. "
+                "Use a scoped policy token for production deployments."
+            )
+            if mode == "team":
+                logger.critical(msg)
+            else:
+                logger.warning(msg)
+
+        bao_dev_token = os.environ.get("BAO_DEV_ROOT_TOKEN_ID")
+        if bao_dev_token:
+            logger.warning(
+                "BAO_DEV_ROOT_TOKEN_ID is set — OpenBao appears to be running "
+                "in dev mode. This is NOT suitable for production."
+            )
+
         self._mount = os.environ.get("VAULT_KV_MOUNT", "secret")
         self._client = httpx.AsyncClient(
             base_url=addr.rstrip("/"),

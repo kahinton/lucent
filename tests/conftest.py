@@ -1,8 +1,10 @@
 """Test configuration and fixtures for Lucent."""
 
 import os
+from unittest.mock import patch
 from uuid import uuid4
 
+import pytest
 import pytest_asyncio
 
 # Set test database URL before importing any db modules
@@ -15,6 +17,28 @@ os.environ.setdefault("LUCENT_RATE_LIMIT_PER_MINUTE", "999999")
 # Ensure secret provider can initialize in tests
 os.environ.setdefault("LUCENT_SECRET_KEY", "test-secret-key-for-testing-only")
 os.environ.setdefault("LUCENT_SECRET_PROVIDER", "builtin")
+
+
+@pytest.fixture(autouse=True)
+def _bypass_ssrf_validation_in_tests(request):
+    """Bypass SSRF URL validation for all tests except SSRF-specific ones.
+
+    Tests in ``test_ssrf_protection.py`` explicitly test the validation
+    logic, so they opt out of this fixture.  All other tests that create
+    MCP servers with localhost/dummy URLs need the bypass.
+    """
+    test_module = request.module.__name__
+    if "test_ssrf_protection" in test_module:
+        yield
+        return
+
+    # Patch both import sites so validation is skipped everywhere.
+    with (
+        patch("lucent.url_validation.validate_url", side_effect=lambda url, **kw: url),
+        patch("lucent.api.routers.definitions.validate_url", side_effect=lambda url, **kw: url),
+        patch("lucent.services.mcp_discovery.validate_url", side_effect=lambda url, **kw: url),
+    ):
+        yield
 
 
 @pytest_asyncio.fixture(scope="function")

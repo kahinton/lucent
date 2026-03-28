@@ -151,12 +151,14 @@ class ApiKeyRepository:
                 break
 
         if matched_row is None:
-            logger.warning("API key verification failed: hash mismatch for prefix=%s", key_prefix)
+            logger.warning("API key verification failed: hash mismatch for key_id=<redacted>")
             return None
 
         # Check expiration
         if matched_row["expires_at"] and matched_row["expires_at"] < datetime.now(timezone.utc):
-            logger.warning("API key verification failed: expired key prefix=%s", key_prefix)
+            logger.warning(
+                "API key verification failed: expired key_id=%s", matched_row["id"]
+            )
             return None
 
         # Update last used timestamp and count

@@ -10,6 +10,7 @@ from typing import Any
 from lucent.db import DefinitionRepository
 from lucent.llm.mcp_bridge import MCPToolBridge
 from lucent.secrets import SecretRegistry, resolve_env_vars
+from lucent.url_validation import SSRFError, validate_url
 
 DISCOVERY_TIMEOUT_SECONDS = 10
 
@@ -100,8 +101,19 @@ async def _discover_http(server_config: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(url, str) or not url:
         raise MCPDiscoveryError("Missing URL for HTTP MCP server")
 
+    # SSRF protection: validate the URL before making any request.
+    try:
+        validate_url(url, purpose="MCP discovery")
+    except SSRFError as exc:
+        raise MCPDiscoveryError(str(exc)) from exc
+
     headers = _coerce_mapping(server_config.get("headers"))
-    bridge = MCPToolBridge(mcp_url=url, headers={str(k): str(v) for k, v in headers.items()})
+    # URL already validated above — skip duplicate check in bridge constructor.
+    bridge = MCPToolBridge(
+        mcp_url=url,
+        headers={str(k): str(v) for k, v in headers.items()},
+        skip_url_validation=True,
+    )
     bridge._client.timeout = DISCOVERY_TIMEOUT_SECONDS  # type: ignore[attr-defined]
 
     try:

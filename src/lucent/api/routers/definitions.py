@@ -18,6 +18,7 @@ from lucent.services.mcp_discovery import (
     discover_mcp_tools,
     get_tools_cached,
 )
+from lucent.url_validation import SSRFError, validate_url
 
 router = APIRouter(prefix="/definitions", tags=["definitions"])
 
@@ -151,6 +152,8 @@ async def reject_agent(agent_id: str, user: AdminUser):
 
 @router.delete("/agents/{agent_id}", status_code=204)
 async def delete_agent(agent_id: str, user: AuthenticatedUser):
+    if user.role.value not in ("admin", "owner"):
+        raise HTTPException(403, "Forbidden: admin or owner role required")
     pool = await get_pool()
     acl = AccessControlService(pool)
     if not await acl.can_modify(str(user.id), "agent", agent_id, str(user.organization_id)):
@@ -164,7 +167,7 @@ async def delete_agent(agent_id: str, user: AuthenticatedUser):
 
 
 @router.post("/agents/{agent_id}/skills")
-async def grant_skill_to_agent(agent_id: str, body: GrantAccess, user: AuthenticatedUser):
+async def grant_skill_to_agent(agent_id: str, body: GrantAccess, user: AdminUser):
     pool = await get_pool()
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     org_id = str(user.organization_id)
@@ -182,7 +185,7 @@ async def grant_skill_to_agent(agent_id: str, body: GrantAccess, user: Authentic
 
 
 @router.delete("/agents/{agent_id}/skills/{skill_id}")
-async def revoke_skill_from_agent(agent_id: str, skill_id: str, user: AuthenticatedUser):
+async def revoke_skill_from_agent(agent_id: str, skill_id: str, user: AdminUser):
     pool = await get_pool()
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     if not await repo.get_agent(
@@ -200,7 +203,7 @@ async def revoke_skill_from_agent(agent_id: str, skill_id: str, user: Authentica
 
 
 @router.post("/agents/{agent_id}/mcp-servers")
-async def grant_mcp_to_agent(agent_id: str, body: GrantAccess, user: AuthenticatedUser):
+async def grant_mcp_to_agent(agent_id: str, body: GrantAccess, user: AdminUser):
     pool = await get_pool()
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     org_id = str(user.organization_id)
@@ -216,7 +219,7 @@ async def grant_mcp_to_agent(agent_id: str, body: GrantAccess, user: Authenticat
 
 
 @router.delete("/agents/{agent_id}/mcp-servers/{server_id}")
-async def revoke_mcp_from_agent(agent_id: str, server_id: str, user: AuthenticatedUser):
+async def revoke_mcp_from_agent(agent_id: str, server_id: str, user: AdminUser):
     pool = await get_pool()
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     if not await repo.get_agent(
@@ -302,6 +305,8 @@ async def reject_skill(skill_id: str, user: AdminUser):
 
 @router.delete("/skills/{skill_id}", status_code=204)
 async def delete_skill(skill_id: str, user: AuthenticatedUser):
+    if user.role.value not in ("admin", "owner"):
+        raise HTTPException(403, "Forbidden: admin or owner role required")
     pool = await get_pool()
     acl = AccessControlService(pool)
     if not await acl.can_modify(str(user.id), "skill", skill_id, str(user.organization_id)):
@@ -330,6 +335,12 @@ async def list_mcp_servers(
 
 @router.post("/mcp-servers", status_code=201)
 async def create_mcp_server(body: CreateMCPServer, user: AuthenticatedUser):
+    # Validate URL against SSRF before persisting.
+    if body.server_type == "http" and body.url:
+        try:
+            validate_url(body.url, purpose="MCP server")
+        except SSRFError as exc:
+            raise HTTPException(400, str(exc))
     pool = await get_pool()
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     return await repo.create_mcp_server(
@@ -359,6 +370,14 @@ async def approve_mcp_server(server_id: str, user: AdminUser):
 
 @router.patch("/mcp-servers/{server_id}")
 async def update_mcp_server(server_id: str, body: UpdateMCPServer, user: AuthenticatedUser):
+    # Validate URL against SSRF if the update includes a URL change.
+    if body.url is not None:
+        effective_type = body.server_type or "http"
+        if effective_type == "http":
+            try:
+                validate_url(body.url, purpose="MCP server")
+            except SSRFError as exc:
+                raise HTTPException(400, str(exc))
     pool = await get_pool()
     acl = AccessControlService(pool)
     if not await acl.can_modify(str(user.id), "mcp_server", server_id, str(user.organization_id)):

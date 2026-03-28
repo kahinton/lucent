@@ -109,8 +109,9 @@ async def _sync_built_in_definitions():
 # Known insecure default values that must not be used in production.
 _INSECURE_DEFAULTS = {
     "LUCENT_SECRET_KEY": "lucent-dev-secret-key-change-in-production",
-    "POSTGRES_PASSWORD": "lucent_dev_password",
-    "VAULT_TOKEN": "root",
+    "POSTGRES_PASSWORD": "change-me-insecure-dev-password",
+    "VAULT_TOKEN": "change-me-insecure-dev-root-token",
+    "BAO_DEV_ROOT_TOKEN_ID": "change-me-insecure-dev-root-token",
 }
 
 
@@ -119,6 +120,9 @@ def _check_security_defaults() -> None:
 
     In team mode (multi-user), insecure defaults are treated as errors
     logged at CRITICAL level. In personal mode they produce warnings.
+
+    Also warns when critical secrets (like LUCENT_SIGNING_SECRET) are
+    not explicitly configured.
     """
     import os
 
@@ -130,6 +134,10 @@ def _check_security_defaults() -> None:
         if current == insecure_value:
             issues.append(var)
 
+    # Check for missing critical secrets that default to random values
+    _REQUIRED_SECRETS = ["LUCENT_SIGNING_SECRET"]
+    missing: list[str] = [v for v in _REQUIRED_SECRETS if not os.environ.get(v)]
+
     if issues:
         msg = (
             "SECURITY: Insecure default values detected for: %s. "
@@ -140,6 +148,18 @@ def _check_security_defaults() -> None:
             logger.critical(msg, ", ".join(issues))
         else:
             logger.warning(msg, ", ".join(issues))
+
+    if missing:
+        msg = (
+            "SECURITY: The following secrets are not set and will use "
+            "ephemeral random values that do not persist across restarts: %s. "
+            "Set them explicitly for production. "
+            "Generate with: openssl rand -base64 32"
+        )
+        if mode == "team":
+            logger.critical(msg, ", ".join(missing))
+        else:
+            logger.warning(msg, ", ".join(missing))
 
 
 @asynccontextmanager
@@ -269,14 +289,23 @@ def create_app() -> FastAPI:
 
     @app.middleware("http")
     async def security_headers_middleware(request: Request, call_next):
-        """Add security headers including CSP to all responses."""
+        """Add security headers including nonce-based CSP to all responses."""
+        import secrets
+
+        # Generate a per-request nonce for inline scripts.  Templates
+        # access it via ``request.state.csp_nonce``.
+        nonce = secrets.token_urlsafe(24)
+        request.state.csp_nonce = nonce
+
         response = await call_next(request)
-        # Content-Security-Policy: restrict resource loading to same origin.
-        # unsafe-inline needed for inline event handlers / <script> blocks in templates.
-        # unsafe-eval needed for Tailwind CSS JIT which uses eval() at runtime.
+
+        # Content-Security-Policy with nonce-based inline script protection.
+        # 'unsafe-eval' is still required for the Tailwind CSS JIT compiler
+        # (tailwindcss-3.4.17.js) which uses eval() at runtime.  When
+        # Tailwind is replaced with a pre-built CSS build, remove it.
         csp = (
             "default-src 'self'; "
-            "script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
+            f"script-src 'self' 'nonce-{nonce}' 'unsafe-eval'; "
             "style-src 'self' 'unsafe-inline'; "
             "img-src 'self' data:; "
             "font-src 'self'; "
@@ -430,6 +459,11 @@ def create_app() -> FastAPI:
     from lucent.api.routers import requests as requests_router
 
     app.include_router(requests_router.router, prefix="/api", tags=["Requests"])
+
+    # Include reviews router
+    from lucent.api.routers import reviews as reviews_router
+
+    app.include_router(reviews_router.router, prefix="/api", tags=["Reviews"])
 
     # Include schedule management router
     from lucent.api.routers import schedules as schedules_router

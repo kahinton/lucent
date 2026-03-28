@@ -132,6 +132,7 @@ services:
       DOCKER_HOST: tcp://docker-socket-proxy:2375
       # Security hardening
       LUCENT_SECURE_COOKIES: "true"
+      LUCENT_SIGNING_SECRET: ${LUCENT_SIGNING_SECRET:?LUCENT_SIGNING_SECRET is required for cookie persistence}
       LUCENT_LOG_FORMAT: json
     # No Docker socket mount — uses docker-socket-proxy instead
     volumes:

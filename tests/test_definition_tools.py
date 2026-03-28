@@ -622,6 +622,29 @@ class TestDeleteAgentDefinition:
         )
         assert "error" in result
 
+    @pytest.mark.asyncio
+    async def test_non_admin_forbidden(self, mcp, auth_user, repo):
+        agent = await repo.create_agent(
+            name="member-cannot-delete-agent",
+            description="",
+            content="# Agent",
+            org_id=str(auth_user["organization_id"]),
+            created_by=str(auth_user["id"]),
+            owner_user_id=str(auth_user["id"]),
+        )
+        set_current_user(
+            {
+                "id": auth_user["id"],
+                "organization_id": auth_user["organization_id"],
+                "role": "member",
+                "display_name": "Member",
+                "email": "member@test.com",
+            }
+        )
+        result = await _call(mcp, "delete_agent_definition", {"agent_id": str(agent["id"])})
+        assert result["code"] == 403
+        assert "Forbidden" in result["error"]
+
 
 # ============================================================================
 # revoke_skill_from_agent
@@ -898,6 +921,29 @@ class TestDeleteSkillDefinition:
             {"skill_id": "00000000-0000-0000-0000-000000000000"},
         )
         assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_non_admin_forbidden(self, mcp, auth_user, repo):
+        skill = await repo.create_skill(
+            name="member-cannot-delete-skill",
+            description="",
+            content="# Skill",
+            org_id=str(auth_user["organization_id"]),
+            created_by=str(auth_user["id"]),
+            owner_user_id=str(auth_user["id"]),
+        )
+        set_current_user(
+            {
+                "id": auth_user["id"],
+                "organization_id": auth_user["organization_id"],
+                "role": "member",
+                "display_name": "Member",
+                "email": "member@test.com",
+            }
+        )
+        result = await _call(mcp, "delete_skill_definition", {"skill_id": str(skill["id"])})
+        assert result["code"] == 403
+        assert "Forbidden" in result["error"]
 
 
 # ============================================================================

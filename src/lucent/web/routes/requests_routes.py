@@ -109,7 +109,7 @@ async def requests_redirect(request: Request):
 @router.get("/activity/{request_id}", response_class=HTMLResponse)
 @router.get("/requests/{request_id}", response_class=HTMLResponse)
 async def request_detail(request: Request, request_id: str):
-    """Full request detail with task tree, events, and memory links."""
+    """Full request detail with task tree, events, memory links, and reviews."""
     user = await get_user_context(request)
     pool = await get_pool()
     from lucent.db.requests import RequestRepository
@@ -129,6 +129,14 @@ async def request_detail(request: Request, request_id: str):
             recent_events.append(event)
     recent_events.sort(key=lambda e: e["created_at"], reverse=True)
 
+    # Load review history for this request
+    from lucent.db.reviews import ReviewRepository
+
+    review_repo = ReviewRepository(pool)
+    reviews = await review_repo.get_reviews_for_request(
+        request_id, str(user.organization_id)
+    )
+
     return templates.TemplateResponse(
         request,
         "request_detail.html",
@@ -136,6 +144,7 @@ async def request_detail(request: Request, request_id: str):
             "user": user,
             "req": req,
             "recent_events": recent_events[:50],
+            "reviews": reviews,
         },
     )
 
