@@ -139,23 +139,38 @@ async def daemon_review_queue(
     page: int = 1,
     per_page: int = 25,
 ):
-    """Show memories tagged 'needs-review' that need human approval."""
+    """Show requests in 'review' status that need human approval."""
     user = await get_user_context(request)
     pool = await get_pool()
-    repo = MemoryRepository(pool)
 
     page = max(1, page)
     per_page = per_page if per_page in ALLOWED_PER_PAGE else 25
     offset = (page - 1) * per_page
 
-    result = await repo.search(
-        tags=["daemon", "needs-review"],
-        limit=per_page,
-        offset=offset,
-        requesting_user_id=user.id,
-        requesting_org_id=user.organization_id,
-    )
-    total_count = result.get("total_count", 0)
+    async with pool.acquire() as conn:
+        review_requests = await conn.fetch(
+            """SELECT r.id, r.title, r.description, r.status, r.created_at, r.updated_at,
+                      r.review_feedback,
+                      (SELECT t.result FROM tasks t
+                       WHERE t.request_id = r.id AND t.agent_type = 'request-review'
+                             AND t.status = 'completed'
+                       ORDER BY t.completed_at DESC LIMIT 1) AS review_result,
+                      (SELECT t.id FROM tasks t
+                       WHERE t.request_id = r.id AND t.agent_type = 'request-review'
+                             AND t.status = 'completed'
+                       ORDER BY t.completed_at DESC LIMIT 1) AS review_task_id
+               FROM requests r
+               WHERE r.organization_id = $1 AND r.status = 'review'
+               ORDER BY r.updated_at DESC
+               LIMIT $2 OFFSET $3""",
+            user.organization_id, per_page, offset,
+        )
+        total_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM requests WHERE organization_id = $1 AND status = 'review'",
+            user.organization_id,
+        )
+
+    review_items = [dict(r) for r in review_requests]
     total_pages = ceil(total_count / per_page) if total_count > 0 else 1
     page = min(page, total_pages)
 
@@ -164,13 +179,104 @@ async def daemon_review_queue(
         "daemon_review.html",
         {
             "user": user,
-            "review_memories": result["memories"],
+            "review_items": review_items,
             "page": page,
             "per_page": per_page,
             "total_pages": total_pages,
             "total_count": total_count,
         },
     )
+
+
+@router.post("/daemon/review/{request_id}/action", response_class=HTMLResponse)
+async def daemon_review_action(
+    request: Request,
+    request_id: UUID,
+    action: str = Form(...),
+    comment: str = Form(""),
+):
+    """Handle approve/reject on a request via the first-class reviews system."""
+    await _check_csrf(request)
+    user = await get_user_context(request)
+    pool = await get_pool()
+
+    if action not in ("approve", "reject"):
+        raise HTTPException(status_code=400, detail=f"Unknown action: {action}")
+    if action == "reject" and not comment.strip():
+        raise HTTPException(status_code=400, detail="Comments are required when rejecting")
+
+    from lucent.db.reviews import ReviewRepository
+    from lucent.db.requests import RequestRepository
+
+    review_repo = ReviewRepository(pool)
+    req_repo = RequestRepository(pool)
+    org_id = str(user.organization_id)
+
+    # Verify request exists and is in review status
+    req = await req_repo.get_request(str(request_id), org_id)
+    if not req:
+        raise HTTPException(status_code=404, detail="Request not found")
+
+    status = "approved" if action == "approve" else "rejected"
+    await review_repo.create_review(
+        request_id=str(request_id),
+        organization_id=org_id,
+        status=status,
+        reviewer_user_id=str(user.id),
+        reviewer_display_name=user.display_name or user.email,
+        comments=comment.strip() or None,
+        source="human",
+    )
+
+    # Transition request status
+    if action == "approve":
+        await req_repo.update_request_status(str(request_id), "completed", org_id=org_id)
+    elif action == "reject":
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """UPDATE requests
+                   SET status = 'needs_rework', review_feedback = $2,
+                       review_count = review_count + 1, reviewed_at = NOW(), updated_at = NOW()
+                   WHERE id = $1 AND organization_id = $3""",
+                request_id, comment.strip(), user.organization_id,
+            )
+        # Create learning memory from rejection
+        memo_repo = MemoryRepository(pool)
+        await memo_repo.create(
+            username=user.display_name or user.email or "reviewer",
+            type="experience",
+            content=f"Review rejection for '{req.get('title', '')}': {comment.strip()}",
+            tags=["rejection-lesson", "learning-extraction", "daemon"],
+            metadata={"request_id": str(request_id), "reviewer": user.display_name or user.email},
+            user_id=user.id,
+            organization_id=user.organization_id,
+        )
+
+    # Notify daemon
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "SELECT pg_notify('request_ready', $1)",
+                f'{{"type": "review", "action": "{action}", "request_id": "{request_id}"}}',
+            )
+    except Exception:
+        logger.warning("pg_notify failed for review action on %s", request_id, exc_info=True)
+
+    # Return HTMX partial showing the result
+    if action == "approve":
+        return HTMLResponse(
+            '<div class="flex items-center gap-2 p-3 bg-emerald-50 rounded-lg border border-emerald-200">'
+            '<svg class="w-5 h-5 text-emerald-600" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">'
+            '<path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>'
+            '<span class="text-sm font-medium text-emerald-800">Approved</span></div>'
+        )
+    else:
+        return HTMLResponse(
+            '<div class="flex items-center gap-2 p-3 bg-red-50 rounded-lg border border-red-200">'
+            '<svg class="w-5 h-5 text-red-600" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">'
+            '<path stroke-linecap="round" stroke-linejoin="round" d="M9.75 9.75l4.5 4.5m0-4.5l-4.5 4.5M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>'
+            f'<span class="text-sm font-medium text-red-800">Rejected — {comment.strip()}</span></div>'
+        )
 
 
 @router.post("/daemon/feedback/{memory_id}", response_class=HTMLResponse)
