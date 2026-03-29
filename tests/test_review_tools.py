@@ -96,41 +96,67 @@ async def test_task(repo, test_request, test_organization):
 
 
 class TestCreateReviewTool:
-    async def test_create_approval(self, mcp, auth_user, test_request):
+    async def test_approval_decisions_rejected_for_mcp(self, mcp, auth_user, test_request):
         result = await _call(mcp, "create_review", {
             "request_id": str(test_request["id"]),
             "status": "approved",
             "comments": "Looks good",
         })
-        assert "id" in result
-        assert result["status"] == "approved"
-        assert result["comments"] == "Looks good"
-        assert result["source"] == "agent"  # default for MCP tool
+        assert result.get("error") == (
+            "MCP create_review cannot submit 'approved' or 'rejected' decisions; "
+            "use the REST API /api/reviews"
+        )
 
-    async def test_create_rejection_with_comments(self, mcp, auth_user, test_request):
+    async def test_rejection_decisions_rejected_for_mcp(self, mcp, auth_user, test_request):
         result = await _call(mcp, "create_review", {
             "request_id": str(test_request["id"]),
             "status": "rejected",
             "comments": "Needs more tests",
         })
-        assert result["status"] == "rejected"
-        assert result["comments"] == "Needs more tests"
+        assert result.get("error") == (
+            "MCP create_review cannot submit 'approved' or 'rejected' decisions; "
+            "use the REST API /api/reviews"
+        )
 
-    async def test_create_with_task_id(self, mcp, auth_user, test_request, test_task):
+    async def test_create_with_task_id_rejected_for_mcp(
+        self, mcp, auth_user, test_request, test_task
+    ):
         result = await _call(mcp, "create_review", {
             "request_id": str(test_request["id"]),
             "task_id": str(test_task["id"]),
             "status": "approved",
         })
-        assert result["task_id"] == str(test_task["id"])
+        assert result.get("error") == (
+            "MCP create_review cannot submit 'approved' or 'rejected' decisions; "
+            "use the REST API /api/reviews"
+        )
 
-    async def test_create_with_custom_source_ignored(self, mcp, auth_user, test_request):
+    async def test_create_with_custom_source_still_rejected(
+        self, mcp, auth_user, test_request
+    ):
         result = await _call(mcp, "create_review", {
             "request_id": str(test_request["id"]),
             "status": "approved",
             "source": "daemon",
         })
-        assert result["source"] == "agent"
+        assert result.get("error") == (
+            "MCP create_review cannot submit 'approved' or 'rejected' decisions; "
+            "use the REST API /api/reviews"
+        )
+
+    async def test_source_effectively_agent_only_for_decisions(
+        self, mcp, auth_user, test_request
+    ):
+        """Passing source='human' cannot spoof a decision-capable review path."""
+        result = await _call(mcp, "create_review", {
+            "request_id": str(test_request["id"]),
+            "status": "approved",
+            "source": "human",
+        })
+        assert result.get("error") == (
+            "MCP create_review cannot submit 'approved' or 'rejected' decisions; "
+            "use the REST API /api/reviews"
+        )
 
     async def test_invalid_status_returns_error(self, mcp, auth_user, test_request):
         result = await _call(mcp, "create_review", {
@@ -146,7 +172,10 @@ class TestCreateReviewTool:
             "request_id": str(test_request["id"]),
             "status": "rejected",
         })
-        assert "error" in result
+        assert result.get("error") == (
+            "MCP create_review cannot submit 'approved' or 'rejected' decisions; "
+            "use the REST API /api/reviews"
+        )
 
     async def test_no_auth_returns_error(self, mcp, test_request):
         """Without auth context, should return error."""
@@ -192,6 +221,12 @@ class TestCreateReviewTool:
         })
         assert result.get("error") == "Request not found"
 
+        # Cleanup cross-org test data (cascade deletes memories and requests)
+        async with db_pool.acquire() as conn:
+            await conn.execute("DELETE FROM requests WHERE organization_id = $1", other_org["id"])
+            await conn.execute("DELETE FROM users WHERE id = $1", other_user["id"])
+            await conn.execute("DELETE FROM organizations WHERE id = $1", other_org["id"])
+
     async def test_task_wrong_request_returns_error(self, mcp, auth_user, test_request, repo, test_organization, test_task):
         other_request = await repo.create_request(
             title="Different request",
@@ -213,12 +248,12 @@ class TestCreateReviewTool:
         assert result.get("error") == "source must be one of: 'human', 'daemon', 'agent'"
 
     async def test_db_exceptions_are_not_leaked(self, mcp, auth_user, monkeypatch, test_request):
-        from lucent.db.reviews import ReviewRepository
+        from lucent.db.requests import RequestRepository
 
         async def boom(*args, **kwargs):
             raise RuntimeError("SQLSTATE 23505 duplicate key details")
 
-        monkeypatch.setattr(ReviewRepository, "create_review", boom)
+        monkeypatch.setattr(RequestRepository, "get_request", boom)
         result = await _call(mcp, "create_review", {
             "request_id": str(test_request["id"]),
             "status": "approved",
@@ -226,18 +261,26 @@ class TestCreateReviewTool:
         assert result.get("error") == "Failed to create review"
         assert "SQLSTATE" not in json.dumps(result)
 
-    async def test_json_serialization(self, mcp, auth_user, test_request):
-        """Verify UUID and datetime are properly serialized to strings."""
+    async def test_self_review_prevention(self, mcp, auth_user, repo, test_organization):
+        """Request creators cannot submit reviews for their own requests."""
+        own_request = await repo.create_request(
+            title="Self review forbidden",
+            org_id=str(test_organization["id"]),
+            created_by=str(auth_user["id"]),
+        )
         result = await _call(mcp, "create_review", {
-            "request_id": str(test_request["id"]),
+            "request_id": str(own_request["id"]),
             "status": "approved",
         })
-        # All UUIDs should be strings
-        assert isinstance(result["id"], str)
-        assert isinstance(result["request_id"], str)
-        assert isinstance(result["organization_id"], str)
-        # created_at should be ISO format string
-        assert isinstance(result["created_at"], str)
+        assert result.get("error") == "Request creators cannot review their own requests"
+
+    async def test_comments_max_length_enforced(self, mcp, auth_user, test_request):
+        result = await _call(mcp, "create_review", {
+            "request_id": str(test_request["id"]),
+            "status": "note",
+            "comments": "x" * 10001,
+        })
+        assert result.get("error") == "comments must be at most 10000 characters"
 
 
 # ── list_reviews tool ────────────────────────────────────────────────────
@@ -249,30 +292,40 @@ class TestListReviewsTool:
         assert "items" in result
         assert "total_count" in result
 
-    async def test_list_after_create(self, mcp, auth_user, test_request):
-        await _call(mcp, "create_review", {
-            "request_id": str(test_request["id"]),
-            "status": "approved",
-            "comments": "Listed review",
-        })
+    async def test_list_after_create(
+        self, mcp, auth_user, test_request, review_repo, test_organization
+    ):
+        await review_repo.create_review(
+            request_id=str(test_request["id"]),
+            organization_id=str(test_organization["id"]),
+            status="approved",
+            comments="Listed review",
+            source="agent",
+        )
         result = await _call(mcp, "list_reviews", {})
         assert result["total_count"] >= 1
         comments = [r.get("comments") for r in result["items"]]
         assert "Listed review" in comments
 
-    async def test_filter_by_request_id(self, mcp, auth_user, test_request, repo, test_organization):
+    async def test_filter_by_request_id(
+        self, mcp, auth_user, test_request, repo, review_repo, test_organization
+    ):
         req2 = await repo.create_request(
             title="Other Req", org_id=str(test_organization["id"])
         )
-        await _call(mcp, "create_review", {
-            "request_id": str(test_request["id"]),
-            "status": "approved",
-        })
-        await _call(mcp, "create_review", {
-            "request_id": str(req2["id"]),
-            "status": "rejected",
-            "comments": "No",
-        })
+        await review_repo.create_review(
+            request_id=str(test_request["id"]),
+            organization_id=str(test_organization["id"]),
+            status="approved",
+            source="agent",
+        )
+        await review_repo.create_review(
+            request_id=str(req2["id"]),
+            organization_id=str(test_organization["id"]),
+            status="rejected",
+            comments="No",
+            source="agent",
+        )
 
         result = await _call(mcp, "list_reviews", {
             "request_id": str(test_request["id"]),
@@ -281,35 +334,124 @@ class TestListReviewsTool:
             r["request_id"] == str(test_request["id"]) for r in result["items"]
         )
 
-    async def test_filter_by_status(self, mcp, auth_user, test_request):
-        await _call(mcp, "create_review", {
-            "request_id": str(test_request["id"]),
-            "status": "approved",
-        })
-        await _call(mcp, "create_review", {
-            "request_id": str(test_request["id"]),
-            "status": "rejected",
-            "comments": "Nah",
-        })
+    async def test_filter_by_task_id(
+        self, mcp, auth_user, test_request, test_task, repo, review_repo, test_organization
+    ):
+        req2 = await repo.create_request(
+            title="Other Req", org_id=str(test_organization["id"])
+        )
+        task2 = await repo.create_task(
+            request_id=str(req2["id"]),
+            title="Other task",
+            org_id=str(test_organization["id"]),
+        )
+        await review_repo.create_review(
+            request_id=str(test_request["id"]),
+            task_id=str(test_task["id"]),
+            organization_id=str(test_organization["id"]),
+            status="approved",
+            source="agent",
+        )
+        await review_repo.create_review(
+            request_id=str(req2["id"]),
+            task_id=str(task2["id"]),
+            organization_id=str(test_organization["id"]),
+            status="approved",
+            source="agent",
+        )
+
+        result = await _call(mcp, "list_reviews", {"task_id": str(test_task["id"])})
+        assert result["total_count"] >= 1
+        assert all(r["task_id"] == str(test_task["id"]) for r in result["items"])
+
+    async def test_filter_by_multiple_fields(
+        self, mcp, auth_user, test_request, test_task, repo, review_repo, test_organization
+    ):
+        await review_repo.create_review(
+            request_id=str(test_request["id"]),
+            task_id=str(test_task["id"]),
+            organization_id=str(test_organization["id"]),
+            status="approved",
+            source="agent",
+            comments="matching",
+        )
+        await review_repo.create_review(
+            request_id=str(test_request["id"]),
+            task_id=str(test_task["id"]),
+            organization_id=str(test_organization["id"]),
+            status="rejected",
+            source="agent",
+            comments="non-matching-status",
+        )
+        req2 = await repo.create_request(
+            title="Other Req Multi", org_id=str(test_organization["id"])
+        )
+        await review_repo.create_review(
+            request_id=str(req2["id"]),
+            organization_id=str(test_organization["id"]),
+            status="approved",
+            source="agent",
+            comments="non-matching-request",
+        )
+
+        result = await _call(
+            mcp,
+            "list_reviews",
+            {
+                "request_id": str(test_request["id"]),
+                "task_id": str(test_task["id"]),
+                "status": "approved",
+                "source": "agent",
+            },
+        )
+        assert result["total_count"] == 1
+        assert len(result["items"]) == 1
+        item = result["items"][0]
+        assert item["request_id"] == str(test_request["id"])
+        assert item["task_id"] == str(test_task["id"])
+        assert item["status"] == "approved"
+        assert item["source"] == "agent"
+
+    async def test_filter_by_status(
+        self, mcp, auth_user, test_request, review_repo, test_organization
+    ):
+        await review_repo.create_review(
+            request_id=str(test_request["id"]),
+            organization_id=str(test_organization["id"]),
+            status="approved",
+            source="agent",
+        )
+        await review_repo.create_review(
+            request_id=str(test_request["id"]),
+            organization_id=str(test_organization["id"]),
+            status="rejected",
+            comments="Nah",
+            source="agent",
+        )
 
         approved = await _call(mcp, "list_reviews", {"status": "approved"})
         assert all(r["status"] == "approved" for r in approved["items"])
 
-    async def test_filter_by_source(self, mcp, auth_user, test_request):
-        await _call(mcp, "create_review", {
-            "request_id": str(test_request["id"]),
-            "status": "approved",
-            "source": "daemon",
-        })
+    async def test_filter_by_source(
+        self, mcp, auth_user, test_request, review_repo, test_organization
+    ):
+        await review_repo.create_review(
+            request_id=str(test_request["id"]),
+            organization_id=str(test_organization["id"]),
+            status="approved",
+            source="daemon",
+        )
         result = await _call(mcp, "list_reviews", {"source": "daemon"})
         assert all(r["source"] == "daemon" for r in result["items"])
 
-    async def test_pagination(self, mcp, auth_user, test_request):
+    async def test_pagination(self, mcp, auth_user, test_request, review_repo, test_organization):
         for _ in range(5):
-            await _call(mcp, "create_review", {
-                "request_id": str(test_request["id"]),
-                "status": "approved",
-            })
+            await review_repo.create_review(
+                request_id=str(test_request["id"]),
+                organization_id=str(test_organization["id"]),
+                status="approved",
+                source="agent",
+            )
         result = await _call(mcp, "list_reviews", {"limit": 2, "offset": 0})
         assert len(result["items"]) == 2
         assert result["has_more"] is True
@@ -347,6 +489,12 @@ class TestListReviewsTool:
         result = await _call(mcp, "list_reviews", {})
         comments = [r.get("comments") for r in result["items"]]
         assert "hidden" not in comments
+
+        # Cleanup cross-org test data
+        async with db_pool.acquire() as conn:
+            await conn.execute("DELETE FROM reviews WHERE organization_id = $1", other_org["id"])
+            await conn.execute("DELETE FROM requests WHERE organization_id = $1", other_org["id"])
+            await conn.execute("DELETE FROM organizations WHERE id = $1", other_org["id"])
 
 
 # ── get_request_details includes reviews ─────────────────────────────────

@@ -1069,20 +1069,28 @@ class RequestRepository:
             )
 
     async def _check_request_completion(self, request_id: str) -> None:
-        """If all tasks are done, move request to review (or failed if task failed)."""
+        """If all work tasks are done, move request to review (or failed).
+
+        Excludes request-review tasks from the completion check — they are
+        meta-tasks that validate work, not work tasks themselves.
+        """
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 """SELECT
                      COUNT(*) as total,
                      COUNT(*) FILTER (WHERE status IN ('completed', 'failed', 'cancelled')) as done
-                   FROM tasks WHERE request_id = $1""",
+                   FROM tasks
+                   WHERE request_id = $1
+                     AND agent_type IS DISTINCT FROM 'request-review'""",
                 UUID(request_id),
             )
         if row and row["total"] > 0 and row["total"] == row["done"]:
             # Check if any failed
             async with self.pool.acquire() as conn:
                 failed = await conn.fetchval(
-                    "SELECT COUNT(*) FROM tasks WHERE request_id = $1 AND status = 'failed'",
+                    """SELECT COUNT(*) FROM tasks
+                       WHERE request_id = $1 AND status = 'failed'
+                         AND agent_type IS DISTINCT FROM 'request-review'""",
                     UUID(request_id),
                 )
             status = REQUEST_STATUS_FAILED if failed > 0 else REQUEST_STATUS_REVIEW

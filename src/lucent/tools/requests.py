@@ -402,17 +402,18 @@ Use this to see what work is queued up."""
     @mcp.tool(
         description="""Create a review for a request or task.
 
-Reviews are first-class approval/rejection decisions. Use this when a request
-or task has been reviewed and a decision needs to be recorded.
+This MCP tool is informational-only and cannot approve/reject requests.
+Final approval decisions must go through the authenticated REST API, which
+applies transactional status transitions and follow-up side effects.
 
 Args:
     request_id: UUID of the request being reviewed
-    status: Review decision — 'approved' or 'rejected'
+    status: Reserved for compatibility. MCP rejects approval/rejection decisions.
     task_id: Optional UUID of the specific task being reviewed
-    comments: Review comments/feedback (required for rejections)
+    comments: Optional review comments/feedback (max 10,000 chars)
     source: Origin of the review — 'human', 'daemon', or 'agent' (default: 'agent')
 
-Returns: JSON with the created review including its ID."""
+Returns: JSON error for approval/rejection attempts from MCP."""
     )
     async def create_review(
         request_id: str,
@@ -425,22 +426,23 @@ Returns: JSON with the created review including its ID."""
         if not org_id:
             return json.dumps({"error": "No organization context"})
 
-        if status not in ("approved", "rejected"):
-            return json.dumps({"error": "status must be 'approved' or 'rejected'"})
-        if status == "rejected" and not comments:
-            return json.dumps({"error": "comments are required when rejecting"})
         if source not in ("human", "daemon", "agent"):
             return json.dumps(
                 {"error": "source must be one of: 'human', 'daemon', 'agent'"}
             )
-
-        from lucent.db.reviews import ReviewRepository
 
         try:
             req_repo = await _get_request_repository()
             request = await req_repo.get_request(request_id, str(org_id))
             if not request:
                 return json.dumps({"error": "Request not found"})
+
+            # Prevent request creators from reviewing their own request.
+            request_creator = request.get("created_by")
+            if request_creator and user_id and str(request_creator) == str(user_id):
+                return json.dumps(
+                    {"error": "Request creators cannot review their own requests"}
+                )
 
             if task_id:
                 task = await req_repo.get_task(task_id, str(org_id))
@@ -451,31 +453,31 @@ Returns: JSON with the created review including its ID."""
                         {"error": "Task does not belong to the specified request"}
                     )
 
-            # MCP tools are agent-originated; do not trust caller-provided source.
-            source = "agent"
+            if comments and len(comments) > 10000:
+                return json.dumps({"error": "comments must be at most 10000 characters"})
 
-            pool = await _get_pool()
-            repo = ReviewRepository(pool)
-            review = await repo.create_review(
-                request_id=request_id,
-                organization_id=str(org_id),
-                status=status,
-                task_id=task_id,
-                reviewer_user_id=str(user_id) if user_id else None,
-                comments=comments,
-                source=source,
+            # MCP tools are agent-originated and do not perform request status
+            # transitions/follow-up side effects. Reject approval/rejection decisions
+            # so agents cannot unilaterally move requests through lifecycle states.
+            if status in ("approved", "rejected"):
+                return json.dumps(
+                    {
+                        "error": (
+                            "MCP create_review cannot submit 'approved' or 'rejected' "
+                            "decisions; use the REST API /api/reviews"
+                        )
+                    }
+                )
+            return json.dumps(
+                {
+                    "error": (
+                        "status must be 'approved' or 'rejected' "
+                        "(REST API only; MCP is informational-only)"
+                    )
+                }
             )
         except Exception:
             return json.dumps({"error": "Failed to create review"})
-
-        def serialize(obj):
-            if hasattr(obj, "isoformat"):
-                return obj.isoformat()
-            if isinstance(obj, UUID):
-                return str(obj)
-            return str(obj)
-
-        return json.dumps(review, default=serialize)
 
     @mcp.tool(
         description="""List reviews with optional filters.

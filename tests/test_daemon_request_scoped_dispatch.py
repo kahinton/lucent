@@ -113,3 +113,99 @@ async def test_dispatch_fails_gracefully_when_no_accessible_agent(monkeypatch):
     assert failed
     assert "No accessible approved agent definition" in failed[0]
     assert any(event_type == "agent_not_found" for _, event_type, _ in events)
+
+
+@pytest.mark.asyncio
+async def test_request_review_approved_auto_completes(monkeypatch):
+    daemon = LucentDaemon()
+    task_id = "11111111-1111-1111-1111-111111111111"
+    request_id = "22222222-2222-2222-2222-222222222222"
+    events: list[tuple[str, str, str | None, dict | None]] = []
+    status_updates: list[tuple[str, str]] = []
+
+    async def _get_request(_request_id):
+        return {"id": request_id, "status": "review", "tasks": []}
+
+    async def _add_event(tid, event_type, detail=None, metadata=None):
+        events.append((tid, event_type, detail, metadata))
+        return {"id": tid}
+
+    async def _update_status(rid, status):
+        status_updates.append((rid, status))
+        return {"id": rid, "status": status}
+
+    async def _forbidden(*_args, **_kwargs):
+        raise AssertionError("should not be called in auto-complete review flow")
+
+    monkeypatch.setattr("daemon.daemon.RequestAPI.get_request", _get_request)
+    monkeypatch.setattr("daemon.daemon.RequestAPI.add_event", _add_event)
+    monkeypatch.setattr("daemon.daemon.RequestAPI.create_review", _forbidden)
+    monkeypatch.setattr("daemon.daemon.RequestAPI.update_request_status", _update_status)
+    monkeypatch.setattr("daemon.daemon.RequestAPI.retry_task", _forbidden)
+    monkeypatch.setattr("daemon.daemon.RequestAPI.create_task", _forbidden)
+
+    await daemon._process_request_review_task(
+        {"id": task_id, "request_id": request_id},
+        "REQUEST_REVIEW_DECISION: APPROVED\nFEEDBACK: Looks good.",
+    )
+
+    assert len(events) == 1
+    tid, event_type, detail, metadata = events[0]
+    assert tid == task_id
+    assert event_type == "request_review_approved"
+    assert "APPROVED" in (detail or "")
+    assert metadata and metadata.get("recommendation") == "APPROVED"
+    # Verify request was auto-completed
+    assert len(status_updates) == 1
+    assert status_updates[0] == (request_id, "completed")
+
+
+@pytest.mark.asyncio
+async def test_request_review_needs_rework_auto_transitions(monkeypatch):
+    daemon = LucentDaemon()
+    task_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    request_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+    target_task_id = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+    events: list[tuple[str, str, str | None, dict | None]] = []
+    status_updates: list[tuple[str, str]] = []
+
+    async def _get_request(_request_id):
+        return {"id": request_id, "status": "review", "tasks": []}
+
+    async def _add_event(tid, event_type, detail=None, metadata=None):
+        events.append((tid, event_type, detail, metadata))
+        return {"id": tid}
+
+    async def _update_status(rid, status):
+        status_updates.append((rid, status))
+        return {"id": rid, "status": status}
+
+    async def _forbidden(*_args, **_kwargs):
+        raise AssertionError("should not be called in auto-rework review flow")
+
+    monkeypatch.setattr("daemon.daemon.RequestAPI.get_request", _get_request)
+    monkeypatch.setattr("daemon.daemon.RequestAPI.add_event", _add_event)
+    monkeypatch.setattr("daemon.daemon.RequestAPI.create_review", _forbidden)
+    monkeypatch.setattr("daemon.daemon.RequestAPI.update_request_status", _update_status)
+    monkeypatch.setattr("daemon.daemon.RequestAPI.retry_task", _forbidden)
+    monkeypatch.setattr("daemon.daemon.RequestAPI.create_task", _forbidden)
+
+    await daemon._process_request_review_task(
+        {"id": task_id, "request_id": request_id},
+        (
+            "REQUEST_REVIEW_DECISION: NEEDS_REWORK\n"
+            f"TASK_IDS_TO_REWORK: {target_task_id}\n"
+            "FEEDBACK: Add tests."
+        ),
+    )
+
+    assert len(events) == 1
+    tid, event_type, detail, metadata = events[0]
+    assert tid == task_id
+    assert event_type == "request_review_needs_rework"
+    assert "NEEDS_REWORK" in (detail or "")
+    assert metadata and metadata.get("recommendation") == "NEEDS_REWORK"
+    assert metadata.get("task_ids_to_rework") == [target_task_id]
+    # Verify request was auto-transitioned to needs_rework
+    assert len(status_updates) == 1
+    assert status_updates[0] == (request_id, "needs_rework")

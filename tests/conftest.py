@@ -61,6 +61,92 @@ async def db_pool():
     await close_db()
 
 
+@pytest.fixture(scope="session", autouse=True)
+def cleanup_orphaned_test_data():
+    """Session-scoped safety net: remove orphaned test data after the full test suite.
+
+    Individual test fixtures should clean up after themselves, but if cleanup
+    fails (e.g. test crash, missing cleanup code), this catches the leftovers.
+    Runs once after ALL tests complete.
+    """
+    yield
+
+    import asyncio
+
+    async def _cleanup():
+        import asyncpg
+
+        database_url = os.environ.get(
+            "DATABASE_URL",
+            "postgresql://lucent:lucent_dev_password@localhost:5433/lucent",
+        )
+        conn = await asyncpg.connect(database_url)
+        try:
+            # Delete test data in FK-safe order.
+            # Test users have external_id starting with 'test_' or 'mcp_other_'.
+            test_user_filter = (
+                "external_id LIKE 'test_%' OR external_id LIKE 'mcp_other_%'"
+            )
+            test_org_filter = (
+                "name LIKE 'test_%' OR name LIKE 'mcp_other_%'"
+            )
+
+            # Reviews, tasks, requests for test orgs
+            await conn.execute(
+                f"DELETE FROM reviews WHERE organization_id IN "
+                f"(SELECT id FROM organizations WHERE {test_org_filter})"
+            )
+            await conn.execute(
+                f"DELETE FROM tasks WHERE request_id IN "
+                f"(SELECT id FROM requests WHERE organization_id IN "
+                f"(SELECT id FROM organizations WHERE {test_org_filter}))"
+            )
+            await conn.execute(
+                f"DELETE FROM requests WHERE organization_id IN "
+                f"(SELECT id FROM organizations WHERE {test_org_filter})"
+            )
+            # Memories owned by test users (CASCADE should handle this, but be explicit)
+            await conn.execute(
+                f"DELETE FROM memory_audit_log WHERE memory_id IN "
+                f"(SELECT id FROM memories WHERE user_id IN "
+                f"(SELECT id FROM users WHERE {test_user_filter}))"
+            )
+            await conn.execute(
+                f"DELETE FROM memory_access_log WHERE memory_id IN "
+                f"(SELECT id FROM memories WHERE user_id IN "
+                f"(SELECT id FROM users WHERE {test_user_filter}))"
+            )
+            await conn.execute(
+                f"DELETE FROM memories WHERE user_id IN "
+                f"(SELECT id FROM users WHERE {test_user_filter})"
+            )
+            # Definitions, API keys, groups for test users
+            for tbl in ("agent_definitions", "skill_definitions"):
+                await conn.execute(
+                    f"DELETE FROM {tbl} WHERE created_by IN "
+                    f"(SELECT id FROM users WHERE {test_user_filter})"
+                )
+            await conn.execute(
+                f"DELETE FROM user_groups WHERE user_id IN "
+                f"(SELECT id FROM users WHERE {test_user_filter})"
+            )
+            await conn.execute(
+                f"DELETE FROM api_keys WHERE user_id IN "
+                f"(SELECT id FROM users WHERE {test_user_filter})"
+            )
+            # Users and orgs
+            await conn.execute(f"DELETE FROM users WHERE {test_user_filter}")
+            await conn.execute(f"DELETE FROM organizations WHERE {test_org_filter}")
+        finally:
+            await conn.close()
+
+    try:
+        asyncio.get_event_loop().run_until_complete(_cleanup())
+    except Exception:
+        # Best-effort cleanup — don't fail the test suite
+        pass
+
+
 @pytest_asyncio.fixture
 async def clean_test_data(db_pool):
     """Fixture that cleans up test data after each test.

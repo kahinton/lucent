@@ -11,6 +11,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from lucent.db import AuditRepository, MemoryRepository, get_pool
 from lucent.logging import get_logger
 from lucent.metrics import metrics
+from lucent.rbac import Role
 
 from ._shared import _check_csrf, get_user_context, templates
 
@@ -202,11 +203,21 @@ async def daemon_review_action(
 
     if action not in ("approve", "reject"):
         raise HTTPException(status_code=400, detail=f"Unknown action: {action}")
+    if (
+        user.role < Role.ADMIN
+        and user.role != Role.DAEMON
+        and user.external_id != "daemon-service"
+    ):
+        raise HTTPException(status_code=403, detail="Admin or owner role required")
+    if len(comment) > 10000:
+        raise HTTPException(
+            status_code=422, detail="Comments must be at most 10000 characters"
+        )
     if action == "reject" and not comment.strip():
         raise HTTPException(status_code=400, detail="Comments are required when rejecting")
 
-    from lucent.db.reviews import ReviewRepository
     from lucent.db.requests import RequestRepository
+    from lucent.db.reviews import ReviewRepository
 
     review_repo = ReviewRepository(pool)
     req_repo = RequestRepository(pool)
@@ -216,31 +227,46 @@ async def daemon_review_action(
     req = await req_repo.get_request(str(request_id), org_id)
     if not req:
         raise HTTPException(status_code=404, detail="Request not found")
+    request_creator = req.get("created_by")
+    if request_creator and str(request_creator) == str(user.id):
+        raise HTTPException(
+            status_code=403,
+            detail="Request creators cannot review their own requests",
+        )
 
     status = "approved" if action == "approve" else "rejected"
-    await review_repo.create_review(
-        request_id=str(request_id),
-        organization_id=org_id,
-        status=status,
-        reviewer_user_id=str(user.id),
-        reviewer_display_name=user.display_name or user.email,
-        comments=comment.strip() or None,
-        source="human",
-    )
-
-    # Transition request status
-    if action == "approve":
-        await req_repo.update_request_status(str(request_id), "completed", org_id=org_id)
-    elif action == "reject":
-        async with pool.acquire() as conn:
-            await conn.execute(
-                """UPDATE requests
-                   SET status = 'needs_rework', review_feedback = $2,
-                       review_count = review_count + 1, reviewed_at = NOW(), updated_at = NOW()
-                   WHERE id = $1 AND organization_id = $3""",
-                request_id, comment.strip(), user.organization_id,
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await review_repo.create_review(
+                request_id=str(request_id),
+                organization_id=org_id,
+                status=status,
+                reviewer_user_id=str(user.id),
+                reviewer_display_name=user.display_name or user.email,
+                comments=comment.strip() or None,
+                source="human",
+                conn=conn,
             )
-        # Create learning memory from rejection
+
+            # Transition request status
+            if action == "approve":
+                updated = await review_repo.mark_request_completed(
+                    request_id=str(request_id),
+                    organization_id=org_id,
+                    conn=conn,
+                )
+            else:
+                updated = await review_repo.mark_request_needs_rework(
+                    request_id=str(request_id),
+                    organization_id=org_id,
+                    feedback=comment.strip(),
+                    conn=conn,
+                )
+            if not updated:
+                raise HTTPException(status_code=409, detail="Request is not in review state")
+
+    # Create learning memory from rejection
+    if action == "reject":
         memo_repo = MemoryRepository(pool)
         await memo_repo.create(
             username=user.display_name or user.email or "reviewer",
@@ -265,17 +291,25 @@ async def daemon_review_action(
     # Return HTMX partial showing the result
     if action == "approve":
         return HTMLResponse(
-            '<div class="flex items-center gap-2 p-3 bg-emerald-50 rounded-lg border border-emerald-200">'
-            '<svg class="w-5 h-5 text-emerald-600" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">'
-            '<path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>'
+            '<div class="flex items-center gap-2 p-3 bg-emerald-50 rounded-lg '
+            'border border-emerald-200">'
+            '<svg class="w-5 h-5 text-emerald-600" fill="none" viewBox="0 0 24 24" '
+            'stroke-width="1.5" stroke="currentColor">'
+            '<path stroke-linecap="round" stroke-linejoin="round" '
+            'd="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>'
             '<span class="text-sm font-medium text-emerald-800">Approved</span></div>'
         )
     else:
         return HTMLResponse(
-            '<div class="flex items-center gap-2 p-3 bg-red-50 rounded-lg border border-red-200">'
-            '<svg class="w-5 h-5 text-red-600" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">'
-            '<path stroke-linecap="round" stroke-linejoin="round" d="M9.75 9.75l4.5 4.5m0-4.5l-4.5 4.5M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>'
-            f'<span class="text-sm font-medium text-red-800">Rejected — {comment.strip()}</span></div>'
+            '<div class="flex items-center gap-2 p-3 bg-red-50 rounded-lg border '
+            'border-red-200">'
+            '<svg class="w-5 h-5 text-red-600" fill="none" viewBox="0 0 24 24" '
+            'stroke-width="1.5" stroke="currentColor">'
+            '<path stroke-linecap="round" stroke-linejoin="round" '
+            'd="M9.75 9.75l4.5 4.5m0-4.5l-4.5 4.5M21 12a9 9 0 11-18 0 9 9 0 0118 0z" '
+            '/></svg>'
+            '<span class="text-sm font-medium text-red-800">'
+            f"Rejected — {comment.strip()}</span></div>"
         )
 
 

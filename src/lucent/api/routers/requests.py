@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 
 from lucent.api.deps import AuthenticatedUser, get_pool
 from lucent.constants import REQUEST_SOURCE_PATTERN
+from lucent.rbac import Role
 
 router = APIRouter(prefix="/requests", tags=["requests"])
 
@@ -59,7 +60,7 @@ class StatusUpdate(BaseModel):
 
 
 class ReviewRejectBody(BaseModel):
-    feedback: str = Field(..., min_length=1)
+    feedback: str = Field(..., min_length=1, max_length=10000)
 
 
 class ClaimBody(BaseModel):
@@ -199,29 +200,47 @@ async def approve_request_review(
     )
     from lucent.db.requests import RequestRepository
 
+    if (
+        user.role < Role.ADMIN
+        and user.role != Role.DAEMON
+        and user.external_id != "daemon-service"
+    ):
+        raise HTTPException(403, "Admin or owner role required")
+
     repo = RequestRepository(pool)
     req = await repo.get_request(str(request_id), str(user.organization_id))
     if not req:
         raise HTTPException(404, "Request not found")
     if req["status"] != "review":
         raise HTTPException(409, "Request not in review state")
+    request_creator = req.get("created_by")
+    if request_creator and str(request_creator) == str(user.id):
+        raise HTTPException(403, "Request creators cannot review their own requests")
 
     # Create a review record for backward compatibility
     from lucent.db.reviews import ReviewRepository
 
     review_repo = ReviewRepository(pool)
-    await review_repo.create_review(
-        request_id=str(request_id),
-        organization_id=str(user.organization_id),
-        status="approved",
-        reviewer_user_id=str(user.id),
-        reviewer_display_name=user.display_name or user.email,
-        source="human",
-    )
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await review_repo.create_review(
+                request_id=str(request_id),
+                organization_id=str(user.organization_id),
+                status="approved",
+                reviewer_user_id=str(user.id),
+                reviewer_display_name=user.display_name or user.email,
+                source="human",
+                conn=conn,
+            )
 
-    return await repo.update_request_status(
-        str(request_id), "completed", org_id=str(user.organization_id)
-    )
+            updated = await review_repo.mark_request_completed(
+                request_id=str(request_id),
+                organization_id=str(user.organization_id),
+                conn=conn,
+            )
+            if not updated:
+                raise HTTPException(409, "Request is not in review state")
+            return updated
 
 
 @router.post("/{request_id}/review/reject")
@@ -244,42 +263,49 @@ async def reject_request_review(
     )
     from lucent.db.requests import RequestRepository
 
+    if (
+        user.role < Role.ADMIN
+        and user.role != Role.DAEMON
+        and user.external_id != "daemon-service"
+    ):
+        raise HTTPException(403, "Admin or owner role required")
+
     repo = RequestRepository(pool)
     req = await repo.get_request(str(request_id), str(user.organization_id))
     if not req:
         raise HTTPException(404, "Request not found")
     if req["status"] != "review":
         raise HTTPException(409, "Request not in review state")
+    request_creator = req.get("created_by")
+    if request_creator and str(request_creator) == str(user.id):
+        raise HTTPException(403, "Request creators cannot review their own requests")
 
     # Create a review record for backward compatibility
     from lucent.db.reviews import ReviewRepository
 
     review_repo = ReviewRepository(pool)
-    await review_repo.create_review(
-        request_id=str(request_id),
-        organization_id=str(user.organization_id),
-        status="rejected",
-        reviewer_user_id=str(user.id),
-        reviewer_display_name=user.display_name or user.email,
-        comments=body.feedback,
-        source="human",
-    )
-
     async with pool.acquire() as conn:
-        await conn.execute(
-            """UPDATE requests
-               SET status = 'needs_rework',
-                   review_feedback = $2,
-                   review_count = review_count + 1,
-                   reviewed_at = NOW(),
-                   updated_at = NOW()
-               WHERE id = $1 AND organization_id = $3""",
-            request_id,
-            body.feedback,
-            user.organization_id,
-        )
-    result = await repo.get_request(str(request_id), str(user.organization_id))
-    return result
+        async with conn.transaction():
+            await review_repo.create_review(
+                request_id=str(request_id),
+                organization_id=str(user.organization_id),
+                status="rejected",
+                reviewer_user_id=str(user.id),
+                reviewer_display_name=user.display_name or user.email,
+                comments=body.feedback,
+                source="human",
+                conn=conn,
+            )
+
+            updated = await review_repo.mark_request_needs_rework(
+                request_id=str(request_id),
+                organization_id=str(user.organization_id),
+                feedback=body.feedback,
+                conn=conn,
+            )
+            if not updated:
+                raise HTTPException(409, "Request is not in review state")
+            return updated
 
 
 # ── Task endpoints ────────────────────────────────────────────────────────

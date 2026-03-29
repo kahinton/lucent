@@ -547,6 +547,92 @@ class TestListReviewsEndpoint:
         assert resp.status_code == 200
         assert all(r["status"] == "approved" for r in resp.json()["items"])
 
+    async def test_filter_by_task_id(
+        self, client, req_repo, api_request, api_task, org_id, review_repo
+    ):
+        other_request = await req_repo.create_request(title="Other req", org_id=org_id)
+        other_task = await req_repo.create_task(
+            request_id=str(other_request["id"]),
+            title="Other task",
+            org_id=org_id,
+        )
+        await review_repo.create_review(
+            request_id=str(api_request["id"]),
+            task_id=str(api_task["id"]),
+            organization_id=org_id,
+            status="approved",
+            source="human",
+        )
+        await review_repo.create_review(
+            request_id=str(other_request["id"]),
+            task_id=str(other_task["id"]),
+            organization_id=org_id,
+            status="approved",
+            source="human",
+        )
+
+        resp = await client.get("/api/reviews", params={"task_id": str(api_task["id"])})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert all(r["task_id"] == str(api_task["id"]) for r in data["items"])
+
+    async def test_filter_by_all_fields(
+        self, client, req_repo, api_request, api_task, org_id, review_repo
+    ):
+        # Matching review
+        await review_repo.create_review(
+            request_id=str(api_request["id"]),
+            task_id=str(api_task["id"]),
+            organization_id=org_id,
+            status="approved",
+            source="daemon",
+        )
+        # Non-matching by request
+        other_request = await req_repo.create_request(title="Other req", org_id=org_id)
+        await review_repo.create_review(
+            request_id=str(other_request["id"]),
+            task_id=None,
+            organization_id=org_id,
+            status="approved",
+            source="daemon",
+        )
+        # Non-matching by status
+        await review_repo.create_review(
+            request_id=str(api_request["id"]),
+            task_id=str(api_task["id"]),
+            organization_id=org_id,
+            status="rejected",
+            comments="No",
+            source="daemon",
+        )
+        # Non-matching by source
+        await review_repo.create_review(
+            request_id=str(api_request["id"]),
+            task_id=str(api_task["id"]),
+            organization_id=org_id,
+            status="approved",
+            source="human",
+        )
+
+        resp = await client.get(
+            "/api/reviews",
+            params={
+                "request_id": str(api_request["id"]),
+                "task_id": str(api_task["id"]),
+                "status": "approved",
+                "source": "daemon",
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total_count"] == 1
+        assert len(data["items"]) == 1
+        item = data["items"][0]
+        assert item["request_id"] == str(api_request["id"])
+        assert item["task_id"] == str(api_task["id"])
+        assert item["status"] == "approved"
+        assert item["source"] == "daemon"
+
     async def test_filter_by_source(self, client, api_request, org_id, review_repo):
         await review_repo.create_review(
             request_id=str(api_request["id"]),
@@ -750,8 +836,12 @@ class TestReviewSideEffects:
     async def test_approval_creates_tracked_request(
         self, client, req_repo, api_request, org_id, db_pool
     ):
-        """Approving a request in 'review' status should create a tracked request
-        from the approved content so it enters the processing pipeline."""
+        """Approving a request in 'review' status transitions it to completed.
+
+        The auto-creation of 'Approved: ...' follow-up requests was removed
+        to prevent recursive approval loops. Approval now simply marks the
+        request as completed.
+        """
         # Put request in review status
         task = await req_repo.create_task(
             request_id=str(api_request["id"]),
@@ -776,29 +866,23 @@ class TestReviewSideEffects:
         resp = await client.post("/api/reviews", json={
             "request_id": str(api_request["id"]),
             "status": "approved",
-            "comments": "Ship it, create a follow-up",
+            "comments": "Ship it",
         })
         assert resp.status_code == 201
 
-        # Verify a new tracked request was created
+        # Verify request transitioned to completed
+        req = await req_repo.get_request(str(api_request["id"]), org_id)
+        assert req["status"] == "completed"
+        assert req["completed_at"] is not None
+
+        # Verify no follow-up request was created (removed to prevent
+        # recursive approval loops)
         async with db_pool.acquire() as conn:
             after_count = await conn.fetchval(
                 "SELECT COUNT(*) FROM requests WHERE organization_id = $1",
                 UUID(org_id),
             )
-            # Should have one more request (the auto-created one)
-            assert after_count == before_count + 1
-
-            # Find the auto-created request
-            auto_req = await conn.fetchrow(
-                "SELECT * FROM requests WHERE organization_id = $1 "
-                "AND title LIKE 'Approved: %' "
-                "ORDER BY created_at DESC LIMIT 1",
-                UUID(org_id),
-            )
-            assert auto_req is not None
-            assert "API Review Request" in auto_req["title"]
-            assert auto_req["source"] == "api"
+            assert after_count == before_count
 
     async def test_approval_tracked_request_is_idempotent(
         self, client, req_repo, api_request, org_id, db_pool
@@ -849,6 +933,129 @@ class TestReviewSideEffects:
         # Should not have created another request since the original
         # request is no longer in 'review' status
         assert count_after_second == count_after_first
+
+    async def test_approval_does_not_chain_for_approved_prefixed_title(
+        self, client, req_repo, org_id, db_pool
+    ):
+        """Approving a request already titled 'Approved: ...' should not create
+        another follow-up request."""
+        req = await req_repo.create_request(
+            title="Approved: Prior request",
+            org_id=org_id,
+            description="Already approved artifact",
+            source="user",
+        )
+        task = await req_repo.create_task(
+            request_id=str(req["id"]),
+            title="Review chain guard task",
+            org_id=org_id,
+        )
+        await req_repo.claim_task(str(task["id"]), "test")
+        await req_repo.complete_task(str(task["id"]), "Done")
+
+        async with db_pool.acquire() as conn:
+            before_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM requests WHERE organization_id = $1 "
+                "AND title LIKE 'Approved: %'",
+                UUID(org_id),
+            )
+
+        resp = await client.post("/api/reviews", json={
+            "request_id": str(req["id"]),
+            "status": "approved",
+            "comments": "Approve without recursion",
+        })
+        assert resp.status_code == 201
+
+        async with db_pool.acquire() as conn:
+            after_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM requests WHERE organization_id = $1 "
+                "AND title LIKE 'Approved: %'",
+                UUID(org_id),
+            )
+        assert after_count == before_count
+
+    async def test_approval_does_not_chain_for_whitespace_and_mixed_case_prefix(
+        self, client, req_repo, org_id, db_pool
+    ):
+        """Approving a request with leading whitespace + mixed-case approved
+        prefix should not create a follow-up request."""
+        req = await req_repo.create_request(
+            title="  aPpRoVeD: Prior request",
+            org_id=org_id,
+            description="Already approved artifact with mixed case prefix",
+            source="user",
+        )
+        task = await req_repo.create_task(
+            request_id=str(req["id"]),
+            title="Review chain guard whitespace/case task",
+            org_id=org_id,
+        )
+        await req_repo.claim_task(str(task["id"]), "test")
+        await req_repo.complete_task(str(task["id"]), "Done")
+
+        async with db_pool.acquire() as conn:
+            before_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM requests WHERE organization_id = $1 "
+                "AND title LIKE 'Approved: %'",
+                UUID(org_id),
+            )
+
+        resp = await client.post("/api/reviews", json={
+            "request_id": str(req["id"]),
+            "status": "approved",
+            "comments": "Approve without recursion for mixed-case prefix",
+        })
+        assert resp.status_code == 201
+
+        async with db_pool.acquire() as conn:
+            after_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM requests WHERE organization_id = $1 "
+                "AND title LIKE 'Approved: %'",
+                UUID(org_id),
+            )
+        assert after_count == before_count
+
+    async def test_approval_does_not_chain_for_api_source_request(
+        self, client, req_repo, org_id, db_pool
+    ):
+        """Approving a request with source='api' should not create a follow-up
+        request, even if title is not prefixed."""
+        req = await req_repo.create_request(
+            title="Imported approval artifact",
+            org_id=org_id,
+            description="Auto-created by API source",
+            source="api",
+        )
+        task = await req_repo.create_task(
+            request_id=str(req["id"]),
+            title="Review source guard task",
+            org_id=org_id,
+        )
+        await req_repo.claim_task(str(task["id"]), "test")
+        await req_repo.complete_task(str(task["id"]), "Done")
+
+        async with db_pool.acquire() as conn:
+            before_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM requests WHERE organization_id = $1 "
+                "AND title LIKE 'Approved: %'",
+                UUID(org_id),
+            )
+
+        resp = await client.post("/api/reviews", json={
+            "request_id": str(req["id"]),
+            "status": "approved",
+            "comments": "Approve api-source request",
+        })
+        assert resp.status_code == 201
+
+        async with db_pool.acquire() as conn:
+            after_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM requests WHERE organization_id = $1 "
+                "AND title LIKE 'Approved: %'",
+                UUID(org_id),
+            )
+        assert after_count == before_count
 
     async def test_rejection_creates_learning_memory(
         self, client, req_repo, api_request, org_id, db_pool
@@ -1040,3 +1247,42 @@ class TestReviewSideEffects:
 
         assert review_count == 1
         assert request_status == "completed"
+
+    async def test_review_on_already_completed_request(
+        self, client, req_repo, api_request, org_id, db_pool
+    ):
+        """Review creation on completed requests does not re-transition state."""
+        # Put request in review status.
+        task = await req_repo.create_task(
+            request_id=str(api_request["id"]),
+            title="Complete first task",
+            org_id=org_id,
+        )
+        await req_repo.claim_task(str(task["id"]), "test")
+        await req_repo.complete_task(str(task["id"]), "Done")
+
+        # First approval transitions to completed.
+        first = await client.post("/api/reviews", json={
+            "request_id": str(api_request["id"]),
+            "status": "approved",
+            "comments": "Initial approval",
+        })
+        assert first.status_code == 201
+
+        # Second review on completed request is accepted but does not change state.
+        second = await client.post("/api/reviews", json={
+            "request_id": str(api_request["id"]),
+            "status": "approved",
+            "comments": "Post-completion note",
+        })
+        assert second.status_code == 201
+
+        req = await req_repo.get_request(str(api_request["id"]), org_id)
+        assert req["status"] == "completed"
+
+        async with db_pool.acquire() as conn:
+            count = await conn.fetchval(
+                "SELECT COUNT(*) FROM reviews WHERE request_id = $1",
+                UUID(str(api_request["id"])),
+            )
+        assert count == 2

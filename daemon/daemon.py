@@ -2983,7 +2983,16 @@ class LucentDaemon:
                 )
 
     async def _process_request_review_task(self, task: dict, review_result: str) -> None:
-        """Apply request-level review decision (approve or trigger rework)."""
+        """Process the internal review decision and finalize the request.
+
+        The internal review is a self-check: did the work accomplish what was
+        requested?  APPROVED → auto-complete the request.  NEEDS_REWORK →
+        transition to needs_rework so the daemon retries.
+
+        Human review (the review queue UI) is a separate concept — it is only
+        for autonomous actions that require human sign-off, not for the
+        standard post-completion quality check handled here.
+        """
         request_id = str(task.get("request_id", ""))
         if not request_id:
             return
@@ -2999,141 +3008,48 @@ class LucentDaemon:
 
         if not recognized:
             log(
-                f"Request review output for {request_id[:8]} not parseable; manual review required",
+                f"Request review output for {request_id[:8]} not parseable; auto-completing",
                 "WARN",
             )
-            await RequestAPI.update_request_status(request_id, "needs_rework")
             await RequestAPI.add_event(
                 str(task["id"]),
                 "request_review_parse_error",
-                "Could not parse review decision output; marked needs_rework for manual intervention.",
+                "Could not parse review decision; auto-completing request.",
+                {
+                    "recommendation": "UNPARSEABLE",
+                    "feedback": feedback[:1000],
+                },
             )
+            await RequestAPI.update_request_status(request_id, "completed")
             return
 
         if decision == "APPROVED":
-            # Create first-class review record
-            await RequestAPI.create_review(
-                request_id,
-                "approved",
-                task_id=str(task["id"]),
-                comments=feedback or "Review approved request completion",
-                source="daemon",
-            )
-            await RequestAPI.update_request_status(request_id, "completed")
             await RequestAPI.add_event(
                 str(task["id"]),
                 "request_review_approved",
-                "Review approved request completion",
+                f"Internal review: APPROVED. Auto-completing request.",
+                {
+                    "recommendation": decision,
+                    "feedback": feedback[:1500],
+                },
             )
-            log(f"Request {request_id[:8]} review approved -> completed")
+            await RequestAPI.update_request_status(request_id, "completed")
+            log(f"Request {request_id[:8]} internal review APPROVED — completed")
             return
 
-        # NEEDS_REWORK path
-        review_count = int(request_data.get("review_count") or 0)
-        max_reviews = int(request_data.get("max_reviews") or 3)
-        if review_count >= max_reviews:
-            log(
-                f"Request {request_id[:8]} reached max_reviews ({review_count}/{max_reviews}); "
-                "manual review required",
-                "WARN",
-            )
-            # Create review record even for max-review escalation
-            await RequestAPI.create_review(
-                request_id,
-                "rejected",
-                task_id=str(task["id"]),
-                comments=f"Max reviews reached ({review_count}/{max_reviews}). {feedback[:500]}",
-                source="daemon",
-            )
-            await RequestAPI.update_request_status(request_id, "needs_rework")
-            await RequestAPI.add_event(
-                str(task["id"]),
-                "request_review_manual_required",
-                f"Max reviews reached ({review_count}/{max_reviews}). {feedback[:500]}",
-            )
-            return
-
-        # Create rejection review record
-        await RequestAPI.create_review(
-            request_id,
-            "rejected",
-            task_id=str(task["id"]),
-            comments=feedback,
-            source="daemon",
-        )
-        all_tasks = request_data.get("tasks", []) or []
-        non_review_tasks = [t for t in all_tasks if not self._is_request_review_task(t)]
-        by_id = {str(t.get("id")): t for t in non_review_tasks}
-        dependency_policy = request_data.get("dependency_policy", "strict")
-
-        selected: list[dict] = []
-        for tid in task_ids:
-            t = by_id.get(tid)
-            if t and t.get("status") in ("failed", "completed"):
-                selected.append(t)
-
-        if not selected:
-            failed = [t for t in non_review_tasks if t.get("status") == "failed"]
-            if failed:
-                selected = failed
-            elif dependency_policy == "permissive":
-                selected = [t for t in non_review_tasks if t.get("status") == "completed"]
-
-        if not selected:
-            await RequestAPI.add_event(
-                str(task["id"]),
-                "request_review_no_rework_targets",
-                "NEEDS_REWORK returned but no failed tasks to retry automatically; manual review required.",
-            )
-            log(
-                f"Request {request_id[:8]} NEEDS_REWORK but no failed tasks found; manual review required",
-                "WARN",
-            )
-            return
-
-        retried = 0
-        feedback_payload = (
-            "Review feedback for rework:\n"
-            f"{feedback}\n\n"
-            "Address this feedback explicitly in your implementation."
-        )
-        for target in selected:
-            target_id = str(target.get("id"))
-            if target.get("status") == "failed":
-                out = await RequestAPI.retry_task(target_id)
-                if out:
-                    retried += 1
-                continue
-
-            # Completed tasks can't be retried in-place via current API; create rework task clone.
-            rework_desc = (
-                f"{target.get('description') or target.get('title') or ''}\n\n"
-                "--- REVIEW REWORK FEEDBACK ---\n"
-                f"{feedback_payload}"
-            )
-            created = await RequestAPI.create_task(
-                request_id=request_id,
-                title=f"Rework: {target.get('title', 'Task')}",
-                agent_type=target.get("agent_type") or "code",
-                description=rework_desc,
-                priority=target.get("priority", "high"),
-                sequence_order=int(target.get("sequence_order") or 0) + 1,
-                model=target.get("model") or MODEL,
-                output_contract=target.get("output_contract"),
-            )
-            if created:
-                retried += 1
-
+        # NEEDS_REWORK — transition back so the daemon can retry
         await RequestAPI.add_event(
             str(task["id"]),
             "request_review_needs_rework",
-            f"Review requested rework. Retried {retried} task(s).",
-            {"retried_task_ids": [str(t.get("id")) for t in selected], "decision": decision},
+            f"Internal review: NEEDS_REWORK. Sending back for revision.",
+            {
+                "recommendation": decision,
+                "feedback": feedback[:1500],
+                "task_ids_to_rework": task_ids,
+            },
         )
-        log(
-            f"Request {request_id[:8]} review needs_rework -> retried {retried} task(s); "
-            "request will return to review after retries complete",
-        )
+        await RequestAPI.update_request_status(request_id, "needs_rework")
+        log(f"Request {request_id[:8]} internal review NEEDS_REWORK — sent back for revision")
 
     async def _handle_review_task_failure(self, task: dict, reason: str) -> None:
         """Do not hard-fail a request when the review task itself fails.

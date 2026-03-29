@@ -185,59 +185,13 @@ async def create_review(
     review_id = str(review["id"])
 
     # Non-transactional follow-up effects after durable state change
-    if body.status == "approved" and request["status"] == "review":
-        # Create a tracked request from approved content so it enters pipeline.
-        # Guard: don't create recursive requests from auto-created approvals.
-        if not (request.get("title") or "").startswith("Approved:"):
-            await _create_approved_request(
-                req_repo, request, review_id, org_id, user
-            )
-    elif body.status == "rejected" and request["status"] == "review":
+    if body.status == "rejected" and request["status"] == "review":
         # Create learning memory from rejection for extraction pipeline.
         await _create_rejection_memory(
             pool, request, body.comments, org_id, user
         )
 
     return _serialize_review(review)
-
-
-async def _create_approved_request(
-    req_repo, request: dict, review_id: str, org_id: str, user
-) -> dict | None:
-    """Create a tracked request from an approved review.
-
-    The fingerprint is derived from the review ID, so retrying the same
-    approval idempotently returns the existing request (ON CONFLICT).
-
-    Returns the created/existing request dict, or None on error.
-    """
-    title = f"Approved: {request.get('title', 'Untitled')}"
-    description = (
-        f"Auto-created from approved review {review_id} "
-        f"of request {request.get('id', '')}.\n\n"
-        f"Original request: {request.get('title', '')}\n"
-        f"{request.get('description') or ''}"
-    )
-    try:
-        result = await req_repo.create_request(
-            title=title,
-            org_id=org_id,
-            description=description,
-            source="api",
-            priority=request.get("priority", "medium"),
-            created_by=str(user.id),
-        )
-        logger.info(
-            "Created tracked request %s from approved review %s",
-            result.get("id"), review_id,
-        )
-        return result
-    except Exception:
-        logger.exception(
-            "Failed to create tracked request from approved review %s",
-            review_id,
-        )
-        return None
 
 
 async def _create_rejection_memory(
