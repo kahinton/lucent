@@ -227,6 +227,34 @@ class RequestRepository:
                     completed_at,
                     reviewed_at,
                 )
+
+        # When a request reaches a terminal state, close any linked schedule run
+        if row and status in (
+            REQUEST_STATUS_COMPLETED,
+            REQUEST_STATUS_FAILED,
+            REQUEST_STATUS_CANCELLED,
+        ):
+            try:
+                async with self.pool.acquire() as conn:
+                    if status == REQUEST_STATUS_COMPLETED:
+                        await conn.execute(
+                            """UPDATE schedule_runs
+                               SET status = 'completed', completed_at = now()
+                               WHERE request_id = $1::uuid AND status = 'running'""",
+                            request_id,
+                        )
+                    else:
+                        await conn.execute(
+                            """UPDATE schedule_runs
+                               SET status = 'failed', completed_at = now(),
+                                   error = $2
+                               WHERE request_id = $1::uuid AND status = 'running'""",
+                            request_id,
+                            f"Request {status}",
+                        )
+            except Exception:
+                pass  # Non-fatal — don't break request status updates
+
         return dict(row) if row else None
 
     async def get_requests_in_review(

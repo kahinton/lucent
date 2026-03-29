@@ -14,6 +14,16 @@
 
 <!-- Header with actions -->
 <div class="mb-6">
+    {% if sched.is_system %}
+    <!-- System Schedule Banner -->
+    <div class="mb-4 px-4 py-3 bg-indigo-50 border border-indigo-200 rounded-lg flex items-start gap-3">
+        <svg class="w-5 h-5 text-indigo-500 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" /></svg>
+        <div>
+            <p class="text-sm font-medium text-indigo-800">System Schedule</p>
+            <p class="text-xs text-indigo-600 mt-0.5">This is a built-in schedule required for Lucent to function. You can adjust its timing, agent, prompt, or disable it &mdash; but it cannot be deleted.</p>
+        </div>
+    </div>
+    {% endif %}
     <div class="flex items-start justify-between">
         <div>
             <h1 class="text-2xl font-bold text-gray-900">{{ sched.title }}</h1>
@@ -36,13 +46,20 @@
                 </button>
                 {% endif %}
             </form>
-            <!-- Delete button -->
+            <!-- Delete button (hidden for system schedules) -->
+            {% if not sched.is_system %}
             <form method="POST" action="/schedules/{{ sched.id }}/delete" onsubmit="return confirm('Delete this schedule? This cannot be undone.');">
                 <button type="submit" class="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-lg bg-red-50 text-red-700 hover:bg-red-100 transition-colors">
                     <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" /></svg>
                     Delete
                 </button>
             </form>
+            {% else %}
+            <span class="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-lg bg-indigo-50 text-indigo-700">
+                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" /></svg>
+                System
+            </span>
+            {% endif %}
             <!-- Status badges -->
             {% if sched.enabled and sched.status == 'active' %}
             <span class="px-3 py-1 rounded-full text-sm font-medium bg-blue-100 text-blue-700">Active</span>

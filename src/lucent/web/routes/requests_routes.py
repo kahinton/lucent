@@ -39,6 +39,10 @@ async def activity_list(
     per_page = per_page if per_page in ALLOWED_PER_PAGE else 25
     offset = (page - 1) * per_page
 
+    # Default: hide system (schedule) tasks unless explicitly requested
+    if source is None:
+        source = "user,cognitive,daemon"
+
     org_id = str(user.organization_id)
     requests_result = await repo.list_requests(
         org_id, status=status, source=source, limit=per_page, offset=offset

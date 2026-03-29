@@ -27,7 +27,7 @@ import signal
 import sys
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -153,6 +153,93 @@ LEARNING_MINUTES = int(
 # Daily experience compression: runs once per day (default 1440 minutes = 24 hours)
 COMPRESSION_MINUTES = int(os.environ.get("LUCENT_COMPRESSION_MINUTES", "1440"))
 
+# ── System schedule prompts ────────────────────────────────────────────
+# These are the task descriptions used by the built-in system schedules.
+# The cognitive prompt is built dynamically from cognitive.md at startup.
+
+MEMORY_CONSOLIDATION_PROMPT = (
+    "Run a memory consolidation pass focused on TECHNICAL memories.\n\n"
+    "## Goal: One Technical Memory Per Scope\n\n"
+    "Technical memories must follow a strict hierarchy:\n"
+    "- **Repo-level**: One memory per repo (metadata.repo='hindsight', metadata.filename=null)\n"
+    "  Contains: general architecture, conventions, build/test commands, key patterns\n"
+    "- **Directory-level**: One memory per significant directory (metadata.repo='hindsight', metadata.filename='src/lucent/api/')\n"
+    "  Contains: what this directory does, key files, patterns specific to this area\n"
+    "- **File-level**: One memory per file that has enough knowledge to warrant it (metadata.repo='hindsight', metadata.filename='src/lucent/db/memory.py')\n"
+    "  Contains: what this file does, key functions, gotchas, patterns\n\n"
+    "## Process\n\n"
+    "1. Search for all technical memories (use search_memories with type='technical', limit=50).\n"
+    "   Also search with search_memories_full for broader coverage.\n\n"
+    "2. For each memory, determine its correct scope:\n"
+    "   - If it's about a specific file -> file-level (set metadata.filename to the file path)\n"
+    "   - If it's about a directory/module -> directory-level (set metadata.filename to the dir path ending in /)\n"
+    "   - If it's about the repo generally -> repo-level (set metadata.repo, clear metadata.filename)\n\n"
+    "3. **Merge duplicates**: If two memories belong to the same scope, merge them into one.\n"
+    "   Update the better one with combined content, delete the other.\n"
+    "   The surviving memory should be comprehensive but concise.\n\n"
+    "4. **Set metadata correctly on every technical memory**:\n"
+    "   - metadata.repo: always set (e.g. 'hindsight')\n"
+    "   - metadata.filename: set for directory/file scope, null for repo scope\n"
+    "   - metadata.category: a short category like 'architecture', 'api', 'database', 'testing'\n\n"
+    "5. **Non-technical memories** (experience, procedural, etc.): Leave these alone.\n\n"
+    "6. Create a summary of what you changed.\n\n"
+    "## Important Rules\n"
+    "- NEVER create new memories. Only update existing ones or delete duplicates.\n"
+    "- The ONLY valid operations are: update_memory and delete_memory.\n"
+    "- If two memories cover the same scope, update the better one and delete the other.\n"
+    "- The total memory count must go DOWN or stay the same, never up.\n"
+    "- Each scope should have AT MOST one technical memory.\n"
+    "- Content should be practical: what does a developer need to know to work here?"
+)
+
+LEARNING_EXTRACTION_PROMPT = (
+    "Run the learning extraction pipeline. "
+    "Core principle: INTEGRATE, don't accumulate. Lessons get folded into "
+    "existing memories, not stored as standalone 'Lesson:' entries.\n\n"
+    "1. Search for memories tagged 'daemon-result' "
+    "or 'rejection-lesson' or 'feedback-rejected' "
+    "or 'validated' that do "
+    "NOT have the 'lesson-extracted' tag. Cap at 10.\n"
+    "2. For each non-routine experience, find the existing memory "
+    "that this lesson is ABOUT (the technical or procedural memory "
+    "for that module/system/workflow).\n"
+    "3. Update that existing memory with the new knowledge. "
+    "If no related memory exists, create ONE well-scoped memory "
+    "that includes the lesson as part of its content.\n"
+    "4. Tag processed source memories with 'lesson-extracted'.\n"
+    "5. Delete source experience memories that are now redundant "
+    "(their knowledge has been absorbed).\n"
+    "\n\nSTRICT RULES:\n"
+    "- NEVER create standalone 'Lesson:' or 'Learning Extraction Run' memories.\n"
+    "- NEVER create a new memory if an existing one covers the same scope - update it.\n"
+    "- The total memory count must go DOWN or stay the same, never up.\n"
+    "- Prefer update_memory and delete_memory. Only use create_memory for genuine gaps.\n"
+    "- Skip anything tagged 'daemon-heartbeat'."
+)
+
+EXPERIENCE_COMPRESSION_PROMPT = (
+    "Compress experience memories into daily digests.\n\n"
+    "## Process\n\n"
+    "1. Search for experience memories that are NOT tagged 'daily-digest' "
+    "and NOT tagged 'daemon-heartbeat' (use search_memories with type='experience', limit=50).\n\n"
+    "2. Group the results by date (use the created_at or updated_at field). "
+    "Skip memories from today - only compress older ones.\n\n"
+    "3. For each date that has 2+ experience memories:\n"
+    "   a. Write a concise narrative digest of what happened that day. "
+    "Include: what was worked on, key decisions made, outcomes, who was involved.\n"
+    "   b. Create ONE experience memory tagged 'daily-digest' with the date in the content title. "
+    "Format: '## Daily Digest - YYYY-MM-DD\\n\\n<narrative>'\n"
+    "   c. Delete the individual experience memories that were merged into the digest.\n\n"
+    "4. For dates with only 1 experience memory, just tag it 'daily-digest' to prevent "
+    "reprocessing. Don't create a new memory for a single entry.\n\n"
+    "## Rules\n"
+    "- Each day gets AT MOST one digest memory.\n"
+    "- If a daily digest already exists for a date, update it instead of creating a new one.\n"
+    "- The narrative should be practical: what happened and why it matters, not raw logs.\n"
+    "- Total memory count must go DOWN.\n"
+    "- Keep digests concise - aim for 200-500 words per day, not a transcript."
+)
+
 # Approval flow: when enabled, tasks go to needs-review before completing.
 # When disabled, tasks complete immediately after successful execution.
 REQUIRE_APPROVAL = os.environ.get("LUCENT_REQUIRE_APPROVAL", "false").lower() in (
@@ -193,15 +280,12 @@ MCP_API_KEY = os.environ.get("LUCENT_MCP_API_KEY", "")
 # Prefers DAEMON_DATABASE_URL (restricted lucent_daemon role) over DATABASE_URL
 # (full-privilege server role). The restricted role can only manage api_keys.
 def _resolve_daemon_database_url() -> str:
-    """Resolve daemon DB URL from environment with safe local-dev fallback.
+    """Resolve daemon DB URL from environment.
 
     Resolution order:
-    1. DAEMON_DATABASE_URL (preferred least-privilege role)
-    2. DATABASE_URL
-    3. LUCENT_INSECURE_DAEMON_DATABASE_URL (explicitly insecure dev fallback)
-
-    If no secure URL is provided, we continue with an obviously insecure local
-    fallback to preserve docker-compose local workflow, but emit a warning.
+    1. DAEMON_DATABASE_URL (preferred — uses least-privilege lucent_daemon role)
+    2. DATABASE_URL (full-privilege, used by the server)
+    3. Local dev fallback (matches docker-compose defaults, personal mode only)
     """
     daemon_url = os.environ.get("DAEMON_DATABASE_URL")
     if daemon_url:
@@ -212,22 +296,25 @@ def _resolve_daemon_database_url() -> str:
         return database_url
 
     mode = os.environ.get("LUCENT_MODE", "personal").lower()
-    insecure_fallback = os.environ.get(
-        "LUCENT_INSECURE_DAEMON_DATABASE_URL",
-        "postgresql://lucent:change-me-insecure-dev-password@localhost:5433/lucent",
-    )
     if mode == "team":
         raise RuntimeError(
-            "DAEMON_DATABASE_URL or DATABASE_URL must be set in team mode. "
-            "Refusing insecure fallback."
+            "DAEMON_DATABASE_URL or DATABASE_URL must be set in team mode."
         )
+
+    # Local dev fallback — matches docker-compose.yml defaults.
+    # Override with LUCENT_DEV_DATABASE_URL if your local password differs.
+    dev_password = os.environ.get("POSTGRES_PASSWORD", "change-me-insecure-dev-password")
+    dev_port = os.environ.get("LUCENT_DB_PORT", "5433")
+    fallback = os.environ.get(
+        "LUCENT_DEV_DATABASE_URL",
+        f"postgresql://lucent:{dev_password}@localhost:{dev_port}/lucent",
+    )
     print(
         "WARNING: Neither DAEMON_DATABASE_URL nor DATABASE_URL is set. "
-        "Falling back to LUCENT_INSECURE_DAEMON_DATABASE_URL for local development. "
-        "Set DAEMON_DATABASE_URL in production.",
+        "Using local dev fallback. Set DAEMON_DATABASE_URL in production.",
         file=sys.stderr,
     )
-    return insecure_fallback
+    return fallback
 
 
 DATABASE_URL = _resolve_daemon_database_url()
@@ -1508,14 +1595,13 @@ to memory — the dispatch system validates your text output.
 class LucentDaemon:
     """Orchestrates Lucent's cognitive architecture.
 
-    Runs independent loops based on configured roles:
+    Runs two core loops:
       - dispatcher:  event-driven task execution (PG LISTEN + polling)
-      - cognitive:   periodic planning / goal assessment
-      - scheduler:   checks and fires due schedules
-      - autonomic:   memory maintenance, learning extraction
+      - scheduler:   checks and fires due schedules (including system schedules
+                     for cognitive planning, memory maintenance, and learning)
     """
 
-    ALL_ROLES = frozenset({"dispatcher", "cognitive", "scheduler", "autonomic"})
+    ALL_ROLES = frozenset({"dispatcher", "scheduler"})
 
     def __init__(self):
         self.active_sessions: list = []
@@ -1662,6 +1748,143 @@ class LucentDaemon:
                 log(f"Startup recovery: released {stale} stale tasks, reconciled {reconciled} requests")
         except Exception as e:
             log(f"Startup recovery failed (non-fatal): {e}", "WARN")
+
+        # Seed system schedules — built-in schedules that drive autonomous work
+        await self._seed_system_schedules()
+
+    async def _seed_system_schedules(self):
+        """Ensure built-in system schedules exist for this organization.
+
+        System schedules replace the old autonomic and cognitive loops.
+        They can be modified (interval, enabled) but not deleted.
+        Idempotent — skips creation if the schedule already exists.
+        Uses direct DB connection (same pattern as key provisioning).
+        """
+        import asyncpg
+
+        try:
+            conn = await asyncpg.connect(DATABASE_URL)
+            try:
+                user = await conn.fetchrow(
+                    "SELECT id, organization_id FROM users "
+                    "WHERE external_id = 'daemon-service' AND is_active = true"
+                )
+                if not user or not user["organization_id"]:
+                    log("Cannot seed system schedules — no daemon-service user", "WARN")
+                    return
+
+                user_id = str(user["id"])
+                org_id = str(user["organization_id"])
+
+                system_schedules = [
+                    {
+                        "title": "Cognitive Planning",
+                        "description": (
+                            "Autonomous planning cycle — perceive state, reason about priorities, "
+                            "create requests and tasks to drive work forward."
+                        ),
+                        "agent_type": "lucent",
+                        "schedule_type": "interval",
+                        "interval_seconds": DAEMON_INTERVAL_MINUTES * 60,
+                        "priority": "medium",
+                        "prompt": self._build_cognitive_schedule_prompt(),
+                    },
+                    {
+                        "title": "Memory Consolidation",
+                        "description": (
+                            "Autonomic memory maintenance — merge duplicate technical memories, "
+                            "enforce one-memory-per-scope hierarchy, set metadata correctly."
+                        ),
+                        "agent_type": "memory",
+                        "schedule_type": "interval",
+                        "interval_seconds": AUTONOMIC_MINUTES * 60,
+                        "priority": "low",
+                        "prompt": MEMORY_CONSOLIDATION_PROMPT,
+                    },
+                    {
+                        "title": "Learning Extraction",
+                        "description": (
+                            "Process recent work results and feedback into reusable lessons. "
+                            "Integrate knowledge into existing memories rather than creating standalone entries."
+                        ),
+                        "agent_type": "reflection",
+                        "schedule_type": "interval",
+                        "interval_seconds": LEARNING_MINUTES * 60,
+                        "priority": "low",
+                        "prompt": LEARNING_EXTRACTION_PROMPT,
+                    },
+                    {
+                        "title": "Experience Compression",
+                        "description": (
+                            "Daily compression of granular experience memories into concise daily digests."
+                        ),
+                        "agent_type": "memory",
+                        "schedule_type": "cron",
+                        "cron_expression": "0 4 * * *",
+                        "priority": "low",
+                        "prompt": EXPERIENCE_COMPRESSION_PROMPT,
+                    },
+                ]
+
+                created = 0
+                for sched in system_schedules:
+                    existing = await conn.fetchrow(
+                        """SELECT id FROM schedules
+                           WHERE title = $1 AND organization_id = $2::uuid AND is_system = true""",
+                        sched["title"],
+                        org_id,
+                    )
+                    if existing:
+                        continue
+
+                    now = datetime.now(timezone.utc)
+                    interval_seconds = sched.get("interval_seconds")
+                    cron_expression = sched.get("cron_expression")
+                    if sched["schedule_type"] == "interval" and interval_seconds:
+                        next_run_at = now + timedelta(seconds=interval_seconds)
+                    else:
+                        next_run_at = now + timedelta(minutes=5)  # first cron run in 5 min
+
+                    await conn.execute(
+                        """INSERT INTO schedules
+                           (title, organization_id, description, agent_type, schedule_type,
+                            interval_seconds, cron_expression, next_run_at, priority, prompt,
+                            created_by, is_system, enabled)
+                           VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10, $11::uuid, true, true)""",
+                        sched["title"],
+                        org_id,
+                        sched["description"],
+                        sched["agent_type"],
+                        sched["schedule_type"],
+                        interval_seconds,
+                        cron_expression,
+                        next_run_at,
+                        sched["priority"],
+                        sched["prompt"],
+                        user_id,
+                    )
+                    created += 1
+
+                if created:
+                    log(f"Seeded {created} system schedule(s)")
+                else:
+                    log("System schedules verified (all exist)")
+
+            finally:
+                await conn.close()
+
+        except Exception as e:
+            log(f"System schedule seeding failed (non-fatal): {e}", "WARN")
+
+    def _build_cognitive_schedule_prompt(self) -> str:
+        """Build the prompt used by the scheduled cognitive planning task."""
+        cognitive_md = COGNITIVE_PROMPT_PATH.read_text() if COGNITIVE_PROMPT_PATH.exists() else ""
+        return (
+            f"{cognitive_md}\n\n"
+            "Begin your cognitive cycle. Load state with list_active_work() and "
+            "list_pending_requests(). Perceive, reason, decide. Use request/task "
+            "tools to create work items. Output a brief summary of your decisions."
+        )
 
     def _handle_shutdown(self):
         """Handle shutdown signal."""
@@ -3376,8 +3599,6 @@ class LucentDaemon:
         """
         log(f"Dispatch loop started (poll fallback: {DISPATCH_POLL_SECONDS}s)")
         await self._setup_listen()
-        heartbeat_interval = 300  # 5 minutes
-        last_heartbeat = 0
 
         while self.running:
             try:
@@ -3394,12 +3615,6 @@ class LucentDaemon:
                         log("Dispatch: no valid API key, retrying in 30s", "WARN")
                         await asyncio.sleep(30)
                         continue
-
-                # Periodic heartbeat
-                now = time.time()
-                if now - last_heartbeat >= heartbeat_interval:
-                    await self._update_heartbeat()
-                    last_heartbeat = now
 
                 # Release stale tasks from dead instances
                 stale = await RequestAPI.release_stale(STALE_HEARTBEAT_MINUTES)
@@ -3630,11 +3845,13 @@ class LucentDaemon:
     async def run_forever(self):
         """Run enabled daemon loops concurrently.
 
-        Each role spawns an independent asyncio task:
-          - dispatcher:  event-driven (PG LISTEN + polling fallback)
-          - cognitive:   interval-based planning
-          - scheduler:   short-interval schedule checks
-          - autonomic:   long-interval maintenance
+        The daemon has two core loops:
+          - dispatcher:  event-driven task execution (PG LISTEN + polling)
+          - scheduler:   fires due schedules (system + user-defined)
+
+        Cognitive planning, memory maintenance, and learning extraction
+        are all system schedules — they flow through the scheduler and
+        dispatcher like any other task.
         """
         await self.start()
         self._source_mtimes = self._snapshot_source_files()
@@ -3646,12 +3863,8 @@ class LucentDaemon:
 
             if "dispatcher" in self.roles:
                 loops.append(asyncio.create_task(self._dispatch_loop(), name="dispatch"))
-            if "cognitive" in self.roles:
-                loops.append(asyncio.create_task(self._cognitive_loop(), name="cognitive"))
             if "scheduler" in self.roles:
                 loops.append(asyncio.create_task(self._scheduler_loop(), name="scheduler"))
-            if "autonomic" in self.roles:
-                loops.append(asyncio.create_task(self._autonomic_loop(), name="autonomic"))
 
             # File watcher for auto-reload (always runs)
             loops.append(asyncio.create_task(self._reload_watcher(), name="reload-watcher"))

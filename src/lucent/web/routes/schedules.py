@@ -173,7 +173,10 @@ async def schedule_delete(request: Request, schedule_id: str):
     repo = ScheduleRepository(pool)
     org_id = str(user.organization_id)
 
-    deleted = await repo.delete_schedule(schedule_id, org_id)
+    try:
+        deleted = await repo.delete_schedule(schedule_id, org_id)
+    except ValueError:
+        raise HTTPException(409, "System schedules cannot be deleted. Disable it instead.")
     if not deleted:
         raise HTTPException(404, "Schedule not found")
 

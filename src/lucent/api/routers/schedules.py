@@ -160,7 +160,10 @@ async def delete_schedule(schedule_id: str, user: AuthenticatedUser, pool=Depend
     from lucent.db.schedules import ScheduleRepository
 
     repo = ScheduleRepository(pool)
-    ok = await repo.delete_schedule(schedule_id, str(user.organization_id))
+    try:
+        ok = await repo.delete_schedule(schedule_id, str(user.organization_id))
+    except ValueError as e:
+        raise HTTPException(409, str(e))
     if not ok:
         raise HTTPException(404, "Schedule not found")
     return {"deleted": True}
@@ -282,6 +285,9 @@ async def trigger_now(
             sandbox_config=sched.get("sandbox_config"),
             org_id=str(user.organization_id),
         )
+
+        # Link the run to the request so completion hooks can find it
+        await sched_repo.link_run_to_request(str(run["id"]), str(req["id"]))
     except Exception as e:
         # Schedule was already advanced — log and fail the run record
         logger.error(f"Schedule {schedule_id} triggered but task creation failed: {e}")

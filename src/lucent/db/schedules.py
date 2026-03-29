@@ -105,6 +105,65 @@ class ScheduleRepository:
     def __init__(self, pool: Pool):
         self.pool = pool
 
+    # ── System schedules ──────────────────────────────────────────────────
+
+    async def ensure_system_schedule(
+        self,
+        title: str,
+        org_id: str,
+        description: str,
+        agent_type: str,
+        schedule_type: str,
+        interval_seconds: int | None = None,
+        cron_expression: str | None = None,
+        priority: str = "low",
+        prompt: str = "",
+        created_by: str | None = None,
+    ) -> dict:
+        """Create a system schedule if it doesn't exist, or return the existing one.
+
+        System schedules are identified by title + org_id + is_system=true.
+        They can be modified by users but never deleted.
+        """
+        async with self.pool.acquire() as conn:
+            existing = await conn.fetchrow(
+                """SELECT * FROM schedules
+                   WHERE title = $1 AND organization_id = $2::uuid AND is_system = true""",
+                title,
+                org_id,
+            )
+            if existing:
+                return dict(existing)
+
+            now = datetime.now(timezone.utc)
+            if schedule_type == "interval" and interval_seconds:
+                next_run_at = now + timedelta(seconds=interval_seconds)
+            elif schedule_type == "cron" and cron_expression:
+                next_run_at = _next_cron_utc(cron_expression, now, "UTC")
+            else:
+                next_run_at = now
+
+            row = await conn.fetchrow(
+                """INSERT INTO schedules
+                   (title, organization_id, description, agent_type, schedule_type,
+                    interval_seconds, cron_expression, next_run_at, priority, prompt,
+                    created_by, is_system)
+                   VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10, $11::uuid, true)
+                   RETURNING *""",
+                title,
+                org_id,
+                description,
+                agent_type,
+                schedule_type,
+                interval_seconds,
+                cron_expression,
+                next_run_at,
+                priority,
+                prompt,
+                created_by,
+            )
+            return dict(row)
+
     # ── Schedules ─────────────────────────────────────────────────────────
 
     async def create_schedule(
@@ -264,8 +323,16 @@ class ScheduleRepository:
 
     async def delete_schedule(self, schedule_id: str, org_id: str) -> bool:
         async with self.pool.acquire() as conn:
+            # System schedules cannot be deleted — only modified or disabled
+            is_sys = await conn.fetchval(
+                "SELECT is_system FROM schedules WHERE id = $1::uuid AND organization_id = $2::uuid",
+                schedule_id,
+                org_id,
+            )
+            if is_sys:
+                raise ValueError("System schedules cannot be deleted. Disable it instead.")
             result = await conn.execute(
-                "DELETE FROM schedules WHERE id = $1::uuid AND organization_id = $2::uuid",
+                "DELETE FROM schedules WHERE id = $1::uuid AND organization_id = $2::uuid AND (is_system IS NOT TRUE)",
                 schedule_id,
                 org_id,
             )
@@ -407,6 +474,15 @@ class ScheduleRepository:
                 error,
             )
             return dict(row) if row else None
+
+    async def link_run_to_request(self, run_id: str, request_id: str) -> None:
+        """Set the request_id on a schedule run after the request is created."""
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE schedule_runs SET request_id = $2::uuid WHERE id = $1::uuid",
+                run_id,
+                request_id,
+            )
 
     # ── Run history ───────────────────────────────────────────────────────
 
