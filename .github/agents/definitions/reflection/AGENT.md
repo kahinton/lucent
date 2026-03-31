@@ -71,6 +71,8 @@ Follow the **self-improvement** skill's Step 5 (Set Up Verification):
 
 Follow the **self-improvement** skill's Step 7 (Record and Output). Produce one of exactly two outcomes:
 
+**Tagging requirement**: Every scan output memory MUST include the `scan-result` tag. If the scan resulted in a concrete change, also include `agent-improvement`. These tags are tracked by the self-improvement meta-goal as measurable milestones.
+
 **Outcome A — Change made:**
 ```
 SELF-IMPROVEMENT RESULT: change_made

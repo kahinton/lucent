@@ -500,14 +500,124 @@ class TestReleaseStale:
         assert count == 0
 
 
+class TestApprovalGate:
+    """Pre-work approval gate for daemon-created requests."""
+
+    @pytest.mark.asyncio
+    async def test_user_request_auto_approved(self, repo, test_organization):
+        org = str(test_organization["id"])
+        r = await repo.create_request("User test", org, source="user")
+        assert r["approval_status"] == "auto_approved"
+
+    @pytest.mark.asyncio
+    async def test_daemon_request_auto_approved_by_default(self, repo, test_organization, monkeypatch):
+        monkeypatch.delenv("LUCENT_AUTO_APPROVE", raising=False)
+        org = str(test_organization["id"])
+        r = await repo.create_request("Daemon default", org, source="cognitive")
+        assert r["approval_status"] == "auto_approved"
+
+    @pytest.mark.asyncio
+    async def test_daemon_request_pending_when_disabled(self, repo, test_organization, monkeypatch):
+        monkeypatch.setenv("LUCENT_AUTO_APPROVE", "false")
+        org = str(test_organization["id"])
+        r = await repo.create_request("Daemon gated", org, source="cognitive")
+        assert r["approval_status"] == "pending_approval"
+
+    @pytest.mark.asyncio
+    async def test_approve_request(self, repo, test_organization, test_user, monkeypatch):
+        monkeypatch.setenv("LUCENT_AUTO_APPROVE", "false")
+        org = str(test_organization["id"])
+        r = await repo.create_request("Approve me", org, source="cognitive")
+        result = await repo.approve_request(str(r["id"]), org, str(test_user["id"]), "looks good")
+        assert result is not None
+        assert result["approval_status"] == "approved"
+        assert result["approved_by"] == test_user["id"]
+        assert result["approved_at"] is not None
+        assert result["approval_comment"] == "looks good"
+
+    @pytest.mark.asyncio
+    async def test_reject_request(self, repo, test_organization, test_user, monkeypatch):
+        monkeypatch.setenv("LUCENT_AUTO_APPROVE", "false")
+        org = str(test_organization["id"])
+        r = await repo.create_request("Reject me", org, source="daemon")
+        result = await repo.reject_request(str(r["id"]), org, str(test_user["id"]), "not needed")
+        assert result is not None
+        assert result["approval_status"] == "rejected"
+        assert result["status"] == "cancelled"
+        assert result["approval_comment"] == "not needed"
+
+    @pytest.mark.asyncio
+    async def test_dispatch_blocked_for_unapproved(self, repo, test_organization, monkeypatch):
+        monkeypatch.setenv("LUCENT_AUTO_APPROVE", "false")
+        org = str(test_organization["id"])
+        r = await repo.create_request("Blocked request", org, source="schedule")
+        t = await repo.create_task(
+            request_id=str(r["id"]),
+            title="blocked task",
+            org_id=org,
+            agent_type="code",
+        )
+        # Task should NOT be in pending tasks (blocked by approval gate)
+        pending = await repo.list_pending_tasks(org)
+        task_ids = [str(t2["id"]) for t2 in pending["items"]]
+        assert str(t["id"]) not in task_ids
+
+    @pytest.mark.asyncio
+    async def test_dispatch_unblocked_after_approval(self, repo, test_organization, test_user, monkeypatch):
+        monkeypatch.setenv("LUCENT_AUTO_APPROVE", "false")
+        org = str(test_organization["id"])
+        r = await repo.create_request("Unblock me", org, source="schedule")
+        t = await repo.create_task(
+            request_id=str(r["id"]),
+            title="unblocked task",
+            org_id=org,
+            agent_type="code",
+        )
+        await repo.approve_request(str(r["id"]), org, str(test_user["id"]))
+        pending = await repo.list_pending_tasks(org)
+        task_ids = [str(t2["id"]) for t2 in pending["items"]]
+        assert str(t["id"]) in task_ids
+
+    @pytest.mark.asyncio
+    async def test_list_pending_approvals(self, repo, test_organization, monkeypatch):
+        monkeypatch.setenv("LUCENT_AUTO_APPROVE", "false")
+        org = str(test_organization["id"])
+        await repo.create_request("Approval 1", org, source="cognitive")
+        await repo.create_request("Approval 2", org, source="daemon")
+        result = await repo.list_pending_approvals(org)
+        assert result["total_count"] >= 2
+        titles = [r["title"] for r in result["items"]]
+        assert "Approval 1" in titles
+        assert "Approval 2" in titles
+
+
 class TestRequestCompletion:
     @pytest.mark.asyncio
-    async def test_auto_complete_when_all_tasks_done(self, repo, req, task):
-        """Request moves to review when all tasks are completed."""
+    async def test_auto_complete_when_review_skipped(self, repo, req, task, monkeypatch):
+        """Request moves to completed when all tasks are done
+        and LUCENT_SKIP_POST_REVIEW=true."""
+        monkeypatch.setenv("LUCENT_SKIP_POST_REVIEW", "true")
         await repo.claim_task(str(task["id"]), "d1")
         await repo.complete_task(str(task["id"]), "done")
         org_id = str(req["organization_id"])
         updated = await repo.get_request(str(req["id"]), org_id)
+        assert updated["status"] == "completed"
+
+    @pytest.mark.asyncio
+    async def test_auto_review_by_default(self, repo, test_organization, monkeypatch):
+        """Request moves to review by default (post-completion review is on)."""
+        monkeypatch.delenv("LUCENT_SKIP_POST_REVIEW", raising=False)
+        org = str(test_organization["id"])
+        r = await repo.create_request("Review required test", org, source="cognitive")
+        t = await repo.create_task(
+            request_id=str(r["id"]),
+            title="task",
+            org_id=org,
+            agent_type="code",
+        )
+        await repo.claim_task(str(t["id"]), "d1")
+        await repo.complete_task(str(t["id"]), "done")
+        updated = await repo.get_request(str(r["id"]), org)
         assert updated["status"] == "review"
 
     @pytest.mark.asyncio
@@ -580,6 +690,16 @@ class TestTaskEvents:
         assert "running" in types
         assert "completed" in types
 
+    @pytest.mark.asyncio
+    async def test_add_event_rejects_cross_org_task(self, repo, task, other_org):
+        with pytest.raises(ValueError, match="Task not found"):
+            await repo.add_task_event(
+                str(task["id"]),
+                "progress",
+                "blocked",
+                org_id=str(other_org["id"]),
+            )
+
 
 class TestTaskMemoryLinks:
     @pytest.mark.asyncio
@@ -616,6 +736,18 @@ class TestTaskMemoryLinks:
         events = await repo.list_task_events(str(task["id"]))
         link_events = [e for e in events["items"] if e["event_type"] == "memory_created"]
         assert len(link_events) == 1
+
+    @pytest.mark.asyncio
+    async def test_link_memory_rejects_cross_org_task(
+        self, repo, task, test_memory, other_org
+    ):
+        with pytest.raises(ValueError, match="Task not found"):
+            await repo.link_memory(
+                str(task["id"]),
+                str(test_memory["id"]),
+                "created",
+                org_id=str(other_org["id"]),
+            )
 
 
 class TestGetRequestWithTasks:

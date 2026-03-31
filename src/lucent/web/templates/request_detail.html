@@ -29,6 +29,13 @@
                 {{ req.status | replace('_', ' ') }}
             </span>
             <span class="px-3 py-1 rounded-md text-sm bg-gray-100 text-gray-500">{{ req.source }}</span>
+            {% if req.approval_status == 'pending_approval' %}
+            <span class="px-3 py-1 rounded-md text-sm bg-amber-200 text-amber-800 font-medium">awaiting approval</span>
+            {% elif req.approval_status == 'rejected' %}
+            <span class="px-3 py-1 rounded-md text-sm bg-red-200 text-red-800 font-medium">rejected</span>
+            {% elif req.approval_status == 'approved' %}
+            <span class="px-3 py-1 rounded-md text-sm bg-emerald-100 text-emerald-700">approved</span>
+            {% endif %}
             {% if req.priority != 'medium' %}
             <span class="px-3 py-1 rounded-md text-sm
                 {% if req.priority == 'urgent' %}bg-red-100 text-red-700

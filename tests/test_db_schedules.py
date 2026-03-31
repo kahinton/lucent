@@ -496,6 +496,16 @@ class TestUpdateSchedule:
         assert updated["updated_at"] is not None
         assert updated["description"] == "changed"
 
+    @pytest.mark.asyncio
+    async def test_update_rejects_invalid_column_name(self, repo, schedule, test_organization):
+        org = str(test_organization["id"])
+        with pytest.raises(ValueError, match="Invalid schedule update column"):
+            await repo.update_schedule(
+                str(schedule["id"]),
+                org,
+                **{"title = 'hacked'": "x"},
+            )
+
 
 class TestToggleSchedule:
     @pytest.mark.asyncio

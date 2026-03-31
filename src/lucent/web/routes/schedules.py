@@ -233,6 +233,11 @@ async def schedule_edit(request: Request, schedule_id: str):
     if prompt != (sched.get("prompt") or ""):
         updates["prompt"] = prompt
 
+    # Model override (blank = use daemon default)
+    model = form.get("model", "").strip() or None
+    if model != (sched.get("model") or None):
+        updates["model"] = model
+
     if updates:
         await repo.update_schedule(schedule_id, org_id, **updates)
 

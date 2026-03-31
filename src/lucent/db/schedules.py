@@ -11,6 +11,28 @@ from zoneinfo import ZoneInfo
 
 from asyncpg import Pool
 
+ALLOWED_SCHEDULE_COLUMNS = frozenset(
+    {
+        "title",
+        "description",
+        "enabled",
+        "agent_type",
+        "model",
+        "prompt",
+        "task_template",
+        "sandbox_config",
+        "sandbox_template_id",
+        "schedule_type",
+        "cron_expression",
+        "interval_seconds",
+        "next_run_at",
+        "priority",
+        "timezone",
+        "max_runs",
+        "expires_at",
+    }
+)
+
 
 def _parse_cron(expression: str, after: datetime) -> datetime:
     """Calculate next run time from a cron expression (minute hour dom month dow).
@@ -293,6 +315,8 @@ class ScheduleRepository:
         params: list[Any] = []
         idx = 1
         for key, val in fields.items():
+            if key not in ALLOWED_SCHEDULE_COLUMNS:
+                raise ValueError(f"Invalid schedule update column: {key}")
             if key == "task_template":
                 sets.append(f"task_template = ${idx}::jsonb")
                 params.append(json.dumps(val))
@@ -325,14 +349,21 @@ class ScheduleRepository:
         async with self.pool.acquire() as conn:
             # System schedules cannot be deleted — only modified or disabled
             is_sys = await conn.fetchval(
-                "SELECT is_system FROM schedules WHERE id = $1::uuid AND organization_id = $2::uuid",
+                (
+                    "SELECT is_system FROM schedules "
+                    "WHERE id = $1::uuid AND organization_id = $2::uuid"
+                ),
                 schedule_id,
                 org_id,
             )
             if is_sys:
                 raise ValueError("System schedules cannot be deleted. Disable it instead.")
             result = await conn.execute(
-                "DELETE FROM schedules WHERE id = $1::uuid AND organization_id = $2::uuid AND (is_system IS NOT TRUE)",
+                (
+                    "DELETE FROM schedules "
+                    "WHERE id = $1::uuid AND organization_id = $2::uuid "
+                    "AND (is_system IS NOT TRUE)"
+                ),
                 schedule_id,
                 org_id,
             )

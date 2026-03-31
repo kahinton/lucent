@@ -380,7 +380,7 @@ class TestCompleteTask:
         events = await repo.list_task_events(str(task["id"]))
         assert any(e["event_type"] == "completed" for e in events["items"])
 
-    async def test_completing_last_task_completes_request(self, repo, org_id):
+    async def test_completing_last_task_moves_to_review(self, repo, org_id):
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
         await repo.claim_task(str(task["id"]), "inst-test")
@@ -856,7 +856,8 @@ class TestGetActiveSummary:
 
 
 class TestReviewLifecycle:
-    async def test_get_requests_in_review(self, repo, org_id):
+    async def test_get_requests_in_review(self, repo, org_id, monkeypatch):
+        monkeypatch.delenv("LUCENT_SKIP_POST_REVIEW", raising=False)
         req = await _make_request(repo, org_id, title="Needs review")
         task = await _make_task(repo, str(req["id"]), org_id)
         await repo.claim_task(str(task["id"]), "inst-test")

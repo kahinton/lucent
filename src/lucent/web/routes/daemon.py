@@ -1,6 +1,7 @@
 """Daemon activity routes — messages, review queue, feedback, legacy redirects."""
 
 import asyncio
+import html
 from datetime import datetime, timezone
 from math import ceil
 from uuid import UUID
@@ -140,7 +141,7 @@ async def daemon_review_queue(
     page: int = 1,
     per_page: int = 25,
 ):
-    """Show requests in 'review' status that need human approval."""
+    """Show requests needing human attention — pending approvals and post-work reviews."""
     user = await get_user_context(request)
     pool = await get_pool()
 
@@ -149,17 +150,33 @@ async def daemon_review_queue(
     offset = (page - 1) * per_page
 
     async with pool.acquire() as conn:
+        # Pending approvals — requests the daemon wants to work on
+        pending_approvals = await conn.fetch(
+            """SELECT r.id, r.title, r.description, r.source, r.priority,
+                      r.created_at, r.updated_at,
+                      (SELECT count(*) FROM tasks t WHERE t.request_id = r.id) as task_count,
+                      u.display_name as creator_name
+               FROM requests r
+               LEFT JOIN users u ON r.created_by = u.id
+               WHERE r.organization_id = $1
+                 AND r.approval_status = 'pending_approval'
+               ORDER BY
+                 CASE r.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1
+                                 WHEN 'medium' THEN 2 ELSE 3 END,
+                 r.created_at
+               LIMIT 50""",
+            user.organization_id,
+        )
+
+        # Post-completion reviews — completed work needing sign-off
         review_requests = await conn.fetch(
             """SELECT r.id, r.title, r.description, r.status, r.created_at, r.updated_at,
-                      r.review_feedback,
+                      r.review_feedback, r.source, r.priority,
                       (SELECT t.result FROM tasks t
-                       WHERE t.request_id = r.id AND t.agent_type = 'request-review'
+                       WHERE t.request_id = r.id AND t.agent_type IN ('request-review', 'code')
                              AND t.status = 'completed'
                        ORDER BY t.completed_at DESC LIMIT 1) AS review_result,
-                      (SELECT t.id FROM tasks t
-                       WHERE t.request_id = r.id AND t.agent_type = 'request-review'
-                             AND t.status = 'completed'
-                       ORDER BY t.completed_at DESC LIMIT 1) AS review_task_id
+                      (SELECT count(*) FROM tasks t WHERE t.request_id = r.id) as task_count
                FROM requests r
                WHERE r.organization_id = $1 AND r.status = 'review'
                ORDER BY r.updated_at DESC
@@ -171,6 +188,7 @@ async def daemon_review_queue(
             user.organization_id,
         )
 
+    approval_items = [dict(r) for r in pending_approvals]
     review_items = [dict(r) for r in review_requests]
     total_pages = ceil(total_count / per_page) if total_count > 0 else 1
     page = min(page, total_pages)
@@ -180,6 +198,7 @@ async def daemon_review_queue(
         "daemon_review.html",
         {
             "user": user,
+            "approval_items": approval_items,
             "review_items": review_items,
             "page": page,
             "per_page": per_page,
@@ -196,7 +215,7 @@ async def daemon_review_action(
     action: str = Form(...),
     comment: str = Form(""),
 ):
-    """Handle approve/reject on a request via the first-class reviews system."""
+    """Handle approve/reject for both pre-work approvals and post-completion reviews."""
     await _check_csrf(request)
     user = await get_user_context(request)
     pool = await get_pool()
@@ -217,76 +236,133 @@ async def daemon_review_action(
         raise HTTPException(status_code=400, detail="Comments are required when rejecting")
 
     from lucent.db.requests import RequestRepository
-    from lucent.db.reviews import ReviewRepository
 
-    review_repo = ReviewRepository(pool)
     req_repo = RequestRepository(pool)
     org_id = str(user.organization_id)
 
-    # Verify request exists and is in review status
+    # Fetch the request to determine which flow we're in
     req = await req_repo.get_request(str(request_id), org_id)
     if not req:
         raise HTTPException(status_code=404, detail="Request not found")
-    request_creator = req.get("created_by")
-    if request_creator and str(request_creator) == str(user.id):
+
+    is_approval_gate = req.get("approval_status") == "pending_approval"
+    is_post_review = req.get("status") == "review"
+
+    if not is_approval_gate and not is_post_review:
         raise HTTPException(
-            status_code=403,
-            detail="Request creators cannot review their own requests",
+            status_code=409,
+            detail="Request is not awaiting approval or review",
         )
 
-    status = "approved" if action == "approve" else "rejected"
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            await review_repo.create_review(
-                request_id=str(request_id),
-                organization_id=org_id,
-                status=status,
-                reviewer_user_id=str(user.id),
-                reviewer_display_name=user.display_name or user.email,
-                comments=comment.strip() or None,
-                source="human",
-                conn=conn,
+    if is_approval_gate:
+        # Pre-work approval: approve → allow work to start, reject → cancel
+        if action == "approve":
+            result = await req_repo.approve_request(
+                str(request_id), org_id, str(user.id), comment.strip() or None
+            )
+        else:
+            result = await req_repo.reject_request(
+                str(request_id), org_id, str(user.id), comment.strip()
+            )
+        if not result:
+            raise HTTPException(status_code=409, detail="Request already processed")
+
+        # Notify daemon
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "SELECT pg_notify('request_ready', $1)",
+                    f'{{"type": "approval", "action": "{action}", "request_id": "{request_id}"}}',
+                )
+        except Exception:
+            pass
+
+        # Create learning memory from rejection
+        if action == "reject":
+            memo_repo = MemoryRepository(pool)
+            await memo_repo.create(
+                username=user.display_name or user.email or "reviewer",
+                type="experience",
+                content=(
+                    f"Request rejected before work began: '{req.get('title', '')}'\n"
+                    f"Reason: {comment.strip()}\n"
+                    f"Description: {req.get('description', 'N/A')}"
+                ),
+                tags=["rejection-lesson", "approval-rejected", "learning-extraction"],
+                metadata={
+                    "request_id": str(request_id),
+                    "reviewer": user.display_name or user.email,
+                    "source": req.get("source", "unknown"),
+                },
+                user_id=user.id,
+                organization_id=user.organization_id,
             )
 
-            # Transition request status
-            if action == "approve":
-                updated = await review_repo.mark_request_completed(
-                    request_id=str(request_id),
-                    organization_id=org_id,
-                    conn=conn,
-                )
-            else:
-                updated = await review_repo.mark_request_needs_rework(
-                    request_id=str(request_id),
-                    organization_id=org_id,
-                    feedback=comment.strip(),
-                    conn=conn,
-                )
-            if not updated:
-                raise HTTPException(status_code=409, detail="Request is not in review state")
+    else:
+        # Post-completion review (existing flow)
+        from lucent.db.reviews import ReviewRepository
 
-    # Create learning memory from rejection
-    if action == "reject":
-        memo_repo = MemoryRepository(pool)
-        await memo_repo.create(
-            username=user.display_name or user.email or "reviewer",
-            type="experience",
-            content=f"Review rejection for '{req.get('title', '')}': {comment.strip()}",
-            tags=["rejection-lesson", "learning-extraction", "daemon"],
-            metadata={"request_id": str(request_id), "reviewer": user.display_name or user.email},
-            user_id=user.id,
-            organization_id=user.organization_id,
-        )
+        review_repo = ReviewRepository(pool)
 
-    # Notify daemon
-    try:
+        # Block self-review
+        request_creator = req.get("created_by")
+        if request_creator and str(request_creator) == str(user.id):
+            raise HTTPException(
+                status_code=403,
+                detail="Request creators cannot review their own requests",
+            )
+
+        status = "approved" if action == "approve" else "rejected"
         async with pool.acquire() as conn:
-            await conn.execute(
-                "SELECT pg_notify('request_ready', $1)",
-                f'{{"type": "review", "action": "{action}", "request_id": "{request_id}"}}',
+            async with conn.transaction():
+                await review_repo.create_review(
+                    request_id=str(request_id),
+                    organization_id=org_id,
+                    status=status,
+                    reviewer_user_id=str(user.id),
+                    reviewer_display_name=user.display_name or user.email,
+                    comments=comment.strip() or None,
+                    source="human",
+                    conn=conn,
+                )
+                if action == "approve":
+                    updated = await review_repo.mark_request_completed(
+                        request_id=str(request_id),
+                        organization_id=org_id,
+                        conn=conn,
+                    )
+                else:
+                    updated = await review_repo.mark_request_needs_rework(
+                        request_id=str(request_id),
+                        organization_id=org_id,
+                        feedback=comment.strip(),
+                        conn=conn,
+                    )
+                if not updated:
+                    raise HTTPException(status_code=409, detail="Request is not in review state")
+
+        # Create learning memory from rejection
+        if action == "reject":
+            memo_repo = MemoryRepository(pool)
+            await memo_repo.create(
+                username=user.display_name or user.email or "reviewer",
+                type="experience",
+                content=f"Review rejection for '{req.get('title', '')}': {comment.strip()}",
+                tags=["rejection-lesson", "learning-extraction", "daemon"],
+                metadata={"request_id": str(request_id), "reviewer": user.display_name or user.email},
+                user_id=user.id,
+                organization_id=user.organization_id,
             )
-    except Exception:
-        logger.warning("pg_notify failed for review action on %s", request_id, exc_info=True)
+
+        # Notify daemon
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "SELECT pg_notify('request_ready', $1)",
+                    f'{{"type": "review", "action": "{action}", "request_id": "{request_id}"}}',
+                )
+        except Exception:
+            pass
 
     # Return HTMX partial showing the result
     if action == "approve":
@@ -300,6 +376,7 @@ async def daemon_review_action(
             '<span class="text-sm font-medium text-emerald-800">Approved</span></div>'
         )
     else:
+        escaped_comment = html.escape(comment.strip())
         return HTMLResponse(
             '<div class="flex items-center gap-2 p-3 bg-red-50 rounded-lg border '
             'border-red-200">'
@@ -309,7 +386,7 @@ async def daemon_review_action(
             'd="M9.75 9.75l4.5 4.5m0-4.5l-4.5 4.5M21 12a9 9 0 11-18 0 9 9 0 0118 0z" '
             '/></svg>'
             '<span class="text-sm font-medium text-red-800">'
-            f"Rejected — {comment.strip()}</span></div>"
+            f"Rejected — {escaped_comment}</span></div>"
         )
 
 

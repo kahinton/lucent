@@ -5,6 +5,8 @@ Full lineage: request → tasks → events → memory links.
 
 import hashlib
 import json
+import logging
+import os
 from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
@@ -23,6 +25,44 @@ from lucent.constants import (
     VALID_REQUEST_SOURCES,
     VALID_REQUEST_STATUSES,
 )
+
+logger = logging.getLogger(__name__)
+
+# Approval statuses for the pre-work gate
+APPROVAL_AUTO = "auto_approved"
+APPROVAL_PENDING = "pending_approval"
+APPROVAL_APPROVED = "approved"
+APPROVAL_REJECTED = "rejected"
+
+# Sources that require approval when auto-approve is disabled
+_DAEMON_SOURCES = frozenset({"cognitive", "daemon", "schedule"})
+
+
+def _requires_approval(source: str) -> bool:
+    """Check if a request from this source needs human approval.
+
+    User/API requests are always auto-approved.
+    Daemon/cognitive/schedule requests require approval unless
+    LUCENT_AUTO_APPROVE is enabled (default: true).
+    """
+    if source not in _DAEMON_SOURCES:
+        return False
+    auto_approve = os.environ.get("LUCENT_AUTO_APPROVE", "true").lower()
+    return auto_approve not in ("true", "1", "yes")
+
+
+def _requires_post_completion_review() -> bool:
+    """Check if completed requests should go through internal review.
+
+    The daemon's post-completion review task is an automatic quality check
+    (did the work accomplish what was requested?).  It always runs by default
+    because it auto-approves or sends work back for rework — no human needed.
+
+    Set LUCENT_SKIP_POST_REVIEW=true to bypass the automatic review task
+    and send completed requests straight to 'completed' status.
+    """
+    val = os.environ.get("LUCENT_SKIP_POST_REVIEW", "false").lower()
+    return val not in ("true", "1", "yes")
 
 
 def _request_fingerprint(title: str) -> str:
@@ -110,12 +150,15 @@ class RequestRepository:
                 f"'{dependency_policy}'. Must be 'strict' or 'permissive'."
             )
         fingerprint = _request_fingerprint(title)
+        approval = APPROVAL_PENDING if _requires_approval(source) else APPROVAL_AUTO
+        now = datetime.now(timezone.utc) if approval == APPROVAL_AUTO else None
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 """INSERT INTO requests
                    (title, description, source, priority, created_by,
-                    organization_id, fingerprint, dependency_policy)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    organization_id, fingerprint, dependency_policy,
+                    approval_status, approved_at)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                    ON CONFLICT (organization_id, fingerprint)
                        WHERE status IN ('pending','planned','in_progress','review','needs_rework')
                     DO UPDATE SET updated_at = NOW()
@@ -128,6 +171,8 @@ class RequestRepository:
                 UUID(org_id),
                 fingerprint,
                 dependency_policy,
+                approval,
+                now,
             )
         return dict(row)
 
@@ -228,7 +273,13 @@ class RequestRepository:
                     reviewed_at,
                 )
 
-        # When a request reaches a terminal state, close any linked schedule run
+        # When a request reaches a terminal state, close any linked schedule run.
+        # This runs in a separate connection from the request status update above,
+        # so there is a small inconsistency window where the request is terminal
+        # but the schedule_run remains "running". We intentionally keep this
+        # best-effort/non-fatal to avoid rolling back the primary request update.
+        # The schedule_run query targets only status='running', making retries safe
+        # and preventing terminal schedule_runs from being overwritten.
         if row and status in (
             REQUEST_STATUS_COMPLETED,
             REQUEST_STATUS_FAILED,
@@ -252,10 +303,106 @@ class RequestRepository:
                             request_id,
                             f"Request {status}",
                         )
-            except Exception:
-                pass  # Non-fatal — don't break request status updates
+            except Exception as e:
+                logger.warning(
+                    "Failed to close schedule run for request %s: %s",
+                    request_id,
+                    e,
+                )
 
         return dict(row) if row else None
+
+    async def approve_request(
+        self,
+        request_id: str,
+        org_id: str,
+        approved_by: str,
+        comment: str | None = None,
+    ) -> dict | None:
+        """Approve a pending_approval request so work can begin."""
+        now = datetime.now(timezone.utc)
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """UPDATE requests
+                   SET approval_status = 'approved',
+                       approved_by = $3::uuid,
+                       approved_at = $4,
+                       approval_comment = $5,
+                       updated_at = $4
+                   WHERE id = $1::uuid
+                     AND organization_id = $2::uuid
+                     AND approval_status = 'pending_approval'
+                   RETURNING *""",
+                request_id,
+                org_id,
+                approved_by,
+                now,
+                comment,
+            )
+        return dict(row) if row else None
+
+    async def reject_request(
+        self,
+        request_id: str,
+        org_id: str,
+        rejected_by: str,
+        comment: str,
+    ) -> dict | None:
+        """Reject a pending_approval request — cancels it with feedback."""
+        now = datetime.now(timezone.utc)
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """UPDATE requests
+                   SET approval_status = 'rejected',
+                       approved_by = $3::uuid,
+                       approved_at = $4,
+                       approval_comment = $5,
+                       status = 'cancelled',
+                       completed_at = $4,
+                       updated_at = $4
+                   WHERE id = $1::uuid
+                     AND organization_id = $2::uuid
+                     AND approval_status = 'pending_approval'
+                   RETURNING *""",
+                request_id,
+                org_id,
+                rejected_by,
+                now,
+                comment,
+            )
+        return dict(row) if row else None
+
+    async def list_pending_approvals(
+        self, org_id: str, limit: int = 25, offset: int = 0
+    ) -> dict:
+        """List requests awaiting human approval."""
+        base = """FROM requests
+                   WHERE organization_id = $1
+                     AND approval_status = 'pending_approval'"""
+        async with self.pool.acquire() as conn:
+            count_row = await conn.fetchrow(
+                f"SELECT COUNT(*) AS total {base}",
+                UUID(org_id),
+            )
+            total_count = count_row["total"] if count_row else 0
+            rows = await conn.fetch(
+                f"""SELECT * {base}
+                   ORDER BY
+                     CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1
+                                   WHEN 'medium' THEN 2 ELSE 3 END,
+                     created_at
+                   LIMIT $2 OFFSET $3""",
+                UUID(org_id),
+                limit,
+                offset,
+            )
+        return {
+            "items": [dict(r) for r in rows],
+            "total_count": total_count,
+            "offset": offset,
+            "limit": limit,
+            "has_more": offset + len(rows) < total_count,
+        }
 
     async def get_requests_in_review(
         self, org_id: str, limit: int = 25, offset: int = 0
@@ -566,6 +713,7 @@ class RequestRepository:
         base = """FROM tasks t JOIN requests r ON t.request_id = r.id
                    WHERE t.organization_id = $1
                      AND t.status IN ('pending', 'planned')
+                     AND r.approval_status IN ('auto_approved', 'approved')
                      AND NOT EXISTS (
                        SELECT 1 FROM tasks earlier
                        WHERE earlier.request_id = t.request_id
@@ -944,10 +1092,19 @@ class RequestRepository:
         event_type: str,
         detail: str | None = None,
         metadata: dict | None = None,
+        org_id: str | None = None,
     ) -> dict:
         import json
 
         async with self.pool.acquire() as conn:
+            if org_id:
+                task_exists = await conn.fetchval(
+                    "SELECT 1 FROM tasks WHERE id = $1 AND organization_id = $2",
+                    UUID(task_id),
+                    UUID(org_id),
+                )
+                if not task_exists:
+                    raise ValueError("Task not found")
             row = await conn.fetchrow(
                 """INSERT INTO task_events (task_id, event_type, detail, metadata)
                    VALUES ($1, $2, $3, $4) RETURNING *""",
@@ -1013,8 +1170,17 @@ class RequestRepository:
         task_id: str,
         memory_id: str,
         relation: str = "created",
+        org_id: str | None = None,
     ) -> None:
         async with self.pool.acquire() as conn:
+            if org_id:
+                task_exists = await conn.fetchval(
+                    "SELECT 1 FROM tasks WHERE id = $1 AND organization_id = $2",
+                    UUID(task_id),
+                    UUID(org_id),
+                )
+                if not task_exists:
+                    raise ValueError("Task not found")
             await conn.execute(
                 """INSERT INTO task_memories (task_id, memory_id, relation)
                    VALUES ($1, $2, $3) ON CONFLICT DO NOTHING""",
@@ -1027,6 +1193,7 @@ class RequestRepository:
             f"memory_{relation}",
             f"Memory {relation}: {memory_id[:8]}...",
             metadata={"memory_id": memory_id, "relation": relation},
+            org_id=org_id,
         )
 
     async def list_task_memories(
@@ -1121,7 +1288,10 @@ class RequestRepository:
                          AND agent_type IS DISTINCT FROM 'request-review'""",
                     UUID(request_id),
                 )
-            status = REQUEST_STATUS_FAILED if failed > 0 else REQUEST_STATUS_REVIEW
+            status = REQUEST_STATUS_FAILED if failed > 0 else (
+                REQUEST_STATUS_REVIEW if _requires_post_completion_review()
+                else REQUEST_STATUS_COMPLETED
+            )
             await self.update_request_status(request_id, status)
 
     async def reconcile_request_statuses(self, org_id: str | None = None) -> int:

@@ -125,7 +125,9 @@ SESSION_TOTAL_TIMEOUT = int(os.environ.get("LUCENT_SESSION_TIMEOUT", "3600"))
 SESSION_IDLE_TIMEOUT = int(os.environ.get("LUCENT_SESSION_IDLE_TIMEOUT", "300"))
 # Watchdog: kill process if no log activity for this many seconds.
 # CopilotClient can block the event loop, defeating asyncio timeouts.
-WATCHDOG_TIMEOUT = int(os.environ.get("LUCENT_WATCHDOG_TIMEOUT", "900"))
+# Default 3600s (1h) — must exceed the longest schedule interval to avoid
+# killing the daemon during idle periods between cognitive cycles.
+WATCHDOG_TIMEOUT = int(os.environ.get("LUCENT_WATCHDOG_TIMEOUT", "3600"))
 WATCHDOG_CHECK_INTERVAL = 60
 # How many cognitive cycles between autonomic maintenance runs
 AUTONOMIC_INTERVAL = int(os.environ.get("LUCENT_AUTONOMIC_INTERVAL", "8"))
@@ -1274,27 +1276,31 @@ async def build_cognitive_prompt() -> str:
 
 async def load_instance_agent(agent_type: str) -> dict | None:
     """Load an instance agent definition from the database, if one exists."""
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(
-                f"{API_BASE}/definitions/agents",
-                params={"status": "active"},
-                headers=API_HEADERS,
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                agents = data.get("items", data) if isinstance(data, dict) else data
-                for agent in agents:
-                    if agent.get("name") == agent_type:
-                        # Load full agent with skills and MCP servers
-                        detail_resp = await client.get(
-                            f"{API_BASE}/definitions/agents/{agent['id']}",
-                            headers=API_HEADERS,
-                        )
-                        if detail_resp.status_code == 200:
-                            return detail_resp.json()
-    except Exception:
-        log("Failed to load instance agent definition", "DEBUG")
+    for attempt in range(2):
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(
+                    f"{API_BASE}/definitions/agents",
+                    params={"status": "active", "limit": 200},
+                    headers=API_HEADERS,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    agents = data.get("items", data) if isinstance(data, dict) else data
+                    for agent in agents:
+                        if agent.get("name") == agent_type:
+                            # Load full agent with skills and MCP servers
+                            detail_resp = await client.get(
+                                f"{API_BASE}/definitions/agents/{agent['id']}",
+                                headers=API_HEADERS,
+                            )
+                            if detail_resp.status_code == 200:
+                                return detail_resp.json()
+            return None  # API responded but agent not found — no retry needed
+        except Exception as exc:
+            log(f"Attempt {attempt + 1} failed to load agent definition '{agent_type}' via API: {exc}", "WARN")
+            if attempt == 0:
+                await asyncio.sleep(1)
     return None
 
 
@@ -1312,8 +1318,9 @@ async def load_accessible_agent(
     try:
         from lucent.db import get_pool
         pool = await get_pool()
-    except Exception:
+    except Exception as exc:
         # DB pool not initialized in daemon process — fall back to API-based lookup
+        log(f"DB pool unavailable for agent resolution, falling back to API: {exc}", "DEBUG")
         return await load_instance_agent(agent_type)
 
     from lucent.access_control import AccessControlService
@@ -2589,9 +2596,21 @@ class LucentDaemon:
                     agent_definition_id=str(agent_def_id) if agent_def_id else None,
                 )
                 if not agent_data:
+                    # Resolve display name for better error messages
+                    user_display = requesting_user_id
+                    try:
+                        async with httpx.AsyncClient(timeout=5) as client:
+                            resp = await client.get(
+                                f"{API_BASE}/users/{requesting_user_id}",
+                                headers=API_HEADERS,
+                            )
+                            if resp.status_code == 200:
+                                user_display = resp.json().get("display_name") or requesting_user_id
+                    except Exception:
+                        pass
                     raise AgentNotFoundError(
                         f"No accessible approved agent definition for '{agent_type}' "
-                        f"for requesting user {requesting_user_id}."
+                        f"for requesting user {user_display}."
                     )
                 skills = await load_accessible_skills_for_agent(
                     org_id=org_id,

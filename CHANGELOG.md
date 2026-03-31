@@ -6,6 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+#### Request Approval Gate
+- Pre-work approval flow for daemon-created requests (`LUCENT_AUTO_APPROVE` env var)
+- When `LUCENT_AUTO_APPROVE=false`, daemon/cognitive/schedule requests require human approval before any tasks are dispatched
+- User/API-created requests are always auto-approved
+- New `approval_status` column on requests: `auto_approved`, `pending_approval`, `approved`, `rejected`
+- Approve/reject actions in the Review Queue UI with comment support
+- Rejected requests automatically cancelled and generate learning memories (tagged `approval-rejected`)
+- Post-completion review now properly gated by `LUCENT_REQUIRE_APPROVAL` env var (previously always-on)
+- Migration 050: adds `approval_status`, `approved_by`, `approved_at`, `approval_comment` columns
+
+#### Review Queue UI Redesign
+- Review Queue now shows two sections: "Pending Approval" (pre-work) and "Completed Work Review" (post-completion)
+- Pending approval cards show request description, priority, source, task count, and creator
+- Amber-bordered approval cards with prominent "Approve — Start Work" button
+- Blue-bordered review cards for post-completion sign-off
+- Cards fade out smoothly after approve/reject action
+- Approval status badge shown on request detail page
+
+### Changed
+- `_check_request_completion` now respects `LUCENT_REQUIRE_APPROVAL` — completed requests go straight to `completed` status by default instead of `review`
+- `list_pending_tasks` query now filters out tasks from unapproved requests
+- Learning extraction skill updated to search for `approval-rejected` tagged memories
+
 ## [0.3.0] - 2026-03-27
 
 ### Added

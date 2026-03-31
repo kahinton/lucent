@@ -18,6 +18,7 @@ class ScheduleCreate(BaseModel):
     title: str = Field(..., min_length=1, max_length=256)
     description: str = ""
     agent_type: str = "code"
+    model: str | None = Field(default=None, max_length=64, description="LLM model override for tasks created by this schedule")
     task_template: dict | None = None
     sandbox_template_id: str | None = None  # Reference a saved sandbox template
     sandbox_config: dict | None = None  # Or inline sandbox config
@@ -35,6 +36,7 @@ class ScheduleUpdate(BaseModel):
     title: str | None = None
     description: str | None = None
     agent_type: str | None = None
+    model: str | None = Field(default=None, max_length=64, description="LLM model override for tasks created by this schedule")
     task_template: dict | None = None
     sandbox_template_id: str | None = None
     sandbox_config: dict | None = None
@@ -66,6 +68,7 @@ async def create_schedule(
         schedule_type=body.schedule_type,
         description=body.description,
         agent_type=body.agent_type,
+        model=body.model,
         task_template=body.task_template,
         sandbox_config=body.sandbox_config,
         sandbox_template_id=body.sandbox_template_id,

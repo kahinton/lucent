@@ -215,9 +215,14 @@ Returns: JSON confirmation."""
         user_id, org_id, _ = await _get_current_user_context()
         if not user_id:
             return json.dumps({"error": "Authentication required"})
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
 
         repo = await _get_request_repository()
-        event = await repo.add_task_event(task_id, event_type, detail)
+        try:
+            event = await repo.add_task_event(task_id, event_type, detail, org_id=str(org_id))
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)})
         return json.dumps({"id": str(event["id"]), "event_type": event_type})
 
     @mcp.tool(
@@ -243,9 +248,14 @@ Returns: JSON confirmation."""
         user_id, org_id, _ = await _get_current_user_context()
         if not user_id:
             return json.dumps({"error": "Authentication required"})
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
 
         repo = await _get_request_repository()
-        await repo.link_memory(task_id, memory_id, relation)
+        try:
+            await repo.link_memory(task_id, memory_id, relation, org_id=str(org_id))
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)})
         return json.dumps({"status": "linked", "task_id": task_id, "memory_id": memory_id})
 
     @mcp.tool(

@@ -115,6 +115,8 @@ services:
       DAEMON_DATABASE_URL: postgresql://lucent_daemon:${DAEMON_DB_PASSWORD:-change-me-insecure-daemon-password}@postgres:5432/lucent
       LUCENT_MODE: ${LUCENT_MODE:-personal}
       LUCENT_LICENSE_KEY: ${LUCENT_LICENSE_KEY:-}
+      LUCENT_AUTO_APPROVE: ${LUCENT_AUTO_APPROVE:-true}
+      LUCENT_SKIP_POST_REVIEW: ${LUCENT_SKIP_POST_REVIEW:-false}
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       LUCENT_CHAT_MODEL: ${LUCENT_CHAT_MODEL:-claude-opus-4.6}
       # LLM Engine: "copilot" (default, uses GitHub Copilot SDK) or "langchain"

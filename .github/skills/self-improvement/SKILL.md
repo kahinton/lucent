@@ -102,7 +102,7 @@ For each, determine whether the expected outcome materialized and update the rec
 create_memory(
   type="experience",
   content="## Self-Improvement: <title>\n\n**Pattern**: <what was wrong, with evidence count>\n**Root cause**: <why it kept happening>\n**Change**: <exact file/memory modified>\n**Verification plan**: <how and when to check>",
-  tags=["self-improvement", "agent-improvement", "daemon"],
+  tags=["self-improvement", "agent-improvement", "scan-result", "daemon"],
   importance=6
 )
 ```
@@ -121,7 +121,7 @@ Verification: <how to confirm>
 create_memory(
   type="experience",
   content="## Self-Improvement Cycle: No Action Needed\n\n**Evidence reviewed**: <what was searched>\n**Finding**: <why no change needed>\n**Verifications checked**: <results of any pending checks>",
-  tags=["self-improvement", "daemon"],
+  tags=["self-improvement", "scan-result", "daemon"],
   importance=3
 )
 ```

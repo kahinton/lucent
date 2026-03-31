@@ -14,6 +14,7 @@ Covers:
 import re
 from uuid import uuid4
 
+import pytest
 import httpx
 import pytest_asyncio
 from httpx import ASGITransport
@@ -67,6 +68,12 @@ async def _fail_task_flow(repo, task, error="Something broke"):
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _enable_review_mode(monkeypatch):
+    """Review mode is the default — ensure it's not disabled."""
+    monkeypatch.delenv("LUCENT_SKIP_POST_REVIEW", raising=False)
 
 
 @pytest_asyncio.fixture

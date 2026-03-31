@@ -26,11 +26,28 @@ The test: **Would future-me benefit from knowing this in a different conversatio
 |---------|--------|------|-----------|
 | Fixed a tricky bug | `create_memory` with cause, fix, and lesson | `experience` | 6-8 |
 | Made an architectural decision | `create_memory` with reasoning and alternatives considered | `technical` | 7-9 |
-| User corrected you | `update_memory` on their individual memory — add the correction | `individual` | 8 |
+| User corrected you | 1. `update_memory` on their individual memory — add the correction. 2. Also `create_memory` (type: experience, tags: [correction]) documenting what was wrong and the correct approach | `individual` + `experience` | 8 |
+| System self-corrected (validation failure → retry) | `create_memory` documenting failed approach and what worked, tagged `self-correction` | `experience` | 6 |
 | User stated a preference | `update_memory` on their individual memory — add the preference | `individual` | 8 |
 | Hit milestone on a tracked goal | `update_memory` on the existing goal memory | `goal` | keep existing |
 | Discovered a working process | `create_memory` with exact steps that worked | `procedural` | 6-7 |
 | Completed significant work | `create_memory` summarizing what was built and learned | `experience` | 6-8 |
+
+### Correction Tagging
+
+When capturing a memory after a **user correction**, add the `correction` tag:
+- User explicitly says something was wrong ("No, don't do X", "That's incorrect", "Actually...")
+- User reverts or rejects a change you made
+- User provides the correct approach after pointing out an error
+
+When capturing a memory after **self-detecting an error**, add the `self-correction` tag:
+- You notice your own mistake before the user does
+- Test results reveal an error in your approach
+- You realize a previous assumption was wrong
+
+**Why this matters**
+The reflection agent and self-improvement skill search for these tags to identify behavioral patterns.
+Without them, the self-improvement loop has no input data — verified 0 memories with these tags have ever been created.
 
 ## Do Not Capture
 

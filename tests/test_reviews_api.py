@@ -21,6 +21,12 @@ from lucent.db.reviews import ReviewRepository
 # ── Fixtures ─────────────────────────────────────────────────────────────
 
 
+@pytest.fixture(autouse=True)
+def _enable_review_mode(monkeypatch):
+    """Reviews API tests require post-completion review to be enabled."""
+    monkeypatch.delenv("LUCENT_SKIP_POST_REVIEW", raising=False)
+
+
 @pytest_asyncio.fixture
 async def rv_api_prefix(db_pool):
     """Unique prefix and cleanup for review API tests."""

@@ -17,6 +17,7 @@ Transforms raw experience into integrated knowledge. Lessons don't exist as stan
 |---------|--------|
 | Daemon autonomic cycle (periodic) | `run_autonomic` |
 | After feedback processing (approved or rejected) | Cognitive loop |
+| After a request is rejected at the approval gate | Tags: `approval-rejected` |
 | After a sub-agent completes a non-trivial task | Task dispatch completion |
 | Correction memories created | Tags: `correction`, `self-correction` |
 
@@ -25,6 +26,7 @@ Transforms raw experience into integrated knowledge. Lessons don't exist as stan
 ```
 search_memories(tags=["daemon-result"], limit=20)
 search_memories(tags=["rejection-lesson"], limit=10)
+search_memories(tags=["approval-rejected"], limit=10)
 search_memories(tags=["correction"], limit=10)
 search_memories(tags=["feedback-processed"], limit=10)
 ```
@@ -59,6 +61,8 @@ Look for:
 **If a matching memory exists**: Update it with the new knowledge using `update_memory`. Append the insight to the existing content — don't rewrite the whole thing, just add what's new.
 
 **If no matching memory exists**: This reveals a genuine knowledge gap. Create ONE technical or procedural memory scoped to the right level (file, module, or system). Include the lesson as part of its content, not as a standalone "Lesson:" entry.
+
+**For correction-tagged memories**: When integrating a correction, note the correction source in the updated memory. User corrections (tagged `correction`): note "Corrected by user feedback" with date. Self-corrections (tagged `self-correction`): note "Self-corrected" with date. This creates traceable lineage from correction event to knowledge update.
 
 ## Step 4: Mark Sources as Processed
 

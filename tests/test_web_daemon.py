@@ -26,6 +26,7 @@ from lucent.auth_providers import (
     set_user_password,
 )
 from lucent.db import MemoryRepository, OrganizationRepository, UserRepository
+from lucent.db.requests import RequestRepository
 
 TEST_PASSWORD = "TestPass1"
 
@@ -42,6 +43,21 @@ async def web_prefix(db_pool):
     prefix = f"test_webdmn_{test_id}_"
     yield prefix
     async with db_pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM reviews WHERE organization_id IN "
+            "(SELECT id FROM organizations WHERE name LIKE $1)",
+            f"{prefix}%",
+        )
+        await conn.execute(
+            "DELETE FROM tasks WHERE organization_id IN "
+            "(SELECT id FROM organizations WHERE name LIKE $1)",
+            f"{prefix}%",
+        )
+        await conn.execute(
+            "DELETE FROM requests WHERE organization_id IN "
+            "(SELECT id FROM organizations WHERE name LIKE $1)",
+            f"{prefix}%",
+        )
         await conn.execute(
             "DELETE FROM memory_audit_log WHERE memory_id IN "
             "(SELECT id FROM memories WHERE username LIKE $1)",
@@ -178,6 +194,46 @@ async def test_send_daemon_message_without_csrf_fails(client):
 async def test_daemon_review_queue_returns_200(client):
     resp = await client.get("/daemon/review")
     assert resp.status_code == 200
+
+
+# ============================================================================
+# POST /daemon/review/{request_id}/action — approve / reject
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_daemon_review_reject_escapes_comment_html(client, db_pool, web_user):
+    user, org, _ = web_user
+
+    # Route requires admin/daemon privileges.
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE users SET role = 'admin' WHERE id = $1",
+            user["id"],
+        )
+
+    req_repo = RequestRepository(db_pool)
+    req = await req_repo.create_request(
+        title="XSS review test",
+        description="Verify rejection comment escaping",
+        source="user",
+        priority="medium",
+        org_id=str(org["id"]),
+    )
+    await req_repo.update_request_status(str(req["id"]), "review", str(org["id"]))
+
+    malicious_comment = "<script>alert(1)</script>"
+    resp = await client.post(
+        f"/daemon/review/{req['id']}/action",
+        data=_csrf_data(
+            client,
+            {"action": "reject", "comment": malicious_comment},
+        ),
+    )
+
+    assert resp.status_code == 200
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in resp.text
+    assert "<script>alert(1)</script>" not in resp.text
 
 
 # ============================================================================

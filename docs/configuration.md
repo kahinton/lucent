@@ -101,10 +101,19 @@ For detailed secret storage configuration, see [Secret Storage](secret-storage.m
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LUCENT_REQUIRE_APPROVAL` | `false` | Require manual approval before requests are marked complete |
+| `LUCENT_AUTO_APPROVE` | `true` | When `false`, daemon-created requests (source: cognitive, daemon, schedule) require human approval via the review queue before work begins. User/API-created requests are always auto-approved. |
+| `LUCENT_SKIP_POST_REVIEW` | `false` | When `true`, bypasses the daemon's automatic post-completion quality review. By default, finished work goes through an internal review task that auto-approves or sends back for rework. |
 | `LUCENT_REQUEST_REVIEW_MODEL` | *(daemon default)* | Model for request-level post-completion review |
 | `LUCENT_REQUEST_REVIEW_AGENT_TYPE` | `request-review` | Agent type for post-completion review |
 | `LUCENT_REQUEST_REVIEW_FALLBACK_AGENT_TYPE` | `code` | Fallback agent type if review agent not found |
+
+#### Approval Flow
+
+Requests go through a two-stage gate:
+
+1. **Pre-work approval** (`LUCENT_AUTO_APPROVE`): Controls whether daemon-initiated requests need human approval before any tasks are dispatched. When disabled (`false`), these requests appear in the Review Queue with an "Approve — Start Work" button. Rejected requests are cancelled and generate a learning memory.
+
+2. **Post-completion review** (`LUCENT_REQUIRE_APPROVAL`): Controls whether finished requests need human sign-off. When enabled (`true`), requests that complete successfully go to `review` status and appear in the Review Queue's "Completed Work Review" section.
 
 ### Daemon Git Operations
 

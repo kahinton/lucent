@@ -71,12 +71,16 @@ class GrantAccess(BaseModel):
 async def list_agents(
     user: AuthenticatedUser,
     status: Literal["proposed", "active", "rejected"] | None = None,
+    limit: int = 25,
+    offset: int = 0,
 ):
     pool = await get_pool()
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     return await repo.list_agents(
         str(user.organization_id),
         status=status,
+        limit=min(limit, 200),
+        offset=offset,
         requester_user_id=str(user.id),
         requester_role=user.role.value,
     )
