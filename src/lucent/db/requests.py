@@ -859,6 +859,7 @@ class RequestRepository:
                        result_summary = $4,
                        validation_status = $5,
                        validation_errors = $6,
+                       error = NULL,
                        completed_at = $7, updated_at = $7
                        WHERE id = $1 AND status IN ('claimed', 'running')
                        AND organization_id = $8 RETURNING *""",
@@ -879,6 +880,7 @@ class RequestRepository:
                        result_summary = $4,
                        validation_status = $5,
                        validation_errors = $6,
+                       error = NULL,
                        completed_at = $7, updated_at = $7
                        WHERE id = $1 AND status IN ('claimed', 'running')
                        RETURNING *""",

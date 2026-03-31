@@ -163,8 +163,8 @@
                     <h4 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1">Output ({{ task.result | length }} chars)</h4>
                     {% if task.result | length > 2000 %}
                     <div id="result-preview-{{ task.id }}" class="bg-gray-50 rounded p-2 text-sm text-gray-700 max-h-48 overflow-y-auto whitespace-pre-wrap font-mono text-xs">{{ task.result[:2000] }}<span class="text-gray-400">…</span></div>
-                    <button onclick="document.getElementById('result-preview-{{ task.id }}').style.display='none'; document.getElementById('result-full-{{ task.id }}').style.display='block'; this.style.display='none';"
-                            class="mt-1 text-xs text-primary-600 hover:text-primary-800 font-medium">
+                    <button class="mt-1 text-xs text-primary-600 hover:text-primary-800 font-medium toggle-full-output"
+                            data-task-id="{{ task.id }}">
                         Show full output ({{ task.result | length }} chars)
                     </button>
                     <div id="result-full-{{ task.id }}" class="bg-gray-50 rounded p-2 text-sm text-gray-700 max-h-[80vh] overflow-y-auto whitespace-pre-wrap font-mono text-xs" style="display:none;">{{ task.result }}</div>
@@ -174,8 +174,8 @@
                 </div>
                 {% endif %}
 
-                <!-- Error -->
-                {% if task.error %}
+                <!-- Error (only shown for failed tasks) -->
+                {% if task.error and task.status == 'failed' %}
                 <div>
                     <h4 class="text-xs font-semibold text-red-400 uppercase tracking-wider mb-1">Error</h4>
                     <div class="bg-red-50 rounded p-2 text-sm text-red-700 font-mono text-xs">{{ task.error }}</div>
@@ -356,4 +356,17 @@
         {% endif %}
     </div>
 </div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script nonce="{{ request.state.csp_nonce }}">
+document.querySelectorAll('.toggle-full-output').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+        var taskId = this.getAttribute('data-task-id');
+        document.getElementById('result-preview-' + taskId).style.display = 'none';
+        document.getElementById('result-full-' + taskId).style.display = 'block';
+        this.style.display = 'none';
+    });
+});
+</script>
 {% endblock %}
