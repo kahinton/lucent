@@ -217,7 +217,12 @@
                         <svg class="w-5 h-5 {% if request.url.path == '/daemon/review' %}text-primary-600{% else %}text-gray-400{% endif %}" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
                             <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                         </svg>
-                        Review Queue
+                        Needs Approval
+                        {% if request.state.pending_approval_count > 0 %}
+                        <span class="ml-auto inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-800">
+                            {{ request.state.pending_approval_count }}
+                        </span>
+                        {% endif %}
                     </a>
                     
                     {% if team_mode() %}

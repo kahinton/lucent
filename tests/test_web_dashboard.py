@@ -1,5 +1,8 @@
 """Integration tests for dashboard web routes in web/routes.py."""
 
+import json
+import re
+from datetime import datetime, timezone
 from uuid import uuid4
 
 import httpx
@@ -45,6 +48,18 @@ async def web_prefix(db_pool):
         await conn.execute(
             "DELETE FROM api_keys WHERE user_id IN "
             "(SELECT id FROM users WHERE external_id LIKE $1)",
+            f"{prefix}%",
+        )
+        # Clean up requests/tasks created during tests (before users/orgs)
+        await conn.execute(
+            "DELETE FROM tasks WHERE request_id IN "
+            "(SELECT id FROM requests WHERE organization_id IN "
+            "(SELECT id FROM organizations WHERE name LIKE $1))",
+            f"{prefix}%",
+        )
+        await conn.execute(
+            "DELETE FROM requests WHERE organization_id IN "
+            "(SELECT id FROM organizations WHERE name LIKE $1)",
             f"{prefix}%",
         )
         await conn.execute("DELETE FROM users WHERE external_id LIKE $1", f"{prefix}%")
@@ -132,3 +147,59 @@ class TestDashboard:
         resp = await client.get("/")
         assert resp.status_code == 200
         assert "1" in resp.text
+
+    @pytest.mark.asyncio
+    async def test_dashboard_shows_daemon_status_panel(self, client, db_pool, web_user, web_prefix):
+        user, org, _token = web_user
+        repo = MemoryRepository(db_pool)
+
+        heartbeat_payload = {
+            "instance_id": "daemon-test-instance",
+            "cycle_count": 42,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        await repo.create(
+            username=f"{web_prefix}User",
+            type="technical",
+            content=json.dumps(heartbeat_payload),
+            tags=["daemon-heartbeat", "daemon"],
+            importance=3,
+            user_id=user["id"],
+            organization_id=org["id"],
+        )
+        await repo.create(
+            username=f"{web_prefix}User",
+            type="procedural",
+            content="## Daemon State\n\n### Cycle focus\n- Processing review queue",
+            tags=["daemon", "daemon-state"],
+            importance=5,
+            user_id=user["id"],
+            organization_id=org["id"],
+        )
+
+        resp = await client.get("/")
+        assert resp.status_code == 200
+        assert "Daemon Status" in resp.text
+        assert "Online" in resp.text
+        assert "Cycle count:</span> 42" in resp.text
+        assert "Processing review queue" in resp.text
+
+    @pytest.mark.asyncio
+    async def test_dashboard_sidebar_shows_approval_badge(self, client, db_pool, web_user, web_prefix, monkeypatch):
+        user, org, _token = web_user
+
+        # Create a request that needs approval (cognitive source + auto-approve off)
+        monkeypatch.setenv("LUCENT_AUTO_APPROVE", "false")
+        from lucent.db.requests import RequestRepository
+        req_repo = RequestRepository(db_pool)
+        await req_repo.create_request(
+            title="Needs approval test",
+            org_id=str(org["id"]),
+            source="cognitive",
+        )
+
+        resp = await client.get("/")
+        assert resp.status_code == 200
+        assert 'href="/daemon/review"' in resp.text
+        assert "Needs Approval" in resp.text
+        assert re.search(r'bg-amber-100[^>]*>\s*\d+\s*</span>', resp.text, re.S)

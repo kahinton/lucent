@@ -16,12 +16,12 @@
                 <p class="text-sm text-gray-500">All work — from you and from Lucent</p>
             </div>
         </div>
-        {% if needs_review_count > 0 %}
+        {% if pending_approval_count > 0 %}
         <a href="/daemon/review" class="inline-flex items-center gap-2 px-4 py-2 bg-amber-100 text-amber-800 text-sm font-medium rounded-lg hover:bg-amber-200 transition-colors">
             <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" />
             </svg>
-            {{ needs_review_count }} Needs Review
+            {{ pending_approval_count }} Needs Approval
         </a>
         {% endif %}
     </div>
@@ -79,6 +79,7 @@
         <a href="/activity?status=in_progress&per_page={{ per_page }}{% if filter_source %}&source={{ filter_source }}{% endif %}" class="px-3 py-1 text-sm rounded-md {% if filter_status == 'in_progress' %}bg-blue-500 text-white{% else %}bg-blue-50 text-blue-700 hover:bg-blue-100{% endif %}">In Progress</a>
         <a href="/activity?status=completed&per_page={{ per_page }}{% if filter_source %}&source={{ filter_source }}{% endif %}" class="px-3 py-1 text-sm rounded-md {% if filter_status == 'completed' %}bg-green-500 text-white{% else %}bg-green-50 text-green-700 hover:bg-green-100{% endif %}">Completed</a>
         <a href="/activity?status=failed&per_page={{ per_page }}{% if filter_source %}&source={{ filter_source }}{% endif %}" class="px-3 py-1 text-sm rounded-md {% if filter_status == 'failed' %}bg-red-500 text-white{% else %}bg-red-50 text-red-700 hover:bg-red-100{% endif %}">Failed</a>
+        <a href="/activity?status=cancelled&per_page={{ per_page }}{% if filter_source %}&source={{ filter_source }}{% endif %}" class="px-3 py-1 text-sm rounded-md {% if filter_status == 'cancelled' %}bg-gray-500 text-white{% else %}bg-gray-50 text-gray-500 hover:bg-gray-100{% endif %}">Cancelled</a>
     </div>
 </div>
 

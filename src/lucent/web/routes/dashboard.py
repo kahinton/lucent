@@ -1,5 +1,8 @@
 """Dashboard routes."""
 
+import json
+from datetime import datetime, timedelta, timezone
+
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 
@@ -87,6 +90,73 @@ async def dashboard(request: Request):
     )
     active_request_count = active_requests["total_count"] + pending_requests["total_count"]
 
+    # Daemon status (heartbeat + state summary)
+    daemon_heartbeat = await memory_repo.search(
+        tags=["daemon-heartbeat"],
+        limit=1,
+        requesting_user_id=user.id,
+        requesting_org_id=user.organization_id,
+    )
+    heartbeat_memory = (
+        daemon_heartbeat.get("memories", [])[0] if daemon_heartbeat.get("memories") else None
+    )
+
+    daemon_state = await memory_repo.search(
+        tags=["daemon", "daemon-state"],
+        limit=1,
+        requesting_user_id=user.id,
+        requesting_org_id=user.organization_id,
+    )
+    state_memory = daemon_state.get("memories", [])[0] if daemon_state.get("memories") else None
+
+    heartbeat_data = {}
+    heartbeat_timestamp = None
+    if heartbeat_memory:
+        try:
+            heartbeat_data = json.loads(heartbeat_memory.get("content") or "{}")
+        except (TypeError, ValueError):
+            heartbeat_data = {}
+        raw_ts = heartbeat_data.get("timestamp")
+        if isinstance(raw_ts, str):
+            try:
+                heartbeat_timestamp = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
+                if heartbeat_timestamp.tzinfo is None:
+                    heartbeat_timestamp = heartbeat_timestamp.replace(tzinfo=timezone.utc)
+            except ValueError:
+                heartbeat_timestamp = None
+
+    status_level = "offline"
+    status_label = "Offline"
+    status_detail = "No heartbeat detected"
+    if heartbeat_timestamp:
+        age = datetime.now(timezone.utc) - heartbeat_timestamp
+        if age <= timedelta(minutes=20):
+            status_level = "online"
+            status_label = "Online"
+            status_detail = f"Last heartbeat {int(age.total_seconds() // 60)} min ago"
+        elif age <= timedelta(minutes=60):
+            status_level = "stale"
+            status_label = "Stale"
+            status_detail = f"Last heartbeat {int(age.total_seconds() // 60)} min ago"
+        else:
+            status_level = "offline"
+            status_label = "Offline"
+            status_detail = f"Last heartbeat {int(age.total_seconds() // 60)} min ago"
+
+    state_summary = ""
+    if state_memory:
+        state_lines = [
+            line.strip()
+            for line in (state_memory.get("content") or "").splitlines()
+            if line.strip()
+        ]
+        for line in state_lines:
+            if line.startswith("### ") or line.startswith("- "):
+                state_summary = line.removeprefix("### ").removeprefix("- ").strip()
+                break
+        if not state_summary and state_lines:
+            state_summary = state_lines[0]
+
     return templates.TemplateResponse(
         request,
         "dashboard.html",
@@ -99,5 +169,11 @@ async def dashboard(request: Request):
             "active_agents": active_agents,
             "active_skills": active_skills,
             "active_request_count": active_request_count,
+            "daemon_status_level": status_level,
+            "daemon_status_label": status_label,
+            "daemon_status_detail": status_detail,
+            "daemon_cycle_count": heartbeat_data.get("cycle_count"),
+            "daemon_instance_id": heartbeat_data.get("instance_id"),
+            "daemon_state_summary": state_summary,
         },
     )

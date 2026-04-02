@@ -111,6 +111,10 @@ class AgentNotFoundError(Exception):
     """Raised when a task references an agent type with no approved definition."""
 
 
+class AuthFailureDetectedError(Exception):
+    """Raised when MCP auth failure is detected in a running session."""
+
+
 # ============================================================================
 # Configuration
 # ============================================================================
@@ -323,6 +327,7 @@ DATABASE_URL = _resolve_daemon_database_url()
 
 # Key expiry — daemon keys auto-expire and are refreshed each cycle
 KEY_TTL_HOURS = 24
+PROACTIVE_KEY_ROTATION_MINUTES = 60
 
 # Daemon API key scopes — currently broad ("read" + "write" = full access).
 # TODO(security): Narrow to daemon-specific scopes once MCP tool-level scope
@@ -359,6 +364,8 @@ def _build_auth_config(api_key: str) -> tuple[dict, dict]:
 
 # Tracks the current key's DB id so we can revoke it on shutdown
 _current_key_db_id: str | None = None
+# Tracks the current key expiry for proactive rotation checks
+_current_key_expires_at: datetime | None = None
 # Lock to prevent concurrent key provisioning from multiple async loops
 _key_provision_lock: asyncio.Lock | None = None
 
@@ -386,7 +393,7 @@ async def _provision_daemon_api_key(instance_id: str) -> str | None:
     import asyncpg
     import bcrypt
 
-    global _current_key_db_id
+    global _current_key_db_id, _current_key_expires_at
 
     try:
         conn = await asyncpg.connect(DATABASE_URL)
@@ -462,7 +469,7 @@ async def _provision_daemon_api_key(instance_id: str) -> str | None:
             "INSERT INTO api_keys "
             "(user_id, organization_id, name, key_prefix, key_hash, scopes, expires_at) "
             "VALUES ($1, $2, $3, $4, $5, $6, NOW() + INTERVAL '1 hour' * $7) "
-            "RETURNING id",
+            "RETURNING id, expires_at",
             user_id,
             org_id,
             key_name,
@@ -472,6 +479,7 @@ async def _provision_daemon_api_key(instance_id: str) -> str | None:
             KEY_TTL_HOURS,
         )
         _current_key_db_id = str(row["id"])
+        _current_key_expires_at = row["expires_at"]
         log(f"Provisioned daemon API key (prefix: {key_prefix}, expires in {KEY_TTL_HOURS}h)")
         return plain_key
 
@@ -486,7 +494,7 @@ async def _revoke_current_key() -> None:
     """Revoke the daemon's current API key (called on shutdown)."""
     import asyncpg
 
-    global _current_key_db_id
+    global _current_key_db_id, _current_key_expires_at
 
     if not _current_key_db_id:
         return
@@ -506,6 +514,7 @@ async def _revoke_current_key() -> None:
         log(f"Failed to revoke key on shutdown: {e}", "WARN")
     finally:
         _current_key_db_id = None
+        _current_key_expires_at = None
 
 
 async def _verify_api_key(api_key: str) -> bool:
@@ -529,6 +538,25 @@ async def _verify_api_key(api_key: str) -> bool:
         return False
 
 
+def _get_key_time_remaining() -> timedelta | None:
+    """Return remaining lifetime for the current daemon key, if known."""
+    if not _current_key_expires_at:
+        return None
+    now = datetime.now(timezone.utc)
+    expires_at = _current_key_expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    return expires_at - now
+
+
+def _should_rotate_proactively() -> bool:
+    """Return True when the current key is close enough to expiry to rotate."""
+    remaining = _get_key_time_remaining()
+    if remaining is None:
+        return False
+    return remaining < timedelta(minutes=PROACTIVE_KEY_ROTATION_MINUTES)
+
+
 async def ensure_valid_api_key(instance_id: str = "local") -> str:
     """Ensure the daemon has a valid hs_ API key.
 
@@ -536,7 +564,7 @@ async def ensure_valid_api_key(instance_id: str = "local") -> str:
     Updates global MCP_CONFIG and API_HEADERS.
     Returns the valid key.
     """
-    global MCP_API_KEY, MCP_CONFIG, API_HEADERS
+    global MCP_API_KEY, MCP_CONFIG, API_HEADERS, _current_key_expires_at
 
     # One-time cleanup: remove legacy key file if it exists
     _key_file = Path(__file__).parent / ".daemon_api_key"
@@ -549,9 +577,17 @@ async def ensure_valid_api_key(instance_id: str = "local") -> str:
 
     # 1. Check if the env var key works
     if MCP_API_KEY and await _verify_api_key(MCP_API_KEY):
-        log("API key from environment is valid")
-        MCP_CONFIG, API_HEADERS = _build_auth_config(MCP_API_KEY)
-        return MCP_API_KEY
+        if _should_rotate_proactively():
+            remaining = _get_key_time_remaining()
+            remaining_minutes = max(0, int((remaining or timedelta()).total_seconds() // 60))
+            log(
+                "API key is near expiry "
+                f"({remaining_minutes}m remaining) — rotating proactively"
+            )
+        else:
+            log("API key from environment is valid")
+            MCP_CONFIG, API_HEADERS = _build_auth_config(MCP_API_KEY)
+            return MCP_API_KEY
 
     # 2. Provision a new key (instance-scoped, 24h expiry)
     log("No valid API key found — provisioning daemon service account...")
@@ -564,27 +600,38 @@ async def ensure_valid_api_key(instance_id: str = "local") -> str:
 
     # 3. Fall back to whatever we have (may not work)
     log("WARNING: Could not provision a valid API key", "WARN")
+    _current_key_expires_at = None
     MCP_CONFIG, API_HEADERS = _build_auth_config(MCP_API_KEY)
     return MCP_API_KEY
 
 
-async def _handle_auth_failure(instance_id: str) -> bool:
+async def _handle_auth_failure(instance_id: str, *, force_rotate: bool = False) -> bool:
     """Re-provision API key after an authentication failure.
 
     Uses a lock to prevent concurrent provisioning from multiple async loops
     (cognitive, scheduler, dispatcher) which would hit the unique constraint.
     Returns True if a new key was provisioned successfully.
     """
-    global MCP_API_KEY, MCP_CONFIG, API_HEADERS, _current_key_db_id
+    global MCP_API_KEY, MCP_CONFIG, API_HEADERS, _current_key_db_id, _current_key_expires_at
 
     lock = _get_key_lock()
     async with lock:
         # Re-check after acquiring lock — another loop may have already fixed it
-        if MCP_API_KEY and await _verify_api_key(MCP_API_KEY):
+        if not force_rotate and MCP_API_KEY and await _verify_api_key(MCP_API_KEY):
             return True
 
-        log("Auth failure detected — re-provisioning API key...", "WARN")
+        if force_rotate:
+            remaining = _get_key_time_remaining()
+            remaining_minutes = max(0, int((remaining or timedelta()).total_seconds() // 60))
+            log(
+                "API key near expiry — proactively rotating "
+                f"({remaining_minutes}m remaining)",
+                "INFO",
+            )
+        else:
+            log("Auth failure detected — re-provisioning API key...", "WARN")
         _current_key_db_id = None  # old key is dead
+        _current_key_expires_at = None
 
         new_key = await _provision_daemon_api_key(instance_id)
         if new_key:
@@ -595,6 +642,15 @@ async def _handle_auth_failure(instance_id: str) -> bool:
 
         log("Failed to re-provision API key after auth failure", "ERROR")
         return False
+
+
+async def _verify_and_provision_key(instance_id: str) -> bool:
+    """Validate daemon key and rotate when invalid or near expiry."""
+    if MCP_API_KEY and await _verify_api_key(MCP_API_KEY):
+        if _should_rotate_proactively():
+            return await _handle_auth_failure(instance_id, force_rotate=True)
+        return True
+    return await _handle_auth_failure(instance_id)
 
 
 # ============================================================================
@@ -708,6 +764,41 @@ class RequestAPI:
         except Exception as e:
             log(f"API list_active_work failed: {e}", "WARN")
         return None
+
+    @staticmethod
+    async def list_recently_completed() -> list[dict]:
+        """Fetch requests completed in the last 2 hours for dedup."""
+        try:
+            async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
+                resp = await client.get(
+                    f"{API_BASE}/requests/recently-completed",
+                    headers=API_HEADERS,
+                    params={"hours": 2},
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    return data.get("items", [])
+        except Exception as e:
+            log(f"API list_recently_completed failed: {e}", "WARN")
+        return []
+
+    @staticmethod
+    async def get_request_memories(request_id: str) -> list[dict]:
+        """Fetch linked memories for a request."""
+        try:
+            async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
+                resp = await client.get(
+                    f"{API_BASE}/requests/{request_id}/memories",
+                    headers=API_HEADERS,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    return data.get("items", [])
+                else:
+                    log(f"API get_request_memories returned {resp.status_code}: {resp.text[:200]}", "WARN")
+        except Exception as e:
+            log(f"API get_request_memories failed: {e}", "WARN")
+        return []
 
     @staticmethod
     async def list_requests(status: str | None = None) -> dict | None:
@@ -1263,9 +1354,26 @@ async def build_cognitive_prompt() -> str:
     else:
         active_work_section = "\n## Current Active Work (auto-injected)\nNo active requests.\n"
 
+    # Fetch recently completed work to prevent re-creating finished work
+    recently_completed_section = ""
+    recently_completed = await RequestAPI.list_recently_completed()
+    if recently_completed:
+        lines = []
+        for req in recently_completed:
+            completed_at = req.get("completed_at", "")
+            lines.append(f"- {req['title']} (completed: {completed_at})")
+        recently_completed_section = (
+            "\n## Recently Completed Work (auto-injected)\n"
+            + "\n".join(lines)
+            + "\n\nThis work was completed recently. Do NOT re-create requests "
+            "for any of these items. If the goal memory is still active, update "
+            "its milestone status instead of creating new work.\n"
+        )
+
     return f"""
 {cognitive_md}
 {active_work_section}
+{recently_completed_section}
 --- AGENT IDENTITY ---
 {agent_def}
 
@@ -1834,6 +1942,7 @@ class LucentDaemon:
                 ]
 
                 created = 0
+                updated = 0
                 for sched in system_schedules:
                     existing = await conn.fetchrow(
                         """SELECT id FROM schedules
@@ -1842,6 +1951,15 @@ class LucentDaemon:
                         org_id,
                     )
                     if existing:
+                        # Update the prompt on existing system schedules so cognitive.md
+                        # changes take effect without manual DB updates.
+                        await conn.execute(
+                            """UPDATE schedules SET prompt = $1, updated_at = now()
+                               WHERE id = $2""",
+                            sched["prompt"],
+                            existing["id"],
+                        )
+                        updated += 1
                         continue
 
                     now = datetime.now(timezone.utc)
@@ -1874,7 +1992,9 @@ class LucentDaemon:
 
                 if created:
                     log(f"Seeded {created} system schedule(s)")
-                else:
+                if updated:
+                    log(f"Refreshed prompts for {updated} system schedule(s)")
+                if not created and not updated:
                     log("System schedules verified (all exist)")
 
             finally:
@@ -1889,7 +2009,10 @@ class LucentDaemon:
         return (
             f"{cognitive_md}\n\n"
             "Begin your cognitive cycle. Load state with list_active_work() and "
-            "list_pending_requests(). Perceive, reason, decide. Use request/task "
+            "list_pending_requests(). Search for active goal memories with "
+            "search_memories(type='goal', limit=20) and create requests for any "
+            "unaddressed active goals. Call list_available_models() before "
+            "assigning models to tasks. Perceive, reason, decide. Use request/task "
             "tools to create work items. Output a brief summary of your decisions."
         )
 
@@ -1977,36 +2100,70 @@ class LucentDaemon:
         if self._tracer:
             self._sessions_active.add(1)
 
+        retried_after_auth_failure = False
         try:
-            result = await asyncio.wait_for(
-                self._run_session_inner(
-                    name,
-                    system_message,
-                    prompt,
-                    model=model,
-                    mcp_config_override=mcp_config_override,
-                ),
-                timeout=SESSION_TOTAL_TIMEOUT,
-            )
-            if span:
-                span.set_attribute("daemon.session.output_length", len(result) if result else 0)
-            return result
-        except asyncio.TimeoutError:
-            status = "timeout"
-            log(
-                f"Session '{name}' HARD TIMEOUT after {SESSION_TOTAL_TIMEOUT}s — "
-                "session lifecycle hung (likely during client.start or create_session)",
-                "ERROR",
-            )
-            if span:
-                span.set_attribute("daemon.session.error", "timeout")
-            return None
-        except Exception as e:
-            status = "error"
-            log(f"Session '{name}' failed: {e}", "ERROR")
-            if span:
-                span.set_attribute("daemon.session.error", str(e)[:200])
-            return None
+            while True:
+                try:
+                    result = await asyncio.wait_for(
+                        self._run_session_inner(
+                            name,
+                            system_message,
+                            prompt,
+                            model=model,
+                            mcp_config_override=mcp_config_override,
+                        ),
+                        timeout=SESSION_TOTAL_TIMEOUT,
+                    )
+                    if span:
+                        span.set_attribute("daemon.session.output_length", len(result) if result else 0)
+                    return result
+                except AuthFailureDetectedError as e:
+                    if retried_after_auth_failure:
+                        status = "error"
+                        log(
+                            f"Session '{name}' encountered repeated MCP auth failures after retry: {e}",
+                            "ERROR",
+                        )
+                        if span:
+                            span.set_attribute("daemon.session.error", "auth_recovery_failed")
+                        return None
+
+                    log(
+                        f"Session '{name}' detected MCP auth failure; attempting key recovery and single retry",
+                        "WARN",
+                    )
+                    recovered = await _handle_auth_failure(self.instance_id)
+                    if not recovered:
+                        status = "error"
+                        log(f"Session '{name}' could not recover MCP credentials", "ERROR")
+                        if span:
+                            span.set_attribute("daemon.session.error", "auth_recovery_failed")
+                        return None
+
+                    retried_after_auth_failure = True
+                    if mcp_config_override:
+                        refreshed = dict(mcp_config_override)
+                        if MCP_CONFIG.get("memory-server"):
+                            refreshed["memory-server"] = MCP_CONFIG["memory-server"]
+                        mcp_config_override = refreshed
+                    log(f"Session '{name}' recovered MCP credentials; retrying once", "INFO")
+                    continue
+                except asyncio.TimeoutError:
+                    status = "timeout"
+                    log(
+                        f"Session '{name}' HARD TIMEOUT after {SESSION_TOTAL_TIMEOUT}s — "
+                        "session lifecycle hung (likely during client.start or create_session)",
+                        "ERROR",
+                    )
+                    if span:
+                        span.set_attribute("daemon.session.error", "timeout")
+                    return None
+                except Exception as e:
+                    status = "error"
+                    log(f"Session '{name}' failed: {e}", "ERROR")
+                    if span:
+                        span.set_attribute("daemon.session.error", str(e)[:200])
+                    return None
         finally:
             duration = time.time() - start_time
             if self._tracer:
@@ -2053,6 +2210,22 @@ class LucentDaemon:
             log("No LLM engine available — install lucent or github-copilot-sdk", "ERROR")
             return None
 
+    @staticmethod
+    def _is_mcp_auth_failure_message(message: str | None) -> bool:
+        """Classify MCP tool output/error text as auth failure when possible."""
+        if not message:
+            return False
+        text = message.lower()
+        return (
+            "unauthorized: invalid or expired credentials" in text
+            or ("unauthorized" in text and "invalid or expired credentials" in text)
+            or ('"code": -32001' in text and "unauthorized" in text)
+            or "status_code=401" in text
+            or '"status_code": 401' in text
+            or " 401 " in text
+            or "http 401" in text
+        )
+
     async def _run_via_engine(
         self,
         name: str,
@@ -2075,6 +2248,10 @@ class LucentDaemon:
                         log(f"  [{name}] message: {event.content[:200]}...", "STREAM")
                 elif event.type == SessionEventType.ERROR:
                     log(f"  [{name}] error: {event.content}", "ERROR")
+                    if self._is_mcp_auth_failure_message(event.content):
+                        raise AuthFailureDetectedError(
+                            f"MCP auth error during session '{name}': {event.content}"
+                        )
                 elif event.type == SessionEventType.TOOL_CALL:
                     log(f"  [{name}] event: tool.call tool={event.tool_name}", "STREAM")
                 elif event.type == SessionEventType.TOOL_RESULT:
@@ -2083,6 +2260,10 @@ class LucentDaemon:
                         f"  [{name}] event: tool.result tool={event.tool_name} output={output}",
                         "STREAM",
                     )
+                    if self._is_mcp_auth_failure_message(event.tool_output):
+                        raise AuthFailureDetectedError(
+                            f"MCP auth failure on tool '{event.tool_name}' in session '{name}'"
+                        )
                 elif event.type != SessionEventType.MESSAGE_DELTA:
                     log(f"  [{name}] event: {etype}", "STREAM")
 
@@ -2153,11 +2334,15 @@ class LucentDaemon:
                     elif etype == "session.idle":
                         done.set()
                     elif "error" in etype.lower():
+                        error_message = getattr(event.data, "message", str(event.data)[:200])
                         log(
-                            f"  [{name}] error event: {etype} - "
-                            f"{getattr(event.data, 'message', str(event.data)[:200])}",
+                            f"  [{name}] error event: {etype} - {error_message}",
                             "ERROR",
                         )
+                        if self._is_mcp_auth_failure_message(error_message):
+                            raise AuthFailureDetectedError(
+                                f"MCP auth error during session '{name}': {error_message}"
+                            )
                         done.set()
                     else:
                         detail = ""
@@ -2168,9 +2353,17 @@ class LucentDaemon:
                         if hasattr(event.data, "output"):
                             output = str(event.data.output)[:300]
                             detail += f" output={output}"
+                            if self._is_mcp_auth_failure_message(output):
+                                raise AuthFailureDetectedError(
+                                    f"MCP auth failure in tool output for session '{name}'"
+                                )
                         elif hasattr(event.data, "result"):
                             result_str = str(event.data.result)[:300]
                             detail += f" result={result_str}"
+                            if self._is_mcp_auth_failure_message(result_str):
+                                raise AuthFailureDetectedError(
+                                    f"MCP auth failure in tool result for session '{name}'"
+                                )
                         log(f"  [{name}] event: {etype}{detail}", "STREAM")
 
                 session.on(on_event)
@@ -2320,12 +2513,10 @@ class LucentDaemon:
                 "daemon.instance_id": self.instance_id,
             },
         ) if self._tracer else contextlib.nullcontext():
-            # Verify API key is still valid (handles 24h expiry and revocation)
-            if not await _verify_api_key(MCP_API_KEY):
-                log("API key expired or revoked — re-provisioning...", "WARN")
-                if not await _handle_auth_failure(self.instance_id):
-                    log("Cannot proceed without valid API key — skipping cycle", "ERROR")
-                    return
+            # Verify key and proactively rotate near expiry (defense-in-depth).
+            if not await _verify_and_provision_key(self.instance_id):
+                log("Cannot proceed without valid API key — skipping cycle", "ERROR")
+                return
 
             # On first cycle, check if environment adaptation is needed
             if self.cycle_count == 1:
@@ -3167,6 +3358,31 @@ class LucentDaemon:
                 "Account for this in your review and require rework if needed."
             )
 
+        # Fetch linked memories so the review task can update them
+        linked_memories = await RequestAPI.get_request_memories(request_id)
+        memory_section = ""
+        if linked_memories:
+            mem_lines = []
+            for mem in linked_memories:
+                mem_lines.append(
+                    f"- Memory ID: {mem['memory_id']}, relation: {mem['relation']}, "
+                    f"type: {mem.get('memory_type', 'unknown')}\n"
+                    f"  Content: {mem.get('content', '')[:200]}\n"
+                    f"  Status: {mem.get('status', 'unknown')}"
+                )
+            memory_section = (
+                "\n\nLinked Memories:\n"
+                + "\n".join(mem_lines)
+                + "\n\nIMPORTANT — Memory Updates Required:\n"
+                "After reviewing the task outcomes, you MUST update each linked memory:\n"
+                "- For 'goal' memories: Use update_memory to add progress_notes describing "
+                "what was accomplished. If a milestone was completed, mark it as such. "
+                "Only set the goal status to 'completed' if ALL milestones are done and "
+                "the goal is fully satisfied.\n"
+                "- For other memories: Update with any relevant new information from the results.\n"
+                "- Use link_task_memory to connect any new memories created by tasks back to this request.\n"
+            )
+
         review_description = (
             "Perform post-completion request review.\n\n"
             "You are validating whether the request outcomes satisfy the original request goals.\n\n"
@@ -3174,7 +3390,8 @@ class LucentDaemon:
             f"Original request description:\n{request_data.get('description', '')}\n\n"
             "Task outcomes:\n"
             f"{chr(10).join(task_summaries)}"
-            f"{incomplete_note}\n\n"
+            f"{incomplete_note}"
+            f"{memory_section}\n\n"
             "Return your decision in this exact machine-readable shape:\n"
             "REQUEST_REVIEW_DECISION: APPROVED|NEEDS_REWORK\n"
             "TASK_IDS_TO_REWORK: <comma-separated task ids, optional when approved>\n"
@@ -3628,12 +3845,11 @@ class LucentDaemon:
                     pass  # polling fallback — this is normal
                 self._task_ready.clear()
 
-                # Verify API key is still valid
-                if not await _verify_api_key(MCP_API_KEY):
-                    if not await _handle_auth_failure(self.instance_id):
-                        log("Dispatch: no valid API key, retrying in 30s", "WARN")
-                        await asyncio.sleep(30)
-                        continue
+                # Verify key and proactively rotate near expiry.
+                if not await _verify_and_provision_key(self.instance_id):
+                    log("Dispatch: no valid API key, retrying in 30s", "WARN")
+                    await asyncio.sleep(30)
+                    continue
 
                 # Release stale tasks from dead instances
                 stale = await RequestAPI.release_stale(STALE_HEARTBEAT_MINUTES)
@@ -3703,11 +3919,10 @@ class LucentDaemon:
 
         while self.running:
             try:
-                # Verify API key
-                if not await _verify_api_key(MCP_API_KEY):
-                    if not await _handle_auth_failure(self.instance_id):
-                        await asyncio.sleep(30)
-                        continue
+                # Verify key and proactively rotate near expiry.
+                if not await _verify_and_provision_key(self.instance_id):
+                    await asyncio.sleep(30)
+                    continue
 
                 await self._check_due_schedules()
             except asyncio.CancelledError:
@@ -3748,25 +3963,19 @@ class LucentDaemon:
             try:
                 # Memory consolidation
                 if _minutes_since(ts_file) >= AUTONOMIC_MINUTES:
-                    if await _verify_api_key(MCP_API_KEY) or await _handle_auth_failure(
-                        self.instance_id
-                    ):
+                    if await _verify_and_provision_key(self.instance_id):
                         _touch(ts_file)
                         await self.run_autonomic()
 
                 # Learning extraction
                 if _minutes_since(learning_ts_file) >= LEARNING_MINUTES:
-                    if await _verify_api_key(MCP_API_KEY) or await _handle_auth_failure(
-                        self.instance_id
-                    ):
+                    if await _verify_and_provision_key(self.instance_id):
                         _touch(learning_ts_file)
                         await self.run_learning_extraction()
 
                 # Daily experience compression
                 if _minutes_since(compression_ts_file) >= COMPRESSION_MINUTES:
-                    if await _verify_api_key(MCP_API_KEY) or await _handle_auth_failure(
-                        self.instance_id
-                    ):
+                    if await _verify_and_provision_key(self.instance_id):
                         _touch(compression_ts_file)
                         await self.run_experience_compression()
 

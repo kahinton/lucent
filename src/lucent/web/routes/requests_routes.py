@@ -5,7 +5,7 @@ from math import ceil
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from lucent.db import MemoryRepository, get_pool
+from lucent.db import get_pool
 
 from ._shared import _check_csrf, get_user_context, templates
 
@@ -44,8 +44,11 @@ async def activity_list(
         source = "user,cognitive,daemon"
 
     org_id = str(user.organization_id)
+    # Hide cancelled requests by default unless explicitly filtered
+    exclude_status = None if status else "cancelled"
     requests_result = await repo.list_requests(
-        org_id, status=status, source=source, limit=per_page, offset=offset
+        org_id, status=status, source=source, limit=per_page, offset=offset,
+        exclude_status=exclude_status,
     )
     requests_data = requests_result["items"]
     total_count = requests_result["total_count"]
@@ -64,15 +67,12 @@ async def activity_list(
         req["tasks_failed"] = sum(1 for s in statuses if s == "failed")
         req["models_used"] = sorted({t["model"] for t in tasks if t.get("model")})
 
-    # Count needs-review items for the badge
-    memory_repo = MemoryRepository(pool)
-    review_result = await memory_repo.search(
-        tags=["daemon", "needs-review"],
-        limit=1,
-        requesting_user_id=user.id,
-        requesting_org_id=user.organization_id,
-    )
-    needs_review_count = review_result.get("total_count", 0)
+    # Count pending approvals for the badge (exclude cancelled)
+    async with pool.acquire() as conn:
+        pending_approval_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM requests WHERE organization_id = $1 AND approval_status = 'pending_approval' AND status != 'cancelled'",
+            user.organization_id,
+        ) or 0
 
     template_ctx = {
         "user": user,
@@ -80,7 +80,7 @@ async def activity_list(
         "summary": summary,
         "filter_status": status,
         "filter_source": source,
-        "needs_review_count": needs_review_count,
+        "pending_approval_count": pending_approval_count,
         "page": page,
         "per_page": per_page,
         "total_pages": total_pages,

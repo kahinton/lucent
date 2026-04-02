@@ -70,6 +70,42 @@
 
 <!-- Two Column Layout -->
 <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+    <!-- Daemon Status -->
+    <div class="bg-white rounded-xl border border-gray-200 shadow-sm">
+        <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+            <h2 class="text-lg font-semibold text-gray-900">Daemon Status</h2>
+            <span class="inline-flex items-center gap-2 px-2.5 py-1 rounded-full text-xs font-medium
+                {% if daemon_status_level == 'online' %}bg-green-100 text-green-700
+                {% elif daemon_status_level == 'stale' %}bg-amber-100 text-amber-700
+                {% else %}bg-red-100 text-red-700{% endif %}">
+                <span class="w-1.5 h-1.5 rounded-full
+                    {% if daemon_status_level == 'online' %}bg-green-500
+                    {% elif daemon_status_level == 'stale' %}bg-amber-500
+                    {% else %}bg-red-500{% endif %}"></span>
+                {{ daemon_status_label }}
+            </span>
+        </div>
+        <div class="p-6 space-y-3">
+            <p class="text-sm text-gray-600">{{ daemon_status_detail }}</p>
+            {% if daemon_cycle_count is not none %}
+            <p class="text-sm text-gray-700">
+                <span class="font-medium">Cycle count:</span> {{ daemon_cycle_count }}
+            </p>
+            {% endif %}
+            {% if daemon_instance_id %}
+            <p class="text-xs text-gray-500 font-mono">
+                Instance: {{ daemon_instance_id | truncate(40) }}
+            </p>
+            {% endif %}
+            {% if daemon_state_summary %}
+            <div class="mt-4 p-3 rounded-lg bg-gray-50 border border-gray-100">
+                <p class="text-xs uppercase tracking-wide text-gray-500 mb-1">Current focus</p>
+                <p class="text-sm text-gray-700">{{ daemon_state_summary | truncate(160) }}</p>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+
     <!-- Recent Memories -->
     <div class="bg-white rounded-xl border border-gray-200 shadow-sm">
         <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100">

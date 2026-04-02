@@ -41,6 +41,11 @@ that will be broken into tasks.
 Use this when you identify new work to do (during cognitive cycles, from user messages, etc.).
 The request will appear in the Requests UI and can be broken into tasks.
 
+IMPORTANT: When creating a request for a goal memory, ALWAYS pass the goal's memory ID
+as goal_id. This enables automatic deduplication — if a request for that goal already
+has an active request (not completed/failed/cancelled), the existing request is returned
+instead of creating a duplicate.
+
     Args:
     title: Short descriptive title (e.g. "Improve search performance")
     description: Detailed description of what needs to be done
@@ -48,6 +53,8 @@ The request will appear in the Requests UI and can be broken into tasks.
     priority: 'low', 'medium', 'high', or 'urgent'
     dependency_policy: 'strict' (default) blocks later tasks when a predecessor fails;
         'permissive' allows continuation past failed/cancelled predecessors.
+    goal_id: Memory ID of the goal this request serves. Enables deduplication —
+        only one active request per memory at a time.
 
 Returns: JSON with the created request including its ID."""
     )
@@ -57,10 +64,15 @@ Returns: JSON with the created request including its ID."""
         source: str = "cognitive",
         priority: str = "medium",
         dependency_policy: str = "strict",
+        goal_id: str = "",
     ) -> str:
         user_id, org_id, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
+
+        memory_ids = None
+        if goal_id:
+            memory_ids = [{"id": goal_id, "relation": "goal"}]
 
         repo = await _get_request_repository()
         req = await repo.create_request(
@@ -71,8 +83,30 @@ Returns: JSON with the created request including its ID."""
             created_by=str(user_id) if user_id else None,
             org_id=str(org_id),
             dependency_policy=dependency_policy,
+            memory_ids=memory_ids,
         )
-        return json.dumps({"id": str(req["id"]), "title": req["title"], "status": req["status"]})
+
+        # Goal already completed — no request created
+        if req.get("status") == "skipped":
+            return json.dumps({
+                "status": "skipped",
+                "reason": req.get("reason"),
+                "note": "This goal memory is already completed. Do NOT create work for it.",
+            })
+
+        result = {
+            "id": str(req["id"]),
+            "title": req["title"],
+            "status": req["status"],
+        }
+        # If the returned title doesn't match what we asked for, this was a dedup hit
+        if req["title"] != title:
+            result["deduplicated"] = True
+            result["note"] = (
+                "An active request already exists for this goal memory. "
+                "Do NOT create new tasks — work is already in progress."
+            )
+        return json.dumps(result)
 
     @mcp.tool(
         description="""Create a task within a tracked request.
@@ -257,6 +291,45 @@ Returns: JSON confirmation."""
         except ValueError as exc:
             return json.dumps({"error": str(exc)})
         return json.dumps({"status": "linked", "task_id": task_id, "memory_id": memory_id})
+
+    @mcp.tool(
+        description="""Link a memory to a tracked request \u2014 establishing a relationship
+between the request and a memory (typically a goal).
+
+Use this to connect a request to the goal memory that motivated it, or to any other
+relevant memory. Linked memories are shown in the request detail UI and are included
+in the post-completion review task for update.
+
+Args:
+    request_id: ID of the request
+    memory_id: ID of the memory to link
+    relation: How the memory relates — 'goal' (default), 'context', or 'reference'
+
+Returns: JSON confirmation."""
+    )
+    async def link_request_memory(
+        request_id: str,
+        memory_id: str,
+        relation: str = "goal",
+    ) -> str:
+        user_id, org_id, _ = await _get_current_user_context()
+        if not user_id:
+            return json.dumps({"error": "Authentication required"})
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+
+        repo = await _get_request_repository()
+        result = await repo.link_request_memory(
+            request_id, memory_id, relation, org_id=str(org_id),
+        )
+        if result is None:
+            return json.dumps({"error": "Request not found or access denied"})
+        return json.dumps({
+            "status": "linked",
+            "request_id": request_id,
+            "memory_id": memory_id,
+            "relation": relation,
+        })
 
     @mcp.tool(
         description="""Get the full details of a tracked request

@@ -3,7 +3,6 @@
 Full lineage: request → tasks → events → memory links.
 """
 
-import hashlib
 import json
 import logging
 import os
@@ -34,20 +33,22 @@ APPROVAL_PENDING = "pending_approval"
 APPROVAL_APPROVED = "approved"
 APPROVAL_REJECTED = "rejected"
 
-# Sources that require approval when auto-approve is disabled
-_DAEMON_SOURCES = frozenset({"cognitive", "daemon", "schedule"})
+# Sources subject to the auto-approve toggle.
+# Schedule is excluded — scheduled requests are always auto-approved because
+# schedules are either user-created or built-in system tasks.
+_DAEMON_SOURCES = frozenset({"cognitive", "daemon"})
 
 
 def _requires_approval(source: str) -> bool:
     """Check if a request from this source needs human approval.
 
-    User/API requests are always auto-approved.
-    Daemon/cognitive/schedule requests require approval unless
-    LUCENT_AUTO_APPROVE is enabled (default: true).
+    User/API/schedule requests are always auto-approved.
+    Cognitive/daemon requests require approval unless
+    LUCENT_AUTO_APPROVE is set to true (default: false).
     """
     if source not in _DAEMON_SOURCES:
         return False
-    auto_approve = os.environ.get("LUCENT_AUTO_APPROVE", "true").lower()
+    auto_approve = os.environ.get("LUCENT_AUTO_APPROVE", "false").lower()
     return auto_approve not in ("true", "1", "yes")
 
 
@@ -63,11 +64,6 @@ def _requires_post_completion_review() -> bool:
     """
     val = os.environ.get("LUCENT_SKIP_POST_REVIEW", "false").lower()
     return val not in ("true", "1", "yes")
-
-
-def _request_fingerprint(title: str) -> str:
-    """Compute a deduplication fingerprint from a request title."""
-    return hashlib.md5(title.lower().strip().encode()).hexdigest()
 
 
 _VALID_OUTPUT_FAILURE_POLICIES = {"fail", "fallback", "retry_then_fallback"}
@@ -138,6 +134,7 @@ class RequestRepository:
         priority: str = "medium",
         created_by: str | None = None,
         dependency_policy: str = "strict",
+        memory_ids: list[dict] | None = None,
     ) -> dict:
         if source not in VALID_REQUEST_SOURCES:
             valid_sources = ", ".join(sorted(VALID_REQUEST_SOURCES))
@@ -149,31 +146,77 @@ class RequestRepository:
                 "Invalid dependency_policy "
                 f"'{dependency_policy}'. Must be 'strict' or 'permissive'."
             )
-        fingerprint = _request_fingerprint(title)
         approval = APPROVAL_PENDING if _requires_approval(source) else APPROVAL_AUTO
         now = datetime.now(timezone.utc) if approval == APPROVAL_AUTO else None
         async with self.pool.acquire() as conn:
+            if memory_ids:
+                mem_ids = [UUID(m["id"]) for m in memory_ids]
+                if mem_ids:
+                    # Check if any linked goal memory is already completed.
+                    # Completed goals should not spawn new requests.
+                    completed_goal = await conn.fetchval(
+                        """SELECT m.id FROM memories m
+                           WHERE m.id = ANY($1)
+                             AND m.type = 'goal'
+                             AND m.metadata->>'status' IN ('completed', 'abandoned')
+                           LIMIT 1""",
+                        mem_ids,
+                    )
+                    if completed_goal:
+                        # Return a synthetic response indicating the goal is done
+                        return {
+                            "id": completed_goal,
+                            "title": title,
+                            "status": "skipped",
+                            "reason": "goal_completed",
+                        }
+
+                    # Dedup: if any linked memory already has an active request, return it.
+                    existing = await conn.fetchrow(
+                        """SELECT r.* FROM requests r
+                           JOIN request_memories rm ON r.id = rm.request_id
+                           WHERE r.organization_id = $1
+                             AND rm.memory_id = ANY($2)
+                             AND r.status NOT IN ('completed', 'failed', 'cancelled')
+                           ORDER BY r.created_at DESC LIMIT 1""",
+                        UUID(org_id),
+                        mem_ids,
+                    )
+                    if existing:
+                        return dict(existing)
+
             row = await conn.fetchrow(
                 """INSERT INTO requests
                    (title, description, source, priority, created_by,
-                    organization_id, fingerprint, dependency_policy,
+                    organization_id, dependency_policy,
                     approval_status, approved_at)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                   ON CONFLICT (organization_id, fingerprint)
-                       WHERE status IN ('pending','planned','in_progress','review','needs_rework')
-                    DO UPDATE SET updated_at = NOW()
-                    RETURNING *""",
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                   RETURNING *""",
                 title,
                 description,
                 source,
                 priority,
                 UUID(created_by) if created_by else None,
                 UUID(org_id),
-                fingerprint,
                 dependency_policy,
                 approval,
                 now,
             )
+
+            # Link memories to the new request
+            if memory_ids and row:
+                for m in memory_ids:
+                    try:
+                        await conn.execute(
+                            """INSERT INTO request_memories (request_id, memory_id, relation)
+                               VALUES ($1, $2, $3) ON CONFLICT DO NOTHING""",
+                            row["id"],
+                            UUID(m["id"]),
+                            m.get("relation", "goal"),
+                        )
+                    except Exception:
+                        pass  # Best-effort — don't fail request creation on link errors
+
         return dict(row)
 
     async def get_request(self, request_id: str, org_id: str) -> dict | None:
@@ -192,12 +235,19 @@ class RequestRepository:
         source: str | None = None,
         limit: int = 25,
         offset: int = 0,
+        exclude_status: str | None = None,
     ) -> dict:
         base = "FROM requests WHERE organization_id = $1"
         params: list[Any] = [UUID(org_id)]
         if status:
             params.append(status)
             base += f" AND status = ${len(params)}"
+        elif exclude_status:
+            excluded = [s.strip() for s in exclude_status.split(",") if s.strip()]
+            if excluded:
+                placeholders = ", ".join(f"${len(params) + i + 1}" for i in range(len(excluded)))
+                params.extend(excluded)
+                base += f" AND status NOT IN ({placeholders})"
         if source:
             sources = [s.strip() for s in source.split(",") if s.strip()]
             if len(sources) == 1:
@@ -310,6 +360,35 @@ class RequestRepository:
                     e,
                 )
 
+        return dict(row) if row else None
+
+    async def link_request_memory(
+        self,
+        request_id: str,
+        memory_id: str,
+        relation: str = "goal",
+        org_id: str | None = None,
+    ) -> dict | None:
+        """Link a memory to a request."""
+        async with self.pool.acquire() as conn:
+            # Verify the request exists and belongs to the org
+            if org_id:
+                req = await conn.fetchval(
+                    "SELECT id FROM requests WHERE id = $1::uuid AND organization_id = $2::uuid",
+                    request_id,
+                    UUID(org_id),
+                )
+                if not req:
+                    return None
+            row = await conn.fetchrow(
+                """INSERT INTO request_memories (request_id, memory_id, relation)
+                   VALUES ($1::uuid, $2::uuid, $3)
+                   ON CONFLICT DO NOTHING
+                   RETURNING *""",
+                request_id,
+                memory_id,
+                relation,
+            )
         return dict(row) if row else None
 
     async def approve_request(
@@ -489,6 +568,20 @@ class RequestRepository:
                 UUID(org_id),
             )
         req["reviews"] = [dict(r) for r in review_rows]
+
+        # Load request-level memory links
+        async with self.pool.acquire() as conn:
+            mem_rows = await conn.fetch(
+                """SELECT rm.memory_id, rm.relation, rm.created_at,
+                          m.content, m.type AS memory_type, m.tags,
+                          m.metadata
+                   FROM request_memories rm
+                   JOIN memories m ON rm.memory_id = m.id
+                   WHERE rm.request_id = $1
+                   ORDER BY rm.created_at""",
+                UUID(request_id),
+            )
+        req["memories"] = [dict(r) for r in mem_rows]
 
         # Build task tree (nest sub-tasks under parents)
         task_map = {str(t["id"]): t for t in req["tasks"]}
@@ -696,6 +789,31 @@ class RequestRepository:
             "limit": limit,
             "has_more": offset + len(rows) < total_count,
         }
+
+    async def list_recently_completed(
+        self, org_id: str, hours: int = 2, limit: int = 25,
+    ) -> list[dict]:
+        """Get requests completed within the last N hours.
+
+        Used by the cognitive loop to avoid re-creating work that was
+        just finished. Without this, the window between a request completing
+        and the goal memory being updated leaves a gap where duplicates
+        can be created.
+        """
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT r.id, r.title, r.source, r.status, r.completed_at
+                   FROM requests r
+                   WHERE r.organization_id = $1
+                     AND r.status IN ('completed', 'review')
+                     AND r.completed_at > NOW() - make_interval(hours => $2)
+                   ORDER BY r.completed_at DESC
+                   LIMIT $3""",
+                UUID(org_id),
+                hours,
+                limit,
+            )
+        return [dict(r) for r in rows]
 
     async def list_pending_tasks(self, org_id: str, limit: int = 25, offset: int = 0) -> dict:
         """Get all tasks ready to be claimed.

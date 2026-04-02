@@ -141,7 +141,7 @@ async def daemon_review_queue(
     page: int = 1,
     per_page: int = 25,
 ):
-    """Show requests needing human attention — pending approvals and post-work reviews."""
+    """Show requests needing human approval before execution."""
     user = await get_user_context(request)
     pool = await get_pool()
 
@@ -150,7 +150,11 @@ async def daemon_review_queue(
     offset = (page - 1) * per_page
 
     async with pool.acquire() as conn:
-        # Pending approvals — requests the daemon wants to work on
+        total_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM requests WHERE organization_id = $1 AND approval_status = 'pending_approval' AND status != 'cancelled'",
+            user.organization_id,
+        )
+
         pending_approvals = await conn.fetch(
             """SELECT r.id, r.title, r.description, r.source, r.priority,
                       r.created_at, r.updated_at,
@@ -160,36 +164,16 @@ async def daemon_review_queue(
                LEFT JOIN users u ON r.created_by = u.id
                WHERE r.organization_id = $1
                  AND r.approval_status = 'pending_approval'
+                 AND r.status != 'cancelled'
                ORDER BY
                  CASE r.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1
                                  WHEN 'medium' THEN 2 ELSE 3 END,
                  r.created_at
-               LIMIT 50""",
-            user.organization_id,
-        )
-
-        # Post-completion reviews — completed work needing sign-off
-        review_requests = await conn.fetch(
-            """SELECT r.id, r.title, r.description, r.status, r.created_at, r.updated_at,
-                      r.review_feedback, r.source, r.priority,
-                      (SELECT t.result FROM tasks t
-                       WHERE t.request_id = r.id AND t.agent_type IN ('request-review', 'code')
-                             AND t.status = 'completed'
-                       ORDER BY t.completed_at DESC LIMIT 1) AS review_result,
-                      (SELECT count(*) FROM tasks t WHERE t.request_id = r.id) as task_count
-               FROM requests r
-               WHERE r.organization_id = $1 AND r.status = 'review'
-               ORDER BY r.updated_at DESC
                LIMIT $2 OFFSET $3""",
             user.organization_id, per_page, offset,
         )
-        total_count = await conn.fetchval(
-            "SELECT COUNT(*) FROM requests WHERE organization_id = $1 AND status = 'review'",
-            user.organization_id,
-        )
 
     approval_items = [dict(r) for r in pending_approvals]
-    review_items = [dict(r) for r in review_requests]
     total_pages = ceil(total_count / per_page) if total_count > 0 else 1
     page = min(page, total_pages)
 
@@ -199,7 +183,6 @@ async def daemon_review_queue(
         {
             "user": user,
             "approval_items": approval_items,
-            "review_items": review_items,
             "page": page,
             "per_page": per_page,
             "total_pages": total_pages,

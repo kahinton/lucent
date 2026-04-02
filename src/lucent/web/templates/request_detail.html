@@ -323,6 +323,39 @@
             </dl>
         </div>
 
+        <!-- Linked Memories -->
+        {% if req.memories %}
+        <div class="mt-4 bg-white rounded-lg border border-gray-200 p-3">
+            <h3 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Linked Memories</h3>
+            <div class="space-y-2">
+                {% for mem in req.memories %}
+                <div class="border-b border-gray-50 pb-2 last:border-0">
+                    <div class="flex items-center gap-1.5 mb-1">
+                        {% if mem.relation == 'goal' %}
+                        <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-purple-100 text-purple-700">goal</span>
+                        {% elif mem.relation == 'context' %}
+                        <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-100 text-blue-700">context</span>
+                        {% else %}
+                        <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-100 text-gray-600">{{ mem.relation }}</span>
+                        {% endif %}
+                        <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-50 text-gray-500">{{ mem.memory_type }}</span>
+                        {% if mem.metadata and mem.metadata.status %}
+                        <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium
+                            {% if mem.metadata.status == 'completed' %}bg-green-100 text-green-700
+                            {% elif mem.metadata.status == 'active' %}bg-yellow-100 text-yellow-700
+                            {% else %}bg-gray-100 text-gray-600{% endif %}">
+                            {{ mem.metadata.status }}
+                        </span>
+                        {% endif %}
+                    </div>
+                    <p class="text-xs text-gray-700 line-clamp-2">{{ mem.content[:150] }}{% if mem.content|length > 150 %}…{% endif %}</p>
+                    <div class="text-[10px] text-gray-400 mt-0.5 font-mono">{{ (mem.memory_id | string)[:8] }}</div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+        {% endif %}
+
         <!-- Review History -->
         {% if reviews %}
         <div class="mt-4 bg-white rounded-lg border border-gray-200 p-3">

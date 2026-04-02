@@ -322,6 +322,38 @@ def create_app() -> FastAPI:
         return response
 
     @app.middleware("http")
+    async def review_badge_middleware(request: Request, call_next):
+        """Attach pending approval count for web templates."""
+        request.state.pending_approval_count = 0
+
+        # Only needed for web page rendering, not API/static/other methods.
+        if request.method == "GET" and not request.url.path.startswith(("/api/", "/static/")):
+            try:
+                from lucent.auth_providers import SESSION_COOKIE_NAME, validate_session
+                from lucent.db import get_pool
+
+                session_token = request.cookies.get(SESSION_COOKIE_NAME)
+                if session_token:
+                    pool = await get_pool()
+                    user = await validate_session(pool, session_token)
+                    if user:
+                        org_id = user.get("organization_id")
+                        async with pool.acquire() as conn:
+                            count = await conn.fetchval(
+                                """SELECT COUNT(*) FROM requests
+                                   WHERE organization_id = $1
+                                     AND approval_status = 'pending_approval'
+                                     AND status != 'cancelled'""",
+                                org_id,
+                            )
+                        request.state.pending_approval_count = count or 0
+            except Exception:
+                # Best-effort UI enhancement only — never block request on badge count.
+                pass
+
+        return await call_next(request)
+
+    @app.middleware("http")
     async def correlation_id_middleware(request: Request, call_next):
         """Generate or propagate a correlation ID for every request.
 

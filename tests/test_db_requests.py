@@ -504,24 +504,43 @@ class TestApprovalGate:
     """Pre-work approval gate for daemon-created requests."""
 
     @pytest.mark.asyncio
-    async def test_user_request_auto_approved(self, repo, test_organization):
+    async def test_user_request_always_auto_approved(self, repo, test_organization, monkeypatch):
+        monkeypatch.setenv("LUCENT_AUTO_APPROVE", "false")
         org = str(test_organization["id"])
         r = await repo.create_request("User test", org, source="user")
         assert r["approval_status"] == "auto_approved"
 
     @pytest.mark.asyncio
-    async def test_daemon_request_auto_approved_by_default(self, repo, test_organization, monkeypatch):
-        monkeypatch.delenv("LUCENT_AUTO_APPROVE", raising=False)
+    async def test_schedule_request_always_auto_approved(self, repo, test_organization, monkeypatch):
+        """Scheduled requests are always auto-approved — they are user-created or built-in."""
+        monkeypatch.setenv("LUCENT_AUTO_APPROVE", "false")
         org = str(test_organization["id"])
-        r = await repo.create_request("Daemon default", org, source="cognitive")
+        r = await repo.create_request("Schedule test", org, source="schedule")
         assert r["approval_status"] == "auto_approved"
 
     @pytest.mark.asyncio
-    async def test_daemon_request_pending_when_disabled(self, repo, test_organization, monkeypatch):
+    @pytest.mark.parametrize("source", ["cognitive", "daemon"])
+    async def test_daemon_sources_pending_when_toggle_false(self, repo, test_organization, monkeypatch, source):
         monkeypatch.setenv("LUCENT_AUTO_APPROVE", "false")
         org = str(test_organization["id"])
-        r = await repo.create_request("Daemon gated", org, source="cognitive")
+        r = await repo.create_request(f"{source} gated", org, source=source)
         assert r["approval_status"] == "pending_approval"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("source", ["cognitive", "daemon"])
+    async def test_daemon_sources_pending_when_toggle_unset(self, repo, test_organization, monkeypatch, source):
+        monkeypatch.delenv("LUCENT_AUTO_APPROVE", raising=False)
+        org = str(test_organization["id"])
+        r = await repo.create_request(f"{source} default", org, source=source)
+        assert r["approval_status"] == "pending_approval"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("source", ["cognitive", "daemon"])
+    async def test_daemon_sources_auto_approved_when_toggle_true(self, repo, test_organization, monkeypatch, source):
+        monkeypatch.setenv("LUCENT_AUTO_APPROVE", "true")
+        org = str(test_organization["id"])
+        r = await repo.create_request(f"{source} auto", org, source=source)
+        assert r["approval_status"] == "auto_approved"
 
     @pytest.mark.asyncio
     async def test_approve_request(self, repo, test_organization, test_user, monkeypatch):
@@ -550,7 +569,7 @@ class TestApprovalGate:
     async def test_dispatch_blocked_for_unapproved(self, repo, test_organization, monkeypatch):
         monkeypatch.setenv("LUCENT_AUTO_APPROVE", "false")
         org = str(test_organization["id"])
-        r = await repo.create_request("Blocked request", org, source="schedule")
+        r = await repo.create_request("Blocked request", org, source="cognitive")
         t = await repo.create_task(
             request_id=str(r["id"]),
             title="blocked task",
@@ -566,7 +585,7 @@ class TestApprovalGate:
     async def test_dispatch_unblocked_after_approval(self, repo, test_organization, test_user, monkeypatch):
         monkeypatch.setenv("LUCENT_AUTO_APPROVE", "false")
         org = str(test_organization["id"])
-        r = await repo.create_request("Unblock me", org, source="schedule")
+        r = await repo.create_request("Unblock me", org, source="cognitive")
         t = await repo.create_task(
             request_id=str(r["id"]),
             title="unblocked task",
@@ -1167,59 +1186,106 @@ class TestListActiveWork:
 
 
 class TestRequestDeduplication:
-    """Request creation deduplication via fingerprint."""
+    """Request deduplication via linked memories."""
 
-    async def test_duplicate_title_returns_existing(self, repo, test_organization):
-        """Two creates with same title in same org return the same request."""
+    async def test_memory_based_dedup_returns_existing(self, repo, test_organization, db_pool):
+        """Creating a request with same memory_ids returns the active one."""
         org_id = str(test_organization["id"])
-        r1 = await repo.create_request(title="Duplicate Me", org_id=org_id)
-        r2 = await repo.create_request(title="Duplicate Me", org_id=org_id)
-        assert str(r1["id"]) == str(r2["id"])
+        # Create a fake memory to link
+        async with db_pool.acquire() as conn:
+            mem = await conn.fetchrow(
+                """INSERT INTO memories (content, type, organization_id, username)
+                   VALUES ('test goal', 'goal', $1::uuid, 'test-user') RETURNING id""",
+                org_id,
+            )
+        mem_id = str(mem["id"])
 
-    async def test_case_insensitive_dedup(self, repo, test_organization):
-        """Dedup is case-insensitive."""
-        org_id = str(test_organization["id"])
-        r1 = await repo.create_request(title="Fix Auth Bug", org_id=org_id)
-        r2 = await repo.create_request(title="fix auth bug", org_id=org_id)
-        assert str(r1["id"]) == str(r2["id"])
-
-    async def test_different_orgs_not_deduped(self, repo, test_organization, other_org):
-        """Same title in different orgs creates separate requests."""
         r1 = await repo.create_request(
-            title="Same Title", org_id=str(test_organization["id"])
+            title="Work A", org_id=org_id,
+            memory_ids=[{"id": mem_id, "relation": "goal"}],
         )
         r2 = await repo.create_request(
-            title="Same Title", org_id=str(other_org["id"])
+            title="Work B", org_id=org_id,
+            memory_ids=[{"id": mem_id, "relation": "goal"}],
+        )
+        assert str(r1["id"]) == str(r2["id"])
+
+    async def test_completed_request_allows_new_for_same_memory(
+        self, repo, test_organization, db_pool
+    ):
+        """After completing a request, a new one for the same memory is allowed."""
+        org_id = str(test_organization["id"])
+        async with db_pool.acquire() as conn:
+            mem = await conn.fetchrow(
+                """INSERT INTO memories (content, type, organization_id, username)
+                   VALUES ('repeatable goal', 'goal', $1::uuid, 'test-user') RETURNING id""",
+                org_id,
+            )
+        mem_id = str(mem["id"])
+
+        r1 = await repo.create_request(
+            title="First attempt", org_id=org_id,
+            memory_ids=[{"id": mem_id, "relation": "goal"}],
+        )
+        await repo.update_request_status(str(r1["id"]), "completed", org_id=org_id)
+        r2 = await repo.create_request(
+            title="Second attempt", org_id=org_id,
+            memory_ids=[{"id": mem_id, "relation": "goal"}],
         )
         assert str(r1["id"]) != str(r2["id"])
 
-    async def test_completed_request_allows_new_with_same_title(
-        self, repo, test_organization
-    ):
-        """After completing a request, a new one with same title is allowed."""
+    async def test_no_memory_ids_always_creates_new(self, repo, test_organization):
+        """Without memory_ids, duplicate titles are allowed (no dedup)."""
         org_id = str(test_organization["id"])
-        r1 = await repo.create_request(title="Repeatable Work", org_id=org_id)
-        await repo.update_request_status(
-            str(r1["id"]), "completed", org_id=org_id
+        r1 = await repo.create_request(title="Same Title", org_id=org_id)
+        r2 = await repo.create_request(title="Same Title", org_id=org_id)
+        assert str(r1["id"]) != str(r2["id"])
+
+    async def test_different_memories_not_deduped(self, repo, test_organization, db_pool):
+        """Different memory IDs create separate requests."""
+        org_id = str(test_organization["id"])
+        async with db_pool.acquire() as conn:
+            m1 = await conn.fetchrow(
+                """INSERT INTO memories (content, type, organization_id, username)
+                   VALUES ('goal 1', 'goal', $1::uuid, 'test-user') RETURNING id""",
+                org_id,
+            )
+            m2 = await conn.fetchrow(
+                """INSERT INTO memories (content, type, organization_id, username)
+                   VALUES ('goal 2', 'goal', $1::uuid, 'test-user') RETURNING id""",
+                org_id,
+            )
+        r1 = await repo.create_request(
+            title="Work for goal 1", org_id=org_id,
+            memory_ids=[{"id": str(m1["id"]), "relation": "goal"}],
         )
-        r2 = await repo.create_request(title="Repeatable Work", org_id=org_id)
+        r2 = await repo.create_request(
+            title="Work for goal 2", org_id=org_id,
+            memory_ids=[{"id": str(m2["id"]), "relation": "goal"}],
+        )
         assert str(r1["id"]) != str(r2["id"])
 
-    async def test_different_titles_not_deduped(self, repo, test_organization):
-        """Different titles always create separate requests."""
-        org_id = str(test_organization["id"])
-        r1 = await repo.create_request(title="First Task", org_id=org_id)
-        r2 = await repo.create_request(title="Second Task", org_id=org_id)
-        assert str(r1["id"]) != str(r2["id"])
-
-    async def test_concurrent_duplicate_creates_return_same_request(
-        self, repo, test_organization
+    async def test_concurrent_creates_with_same_memory_deduped(
+        self, repo, test_organization, db_pool
     ):
-        """N concurrent create_request calls with the same title return one request."""
+        """Concurrent create_request calls with the same memory_id return one request."""
         org_id = str(test_organization["id"])
-        results = await asyncio.gather(*[
-            repo.create_request(title="Concurrent Work", org_id=org_id)
-            for _ in range(5)
-        ])
-        ids = {str(r["id"]) for r in results}
-        assert len(ids) == 1, f"Expected 1 unique request, got {len(ids)}: {ids}"
+        async with db_pool.acquire() as conn:
+            mem = await conn.fetchrow(
+                """INSERT INTO memories (content, type, organization_id, username)
+                   VALUES ('concurrent goal', 'goal', $1::uuid, 'test-user') RETURNING id""",
+                org_id,
+            )
+        mem_id = str(mem["id"])
+
+        # First call creates the request
+        r1 = await repo.create_request(
+            title="Concurrent Work", org_id=org_id,
+            memory_ids=[{"id": mem_id, "relation": "goal"}],
+        )
+        # Second call with same memory returns existing
+        r2 = await repo.create_request(
+            title="Concurrent Work v2", org_id=org_id,
+            memory_ids=[{"id": mem_id, "relation": "goal"}],
+        )
+        assert str(r1["id"]) == str(r2["id"])

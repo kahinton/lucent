@@ -1261,39 +1261,67 @@ class TestIsRequestReviewTask:
 
 
 class TestDeduplication:
-    """Test that fingerprint dedup includes review and needs_rework as open states."""
+    """Test that memory-based dedup respects request lifecycle states."""
 
-    async def test_dedup_conflict_in_review_state(self, repo, org_id):
-        """Creating a request with same title while original is in 'review' returns existing."""
-        title = f"Dedup test {uuid4().hex[:6]}"
-        req1 = await _make_request(repo, org_id, title=title)
+    async def test_dedup_in_review_state(self, repo, org_id, db_pool):
+        """Creating request with same memory while original is in 'review' returns existing."""
+        async with db_pool.acquire() as conn:
+            mem = await conn.fetchrow(
+                """INSERT INTO memories (content, type, organization_id, username)
+                   VALUES ('dedup goal', 'goal', $1::uuid, 'test-user') RETURNING id""",
+                org_id,
+            )
+        mem_id = str(mem["id"])
+        mids = [{"id": mem_id, "relation": "goal"}]
+
+        req1 = await _make_request(repo, org_id, title=f"Dedup test {uuid4().hex[:6]}")
+        # Link the memory
+        await repo.link_request_memory(str(req1["id"]), mem_id, "goal", org_id=org_id)
         task = await _make_task(repo, str(req1["id"]), org_id)
         await _complete_task_flow(repo, task)
 
-        # r1 is now in 'review'; creating same title should dedup
-        req2 = await repo.create_request(title=title, org_id=org_id)
+        # r1 is now in 'review'; creating with same memory should dedup
+        req2 = await repo.create_request(title="Different title", org_id=org_id, memory_ids=mids)
         assert str(req2["id"]) == str(req1["id"])
 
-    async def test_dedup_conflict_in_needs_rework_state(self, repo, org_id):
-        """Creating a request with same title while original is 'needs_rework' returns existing."""
-        title = f"Dedup rework {uuid4().hex[:6]}"
-        req1 = await _make_request(repo, org_id, title=title)
+    async def test_dedup_in_needs_rework_state(self, repo, org_id, db_pool):
+        """Creating request with same memory while original is 'needs_rework' returns existing."""
+        async with db_pool.acquire() as conn:
+            mem = await conn.fetchrow(
+                """INSERT INTO memories (content, type, organization_id, username)
+                   VALUES ('rework goal', 'goal', $1::uuid, 'test-user') RETURNING id""",
+                org_id,
+            )
+        mem_id = str(mem["id"])
+        mids = [{"id": mem_id, "relation": "goal"}]
+
+        req1 = await _make_request(repo, org_id, title=f"Rework test {uuid4().hex[:6]}")
+        await repo.link_request_memory(str(req1["id"]), mem_id, "goal", org_id=org_id)
         task = await _make_task(repo, str(req1["id"]), org_id)
         await _complete_task_flow(repo, task)
         await repo.update_request_status(str(req1["id"]), "needs_rework")
 
-        req2 = await repo.create_request(title=title, org_id=org_id)
+        req2 = await repo.create_request(title="Different title", org_id=org_id, memory_ids=mids)
         assert str(req2["id"]) == str(req1["id"])
 
-    async def test_no_dedup_after_completed(self, repo, org_id):
-        """After a request is completed, same title creates a new request."""
-        title = f"Dedup done {uuid4().hex[:6]}"
-        req1 = await _make_request(repo, org_id, title=title)
+    async def test_no_dedup_after_completed(self, repo, org_id, db_pool):
+        """After a request is completed, same memory creates a new request."""
+        async with db_pool.acquire() as conn:
+            mem = await conn.fetchrow(
+                """INSERT INTO memories (content, type, organization_id, username)
+                   VALUES ('done goal', 'goal', $1::uuid, 'test-user') RETURNING id""",
+                org_id,
+            )
+        mem_id = str(mem["id"])
+        mids = [{"id": mem_id, "relation": "goal"}]
+
+        req1 = await _make_request(repo, org_id, title=f"Done test {uuid4().hex[:6]}")
+        await repo.link_request_memory(str(req1["id"]), mem_id, "goal", org_id=org_id)
         task = await _make_task(repo, str(req1["id"]), org_id)
         await _complete_task_flow(repo, task)
         await repo.update_request_status(str(req1["id"]), "completed")
 
-        req2 = await repo.create_request(title=title, org_id=org_id)
+        req2 = await repo.create_request(title="New attempt", org_id=org_id, memory_ids=mids)
         assert str(req2["id"]) != str(req1["id"])
 
 

@@ -84,6 +84,10 @@ class MemoryRepository:
             RETURNING {self._FULL_COLUMNS}
         """
 
+        # Goal memories are always shared so the daemon's cognitive cycle can
+        # discover them for task planning regardless of which user created them.
+        effective_shared = True if type == "goal" else shared
+
         async with self.pool.acquire() as conn:
             # Validate related memory IDs exist and are not deleted
             if related_memory_ids:
@@ -100,7 +104,7 @@ class MemoryRepository:
                 metadata or {},
                 str(user_id) if user_id else None,
                 str(organization_id) if organization_id else None,
-                shared,
+                effective_shared,
             )
 
         return self._row_to_dict(row)

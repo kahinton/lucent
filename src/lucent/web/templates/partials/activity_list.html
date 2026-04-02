@@ -34,6 +34,16 @@
                         {% else %}bg-gray-100 text-gray-600{% endif %}">
                         {{ req.status | replace('_', ' ') }}
                     </span>
+                    <!-- Approval badge -->
+                    {% if req.approval_status == 'pending_approval' %}
+                    <span class="px-2 py-0.5 rounded text-xs bg-amber-200 text-amber-800 font-medium">
+                        needs approval
+                    </span>
+                    {% elif req.approval_status == 'rejected' %}
+                    <span class="px-2 py-0.5 rounded text-xs bg-red-200 text-red-800 font-medium">
+                        rejected
+                    </span>
+                    {% endif %}
                     <!-- Priority badge -->
                     {% if req.priority != 'medium' %}
                     <span class="px-2 py-0.5 rounded text-xs

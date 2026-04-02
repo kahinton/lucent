@@ -120,6 +120,20 @@ async def list_active_work(user: AuthenticatedUser, pool=Depends(get_pool)):
     return await repo.list_active_work(str(user.organization_id))
 
 
+@router.get("/recently-completed")
+async def list_recently_completed(
+    user: AuthenticatedUser,
+    pool=Depends(get_pool),
+    hours: int = 2,
+):
+    """Get requests completed in the last N hours for dedup in the cognitive loop."""
+    from lucent.db.requests import RequestRepository
+
+    repo = RequestRepository(pool)
+    items = await repo.list_recently_completed(str(user.organization_id), hours=hours)
+    return {"items": items}
+
+
 @router.get("/review")
 async def list_requests_in_review(
     user: AuthenticatedUser,
@@ -150,6 +164,28 @@ async def recent_events(user: AuthenticatedUser, limit: int = 50, pool=Depends(g
 
     repo = RequestRepository(pool)
     return await repo.get_recent_events(str(user.organization_id), limit=limit)
+
+
+@router.get("/{request_id}/memories")
+async def request_memories(request_id: UUID, user: AuthenticatedUser, pool=Depends(get_pool)):
+    from lucent.db.requests import RequestRepository
+
+    repo = RequestRepository(pool)
+    req = await repo.get_request(str(request_id), str(user.organization_id))
+    if not req:
+        raise HTTPException(404, "Request not found")
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT rm.memory_id, rm.relation, rm.created_at,
+                      m.content, m.type AS memory_type, m.tags,
+                      m.metadata->>'status' AS status
+               FROM request_memories rm
+               JOIN memories m ON rm.memory_id = m.id
+               WHERE rm.request_id = $1
+               ORDER BY rm.created_at""",
+            request_id,
+        )
+    return {"items": [dict(r) for r in rows]}
 
 
 @router.get("/{request_id}")

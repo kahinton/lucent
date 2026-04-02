@@ -230,6 +230,26 @@ async def trigger_now(
             template = {}
     prompt = sched.get("prompt") or ""
     try:
+        # Skip if this schedule already has an active (non-terminal) request.
+        # Prevents duplicate tasks when a scheduled request is pending approval
+        # or still running.
+        async with (await get_pool()).acquire() as conn:
+            active_request = await conn.fetchval(
+                """SELECT id FROM requests
+                   WHERE title = $1
+                     AND organization_id = $2::uuid
+                     AND status NOT IN ('completed', 'failed', 'cancelled')
+                   LIMIT 1""",
+                f"[Scheduled] {sched['title']}",
+                str(user.organization_id),
+            )
+        if active_request:
+            logger.info(
+                "Schedule %s skipped — active request %s exists",
+                schedule_id, str(active_request)[:8],
+            )
+            return {"schedule": sched, "skipped": True, "active_request": str(active_request)}
+
         req = await req_repo.create_request(
             title=f"[Scheduled] {sched['title']}",
             org_id=str(user.organization_id),

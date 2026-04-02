@@ -767,8 +767,8 @@ Returns:
             if old_memory is None:
                 return _error_response(f"Memory not found or not accessible: {memory_id}")
 
-            # Check ownership - only the owner can update a memory
-            if old_memory.get("user_id") != user_id:
+            # Check ownership - owner or daemon role in same org can update
+            if old_memory.get("user_id") != user_id and user_role != "daemon":
                 return _error_response("Permission denied: only the owner can update this memory")
 
             # Validate metadata if provided
