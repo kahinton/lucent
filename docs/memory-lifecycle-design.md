@@ -1,22 +1,25 @@
 # Memory Lifecycle Design Document
 
-**Status:** Draft — needs review  
+**Status:** Draft v2 — ready for review  
 **Author:** Lucent (documentation agent)  
-**Date:** 2026-03-31  
-**Roadmap Reference:** Post-Review Roadmap item #4 — "Continuous Existence Research → Design Doc"
+**Date:** 2026-04-02 (v2), 2026-03-31 (v1)  
+**Roadmap Reference:** Post-Review Roadmap item #4 — "Continuous Existence Research → Design Doc"  
+**Research Basis:** "Biological & Computational Memory Consolidation Models for Lucent Memory Lifecycle" (2026-04-02)
 
 ---
 
 ## Table of Contents
 
 1. [Problem Statement](#1-problem-statement)
-2. [Design Principles](#2-design-principles)
-3. [Memory Lifecycle Stages](#3-memory-lifecycle-stages)
-4. [Consolidation Mechanism](#4-consolidation-mechanism)
-5. [Active Forgetting](#5-active-forgetting)
-6. [Reconsolidation](#6-reconsolidation)
-7. [Implementation Plan](#7-implementation-plan)
-8. [Risks and Open Questions](#8-risks-and-open-questions)
+2. [Theoretical Foundations](#2-theoretical-foundations)
+3. [Design Principles](#3-design-principles)
+4. [Memory Lifecycle Stages](#4-memory-lifecycle-stages)
+5. [Consolidation Mechanism](#5-consolidation-mechanism)
+6. [Active Forgetting](#6-active-forgetting)
+7. [Reconsolidation](#7-reconsolidation)
+8. [Implementation Plan](#8-implementation-plan)
+9. [Phased Rollout](#9-phased-rollout)
+10. [Risks and Open Questions](#10-risks-and-open-questions)
 
 ---
 
@@ -61,9 +64,73 @@ What's missing: a system that ties these signals together into lifecycle decisio
 
 ---
 
-## 2. Design Principles
+## 2. Theoretical Foundations
 
-These principles are derived from biological memory research (synaptic consolidation, systems consolidation, active forgetting, reconsolidation) and adapted to Lucent's architecture.
+This design is grounded in specific biological and computational models studied during the research phase. This section summarizes the key models and maps them to design decisions. Detailed citations appear in Appendix A.
+
+### 2.1 Complementary Learning Systems (McClelland, McNaughton & O'Reilly 1995)
+
+The brain uses two complementary systems to avoid catastrophic interference:
+- **Hippocampus:** Rapid, one-shot learning. Binds episodic details. Temporary storage.
+- **Neocortex:** Slow, statistical extraction of general patterns. Permanent, distributed storage.
+
+**Lucent mapping:** Conversation-mode creates memories rapidly (hippocampal analog). The daemon's consolidation cycle gradually extracts patterns and synthesizes summaries (neocortical analog). This is the foundational metaphor for the tiered lifecycle.
+
+### 2.2 Standard Consolidation Theory (Squire & Alvarez 1995)
+
+Memories gradually become hippocampus-independent as neocortical connections strengthen through repeated reactivation. The hippocampus acts as a binding relay that is eventually no longer needed.
+
+**Lucent mapping:** Newly created memories depend on their full episodic detail (Active stage). Over time, their content is absorbed into consolidated summaries (Archived stage) and the originals become redundant — the "relay" is no longer needed.
+
+### 2.3 Multiple Trace Theory (Nadel & Moscovitch 1997)
+
+Each retrieval creates a new hippocampal trace. Older memories have more traces and are therefore more robust. Episodic memories always require some hippocampal involvement; semantic memories can become fully independent.
+
+**Lucent mapping:** Access frequency directly strengthens a memory's vitality score (§4.1). Each access is a "trace" that increases robustness. Experience memories (episodic) decay fastest; procedural and technical memories (semantic) have type bonuses that extend their lifespan.
+
+### 2.4 Memory Reconsolidation (Nader, Schafe & LeDoux 2000)
+
+Retrieved memories enter a labile state (~6 hours) requiring new protein synthesis to re-stabilize. During this window, memories can be modified, strengthened, or weakened. This is distinct from initial consolidation — it uses different molecular mechanisms (Zif268 vs. BDNF).
+
+**Lucent mapping:** When a memory is accessed and updated, it is promoted back to Active regardless of its current stage (§7). The version history preserves the pre-reconsolidation state as a safety net, analogous to how biological reconsolidation can fail if protein synthesis is disrupted.
+
+### 2.5 Ebbinghaus Forgetting Curve (1885)
+
+Retention follows exponential decay: `R = e^(-t/S)`, where R is retrievability, t is time, and S is memory stability. Retention drops ~50% within 1 day of encoding, then levels off. Each retrieval resets the curve and increases S.
+
+**Lucent mapping:** The recency component of the vitality score uses this exact formula (§4.1). Each access resets `last_accessed_at`, resetting the decay curve. The stability constant S effectively increases with access frequency.
+
+### 2.6 Active Forgetting Mechanisms
+
+Biological forgetting is not passive decay — it includes active mechanisms:
+- **Synaptic pruning:** "Use it or lose it" — inactive synapses are eliminated to improve signal-to-noise ratio.
+- **Interference:** New learning disrupts old memories (retroactive) and old memories interfere with new learning (proactive).
+- **Directed forgetting:** Conscious suppression through inhibitory control.
+
+**Lucent mapping:** The forgetting system (§6) actively removes low-vitality memories to improve search quality (pruning). When new memories contradict old ones, consolidation reconciles them (interference resolution). Users can manually forget via deletion (directed forgetting).
+
+### 2.7 Computational Precedents
+
+| System | Key Innovation | What Lucent Adopts |
+|--------|---------------|-------------------|
+| **MemGPT/Letta** (Packer et al. 2023) | OS-style virtual memory paging — LLM manages what's in/out of context | Tiered storage concept; lifecycle stages as "memory pages" |
+| **Generative Agents** (Park et al. 2023) | Reflection: periodic synthesis of observations into higher-level abstractions; retrieval scored by `recency × importance × relevance` | Consolidation mechanism (§5); vitality score formula (§4.1) |
+| **Voyager** (Wang et al. 2023) | Skill library: stores capabilities as executable code, not raw observations | Validates Lucent's existing type distinction (procedural vs. experience) |
+| **CoALA** (Sumers, Yao et al. 2023) | Modular memory: working, episodic, semantic, procedural as distinct stores | Validates type-aware lifecycle rules (§4.2) |
+
+**Key gap across all systems:** No existing AI memory system has robust active forgetting. All grow monotonically. Lucent's forgetting mechanism (§6) addresses an unsolved problem in the field.
+
+### 2.8 Sleep Consolidation Analogy
+
+Biological consolidation occurs primarily during sleep — offline periods where the brain replays and reorganizes experiences via slow-wave sleep (hippocampal sharp-wave ripples coordinated with cortical slow oscillations).
+
+**Lucent mapping:** The daemon's scheduled consolidation tasks (§8.4) are the direct analog. Consolidation runs during "offline" periods (daemon cycles), not inline during user-facing operations. The daemon replays and reorganizes memories, producing consolidated summaries — the computational equivalent of sleep replay.
+
+---
+
+## 3. Design Principles
+
+These principles are derived from the biological and computational research above (§2) and adapted to Lucent's architecture.
 
 ### P1: Consolidation over deletion
 
@@ -99,7 +166,7 @@ Not all memory types decay equally. Individual memories (contact info) should ne
 
 ---
 
-## 3. Memory Lifecycle Stages
+## 4. Memory Lifecycle Stages
 
 Every memory occupies exactly one lifecycle stage at any time. Stage transitions are determined by a **vitality score** computed from access patterns, age, importance, and type-specific rules.
 
@@ -122,7 +189,7 @@ Every memory occupies exactly one lifecycle stage at any time. Stage transitions
 The default state for all newly created or recently accessed memories.
 
 - **Search behavior:** Included in all searches (current behavior, no change).
-- **Transition out:** Vitality score drops below the **consolidation threshold** (see §3.1).
+- **Transition out:** Vitality score drops below the **consolidation threshold** (see §4.1).
 - **Transition in:** Created, or reconsolidated from Consolidating/Archived via access.
 
 #### CONSOLIDATING
@@ -130,9 +197,9 @@ The default state for all newly created or recently accessed memories.
 Memories whose vitality has declined enough to warrant review for merging or summarization. They remain searchable but are candidates for the consolidation daemon task.
 
 - **Search behavior:** Included in default searches, but ranked lower (vitality score acts as a tiebreaker after similarity).
-- **What happens here:** The consolidation daemon identifies related Consolidating memories, merges overlapping content into summary memories, and archives the originals. See §4 for the full mechanism.
+- **What happens here:** The consolidation daemon identifies related Consolidating memories, merges overlapping content into summary memories, and archives the originals. See §5 for the full mechanism.
 - **Transition out → Archived:** Memory is consolidated (merged into a summary) or vitality drops further.
-- **Transition out → Active:** Memory is accessed, triggering reconsolidation (§6).
+- **Transition out → Active:** Memory is accessed, triggering reconsolidation (§7).
 
 #### ARCHIVED
 
@@ -150,7 +217,7 @@ Terminal pre-deletion state. Memories here are soft-deleted and pending permanen
 - **What happens:** `deleted_at` is set. After the hard-delete grace period (default: 90 days), a cleanup task permanently removes the record.
 - **Transition out:** Manual recovery only (restore from audit snapshot via `restore_memory_version`).
 
-### 3.1 Vitality Score
+### 4.1 Vitality Score
 
 The vitality score is a composite metric that determines a memory's lifecycle stage. It is computed periodically by the lifecycle daemon, not on every access.
 
@@ -216,7 +283,7 @@ importance_score = importance / 10.0
 
 These thresholds are configurable per organization. The lifecycle daemon reads them from organization settings (with system defaults as fallback).
 
-### 3.2 Exemption Rules
+### 4.2 Exemption Rules
 
 Certain memories are exempt from lifecycle transitions regardless of vitality score:
 
@@ -230,11 +297,11 @@ Certain memories are exempt from lifecycle transitions regardless of vitality sc
 
 ---
 
-## 4. Consolidation Mechanism
+## 5. Consolidation Mechanism
 
 Consolidation is the process of merging related, aging memories into denser summary memories. This is the core value proposition — reducing volume while preserving knowledge.
 
-### 4.1 Identifying Consolidation Candidates
+### 5.1 Identifying Consolidation Candidates
 
 The consolidation daemon runs on a schedule (default: daily). It identifies candidates in two ways:
 
@@ -258,7 +325,7 @@ Clustering criteria:
 4. **Metadata similarity** — For technical memories: same `repo` or `filename`. For experience memories: overlapping `related_entities`.
 5. **Explicit links** — Memories in each other's `related_memory_ids` arrays.
 
-### 4.2 Consolidation Process
+### 5.2 Consolidation Process
 
 For each identified cluster of related memories:
 
@@ -299,7 +366,7 @@ Step 6: LOG
   - Link summary memory to the consolidation task via link_task_memory
 ```
 
-### 4.3 Consolidation Rules by Type
+### 5.3 Consolidation Rules by Type
 
 | Memory Type | Consolidation Strategy | Maximum Cluster Size |
 |-------------|----------------------|---------------------|
@@ -309,7 +376,9 @@ Step 6: LOG
 | `goal` | Completed/abandoned goals: merge progress notes into a summary experience memory. Active goals: never consolidate. | 3 |
 | `individual` | Never consolidated. Updated in place. | N/A |
 
-### 4.4 Consolidation Depth (Hierarchical)
+### 5.4 Consolidation Depth (Hierarchical)
+
+This mirrors the biological distinction between synaptic consolidation (fast, local) and systems consolidation (slow, global) described in §2.1. Level 1 is the synaptic analog — stabilizing recent session memories. Level 3 is the systems analog — extracting domain-level patterns across many experiences.
 
 Consolidation can happen at multiple levels:
 
@@ -323,11 +392,11 @@ Each level produces a summary that is itself subject to lifecycle scoring. A Lev
 
 ---
 
-## 5. Active Forgetting
+## 6. Active Forgetting
 
-Active forgetting is the deliberate removal of memories that provide no ongoing value. It improves retrieval quality by reducing the haystack.
+Active forgetting is the deliberate removal of memories that provide no ongoing value. It improves retrieval quality by reducing the haystack. This is modeled on biological synaptic pruning (§2.6) — not damage, but optimization. Removing low-value memories improves the signal-to-noise ratio for all searches.
 
-### 5.1 Decay Criteria
+### 6.1 Decay Criteria
 
 A memory becomes a forgetting candidate when ALL of the following are true:
 
@@ -339,7 +408,7 @@ A memory becomes a forgetting candidate when ALL of the following are true:
 | Importance | ≤ 3 | Only forget low-importance memories automatically |
 | Not exempted | No `pinned` tag, not `individual` type, not active goal | Safety rails |
 
-### 5.2 Forgetting Process
+### 6.2 Forgetting Process
 
 ```
 Step 1: IDENTIFY candidates
@@ -370,7 +439,7 @@ Step 4: HARD DELETE (deferred)
   - Before hard delete: ensure audit snapshot exists (for recovery if needed)
 ```
 
-### 5.3 Safety Rails
+### 6.3 Safety Rails
 
 These protections prevent the system from losing valuable knowledge:
 
@@ -388,15 +457,15 @@ These protections prevent the system from losing valuable knowledge:
 
 ---
 
-## 6. Reconsolidation
+## 7. Reconsolidation
 
-In neuroscience, reconsolidation is the process where retrieving a memory temporarily destabilizes it, allowing modification before it is re-stored — often stronger than before. This mechanism explains why memories change over time and how retrieval itself is a form of learning.
+In neuroscience, reconsolidation is the process where retrieving a memory temporarily destabilizes it, allowing modification before it is re-stored — often stronger than before (Nader, Schafe & LeDoux 2000; see §2.4). The labile window lasts ~6 hours in biological systems, during which protein synthesis inhibition can erase the memory entirely. This has been validated experimentally in both animal models and human PTSD treatment (Brunet et al. 2008).
 
 Lucent's reconsolidation provides two benefits:
 1. **Lifecycle refresh** — accessing a memory prevents premature decay.
 2. **Content strengthening** — updating a memory during access improves its quality.
 
-### 6.1 Lifecycle Refresh on Access
+### 7.1 Lifecycle Refresh on Access
 
 When a memory is accessed (via `get_memory`, `get_accessible`, or returned in search results), the system already updates `last_accessed_at`. This naturally increases the recency component of the vitality score on the next lifecycle evaluation.
 
@@ -411,7 +480,7 @@ When a memory is accessed (via `get_memory`, `get_accessible`, or returned in se
 | Archived | Direct view (`get_memory`) | Promote to Active immediately. Log reconsolidation event. |
 | Forgotten (soft-deleted) | Direct view | Not reachable via normal search. Manual restore via `restore_memory_version` promotes to Active. |
 
-### 6.2 Content Strengthening on Update
+### 7.2 Content Strengthening on Update
 
 When a memory is both accessed AND updated in the same interaction (common pattern: agent searches for context, finds a memory, updates it with new information), this is the strongest lifecycle signal. The memory should be treated as actively maintained.
 
@@ -422,7 +491,7 @@ When a memory is both accessed AND updated in the same interaction (common patte
 - Vitality score floor set to 0.5 for next lifecycle evaluation (prevents immediate re-decay)
 - Audit log records the update with full snapshot
 
-### 6.3 Reconsolidation of Consolidated Memories
+### 7.3 Reconsolidation of Consolidated Memories
 
 When a summary memory (tagged `consolidated`) is accessed and found to be stale or incomplete, agents can trigger re-consolidation:
 
@@ -436,9 +505,9 @@ This mirrors biological reconsolidation: the act of retrieval opens the memory f
 
 ---
 
-## 7. Implementation Plan
+## 8. Implementation Plan
 
-### 7.1 Database Schema Changes
+### 8.1 Database Schema Changes
 
 #### Migration 051: Add lifecycle columns
 
@@ -487,7 +556,7 @@ ON memories ((metadata->'consolidated_from'))
 WHERE metadata ? 'consolidated_from' AND deleted_at IS NULL;
 ```
 
-### 7.2 Search Changes
+### 8.2 Search Changes
 
 Modify `MemoryRepository.search()` to respect lifecycle stages:
 
@@ -523,27 +592,96 @@ elif lifecycle_stage == 'archived':
     adjusted_score = sim_score * 0.6   # Significant penalty (only when explicitly included)
 ```
 
-### 7.3 MCP Tool Changes
+### 8.3 MCP Tool Changes
 
 **Modified tools:**
 
 | Tool | Change |
 |------|--------|
-| `search_memories` | Add optional `include_archived` parameter (default: false) |
-| `search_memories_full` | Add optional `include_archived` parameter (default: false) |
-| `get_memory` | No change — direct access always works, triggers reconsolidation |
-| `get_memories` | No change — batch access always works |
-| `update_memory` | Set `lifecycle_stage = 'active'` on any update |
+| `search_memories` | Add optional `include_archived` parameter (default: false). Add `lifecycle_stage` to response objects. |
+| `search_memories_full` | Add optional `include_archived` parameter (default: false). Add `lifecycle_stage` to response objects. |
+| `get_memory` | Return `lifecycle_stage` and `vitality_score` in response. Trigger reconsolidation: if stage is Consolidating/Archived, promote to Active. |
+| `get_memories` | Return `lifecycle_stage` and `vitality_score` in response. Trigger reconsolidation for each memory accessed. |
+| `update_memory` | Set `lifecycle_stage = 'active'` and `vitality_score = max(0.5, current)` on any update. |
+| `export_memories` | Add optional `lifecycle_stage` filter. Include lifecycle fields in export. |
 
 **New tools:**
 
-| Tool | Purpose |
-|------|---------|
-| `get_memory_stats` | Return lifecycle stage distribution, vitality score histogram, consolidation activity summary |
-| `pin_memory` | Add `pinned` tag to exempt memory from lifecycle transitions |
-| `unpin_memory` | Remove `pinned` tag |
+| Tool | Purpose | Parameters |
+|------|---------|------------|
+| `get_memory_stats` | Return lifecycle stage distribution, vitality score histogram, consolidation activity summary, forgetting candidates count | `organization_id` (optional) |
+| `pin_memory` | Add `pinned` tag to exempt memory from lifecycle transitions | `memory_id` |
+| `unpin_memory` | Remove `pinned` tag, re-enabling lifecycle transitions | `memory_id` |
+| `get_lifecycle_history` | Return a memory's lifecycle stage transitions with timestamps and reasons | `memory_id`, `limit` (default 20) |
 
-### 7.4 Lifecycle Daemon Tasks
+**New tool signatures (pseudocode):**
+
+```python
+@mcp_tool
+async def get_memory_stats(
+    organization_id: UUID | None = None,
+) -> dict:
+    """Return lifecycle health metrics.
+
+    Response:
+    {
+        "stage_distribution": {"active": 150, "consolidating": 30, "archived": 45, "forgotten": 5},
+        "type_distribution": {"experience": 80, "technical": 60, ...},
+        "vitality_histogram": {"0.0-0.1": 10, "0.1-0.2": 15, ...},
+        "consolidation_summary": {
+            "clusters_pending": 5,
+            "last_consolidation": "2026-04-01T...",
+            "memories_consolidated_30d": 12
+        },
+        "forgetting_summary": {
+            "candidates": 8,
+            "forgotten_30d": 3,
+            "hard_deleted_30d": 0
+        }
+    }
+    """
+
+@mcp_tool
+async def pin_memory(memory_id: UUID) -> dict:
+    """Add 'pinned' tag. Memory becomes exempt from all lifecycle transitions.
+    Returns updated memory."""
+
+@mcp_tool
+async def unpin_memory(memory_id: UUID) -> dict:
+    """Remove 'pinned' tag. Memory re-enters normal lifecycle.
+    Returns updated memory."""
+
+@mcp_tool
+async def get_lifecycle_history(
+    memory_id: UUID,
+    limit: int = 20,
+) -> dict:
+    """Return lifecycle transition history for a memory.
+
+    Response:
+    {
+        "memory_id": "...",
+        "current_stage": "active",
+        "current_vitality": 0.72,
+        "transitions": [
+            {"from": "active", "to": "consolidating", "at": "...", "reason": "vitality_decay", "vitality": 0.31},
+            {"from": "consolidating", "to": "active", "at": "...", "reason": "reconsolidation_access", "vitality": 0.65}
+        ]
+    }
+    """
+```
+
+**REST API additions** (for the web UI and admin operations):
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/api/v1/lifecycle/stats` | GET | Same as `get_memory_stats` MCP tool |
+| `/api/v1/lifecycle/review-queue` | GET | List memories flagged for human review (forgetting edge cases) |
+| `/api/v1/lifecycle/review-queue/{id}/approve` | POST | Approve forgetting of a flagged memory |
+| `/api/v1/lifecycle/review-queue/{id}/preserve` | POST | Pin the memory, preventing forgetting |
+| `/api/v1/lifecycle/config` | GET/PUT | Read/update organization lifecycle configuration |
+
+### 8.4 Lifecycle Daemon Tasks
 
 #### Schedule 1: Vitality Score Computation
 
@@ -559,9 +697,9 @@ Algorithm:
    b. frequency_score from COUNT(*) in memory_access_log last 90 days
    c. importance_score from importance column
    d. type_bonus from type column
-3. vitality = weighted sum per formula in §3.1
+3. vitality = weighted sum per formula in §4.1
 4. UPDATE memories SET vitality_score = ?, vitality_computed_at = NOW()
-5. Apply stage transitions based on thresholds (§3.1)
+5. Apply stage transitions based on thresholds (§4.1)
 6. Log transitions as task events
 ```
 
@@ -586,10 +724,10 @@ This returns the full frequency map in one query, then joined in-application wit
 ```
 Algorithm:
 1. Fetch consolidation candidates (lifecycle_stage = 'consolidating')
-2. Cluster by: type + tag overlap + metadata similarity (§4.1)
+2. Cluster by: type + tag overlap + metadata similarity (§5.1)
 3. For each cluster of ≥ 2 memories:
    a. Load full content
-   b. LLM synthesizes summary (§4.2, Steps 2-3)
+   b. LLM synthesizes summary (§5.2, Steps 2-3)
    c. Create summary memory
    d. Archive source memories
    e. Verify summary quality
@@ -604,8 +742,8 @@ Algorithm:
 
 ```
 Algorithm:
-1. Query forget candidates (§5.1 criteria)
-2. Apply safety checks (§5.2)
+1. Query forget candidates (§6.1 criteria)
+2. Apply safety checks (§6.2)
 3. Soft-delete qualifying memories
 4. Flag edge cases for human review
 ```
@@ -624,13 +762,16 @@ Algorithm:
 4. Log audit entry with action_type = 'hard_delete'
 ```
 
-### 7.5 Repository Layer Changes
+### 8.5 Repository Layer Changes
 
 Add to `MemoryRepository`:
 
 ```python
 async def compute_vitality_scores(self, batch_size: int = 500) -> dict:
-    """Compute and update vitality scores for all active memories."""
+    """Compute and update vitality scores for all non-deleted, non-forgotten memories.
+
+    Returns: {"processed": int, "transitions": {"active→consolidating": int, ...}}
+    """
     ...
 
 async def transition_lifecycle_stage(
@@ -639,7 +780,14 @@ async def transition_lifecycle_stage(
     new_stage: str,
     reason: str,
 ) -> dict | None:
-    """Transition a memory to a new lifecycle stage with audit logging."""
+    """Transition a memory to a new lifecycle stage with audit logging.
+
+    Creates an audit entry with:
+    - action_type: 'lifecycle_transition'
+    - old_values: {"lifecycle_stage": old_stage}
+    - new_values: {"lifecycle_stage": new_stage}
+    - notes: reason
+    """
     ...
 
 async def get_consolidation_candidates(
@@ -654,7 +802,15 @@ async def get_forget_candidates(
     self,
     limit: int = 50,
 ) -> list[dict]:
-    """Fetch memories meeting all forgetting criteria."""
+    """Fetch memories meeting all forgetting criteria (§6.1).
+
+    Returns memories where:
+    - lifecycle_stage = 'archived'
+    - vitality_score < forget_threshold
+    - archived for > archive_grace_period_days
+    - importance <= auto_forget_max_importance
+    - NOT pinned, NOT individual type, NOT active goal
+    """
     ...
 
 async def get_lifecycle_stats(
@@ -663,13 +819,88 @@ async def get_lifecycle_stats(
 ) -> dict:
     """Return memory counts by lifecycle stage and type."""
     ...
+
+async def get_lifecycle_history(
+    self,
+    memory_id: UUID,
+    limit: int = 20,
+) -> list[dict]:
+    """Return lifecycle transition audit entries for a memory.
+
+    Queries memory_audit_log for entries where
+    action_type = 'lifecycle_transition'.
+    """
+    ...
+
+async def reconsolidate(
+    self,
+    memory_id: UUID,
+    reason: str = "access",
+) -> dict | None:
+    """Promote a memory back to Active stage (reconsolidation).
+
+    Updates lifecycle_stage to 'active', refreshes last_accessed_at,
+    sets vitality_score floor to 0.5, and logs the transition.
+    Only acts if memory is in 'consolidating' or 'archived' stage.
+    """
+    ...
+
+async def bulk_compute_access_frequencies(
+    self,
+    window_days: int = 90,
+) -> dict[UUID, int]:
+    """Return access counts per memory for the given window.
+
+    Single aggregate query against memory_access_log, returned as a dict.
+    Used by compute_vitality_scores to avoid N+1 queries.
+    """
+    ...
 ```
 
-### 7.6 Migration Path for Existing Memories
+Add to `AccessRepository`:
+
+```python
+async def get_frequency_baseline(
+    self,
+    organization_id: UUID,
+    window_days: int = 90,
+    percentile: float = 0.75,
+) -> int:
+    """Compute the Nth-percentile access count for normalization.
+
+    Returns the access count at the given percentile across all active memories.
+    Used as the denominator in the frequency_score calculation.
+    """
+    ...
+```
+
+### 8.6 Migration Path for Existing Memories
 
 All existing memories start in the **Active** stage with `vitality_score = NULL`.
 
-**First lifecycle run after deployment:**
+#### Database Migration Strategy
+
+The schema changes are additive — no existing columns are modified or removed. This means:
+- Migration 051 can be applied to a running system with zero downtime.
+- The new columns have defaults (`lifecycle_stage = 'active'`, `vitality_score = NULL`), so no backfill query is needed during migration.
+- Application code can be deployed before or after migration — absent columns in old code are simply ignored; null vitality_score in new code is handled as "not yet computed."
+
+**Migration execution order:**
+
+```
+1. Apply migration 051 (add columns + indexes)     — ~seconds for current table size
+2. Apply migration 052 (consolidation metadata index) — ~seconds
+3. Deploy application code with lifecycle support
+4. First vitality computation run fills in scores    — daemon schedule
+```
+
+**Backward compatibility:**
+
+- If rollback is needed, `ALTER TABLE memories DROP COLUMN lifecycle_stage, DROP COLUMN vitality_score, DROP COLUMN vitality_computed_at` restores the original schema.
+- Old application code running against the new schema works — the new columns have defaults and are nullable.
+- New application code running against the old schema (before migration) should check for column existence or use a feature flag (`memory_lifecycle.enabled`).
+
+#### First Lifecycle Run
 
 1. Compute vitality scores for all existing memories.
 2. Apply stage transitions based on scores.
@@ -682,7 +913,17 @@ All existing memories start in the **Active** stage with `vitality_score = NULL`
 - Memories not accessed in 90+ days with low importance → Consolidating (not yet Archived, due to lenient first-run threshold)
 - No memories immediately Archived or Forgotten on first run
 
-### 7.7 Configuration
+#### Gradual Threshold Tightening
+
+```
+Week 1:  consolidation_threshold = 0.25 (lenient)
+Week 2:  consolidation_threshold = 0.30
+Week 3+: consolidation_threshold = 0.35 (design default)
+```
+
+This prevents a "cliff effect" where hundreds of old memories suddenly transition. The daemon logs the threshold used in each run for debugging.
+
+### 8.7 Configuration
 
 Lifecycle parameters stored in organization settings (with system defaults):
 
@@ -713,12 +954,136 @@ Lifecycle parameters stored in organization settings (with system defaults):
 
 ---
 
-## 8. Risks and Open Questions
+## 9. Phased Rollout
+
+The implementation is divided into three phases. Each phase is independently deployable and provides value on its own. A phase is only started after the previous one is stable in production.
+
+### Phase 1: Foundation — Schema, Vitality Scoring, and Stage Transitions
+
+**Goal:** Add lifecycle infrastructure without changing user-visible behavior. Score all memories; transition stages; verify correctness.
+
+**Duration:** 2–3 weeks
+
+**Deliverables:**
+
+1. **Migration 051** — Add `lifecycle_stage`, `vitality_score`, `vitality_computed_at` columns (§8.1).
+2. **Migration 052** — Add consolidation metadata index (§8.1).
+3. **Vitality score computation** — `MemoryRepository.compute_vitality_scores()` implementation.
+4. **Stage transition logic** — `MemoryRepository.transition_lifecycle_stage()` with audit logging.
+5. **Scheduled vitality computation** — Daemon schedule running every 6 hours.
+6. **Lifecycle stats** — `get_memory_stats` MCP tool for observability.
+7. **Configuration** — Organization-level lifecycle settings with defaults (§8.7).
+
+**Constraints:**
+
+- Search behavior does NOT change in Phase 1. All memories remain searchable regardless of stage.
+- Vitality scores are computed and stored but only observed (not acted upon for search ranking).
+- Stage transitions happen but have no functional consequence yet — this is a "shadow mode" that lets us validate the scoring formula against intuition.
+- The `pinned` tag exemption is enforced from the start.
+
+**Validation criteria:**
+
+- All existing memories get a vitality score on first run.
+- Stage distribution matches expectations (§8.6).
+- No memory with `last_accessed_at` in the last 14 days transitions below Active.
+- No exempted memory types (individual, active goals) transition below Active.
+- Vitality scores are monotonically related to intuitive "usefulness" — a manual spot-check of 20 memories confirms the formula produces sensible rankings.
+
+**Rollback:** Drop the new columns. No data loss, no behavior change.
+
+### Phase 2: Lifecycle-Aware Search and Consolidation
+
+**Goal:** Search results improve by incorporating lifecycle signals. The consolidation daemon reduces memory volume.
+
+**Duration:** 3–4 weeks (after Phase 1 is stable for ≥ 1 week)
+
+**Deliverables:**
+
+1. **Search ranking** — Apply lifecycle stage multipliers to search results (§8.2).
+2. **`include_archived` parameter** — Add to `search_memories` and `search_memories_full` (§8.3).
+3. **Reconsolidation on access** — Direct `get_memory` access promotes Archived/Consolidating memories to Active (§7.1).
+4. **Reconsolidation on update** — Any update promotes to Active with vitality floor (§7.2).
+5. **Consolidation daemon** — Schedule 2 (§8.4): daily task that identifies clusters and synthesizes summaries.
+6. **Consolidation agent definition** — Create a `memory-consolidation` agent with appropriate skills.
+7. **`pin_memory` / `unpin_memory` MCP tools** — Manual lifecycle override.
+
+**Constraints:**
+
+- Consolidation runs in "dry-run" mode for the first week — identifies clusters and logs what it would do, but doesn't create summaries or archive sources. This validates clustering quality.
+- After dry-run validation, enable full consolidation with human review of the first 5 consolidation batches.
+- Archived memories are excluded from default search but always accessible by ID.
+
+**Validation criteria:**
+
+- Search quality improves: spot-check 10 queries, confirm Active/relevant results rank higher than stale ones.
+- Consolidation clusters are coherent: each cluster's memories are genuinely about the same topic.
+- Consolidated summaries preserve all key facts from source memories (agent self-verification + human review).
+- Source memories are correctly archived with `consolidated-source` tag and `consolidated_into` metadata.
+- Reconsolidation works: accessing an Archived memory promotes it to Active.
+
+**Rollback:** Revert search to ignore lifecycle_stage. Archived sources can be restored from snapshots.
+
+### Phase 3: Active Forgetting and Autonomous Lifecycle
+
+**Goal:** The system actively manages its own memory health. Low-value memories are pruned. The lifecycle runs autonomously.
+
+**Duration:** 2–3 weeks (after Phase 2 is stable for ≥ 2 weeks)
+
+**Deliverables:**
+
+1. **Forgetting daemon** — Schedule 3 (§8.4): weekly task applying decay criteria (§6.1).
+2. **Safety checks** — Last-of-its-kind protection, importance floor, consolidated-source protection (§6.3).
+3. **Hard delete cleanup** — Schedule 4 (§8.4): monthly permanent removal with audit preservation.
+4. **Human review queue** — Edge-case memories flagged for human decision surface in the UI.
+5. **Lifecycle dashboard** — Expose lifecycle stats in the web UI (stage distribution, consolidation activity, forgetting candidates).
+
+**Constraints:**
+
+- Forgetting only affects memories with `importance ≤ 3` for the first month. Expand to `importance ≤ 4` (the design default) after confidence builds.
+- Hard delete grace period is 90 days — no data is permanently lost for 3 months after soft-delete.
+- All forgetting candidates are logged before deletion, including the reason and vitality score.
+
+**Validation criteria:**
+
+- No memory with `pinned` tag or `individual` type is ever forgotten.
+- No memory with `importance ≥ 4` is auto-forgotten.
+- No memory is the last of its kind without being flagged for review.
+- Search quality continues to improve as low-value memories are pruned.
+- Total memory count stabilizes (creation rate ≈ forgetting rate + consolidation compression).
+
+**Rollback:** Stop the forgetting schedule. Soft-deleted memories can be restored from snapshots.
+
+### Phase Summary
+
+```
+Phase 1 (Weeks 1-3):     Schema + Scoring + Shadow Mode
+                          ├── Migration 051, 052
+                          ├── Vitality computation schedule
+                          ├── Stage transitions (no search impact)
+                          └── get_memory_stats tool
+
+Phase 2 (Weeks 4-7):     Search Integration + Consolidation
+                          ├── Lifecycle-aware search ranking
+                          ├── include_archived parameter
+                          ├── Reconsolidation on access/update
+                          ├── Consolidation daemon (dry-run → live)
+                          └── pin/unpin tools
+
+Phase 3 (Weeks 8-10):    Active Forgetting + Autonomy
+                          ├── Forgetting daemon
+                          ├── Safety checks
+                          ├── Hard delete cleanup
+                          └── Lifecycle dashboard
+```
+
+---
+
+## 10. Risks and Open Questions
 
 ### Risks
 
 **R1: Consolidation quality depends on LLM synthesis.**  
-If the summarization agent produces lossy or inaccurate summaries, consolidation destroys information instead of compressing it. **Mitigation:** Source memories are archived, not deleted. A bad summary can be detected and sources restored. Include a verification step (§4.2 Step 5) where the agent checks its own summary against sources.
+If the summarization agent produces lossy or inaccurate summaries, consolidation destroys information instead of compressing it. **Mitigation:** Source memories are archived, not deleted. A bad summary can be detected and sources restored. Include a verification step (§5.2 Step 5) where the agent checks its own summary against sources.
 
 **R2: Over-aggressive decay for organizations with bursty access patterns.**  
 An organization that works intensely on a project for 2 months, then pivots for 3 months, may see project memories decay before they return to the project. **Mitigation:** The 180-day archive grace period and importance floor (≥4 blocks auto-forgetting) provide substantial buffer. The `pinned` tag provides manual override. Consider adding a "project" grouping concept in the future.
@@ -759,18 +1124,39 @@ Shared memories visible to multiple organizations could have different value to 
 
 ## Appendix A: Biological Foundations
 
-This design draws from established neuroscience research on memory consolidation:
+This design draws from established neuroscience and AI research on memory consolidation. See §2 for detailed discussion of each model and its mapping to Lucent.
 
 | Biological Concept | Lucent Analog | Section |
 |-------------------|---------------|---------|
-| **Synaptic consolidation** (minutes–hours: short-term → long-term via protein synthesis) | Memory creation with importance rating and initial Active stage | §3 |
-| **Systems consolidation** (weeks–months: hippocampus → neocortex) | Stage transitions from Active → Consolidating → Archived | §3, §4 |
-| **Long-term potentiation** (repeated activation strengthens synapses) | Access frequency increasing vitality score | §3.1 |
-| **Active forgetting** (synaptic pruning, intrinsic forgetting via Rac1/Cdc42) | Decay criteria and soft/hard delete process | §5 |
-| **Reconsolidation** (retrieval destabilizes, allows modification) | Access-triggered stage promotion and update strengthening | §6 |
-| **Sleep replay** (offline consolidation during sleep) | Daemon scheduled consolidation tasks | §7.4 |
-| **Spacing effect** (distributed retrieval strengthens more than massed) | Frequency score over 90-day window rewards spread-out access | §3.1 |
-| **Semantic memory formation** (episodic details compressed into general knowledge) | Consolidation merging session logs into topic summaries | §4.3, §4.4 |
+| **Synaptic consolidation** (minutes–hours: short-term → long-term via protein synthesis) | Memory creation with importance rating and initial Active stage | §4 |
+| **Systems consolidation** (weeks–months: hippocampus → neocortex) | Stage transitions from Active → Consolidating → Archived | §4, §5 |
+| **Long-term potentiation** (repeated activation strengthens synapses) | Access frequency increasing vitality score | §4.1 |
+| **Active forgetting** (synaptic pruning, intrinsic forgetting via Rac1/Cdc42) | Decay criteria and soft/hard delete process | §6 |
+| **Reconsolidation** (retrieval destabilizes, allows modification) | Access-triggered stage promotion and update strengthening | §7 |
+| **Sleep replay** (offline consolidation during sleep) | Daemon scheduled consolidation tasks | §8.4 |
+| **Spacing effect** (distributed retrieval strengthens more than massed) | Frequency score over 90-day window rewards spread-out access | §4.1 |
+| **Semantic memory formation** (episodic details compressed into general knowledge) | Consolidation merging session logs into topic summaries | §5.3, §5.4 |
+| **Complementary Learning Systems** (hippocampus fast-learning + neocortex slow-learning) | Conversation-mode (fast) + daemon consolidation (slow) | §2.1 |
+| **Ebbinghaus forgetting curve** (exponential decay: R = e^(-t/S)) | Recency score decay formula in vitality computation | §4.1 |
+
+### Full Bibliography
+
+**Neuroscience:**
+- Dudai, Y. (2004). "The Neurobiology of Consolidations, Or, How Stable is the Engram?". *Annual Review of Psychology*, 55, 51-86.
+- Ebbinghaus, H. (1885/1913). *Memory: A Contribution to Experimental Psychology*.
+- McClelland, J.L., McNaughton, B.L. & O'Reilly, R.C. (1995). "Why there are complementary learning systems in the hippocampus and neocortex". *Psychological Review*, 102(3), 419-457.
+- McGaugh, J.L. (2000). "Memory — a Century of Consolidation". *Science*, 287(5451), 248-251.
+- Murre, J.M.J. & Dros, J. (2015). "Replication and Analysis of Ebbinghaus' Forgetting Curve". *PLOS ONE*, 10(7).
+- Nader, K., Schafe, G.E. & LeDoux, J.E. (2000). "Fear memories require protein synthesis in the amygdala for reconsolidation after retrieval". *Nature*, 406, 722-726.
+- Nadel, L. & Moscovitch, M. (1997). "Memory consolidation, retrograde amnesia and the hippocampal complex". *Current Opinion in Neurobiology*, 7(2), 217-227.
+- Sara, S.J. (2000). "Retrieval and reconsolidation: toward a neurobiology of remembering". *Learning & Memory*, 7(2), 73-84.
+- Squire, L.R. & Alvarez, P. (1995). "Retrograde amnesia and memory consolidation: a neurobiological perspective". *Current Opinion in Neurobiology*, 5(2), 169-177.
+
+**AI Memory Architectures:**
+- Packer, C. et al. (2023). "MemGPT: Towards LLMs as Operating Systems". arXiv:2310.08560.
+- Park, J.S. et al. (2023). "Generative Agents: Interactive Simulacra of Human Behavior". arXiv:2304.03442.
+- Sumers, T.R., Yao, S. et al. (2023). "Cognitive Architectures for Language Agents". arXiv:2309.02427.
+- Wang, G. et al. (2023). "Voyager: An Open-Ended Embodied Agent with LLMs". arXiv:2305.16291.
 
 ## Appendix B: Example Lifecycle Walkthrough
 
@@ -791,4 +1177,4 @@ This design draws from established neuroscience research on memory consolidation
 
 ---
 
-*This document is ready for review. It maps biological memory consolidation principles to concrete implementation against Lucent's existing PostgreSQL-based memory system, daemon architecture, and MCP tool layer.*
+*This document is ready for review. It maps biological memory consolidation principles to concrete implementation against Lucent's existing PostgreSQL-based memory system, daemon architecture, and MCP tool layer. Phased rollout enables incremental delivery with validation gates between phases.*
