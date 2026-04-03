@@ -4,6 +4,7 @@ This module handles PostgreSQL connection pooling, initialization,
 and optional OpenTelemetry instrumentation for query tracing.
 """
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -128,9 +129,9 @@ async def _init_connection(conn: Connection) -> None:
 async def _run_migrations(pool: Pool) -> None:
     """Run SQL migration files in order, tracking which have been applied.
 
-    Uses a `_migrations` table to record applied migrations and skip
-    previously-run files. This prevents re-executing non-idempotent
-    statements on every startup.
+    Uses a ``schema_migrations`` table to record applied migrations with
+    SHA-256 checksums.  Skips previously-run files and warns when a file's
+    content has changed since it was applied.
     """
     migrations_dir = Path(__file__).parent / "migrations"
 
@@ -141,33 +142,115 @@ async def _run_migrations(pool: Pool) -> None:
     migration_files = sorted(migrations_dir.glob("*.sql"))
 
     async with pool.acquire() as conn:
-        # Create tracking table if it doesn't exist
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS _migrations (
-                name TEXT PRIMARY KEY,
-                applied_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-            )
-        """)
+        # Bootstrap tracking table (handles legacy _migrations upgrade)
+        await _bootstrap_schema_migrations(conn, migration_files)
 
-        # Get already-applied migrations
-        applied = set()
-        rows = await conn.fetch("SELECT name FROM _migrations")
+        # Get already-applied migrations with checksums
+        applied: dict[str, str | None] = {}
+        rows = await conn.fetch("SELECT name, checksum FROM schema_migrations")
         for row in rows:
-            applied.add(row["name"])
+            applied[row["name"]] = row["checksum"]
 
-        # Apply new migrations (each in its own transaction for atomicity)
+        applied_count = 0
+        skipped_count = 0
+
         for migration_file in migration_files:
             if migration_file.name in applied:
+                # Verify checksum to detect post-application drift
+                current_checksum = _file_checksum(migration_file)
+                recorded = applied[migration_file.name]
+                if recorded and current_checksum != recorded:
+                    logger.warning(
+                        "Migration %s modified after application "
+                        "(recorded: %s, current: %s)",
+                        migration_file.name,
+                        recorded[:12],
+                        current_checksum[:12],
+                    )
+                skipped_count += 1
                 continue
 
             sql = migration_file.read_text()
+            checksum = hashlib.sha256(sql.encode()).hexdigest()
             async with conn.transaction():
                 await conn.execute(sql)
                 await conn.execute(
-                    "INSERT INTO _migrations (name) VALUES ($1)",
+                    "INSERT INTO schema_migrations (name, checksum) "
+                    "VALUES ($1, $2)",
                     migration_file.name,
+                    checksum,
                 )
+                applied_count += 1
                 logger.info("Applied migration: %s", migration_file.name)
+
+        if applied_count > 0 or skipped_count > 0:
+            logger.info(
+                "Migrations complete: %d applied, %d skipped",
+                applied_count,
+                skipped_count,
+            )
+
+
+async def _bootstrap_schema_migrations(
+    conn: Connection,
+    migration_files: list[Path],
+) -> None:
+    """Create the schema_migrations table and migrate from legacy _migrations.
+
+    On first run against a database that used the old ``_migrations`` table,
+    copies all records across and backfills checksums from current file
+    content, then drops the legacy table.
+    """
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            name        TEXT PRIMARY KEY,
+            checksum    TEXT,
+            applied_at  TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+    """)
+
+    # Check for legacy _migrations table
+    legacy_exists = await conn.fetchval(
+        "SELECT EXISTS ("
+        "  SELECT FROM information_schema.tables"
+        "  WHERE table_schema = 'public' AND table_name = '_migrations'"
+        ")"
+    )
+
+    if not legacy_exists:
+        return
+
+    # Copy records that aren't already in schema_migrations
+    migrated = await conn.fetch(
+        "INSERT INTO schema_migrations (name, applied_at) "
+        "SELECT name, applied_at FROM _migrations "
+        "WHERE name NOT IN (SELECT name FROM schema_migrations) "
+        "RETURNING name"
+    )
+
+    if migrated:
+        # Backfill checksums from current file content
+        file_map = {f.name: f for f in migration_files}
+        for row in migrated:
+            name = row["name"]
+            if name in file_map:
+                checksum = _file_checksum(file_map[name])
+                await conn.execute(
+                    "UPDATE schema_migrations SET checksum = $1 WHERE name = $2",
+                    checksum,
+                    name,
+                )
+        logger.info(
+            "Migrated %d entries from legacy _migrations table", len(migrated)
+        )
+
+    await conn.execute("DROP TABLE _migrations")
+    logger.info("Dropped legacy _migrations table")
+
+
+def _file_checksum(path: Path) -> str:
+    """Return the SHA-256 hex digest of a file's UTF-8 content."""
+    return hashlib.sha256(path.read_text().encode()).hexdigest()
 
 
 async def get_pool() -> Pool:
