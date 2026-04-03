@@ -427,7 +427,7 @@ class RequestRepository:
         rejected_by: str,
         comment: str,
     ) -> dict | None:
-        """Reject a pending_approval request — cancels it with feedback."""
+        """Reject a pending_approval request — enters rejection_processing for daemon feedback loop."""
         now = datetime.now(timezone.utc)
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -436,8 +436,7 @@ class RequestRepository:
                        approved_by = $3::uuid,
                        approved_at = $4,
                        approval_comment = $5,
-                       status = 'cancelled',
-                       completed_at = $4,
+                       status = 'rejection_processing',
                        updated_at = $4
                    WHERE id = $1::uuid
                      AND organization_id = $2::uuid

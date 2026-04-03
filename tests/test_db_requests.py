@@ -562,7 +562,7 @@ class TestApprovalGate:
         result = await repo.reject_request(str(r["id"]), org, str(test_user["id"]), "not needed")
         assert result is not None
         assert result["approval_status"] == "rejected"
-        assert result["status"] == "cancelled"
+        assert result["status"] == "rejection_processing"
         assert result["approval_comment"] == "not needed"
 
     @pytest.mark.asyncio

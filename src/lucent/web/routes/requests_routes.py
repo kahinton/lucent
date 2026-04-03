@@ -70,7 +70,7 @@ async def activity_list(
     # Count pending approvals for the badge (exclude cancelled)
     async with pool.acquire() as conn:
         pending_approval_count = await conn.fetchval(
-            "SELECT COUNT(*) FROM requests WHERE organization_id = $1 AND approval_status = 'pending_approval' AND status != 'cancelled'",
+            "SELECT COUNT(*) FROM requests WHERE organization_id = $1 AND approval_status = 'pending_approval' AND status NOT IN ('cancelled', 'rejection_processing')",
             user.organization_id,
         ) or 0
 

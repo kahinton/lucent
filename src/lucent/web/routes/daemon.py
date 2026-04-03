@@ -151,7 +151,7 @@ async def daemon_review_queue(
 
     async with pool.acquire() as conn:
         total_count = await conn.fetchval(
-            "SELECT COUNT(*) FROM requests WHERE organization_id = $1 AND approval_status = 'pending_approval' AND status != 'cancelled'",
+            "SELECT COUNT(*) FROM requests WHERE organization_id = $1 AND approval_status = 'pending_approval' AND status NOT IN ('cancelled', 'rejection_processing')",
             user.organization_id,
         )
 
@@ -164,7 +164,7 @@ async def daemon_review_queue(
                LEFT JOIN users u ON r.created_by = u.id
                WHERE r.organization_id = $1
                  AND r.approval_status = 'pending_approval'
-                 AND r.status != 'cancelled'
+                  AND r.status NOT IN ('cancelled', 'rejection_processing')
                ORDER BY
                  CASE r.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1
                                  WHEN 'medium' THEN 2 ELSE 3 END,
@@ -271,7 +271,7 @@ async def daemon_review_action(
                     f"Reason: {comment.strip()}\n"
                     f"Description: {req.get('description', 'N/A')}"
                 ),
-                tags=["rejection-lesson", "approval-rejected", "learning-extraction"],
+                tags=["rejection-lesson", "approval-rejected", "feedback-rejected", "learning-extraction"],
                 metadata={
                     "request_id": str(request_id),
                     "reviewer": user.display_name or user.email,

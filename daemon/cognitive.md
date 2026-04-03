@@ -14,6 +14,7 @@ Each cycle: perceive, reason, decide, act.
 - Load `daemon-state` memory for what happened last cycle
 - Check for `daemon-message` memories (messages from collaborators)
 - Check for `feedback-approved` and `feedback-rejected` memories (process these FIRST)
+- **Check for `rejection_processing` requests** (auto-injected into prompt — process these BEFORE any new work)
 - **Call `list_active_work()` to see ALL active requests and their task status breakdown** — this shows what's already planned, in progress, or queued. **This is the primary deduplication mechanism** — review this data before creating any new requests to avoid duplicates.
 - Call `list_pending_requests()` to find requests waiting for task planning (subset of active work with 0 tasks)
 - Call `list_pending_tasks()` to see what's queued for dispatch
@@ -184,6 +185,21 @@ When in idle back-off mode, still do a lightweight goal check:
 4. Tag the original memory with `feedback-processed` and `rejection-lesson`
 
 **Wake signal**: Web API fires `pg_notify('request_ready')` on rejection → you wake immediately to course-correct
+
+### Processing Rejected Requests (status: `rejection_processing`)
+
+When requests are rejected by the user, they enter `rejection_processing` status. These are auto-injected into your prompt with the rejection reason. **Process them before creating any new work.**
+
+For each `rejection_processing` request:
+1. Call `get_request_details` to see the linked goal memories
+2. Read the `approval_comment` — this is the user's rejection reason
+3. Update each linked goal memory based on the feedback:
+   - If the goal is obsolete or already accomplished → update `metadata.status` to `'abandoned'` and add the reason to the goal's content
+   - If the approach was wrong but the goal is still valid → add the rejection feedback to the goal's content so future requests take it into account
+4. Call `update_request_status` to transition the request to `'cancelled'`
+5. Search for `feedback-rejected` memories linked to this request and tag them `feedback-processed`
+
+**This is critical for the feedback loop.** Until you process these, the request stays in `rejection_processing` which blocks duplicate creation through dedup. Completing this step closes the loop and ensures your future work reflects the user's feedback.
 
 ## Roles (Sub-Agents)
 

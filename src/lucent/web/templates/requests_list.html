@@ -80,6 +80,7 @@
         <a href="/activity?status=completed&per_page={{ per_page }}{% if filter_source %}&source={{ filter_source }}{% endif %}" class="px-3 py-1 text-sm rounded-md {% if filter_status == 'completed' %}bg-green-500 text-white{% else %}bg-green-50 text-green-700 hover:bg-green-100{% endif %}">Completed</a>
         <a href="/activity?status=failed&per_page={{ per_page }}{% if filter_source %}&source={{ filter_source }}{% endif %}" class="px-3 py-1 text-sm rounded-md {% if filter_status == 'failed' %}bg-red-500 text-white{% else %}bg-red-50 text-red-700 hover:bg-red-100{% endif %}">Failed</a>
         <a href="/activity?status=cancelled&per_page={{ per_page }}{% if filter_source %}&source={{ filter_source }}{% endif %}" class="px-3 py-1 text-sm rounded-md {% if filter_status == 'cancelled' %}bg-gray-500 text-white{% else %}bg-gray-50 text-gray-500 hover:bg-gray-100{% endif %}">Cancelled</a>
+        <a href="/activity?status=rejection_processing&per_page={{ per_page }}{% if filter_source %}&source={{ filter_source }}{% endif %}" class="px-3 py-1 text-sm rounded-md {% if filter_status == 'rejection_processing' %}bg-orange-500 text-white{% else %}bg-orange-50 text-orange-600 hover:bg-orange-100{% endif %}">Rejection Processing</a>
     </div>
 </div>
 

@@ -1370,10 +1370,40 @@ async def build_cognitive_prompt() -> str:
             "its milestone status instead of creating new work.\n"
         )
 
+    # Fetch rejection_processing requests — need daemon feedback loop
+    rejection_section = ""
+    rejection_data = await RequestAPI.list_requests(status="rejection_processing")
+    if rejection_data:
+        items = rejection_data.get("items", []) if isinstance(rejection_data, dict) else []
+        if items:
+            lines = []
+            for req in items:
+                req_id = req.get("id", "")
+                title = req.get("title", "")
+                comment = req.get("approval_comment", "No reason given")
+                lines.append(
+                    f"- **{title}** (id: {req_id})\n"
+                    f"  Rejection reason: {comment}"
+                )
+            rejection_section = (
+                "\n## Rejected Requests Awaiting Processing (auto-injected)\n"
+                + "\n".join(lines)
+                + "\n\nThese requests were rejected by the user. You MUST process each one:\n"
+                "1. Read the rejection reason carefully\n"
+                "2. Fetch the linked goal memories for the request using `get_request_details`\n"
+                "3. Update each linked goal memory based on the feedback:\n"
+                "   - If the goal itself is obsolete/already done → set metadata.status to 'abandoned' with the reason\n"
+                "   - If just the approach was wrong → add the rejection feedback to the goal's content\n"
+                "4. Transition the request to 'cancelled' using `update_request_status`\n"
+                "5. Tag the feedback-rejected memory as 'feedback-processed'\n\n"
+                "Do NOT skip this. Do NOT create new requests for these goals until processing is complete.\n"
+            )
+
     return f"""
 {cognitive_md}
 {active_work_section}
 {recently_completed_section}
+{rejection_section}
 --- AGENT IDENTITY ---
 {agent_def}
 

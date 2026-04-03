@@ -343,7 +343,7 @@ def create_app() -> FastAPI:
                                 """SELECT COUNT(*) FROM requests
                                    WHERE organization_id = $1
                                      AND approval_status = 'pending_approval'
-                                     AND status != 'cancelled'""",
+                                     AND status NOT IN ('cancelled', 'rejection_processing')""",
                                 org_id,
                             )
                         request.state.pending_approval_count = count or 0
