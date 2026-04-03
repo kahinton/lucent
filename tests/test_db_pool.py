@@ -10,7 +10,10 @@ import pytest
 import lucent.db.pool as pool_module
 from lucent.db.pool import (
     _bootstrap_schema_migrations,
+    _discover_forward_migration_files,
     _file_checksum,
+    _parse_migration_metadata,
+    _rollback_migrations,
     _init_connection,
     _run_migrations,
     close_db,
@@ -374,6 +377,154 @@ class TestBootstrapSchemaMigrations:
 
         execute_calls = [str(c) for c in mock_conn.execute.call_args_list]
         assert not any("DROP TABLE" in s for s in execute_calls)
+
+
+class TestRollbackMigrations:
+    """Tests for _rollback_migrations()."""
+
+    async def test_single_rollback(self, tmp_path):
+        """Rollback latest migration and delete tracking row."""
+        migrations_dir = tmp_path / "migrations"
+        migrations_dir.mkdir()
+        (migrations_dir / "001_init.sql").write_text("CREATE TABLE test (id INT);")
+        (migrations_dir / "001_init.down.sql").write_text("DROP TABLE test;")
+        (migrations_dir / "002_add_col.sql").write_text("ALTER TABLE test ADD COLUMN name TEXT;")
+        (migrations_dir / "002_add_col.down.sql").write_text("ALTER TABLE test DROP COLUMN name;")
+
+        mock_conn = AsyncMock()
+        mock_conn.fetchval.return_value = False
+        mock_conn.fetch.return_value = [
+            {"name": "002_add_col.sql", "checksum": hashlib.sha256("ALTER TABLE test ADD COLUMN name TEXT;".encode()).hexdigest()},
+            {"name": "001_init.sql", "checksum": hashlib.sha256("CREATE TABLE test (id INT);".encode()).hexdigest()},
+        ]
+        mock_tx = MagicMock()
+        mock_tx.__aenter__ = AsyncMock()
+        mock_tx.__aexit__ = AsyncMock(return_value=False)
+        mock_conn.transaction = MagicMock(return_value=mock_tx)
+        mock_pool = _make_mock_pool(mock_conn)
+
+        with patch("lucent.db.pool.Path") as mock_path_cls:
+            mock_path_cls.return_value.parent.__truediv__ = MagicMock(return_value=migrations_dir)
+            rolled_back = await _rollback_migrations(mock_pool, steps=1)
+
+        assert rolled_back == 1
+        execute_calls = [str(c) for c in mock_conn.execute.call_args_list]
+        assert any("ALTER TABLE test DROP COLUMN name;" in s for s in execute_calls)
+        assert any("DELETE FROM schema_migrations WHERE name = $1" in s for s in execute_calls)
+
+    async def test_multi_step_rollback(self, tmp_path):
+        """Rollback multiple migrations in reverse order."""
+        migrations_dir = tmp_path / "migrations"
+        migrations_dir.mkdir()
+        (migrations_dir / "001_base.sql").write_text("CREATE TABLE test (id INT);")
+        (migrations_dir / "001_base.down.sql").write_text("DROP TABLE test;")
+        (migrations_dir / "002_a.sql").write_text("ALTER TABLE test ADD COLUMN a INT;")
+        (migrations_dir / "002_a.down.sql").write_text("ALTER TABLE test DROP COLUMN a;")
+        (migrations_dir / "003_b.sql").write_text("ALTER TABLE test ADD COLUMN b INT;")
+        (migrations_dir / "003_b.down.sql").write_text("ALTER TABLE test DROP COLUMN b;")
+
+        mock_conn = AsyncMock()
+        mock_conn.fetchval.return_value = False
+        mock_conn.fetch.return_value = [
+            {"name": "003_b.sql", "checksum": hashlib.sha256("ALTER TABLE test ADD COLUMN b INT;".encode()).hexdigest()},
+            {"name": "002_a.sql", "checksum": hashlib.sha256("ALTER TABLE test ADD COLUMN a INT;".encode()).hexdigest()},
+            {"name": "001_base.sql", "checksum": hashlib.sha256("CREATE TABLE test (id INT);".encode()).hexdigest()},
+        ]
+        mock_tx = MagicMock()
+        mock_tx.__aenter__ = AsyncMock()
+        mock_tx.__aexit__ = AsyncMock(return_value=False)
+        mock_conn.transaction = MagicMock(return_value=mock_tx)
+        mock_pool = _make_mock_pool(mock_conn)
+
+        with patch("lucent.db.pool.Path") as mock_path_cls:
+            mock_path_cls.return_value.parent.__truediv__ = MagicMock(return_value=migrations_dir)
+            rolled_back = await _rollback_migrations(mock_pool, steps=2)
+
+        assert rolled_back == 2
+        sql_calls = [c[0][0] for c in mock_conn.execute.call_args_list if c[0]]
+        rollback_sqls = [s for s in sql_calls if "DROP COLUMN" in s]
+        assert rollback_sqls == [
+            "ALTER TABLE test DROP COLUMN b;",
+            "ALTER TABLE test DROP COLUMN a;",
+        ]
+
+    async def test_rollback_irreversible_migration_fails(self, tmp_path, caplog):
+        """Rollback fails for irreversible migrations without allow_irreversible."""
+        import logging
+
+        migrations_dir = tmp_path / "migrations"
+        migrations_dir.mkdir()
+        (migrations_dir / "001_base.sql").write_text("CREATE TABLE test (id INT);")
+        (migrations_dir / "001_base.down.sql").write_text("DROP TABLE test;")
+        (migrations_dir / "002_data.sql").write_text(
+            "-- lucent: rollback=irreversible\nINSERT INTO test (id) VALUES (1);"
+        )
+
+        mock_conn = AsyncMock()
+        mock_conn.fetchval.return_value = False
+        mock_conn.fetch.return_value = [
+            {"name": "002_data.sql", "checksum": hashlib.sha256("-- lucent: rollback=irreversible\nINSERT INTO test (id) VALUES (1);".encode()).hexdigest()},
+            {"name": "001_base.sql", "checksum": hashlib.sha256("CREATE TABLE test (id INT);".encode()).hexdigest()},
+        ]
+        mock_tx = MagicMock()
+        mock_tx.__aenter__ = AsyncMock()
+        mock_tx.__aexit__ = AsyncMock(return_value=False)
+        mock_conn.transaction = MagicMock(return_value=mock_tx)
+        mock_pool = _make_mock_pool(mock_conn)
+
+        with patch("lucent.db.pool.Path") as mock_path_cls:
+            mock_path_cls.return_value.parent.__truediv__ = MagicMock(return_value=migrations_dir)
+            with caplog.at_level(logging.WARNING, logger="lucent.db.pool"):
+                with pytest.raises(RuntimeError, match="irreversible"):
+                    await _rollback_migrations(mock_pool, steps=1)
+
+        assert any("irreversible" in r.message for r in caplog.records)
+
+    async def test_rollback_no_migrations_to_reverse(self, tmp_path):
+        """Rollback is a no-op when no migrations were applied."""
+        migrations_dir = tmp_path / "migrations"
+        migrations_dir.mkdir()
+        (migrations_dir / "001_init.sql").write_text("CREATE TABLE test (id INT);")
+        (migrations_dir / "001_init.down.sql").write_text("DROP TABLE test;")
+
+        mock_conn = AsyncMock()
+        mock_conn.fetchval.return_value = False
+        mock_conn.fetch.return_value = []
+        mock_pool = _make_mock_pool(mock_conn)
+
+        with patch("lucent.db.pool.Path") as mock_path_cls:
+            mock_path_cls.return_value.parent.__truediv__ = MagicMock(return_value=migrations_dir)
+            rolled_back = await _rollback_migrations(mock_pool, steps=1)
+
+        assert rolled_back == 0
+        execute_sqls = [str(c) for c in mock_conn.execute.call_args_list]
+        assert not any("DELETE FROM schema_migrations" in s for s in execute_sqls)
+
+
+class TestMigrationFileMetadata:
+    """Tests for migration file discovery and metadata parsing."""
+
+    def test_forward_discovery_excludes_down_files(self, tmp_path):
+        migrations_dir = tmp_path / "migrations"
+        migrations_dir.mkdir()
+        up = migrations_dir / "001_init.sql"
+        down = migrations_dir / "001_init.down.sql"
+        up.write_text("SELECT 1;")
+        down.write_text("SELECT 2;")
+
+        files = _discover_forward_migration_files(migrations_dir)
+        assert files == [up]
+
+    def test_parse_metadata(self, tmp_path):
+        migration = tmp_path / "001_test.sql"
+        migration.write_text(
+            "-- lucent: rollback=irreversible\n"
+            "-- lucent: warning=Data loss expected\n"
+            "CREATE TABLE x (id INT);\n"
+        )
+        metadata = _parse_migration_metadata(migration)
+        assert metadata["rollback"] == "irreversible"
+        assert metadata["warning"] == "Data loss expected"
 
 
 class TestFileChecksum:

@@ -56,7 +56,8 @@ On some managed databases (e.g., RDS), you may need to enable this through the p
 
 ### Migration Errors
 
-Migrations run automatically on startup and are tracked in a `_migrations` table. If a migration fails:
+Migrations run automatically on startup and are tracked in `schema_migrations`.
+If a migration fails:
 
 1. Check the logs for the specific SQL error:
 
@@ -70,10 +71,10 @@ docker compose logs lucent | grep -i migration
 
 ```sql
 -- Check applied migrations
-SELECT * FROM _migrations ORDER BY applied_at;
+SELECT name, checksum, applied_at FROM schema_migrations ORDER BY applied_at;
 
--- Remove a failed migration entry to retry
-DELETE FROM _migrations WHERE name = 'failed_migration_file.sql';
+-- Remove a failed migration entry to retry (only after fixing DB state)
+DELETE FROM schema_migrations WHERE name = 'failed_migration_file.sql';
 ```
 
 Then restart the server to re-apply.

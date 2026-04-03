@@ -1,4 +1,6 @@
 -- Migration 048: Migrate review-related memories into the reviews table
+-- lucent: rollback=irreversible
+-- lucent: warning=Data transformation migration; requires manual recovery if reverted
 --
 -- This is the core motivation for the reviews refactoring: removing review
 -- pollution from the memory store. Reviews stored as memories (tagged with

@@ -613,8 +613,9 @@ kubectl -n lucent run lucent-migrate --rm -i --restart=Never \
   -- python -m lucent.migrate
 ```
 
-> **Warning:** Never downgrade the schema. Lucent migrations are forward-only. Always back up
-> before upgrading to a new major version.
+> **Warning:** Schema rollback is only supported for migrations that ship a paired
+> `.down.sql` file and are not marked `-- lucent: rollback=irreversible`. Always
+> back up before upgrading to a new major version.
 
 ---
 

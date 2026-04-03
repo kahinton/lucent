@@ -154,7 +154,22 @@ export DATABASE_URL=postgresql://lucent:your_secure_password@your-host:5432/luce
 
 ### Migrations
 
-Lucent runs migrations automatically on startup. A `_migrations` table tracks which SQL files have been applied. No manual migration steps are needed.
+Lucent runs migrations automatically on startup. A `schema_migrations` table tracks
+applied migration files and checksums.
+
+Rollback support is available for migrations that provide paired rollback files:
+
+- Forward migration: `NNN_description.sql`
+- Rollback migration: `NNN_description.down.sql`
+
+Migration metadata comments are supported at the top of migration files:
+
+```sql
+-- lucent: rollback=irreversible
+-- lucent: warning=Data loss possible when rolling back
+```
+
+If a migration is marked irreversible (or has no `.down.sql` file), rollback fails by default.
 
 ### Backups
 
