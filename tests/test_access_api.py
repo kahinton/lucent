@@ -271,6 +271,50 @@ class TestMostAccessed:
         assert resp.status_code == 200
 
 
+class TestLeastAccessed:
+    async def test_least_accessed_personal(self, member_client):
+        resp = await member_client.get("/api/access/least-accessed")
+        assert resp.status_code == 200
+        assert isinstance(resp.json(), list)
+
+    async def test_least_accessed_org_wide_member_forbidden(self, member_client):
+        resp = await member_client.get(
+            "/api/access/least-accessed", params={"organization_wide": "true"}
+        )
+        assert resp.status_code == 403
+
+    async def test_least_accessed_org_wide_admin(self, admin_client):
+        resp = await admin_client.get(
+            "/api/access/least-accessed", params={"organization_wide": "true"}
+        )
+        assert resp.status_code == 200
+
+
+class TestAccessFrequency:
+    async def test_access_frequency_personal(self, member_client):
+        resp = await member_client.get("/api/access/frequency")
+        assert resp.status_code == 200
+        assert isinstance(resp.json(), list)
+
+    async def test_access_frequency_with_bucket(self, member_client):
+        resp = await member_client.get(
+            "/api/access/frequency",
+            params={"bucket": "hour", "limit": 10},
+        )
+        assert resp.status_code == 200
+
+    async def test_access_frequency_org_wide_member_forbidden(self, member_client):
+        resp = await member_client.get(
+            "/api/access/frequency",
+            params={"organization_wide": "true"},
+        )
+        assert resp.status_code == 403
+
+    async def test_access_frequency_org_wide_admin(self, admin_client):
+        resp = await admin_client.get("/api/access/frequency", params={"organization_wide": "true"})
+        assert resp.status_code == 200
+
+
 # ============================================================================
 # GET /api/access/organization/activity — org activity (not implemented)
 # ============================================================================

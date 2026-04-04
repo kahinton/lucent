@@ -31,6 +31,7 @@ from lucent.db.reviews import ReviewRepository
 
 # TypedDict definitions for repository return values
 from lucent.db.types import (
+    AccessFrequencyRecord,
     AccessLogRecord,
     AccessLogResult,
     ApiKeyRecord,
@@ -82,5 +83,6 @@ __all__ = [
     "AuditLogResult",
     "AccessLogRecord",
     "AccessLogResult",
+    "AccessFrequencyRecord",
     "MostAccessedRecord",
 ]

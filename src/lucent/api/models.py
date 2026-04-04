@@ -54,6 +54,7 @@ class MemoryResponse(BaseModel):
     organization_id: UUID | None
     shared: bool
     last_accessed_at: datetime | None
+    access_count: int = 0
 
 
 class MemoryListResponse(BaseModel):
@@ -104,6 +105,7 @@ class SearchResultMemory(BaseModel):
     organization_id: UUID | None
     shared: bool
     last_accessed_at: datetime | None
+    access_count: int = 0
 
 
 class SearchResponse(BaseModel):
@@ -179,7 +181,14 @@ class MostAccessedItem(BaseModel):
 
     memory_id: UUID
     access_count: int
-    last_accessed: datetime
+    last_accessed: datetime | None
+
+
+class AccessFrequencyItem(BaseModel):
+    """Access frequency bucket item."""
+
+    bucket_start: datetime
+    access_count: int
 
 
 # =============================================================================

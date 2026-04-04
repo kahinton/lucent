@@ -48,6 +48,7 @@ def _memory_to_response(memory: dict[str, Any]) -> MemoryResponse:
         organization_id=memory.get("organization_id"),
         shared=memory.get("shared", False),
         last_accessed_at=memory.get("last_accessed_at"),
+        access_count=memory.get("access_count", 0),
     )
 
 
@@ -261,6 +262,9 @@ async def get_memory(
         user_id=user.id,
         organization_id=user.organization_id,
     )
+
+    counts = await access_repo.get_access_counts([memory_id])
+    result["access_count"] = counts.get(memory_id, 0)
 
     return _memory_to_response(result)
 

@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Query, status
 
 from lucent.api.deps import AdminUser, AuthenticatedUser
 from lucent.api.models import (
+    AccessFrequencyItem,
     AccessLogEntry,
     AccessLogResponse,
     MostAccessedItem,
@@ -181,6 +182,96 @@ async def get_most_accessed_memories(
             memory_id=r["memory_id"],
             access_count=r["access_count"],
             last_accessed=r["last_accessed"],
+        )
+        for r in result
+    ]
+
+
+@router.get(
+    "/least-accessed",
+    response_model=list[MostAccessedItem],
+)
+async def get_least_accessed_memories(
+    user: AuthenticatedUser,
+    since: datetime | None = Query(default=None, description="Count accesses after this date"),
+    limit: int = Query(default=20, ge=1, le=100),
+    organization_wide: bool = Query(
+        default=False, description="Include all org members (admin only)"
+    ),
+) -> list[MostAccessedItem]:
+    """Get the least frequently accessed memories, including never-accessed items."""
+    pool = await get_pool()
+    access_repo = AccessRepository(pool)
+
+    if organization_wide:
+        if not user.has_permission(Permission.ACCESS_VIEW_ORG):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Organization-wide access stats require admin permissions",
+            )
+        result = await access_repo.get_least_accessed(
+            organization_id=user.organization_id,
+            since=since,
+            limit=limit,
+        )
+    else:
+        result = await access_repo.get_least_accessed(
+            user_id=user.id,
+            since=since,
+            limit=limit,
+        )
+
+    return [
+        MostAccessedItem(
+            memory_id=r["memory_id"],
+            access_count=r["access_count"],
+            last_accessed=r["last_accessed"],
+        )
+        for r in result
+    ]
+
+
+@router.get(
+    "/frequency",
+    response_model=list[AccessFrequencyItem],
+)
+async def get_access_frequency(
+    user: AuthenticatedUser,
+    bucket: str = Query(default="day", pattern="^(hour|day|week)$"),
+    since: datetime | None = Query(default=None, description="Count accesses after this date"),
+    limit: int = Query(default=90, ge=1, le=500),
+    organization_wide: bool = Query(
+        default=False, description="Include all org members (admin only)"
+    ),
+) -> list[AccessFrequencyItem]:
+    """Get memory access frequency over time."""
+    pool = await get_pool()
+    access_repo = AccessRepository(pool)
+
+    if organization_wide:
+        if not user.has_permission(Permission.ACCESS_VIEW_ORG):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Organization-wide access stats require admin permissions",
+            )
+        result = await access_repo.get_access_frequency(
+            bucket=bucket,
+            organization_id=user.organization_id,
+            since=since,
+            limit=limit,
+        )
+    else:
+        result = await access_repo.get_access_frequency(
+            bucket=bucket,
+            user_id=user.id,
+            since=since,
+            limit=limit,
+        )
+
+    return [
+        AccessFrequencyItem(
+            bucket_start=r["bucket_start"],
+            access_count=r["access_count"],
         )
         for r in result
     ]

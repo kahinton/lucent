@@ -201,4 +201,11 @@ class MostAccessedRecord(TypedDict):
 
     memory_id: UUID
     access_count: int
-    last_accessed: datetime
+    last_accessed: datetime | None
+
+
+class AccessFrequencyRecord(TypedDict):
+    """Record returned by AccessRepository.get_access_frequency()."""
+
+    bucket_start: datetime
+    access_count: int
