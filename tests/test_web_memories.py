@@ -169,6 +169,22 @@ class TestMemoriesList:
         resp = await client.get("/memories")
         assert "memor" in resp.text.lower()
 
+    async def test_list_shows_access_count(self, client, web_memory, db_pool, web_user):
+        user, org, _token = web_user
+        from lucent.db.access import AccessRepository
+
+        access_repo = AccessRepository(db_pool)
+        await access_repo.log_access(
+            memory_id=web_memory["id"],
+            access_type="view",
+            user_id=user["id"],
+            organization_id=org["id"],
+        )
+
+        resp = await client.get("/memories")
+        assert resp.status_code == 200
+        assert "views" in resp.text
+
     async def test_list_with_query_param(self, client, web_memory):
         resp = await client.get("/memories", params={"q": "Test memory"})
         assert resp.status_code == 200
@@ -294,6 +310,11 @@ class TestMemoryDetail:
     async def test_detail_contains_content(self, client, web_memory):
         resp = await client.get(f"/memories/{web_memory['id']}")
         assert "Test memory content" in resp.text
+
+    async def test_detail_shows_access_count(self, client, web_memory):
+        resp = await client.get(f"/memories/{web_memory['id']}")
+        assert resp.status_code == 200
+        assert "Access Count" in resp.text
 
     async def test_detail_not_found(self, client):
         resp = await client.get(f"/memories/{uuid4()}")

@@ -21,6 +21,7 @@ from . import (
     schedules,
     secrets,
     settings,
+    usage_analytics,
 )
 
 # Re-export symbols that tests and other modules import directly
@@ -35,6 +36,7 @@ router.include_router(chat.router)
 router.include_router(dashboard.router)
 router.include_router(definitions.router)
 router.include_router(daemon.router)
+router.include_router(usage_analytics.router)
 router.include_router(memories.router)
 router.include_router(audit.router)
 router.include_router(admin.router)

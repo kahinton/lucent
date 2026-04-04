@@ -36,6 +36,7 @@ async def memories_list(
     user = await get_user_context(request)
     pool = await get_pool()
     repo = MemoryRepository(pool)
+    access_repo = AccessRepository(pool)
 
     # Treat empty strings as None
     q = q if q else None
@@ -57,6 +58,12 @@ async def memories_list(
         requesting_user_id=user.id,
         requesting_org_id=user.organization_id,
     )
+
+    # Attach access counts for list display
+    memory_ids = [m["id"] for m in result["memories"]]
+    access_counts = await access_repo.get_access_counts(memory_ids)
+    for memory in result["memories"]:
+        memory["access_count"] = access_counts.get(memory["id"], 0)
 
     # Get tags for filter (with access control)
     tags = await repo.get_existing_tags(
@@ -291,6 +298,10 @@ async def memory_detail(request: Request, memory_id: UUID):
 
     # Get access history
     access = await access_repo.get_access_history(memory_id, limit=10)
+
+    # Access count (includes this view)
+    counts = await access_repo.get_access_counts([memory_id])
+    memory["access_count"] = counts.get(memory_id, 0)
 
     is_owner = memory.get("user_id") == user.id
 

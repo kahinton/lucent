@@ -191,6 +191,13 @@
                         </svg>
                         Memories
                     </a>
+
+                    <a href="/memories/analytics" class="flex items-center gap-3 px-3 py-2 text-sm rounded-lg transition-colors {% if request.url.path.startswith('/memories/analytics') %}bg-primary-50 text-primary-700{% else %}text-gray-600 hover:bg-gray-50{% endif %}">
+                        <svg class="w-4 h-4 {% if request.url.path.startswith('/memories/analytics') %}text-primary-600{% else %}text-gray-400{% endif %}" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M3 13.125C3 12.503 3.503 12 4.125 12h3.75c.622 0 1.125.503 1.125 1.125V20.25A.75.75 0 018.25 21h-4.5a.75.75 0 01-.75-.75v-7.125zM10.5 8.625c0-.622.503-1.125 1.125-1.125h3.75c.622 0 1.125.503 1.125 1.125v11.625a.75.75 0 01-.75.75h-4.5a.75.75 0 01-.75-.75V8.625zM18 4.125C18 3.503 18.503 3 19.125 3h.75C20.497 3 21 3.503 21 4.125V20.25a.75.75 0 01-.75.75h-1.5a.75.75 0 01-.75-.75V4.125z" />
+                        </svg>
+                        Usage Analytics
+                    </a>
                     
                     <a href="/activity" class="flex items-center gap-3 px-3 py-2.5 text-sm font-medium rounded-lg transition-colors {% if '/activity' in request.url.path or '/requests' in request.url.path %}bg-primary-50 text-primary-700{% else %}text-gray-700 hover:bg-gray-50{% endif %}">
                         <svg class="w-5 h-5 {% if '/activity' in request.url.path or '/requests' in request.url.path %}text-primary-600{% else %}text-gray-400{% endif %}" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
