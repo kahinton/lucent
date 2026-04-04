@@ -24,6 +24,18 @@ from lucent.db.audit import (
 
 logger = logging.getLogger(__name__)
 
+BUILTIN_PROTECTION_MSG = (
+    "Built-in definitions cannot be modified by the daemon. "
+    "Update the on-disk source file instead."
+)
+
+
+class BuiltInProtectionError(Exception):
+    """Raised when a daemon tries to modify a built-in definition."""
+
+    def __init__(self, msg: str = BUILTIN_PROTECTION_MSG):
+        super().__init__(msg)
+
 
 class DefinitionRepository:
     """Repository for managing agent, skill, and MCP server definitions."""
@@ -35,6 +47,32 @@ class DefinitionRepository:
     @staticmethod
     def _role_value(role: str | None) -> str:
         return role or "member"
+
+    async def _check_builtin_protection(
+        self,
+        table: str,
+        item_id: str,
+        org_id: str,
+        requester_role: str | None,
+    ) -> None:
+        """Raise BuiltInProtectionError if a daemon tries to modify a built-in object.
+
+        Built-in objects have their source of truth on disk (.github/agents/definitions/,
+        .github/skills/, etc.).  DB-only updates are ephemeral — they get overwritten on
+        server restart when files are reloaded.  The daemon should be blocked from making
+        changes it cannot persist.
+
+        Admin and owner roles are still allowed to update built-in objects.
+        """
+        if requester_role != "daemon":
+            return
+        async with self.pool.acquire() as conn:
+            scope = await conn.fetchval(
+                f"SELECT scope FROM {table} WHERE id = $1 AND organization_id = $2",
+                item_id, org_id,
+            )
+        if scope == "built-in":
+            raise BuiltInProtectionError()
 
     async def _audit(
         self,
@@ -186,7 +224,12 @@ class DefinitionRepository:
         )
         return result
 
-    async def update_agent(self, agent_id: str, org_id: str, **kwargs) -> dict | None:
+    async def update_agent(
+        self, agent_id: str, org_id: str, *, requester_role: str | None = None, **kwargs,
+    ) -> dict | None:
+        await self._check_builtin_protection(
+            "agent_definitions", agent_id, org_id, requester_role,
+        )
         sets = []
         params: list[Any] = []
         for key in ("name", "description", "content", "status", "owner_user_id", "owner_group_id"):
@@ -737,7 +780,12 @@ class DefinitionRepository:
             )
         return updated
 
-    async def update_skill(self, skill_id: str, org_id: str, **kwargs) -> dict | None:
+    async def update_skill(
+        self, skill_id: str, org_id: str, *, requester_role: str | None = None, **kwargs,
+    ) -> dict | None:
+        await self._check_builtin_protection(
+            "skill_definitions", skill_id, org_id, requester_role,
+        )
         sets = []
         params: list[Any] = []
         for key in ("name", "description", "content", "status", "owner_user_id", "owner_group_id"):
@@ -772,7 +820,12 @@ class DefinitionRepository:
             )
         return result
 
-    async def update_mcp_server(self, server_id: str, org_id: str, **kwargs) -> dict | None:
+    async def update_mcp_server(
+        self, server_id: str, org_id: str, *, requester_role: str | None = None, **kwargs,
+    ) -> dict | None:
+        await self._check_builtin_protection(
+            "mcp_server_configs", server_id, org_id, requester_role,
+        )
         sets = []
         params: list[Any] = []
         for key in ("name", "description", "server_type", "url", "command",

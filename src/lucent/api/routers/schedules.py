@@ -136,7 +136,13 @@ async def update_schedule(
     fields = {k: v for k, v in body.model_dump(exclude_unset=True).items()}
     if "timezone" in fields:
         fields["timezone_str"] = fields.pop("timezone")
-    result = await repo.update_schedule(schedule_id, str(user.organization_id), **fields)
+    try:
+        result = await repo.update_schedule(
+            schedule_id, str(user.organization_id),
+            requester_role=user.role.value, **fields,
+        )
+    except ValueError as e:
+        raise HTTPException(403, str(e))
     if not result:
         raise HTTPException(404, "Schedule not found")
     return result
@@ -152,7 +158,13 @@ async def toggle_schedule(
     from lucent.db.schedules import ScheduleRepository
 
     repo = ScheduleRepository(pool)
-    result = await repo.toggle_schedule(schedule_id, str(user.organization_id), body.enabled)
+    try:
+        result = await repo.toggle_schedule(
+            schedule_id, str(user.organization_id), body.enabled,
+            requester_role=user.role.value,
+        )
+    except ValueError as e:
+        raise HTTPException(403, str(e))
     if not result:
         raise HTTPException(404, "Schedule not found")
     return result

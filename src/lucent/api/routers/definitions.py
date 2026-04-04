@@ -13,6 +13,7 @@ from lucent.access_control import AccessControlService
 from lucent.api.deps import AdminUser, AuthenticatedUser
 from lucent.db import DefinitionRepository, get_pool
 from lucent.db.audit import AuditRepository
+from lucent.db.definitions import BuiltInProtectionError
 from lucent.services.mcp_discovery import (
     MCPDiscoveryError,
     discover_mcp_tools,
@@ -122,13 +123,17 @@ async def update_agent(agent_id: str, body: CreateAgent, user: AuthenticatedUser
     if not await acl.can_modify(str(user.id), "agent", agent_id, str(user.organization_id)):
         raise HTTPException(404, "Agent not found")
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
-    result = await repo.update_agent(
-        agent_id,
-        str(user.organization_id),
-        name=body.name,
-        description=body.description or "",
-        content=body.content,
-    )
+    try:
+        result = await repo.update_agent(
+            agent_id,
+            str(user.organization_id),
+            requester_role=user.role.value,
+            name=body.name,
+            description=body.description or "",
+            content=body.content,
+        )
+    except BuiltInProtectionError as exc:
+        raise HTTPException(403, str(exc))
     if not result:
         raise HTTPException(404, "Agent not found")
     return result
@@ -388,7 +393,13 @@ async def update_mcp_server(server_id: str, body: UpdateMCPServer, user: Authent
         raise HTTPException(404, "MCP server not found")
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     updates = body.model_dump(exclude_none=True)
-    result = await repo.update_mcp_server(server_id, str(user.organization_id), **updates)
+    try:
+        result = await repo.update_mcp_server(
+            server_id, str(user.organization_id),
+            requester_role=user.role.value, **updates,
+        )
+    except BuiltInProtectionError as exc:
+        raise HTTPException(403, str(exc))
     if not result:
         raise HTTPException(404, "MCP server not found")
     return result

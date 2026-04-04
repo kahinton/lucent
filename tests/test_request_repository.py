@@ -835,6 +835,68 @@ class TestListPendingTasks:
         with pytest.raises(ValueError, match="Invalid dependency_policy"):
             await _make_request(repo, org_id, dependency_policy="invalid")
 
+    # ── retry scenario tests ─────────────────────────────────────────────
+
+    async def test_strict_unblocks_when_retry_completes(self, repo, org_id):
+        """Strict policy: if original task failed but a retry at the same
+        sequence_order completed, later tasks should be unblocked."""
+        req = await _make_request(repo, org_id)
+        rid = str(req["id"])
+        # Create task A at seq 0 and task B at seq 1
+        t_a = await _make_task(repo, rid, org_id, title="Task A", sequence_order=0)
+        await _make_task(repo, rid, org_id, title="Task B", sequence_order=1)
+        # Fail task A
+        await repo.claim_task(str(t_a["id"]), "inst-test")
+        await repo.start_task(str(t_a["id"]))
+        await repo.fail_task(str(t_a["id"]), "boom")
+        # Task B should be blocked (no completed task at seq 0)
+        pending = await repo.list_pending_tasks(org_id)
+        titles = [t["title"] for t in pending["items"]]
+        assert "Task B" not in titles
+        # Create retry task A2 at seq 0 and complete it
+        t_a2 = await _make_task(repo, rid, org_id, title="Task A2", sequence_order=0)
+        await repo.claim_task(str(t_a2["id"]), "inst-test")
+        await repo.complete_task(str(t_a2["id"]), "Retry succeeded")
+        # Now task B should be unblocked
+        pending = await repo.list_pending_tasks(org_id)
+        titles = [t["title"] for t in pending["items"]]
+        assert "Task B" in titles
+
+    async def test_strict_still_blocks_failed_without_retry(self, repo, org_id):
+        """Strict policy: failed task at seq 0 with NO retry should still
+        block seq 1 tasks — the original blocking behavior is preserved."""
+        req = await _make_request(repo, org_id)
+        rid = str(req["id"])
+        t0 = await _make_task(repo, rid, org_id, title="Step 0", sequence_order=0)
+        await _make_task(repo, rid, org_id, title="Step 1", sequence_order=1)
+        await repo.claim_task(str(t0["id"]), "inst-test")
+        await repo.start_task(str(t0["id"]))
+        await repo.fail_task(str(t0["id"]), "boom")
+        pending = await repo.list_pending_tasks(org_id)
+        titles = [t["title"] for t in pending["items"]]
+        assert "Step 1" not in titles
+
+    async def test_permissive_unblocks_when_retry_completes(self, repo, org_id):
+        """Permissive policy: retry scenario also works correctly."""
+        req = await _make_request(repo, org_id, dependency_policy="permissive")
+        rid = str(req["id"])
+        t_a = await _make_task(repo, rid, org_id, title="Task A", sequence_order=0)
+        await _make_task(repo, rid, org_id, title="Task B", sequence_order=1)
+        await repo.claim_task(str(t_a["id"]), "inst-test")
+        await repo.start_task(str(t_a["id"]))
+        await repo.fail_task(str(t_a["id"]), "boom")
+        # Under permissive, B is already unblocked by the failed task
+        pending = await repo.list_pending_tasks(org_id)
+        titles = [t["title"] for t in pending["items"]]
+        assert "Task B" in titles
+        # Adding a completed retry should also keep B unblocked
+        t_a2 = await _make_task(repo, rid, org_id, title="Task A2", sequence_order=0)
+        await repo.claim_task(str(t_a2["id"]), "inst-test")
+        await repo.complete_task(str(t_a2["id"]), "Retry succeeded")
+        pending = await repo.list_pending_tasks(org_id)
+        titles = [t["title"] for t in pending["items"]]
+        assert "Task B" in titles
+
 
 # ── Dashboard ────────────────────────────────────────────────────────────
 

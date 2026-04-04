@@ -154,12 +154,17 @@ Args:
 Returns: JSON with the updated schedule."""
     )
     async def toggle_schedule(schedule_id: str, enabled: bool) -> str:
-        user_id, org_id, _ = await _get_current_user_context()
+        user_id, org_id, user_role = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
 
         repo = await _get_schedule_repository()
-        result = await repo.toggle_schedule(schedule_id, str(org_id), enabled)
+        try:
+            result = await repo.toggle_schedule(
+                schedule_id, str(org_id), enabled, requester_role=user_role,
+            )
+        except ValueError as exc:
+            return json.dumps({"error": str(exc), "code": 403})
         if not result:
             return json.dumps({"error": "Schedule not found"})
         return json.dumps(

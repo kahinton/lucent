@@ -34,6 +34,12 @@ ALLOWED_SCHEDULE_COLUMNS = frozenset(
 )
 
 
+SYSTEM_SCHEDULE_PROTECTION_MSG = (
+    "Built-in system schedules cannot be modified by the daemon. "
+    "Update the on-disk source file instead."
+)
+
+
 def _parse_cron(expression: str, after: datetime) -> datetime:
     """Calculate next run time from a cron expression (minute hour dom month dow).
 
@@ -126,6 +132,29 @@ class ScheduleRepository:
 
     def __init__(self, pool: Pool):
         self.pool = pool
+
+    async def _check_system_schedule_protection(
+        self,
+        schedule_id: str,
+        org_id: str,
+        requester_role: str | None,
+    ) -> None:
+        """Raise ValueError if a daemon tries to modify a system schedule.
+
+        System (built-in) schedules have their source of truth on disk or in the
+        seeding logic.  The daemon should not modify them — changes would be
+        overwritten on restart.
+        """
+        if requester_role != "daemon":
+            return
+        async with self.pool.acquire() as conn:
+            is_sys = await conn.fetchval(
+                "SELECT is_system FROM schedules "
+                "WHERE id = $1::uuid AND organization_id = $2::uuid",
+                schedule_id, org_id,
+            )
+        if is_sys:
+            raise ValueError(SYSTEM_SCHEDULE_PROTECTION_MSG)
 
     # ── System schedules ──────────────────────────────────────────────────
 
@@ -307,7 +336,10 @@ class ScheduleRepository:
                 "has_more": offset + len(rows) < total_count,
             }
 
-    async def update_schedule(self, schedule_id: str, org_id: str, **fields) -> dict | None:
+    async def update_schedule(
+        self, schedule_id: str, org_id: str, *, requester_role: str | None = None, **fields,
+    ) -> dict | None:
+        await self._check_system_schedule_protection(schedule_id, org_id, requester_role)
         if not fields:
             return await self.get_schedule(schedule_id, org_id)
 
@@ -342,8 +374,13 @@ class ScheduleRepository:
             )
             return dict(row) if row else None
 
-    async def toggle_schedule(self, schedule_id: str, org_id: str, enabled: bool) -> dict | None:
-        return await self.update_schedule(schedule_id, org_id, enabled=enabled)
+    async def toggle_schedule(
+        self, schedule_id: str, org_id: str, enabled: bool,
+        *, requester_role: str | None = None,
+    ) -> dict | None:
+        return await self.update_schedule(
+            schedule_id, org_id, requester_role=requester_role, enabled=enabled,
+        )
 
     async def delete_schedule(self, schedule_id: str, org_id: str) -> bool:
         async with self.pool.acquire() as conn:

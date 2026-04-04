@@ -6,7 +6,7 @@ from uuid import UUID
 from mcp.server.fastmcp import FastMCP
 
 from lucent.db import get_pool
-from lucent.db.definitions import DefinitionRepository
+from lucent.db.definitions import BuiltInProtectionError, DefinitionRepository
 from lucent.tools.memories import _get_current_user_context
 
 
@@ -317,7 +317,7 @@ Returns: JSON with the updated agent, or an error if not found."""
         description: str | None = None,
         content: str | None = None,
     ) -> str:
-        user_id, org_id, _ = await _get_current_user_context()
+        user_id, org_id, user_role = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         if not user_id:
@@ -332,7 +332,12 @@ Returns: JSON with the updated agent, or an error if not found."""
             kwargs["content"] = content
 
         repo = await _get_definition_repository()
-        result = await repo.update_agent(agent_id, str(org_id), **kwargs)
+        try:
+            result = await repo.update_agent(
+                agent_id, str(org_id), requester_role=user_role, **kwargs,
+            )
+        except BuiltInProtectionError as exc:
+            return json.dumps({"error": str(exc), "code": 403})
         if not result:
             return json.dumps({"error": "Agent not found"})
         return json.dumps(result, default=_serialize)
@@ -705,7 +710,7 @@ Returns: JSON with the updated server, or an error if not found."""
         server_type: str | None = None,
         command: str | None = None,
     ) -> str:
-        user_id, org_id, _ = await _get_current_user_context()
+        user_id, org_id, user_role = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         if not user_id:
@@ -724,7 +729,12 @@ Returns: JSON with the updated server, or an error if not found."""
             kwargs["command"] = command
 
         repo = await _get_definition_repository()
-        result = await repo.update_mcp_server(server_id, str(org_id), **kwargs)
+        try:
+            result = await repo.update_mcp_server(
+                server_id, str(org_id), requester_role=user_role, **kwargs,
+            )
+        except BuiltInProtectionError as exc:
+            return json.dumps({"error": str(exc), "code": 403})
         if not result:
             return json.dumps({"error": "MCP server not found"})
         return json.dumps(result, default=_serialize)

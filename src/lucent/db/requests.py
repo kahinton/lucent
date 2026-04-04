@@ -818,28 +818,42 @@ class RequestRepository:
         """Get all tasks ready to be claimed.
 
         Respects sequence_order as a dependency gate: a task is only
-        dispatchable when all lower-sequence tasks in the same request
-        have completed.
+        dispatchable when every earlier sequence level in the same request
+        has at least one task in an acceptable terminal state.
+
+        This correctly handles retries — if a task at sequence 0 fails but
+        a retry task at the same sequence 0 completes, subsequent tasks
+        are unblocked.
 
         The request's dependency_policy controls what happens when a
         predecessor fails or is cancelled:
-          - 'strict' (default): only 'completed' unblocks — failed/cancelled
-            predecessors block all subsequent tasks.
-          - 'permissive': completed, failed, and cancelled all unblock.
+          - 'strict' (default): at least one task at each earlier level must
+            be 'completed' — failed/cancelled predecessors block unless a
+            retry completed.
+          - 'permissive': completed, failed, and cancelled all count as
+            acceptable terminal states.
         """
         base = """FROM tasks t JOIN requests r ON t.request_id = r.id
                    WHERE t.organization_id = $1
                      AND t.status IN ('pending', 'planned')
                      AND r.approval_status IN ('auto_approved', 'approved')
                      AND NOT EXISTS (
-                       SELECT 1 FROM tasks earlier
-                       WHERE earlier.request_id = t.request_id
-                         AND earlier.sequence_order < t.sequence_order
-                         AND CASE COALESCE(r.dependency_policy, 'strict')
-                             WHEN 'permissive'
-                               THEN earlier.status NOT IN ('completed', 'failed', 'cancelled')
-                             ELSE earlier.status != 'completed'
-                             END
+                       SELECT 1 FROM (
+                           SELECT DISTINCT sequence_order AS seq
+                           FROM tasks
+                           WHERE request_id = t.request_id
+                             AND sequence_order < t.sequence_order
+                       ) earlier_seqs
+                       WHERE NOT EXISTS (
+                           SELECT 1 FROM tasks t2
+                           WHERE t2.request_id = t.request_id
+                             AND t2.sequence_order = earlier_seqs.seq
+                             AND CASE COALESCE(r.dependency_policy, 'strict')
+                                 WHEN 'permissive'
+                                   THEN t2.status IN ('completed', 'failed', 'cancelled')
+                                 ELSE t2.status = 'completed'
+                                 END
+                       )
                      )"""
         async with self.pool.acquire() as conn:
             count_row = await conn.fetchrow(
