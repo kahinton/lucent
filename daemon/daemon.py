@@ -156,6 +156,10 @@ AUTONOMIC_MINUTES = int(
 LEARNING_MINUTES = int(
     os.environ.get("LUCENT_LEARNING_MINUTES", str(LEARNING_INTERVAL * DAEMON_INTERVAL_MINUTES))
 )
+# Procedural consolidation: runs every 5 hours by default (300 minutes)
+PROCEDURAL_CONSOLIDATION_MINUTES = int(
+    os.environ.get("LUCENT_PROCEDURAL_CONSOLIDATION_MINUTES", "300")
+)
 # Daily experience compression: runs once per day (default 1440 minutes = 24 hours)
 COMPRESSION_MINUTES = int(os.environ.get("LUCENT_COMPRESSION_MINUTES", "1440"))
 
@@ -167,34 +171,44 @@ MEMORY_CONSOLIDATION_PROMPT = (
     "Run a memory consolidation pass focused on TECHNICAL memories.\n\n"
     "## Goal: One Technical Memory Per Scope\n\n"
     "Technical memories must follow a strict hierarchy:\n"
-    "- **Repo-level**: One memory per repo (metadata.repo='hindsight', metadata.filename=null)\n"
+    "- **Repo-level**: One memory per repo (metadata.repo='hindsight', metadata.directory=null, metadata.filename=null)\n"
     "  Contains: general architecture, conventions, build/test commands, key patterns\n"
-    "- **Directory-level**: One memory per significant directory (metadata.repo='hindsight', metadata.filename='src/lucent/api/')\n"
+    "- **Directory-level**: One memory per significant directory (metadata.repo='hindsight', metadata.directory='src/lucent/api/', metadata.filename=null)\n"
     "  Contains: what this directory does, key files, patterns specific to this area\n"
-    "- **File-level**: One memory per file that has enough knowledge to warrant it (metadata.repo='hindsight', metadata.filename='src/lucent/db/memory.py')\n"
+    "- **File-level**: One memory per file that has enough knowledge to warrant it (metadata.repo='hindsight', metadata.directory='src/lucent/db/', metadata.filename='src/lucent/db/memory.py')\n"
     "  Contains: what this file does, key functions, gotchas, patterns\n\n"
-    "## Process\n\n"
+    "## Process (Mandatory Phases)\n\n"
     "1. Search for all technical memories (use search_memories with type='technical', limit=50).\n"
     "   Also search with search_memories_full for broader coverage.\n\n"
     "2. For each memory, determine its correct scope:\n"
-    "   - If it's about a specific file -> file-level (set metadata.filename to the file path)\n"
-    "   - If it's about a directory/module -> directory-level (set metadata.filename to the dir path ending in /)\n"
-    "   - If it's about the repo generally -> repo-level (set metadata.repo, clear metadata.filename)\n\n"
+    "   - If it's about a specific file -> file-level\n"
+    "   - If it's about a directory/module -> directory-level\n"
+    "   - If it's about the repo generally -> repo-level\n\n"
     "3. **Merge duplicates**: If two memories belong to the same scope, merge them into one.\n"
     "   Update the better one with combined content, delete the other.\n"
     "   The surviving memory should be comprehensive but concise.\n\n"
-    "4. **Set metadata correctly on every technical memory**:\n"
-    "   - metadata.repo: always set (e.g. 'hindsight')\n"
-    "   - metadata.filename: set for directory/file scope, null for repo scope\n"
-    "   - metadata.category: a short category like 'architecture', 'api', 'database', 'testing'\n\n"
-    "5. **Non-technical memories** (experience, procedural, etc.): Leave these alone.\n\n"
-    "6. Create a summary of what you changed.\n\n"
+    "4. **MANDATORY METADATA NORMALIZATION PASS (separate from merge pass)**:\n"
+    "   Update EVERY technical memory so it has these exact metadata fields:\n"
+    "   - metadata.repo (repository name, e.g. 'hindsight')\n"
+    "   - metadata.directory (path within repo; directory path ending with '/', or null)\n"
+    "   - metadata.filename (specific file path within repo, or null)\n"
+    "   Scope mapping is strict and non-optional:\n"
+    "   - repo-level -> repo set, directory=null, filename=null\n"
+    "   - directory-level -> repo set, directory='path/within/repo/', filename=null\n"
+    "   - file-level -> repo set, directory='parent/dir/', filename='full/path/to/file.ext'\n"
+    "   Also set metadata.category to a short category like 'architecture', 'api', 'database', 'testing'.\n\n"
+    "5. **MANDATORY VERIFICATION PASS (after all updates/deletes)**:\n"
+    "   Re-read technical memories and verify each one includes metadata.repo, metadata.directory, and metadata.filename\n"
+    "   with values consistent with its scope mapping above. If any memory is non-compliant, fix it in this run before finishing.\n\n"
+    "6. **Non-technical memories** (experience, procedural, etc.): Leave these alone.\n\n"
+    "7. Create a summary of what you changed, including verification counts and any corrected memory IDs.\n\n"
     "## Important Rules\n"
     "- NEVER create new memories. Only update existing ones or delete duplicates.\n"
     "- The ONLY valid operations are: update_memory and delete_memory.\n"
     "- If two memories cover the same scope, update the better one and delete the other.\n"
     "- The total memory count must go DOWN or stay the same, never up.\n"
     "- Each scope should have AT MOST one technical memory.\n"
+    "- Do NOT treat metadata normalization as optional; it is a required pass every run.\n"
     "- Content should be practical: what does a developer need to know to work here?"
 )
 
@@ -244,6 +258,42 @@ EXPERIENCE_COMPRESSION_PROMPT = (
     "- The narrative should be practical: what happened and why it matters, not raw logs.\n"
     "- Total memory count must go DOWN.\n"
     "- Keep digests concise - aim for 200-500 words per day, not a transcript."
+)
+
+PROCEDURAL_CONSOLIDATION_PROMPT = (
+    "Run a memory consolidation pass focused on PROCEDURAL memories.\n\n"
+    "## Goal: One Canonical Procedure Per Topic\n\n"
+    "Procedural memories should converge toward one current, complete procedure per topic.\n"
+    "Do not let overlapping step lists accumulate.\n\n"
+    "## Process (Mandatory Phases)\n\n"
+    "1. Search for procedural memories (search_memories with type='procedural', limit=50) and "
+    "expand coverage with search_memories_full.\n\n"
+    "2. Cluster by topic/workflow.\n"
+    "   Topic matching signals include: similar titles, shared tags, same system/module names, "
+    "and overlapping step text.\n\n"
+    "3. **Merge duplicates/overlap**:\n"
+    "   - For each cluster, keep ONE canonical memory: the most recent and most complete version.\n"
+    "   - Fold useful missing steps/notes from older duplicates into the canonical memory.\n"
+    "   - Delete merged duplicates after canonical memory is updated.\n\n"
+    "4. **Update outdated procedures**:\n"
+    "   - If newer procedural/experience/technical memories invalidate older steps, update the "
+    "canonical procedural memory so it reflects current practice.\n"
+    "   - Prefer explicit, ordered steps and preserve practical caveats.\n\n"
+    "5. **Archive stale daemon-task procedural entries**:\n"
+    "   - Find procedural memories tagged 'daemon-task' where status indicates completed/cancelled "
+    "(including tags like 'completed', 'cancelled', 'done', or equivalent metadata).\n"
+    "   - Archive by updating tags/metadata to clearly mark them archived and non-actionable.\n"
+    "   - If a stale daemon-task memory is fully redundant with a canonical procedure, delete it.\n\n"
+    "6. Verify outcomes:\n"
+    "   - Each topic should have at most one active canonical procedure.\n"
+    "   - Archived daemon-task entries should not appear as active procedures.\n"
+    "   - Summarize updates/deletes/archives performed.\n\n"
+    "## Important Rules\n"
+    "- Prefer update_memory and delete_memory; only create_memory for a genuine gap.\n"
+    "- Total memory count should go DOWN or stay the same unless a true missing canonical procedure "
+    "must be created.\n"
+    "- Preserve the newest, most complete procedure as canonical.\n"
+    "- Keep procedural memories actionable: ordered steps, prerequisites, pitfalls, and success criteria."
 )
 
 # Approval flow: when enabled, tasks go to needs-review before completing.
@@ -1938,7 +1988,8 @@ class LucentDaemon:
                         "title": "Memory Consolidation",
                         "description": (
                             "Autonomic memory maintenance — merge duplicate technical memories, "
-                            "enforce one-memory-per-scope hierarchy, set metadata correctly."
+                            "enforce one-memory-per-scope hierarchy, run mandatory repo→directory→filename "
+                            "metadata normalization, then verify metadata compliance."
                         ),
                         "agent_type": "memory",
                         "schedule_type": "interval",
@@ -1969,6 +2020,19 @@ class LucentDaemon:
                         "priority": "low",
                         "prompt": EXPERIENCE_COMPRESSION_PROMPT,
                     },
+                    {
+                        "title": "Procedural Consolidation",
+                        "description": (
+                            "Consolidate procedural memories — merge overlapping procedures, "
+                            "archive stale daemon-task procedure entries, and keep one current "
+                            "canonical procedure per topic."
+                        ),
+                        "agent_type": "memory",
+                        "schedule_type": "interval",
+                        "interval_seconds": PROCEDURAL_CONSOLIDATION_MINUTES * 60,
+                        "priority": "low",
+                        "prompt": PROCEDURAL_CONSOLIDATION_PROMPT,
+                    },
                 ]
 
                 created = 0
@@ -1981,12 +2045,16 @@ class LucentDaemon:
                         org_id,
                     )
                     if existing:
-                        # Update the prompt on existing system schedules so cognitive.md
-                        # changes take effect without manual DB updates.
+                        # Update prompt + description on existing system schedules so
+                        # maintenance behavior changes take effect without manual DB edits.
                         await conn.execute(
-                            """UPDATE schedules SET prompt = $1, updated_at = now()
-                               WHERE id = $2""",
+                            """UPDATE schedules
+                               SET prompt = $1,
+                                   description = $2,
+                                   updated_at = now()
+                               WHERE id = $3""",
                             sched["prompt"],
+                            sched["description"],
                             existing["id"],
                         )
                         updated += 1
@@ -3638,7 +3706,11 @@ class LucentDaemon:
                     request_id=request_id,
                     title="Consolidate memories",
                     agent_type="memory",
-                    description="Enforce one-memory-per-scope hierarchy for technical memories. Merge duplicates, set metadata.repo and metadata.filename correctly, ensure fewer but richer memories.",
+                    description=(
+                        "Enforce one-memory-per-scope hierarchy for technical memories. "
+                        "Run mandatory metadata normalization for metadata.repo, "
+                        "metadata.directory, metadata.filename, then verify compliance."
+                    ),
                     model=MODEL,
                 )
                 if task_record:
@@ -3652,41 +3724,7 @@ class LucentDaemon:
         result = await self.run_session(
             "autonomic-maintenance",
             system_message,
-            (
-                "Run a memory consolidation pass focused on TECHNICAL memories.\n\n"
-                "## Goal: One Technical Memory Per Scope\n\n"
-                "Technical memories must follow a strict hierarchy:\n"
-                "- **Repo-level**: One memory per repo (metadata.repo='hindsight', metadata.filename=null)\n"
-                "  Contains: general architecture, conventions, build/test commands, key patterns\n"
-                "- **Directory-level**: One memory per significant directory (metadata.repo='hindsight', metadata.filename='src/lucent/api/')\n"
-                "  Contains: what this directory does, key files, patterns specific to this area\n"
-                "- **File-level**: One memory per file that has enough knowledge to warrant it (metadata.repo='hindsight', metadata.filename='src/lucent/db/memory.py')\n"
-                "  Contains: what this file does, key functions, gotchas, patterns\n\n"
-                "## Process\n\n"
-                "1. Search for all technical memories (use search_memories with type='technical', limit=50).\n"
-                "   Also search with search_memories_full for broader coverage.\n\n"
-                "2. For each memory, determine its correct scope:\n"
-                "   - If it's about a specific file → file-level (set metadata.filename to the file path)\n"
-                "   - If it's about a directory/module → directory-level (set metadata.filename to the dir path ending in /)\n"
-                "   - If it's about the repo generally → repo-level (set metadata.repo, clear metadata.filename)\n\n"
-                "3. **Merge duplicates**: If two memories belong to the same scope, merge them into one.\n"
-                "   Update the better one with combined content, delete the other.\n"
-                "   The surviving memory should be comprehensive but concise.\n\n"
-                "4. **Set metadata correctly on every technical memory**:\n"
-                "   - metadata.repo: always set (e.g. 'hindsight')\n"
-                "   - metadata.filename: set for directory/file scope, null for repo scope\n"
-                "   - metadata.category: a short category like 'architecture', 'api', 'database', 'testing'\n\n"
-                "5. **Daemon heartbeat memories** (tagged 'daemon-heartbeat'): Leave these alone, they're transient.\n\n"
-                "6. **Non-technical memories** (experience, procedural, etc.): Leave these alone.\n\n"
-                "7. Create a summary of what you changed.\n\n"
-                "## Important — STRICT RULES\n"
-                "- NEVER create new memories. Only update existing ones or delete duplicates.\n"
-                "- The ONLY valid operations are: update_memory and delete_memory.\n"
-                "- If two memories cover the same scope, update the better one and delete the other.\n"
-                "- The total memory count must go DOWN or stay the same, never up.\n"
-                "- Each scope should have AT MOST one technical memory.\n"
-                "- Content should be practical: what does a developer need to know to work here?"
-            ),
+            MEMORY_CONSOLIDATION_PROMPT,
         )
 
         # Update the request/task records with the outcome
