@@ -183,6 +183,7 @@ async def definitions_page(
             "per_page": per_page,
             "total_pages": total_pages,
             "total_count": total_count,
+            "csrf_token": request.cookies.get(CSRF_COOKIE_NAME, ""),
         },
     )
 
