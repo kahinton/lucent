@@ -77,6 +77,8 @@ Follow the **memory-capture** skill to save what you learned:
 - Search first to avoid duplicates
 - Include the what, why, and lesson
 - Use appropriate tags and importance
+- When making errors or receiving corrections, tag the resulting memory with `correction` or `self-correction`
+- When a correction is identified during work, create an experience memory capturing what went wrong and what the correct approach is, tagged `correction`
 
 ```
 link_task_memory(task_id, memory_id, "created")

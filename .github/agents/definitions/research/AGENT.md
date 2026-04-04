@@ -102,6 +102,9 @@ create_memory(
 )
 ```
 
+When making errors or receiving corrections, tag the resulting memory with `correction` or `self-correction`.
+When a correction is identified during work, create an experience memory capturing what went wrong and what the correct approach is, tagged `correction`.
+
 ```
 link_task_memory(task_id, memory_id, "created")
 ```
