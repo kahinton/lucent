@@ -1,5 +1,6 @@
 """Tests for RequestRepository — request tracking and task queue."""
 
+import asyncio
 from uuid import UUID, uuid4
 
 import pytest
@@ -32,6 +33,7 @@ async def cleanup_requests(db_pool, test_organization):
     org_uuid = test_organization["id"]
     yield
     async with db_pool.acquire() as conn:
+        await conn.execute("DELETE FROM daemon_instances WHERE organization_id = $1", org_uuid)
         # Get all request IDs for this org
         req_ids = [
             r["id"]
@@ -337,6 +339,18 @@ class TestClaimTask:
         assert len(claimed_events) == 1
         assert "inst-x" in claimed_events[0]["detail"]
 
+    async def test_concurrent_claim_same_task_only_one_wins(self, repo, org_id):
+        req = await _make_request(repo, org_id)
+        task = await _make_task(repo, str(req["id"]), org_id)
+        claim_a, claim_b = await asyncio.gather(
+            repo.claim_task(str(task["id"]), "daemon-a"),
+            repo.claim_task(str(task["id"]), "daemon-b"),
+        )
+        winners = [c for c in (claim_a, claim_b) if c is not None]
+        assert len(winners) == 1
+        assert winners[0]["status"] == "claimed"
+        assert winners[0]["claimed_by"] in {"daemon-a", "daemon-b"}
+
 
 class TestStartTask:
     async def test_start_claimed_task(self, repo, org_id):
@@ -525,6 +539,85 @@ class TestReleaseStaleTasks:
         _count = await repo.release_stale_tasks(stale_minutes=30)
         refreshed = await repo.get_task(str(task["id"]))
         assert refreshed["status"] == "claimed"
+
+    async def test_release_expired_lease_even_when_claim_recent(self, repo, org_id, db_pool):
+        req = await _make_request(repo, org_id)
+        task = await _make_task(repo, str(req["id"]), org_id)
+        await repo.claim_task(str(task["id"]), "inst-lease")
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                """UPDATE tasks
+                   SET claim_expires_at = NOW() - INTERVAL '1 minute',
+                       claimed_at = NOW()
+                   WHERE id = $1""",
+                task["id"],
+            )
+        released = await repo.release_stale_tasks(stale_minutes=120)
+        assert released == 1
+        refreshed = await repo.get_task(str(task["id"]))
+        assert refreshed["status"] == "pending"
+        assert refreshed["claimed_by"] is None
+
+    async def test_release_tasks_from_stale_instance(self, repo, org_id, db_pool):
+        req = await _make_request(repo, org_id)
+        task = await _make_task(repo, str(req["id"]), org_id)
+        instance_id = "inst-stale"
+        await repo.register_instance(
+            org_id=org_id,
+            instance_id=instance_id,
+            hostname="host-a",
+            pid=1234,
+            roles=["dispatcher"],
+        )
+        await repo.claim_task(str(task["id"]), instance_id)
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                """UPDATE daemon_instances
+                   SET last_seen_at = NOW() - INTERVAL '10 minutes'
+                   WHERE organization_id = $1 AND instance_id = $2""",
+                UUID(org_id),
+                instance_id,
+            )
+            await conn.execute(
+                """UPDATE tasks
+                   SET claim_expires_at = NOW() + INTERVAL '10 minutes'
+                   WHERE id = $1""",
+                task["id"],
+            )
+        released = await repo.release_stale_tasks(stale_minutes=120, instance_stale_seconds=60)
+        assert released == 1
+        refreshed = await repo.get_task(str(task["id"]))
+        assert refreshed["status"] == "pending"
+        assert refreshed["claimed_by"] is None
+
+
+class TestDaemonInstanceRegistry:
+    async def test_register_instance_and_heartbeat(self, repo, org_id):
+        instance_id = "inst-reg-1"
+        reg = await repo.register_instance(
+            org_id=org_id,
+            instance_id=instance_id,
+            hostname="host-a",
+            pid=4321,
+            roles=["dispatcher", "scheduler"],
+            metadata={"boot": "cold"},
+        )
+        assert reg["instance_id"] == instance_id
+        assert reg["status"] == "active"
+        assert "dispatcher" in (reg["roles"] or [])
+
+        hb = await repo.heartbeat_instance(
+            org_id=org_id,
+            instance_id=instance_id,
+            metadata={"cycle": 4},
+        )
+        assert hb is not None
+        assert hb["instance_id"] == instance_id
+        assert hb["status"] == "active"
+
+        stopped = await repo.mark_instance_stopped(org_id=org_id, instance_id=instance_id)
+        assert stopped is not None
+        assert stopped["status"] == "stopped"
 
 
 # ── Events ───────────────────────────────────────────────────────────────

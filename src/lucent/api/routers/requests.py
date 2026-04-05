@@ -68,6 +68,27 @@ class ClaimBody(BaseModel):
     instance_id: str = Field(..., min_length=1, max_length=128)
 
 
+class TaskTransitionBody(BaseModel):
+    """Optional ownership context for task lifecycle transitions."""
+    instance_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class InstanceRegistrationBody(BaseModel):
+    instance_id: str = Field(..., min_length=1, max_length=128)
+    hostname: str | None = Field(default=None, max_length=255)
+    pid: int | None = Field(default=None, ge=1)
+    roles: list[str] | None = None
+    metadata: dict | None = None
+
+
+class InstanceHeartbeatBody(BaseModel):
+    metadata: dict | None = None
+
+
+class InstanceStopBody(BaseModel):
+    instance_id: str = Field(..., min_length=1, max_length=128)
+
+
 class MemoryLinkCreate(BaseModel):
     memory_id: str
     relation: str = Field(default="created", pattern=r"^(created|read|updated)$")
@@ -485,11 +506,20 @@ async def update_task_model(
 
 
 @router.post("/tasks/{task_id}/start")
-async def start_task(task_id: UUID, user: AuthenticatedUser, pool=Depends(get_pool)):
+async def start_task(
+    task_id: UUID,
+    user: AuthenticatedUser,
+    body: TaskTransitionBody = Body(default=TaskTransitionBody()),
+    pool=Depends(get_pool),
+):
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
-    result = await repo.start_task(str(task_id), org_id=str(user.organization_id))
+    result = await repo.start_task(
+        str(task_id),
+        org_id=str(user.organization_id),
+        instance_id=body.instance_id,
+    )
     if not result:
         raise HTTPException(409, "Task not in claimed state")
     return result
@@ -497,6 +527,7 @@ async def start_task(task_id: UUID, user: AuthenticatedUser, pool=Depends(get_po
 
 class TaskCompleteBody(BaseModel):
     result: str = ""
+    instance_id: str | None = Field(default=None, min_length=1, max_length=128)
     result_structured: dict | None = None
     result_summary: str | None = None
     validation_status: str = Field(
@@ -541,6 +572,7 @@ async def complete_task(
             str(task_id),
             body.result,
             org_id=str(user.organization_id),
+            instance_id=body.instance_id,
             result_structured=body.result_structured,
             result_summary=body.result_summary,
             validation_status=body.validation_status,
@@ -558,6 +590,7 @@ async def complete_task(
 
 class TaskFailBody(BaseModel):
     error: str = ""
+    instance_id: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 @router.post("/tasks/{task_id}/fail")
@@ -570,7 +603,12 @@ async def fail_task(
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
-    task = await repo.fail_task(str(task_id), body.error, org_id=str(user.organization_id))
+    task = await repo.fail_task(
+        str(task_id),
+        body.error,
+        org_id=str(user.organization_id),
+        instance_id=body.instance_id,
+    )
     if not task:
         raise HTTPException(
             409,
@@ -580,11 +618,20 @@ async def fail_task(
 
 
 @router.post("/tasks/{task_id}/release")
-async def release_task(task_id: UUID, user: AuthenticatedUser, pool=Depends(get_pool)):
+async def release_task(
+    task_id: UUID,
+    user: AuthenticatedUser,
+    body: TaskTransitionBody = Body(default=TaskTransitionBody()),
+    pool=Depends(get_pool),
+):
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
-    task = await repo.release_task(str(task_id), org_id=str(user.organization_id))
+    task = await repo.release_task(
+        str(task_id),
+        org_id=str(user.organization_id),
+        instance_id=body.instance_id,
+    )
     if not task:
         raise HTTPException(409, "Task not in claimed/running state")
     return task
@@ -708,3 +755,61 @@ async def reconcile_statuses(
     repo = RequestRepository(pool)
     fixed = await repo.reconcile_request_statuses(org_id=str(user.organization_id))
     return {"reconciled": fixed}
+
+
+@router.post("/instances/register")
+async def register_instance(
+    user: AuthenticatedUser,
+    body: InstanceRegistrationBody = Body(...),
+    pool=Depends(get_pool),
+):
+    from lucent.db.requests import RequestRepository
+
+    repo = RequestRepository(pool)
+    return await repo.register_instance(
+        org_id=str(user.organization_id),
+        instance_id=body.instance_id,
+        hostname=body.hostname,
+        pid=body.pid,
+        roles=body.roles,
+        metadata=body.metadata,
+        status="active",
+    )
+
+
+@router.post("/instances/{instance_id}/heartbeat")
+async def heartbeat_instance(
+    instance_id: str,
+    user: AuthenticatedUser,
+    body: InstanceHeartbeatBody = Body(default=InstanceHeartbeatBody()),
+    pool=Depends(get_pool),
+):
+    from lucent.db.requests import RequestRepository
+
+    repo = RequestRepository(pool)
+    row = await repo.heartbeat_instance(
+        org_id=str(user.organization_id),
+        instance_id=instance_id,
+        metadata=body.metadata,
+    )
+    if not row:
+        raise HTTPException(404, "Instance not found")
+    return row
+
+
+@router.post("/instances/stop")
+async def stop_instance(
+    user: AuthenticatedUser,
+    body: InstanceStopBody = Body(...),
+    pool=Depends(get_pool),
+):
+    from lucent.db.requests import RequestRepository
+
+    repo = RequestRepository(pool)
+    row = await repo.mark_instance_stopped(
+        org_id=str(user.organization_id),
+        instance_id=body.instance_id,
+    )
+    if not row:
+        raise HTTPException(404, "Instance not found")
+    return row

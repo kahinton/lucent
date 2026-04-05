@@ -1035,6 +1035,64 @@ class RequestAPI:
         return None
 
     @staticmethod
+    async def register_instance(
+        instance_id: str,
+        *,
+        hostname: str | None = None,
+        pid: int | None = None,
+        roles: list[str] | None = None,
+        metadata: dict | None = None,
+    ) -> dict | None:
+        try:
+            async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
+                resp = await client.post(
+                    f"{API_BASE}/requests/instances/register",
+                    json={
+                        "instance_id": instance_id,
+                        "hostname": hostname,
+                        "pid": pid,
+                        "roles": roles or [],
+                        "metadata": metadata or {},
+                    },
+                    headers=API_HEADERS,
+                )
+                if resp.status_code in (200, 201):
+                    return resp.json()
+        except Exception as e:
+            log(f"API register_instance failed: {e}", "WARN")
+        return None
+
+    @staticmethod
+    async def heartbeat_instance(instance_id: str, metadata: dict | None = None) -> dict | None:
+        try:
+            async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
+                resp = await client.post(
+                    f"{API_BASE}/requests/instances/{instance_id}/heartbeat",
+                    json={"metadata": metadata or {}},
+                    headers=API_HEADERS,
+                )
+                if resp.status_code in (200, 201):
+                    return resp.json()
+        except Exception as e:
+            log(f"API heartbeat_instance failed: {e}", "WARN")
+        return None
+
+    @staticmethod
+    async def mark_instance_stopped(instance_id: str) -> dict | None:
+        try:
+            async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
+                resp = await client.post(
+                    f"{API_BASE}/requests/instances/stop",
+                    json={"instance_id": instance_id},
+                    headers=API_HEADERS,
+                )
+                if resp.status_code in (200, 201):
+                    return resp.json()
+        except Exception as e:
+            log(f"API mark_instance_stopped failed: {e}", "WARN")
+        return None
+
+    @staticmethod
     async def update_task_model(task_id: str, model: str) -> dict | None:
         try:
             async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
@@ -1050,11 +1108,13 @@ class RequestAPI:
         return None
 
     @staticmethod
-    async def start_task(task_id: str) -> dict | None:
+    async def start_task(task_id: str, instance_id: str | None = None) -> dict | None:
         try:
             async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
                 resp = await client.post(
-                    f"{API_BASE}/requests/tasks/{task_id}/start", headers=API_HEADERS
+                    f"{API_BASE}/requests/tasks/{task_id}/start",
+                    json={"instance_id": instance_id} if instance_id else {},
+                    headers=API_HEADERS,
                 )
                 if resp.status_code == 200:
                     return resp.json()
@@ -1066,6 +1126,7 @@ class RequestAPI:
     async def complete_task(
         task_id: str,
         result: str,
+        instance_id: str | None = None,
         result_structured: dict | None = None,
         result_summary: str | None = None,
         validation_status: str = "not_applicable",
@@ -1077,6 +1138,7 @@ class RequestAPI:
                     f"{API_BASE}/requests/tasks/{task_id}/complete",
                     json={
                         "result": result[:50000],
+                        "instance_id": instance_id,
                         "result_structured": result_structured,
                         "result_summary": result_summary[:2000] if result_summary else None,
                         "validation_status": validation_status,
@@ -1093,12 +1155,12 @@ class RequestAPI:
         return None
 
     @staticmethod
-    async def fail_task(task_id: str, error: str) -> dict | None:
+    async def fail_task(task_id: str, error: str, instance_id: str | None = None) -> dict | None:
         try:
             async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
                 resp = await client.post(
                     f"{API_BASE}/requests/tasks/{task_id}/fail",
-                    json={"error": error[:10000]},
+                    json={"error": error[:10000], "instance_id": instance_id},
                     headers=API_HEADERS,
                 )
                 if resp.status_code == 200:
@@ -1892,6 +1954,13 @@ class LucentDaemon:
 
         # Ensure we have a valid API key before anything else
         await ensure_valid_api_key(self.instance_id)
+        await RequestAPI.register_instance(
+            self.instance_id,
+            hostname=platform.node(),
+            pid=os.getpid(),
+            roles=sorted(self.roles),
+            metadata={"model": MODEL, "max_sessions": MAX_CONCURRENT_SESSIONS},
+        )
 
         # Start the watchdog thread — detects event loop freezes
         watchdog = threading.Thread(target=_watchdog_loop, daemon=True, name="watchdog")
@@ -2126,6 +2195,11 @@ class LucentDaemon:
         """Stop the daemon, revoke API key, and clean up."""
         log(f"Stopping daemon (instance: {self.instance_id})...")
         self.running = False
+
+        try:
+            await RequestAPI.mark_instance_stopped(self.instance_id)
+        except Exception:
+            pass
 
         # Flush and shut down OTEL telemetry
         if _TELEMETRY_AVAILABLE:
@@ -2681,7 +2755,18 @@ class LucentDaemon:
         return True, "ok"
 
     async def _update_heartbeat(self):
-        """Update instance heartbeat via direct API (no LLM session)."""
+        """Update instance heartbeat in DB registry via API."""
+        await RequestAPI.heartbeat_instance(
+            self.instance_id,
+            metadata={
+                "cycle_count": self.cycle_count,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "roles": sorted(self.roles),
+            },
+        )
+
+    async def _update_legacy_heartbeat_memory(self):
+        """Backward-compatible heartbeat memory updates."""
         heartbeat_content = json.dumps(
             {
                 "instance_id": self.instance_id,
@@ -2764,6 +2849,30 @@ class LucentDaemon:
 
     async def _dispatch_tracked_tasks(self, max_tasks: int = 2):
         """Dispatch tasks from the new request tracking queue."""
+        async def _start_owned(task_id: str):
+            try:
+                return await RequestAPI.start_task(task_id, instance_id=self.instance_id)
+            except TypeError:
+                # Backwards-compatible for tests that monkeypatch old signatures.
+                return await RequestAPI.start_task(task_id)
+
+        async def _fail_owned(task_id: str, error: str):
+            try:
+                return await RequestAPI.fail_task(task_id, error, instance_id=self.instance_id)
+            except TypeError:
+                return await RequestAPI.fail_task(task_id, error)
+
+        async def _complete_owned(task_id: str, result: str, **kwargs):
+            try:
+                return await RequestAPI.complete_task(
+                    task_id,
+                    result,
+                    instance_id=self.instance_id,
+                    **kwargs,
+                )
+            except TypeError:
+                return await RequestAPI.complete_task(task_id, result, **kwargs)
+
         # Ensure requests that reached review status have a review task queued.
         await self._ensure_request_review_tasks()
 
@@ -2808,7 +2917,7 @@ class LucentDaemon:
                     requesting_user_id = req_row.get("created_by")
             if not requesting_user_id:
                 reason = "Task missing requesting_user_id and parent request creator"
-                await RequestAPI.fail_task(task_id, reason)
+                await _fail_owned(task_id, reason)
                 await RequestAPI.add_event(task_id, "dispatch_denied", reason)
                 continue
             requesting_user_id = str(requesting_user_id)
@@ -2913,7 +3022,7 @@ class LucentDaemon:
                 )
             except AgentNotFoundError as exc:
                 log(f"Tracked task {task_id[:8]} failed: {exc}", "WARN")
-                await RequestAPI.fail_task(task_id, str(exc))
+                await _fail_owned(task_id, str(exc))
                 await RequestAPI.add_event(task_id, "agent_not_found", str(exc))
                 continue
 
@@ -2928,7 +3037,7 @@ class LucentDaemon:
                 )
             except AgentNotFoundError as exc:
                 log(f"Tracked task {task_id[:8]} failed: {exc}", "WARN")
-                await RequestAPI.fail_task(task_id, str(exc))
+                await _fail_owned(task_id, str(exc))
                 await RequestAPI.add_event(
                     task_id, "agent_not_found", f"No approved definition for agent '{agent_type}'"
                 )
@@ -2973,7 +3082,7 @@ class LucentDaemon:
                 task_mcp_config["memory-server"] = MCP_CONFIG["memory-server"]
 
             # Mark running only after requester-scoped resources resolve successfully
-            await RequestAPI.start_task(task_id)
+            await _start_owned(task_id)
             await RequestAPI.add_event(
                 task_id,
                 "agent_dispatched",
@@ -3092,7 +3201,7 @@ class LucentDaemon:
                     # If validation still failed after policy actions, either fail or fallback.
                     if output_result["validation_status"] not in ("valid", "repair_succeeded"):
                         if on_failure == "fail":
-                            await RequestAPI.fail_task(
+                            await _fail_owned(
                                 task_id,
                                 "Output validation failed: "
                                 f"{output_result.get('validation_errors')}",
@@ -3109,10 +3218,10 @@ class LucentDaemon:
                     )
                     if not review_passed:
                         log(f"Tracked task {task_id[:8]} failed multi-model review", "WARN")
-                        await RequestAPI.fail_task(task_id, "Failed multi-model review")
+                        await _fail_owned(task_id, "Failed multi-model review")
                         continue
 
-                await RequestAPI.complete_task(
+                await _complete_owned(
                     task_id,
                     result,
                     result_structured=output_result.get("result_structured"),
@@ -3150,7 +3259,7 @@ class LucentDaemon:
                             1, {"status": "manual_review", "agent_type": agent_type}
                         )
                 else:
-                    await RequestAPI.fail_task(task_id, reason)
+                    await _fail_owned(task_id, reason)
                     log(f"Tracked task {task_id[:8]} failed: {reason}", "WARN")
                     if self._tracer:
                         self._tasks_completed_total.add(
@@ -3619,7 +3728,10 @@ class LucentDaemon:
             "Automatic request review failed; manual review required.\n\n"
             f"Reason: {reason}"
         )
-        await RequestAPI.complete_task(task_id, note)
+        try:
+            await RequestAPI.complete_task(task_id, note, instance_id=self.instance_id)
+        except TypeError:
+            await RequestAPI.complete_task(task_id, note)
         if request_id:
             await RequestAPI.update_request_status(request_id, "needs_rework")
         await RequestAPI.add_event(
@@ -3716,7 +3828,10 @@ class LucentDaemon:
                 if task_record:
                     task_id = str(task_record["id"])
                     await RequestAPI.claim_task(task_id, self.instance_id)
-                    await RequestAPI.start_task(task_id)
+                    try:
+                        await RequestAPI.start_task(task_id, instance_id=self.instance_id)
+                    except TypeError:
+                        await RequestAPI.start_task(task_id)
         except Exception as e:
             log(f"Failed to create request record for autonomic run: {e}", "WARN")
             task_id = None
@@ -3731,9 +3846,23 @@ class LucentDaemon:
         if task_id:
             try:
                 if result:
-                    await RequestAPI.complete_task(task_id, result[:4000])
+                    try:
+                        await RequestAPI.complete_task(
+                            task_id,
+                            result[:4000],
+                            instance_id=self.instance_id,
+                        )
+                    except TypeError:
+                        await RequestAPI.complete_task(task_id, result[:4000])
                 else:
-                    await RequestAPI.fail_task(task_id, "No output from maintenance session")
+                    try:
+                        await RequestAPI.fail_task(
+                            task_id,
+                            "No output from maintenance session",
+                            instance_id=self.instance_id,
+                        )
+                    except TypeError:
+                        await RequestAPI.fail_task(task_id, "No output from maintenance session")
             except Exception as e:
                 log(f"Failed to update request record for autonomic run: {e}", "WARN")
 
@@ -3918,6 +4047,11 @@ class LucentDaemon:
                     log("Dispatch: no valid API key, retrying in 30s", "WARN")
                     await asyncio.sleep(30)
                     continue
+
+                # Refresh instance liveness and lease heartbeats.
+                await self._update_heartbeat()
+                # Keep existing memory heartbeat for backward compatibility/observability.
+                await self._update_legacy_heartbeat_memory()
 
                 # Release stale tasks from dead instances
                 stale = await RequestAPI.release_stale(STALE_HEARTBEAT_MINUTES)
