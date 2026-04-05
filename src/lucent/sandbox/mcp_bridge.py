@@ -9,12 +9,18 @@ import argparse
 import json
 import logging
 import os
+import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 logger = logging.getLogger("sandbox.mcp_bridge")
+
+# Memory-server tools tracked for observability
+_MEMORY_TOOL_NAMES = frozenset({
+    "create_memory", "search_memories", "update_memory",
+})
 
 
 def _tool_specs() -> list[dict[str, Any]]:
@@ -112,32 +118,56 @@ class BridgeServer:
         if name not in self._specs:
             raise ValueError(f"Unknown tool: {name}")
 
-        if name == "create_memory":
-            return self._proxy("POST", "/memories", arguments)
-        if name == "search_memories":
-            return self._proxy("POST", "/search", arguments)
-        if name == "update_memory":
-            memory_id = arguments.get("memory_id")
-            if not memory_id:
-                raise ValueError("memory_id is required")
-            payload = {k: v for k, v in arguments.items() if k != "memory_id"}
-            return self._proxy("PATCH", f"/memories/{memory_id}", payload)
-        if name == "log_task_event":
-            task_id = self._resolve_task_id(arguments)
-            payload = {
-                "event_type": arguments.get("event_type"),
-                "detail": arguments.get("detail", ""),
-            }
-            return self._proxy("POST", f"/requests/tasks/{task_id}/events", payload)
-        if name == "link_task_memory":
-            task_id = self._resolve_task_id(arguments)
-            payload = {
-                "memory_id": arguments.get("memory_id"),
-                "relation": arguments.get("relation", "created"),
-            }
-            return self._proxy("POST", f"/requests/tasks/{task_id}/memories", payload)
+        is_memory_tool = name in _MEMORY_TOOL_NAMES
+        start = time.monotonic()
 
-        raise ValueError(f"Unsupported tool: {name}")
+        try:
+            if name == "create_memory":
+                result = self._proxy("POST", "/memories", arguments)
+            elif name == "search_memories":
+                result = self._proxy("POST", "/search", arguments)
+            elif name == "update_memory":
+                memory_id = arguments.get("memory_id")
+                if not memory_id:
+                    raise ValueError("memory_id is required")
+                payload = {k: v for k, v in arguments.items() if k != "memory_id"}
+                result = self._proxy("PATCH", f"/memories/{memory_id}", payload)
+            elif name == "log_task_event":
+                task_id = self._resolve_task_id(arguments)
+                payload = {
+                    "event_type": arguments.get("event_type"),
+                    "detail": arguments.get("detail", ""),
+                }
+                result = self._proxy("POST", f"/requests/tasks/{task_id}/events", payload)
+            elif name == "link_task_memory":
+                task_id = self._resolve_task_id(arguments)
+                payload = {
+                    "memory_id": arguments.get("memory_id"),
+                    "relation": arguments.get("relation", "created"),
+                }
+                result = self._proxy("POST", f"/requests/tasks/{task_id}/memories", payload)
+            else:
+                raise ValueError(f"Unsupported tool: {name}")
+
+            if is_memory_tool:
+                elapsed_ms = (time.monotonic() - start) * 1000
+                logger.info(
+                    "mcp.memory_tool tool=%s task=%s status=ok duration_ms=%.0f",
+                    name,
+                    self.task_id or "unknown",
+                    elapsed_ms,
+                )
+            return result
+        except Exception:
+            if is_memory_tool:
+                elapsed_ms = (time.monotonic() - start) * 1000
+                logger.warning(
+                    "mcp.memory_tool tool=%s task=%s status=error duration_ms=%.0f",
+                    name,
+                    self.task_id or "unknown",
+                    elapsed_ms,
+                )
+            raise
 
     def tool_list(self) -> list[dict[str, Any]]:
         return list(self._specs.values())

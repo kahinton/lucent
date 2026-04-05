@@ -114,3 +114,19 @@ Set the contributor up for ongoing success:
 - Don't rush through the architecture overview because a contributor who doesn't understand the codebase structure will make changes in the wrong place and miss existing conventions.
 - Don't skip running tests after setup because passing tests are the only reliable signal that the environment is actually working — "services running" is not sufficient.
 - Don't assume the first contribution workflow is obvious because branch naming, commit conventions, and PR requirements vary by project and must be explicitly confirmed.
+
+## Recording Results
+
+After completing an onboarding session, save the outcome for future onboardings:
+
+```
+create_memory(
+  type="experience",
+  content="## Onboarding: <contributor name or context>\n\n**Project**: <repo/project name>\n**Setup issues**: <any problems encountered during setup and how they were resolved>\n**Environment notes**: <OS, runtime versions, or config that mattered>\n**Gaps found**: <missing docs, unclear steps, or broken tooling discovered>",
+  tags=["onboarding"],
+  importance=5,
+  shared=true
+)
+```
+
+This captures setup friction that should be fixed — missing docs, broken scripts, unclear steps. Search before creating: `search_memories(query="onboarding <project>", tags=["onboarding"])`

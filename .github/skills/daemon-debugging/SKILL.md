@@ -226,3 +226,19 @@ find pending tasks → get memory details → atomic claim (tag swap) → run_se
 - Release stale claims via API rather than manual DB edits
 - Save findings as a memory before fixing
 ```
+
+## Recording Results
+
+After diagnosing a daemon issue, save the findings — even if the fix was simple:
+
+```
+create_memory(
+  type="experience",
+  content="## Daemon Debug: <symptom summary>\n\n**Symptom**: <what was observed>\n**Root cause**: <what was actually wrong>\n**Diagnostic path**: <which checklist steps led to the answer>\n**Fix applied**: <what resolved it>\n**Prevention**: <how to avoid this in the future>",
+  tags=["daemon-debugging", "daemon"],
+  importance=6,
+  shared=true
+)
+```
+
+For recurring issues, search first and update the existing memory: `search_memories(query="daemon debug <symptom>", tags=["daemon-debugging"])`

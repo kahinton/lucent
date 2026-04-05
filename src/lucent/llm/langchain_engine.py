@@ -289,6 +289,7 @@ class LangChainEngine(LLMEngine):
                             SessionEvent(
                                 type=SessionEventType.TOOL_CALL,
                                 tool_name=tool_name,
+                                tool_input=tool_args,
                             )
                         )
 

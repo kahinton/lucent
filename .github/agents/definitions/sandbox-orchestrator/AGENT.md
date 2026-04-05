@@ -57,7 +57,7 @@ Follow the **sandbox-operations** skill's **6. Common Failure Modes and Fixes** 
 Use unconditional `try/finally` destruction and surface failures via task events; never mask errors with silent retries.
 
 ### 6. Record Results
-Follow the **sandbox-operations** skill's **9. Recording Results** section and then the **memory-capture** skill for durable lessons.
+Follow the **sandbox-operations** skill's **9. Recording Results** section and then the **memory-capture** skill for durable lessons. Use tags `["sandbox", "daemon"]` for sandbox-specific memories to distinguish from general infrastructure memories.
 
 ## Decision Framework
 

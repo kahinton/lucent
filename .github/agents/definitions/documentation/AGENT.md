@@ -48,7 +48,7 @@ Follow the **documentation** skill's **Verification Checklist**.
 
 ### 5. Record Changes
 
-Follow the **memory-capture** skill and the **documentation** skill's **Recording Results** pattern.
+Follow the **memory-capture** skill and the **documentation** skill's **Recording Results** pattern. Use tags `["documentation", "daemon"]` for documentation-specific memories to distinguish from general technical memories.
 
 ## Decision Framework
 

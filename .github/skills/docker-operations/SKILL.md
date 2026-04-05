@@ -77,7 +77,7 @@ docker system df                        # See what's using space
 
 ## Recording Issues
 
-When you solve a Docker issue that wasn't obvious:
+After resolving any Docker issue, save the diagnosis — this is mandatory, not optional. Future debugging sessions depend on this knowledge:
 
 ```
 create_memory(
@@ -88,3 +88,5 @@ create_memory(
   shared=true
 )
 ```
+
+For recurring issues, search first and update: `search_memories(query="docker <symptom>", tags=["docker"])`

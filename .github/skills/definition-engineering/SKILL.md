@@ -7,6 +7,21 @@ description: 'Deep procedural knowledge for crafting world-class agent definitio
 
 This skill contains everything needed to design, write, evaluate, and ship agent definitions and skills that drive peak autonomous performance. It is not a template — it is a discipline.
 
+## Before Starting
+
+Search memory for prior definition work, evaluations, and design decisions:
+
+```
+search_memories(query="definition engineering agent skill", tags=["definition-design"], limit=5)
+search_memories(query=<name of the agent or skill being created/evaluated>, limit=5)
+search_memories(query="definition quality checklist evaluation", tags=["experience"], limit=5)
+```
+
+Look for:
+- **Past evaluations** — what quality issues were found in similar definitions
+- **Design decisions** — why specific architectural choices were made (skill delegation, identity framing)
+- **Anti-patterns encountered** — real failures from previous definition work
+
 ## The Architecture
 
 Lucent uses a two-tier definition system. Understanding it is prerequisite to building anything.
@@ -296,3 +311,19 @@ These are the insights that separate definitions that WORK from definitions that
 6. **Built-in definitions are infrastructure. Instance definitions are applications.** Built-in definitions should be general enough to serve any deployment. Instance definitions should be specific enough to serve one domain perfectly. Don't confuse the two.
 
 7. **The frontmatter is the contract.** `skill_names` in the frontmatter is not documentation — it's the runtime binding that ensures skills are loaded into the agent's context. A missing skill_name means a missing capability at runtime.
+
+## Recording Results
+
+After creating, evaluating, or significantly modifying a definition, save the design decisions:
+
+```
+create_memory(
+  type="experience",
+  content="## Definition Work: <agent/skill name>\n\n**Action**: created | evaluated | revised\n**Key decisions**: <why this structure, skill delegation choices, identity framing>\n**Quality issues found**: <what the checklist caught>\n**Lessons**: <what to do differently next time>",
+  tags=["definition-design", "daemon"],
+  importance=5,
+  shared=true
+)
+```
+
+When evaluating an existing definition, update the relevant memory rather than creating a new one. Search first: `search_memories(query="<agent/skill name> definition", tags=["definition-design"])`

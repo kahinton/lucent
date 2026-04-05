@@ -51,6 +51,132 @@ _SECRET_PATTERNS = re.compile(
 def _redact_secrets(text: str) -> str:
     """Replace known secret patterns with [REDACTED]."""
     return _SECRET_PATTERNS.sub("[REDACTED]", text)
+
+
+# ---------------------------------------------------------------------------
+# Memory-server MCP tool observability
+# ---------------------------------------------------------------------------
+# These are the memory-server tools we track for auditing whether agents
+# follow prescribed memory integration patterns (pre-search, post-capture).
+_MEMORY_TOOL_NAMES = frozenset({
+    "search_memories",
+    "search_memories_full",
+    "get_memory",
+    "get_memories",
+    "get_current_user_context",
+    "create_memory",
+    "update_memory",
+    "delete_memory",
+    "get_existing_tags",
+    "get_tag_suggestions",
+    "export_memories",
+})
+
+# Subset that counts as "pre-work search" — used for compliance auditing
+_MEMORY_SEARCH_TOOLS = frozenset({
+    "search_memories",
+    "search_memories_full",
+    "get_memory",
+    "get_memories",
+    "get_current_user_context",
+})
+
+# Subset that counts as "post-work capture" — used for compliance auditing
+_MEMORY_CAPTURE_TOOLS = frozenset({
+    "create_memory",
+    "update_memory",
+})
+
+
+def _summarize_memory_tool_params(tool_name: str, arguments: dict) -> str:
+    """Build a concise, loggable summary of memory tool parameters.
+
+    Extracts operationally meaningful fields for each tool type while
+    omitting large content bodies. Designed for structured log lines.
+    """
+    parts: list[str] = []
+
+    if tool_name in ("search_memories", "search_memories_full"):
+        if q := arguments.get("query"):
+            parts.append(f"query={q!r}")
+        if t := arguments.get("type"):
+            parts.append(f"type={t}")
+        if tags := arguments.get("tags"):
+            parts.append(f"tags={tags}")
+        if lim := arguments.get("limit"):
+            parts.append(f"limit={lim}")
+
+    elif tool_name in ("get_memory", "get_memories"):
+        if mid := arguments.get("memory_id"):
+            parts.append(f"memory_id={mid}")
+        if mids := arguments.get("memory_ids"):
+            parts.append(f"memory_ids={mids}")
+
+    elif tool_name == "create_memory":
+        if t := arguments.get("type"):
+            parts.append(f"type={t}")
+        if tags := arguments.get("tags"):
+            parts.append(f"tags={tags}")
+        if imp := arguments.get("importance"):
+            parts.append(f"importance={imp}")
+        if content := arguments.get("content"):
+            parts.append(f"content_len={len(content)}")
+
+    elif tool_name == "update_memory":
+        if mid := arguments.get("memory_id"):
+            parts.append(f"memory_id={mid}")
+        if tags := arguments.get("tags"):
+            parts.append(f"tags={tags}")
+        if imp := arguments.get("importance"):
+            parts.append(f"importance={imp}")
+        if content := arguments.get("content"):
+            parts.append(f"content_len={len(content)}")
+
+    elif tool_name == "delete_memory":
+        if mid := arguments.get("memory_id"):
+            parts.append(f"memory_id={mid}")
+
+    elif tool_name == "get_current_user_context":
+        pass  # No params
+
+    elif tool_name in ("get_existing_tags", "get_tag_suggestions"):
+        if q := arguments.get("query"):
+            parts.append(f"query={q!r}")
+
+    else:
+        # Fallback: log all keys (not values) for unknown memory tools
+        parts.append(f"keys={list(arguments.keys())}")
+
+    return ", ".join(parts) if parts else "(no params)"
+
+
+def _build_mcp_tool_summary(tracker: list[dict]) -> str:
+    """Build a human-readable summary of memory tool usage during a session.
+
+    Returns a string suitable for logging as a task event detail.
+    """
+    if not tracker:
+        return "No memory-server tools were called during this session."
+
+    tool_counts: dict[str, int] = {}
+    for entry in tracker:
+        tool = entry["tool"]
+        tool_counts[tool] = tool_counts.get(tool, 0) + 1
+
+    search_count = sum(
+        tool_counts.get(t, 0) for t in _MEMORY_SEARCH_TOOLS
+    )
+    capture_count = sum(
+        tool_counts.get(t, 0) for t in _MEMORY_CAPTURE_TOOLS
+    )
+
+    counts_str = ", ".join(f"{t}={c}" for t, c in sorted(tool_counts.items()))
+    summary = (
+        f"Memory tool calls: {len(tracker)} total "
+        f"(search={search_count}, capture={capture_count}). "
+        f"Breakdown: {counts_str}"
+    )
+    return summary
 from lucent.auth import set_current_user
 from lucent.secrets import SecretRegistry, initialize_secret_provider
 from lucent.secrets.utils import is_secret_reference, resolve_secret_reference
@@ -1881,6 +2007,9 @@ class LucentDaemon:
         # Heartbeat memory ID (cached after first create/lookup)
         self._heartbeat_memory_id: str | None = None
 
+        # MCP memory-tool usage tracking per session (for observability)
+        self._session_mcp_trackers: dict[str, list[dict]] = {}
+
         # OTEL instrumentation — create tracer and metrics (no-ops when unavailable)
         self._init_telemetry_instruments()
 
@@ -2411,6 +2540,10 @@ class LucentDaemon:
         session_id = f"engine-session-{name}"
         self.active_sessions.append(session_id)
 
+        # Initialize MCP memory-tool tracker for this session
+        tracker: list[dict] = []
+        self._session_mcp_trackers[name] = tracker
+
         try:
 
             def on_event(event: SessionEvent) -> None:
@@ -2426,6 +2559,20 @@ class LucentDaemon:
                         )
                 elif event.type == SessionEventType.TOOL_CALL:
                     log(f"  [{name}] event: tool.call tool={event.tool_name}", "STREAM")
+                    # Track memory-server tool calls for observability
+                    if event.tool_name and event.tool_name in _MEMORY_TOOL_NAMES:
+                        params_summary = _summarize_memory_tool_params(
+                            event.tool_name, event.tool_input or {}
+                        )
+                        tracker.append({
+                            "tool": event.tool_name,
+                            "params": params_summary,
+                            "timestamp": time.time(),
+                        })
+                        log(
+                            f"  [{name}] mcp.memory_tool: {event.tool_name} "
+                            f"params={{{params_summary}}}",
+                        )
                 elif event.type == SessionEventType.TOOL_RESULT:
                     output = _redact_secrets(event.tool_output[:50]) if event.tool_output else ""
                     log(
@@ -3140,6 +3287,38 @@ class LucentDaemon:
                 mcp_config_override=task_mcp_config,
             )
             dispatched += 1
+
+            # Log MCP memory-tool usage summary as a queryable task event
+            session_name = f"{agent_type}-{task_id[:8]}"
+            mcp_tracker = self._session_mcp_trackers.pop(session_name, [])
+            mcp_summary = _build_mcp_tool_summary(mcp_tracker)
+            log(f"Task {task_id[:8]} ({agent_type}): {mcp_summary}")
+
+            # Build structured metadata for queryable event
+            search_count = sum(
+                1 for e in mcp_tracker if e["tool"] in _MEMORY_SEARCH_TOOLS
+            )
+            capture_count = sum(
+                1 for e in mcp_tracker if e["tool"] in _MEMORY_CAPTURE_TOOLS
+            )
+            tool_counts: dict[str, int] = {}
+            for entry in mcp_tracker:
+                tool_counts[entry["tool"]] = tool_counts.get(entry["tool"], 0) + 1
+            await RequestAPI.add_event(
+                task_id,
+                "mcp_tool_usage",
+                mcp_summary,
+                {
+                    "total_calls": len(mcp_tracker),
+                    "search_calls": search_count,
+                    "capture_calls": capture_count,
+                    "tool_counts": tool_counts,
+                    "calls": [
+                        {"tool": e["tool"], "params": e["params"]}
+                        for e in mcp_tracker
+                    ],
+                },
+            )
 
             # Process and destroy sandbox after task completes
             if sandbox_id:

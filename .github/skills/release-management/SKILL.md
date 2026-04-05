@@ -7,6 +7,20 @@ description: 'Manage changelog updates, version bumping, tagging, and release no
 
 ## Release Procedure
 
+### 0. Load Release Context
+
+Before starting a release, search memory for prior release history:
+
+```
+search_memories(query="release", tags=["release"], limit=5)
+search_memories(query=<project or repo name>, tags=["release"], limit=3)
+```
+
+Look for:
+- **Past release notes** — version numbering pattern, what was included
+- **Release issues** — problems from previous releases to avoid repeating
+- **Breaking change history** — how breaking changes were communicated before
+
 ### 1. Update the Changelog
 
 Follow [Keep a Changelog](https://keepachangelog.com/) format:
