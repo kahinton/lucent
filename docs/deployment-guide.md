@@ -206,7 +206,7 @@ docker run --rm -v lucent_data:/data -v $(pwd):/backup alpine \
 |----------|---------|-------------|
 | `LUCENT_AUTH_PROVIDER` | `basic` | `basic` (username/password) or `api_key` |
 | `LUCENT_SESSION_TTL_HOURS` | `24` | Web session cookie lifetime |
-| `LUCENT_SECURE_COOKIES` | `false` | Set `true` behind HTTPS |
+| `LUCENT_SECURE_COOKIES` | `true` | Set `false` for local HTTP development without HTTPS |
 | `LUCENT_SIGNING_SECRET` | *(random)* | HMAC secret for impersonation cookies — set a fixed value for persistence across restarts |
 
 ### Integrations

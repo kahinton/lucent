@@ -137,10 +137,13 @@ Once running, the web UI at http://localhost:8766 provides:
 
 The Lucent server provides persistent memory and the web dashboard. The **daemon** adds autonomous capabilities — cognitive reasoning, task dispatch, scheduled work, and background learning.
 
-The daemon runs as a separate process that connects to the Lucent server over MCP:
+The daemon connects to the server over MCP and requires a GitHub token for LLM access via the Copilot SDK:
 
 ```bash
-# Set required environment variables
+# Required: GitHub personal access token with "copilot" scope
+export GITHUB_TOKEN=your_github_token_here
+
+# Required: MCP connection details
 export LUCENT_MCP_URL=http://localhost:8766/mcp
 export LUCENT_MCP_API_KEY=hs_your_api_key_here  # Same key from step 2
 

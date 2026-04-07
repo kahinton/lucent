@@ -83,7 +83,8 @@ services:
       AUTH: 0
       BUILD: 0
       COMMIT: 0
-      EXEC: 0
+      EXEC: 0             # NOTE: Sandboxes using exec (e.g. devcontainer setup) need EXEC=1.
+                           # Enable if sandbox tasks fail silently on exec operations.
       NODES: 0
       PLUGINS: 0
       SECRETS: 0
@@ -115,6 +116,9 @@ services:
       DAEMON_DATABASE_URL: postgresql://lucent_daemon:${DAEMON_DB_PASSWORD:-change-me-insecure-daemon-password}@postgres:5432/lucent
       LUCENT_MODE: ${LUCENT_MODE:-personal}
       LUCENT_LICENSE_KEY: ${LUCENT_LICENSE_KEY:-}
+      # Cookie signing — set a stable value for session persistence across container restarts.
+      # Without this, sessions are lost every restart. Generate: openssl rand -base64 32
+      LUCENT_SIGNING_SECRET: ${LUCENT_SIGNING_SECRET:-lucent-dev-signing-secret-change-in-production}
       LUCENT_AUTO_APPROVE: ${LUCENT_AUTO_APPROVE:-false}
       LUCENT_SKIP_POST_REVIEW: ${LUCENT_SKIP_POST_REVIEW:-false}
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
@@ -132,6 +136,10 @@ services:
       # Secret storage (builtin provider requires an encryption key)
       LUCENT_SECRET_PROVIDER: ${LUCENT_SECRET_PROVIDER:-builtin}
       LUCENT_SECRET_KEY: ${LUCENT_SECRET_KEY:-lucent-dev-secret-key-change-in-production}
+      # Credential encryption for integrations (Slack/Discord). Only needed if you
+      # enable integrations. Generate with:
+      #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+      LUCENT_CREDENTIAL_KEY: ${LUCENT_CREDENTIAL_KEY:-}
       # OpenBao / Vault connectivity
       VAULT_ADDR: http://openbao:8200
       VAULT_TOKEN: ${VAULT_TOKEN:-change-me-insecure-dev-root-token}

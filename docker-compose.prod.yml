@@ -125,6 +125,10 @@ services:
       # Secret storage
       LUCENT_SECRET_PROVIDER: ${LUCENT_SECRET_PROVIDER:-builtin}
       LUCENT_SECRET_KEY: ${LUCENT_SECRET_KEY:?LUCENT_SECRET_KEY is required}
+      # Credential encryption for integrations (Slack/Discord). Required if you
+      # enable integrations. Generate with:
+      #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+      LUCENT_CREDENTIAL_KEY: ${LUCENT_CREDENTIAL_KEY:-}
       # OpenBao connectivity
       VAULT_ADDR: http://openbao:8200
       VAULT_TOKEN: ${VAULT_TOKEN:?VAULT_TOKEN is required}
