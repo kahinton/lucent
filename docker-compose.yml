@@ -8,7 +8,7 @@
 #   - Runs OpenBao in production mode with persistent storage
 #   - Pins base images with SHA256 digests
 #
-# See docs/deployment.md for production deployment guidance.
+# See docs/deployment-guide.md for production deployment guidance.
 # ===========================================================================
 
 services:

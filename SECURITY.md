@@ -19,7 +19,8 @@ You should receive a response within 72 hours acknowledging your report. We will
 
 | Version | Supported |
 | ------- | --------- |
-| 0.1.x   | ✅        |
+| 0.2.x   | ✅        |
+| < 0.2   | ❌        |
 
 ## Scope
 

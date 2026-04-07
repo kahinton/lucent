@@ -133,6 +133,30 @@ Once running, the web UI at http://localhost:8766 provides:
 | `/users` | User management (admin) |
 | `/settings` | API keys, password, profile |
 
+## 5. Run the Daemon (Optional)
+
+The Lucent server provides persistent memory and the web dashboard. The **daemon** adds autonomous capabilities — cognitive reasoning, task dispatch, scheduled work, and background learning.
+
+The daemon runs as a separate process that connects to the Lucent server over MCP:
+
+```bash
+# Set required environment variables
+export LUCENT_MCP_URL=http://localhost:8766/mcp
+export LUCENT_MCP_API_KEY=hs_your_api_key_here  # Same key from step 2
+
+# Run the daemon
+python -m daemon.daemon
+```
+
+Or use the multi-daemon Docker profile:
+
+```bash
+# Set your API key in .env first: LUCENT_MCP_API_KEY=hs_...
+docker compose --profile multi-daemon up -d
+```
+
+See [Architecture — Autonomous Daemon](architecture.md#autonomous-daemon) for details on the four daemon loops.
+
 ## Next Steps
 
 - [Architecture](architecture.md) — how Lucent's components fit together

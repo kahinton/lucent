@@ -37,11 +37,18 @@ src/lucent/
 ├── server.py           # Unified server entry point (MCP + API + Web)
 ├── auth.py             # User context management (ContextVars)
 ├── auth_providers.py   # Pluggable auth backends + session management
+├── access_control.py   # Access control policies and enforcement
 ├── mode.py             # Deployment mode (personal/team)
 ├── model_registry.py   # LLM model catalog (20+ models, providers, categories)
 ├── rate_limit.py       # API key rate limiting
 ├── rbac.py             # Role-based access control
+├── security.py         # Security utilities (CSRF, headers, validation)
+├── license.py          # License key verification
+├── constants.py        # Shared constants
 ├── logging.py          # Structured logging configuration
+├── telemetry.py        # OpenTelemetry setup
+├── metrics.py          # Metrics collection
+├── url_validation.py   # SSRF-safe URL validation
 ├── api/
 │   ├── app.py          # FastAPI application
 │   ├── deps.py         # Authentication dependencies
@@ -50,48 +57,104 @@ src/lucent/
 │       ├── memories.py      # Memory CRUD endpoints
 │       ├── search.py        # Search endpoints
 │       ├── requests.py      # Request/task tracking endpoints
+│       ├── reviews.py       # Review workflow endpoints
 │       ├── schedules.py     # Schedule management endpoints
 │       ├── definitions.py   # Agent/skill definition endpoints
 │       ├── sandboxes.py     # Sandbox instance + template endpoints
 │       ├── users.py         # User management endpoints
 │       ├── organizations.py # Organization endpoints
+│       ├── groups.py        # Group management endpoints
 │       ├── audit.py         # Audit log endpoints
 │       ├── access.py        # Access tracking endpoints
-│       └── chat.py          # Streaming chat endpoint
+│       ├── chat.py          # Streaming chat endpoint
+│       ├── secrets.py       # Secret storage endpoints
+│       ├── export.py        # Memory export/import endpoints
+│       ├── admin_models.py  # Model registry admin endpoints
+│       ├── daemon_tasks.py  # Daemon task management endpoints
+│       └── daemon_messages.py # Daemon messaging endpoints
 ├── web/
-│   ├── routes.py       # Web UI routes (dashboard, memories, activity, etc.)
-│   ├── static/         # Favicons and logos
+│   ├── routes/         # Web UI route handlers
+│   │   ├── dashboard.py     # Dashboard overview
+│   │   ├── memories.py      # Memory management UI
+│   │   ├── requests_routes.py # Request/task tracking UI
+│   │   ├── definitions.py   # Agent/skill definition UI
+│   │   ├── schedules.py     # Schedule management UI
+│   │   ├── sandboxes.py     # Sandbox management UI
+│   │   ├── daemon.py        # Daemon review queue UI
+│   │   ├── secrets.py       # Secret storage UI
+│   │   ├── groups.py        # Group management UI
+│   │   ├── admin.py         # Admin pages
+│   │   ├── auth.py          # Login/setup pages
+│   │   ├── chat.py          # Chat interface
+│   │   ├── settings.py      # User settings
+│   │   ├── audit.py         # Audit log viewer
+│   │   └── usage_analytics.py # Usage analytics
+│   ├── static/         # CSS, JavaScript, and vendor assets
 │   └── templates/      # Jinja2 templates
 ├── db/
 │   ├── pool.py         # Connection pool + migration runner
 │   ├── memory.py       # Memory repository (CRUD + search)
 │   ├── requests.py     # Request/task repository + event tracking
+│   ├── reviews.py      # Review repository
 │   ├── schedules.py    # Schedule repository + cron parser
 │   ├── definitions.py  # Agent/skill definition repository
+│   ├── sandbox.py      # Sandbox instance repository
 │   ├── sandbox_template.py # Sandbox template repository
 │   ├── user.py         # User repository
 │   ├── audit.py        # Audit log + versioning repository
 │   ├── api_key.py      # API key repository
 │   ├── access.py       # Access tracking repository
 │   ├── organization.py # Organization repository
+│   ├── groups.py       # Group repository
+│   ├── integrations.py # Integration repository
+│   ├── models.py       # Database model definitions
 │   ├── types.py        # TypedDict definitions
 │   └── migrations/     # SQL migration files (auto-applied on startup)
 ├── sandbox/
 │   ├── manager.py      # Sandbox lifecycle management
 │   ├── backend.py      # Abstract sandbox backend interface
 │   ├── docker_backend.py # Docker container implementation
+│   ├── devcontainer.py # DevContainer support
 │   ├── k8s_backend.py  # Kubernetes backend (stub)
+│   ├── mcp_bridge.py   # MCP bridge for sandbox communication
+│   ├── output.py       # Output capture and formatting
 │   └── models.py       # SandboxConfig, SandboxInfo, ExecResult
 ├── llm/
 │   ├── engine.py       # Abstract LLM engine interface
 │   ├── copilot_engine.py # GitHub Copilot SDK implementation
-│   ├── langchain_engine.py # LangChain fallback
-│   └── factory.py      # Engine selection factory
+│   ├── langchain_engine.py # LangChain multi-provider implementation
+│   ├── factory.py      # Engine selection factory
+│   ├── mcp_bridge.py   # MCP bridge for LLM tool access
+│   └── model_engine_validation.py # Model-engine compatibility checks
+├── secrets/
+│   ├── base.py         # Abstract secret provider interface
+│   ├── builtin.py      # Built-in Fernet encryption provider
+│   ├── transit.py      # OpenBao Transit provider
+│   ├── vault.py        # HashiCorp Vault provider
+│   ├── aws.py          # AWS Secrets Manager provider
+│   ├── azure.py        # Azure Key Vault provider
+│   ├── registry.py     # Provider registry and auto-detection
+│   └── utils.py        # Encryption utilities
+├── integrations/
+│   ├── base.py         # Abstract integration interface
+│   ├── adapters.py     # Integration adapter implementations
+│   ├── slack_adapter.py # Slack-specific adapter
+│   ├── service.py      # Integration service layer
+│   ├── router.py       # Integration API router
+│   ├── webhooks.py     # Webhook handling
+│   ├── identity.py     # User identity linking
+│   ├── encryption.py   # Integration credential encryption
+│   ├── middleware.py    # Integration middleware
+│   ├── models.py       # Integration data models
+│   └── repositories.py # Integration data access
 ├── tools/
 │   ├── memories.py     # Memory MCP tools
 │   ├── requests.py     # Request/task MCP tools
-│   └── schedules.py    # Schedule MCP tools
-├── models/             # Pydantic models
+│   ├── schedules.py    # Schedule MCP tools
+│   └── definitions.py  # Agent/skill definition MCP tools
+├── services/
+│   └── mcp_discovery.py # MCP server discovery
+├── models/             # Pydantic models (memory, user, organization, audit, validation)
 └── prompts/            # System prompt templates
 ```
 
@@ -154,9 +217,11 @@ Every memory update is versioned. Use `get_memory_versions` to browse history an
 | `create_task` | Create a task under a request (agent type, model, sandbox) |
 | `get_request_details` | Get request with tasks and events |
 | `list_pending_requests` | List requests awaiting work |
+| `list_active_work` | List all active requests with task status summaries |
 | `list_pending_tasks` | List tasks ready for dispatch |
 | `log_task_event` | Record an event in a task's timeline |
 | `link_task_memory` | Link a memory to a task (created/read/updated) |
+| `link_request_memory` | Link a memory to a request (goal/context/reference) |
 
 ### Schedule Tools
 
@@ -166,6 +231,54 @@ Every memory update is versioned. Use `get_memory_versions` to browse history an
 | `list_schedules` | List schedules with optional status filter |
 | `get_schedule_details` | Get schedule config, run history, and next run time |
 | `toggle_schedule` | Enable or disable a schedule |
+
+### Definition Tools
+
+| Tool | Purpose |
+|------|---------|
+| `create_agent_definition` | Create a new agent definition (starts as proposed) |
+| `get_agent_definition` | Get full agent definition by ID |
+| `list_agent_definitions` | List agents with optional status filter |
+| `update_agent_definition` | Update an agent's name, description, or content |
+| `approve_agent_definition` | Approve a proposed agent (admin only) |
+| `reject_agent_definition` | Reject a proposed agent (admin only) |
+| `delete_agent_definition` | Delete an agent definition |
+| `create_skill_definition` | Create a new skill definition (starts as proposed) |
+| `get_skill_definition` | Get full skill definition by ID |
+| `list_skill_definitions` | List skills with optional status filter |
+| `approve_skill_definition` | Approve a proposed skill (admin only) |
+| `reject_skill_definition` | Reject a proposed skill (admin only) |
+| `delete_skill_definition` | Delete a skill definition |
+| `grant_skill_to_agent` | Grant a skill to an agent |
+| `revoke_skill_from_agent` | Revoke a skill from an agent |
+| `create_mcp_server_definition` | Register an external MCP server |
+| `list_mcp_server_definitions` | List registered MCP servers |
+| `grant_mcp_server_to_agent` | Grant MCP server access to an agent |
+| `revoke_mcp_server_from_agent` | Revoke MCP server access from an agent |
+| `list_proposals` | List all pending proposals (agents, skills, MCP servers) |
+
+### Review & Model Tools
+
+| Tool | Purpose |
+|------|---------|
+| `create_review` | Create a review for a request or task |
+| `list_reviews` | List reviews with filters |
+| `list_available_models` | List available LLM models for task assignment |
+
+### Export & Import Tools
+
+| Tool | Purpose |
+|------|---------|
+| `export_memories` | Export memories with full content (no truncation) |
+| `import_memories` | Import memories from a JSON payload |
+
+### Daemon-Internal Tools
+
+| Tool | Purpose |
+|------|---------|
+| `claim_task` | Atomically claim a pending task (daemon use) |
+| `release_claim` | Release a claimed task back to pending (daemon use) |
+| `create_daemon_task` | Create a task for daemon processing (legacy — prefer `create_request` + `create_task`) |
 
 ### Tool Parameters
 
@@ -228,11 +341,11 @@ Arguments:
 
 ## System Prompts
 
-Lucent provides prompt templates to help LLMs use the memory system effectively:
+Lucent provides prompt templates (in `src/lucent/prompts/`) to help LLMs use the memory system effectively:
 
-- **memory_usage_guide**: Comprehensive guidance on memory types, importance ratings, and best practices
-- **memory_usage_guide_short**: Condensed version for limited prompt space
-- **user_introduction**: Guidance for greeting users and personalizing interactions based on their individual memory
+- **`get_memory_system_prompt()`**: Comprehensive guidance on memory types, importance ratings, and best practices
+- **`get_memory_system_prompt_short()`**: Condensed version for limited prompt space
+- **`get_user_introduction_prompt()`**: Guidance for greeting users and personalizing interactions based on their individual memory
 
 ## Autonomous Daemon
 
@@ -293,7 +406,6 @@ daemon/
 ├── adaptation.py       # Environment assessment + capability generation
 ├── output_validation.py # Output contract validation and repair
 ├── cognitive.md        # Cognitive governance context
-├── agents/             # Runtime agent workspace
 ├── tasks/              # Task module stubs
 └── templates/          # Jinja2 templates for domain-specific agents/skills
     ├── agents/         # Agent definition templates (.md.j2)

@@ -4,7 +4,11 @@ An MCP (Model Context Protocol) server that gives AI assistants persistent memor
 
 More than a memory store — Lucent is the infrastructure for AI teammates that learn, plan, and act independently. It provides five memory types with fuzzy search, an autonomous daemon with four independent loops (cognitive reasoning, task dispatch, scheduling, and background learning), sandboxed Docker execution, and a full web dashboard — all behind a single `docker compose up -d`.
 
+> **Project Status:** Active development (v0.2.0). Core features are stable. APIs may change before 1.0.
+
 ## Quick Start
+
+**Prerequisites:** [Docker](https://docs.docker.com/get-docker/) and [Docker Compose](https://docs.docker.com/compose/install/) v2+.
 
 ```bash
 # 1. Clone and start
@@ -39,7 +43,7 @@ For other clients (Claude Desktop, GitHub Copilot CLI), see the [Getting Started
 - **Autonomous Daemon** — cognitive reasoning, event-driven task dispatch, cron scheduling, and background learning loops
 - **Sandboxed Execution** — Docker-based isolated environments with resource limits, network policies, and auto-cleanup
 - **Agent Definitions** — approval-gated registry for agents and skills, human-vetted before daemon use
-- **Multi-Model Support** — per-task model selection from 20+ LLMs (OpenAI, Anthropic, Google)
+- **Multi-Model Support** — per-task model selection from 20+ LLMs (OpenAI, Anthropic, Google) via GitHub Copilot SDK or LangChain engine
 - **Web Dashboard** — manage memories, agents, schedules, sandboxes, activity tracking, and review queues
 - **Pluggable Auth** — basic auth, API key auth, session management, RBAC
 - **Secret Storage** — [OpenBao Transit](docs/secret-storage.md), builtin Fernet, or external Vault
@@ -65,6 +69,10 @@ For other clients (Claude Desktop, GitHub Copilot CLI), see the [Getting Started
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) and the [Development Guide](docs/development.md).
 
+## Security
+
+To report a vulnerability, see [SECURITY.md](SECURITY.md).
+
 ## License
 
-Lucent Source Available License 1.0 — free for non-commercial use. Commercial use requires a separate license. Release converts to Apache 2.0 after 2 years. See [LICENSE](LICENSE) for full terms.
+Lucent Source Available License 1.0 — free for non-commercial use. Commercial use requires a separate license. Converts to Apache 2.0 after 2 years. See [LICENSE](LICENSE) for full terms.

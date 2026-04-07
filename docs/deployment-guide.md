@@ -1,6 +1,6 @@
 # Deployment Guide
 
-This guide covers deploying Lucent in production. For local development, see the [README](../README.md#development).
+This guide covers deploying Lucent in production. For local development, see the [Development Guide](development.md).
 
 ## Quick Start (Docker Compose)
 
