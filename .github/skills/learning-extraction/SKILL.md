@@ -11,6 +11,8 @@ Transforms raw experience into integrated knowledge. Lessons don't exist as stan
 
 **Integrate, don't accumulate.** A lesson about consolidation timing should update the memory about the consolidation system. A lesson about RBAC should update the memory about the RBAC module. If there's no existing memory to update, that's a knowledge gap — fill it with one well-scoped memory, not a floating "lesson."
 
+**Tag discipline is mandatory.** The `lesson-extracted` tag is reserved for structured procedural lessons that prescribe a specific behavioral change. Do **not** apply `lesson-extracted` to technical knowledge bases, daily digests, status summaries, or general documentation.
+
 ## Triggers
 
 | Trigger | Source |
@@ -45,6 +47,27 @@ Cap at 10 per run. Skip anything tagged `daemon-heartbeat`.
 | **Discovery** | New information about the domain or tools | Find the related memory and add the new knowledge |
 | **Routine** | Normal completion, nothing notable | Mark as extracted, move on |
 
+## Step 2.5: Lesson Qualification Gate (Required)
+
+Before adding `lesson-extracted`, verify the candidate is a real lesson.
+
+A memory qualifies for `lesson-extracted` **only if all are true**:
+1. It is a **structured procedural lesson**, not narrative reporting.
+2. It identifies a concrete mistake, gap, or failure mode.
+3. It prescribes a specific **Behavioral Change** (what to do differently next time).
+4. It includes explicit **Verification** (how to confirm the new behavior is actually happening).
+
+If any criterion fails:
+- Do **not** add `lesson-extracted`.
+- You may still integrate useful facts into technical/procedural memories.
+- For pure summaries/digests/documentation, treat as reference material, not lessons.
+
+### Negative Examples (Not Lessons)
+
+- "A summary of what happened is NOT a lesson."
+- "A list of technical facts is NOT a lesson."
+- "A lesson must prescribe a specific behavioral change."
+
 ## Step 3: Find the Memory to Update
 
 This is the critical step. For each non-routine experience:
@@ -64,6 +87,18 @@ Look for:
 
 **For correction-tagged memories**: When integrating a correction, note the correction source in the updated memory. User corrections (tagged `correction`): note "Corrected by user feedback" with date. Self-corrections (tagged `self-correction`): note "Self-corrected" with date. This creates traceable lineage from correction event to knowledge update.
 
+## Step 3.5: Required Lesson Format
+
+Every extracted lesson (the content being integrated) must include both sections below:
+
+### Behavioral Change
+- State the exact behavior to adopt going forward.
+- Must be specific and testable (who does what, when).
+
+### Verification
+- State how to confirm the behavior is being applied.
+- Include an observable signal (checklist item, metric, test, audit query, or review criterion).
+
 ## Step 4: Mark Sources as Processed
 
 ```
@@ -72,6 +107,10 @@ update_memory(
   tags=[...existing_tags, "lesson-extracted"]
 )
 ```
+
+Apply `lesson-extracted` **only** when Step 2.5 passed and the lesson includes both required sections from Step 3.5.
+
+If a source was reviewed but is not a qualifying lesson (digest, status summary, technical KB, general docs), do not apply `lesson-extracted`.
 
 ## Step 5: Clean Up
 
@@ -99,4 +138,6 @@ Skipped: J routine experiences
 - **Extracting from a single occurrence** — wait for 2+ confirming instances before treating something as a pattern
 - **Writing lessons too vaguely to be actionable** — "be careful with X" is not a lesson
 - **Not marking sources as `lesson-extracted`** — leads to re-processing loops
+- **Tagging digests/KBs as `lesson-extracted`** — this dilutes lesson quality metrics and breaks extraction audits
+- **Missing Behavioral Change or Verification sections** — incomplete lessons are not valid lessons
 - **Increasing total memory count** — extraction should consolidate, not expand
