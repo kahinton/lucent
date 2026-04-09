@@ -254,3 +254,48 @@ def generate_all_metadata_docs() -> str:
 
 # Pre-generate the documentation for use in tool docstrings
 METADATA_DOCS = generate_all_metadata_docs()
+
+
+# ── Tag normalization (workflow-audit/phase-4) ────────────────────────────
+
+# Prohibited tags → canonical replacements. Sourced from
+# .github/skills/workflow-conventions.md § "Prohibited Tags".
+PROHIBITED_TAG_MAP: dict[str, str] = {
+    "awaiting-approval": "needs-review",
+    "pending-review": "needs-review",
+    "from-daemon": "daemon",
+    "daemon-service": "daemon",
+    "user-approved": "feedback-approved",
+}
+
+
+def normalize_tags(tags: list[str] | None, *, is_daemon: bool = False) -> list[str]:
+    """Normalize memory tags: replace prohibited tags and auto-tag daemon content.
+
+    Args:
+        tags: Raw tag list (may be None).
+        is_daemon: True when the caller is the daemon-service user.
+
+    Returns:
+        Deduplicated, normalized tag list.
+    """
+    if not tags:
+        tags = []
+
+    normalized: list[str] = []
+    for tag in tags:
+        replacement = PROHIBITED_TAG_MAP.get(tag)
+        normalized.append(replacement if replacement else tag)
+
+    # Daemon-created content must carry the 'daemon' tag for discoverability
+    if is_daemon and "daemon" not in normalized:
+        normalized.append("daemon")
+
+    # Deduplicate while preserving order
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for tag in normalized:
+        if tag not in seen:
+            seen.add(tag)
+            deduped.append(tag)
+    return deduped

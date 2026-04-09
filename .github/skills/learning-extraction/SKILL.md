@@ -1,198 +1,143 @@
 ---
 name: learning-extraction
-description: 'Extract reusable lessons from completed work and feedback. Use after task completion, when processing daemon-results, when feedback is processed, or when the autonomic layer triggers periodic learning extraction.'
+description: 'Extract reusable lessons from completed work and feedback. Use after task completion, when processing daemon results, when feedback is processed, or when the autonomic layer triggers periodic extraction.'
 ---
 
-# Learning Extraction Pipeline
+# Learning Extraction
 
-Transforms raw experience into reusable capability. This is the mechanism that makes Lucent genuinely better over time — not just remembering what happened, but extracting transferable principles that improve future decisions.
+Transforms raw experience into integrated knowledge. Lessons don't exist as standalone memories — they get folded into the existing knowledge that needs them. The goal is *fewer, smarter memories*, not more.
 
-## When to Trigger
+## Core Principle
+
+**Integrate, don't accumulate.** A lesson about consolidation timing should update the memory about the consolidation system. A lesson about RBAC should update the memory about the RBAC module. If there's no existing memory to update, that's a knowledge gap — fill it with one well-scoped memory, not a floating "lesson."
+
+**Tag discipline is mandatory.** The `lesson-extracted` tag is reserved for structured procedural lessons that prescribe a specific behavioral change. Do **not** apply `lesson-extracted` to technical knowledge bases, daily digests, status summaries, or general documentation.
+
+## Triggers
 
 | Trigger | Source |
 |---------|--------|
-| Daemon autonomic cycle (periodic) | `run_autonomic` in daemon.py |
-| After feedback processing (approved or rejected) | Cognitive loop Phase 5 |
+| Daemon autonomic cycle (periodic) | `run_autonomic` |
+| After feedback processing (approved or rejected) | Cognitive loop |
+| After a request is rejected at the approval gate | Tags: `approval-rejected` |
 | After a sub-agent completes a non-trivial task | Task dispatch completion |
-| Explicitly requested by cognitive loop | `daemon-task` tagged `learning-extraction` |
-| Batch of 5+ unprocessed `daemon-result` memories accumulate | Autonomic threshold check |
+| Correction memories created | Tags: `correction`, `self-correction` |
 
-## Input: What to Process
-
-Search for candidate memories using these queries, filtered to exclude those already tagged `lesson-extracted`:
-
-1. **Completed results**: `daemon-result` — what sub-agents produced
-2. **Validated work**: `validated` or `feedback-approved` — approaches that were endorsed
-3. **Rejected work**: `rejection-lesson` — approaches that failed (highest learning value)
-4. **Self-improvement notes**: `self-improvement` — behavioral observations
-5. **Experience memories**: type `experience` created in the last 48 hours
-
-For each candidate, skip if it already has the `lesson-extracted` tag — this prevents reprocessing.
-
-## Pipeline Phases
-
-### Phase 1: Gather Context
-
-For each candidate memory:
-
-1. Read the full memory content with `get_memory(id)`
-2. Search for **related memories** — same tags, same domain, same project
-3. Search for **existing lessons** — `procedural` type memories with tag `lesson` in the same domain
-4. Load any relevant **goal memories** — does this work connect to an active goal?
-
-This context is essential. A result in isolation teaches less than a result compared against prior patterns.
-
-### Phase 2: Classify the Experience
-
-Categorize each candidate into one of these learning types:
-
-| Type | Description | Example |
-|------|-------------|---------|
-| **Pattern Validation** | An existing approach was confirmed to work | "Architecture-first documentation prevents stale refs — confirmed again" |
-| **Pattern Invalidation** | An assumed approach was shown to be wrong | "Speculative code changes without user context get rejected" |
-| **New Pattern Discovery** | A novel approach worked and should be remembered | "Checking file existence before documenting modules catches gaps" |
-| **Failure Analysis** | Something went wrong — extract the root cause | "Task failed because API schema changed — need version checks" |
-| **Scope Calibration** | Learned about appropriate scope/ambition for tasks | "User prefers focused, minimal changes over comprehensive rewrites" |
-| **Process Improvement** | Discovered a better workflow or process | "Running tests before AND after changes catches regressions earlier" |
-| **Domain Knowledge** | Learned something about the problem domain | "This codebase uses event sourcing — updates must be append-only" |
-
-### Phase 3: Extract the Principle
-
-This is the critical step. For each classified experience, extract a **transferable principle** — not just what happened, but what it teaches.
-
-**The extraction formula:**
+## Step 1: Find Unprocessed Experiences
 
 ```
-CONTEXT: [When doing X in situation Y...]
-ACTION: [The approach taken was Z...]
-OUTCOME: [This resulted in...]
-PRINCIPLE: [Therefore, when facing similar situations, do/avoid...]
-APPLICABILITY: [This applies when... but NOT when...]
+search_memories(tags=["daemon-result"], limit=20)
+search_memories(tags=["rejection-lesson"], limit=10)
+search_memories(tags=["approval-rejected"], limit=10)
+search_memories(tags=["correction"], limit=10)
+search_memories(tags=["feedback-processed"], limit=10)
 ```
 
-**Quality criteria for a good principle:**
+Filter to memories that do NOT have the `lesson-extracted` tag.
 
-- **Transferable**: Applies beyond this specific instance
-- **Actionable**: Someone encountering a similar situation knows what to do
-- **Bounded**: Includes when it does and doesn't apply
-- **Falsifiable**: Could be proven wrong by future experience (this is a feature — it means the principle is specific enough to be useful)
+Cap at 10 per run. Skip anything tagged `daemon-heartbeat`.
 
-**Bad lesson**: "The code review was rejected"
-**Good lesson**: "When proposing code changes, verify the user's intent by examining recent git history and open issues before assuming what needs fixing. Speculative fixes based on code smell alone get rejected when they don't align with the user's current priorities."
+## Step 2: Classify Each Experience
 
-### Phase 4: Compare Against Existing Knowledge
+| Classification | Criteria | Action |
+|---------------|----------|--------|
+| **Success pattern** | Task completed, validated, produced good output | Find the related technical/procedural memory and add what worked |
+| **Failure pattern** | Task failed, rejected, or produced poor output | Find the related memory and add the gotcha/pitfall |
+| **Correction** | User or system corrected a behavior | Find the related memory and update it with the correct approach |
+| **Discovery** | New information about the domain or tools | Find the related memory and add the new knowledge |
+| **Routine** | Normal completion, nothing notable | Mark as extracted, move on |
 
-Before creating a new lesson memory:
+## Step 2.5: Lesson Qualification Gate (Required)
 
-1. **Search for existing lessons** in the same domain: `search_memories` with tags `["lesson", domain-tag]`
-2. **Check for contradictions**: Does this new principle contradict an existing one? If so, which has more evidence? Update the weaker one.
-3. **Check for reinforcement**: Does this confirm an existing principle? If so, update the existing memory to note additional evidence — don't create a duplicate.
-4. **Check for refinement**: Does this add nuance to an existing principle? If so, update the existing memory with the refined understanding.
+Before adding `lesson-extracted`, verify the candidate is a real lesson.
 
-**Decision matrix:**
+A memory qualifies for `lesson-extracted` **only if all are true**:
+1. It is a **structured procedural lesson**, not narrative reporting.
+2. It identifies a concrete mistake, gap, or failure mode.
+3. It prescribes a specific **Behavioral Change** (what to do differently next time).
+4. It includes explicit **Verification** (how to confirm the new behavior is actually happening).
 
-| Situation | Action |
-|-----------|--------|
-| No existing lesson on this topic | Create new `procedural` memory |
-| Existing lesson, this confirms it | Update existing memory — add evidence count and latest example |
-| Existing lesson, this contradicts it | Update existing memory — note the contradiction and conditions where each applies |
-| Existing lesson, this refines it | Update existing memory — add the nuance/boundary condition |
+If any criterion fails:
+- Do **not** add `lesson-extracted`.
+- You may still integrate useful facts into technical/procedural memories.
+- For pure summaries/digests/documentation, treat as reference material, not lessons.
 
-### Phase 5: Create or Update Lesson Memory
+### Negative Examples (Not Lessons)
 
-**For new lessons**, create a memory with:
+- "A summary of what happened is NOT a lesson."
+- "A list of technical facts is NOT a lesson."
+- "A lesson must prescribe a specific behavioral change."
 
-- **type**: `procedural`
-- **tags**: `["lesson", "daemon", domain-tag, learning-type-tag]`
-  - Domain tags: the relevant project, technology, or work area (e.g., `code-review`, `documentation`, `python`)
-  - Learning type tags: `pattern-validation`, `pattern-invalidation`, `new-pattern`, `failure-analysis`, `scope-calibration`, `process-improvement`, `domain-knowledge`
-- **importance**: Based on the principle's breadth of applicability:
-  - **8-9**: Broadly applicable across many task types (e.g., "always verify intent before acting")
-  - **6-7**: Applicable within a specific domain (e.g., "in this codebase, check event sourcing constraints")
-  - **4-5**: Narrow but useful (e.g., "this API requires auth header format X")
-- **content**: Structured as:
+## Step 3: Find the Memory to Update
 
-```markdown
-## Lesson: [One-line summary of the principle]
+This is the critical step. For each non-routine experience:
 
-**Context**: [When this applies — situation, domain, task type]
-
-**Principle**: [The transferable lesson — what to do or avoid]
-
-**Evidence**:
-- [Date]: [Brief description of the experience that taught this]
-
-**Boundaries**: [When this does NOT apply — important for avoiding overgeneralization]
-
-**Related**: [Links to goal IDs, project names, or other lesson IDs if applicable]
+```
+search_memories(query="<the topic/module/system this lesson is about>", limit=10)
 ```
 
-**For updated lessons**, use `update_memory` to:
+Look for:
+- Technical memories about the relevant file, module, or system
+- Procedural memories about the relevant workflow or process
+- Any memory whose scope covers this lesson's domain
 
-- Add new evidence entries to the Evidence section
-- Refine Boundaries based on new information
-- Adjust importance if the principle proved more/less broadly applicable than initially thought
+**If a matching memory exists**: Update it with the new knowledge using `update_memory`. Append the insight to the existing content — don't rewrite the whole thing, just add what's new.
 
-### Phase 6: Link and Index
+**If no matching memory exists**: This reveals a genuine knowledge gap. Create ONE technical or procedural memory scoped to the right level (file, module, or system). Include the lesson as part of its content, not as a standalone "Lesson:" entry.
 
-After creating/updating lesson memories:
+**For correction-tagged memories**: When integrating a correction, note the correction source in the updated memory. User corrections (tagged `correction`): note "Corrected by user feedback" with date. Self-corrections (tagged `self-correction`): note "Self-corrected" with date. This creates traceable lineage from correction event to knowledge update.
 
-1. **Tag source memories**: Add `lesson-extracted` to each processed candidate memory so it isn't reprocessed
-2. **Link to goals**: If the lesson relates to an active goal, update the goal memory's content to reference the lesson
-3. **Update daemon-state**: Note the extraction run — when it happened, how many lessons were extracted/updated, any notable findings
+## Step 3.5: Required Lesson Format
+
+Every extracted lesson (the content being integrated) must include both sections below:
+
+### Behavioral Change
+- State the exact behavior to adopt going forward.
+- Must be specific and testable (who does what, when).
+
+### Verification
+- State how to confirm the behavior is being applied.
+- Include an observable signal (checklist item, metric, test, audit query, or review criterion).
+
+## Step 4: Mark Sources as Processed
+
+```
+update_memory(
+  memory_id="<source_id>",
+  tags=[...existing_tags, "lesson-extracted"]
+)
+```
+
+Apply `lesson-extracted` **only** when Step 2.5 passed and the lesson includes both required sections from Step 3.5.
+
+If a source was reviewed but is not a qualifying lesson (digest, status summary, technical KB, general docs), do not apply `lesson-extracted`.
+
+## Step 5: Clean Up
+
+After integration, check if any source experience memories are now fully redundant (their knowledge has been absorbed into a better-scoped memory). If so, delete them.
+
+The memory count should go DOWN or stay the same after extraction. Never up.
 
 ## Output
 
-After completing the pipeline, create a summary memory:
+Brief text summary only. Do NOT create a summary memory.
 
-- **type**: `experience`
-- **tags**: `["daemon", "learning-extraction", "autonomic"]`
-- **importance**: 3 (ephemeral — the lessons themselves are what matter)
-- **content**: Brief summary of what was processed and what lessons were extracted/updated
-
-## Integration with Existing Skills
-
-This skill works alongside, not in replacement of:
-
-- **memory-capture**: Captures raw experiences as they happen (real-time). Learning-extraction processes them into principles (batch/periodic).
-- **self-improvement**: Focuses on agent behavior and configuration changes. Learning-extraction focuses on reusable domain and process knowledge.
-- **memory-management**: Handles consolidation and cleanup. Learning-extraction adds structured lesson content that memory-management can then maintain.
-
-## Anti-Patterns to Avoid
-
-| Anti-Pattern | Why It's Bad | Instead |
-|--------------|-------------|---------|
-| Extracting lessons from trivial work | Floods memory with noise | Only process non-trivial results — skip routine maintenance, simple lookups |
-| Overgeneralizing from one instance | Creates unreliable principles | Mark single-evidence lessons as tentative; require 2+ confirmations before raising importance above 6 |
-| Creating duplicate lessons | Fragments knowledge | Always search before creating; update existing lessons when possible |
-| Lessons without boundaries | Leads to rigid, context-blind behavior | Every principle MUST include when it does NOT apply |
-| Ignoring contradictions | Allows inconsistent behavior | When principles conflict, explicitly document the conditions that determine which applies |
-| Extracting only from failures | Misses half the learning | Validated work teaches what TO do, which is equally valuable |
-
-## Example Extraction
-
-**Input**: A `daemon-result` memory where the code agent updated documentation but was rejected with feedback: "Don't rewrite sections that are already accurate. Only fix what's actually wrong."
-
-**Classification**: Scope Calibration
-
-**Extracted Principle**:
-
-```markdown
-## Lesson: Minimize documentation changes to what's actually wrong
-
-**Context**: When tasked with documentation updates or improvements.
-
-**Principle**: Review existing content for accuracy first. Only modify sections that
-contain errors, are outdated, or are genuinely unclear. Resist the urge to rewrite
-for style or restructure for preference. The user values stability in working
-documentation over theoretical improvements.
-
-**Evidence**:
-- 2026-03-10: Documentation update rejected — feedback indicated accurate sections
-  were unnecessarily rewritten.
-
-**Boundaries**: Does NOT apply when explicitly asked to rewrite or restructure.
-Does NOT apply to new documentation being created from scratch.
-
-**Related**: hindsight project, documentation workflow
 ```
+EXTRACTION RESULT:
+Processed: N experiences
+Updated: K existing memories with new knowledge
+Created: M new memories (for genuine gaps only)
+Deleted: D redundant source memories
+Skipped: J routine experiences
+```
+
+## Anti-Patterns
+
+- **Creating standalone "Lesson:" memories** — lessons should be integrated into the memory they're about, not floating independently
+- **Creating "Learning Extraction Run" summary memories** — the output goes to text, not to memory
+- **Extracting from a single occurrence** — wait for 2+ confirming instances before treating something as a pattern
+- **Writing lessons too vaguely to be actionable** — "be careful with X" is not a lesson
+- **Not marking sources as `lesson-extracted`** — leads to re-processing loops
+- **Tagging digests/KBs as `lesson-extracted`** — this dilutes lesson quality metrics and breaks extraction audits
+- **Missing Behavioral Change or Verification sections** — incomplete lessons are not valid lessons
+- **Increasing total memory count** — extraction should consolidate, not expand

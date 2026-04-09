@@ -88,6 +88,9 @@ async def search_memories(
                 "tags": data.tags,
             },
         )
+        counts = await access_repo.get_access_counts(memory_ids)
+        for memory in result["memories"]:
+            memory["access_count"] = counts.get(memory["id"], 0)
 
     return SearchResponse(
         memories=[_memory_to_search_result(m) for m in result["memories"]],
@@ -179,6 +182,9 @@ async def search_memories_full(
                 "type": data.type,
             },
         )
+        counts = await access_repo.get_access_counts(memory_ids)
+        for memory in result["memories"]:
+            memory["access_count"] = counts.get(memory["id"], 0)
 
     return SearchResponse(
         memories=[_memory_to_search_result(m) for m in result["memories"]],

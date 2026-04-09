@@ -45,8 +45,45 @@ async def auth_user(test_user):
 
 
 @pytest_asyncio.fixture
+async def other_auth_user(db_pool, other_org, clean_test_data):
+    """Set auth context to a user in a different organization."""
+    from lucent.db import UserRepository
+
+    prefix = clean_test_data
+    repo = UserRepository(db_pool)
+    user = await repo.create(
+        external_id=f"{prefix}other_user",
+        provider="local",
+        organization_id=other_org["id"],
+        email=f"{prefix}other_user@test.com",
+        display_name=f"{prefix}Other User",
+    )
+    set_current_user(
+        {
+            "id": user["id"],
+            "organization_id": user["organization_id"],
+            "role": "member",
+            "display_name": user["display_name"],
+            "email": user["email"],
+        }
+    )
+    yield user
+    set_current_user(None)
+
+
+@pytest_asyncio.fixture
 async def repo(db_pool):
     return RequestRepository(db_pool)
+
+
+@pytest_asyncio.fixture
+async def other_org(db_pool, clean_test_data):
+    """Create a second organization for cross-org isolation tests."""
+    from lucent.db import OrganizationRepository
+
+    prefix = clean_test_data
+    org_repo = OrganizationRepository(db_pool)
+    return await org_repo.create(name=f"{prefix}other_org")
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -107,6 +144,14 @@ class TestCreateRequest:
 
 
 class TestCreateTask:
+    _UPSERT_AGENT_DEFINITION_SQL = (
+        "INSERT INTO agent_definitions "
+        "(name, organization_id, content, status, owner_user_id) "
+        "VALUES ($1, $2, $3, 'active', $4) "
+        "ON CONFLICT (name, organization_id) DO UPDATE SET "
+        "status = 'active', owner_user_id = EXCLUDED.owner_user_id"
+    )
+
     @pytest_asyncio.fixture
     async def request_id(self, mcp, auth_user):
         result = await _call(mcp, "create_request", {"title": "Parent Request"})
@@ -117,12 +162,11 @@ class TestCreateTask:
         # Need an active agent definition for validation
         async with db_pool.acquire() as conn:
             await conn.execute(
-                """INSERT INTO agent_definitions (name, organization_id, content, status)
-                   VALUES ($1, $2, $3, 'active')
-                   ON CONFLICT (name, organization_id) DO UPDATE SET status = 'active'""",
+                self._UPSERT_AGENT_DEFINITION_SQL,
                 "code",
                 auth_user["organization_id"],
                 "test definition",
+                auth_user["id"],
             )
 
         result = await _call(
@@ -150,16 +194,20 @@ class TestCreateTask:
         assert "nonexistent_agent_xyz" in result["error"]
 
     @pytest.mark.asyncio
-    async def test_with_model(self, mcp, auth_user, request_id, db_pool):
-        """Model validation accepts any string (new models may exist before registry update)."""
+    async def test_with_model(self, mcp, auth_user, request_id, db_pool, monkeypatch):
+        """Known model from hardcoded registry is accepted in strict mode."""
+        from lucent import model_registry
+        from lucent.model_registry import MODELS
+
+        monkeypatch.setattr(model_registry, "_db_models", None)
+        monkeypatch.setattr(model_registry, "_MODEL_BY_ID", {m.id: m for m in MODELS})
         async with db_pool.acquire() as conn:
             await conn.execute(
-                """INSERT INTO agent_definitions (name, organization_id, content, status)
-                   VALUES ($1, $2, $3, 'active')
-                   ON CONFLICT (name, organization_id) DO UPDATE SET status = 'active'""",
+                self._UPSERT_AGENT_DEFINITION_SQL,
                 "code",
                 auth_user["organization_id"],
                 "test definition",
+                auth_user["id"],
             )
         result = await _call(
             mcp,
@@ -175,7 +223,29 @@ class TestCreateTask:
         assert result["model"] == "claude-sonnet-4.6"
 
     @pytest.mark.asyncio
-    async def test_no_auth_returns_error(self, mcp, test_user):
+    async def test_unknown_model_rejected(self, mcp, auth_user, request_id, db_pool):
+        """Unknown model ID is rejected with helpful error message."""
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                self._UPSERT_AGENT_DEFINITION_SQL,
+                "code",
+                auth_user["organization_id"],
+                "test definition",
+                auth_user["id"],
+            )
+        result = await _call(
+            mcp,
+            "create_task",
+            {
+                "request_id": request_id,
+                "title": "Bad Model",
+                "agent_type": "code",
+                "model": "totally-fake-model-xyz",
+            },
+        )
+        assert "error" in result
+        assert "Unknown model" in result["error"]
+        assert "list_available_models" in result["error"]
         set_current_user(None)
         result = await _call(
             mcp,
@@ -183,6 +253,68 @@ class TestCreateTask:
             {"request_id": "fake-id", "title": "No Auth"},
         )
         assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_negative_sequence_order_rejected(self, mcp, auth_user, request_id):
+        result = await _call(
+            mcp,
+            "create_task",
+            {
+                "request_id": request_id,
+                "title": "Negative Seq",
+                "sequence_order": -1,
+            },
+        )
+        assert "error" in result
+        assert "sequence_order" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_sequence_order_zero_accepted(self, mcp, auth_user, request_id, db_pool):
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                self._UPSERT_AGENT_DEFINITION_SQL,
+                "code",
+                auth_user["organization_id"],
+                "test definition",
+                auth_user["id"],
+            )
+        result = await _call(
+            mcp,
+            "create_task",
+            {
+                "request_id": request_id,
+                "title": "Zero Seq",
+                "agent_type": "code",
+                "sequence_order": 0,
+            },
+        )
+        assert "id" in result
+
+    @pytest.mark.asyncio
+    async def test_create_task_inherits_requesting_user_id(
+        self, mcp, auth_user, request_id, db_pool
+    ):
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                self._UPSERT_AGENT_DEFINITION_SQL,
+                "code",
+                auth_user["organization_id"],
+                "test definition",
+                auth_user["id"],
+            )
+        result = await _call(
+            mcp,
+            "create_task",
+            {"request_id": request_id, "title": "Trace requester", "agent_type": "code"},
+        )
+        assert "id" in result
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT requesting_user_id FROM tasks WHERE id = $1",
+                result["id"],
+            )
+        assert row is not None
+        assert row["requesting_user_id"] == auth_user["id"]
 
 
 # ============================================================================
@@ -222,6 +354,24 @@ class TestLogTaskEvent:
             {"task_id": task_id, "event_type": "info"},
         )
         assert result["event_type"] == "info"
+
+    @pytest.mark.asyncio
+    async def test_log_event_rejects_cross_org_task(self, mcp, other_auth_user, task_id):
+        set_current_user(
+            {
+                "id": other_auth_user["id"],
+                "organization_id": other_auth_user["organization_id"],
+                "role": "member",
+                "display_name": other_auth_user["display_name"],
+                "email": other_auth_user["email"],
+            }
+        )
+        result = await _call(
+            mcp,
+            "log_task_event",
+            {"task_id": task_id, "event_type": "progress", "detail": "cross-org attempt"},
+        )
+        assert result["error"] == "Task not found"
 
 
 # ============================================================================
@@ -270,6 +420,30 @@ class TestLinkTaskMemory:
             },
         )
         assert result["status"] == "linked"
+
+    @pytest.mark.asyncio
+    async def test_link_memory_rejects_cross_org_task(
+        self, mcp, other_auth_user, task_id, test_memory
+    ):
+        set_current_user(
+            {
+                "id": other_auth_user["id"],
+                "organization_id": other_auth_user["organization_id"],
+                "role": "member",
+                "display_name": other_auth_user["display_name"],
+                "email": other_auth_user["email"],
+            }
+        )
+        result = await _call(
+            mcp,
+            "link_task_memory",
+            {
+                "task_id": task_id,
+                "memory_id": str(test_memory["id"]),
+                "relation": "created",
+            },
+        )
+        assert result["error"] == "Task not found"
 
 
 # ============================================================================
@@ -321,7 +495,8 @@ class TestListPendingRequests:
     @pytest.mark.asyncio
     async def test_empty_list(self, mcp, auth_user):
         result = await _call(mcp, "list_pending_requests")
-        assert isinstance(result, list)
+        assert isinstance(result, dict)
+        assert result["items"] == []
 
     @pytest.mark.asyncio
     async def test_returns_pending(self, mcp, auth_user, repo, test_organization):
@@ -330,8 +505,8 @@ class TestListPendingRequests:
             org_id=str(test_organization["id"]),
         )
         result = await _call(mcp, "list_pending_requests")
-        assert isinstance(result, list)
-        titles = [r["title"] for r in result]
+        assert isinstance(result, dict)
+        titles = [r["title"] for r in result["items"]]
         assert "Pending One" in titles
 
     @pytest.mark.asyncio
@@ -339,6 +514,49 @@ class TestListPendingRequests:
         set_current_user(None)
         result = await _call(mcp, "list_pending_requests")
         assert "error" in result
+
+
+# ============================================================================
+# list_available_models
+# ============================================================================
+
+
+class TestListAvailableModels:
+    @pytest.mark.asyncio
+    async def test_returns_models(self, mcp, auth_user):
+        result = await _call(mcp, "list_available_models")
+        assert "models" in result
+        assert isinstance(result["models"], list)
+        assert len(result["models"]) > 0
+
+    @pytest.mark.asyncio
+    async def test_model_fields(self, mcp, auth_user):
+        result = await _call(mcp, "list_available_models")
+        m = result["models"][0]
+        for field in ("id", "name", "provider", "category", "supports_tools", "notes", "tags"):
+            assert field in m
+
+    @pytest.mark.asyncio
+    async def test_category_filter(self, mcp, auth_user):
+        result = await _call(mcp, "list_available_models", {"category": "fast"})
+        assert all(m["category"] == "fast" for m in result["models"])
+
+    @pytest.mark.asyncio
+    async def test_unknown_category_returns_empty(self, mcp, auth_user):
+        result = await _call(mcp, "list_available_models", {"category": "nonexistent"})
+        assert result["models"] == []
+
+    @pytest.mark.asyncio
+    async def test_recommended_included_when_agent_type_given(self, mcp, auth_user):
+        result = await _call(mcp, "list_available_models", {"agent_type": "code"})
+        assert "recommended" in result
+        assert isinstance(result["recommended"], str)
+        assert len(result["recommended"]) > 0
+
+    @pytest.mark.asyncio
+    async def test_no_recommended_without_agent_type(self, mcp, auth_user):
+        result = await _call(mcp, "list_available_models")
+        assert "recommended" not in result
 
 
 # ============================================================================
@@ -350,7 +568,8 @@ class TestListPendingTasks:
     @pytest.mark.asyncio
     async def test_empty_list(self, mcp, auth_user):
         result = await _call(mcp, "list_pending_tasks")
-        assert isinstance(result, list)
+        assert isinstance(result, dict)
+        assert result["items"] == []
 
     @pytest.mark.asyncio
     async def test_returns_tasks(self, mcp, auth_user, repo, test_organization):
@@ -364,8 +583,8 @@ class TestListPendingTasks:
             org_id=str(test_organization["id"]),
         )
         result = await _call(mcp, "list_pending_tasks")
-        assert isinstance(result, list)
-        titles = [t["title"] for t in result]
+        assert isinstance(result, dict)
+        titles = [t["title"] for t in result["items"]]
         assert "Queued Task" in titles
 
     @pytest.mark.asyncio

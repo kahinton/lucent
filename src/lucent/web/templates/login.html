@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="color-scheme" content="light dark">
     <title>Login - Lucent</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script>
+    <script src="/static/vendor/tailwindcss-3.4.17.js"></script>
+    <script nonce="{{ request.state.csp_nonce }}">
         tailwind.config = {
             darkMode: 'media',
             theme: {
@@ -44,6 +44,12 @@
             {% if error %}
             <div class="mb-4 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-400 rounded-lg text-sm">
                 {{ error }}
+            </div>
+            {% endif %}
+
+            {% if session_warning %}
+            <div class="mb-4 p-3 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 text-blue-700 dark:text-blue-400 rounded-lg text-xs">
+                {{ session_warning }}
             </div>
             {% endif %}
 

@@ -41,6 +41,12 @@ class ChatRequest(BaseModel):
     model: str | None = None  # override the default chat model
 
 
+class ChatStreamRequest(BaseModel):
+    messages: list[ChatMessage]
+    model: str | None = None
+    agent_id: str | None = None  # optional agent definition to use
+
+
 async def _get_session_user(request: Request):
     """Authenticate via session cookie (same as web routes)."""
     session_token = request.cookies.get(SESSION_COOKIE_NAME)
@@ -151,7 +157,7 @@ async def _build_system_prompt(user: dict, pool, page_context: dict | None) -> s
                     parts.append(f"- Status: {req.get('status')}")
                     parts.append(f"- Priority: {req.get('priority')}")
                     parts.append(f"- Source: {req.get('source')}")
-                    tasks = await repo.list_tasks(page_data["request_id"])
+                    tasks = (await repo.list_tasks(page_data["request_id"]))["items"]
                     if tasks:
                         parts.append(f"- Tasks: {len(tasks)}")
                         for t in tasks[:5]:
@@ -294,3 +300,185 @@ async def chat_status(request: Request):
         "model": CHAT_MODEL,
         "engine": get_engine_name(),
     }
+
+
+@router.post("/stream-v2")
+async def chat_stream_v2(
+    request: Request,
+    body: ChatStreamRequest,
+):
+    """Enhanced streaming chat with granular SSE events.
+
+    Streams individual events for text deltas, tool calls, tool results,
+    and session state — enabling rich UI visibility into what the model
+    is doing.
+
+    SSE event types:
+      - text_delta: Incremental text chunk
+      - tool_call: Model invoked a tool (name + args)
+      - tool_result: Tool returned a result
+      - message: Complete message block
+      - error: Something went wrong
+      - done: Session finished
+    """
+    import asyncio
+
+    user, pool = await _get_session_user(request)
+
+    from lucent.llm import get_engine
+    from lucent.llm.engine import SessionEvent, SessionEventType
+
+    engine = get_engine()
+    selected_model = body.model or CHAT_MODEL
+
+    # Build system prompt — optionally load agent definition
+    system_prompt_parts = []
+    agent_name = None
+
+    if body.agent_id:
+        try:
+            from lucent.db.definitions import DefinitionRepository
+
+            repo = DefinitionRepository(pool)
+            agent = await repo.get_agent(body.agent_id, str(user["organization_id"]))
+            if agent:
+                system_prompt_parts.append(agent.get("content", ""))
+                agent_name = agent.get("name", "Lucent")
+                # Load granted skills
+                skills = await repo.list_agent_skills(body.agent_id)
+                for skill in skills:
+                    skill_def = await repo.get_skill(
+                        str(skill["skill_id"]), str(user["organization_id"])
+                    )
+                    if skill_def:
+                        system_prompt_parts.append(
+                            f"\n## Skill: {skill_def.get('name', '')}\n"
+                            f"{skill_def.get('content', '')}"
+                        )
+        except Exception:
+            logger.debug("Failed to load agent definition for chat", exc_info=True)
+
+    if not system_prompt_parts:
+        # Default Lucent system prompt
+        display_name = user.get("display_name", "a user")
+        system_prompt_parts.append(
+            "You are Lucent, an AI assistant embedded in the Lucent Memory System.\n"
+            f"You're talking with {display_name}.\n"
+            "Be helpful, concise, and knowledgeable. "
+            "You have access to MCP tools for memory search, creation, and management.\n"
+            "Format responses in markdown when helpful.\n"
+            f"Current time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}."
+        )
+
+    system_prompt = "\n\n".join(system_prompt_parts)
+
+    # Build conversation prompt with history
+    history_parts = []
+    for m in body.messages[:-1]:
+        prefix = "User" if m.role == "user" else "Assistant"
+        history_parts.append(f"{prefix}: {m.content}")
+
+    last_message = body.messages[-1].content if body.messages else ""
+    if history_parts:
+        prompt = "Previous conversation:\n" + "\n".join(history_parts) + f"\n\nUser: {last_message}"
+    else:
+        prompt = last_message
+
+    session_token = request.cookies.get(SESSION_COOKIE_NAME)
+    mcp_config = _build_mcp_config(session_token) if session_token else {}
+
+    logger.info(
+        "Chat v2 session: engine=%s, model=%s, agent=%s",
+        engine.name,
+        selected_model,
+        agent_name or "default",
+    )
+
+    # Use an asyncio.Queue to bridge callback events → SSE stream
+    event_queue: asyncio.Queue[dict | None] = asyncio.Queue()
+
+    def on_event(event: SessionEvent):
+        """Push normalized events into the queue for SSE consumption."""
+        if event.type == SessionEventType.MESSAGE_DELTA:
+            event_queue.put_nowait({
+                "type": "text_delta",
+                "text": event.content or "",
+            })
+        elif event.type == SessionEventType.MESSAGE:
+            event_queue.put_nowait({
+                "type": "message",
+                "text": event.content or "",
+            })
+        elif event.type == SessionEventType.TOOL_CALL:
+            event_queue.put_nowait({
+                "type": "tool_call",
+                "tool": event.tool_name or "unknown",
+                "input": event.content or "",
+            })
+        elif event.type == SessionEventType.TOOL_RESULT:
+            event_queue.put_nowait({
+                "type": "tool_result",
+                "tool": event.tool_name or "unknown",
+                "output": event.tool_output or event.content or "",
+            })
+        elif event.type == SessionEventType.ERROR:
+            event_queue.put_nowait({
+                "type": "error",
+                "error": event.content or "Unknown error",
+            })
+        elif event.type == SessionEventType.OTHER and event.tool_name == "_reasoning":
+            event_queue.put_nowait({
+                "type": "reasoning",
+                "text": event.content or "",
+            })
+        elif event.type == SessionEventType.SESSION_IDLE:
+            pass  # We'll handle done when the task completes
+
+    # Run the streaming session in a background task
+    async def run_llm():
+        try:
+            result = await engine.run_session_streaming(
+                model=selected_model,
+                system_message=system_prompt,
+                prompt=prompt,
+                mcp_config=mcp_config,
+                on_event=on_event,
+                timeout=CHAT_SESSION_TIMEOUT,
+                idle_timeout=CHAT_SESSION_TIMEOUT,
+            )
+            # If we got no deltas from streaming, send the full result
+            if result:
+                event_queue.put_nowait({
+                    "type": "message",
+                    "text": result,
+                })
+        except Exception as e:
+            logger.error("Chat v2 session failed: %s", e)
+            event_queue.put_nowait({
+                "type": "error",
+                "error": str(e),
+            })
+        finally:
+            event_queue.put_nowait(None)  # Sentinel: stream done
+
+    async def generate():
+        task = asyncio.create_task(run_llm())
+        try:
+            while True:
+                event = await event_queue.get()
+                if event is None:
+                    yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                    break
+                yield f"data: {json.dumps(event)}\n\n"
+        except asyncio.CancelledError:
+            task.cancel()
+            raise
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )

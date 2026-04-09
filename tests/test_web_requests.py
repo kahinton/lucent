@@ -152,6 +152,7 @@ async def failed_task(db_pool, request_with_task):
     """Create a request with a failed task."""
     req, task = request_with_task
     repo = RequestRepository(db_pool)
+    await repo.claim_task(str(task["id"]), "inst-test")
     await repo.fail_task(str(task["id"]), "Simulated failure for testing")
     return req, task
 

@@ -5,7 +5,7 @@ Thank you for your interest in contributing to Lucent! This guide will help you 
 ## Prerequisites
 
 - Python 3.12+
-- Docker and Docker Compose
+- Docker and Docker Compose (v2+)
 - Git
 
 ## Local Development Setup
@@ -21,12 +21,21 @@ Thank you for your interest in contributing to Lucent! This guide will help you 
    docker compose up -d postgres
    ```
 
-3. **Install dependencies:**
+3. **Create a virtual environment and install dependencies:**
    ```bash
+   python -m venv .venv
+   source .venv/bin/activate  # On Windows: .venv\Scripts\activate
    pip install -e ".[dev]"
    ```
 
-4. **Run the server:**
+4. **Set up environment:**
+   ```bash
+   cp .env.example .env
+   # The DATABASE_URL below connects to the Docker Compose postgres service:
+   export DATABASE_URL="postgresql://lucent:change-me-insecure-dev-password@localhost:5433/lucent"
+   ```
+
+5. **Run the server:**
    ```bash
    lucent
    ```
@@ -35,6 +44,8 @@ Thank you for your interest in contributing to Lucent! This guide will help you 
    ```bash
    docker compose up
    ```
+
+See the [Development Guide](docs/development.md) for more options including the full Docker development setup.
 
 ## Running Tests
 
@@ -68,6 +79,10 @@ Use [GitHub Issues](https://github.com/kahinton/lucent/issues) to report bugs or
 - Steps to reproduce (for bugs)
 - Expected vs actual behavior
 - Python version and OS
+
+## Security Issues
+
+**Do not open public issues for security vulnerabilities.** See [SECURITY.md](SECURITY.md) for responsible disclosure instructions.
 
 ## License
 

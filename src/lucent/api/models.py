@@ -54,6 +54,7 @@ class MemoryResponse(BaseModel):
     organization_id: UUID | None
     shared: bool
     last_accessed_at: datetime | None
+    access_count: int = 0
 
 
 class MemoryListResponse(BaseModel):
@@ -104,6 +105,7 @@ class SearchResultMemory(BaseModel):
     organization_id: UUID | None
     shared: bool
     last_accessed_at: datetime | None
+    access_count: int = 0
 
 
 class SearchResponse(BaseModel):
@@ -179,7 +181,14 @@ class MostAccessedItem(BaseModel):
 
     memory_id: UUID
     access_count: int
-    last_accessed: datetime
+    last_accessed: datetime | None
+
+
+class AccessFrequencyItem(BaseModel):
+    """Access frequency bucket item."""
+
+    bucket_start: datetime
+    access_count: int
 
 
 # =============================================================================
@@ -213,6 +222,14 @@ class UserRoleUpdate(BaseModel):
     role: str = Field(..., description="New role: member, admin, owner")
 
 
+class PasswordResetResponse(BaseModel):
+    """Response model for admin password reset."""
+
+    success: bool
+    message: str
+    temp_password: str = Field(..., description="Temporary password (share securely)")
+
+
 class UserResponse(BaseModel):
     """Response model for a user."""
 
@@ -235,6 +252,54 @@ class UserListResponse(BaseModel):
 
     users: list[UserResponse]
     total_count: int
+
+
+# =============================================================================
+# Group Models
+# =============================================================================
+
+
+class GroupCreate(BaseModel):
+    """Request model for creating a group."""
+
+    name: str = Field(..., min_length=1, max_length=128)
+    description: str | None = None
+
+
+class GroupUpdate(BaseModel):
+    """Request model for updating a group."""
+
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    description: str | None = None
+
+
+class GroupResponse(BaseModel):
+    """Response model for a group."""
+
+    id: UUID
+    name: str
+    description: str | None
+    org_id: UUID
+    member_count: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class GroupMemberAdd(BaseModel):
+    """Request model for adding a member to a group."""
+
+    user_id: UUID
+    role: str = Field(default="member", pattern=r"^(member|admin)$")
+
+
+class GroupMemberResponse(BaseModel):
+    """Response model for a group member."""
+
+    user_id: UUID
+    display_name: str | None
+    email: str | None
+    role: str
+    joined_at: datetime
 
 
 # =============================================================================

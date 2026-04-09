@@ -30,6 +30,7 @@ class SessionEvent:
     type: SessionEventType
     content: str | None = None
     tool_name: str | None = None
+    tool_input: dict[str, Any] | None = None  # Tool arguments/parameters
     tool_output: str | None = None
     raw: Any = None  # Original event object from the backend
 
@@ -74,6 +75,7 @@ class LLMEngine(ABC):
         mcp_config: dict | None = None,
         on_event: Callable[[SessionEvent], None] | None = None,
         timeout: int = 600,
+        idle_timeout: int = 300,
     ) -> str | None:
         """Run an LLM session with event streaming.
 
@@ -88,6 +90,10 @@ class LLMEngine(ABC):
             prompt: User prompt text.
             mcp_config: MCP server configuration dict for tool access.
             on_event: Callback for streaming events.
+            timeout: Maximum total wall-clock seconds (hard limit).
+            idle_timeout: Seconds of inactivity before timing out. If the
+                agent is actively producing events, the session continues
+                indefinitely (up to `timeout`). Default 300s (5 min).
             timeout: Maximum seconds to wait for completion.
 
         Returns:

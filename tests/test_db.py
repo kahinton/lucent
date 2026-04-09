@@ -894,7 +894,8 @@ class TestApiKeyRepository:
             name="List Key 2",
         )
 
-        keys = await repo.list_by_user(test_user["id"])
+        result = await repo.list_by_user(test_user["id"])
+        keys = result["items"]
 
         names = [k["name"] for k in keys]
         assert "List Key 1" in names
@@ -951,8 +952,8 @@ class TestApiKeyRepository:
 
         await repo.revoke(key_record["id"], test_user["id"])
 
-        keys = await repo.list_by_user(test_user["id"])
-        key_ids = [k["id"] for k in keys]
+        result = await repo.list_by_user(test_user["id"])
+        key_ids = [k["id"] for k in result["items"]]
         assert key_record["id"] not in key_ids
 
 
@@ -1426,3 +1427,108 @@ class TestAccessRepository:
         # Results may include other test data, but our specific memory shouldn't be there
         our_ids = [r["memory_id"] for r in results_other]
         assert test_memory["id"] not in our_ids
+
+    async def test_get_least_accessed_includes_never_accessed(
+        self,
+        db_pool,
+        test_user,
+        clean_test_data,
+    ):
+        """Least accessed should include memories with zero accesses."""
+        prefix = clean_test_data
+        mem_repo = MemoryRepository(db_pool)
+        repo = AccessRepository(db_pool)
+
+        never_accessed = await mem_repo.create(
+            username=f"{prefix}user",
+            type="experience",
+            content=f"{prefix} Never accessed memory",
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
+        )
+        accessed = await mem_repo.create(
+            username=f"{prefix}user",
+            type="experience",
+            content=f"{prefix} Accessed memory",
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
+        )
+
+        await repo.log_access(
+            memory_id=accessed["id"],
+            access_type="view",
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
+        )
+
+        results = await repo.get_least_accessed(user_id=test_user["id"], limit=10)
+        never_entry = next(r for r in results if r["memory_id"] == never_accessed["id"])
+        accessed_entry = next(r for r in results if r["memory_id"] == accessed["id"])
+        assert never_entry["access_count"] == 0
+        assert accessed_entry["access_count"] >= 1
+
+    async def test_get_access_frequency(self, db_pool, test_user, test_memory):
+        """Access frequency returns bucketed counts."""
+        repo = AccessRepository(db_pool)
+
+        await repo.log_access(
+            memory_id=test_memory["id"],
+            access_type="view",
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
+        )
+        await repo.log_access(
+            memory_id=test_memory["id"],
+            access_type="search_result",
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
+        )
+
+        freq = await repo.get_access_frequency(bucket="day", user_id=test_user["id"], limit=10)
+        assert len(freq) >= 1
+        assert "bucket_start" in freq[0]
+        assert "access_count" in freq[0]
+
+    async def test_get_access_counts(self, db_pool, test_user, clean_test_data):
+        """Access counts map should include counted memories."""
+        prefix = clean_test_data
+        mem_repo = MemoryRepository(db_pool)
+        repo = AccessRepository(db_pool)
+
+        m1 = await mem_repo.create(
+            username=f"{prefix}user",
+            type="experience",
+            content=f"{prefix} Counted memory 1",
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
+        )
+        m2 = await mem_repo.create(
+            username=f"{prefix}user",
+            type="experience",
+            content=f"{prefix} Counted memory 2",
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
+        )
+
+        await repo.log_access(
+            memory_id=m1["id"],
+            access_type="view",
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
+        )
+        await repo.log_access(
+            memory_id=m1["id"],
+            access_type="view",
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
+        )
+        await repo.log_access(
+            memory_id=m2["id"],
+            access_type="view",
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
+        )
+
+        counts = await repo.get_access_counts([m1["id"], m2["id"]])
+        assert counts[m1["id"]] == 2
+        assert counts[m2["id"]] == 1

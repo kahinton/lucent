@@ -25,7 +25,8 @@ from lucent.models.memory import (
     SearchMemoriesInput,
     UpdateMemoryInput,
 )
-from lucent.models.validation import validate_metadata
+from lucent.models.validation import normalize_tags, validate_metadata
+from lucent.security import scan_content_for_injection
 
 logger = get_logger("tools.memories")
 
@@ -217,23 +218,55 @@ Returns:
             # Validate and normalize metadata for the memory type
             validated_metadata = validate_metadata(memory_type, metadata)
 
-            # Use authenticated user's name if username not provided
-            effective_username = username or _get_current_username() or "unknown"
+            # Always derive username from authenticated user — never trust
+            # caller-supplied username to prevent display-name spoofing
+            # (anti-spoofing: V1/V2). The username parameter is accepted
+            # for backward compatibility but ignored when authenticated.
+            auth_username = _get_current_username()
+            effective_username = auth_username or username or "unknown"
 
             logger.info("create_memory: type=%s, user=%s, tags=%s", type, effective_username, tags)
+
+            # Get current user context (from auth context or dev mode)
+            user_id, org_id, user_role = await _get_current_user_context()
+
+            # Detect daemon caller for auto-sharing and auto-tagging
+            current_user = get_current_user()
+            is_daemon = bool(
+                current_user and current_user.get("external_id") == "daemon-service"
+            )
+
+            # Normalize tags: replace prohibited tags, auto-tag daemon content
+            effective_tags = normalize_tags(tags, is_daemon=is_daemon)
+
+            # Scan content for prompt injection patterns (defense-in-depth)
+            injection_matches = scan_content_for_injection(content)
+            if injection_matches:
+                logger.warning(
+                    "Memory content flagged as suspicious: user=%s, patterns=%s",
+                    effective_username,
+                    injection_matches,
+                )
+                if effective_tags is None:
+                    effective_tags = []
+                if "suspicious_content" not in effective_tags:
+                    effective_tags.append("suspicious_content")
 
             input_data = CreateMemoryInput(
                 username=effective_username,
                 type=memory_type,
                 content=content,
-                tags=tags or [],
+                tags=effective_tags,
                 importance=importance,
                 related_memory_ids=[UUID(uid) for uid in (related_memory_ids or [])],
                 metadata=validated_metadata,
             )
 
-            # Get current user context (from auth context or dev mode)
-            user_id, org_id, user_role = await _get_current_user_context()
+            # Daemon-created memories should always be shared so org members
+            # can see them in the review queue and search results
+            effective_shared = shared
+            if is_daemon:
+                effective_shared = True
 
             repo = await _get_repository()
 
@@ -247,7 +280,7 @@ Returns:
                 metadata=input_data.metadata,
                 user_id=user_id,
                 organization_id=org_id,
-                shared=shared,
+                shared=effective_shared,
             )
 
             # Log the creation in audit log with version snapshot
@@ -315,18 +348,17 @@ Returns:
             if result is None:
                 return _error_response(f"Memory not found or not accessible: {memory_id}")
 
-            # Log the access (team mode only)
-            if is_team_mode():
-                try:
-                    access_repo = await _get_access_repository()
-                    await access_repo.log_access(
-                        memory_id=uuid_id,
-                        access_type="view",
-                        user_id=user_id,
-                        organization_id=org_id,
-                    )
-                except Exception:
-                    logger.debug("Access log failed for get_memory", exc_info=True)
+            # Log the access
+            try:
+                access_repo = await _get_access_repository()
+                await access_repo.log_access(
+                    memory_id=uuid_id,
+                    access_type="view",
+                    user_id=user_id,
+                    organization_id=org_id,
+                )
+            except Exception:
+                logger.debug("Access log failed for get_memory", exc_info=True)
 
             return json.dumps(_serialize_memory(result), indent=2)
 
@@ -390,17 +422,16 @@ Returns:
                     not_found.append(original_id)
                 else:
                     memories.append(_serialize_memory(result))
-                    # Log access (team mode only)
-                    if is_team_mode():
-                        try:
-                            await access_repo.log_access(
-                                memory_id=uuid_id,
-                                access_type="view",
-                                user_id=user_id,
-                                organization_id=org_id,
-                            )
-                        except Exception:
-                            logger.debug("Access log failed for get_memories", exc_info=True)
+                    # Log access
+                    try:
+                        await access_repo.log_access(
+                            memory_id=uuid_id,
+                            access_type="view",
+                            user_id=user_id,
+                            organization_id=org_id,
+                        )
+                    except Exception:
+                        logger.debug("Access log failed for get_memories", exc_info=True)
 
             return json.dumps(
                 {
@@ -556,8 +587,8 @@ Returns:
                 requesting_org_id=org_id,
             )
 
-            # Log access for returned memories (team mode only)
-            if result["memories"] and is_team_mode():
+            # Log access for returned memories
+            if result["memories"]:
                 try:
                     access_repo = await _get_access_repository()
                     memory_ids_accessed = [m["id"] for m in result["memories"]]
@@ -651,8 +682,8 @@ Returns:
                 requesting_org_id=org_id,
             )
 
-            # Log access for returned memories (team mode only)
-            if result["memories"] and is_team_mode():
+            # Log access for returned memories
+            if result["memories"]:
                 try:
                     access_repo = await _get_access_repository()
                     memory_ids_accessed = [m["id"] for m in result["memories"]]
@@ -734,8 +765,8 @@ Returns:
             if old_memory is None:
                 return _error_response(f"Memory not found or not accessible: {memory_id}")
 
-            # Check ownership - only the owner can update a memory
-            if old_memory.get("user_id") != user_id:
+            # Check ownership - owner or daemon role in same org can update
+            if old_memory.get("user_id") != user_id and user_role != "daemon":
                 return _error_response("Permission denied: only the owner can update this memory")
 
             # Validate metadata if provided
@@ -866,9 +897,12 @@ Returns:
             if old_memory is None:
                 return _error_response(f"Memory not found or not accessible: {memory_id}")
 
-            # Check ownership - only the owner can delete a memory
+            # Check ownership OR MEMORY_DELETE_ANY permission
             if old_memory.get("user_id") != user_id:
-                return _error_response("Permission denied: only the owner can delete this memory")
+                from lucent.rbac import Permission, has_permission, Role
+                role = Role.from_string(user_role or "member")
+                if not has_permission(role, Permission.MEMORY_DELETE_ANY):
+                    return _error_response("Permission denied: only the owner can delete this memory")
 
             # Individual memories cannot be deleted via MCP
             # - they are deleted when users are removed
@@ -1420,6 +1454,13 @@ Returns:
             if user_id is None:
                 return _error_response("Authentication required")
 
+            # Anti-spoofing V3: verify task belongs to caller's org before claiming
+            task_memory = await repo.get_accessible(uuid_id, user_id, org_id)
+            if task_memory is None:
+                return _error_response(
+                    f"Could not claim task {memory_id}: not found or not accessible."
+                )
+
             result = await repo.claim_task(
                 memory_id=uuid_id,
                 instance_id=instance_id,
@@ -1482,6 +1523,13 @@ Returns:
             user_id, org_id, _ = await _get_current_user_context()
             if user_id is None:
                 return _error_response("Authentication required")
+
+            # Anti-spoofing V3: verify task belongs to caller's org before releasing
+            task_memory = await repo.get_accessible(uuid_id, user_id, org_id)
+            if task_memory is None:
+                return _error_response(
+                    f"Could not release task {memory_id}: not found or not accessible."
+                )
 
             result = await repo.release_claim(
                 memory_id=uuid_id,

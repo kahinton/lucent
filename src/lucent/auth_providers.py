@@ -34,7 +34,7 @@ logger = get_logger("auth.providers")
 
 # Session configuration
 SESSION_COOKIE_NAME = "lucent_session"
-SESSION_TTL_HOURS = int(os.environ.get("LUCENT_SESSION_TTL_HOURS", "72"))
+SESSION_TTL_HOURS = int(os.environ.get("LUCENT_SESSION_TTL_HOURS", "24"))
 SECURE_COOKIES = os.environ.get("LUCENT_SECURE_COOKIES", "true").lower() in ("true", "1", "yes")
 if not SECURE_COOKIES:
     logger.warning("LUCENT_SECURE_COOKIES is disabled — only use this for local HTTP development")
@@ -43,9 +43,28 @@ if not SECURE_COOKIES:
 CSRF_COOKIE_NAME = "lucent_csrf"
 CSRF_FIELD_NAME = "csrf_token"
 
-# Signing secret for impersonation cookies — MUST be persistent across restarts
-# If not set, generates a random one (impersonation cookies won't survive restarts)
-SIGNING_SECRET = os.environ.get("LUCENT_SIGNING_SECRET", secrets.token_urlsafe(32))
+# Signing secret for impersonation cookies — MUST be persistent across restarts.
+# In team mode, a missing signing secret is a configuration error because
+# impersonation cookies become invalid after every restart.
+_signing_secret_from_env = os.environ.get("LUCENT_SIGNING_SECRET")
+if _signing_secret_from_env:
+    SIGNING_SECRET = _signing_secret_from_env
+else:
+    SIGNING_SECRET = secrets.token_urlsafe(32)
+    _mode = os.environ.get("LUCENT_MODE", "personal")
+    if _mode == "team":
+        logger.critical(
+            "LUCENT_SIGNING_SECRET is not set — a random secret was generated. "
+            "Impersonation cookies will NOT survive restarts. "
+            "Set LUCENT_SIGNING_SECRET to a stable value: "
+            "openssl rand -base64 32"
+        )
+    else:
+        logger.warning(
+            "LUCENT_SIGNING_SECRET is not set — using an ephemeral random value. "
+            "Set this env var for cookie persistence across restarts. "
+            "Generate with: openssl rand -base64 32"
+        )
 
 
 def get_cookie_params() -> dict:
@@ -165,7 +184,7 @@ class BasicAuthProvider(AuthProvider):
         query = """
             SELECT id, external_id, provider, organization_id, email, display_name,
                    avatar_url, provider_metadata, is_active, created_at, updated_at,
-                   last_login_at, role, password_hash
+                   last_login_at, role, password_hash, force_password_change
             FROM users
             WHERE (LOWER(email) = LOWER($1) OR LOWER(display_name) = LOWER($1))
               AND is_active = true
@@ -291,7 +310,7 @@ async def validate_session(pool: Pool, token: str) -> dict[str, Any] | None:
     query = """
         SELECT id, external_id, provider, organization_id, email, display_name,
                avatar_url, provider_metadata, is_active, created_at, updated_at,
-               last_login_at, role, session_expires_at
+               last_login_at, role, session_expires_at, force_password_change
         FROM users
         WHERE session_token = $1
           AND session_expires_at > NOW()
@@ -353,21 +372,50 @@ def validate_password_complexity(password: str) -> str | None:
     return None
 
 
-async def set_user_password(pool: Pool, user_id: UUID, password: str) -> None:
+async def set_user_password(
+    pool: Pool, user_id: UUID, password: str, *, force_change: bool = False
+) -> None:
     """Set or update a user's password.
 
     Args:
         pool: Database connection pool.
         user_id: The user's UUID.
         password: The new plaintext password (will be hashed).
+        force_change: If True, user must change password on next login.
     """
     error = validate_password_complexity(password)
     if error:
         raise ValueError(error)
     pw_hash = hash_password(password)
-    query = "UPDATE users SET password_hash = $1 WHERE id = $2"
+    query = "UPDATE users SET password_hash = $1, force_password_change = $2 WHERE id = $3"
     async with pool.acquire() as conn:
-        await conn.execute(query, pw_hash, str(user_id))
+        await conn.execute(query, pw_hash, force_change, str(user_id))
+
+
+async def admin_reset_password(pool: Pool, user_id: UUID) -> str:
+    """Reset a user's password to a random temporary value (admin action).
+
+    Sets force_password_change so the user must change it on next login.
+
+    Args:
+        pool: Database connection pool.
+        user_id: The user's UUID.
+
+    Returns:
+        The temporary plaintext password.
+    """
+    temp_password = secrets.token_urlsafe(12)
+    await set_user_password(pool, user_id, temp_password, force_change=True)
+    # Invalidate existing sessions so user must re-login
+    await destroy_session(pool, user_id)
+    return temp_password
+
+
+async def clear_force_password_change(pool: Pool, user_id: UUID) -> None:
+    """Clear the force_password_change flag after user sets a new password."""
+    query = "UPDATE users SET force_password_change = false WHERE id = $1"
+    async with pool.acquire() as conn:
+        await conn.execute(query, str(user_id))
 
 
 # --- Provider Factory ---

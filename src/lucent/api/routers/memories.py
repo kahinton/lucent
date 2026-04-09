@@ -19,8 +19,9 @@ from lucent.api.models import (
 )
 from lucent.db import AccessRepository, AuditRepository, MemoryRepository, get_pool
 from lucent.logging import get_logger
-from lucent.models.validation import validate_metadata
+from lucent.models.validation import normalize_tags, validate_metadata
 from lucent.rbac import Permission
+from lucent.security import scan_content_for_injection
 
 logger = get_logger("api.memories")
 
@@ -47,6 +48,7 @@ def _memory_to_response(memory: dict[str, Any]) -> MemoryResponse:
         organization_id=memory.get("organization_id"),
         shared=memory.get("shared", False),
         last_accessed_at=memory.get("last_accessed_at"),
+        access_count=memory.get("access_count", 0),
     )
 
 
@@ -95,20 +97,44 @@ async def create_memory(
             detail=str(e),
         )
 
-    # Use authenticated user's info if username not provided
-    username = data.username or user.display_name or user.email or str(user.id)
+    # Always derive username from authenticated user — never trust client-supplied
+    # username to prevent display-name spoofing (anti-spoofing: V1/V2)
+    username = user.display_name or user.email or str(user.id)
+
+    # Detect daemon caller for auto-sharing and auto-tagging
+    is_daemon = user.external_id == "daemon-service"
+
+    # Daemon-created memories must always be shared so org members can see
+    # them in the review queue and search results (workflow-audit/phase-4)
+    effective_shared = data.shared
+    if is_daemon:
+        effective_shared = True
+
+    # Normalize tags: replace prohibited tags, auto-tag daemon content
+    effective_tags = normalize_tags(data.tags, is_daemon=is_daemon)
+
+    # Scan content for prompt injection patterns (defense-in-depth)
+    injection_matches = scan_content_for_injection(data.content)
+    if injection_matches:
+        logger.warning(
+            "Memory content flagged as suspicious: user=%s, patterns=%s",
+            user.id,
+            injection_matches,
+        )
+        if "suspicious_content" not in effective_tags:
+            effective_tags.append("suspicious_content")
 
     result = await repo.create(
         username=username,
         type=data.type,
         content=data.content,
-        tags=data.tags,
+        tags=effective_tags,
         importance=data.importance,
         related_memory_ids=data.related_memory_ids,
         metadata=validated_metadata,
         user_id=user.id,
         organization_id=user.organization_id,
-        shared=data.shared,
+        shared=effective_shared,
     )
 
     logger.info("Memory created: id=%s, type=%s, user=%s", result["id"], data.type, user.id)
@@ -236,6 +262,9 @@ async def get_memory(
         user_id=user.id,
         organization_id=user.organization_id,
     )
+
+    counts = await access_repo.get_access_counts([memory_id])
+    result["access_count"] = counts.get(memory_id, 0)
 
     return _memory_to_response(result)
 

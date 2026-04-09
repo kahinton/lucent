@@ -1,0 +1,91 @@
+{{- if .Values.openbao.embedded }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ printf "%s-openbao" (include "lucent.fullname" .) }}
+  labels:
+    {{- include "lucent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: openbao
+spec:
+  serviceName: {{ printf "%s-openbao" (include "lucent.fullname" .) }}
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "lucent.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: openbao
+  template:
+    metadata:
+      labels:
+        {{- include "lucent.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: openbao
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      {{- if (dig "openbao" "unseal" "enabled" false .Values) }}
+      initContainers:
+        - name: init-unseal
+          image: {{ printf "%s:%s" .Values.openbao.image.repository .Values.openbao.image.tag | quote }}
+          imagePullPolicy: {{ .Values.openbao.image.pullPolicy }}
+          command: ["sh", "-c", {{ (dig "openbao" "unseal" "command" "echo openbao unseal init enabled" .Values) | quote }}]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+      {{- end }}
+      containers:
+        - name: openbao
+          image: {{ printf "%s:%s" .Values.openbao.image.repository .Values.openbao.image.tag | quote }}
+          imagePullPolicy: {{ .Values.openbao.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsUser: 100
+            runAsGroup: 1000
+            capabilities:
+              drop: ["ALL"]
+              add: ["IPC_LOCK"]
+          ports:
+            - name: http
+              containerPort: 8200
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ printf "%s-config" (include "lucent.fullname" .) }}
+            - secretRef:
+                name: {{ printf "%s-secrets" (include "lucent.fullname" .) }}
+          livenessProbe:
+            httpGet:
+              path: /v1/sys/health
+              port: http
+            periodSeconds: {{ dig "openbao" "health" "livenessPeriodSeconds" 10 .Values }}
+          readinessProbe:
+            httpGet:
+              path: /v1/sys/health
+              port: http
+            periodSeconds: {{ dig "openbao" "health" "readinessPeriodSeconds" 10 .Values }}
+          {{- with .Values.openbao.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: /openbao/file
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "lucent.labels" . | nindent 10 }}
+          app.kubernetes.io/component: openbao
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.openbao.persistence.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.openbao.persistence.size }}
+{{- end }}

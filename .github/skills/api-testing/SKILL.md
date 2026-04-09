@@ -1,9 +1,16 @@
 ---
 name: api-testing
-description: 'Procedures for testing REST API endpoints and MCP protocol compliance — pairs with the existing api-testing agent'
+description: 'Procedures for testing REST API endpoints and MCP protocol compliance. Use when validating API changes, testing new endpoints, or verifying MCP protocol compliance after code changes.'
 ---
 
 # API Testing — Lucent Project
+
+## MCP Tools Used
+
+| Tool | Purpose | Key Parameters |
+|------|---------|---------------|
+| `memory-server-search_memories` | Load past test findings and known issues | `query="api test [endpoint area]"`, `tags=["api-testing"]` |
+| `memory-server-create_memory` | Save test findings and bug discoveries | `type="technical"`, `tags=["api-testing", "lucent"]`, `importance=7` |
 
 ## Endpoints Reference
 
@@ -33,7 +40,66 @@ description: 'Procedures for testing REST API endpoints and MCP protocol complia
 | `get_current_user_context` | (none) | Auth context extraction |
 | `get_existing_tags` | limit (max 100) | Limit capping |
 
-## Test Procedures
+## Procedure: Full API Test Run
+
+### Step 1: Load Context
+
+```
+memory-server-search_memories(query="api test failures known issues", tags=["api-testing"], limit=5)
+```
+
+### Step 2: Health Check
+
+```bash
+curl -s http://localhost:8766/api/health
+```
+
+Expected: `{"status": "ok"}` with 200. If this fails, no other tests will pass — diagnose server first.
+
+### Step 3: Auth Flow Testing
+
+```bash
+# Login
+curl -s -X POST http://localhost:8766/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"test@example.com","password":"password"}' \
+  -c cookies.txt
+
+# Access with session
+curl -s http://localhost:8766/api/memories \
+  -b cookies.txt
+
+# Access without auth → expect 401
+curl -s http://localhost:8766/api/memories
+
+# API key auth
+curl -s http://localhost:8766/api/memories \
+  -H "Authorization: Bearer hs_your_api_key"
+```
+
+### Step 4: Run Test Suite
+
+```bash
+pytest tests/test_mcp_tools.py -v          # MCP tool tests
+pytest tests/test_memories_api.py -v       # Memory API tests
+pytest tests/test_auth.py -v               # Auth tests
+pytest tests/test_search_api.py -v         # Search tests
+pytest tests/test_rate_limit.py -v         # Rate limit tests
+```
+
+### Step 5: Save Findings
+
+```
+memory-server-create_memory(
+  type="technical",
+  content="## API Test Run: [date]\n\n**Scope**: ...\n**Results**: [pass/fail counts]\n**Issues Found**: ...",
+  tags=["api-testing", "lucent"],
+  importance=6,
+  shared=true
+)
+```
+
+## Test Procedures by Area
 
 ### 1. Auth Flow Testing
 - Login with valid creds → session cookie set (HttpOnly, Secure, SameSite=Lax)
@@ -69,14 +135,20 @@ Verify each step returns expected data. Test optimistic locking: update with wro
 - Missing required fields → 400/422
 - Oversized content → handled gracefully
 
-## Running Tests
-```bash
-pytest tests/test_mcp_tools.py -v          # MCP tool tests
-pytest tests/test_memories_api.py -v       # Memory API tests
-pytest tests/test_auth.py -v               # Auth tests
-pytest tests/test_search_api.py -v         # Search tests
-pytest tests/test_rate_limit.py -v         # Rate limit tests
-```
+## Decision: What to Test First
+
+- IF server just restarted → run health check + auth flow first
+- ELIF code change to auth/RBAC → run test_auth.py and org isolation tests
+- ELIF code change to memory CRUD → run test_mcp_tools.py and test_memories_api.py
+- ELIF code change to search → run test_search_api.py with edge case queries
+- ELIF full regression before release → run full test suite in order above
+
+## Anti-Patterns
+
+- Don't test only happy paths — the most critical bugs live in error handling, auth failures, and edge cases that only appear when things go wrong.
+- Never ignore auth token expiry edge cases — expired sessions and API keys that should return 401 are a common source of security regressions; test them explicitly.
+- Don't skip validating error response formats — callers depend on consistent error shapes (status code, message structure); a 500 with an HTML body instead of JSON silently breaks clients.
+- Don't run the full test suite every time for a targeted change — use the Decision section to run only the relevant tests, otherwise feedback loops slow down and failures become hard to localize.
 
 ## Key Test Files
 - `tests/conftest.py` — shared fixtures (db_pool, test users, async client)

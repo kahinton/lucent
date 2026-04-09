@@ -1,0 +1,54 @@
+Thank you for installing {{ include "lucent.fullname" . }}.
+
+1. Release details:
+   Namespace: {{ .Release.Namespace }}
+   Server Service: {{ printf "%s-server" (include "lucent.fullname" .) }}
+   Server Port: {{ .Values.server.service.port }}
+
+{{- if .Values.ingress.enabled }}
+2. Ingress:
+{{- range .Values.ingress.hosts }}
+   - Host: {{ .host }}
+{{- end }}
+{{- if .Values.ingress.tls }}
+   TLS is configured for this release.
+{{- else }}
+   TLS is not configured; configure ingress.tls for production.
+{{- end }}
+{{- else }}
+2. Ingress is disabled. Use port-forward for local access:
+   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ printf "%s-server" (include "lucent.fullname" .) }} {{ .Values.server.service.port }}:{{ .Values.server.service.port }}
+{{- end }}
+
+{{- if .Values.autoscaling.enabled }}
+3. HPA enabled: min={{ .Values.autoscaling.minReplicas }}, max={{ .Values.autoscaling.maxReplicas }}, targetCPU={{ .Values.autoscaling.targetCPU }}%.
+{{- else }}
+3. HPA disabled. Replicas: {{ .Values.server.replicaCount }}.
+{{- end }}
+
+{{- if .Values.database.embedded }}
+4. Embedded PostgreSQL is enabled (service: {{ printf "%s-db" (include "lucent.fullname" .) }}).
+{{- else }}
+4. External database is configured.
+{{- end }}
+
+{{- if .Values.openbao.embedded }}
+5. Embedded OpenBao is enabled (service: {{ printf "%s-openbao" (include "lucent.fullname" .) }}).
+{{- else }}
+5. External OpenBao/Vault is configured.
+{{- end }}
+
+{{- if and .Values.observability.enabled .Values.observability.prometheus.serviceMonitor }}
+6. ServiceMonitor has been created for Prometheus scraping.
+{{- end }}
+{{- if and .Values.observability.enabled .Values.observability.grafana.dashboards }}
+{{- if and .Values.observability.enabled .Values.observability.prometheus.serviceMonitor }}
+7. Grafana dashboard ConfigMap has been created.
+{{- else }}
+6. Grafana dashboard ConfigMap has been created.
+{{- end }}
+{{- end }}
+
+Useful commands:
+  kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }}
+  kubectl -n {{ .Release.Namespace }} get svc {{ printf "%s-server" (include "lucent.fullname" .) }}

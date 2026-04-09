@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="color-scheme" content="light dark">
     <title>Setup Complete - Lucent</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script>
+    <script src="/static/vendor/tailwindcss-3.4.17.js"></script>
+    <script nonce="{{ request.state.csp_nonce }}">
         tailwind.config = {
             darkMode: 'media',
             theme: {
@@ -66,7 +66,7 @@
                 <pre class="p-3 bg-gray-50 border border-gray-200 rounded-lg text-xs font-mono overflow-x-auto">{
   "mcpServers": {
     "memory-server": {
-      "url": "http://localhost:8767/mcp",
+      "url": "http://localhost:8766/mcp",
       "headers": {
         "Authorization": "Bearer {{ api_key }}"
       }

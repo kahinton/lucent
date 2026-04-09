@@ -23,13 +23,13 @@
 <!-- Success/Error Messages -->
 {% if temp_password %}
 <div class="mb-6 bg-emerald-50 border border-emerald-200 rounded-xl p-4">
-    <p class="text-sm font-medium text-emerald-800">User created successfully</p>
+    <p class="text-sm font-medium text-emerald-800">Password reset successfully</p>
     <p class="text-sm text-emerald-700 mt-1">Temporary password (shown once): <code class="bg-emerald-100 px-2 py-0.5 rounded font-mono text-sm select-all">{{ temp_password }}</code></p>
-    <p class="text-xs text-emerald-600 mt-1">This password will not be shown again. Please share it securely with the user.</p>
+    <p class="text-xs text-emerald-600 mt-1">This password will not be shown again. The user must change it on next login.</p>
 </div>
 {% elif success %}
 <div class="mb-6 bg-emerald-50 border border-emerald-200 rounded-xl p-4">
-    <p class="text-sm text-emerald-700">{{ success | replace('+', ' ') }}</p>
+    <p class="text-sm text-emerald-700">{{ success | replace('_', ' ') | replace('+', ' ') | capitalize }}</p>
 </div>
 {% endif %}
 {% if error %}
@@ -41,6 +41,8 @@
 <!-- Users Table -->
 <div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden mb-8">
     {% if users %}
+    {% from "partials/pagination.html" import pagination_controls %}
+    {{ pagination_controls(base_url="/users", page=page, per_page=per_page, total_pages=total_pages, total_count=total_count, entity_name="users") }}
     <div class="overflow-x-auto">
         <table class="w-full">
             <thead>
@@ -51,7 +53,7 @@
                     <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
                     <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Created</th>
                     <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Last Login</th>
-                    {% if can_impersonate %}
+                    {% if can_manage %}
                     <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
                     {% endif %}
                 </tr>
@@ -96,14 +98,27 @@
                     </td>
                     <td class="px-6 py-4 text-sm text-gray-500">{{ u.created_at | datetime }}</td>
                     <td class="px-6 py-4 text-sm text-gray-500">{{ u.last_login_at | datetime }}</td>
-                    {% if can_impersonate %}
+                    {% if can_manage %}
                     <td class="px-6 py-4 text-right">
-                        {% if u.id != user.id and u.role != 'owner' %}
-                        <form action="/users/{{ u.id }}/impersonate" method="POST" class="inline">
-                            <button type="submit" class="text-sm text-primary-600 hover:text-primary-700 font-medium">
-                                Impersonate
-                            </button>
-                        </form>
+                        {% if u.id != user.id %}
+                        <div class="flex items-center justify-end gap-2">
+                            {% if u.role != 'owner' or can_impersonate %}
+                            <form action="/users/{{ u.id }}/reset-password" method="POST" class="inline"
+                                  onsubmit="return confirm('Reset password for {{ u.display_name or u.external_id }}? Their current password will be invalidated.')">
+                                <button type="submit" class="text-sm text-amber-600 hover:text-amber-700 font-medium">
+                                    Reset Password
+                                </button>
+                            </form>
+                            {% endif %}
+                            {% if can_impersonate and u.role != 'owner' %}
+                            <span class="text-gray-300">|</span>
+                            <form action="/users/{{ u.id }}/impersonate" method="POST" class="inline">
+                                <button type="submit" class="text-sm text-primary-600 hover:text-primary-700 font-medium">
+                                    Impersonate
+                                </button>
+                            </form>
+                            {% endif %}
+                        </div>
                         {% endif %}
                     </td>
                     {% endif %}
@@ -112,6 +127,7 @@
             </tbody>
         </table>
     </div>
+    {{ pagination_controls(base_url="/users", page=page, per_page=per_page, total_pages=total_pages, total_count=total_count, show_per_page=false, entity_name="users") }}
     {% else %}
     <div class="p-12 text-center">
         <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
@@ -173,7 +189,7 @@
                 <tr>
                     <td class="px-6 py-3 text-sm text-gray-700">Delete any org memory</td>
                     <td class="px-6 py-3 text-center"><span class="text-gray-400">—</span></td>
-                    <td class="px-6 py-3 text-center"><span class="text-emerald-600">✓</span></td>
+                    <td class="px-6 py-3 text-center"><span class="text-gray-400">—</span></td>
                     <td class="px-6 py-3 text-center"><span class="text-emerald-600">✓</span></td>
                 </tr>
                 <tr>

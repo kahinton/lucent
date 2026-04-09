@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}Review Queue - Lucent{% endblock %}
+{% block title %}Needs Approval - Lucent{% endblock %}
 
 {% block content %}
 <!-- Breadcrumb -->
@@ -22,47 +22,95 @@
             </svg>
         </div>
         <div>
-            <h1 class="text-2xl font-bold text-gray-900">Review Queue</h1>
-            <p class="text-sm text-gray-500">Lucent's work that needs your approval</p>
+            <h1 class="text-2xl font-bold text-gray-900">Needs Approval</h1>
+            <p class="text-sm text-gray-500">Autonomous work that needs your approval before execution</p>
         </div>
     </div>
 </div>
 
-{% if review_memories %}
+{% if approval_items %}
+{% from "partials/pagination.html" import pagination_controls %}
+{{ pagination_controls(base_url="/daemon/review", page=page, per_page=per_page, total_pages=total_pages, total_count=total_count, entity_name="items") }}
+
 <div class="space-y-4">
-    {% for memory in review_memories %}
-    <div class="bg-white rounded-xl border border-amber-300 shadow-sm overflow-hidden">
+    {% for item in approval_items %}
+    <div id="review-card-{{ item.id }}" class="bg-white rounded-xl border border-amber-300 shadow-sm overflow-hidden transition-all duration-300">
         <div class="px-6 py-4">
             <div class="flex items-start gap-4">
                 <div class="shrink-0 w-10 h-10 rounded-full flex items-center justify-center bg-amber-100 text-amber-600">
                     <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" />
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M9 12h3.75M9 15h3.75M9 18h3.75m3 .75H18a2.25 2.25 0 002.25-2.25V6.108c0-1.135-.845-2.098-1.976-2.192a48.424 48.424 0 00-1.123-.08m-5.801 0c-.065.21-.1.433-.1.664 0 .414.336.75.75.75h4.5a.75.75 0 00.75-.75 2.25 2.25 0 00-.1-.664m-5.8 0A2.251 2.251 0 0113.5 3h1a2.25 2.25 0 012.25 2.25c0 .231-.035.454-.1.664M6.75 7.5H4.875c-.621 0-1.125.504-1.125 1.125v12c0 .621.504 1.125 1.125 1.125h9.75c.621 0 1.125-.504 1.125-1.125V16.5a9 9 0 00-9-9z" />
                     </svg>
                 </div>
                 
                 <div class="flex-1 min-w-0">
-                    <!-- Tags and timestamp -->
-                    <div class="flex items-center gap-2 mb-2 flex-wrap">
-                        {% for tag in memory.tags if tag not in ['daemon', 'needs-review'] %}
-                        <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-600">
-                            {{ tag }}
+                    <!-- Title and metadata -->
+                    <div class="flex items-center gap-2 mb-2">
+                        <h3 class="text-sm font-semibold text-gray-900 truncate">{{ item.title }}</h3>
+                        <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium
+                            {% if item.priority == 'urgent' %}bg-red-100 text-red-700
+                            {% elif item.priority == 'high' %}bg-orange-100 text-orange-700
+                            {% elif item.priority == 'medium' %}bg-blue-100 text-blue-700
+                            {% else %}bg-gray-100 text-gray-600{% endif %}">
+                            {{ item.priority }}
                         </span>
-                        {% endfor %}
-                        <span class="text-xs text-gray-400 ml-auto">{{ memory.created_at | datetime }}</span>
+                        <span class="text-xs text-gray-400 ml-auto shrink-0">{{ item.created_at | datetime }}</span>
                     </div>
                     
-                    <!-- Content -->
-                    <div class="text-sm text-gray-800 whitespace-pre-wrap leading-relaxed">{{ memory.content }}</div>
-                    
-                    <!-- Feedback actions -->
-                    <div class="mt-3 pt-3 border-t border-gray-100">
-                        {% include "partials/feedback_actions.html" %}
+                    <!-- Description -->
+                    {% if item.description %}
+                    <div class="text-sm text-gray-600 whitespace-pre-wrap leading-relaxed max-h-48 overflow-y-auto mb-2">{{ item.description }}</div>
+                    {% endif %}
+
+                    <!-- Source + task count -->
+                    <div class="flex items-center gap-3 text-xs text-gray-400 mb-3">
+                        <span>Source: {{ item.source }}</span>
+                        <span>{{ item.task_count }} task{{ 's' if item.task_count != 1 }}</span>
+                        {% if item.creator_name %}<span>by {{ item.creator_name }}</span>{% endif %}
                     </div>
                     
-                    <!-- Memory link -->
+                    <!-- Approval actions -->
+                    <div id="review-actions-{{ item.id }}" class="pt-3 border-t border-gray-100">
+                        <div class="flex items-center gap-2 flex-wrap">
+                            <button 
+                                hx-post="/daemon/review/{{ item.id }}/action" 
+                                hx-vals='{"action": "approve"}'
+                                hx-target="#review-actions-{{ item.id }}"
+                                hx-swap="innerHTML"
+                                class="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-100 text-emerald-700 text-sm font-medium rounded-lg hover:bg-emerald-200 transition-colors">
+                                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                                    <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+                                </svg>
+                                Approve
+                            </button>
+                            <button 
+                                data-action="show-reject"
+                                class="inline-flex items-center gap-1.5 px-3 py-1.5 bg-red-100 text-red-700 text-sm font-medium rounded-lg hover:bg-red-200 transition-colors">
+                                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                                    <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+                                </svg>
+                                Reject
+                            </button>
+                        </div>
+                        <!-- Reject form -->
+                        <div class="reject-form hidden mt-3">
+                            <form hx-post="/daemon/review/{{ item.id }}/action" 
+                                  hx-target="#review-actions-{{ item.id }}" 
+                                  hx-swap="innerHTML"
+                                  class="flex gap-2">
+                                <input type="hidden" name="action" value="reject">
+                                <input type="text" name="comment" placeholder="Why is this being rejected? (required)" required
+                                       class="flex-1 px-3 py-2 text-sm border border-red-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-red-500 outline-none bg-red-50">
+                                <button type="submit" class="px-3 py-2 bg-red-600 text-white text-sm font-medium rounded-lg hover:bg-red-700 transition-colors">Reject</button>
+                                <button type="button" data-action="cancel-reject" class="px-3 py-2 bg-gray-100 text-gray-600 text-sm font-medium rounded-lg hover:bg-gray-200 transition-colors">Cancel</button>
+                            </form>
+                        </div>
+                    </div>
+                    
+                    <!-- Request link -->
                     <div class="mt-2">
-                        <a href="/memories/{{ memory.id }}" class="text-xs text-primary-500 hover:text-primary-700">
-                            View full memory →
+                        <a href="/activity/{{ item.id }}" class="text-xs text-primary-500 hover:text-primary-700">
+                            View request details →
                         </a>
                     </div>
                 </div>
@@ -71,6 +119,8 @@
     </div>
     {% endfor %}
 </div>
+
+{{ pagination_controls(base_url="/daemon/review", page=page, per_page=per_page, total_pages=total_pages, total_count=total_count, show_per_page=false, entity_name="items") }}
 {% else %}
 <!-- Empty state -->
 <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-12 text-center">
@@ -79,9 +129,52 @@
     </svg>
     <h3 class="text-lg font-semibold text-gray-900 mb-2">All caught up!</h3>
     <p class="text-sm text-gray-500 max-w-md mx-auto">
-        No work needs your review right now. Check back later or view all 
-        <a href="/daemon" class="text-primary-600 hover:text-primary-700 underline">autonomous activity</a>.
+        No work needs your approval right now. Check back later or view all 
+        <a href="/activity" class="text-primary-600 hover:text-primary-700 underline">activity</a>.
     </p>
 </div>
 {% endif %}
+{% endblock %}
+
+{% block extra_scripts %}
+<script nonce="{{ request.state.csp_nonce }}">
+// Show reject form
+document.addEventListener('click', function(e) {
+    var btn = e.target.closest('[data-action="show-reject"]');
+    if (btn) {
+        var container = btn.closest('[id^="review-actions-"]');
+        if (container) {
+            var form = container.querySelector('.reject-form');
+            form.classList.remove('hidden');
+            form.querySelector('input[name=comment]').focus();
+        }
+    }
+    var cancel = e.target.closest('[data-action="cancel-reject"]');
+    if (cancel) {
+        cancel.closest('.reject-form').classList.add('hidden');
+    }
+});
+
+// After HTMX swaps a review action, fade out the review card
+document.addEventListener('htmx:afterSwap', function(evt) {
+    var target = evt.detail.target;
+    if (!target || !target.id || !target.id.startsWith('feedback-')) return;
+    var hasResolved = target.querySelector('.bg-emerald-50, .bg-red-50');
+    if (!hasResolved) return;
+    var card = target.closest('[id^="review-card-"]');
+    if (!card) return;
+    setTimeout(function() {
+        card.style.opacity = '0';
+        card.style.maxHeight = card.scrollHeight + 'px';
+        card.style.overflow = 'hidden';
+        setTimeout(function() {
+            card.style.maxHeight = '0';
+            card.style.padding = '0';
+            card.style.margin = '0';
+            card.style.borderWidth = '0';
+        }, 150);
+        setTimeout(function() { card.remove(); }, 450);
+    }, 800);
+});
+</script>
 {% endblock %}

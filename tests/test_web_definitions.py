@@ -117,6 +117,7 @@ async def web_user(db_pool, web_prefix):
         organization_id=org["id"],
         email=f"{web_prefix}user@test.com",
         display_name=f"{web_prefix}User",
+        role="admin",
     )
     token = await create_session(db_pool, user["id"])
     return user, org, token
@@ -325,7 +326,8 @@ class TestAgentCreate:
             ),
         )
         repo = DefinitionRepository(db_pool)
-        agents = await repo.list_agents(str(org["id"]))
+        result = await repo.list_agents(str(org["id"]))
+        agents = result["items"] if isinstance(result, dict) else result
         names = [a["name"] for a in agents]
         assert "Persisted Agent" in names
 
@@ -592,7 +594,8 @@ class TestMcpCreate:
             ),
         )
         repo = DefinitionRepository(db_pool)
-        servers = await repo.list_mcp_servers(str(org["id"]))
+        result = await repo.list_mcp_servers(str(org["id"]))
+        servers = result["items"] if isinstance(result, dict) else result
         found = [s for s in servers if s["name"] == "MCP With Headers"]
         assert len(found) == 1
 
@@ -807,3 +810,279 @@ class TestGrantManagement:
             data={"skill_id": str(skill_def["id"])},
         )
         assert resp.status_code in (403, 400)
+
+
+# ============================================================================
+# Member-role users get 403 on all mutating endpoints
+# ============================================================================
+
+
+@pytest_asyncio.fixture
+async def member_user(db_pool, web_prefix):
+    """Create a member-role user in the same org as web_user."""
+    org_repo = OrganizationRepository(db_pool)
+    org = await org_repo.create(name=f"{web_prefix}member_org")
+    user_repo = UserRepository(db_pool)
+    user = await user_repo.create(
+        external_id=f"{web_prefix}member",
+        provider="local",
+        organization_id=org["id"],
+        email=f"{web_prefix}member@test.com",
+        display_name=f"{web_prefix}Member",
+        role="member",
+    )
+    token = await create_session(db_pool, user["id"])
+    return user, org, token
+
+
+@pytest_asyncio.fixture
+async def member_client(db_pool, member_user):
+    """httpx client authenticated as a member-role user."""
+    _user, _org, session_token = member_user
+    csrf_token = "test-csrf-token-member456"
+
+    app = create_app()
+    transport = ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        cookies={
+            SESSION_COOKIE_NAME: session_token,
+            CSRF_COOKIE_NAME: csrf_token,
+        },
+    ) as c:
+        c._csrf_token = csrf_token  # type: ignore[attr-defined]
+        yield c
+
+
+@pytest_asyncio.fixture
+async def member_agent_def(db_pool, member_user):
+    """Agent definition in the member user's org."""
+    _user, org, _token = member_user
+    repo = DefinitionRepository(db_pool)
+    return await repo.create_agent(
+        name="Member Test Agent",
+        description="Agent for member tests",
+        content="# Member Test Agent",
+        org_id=str(org["id"]),
+        created_by=str(_user["id"]),
+    )
+
+
+@pytest_asyncio.fixture
+async def member_skill_def(db_pool, member_user):
+    """Skill definition in the member user's org."""
+    _user, org, _token = member_user
+    repo = DefinitionRepository(db_pool)
+    return await repo.create_skill(
+        name="Member Test Skill",
+        description="Skill for member tests",
+        content="# Member Test Skill",
+        org_id=str(org["id"]),
+        created_by=str(_user["id"]),
+    )
+
+
+@pytest_asyncio.fixture
+async def member_mcp_def(db_pool, member_user):
+    """MCP server definition in the member user's org."""
+    _user, org, _token = member_user
+    repo = DefinitionRepository(db_pool)
+    return await repo.create_mcp_server(
+        name="Member Test MCP",
+        description="MCP for member tests",
+        server_type="http",
+        url="http://localhost:9999",
+        org_id=str(org["id"]),
+        created_by=str(_user["id"]),
+    )
+
+
+class TestMemberRoleBlocked:
+    """Member-role users must get 403 on all mutating definition endpoints."""
+
+    # --- Agent CRUD ---
+
+    async def test_member_cannot_create_agent(self, member_client):
+        resp = await member_client.post(
+            "/definitions/agents/create",
+            data=_csrf_data(member_client, {"name": "X", "description": "X", "content": "X"}),
+        )
+        assert resp.status_code == 403
+
+    async def test_member_cannot_update_agent(self, member_client, member_agent_def):
+        resp = await member_client.post(
+            f"/definitions/agents/{member_agent_def['id']}/update",
+            data=_csrf_data(
+                member_client, {"name": "X", "description": "X", "content": "X"}
+            ),
+        )
+        assert resp.status_code == 403
+
+    async def test_member_cannot_delete_agent(self, member_client, member_agent_def):
+        resp = await member_client.post(
+            f"/definitions/agents/{member_agent_def['id']}/delete",
+            data=_csrf_data(member_client),
+        )
+        assert resp.status_code == 403
+
+    async def test_member_cannot_approve_agent(self, member_client, member_agent_def):
+        resp = await member_client.post(
+            f"/definitions/agents/{member_agent_def['id']}/approve",
+            data=_csrf_data(member_client),
+        )
+        assert resp.status_code == 403
+
+    async def test_member_cannot_reject_agent(self, member_client, member_agent_def):
+        resp = await member_client.post(
+            f"/definitions/agents/{member_agent_def['id']}/reject",
+            data=_csrf_data(member_client),
+        )
+        assert resp.status_code == 403
+
+    # --- Skill CRUD ---
+
+    async def test_member_cannot_create_skill(self, member_client):
+        resp = await member_client.post(
+            "/definitions/skills/create",
+            data=_csrf_data(member_client, {"name": "X", "description": "X", "content": "X"}),
+        )
+        assert resp.status_code == 403
+
+    async def test_member_cannot_update_skill(self, member_client, member_skill_def):
+        resp = await member_client.post(
+            f"/definitions/skills/{member_skill_def['id']}/update",
+            data=_csrf_data(
+                member_client, {"name": "X", "description": "X", "content": "X"}
+            ),
+        )
+        assert resp.status_code == 403
+
+    async def test_member_cannot_delete_skill(self, member_client, member_skill_def):
+        resp = await member_client.post(
+            f"/definitions/skills/{member_skill_def['id']}/delete",
+            data=_csrf_data(member_client),
+        )
+        assert resp.status_code == 403
+
+    async def test_member_cannot_approve_skill(self, member_client, member_skill_def):
+        resp = await member_client.post(
+            f"/definitions/skills/{member_skill_def['id']}/approve",
+            data=_csrf_data(member_client),
+        )
+        assert resp.status_code == 403
+
+    async def test_member_cannot_reject_skill(self, member_client, member_skill_def):
+        resp = await member_client.post(
+            f"/definitions/skills/{member_skill_def['id']}/reject",
+            data=_csrf_data(member_client),
+        )
+        assert resp.status_code == 403
+
+    # --- MCP Server CRUD ---
+
+    async def test_member_cannot_create_mcp(self, member_client):
+        resp = await member_client.post(
+            "/definitions/mcp-servers/create",
+            data=_csrf_data(
+                member_client,
+                {"name": "X", "description": "X", "command": "echo", "args": "hi"},
+            ),
+        )
+        assert resp.status_code == 403
+
+    async def test_member_cannot_update_mcp(self, member_client, member_mcp_def):
+        resp = await member_client.post(
+            f"/definitions/mcp-servers/{member_mcp_def['id']}/update",
+            data=_csrf_data(
+                member_client,
+                {"name": "X", "description": "X", "command": "echo", "args": "hi"},
+            ),
+        )
+        assert resp.status_code == 403
+
+    async def test_member_cannot_delete_mcp(self, member_client, member_mcp_def):
+        resp = await member_client.post(
+            f"/definitions/mcp-servers/{member_mcp_def['id']}/delete",
+            data=_csrf_data(member_client),
+        )
+        assert resp.status_code == 403
+
+    async def test_member_cannot_approve_mcp(self, member_client, member_mcp_def):
+        resp = await member_client.post(
+            f"/definitions/mcp-servers/{member_mcp_def['id']}/approve",
+            data=_csrf_data(member_client),
+        )
+        assert resp.status_code == 403
+
+    async def test_member_cannot_reject_mcp(self, member_client, member_mcp_def):
+        resp = await member_client.post(
+            f"/definitions/mcp-servers/{member_mcp_def['id']}/reject",
+            data=_csrf_data(member_client),
+        )
+        assert resp.status_code == 403
+
+    # --- Grant management ---
+
+    async def test_member_cannot_grant_skill(
+        self, member_client, member_agent_def, member_skill_def
+    ):
+        resp = await member_client.post(
+            f"/definitions/agents/{member_agent_def['id']}/grant-skill",
+            data=_csrf_data(member_client, {"skill_id": str(member_skill_def["id"])}),
+        )
+        assert resp.status_code == 403
+
+    async def test_member_cannot_revoke_skill(
+        self, member_client, member_agent_def, member_skill_def
+    ):
+        resp = await member_client.post(
+            f"/definitions/agents/{member_agent_def['id']}/revoke-skill/{member_skill_def['id']}",
+            data=_csrf_data(member_client),
+        )
+        assert resp.status_code == 403
+
+    async def test_member_cannot_grant_mcp(
+        self, member_client, member_agent_def, member_mcp_def
+    ):
+        resp = await member_client.post(
+            f"/definitions/agents/{member_agent_def['id']}/grant-mcp",
+            data=_csrf_data(member_client, {"server_id": str(member_mcp_def["id"])}),
+        )
+        assert resp.status_code == 403
+
+    async def test_member_cannot_revoke_mcp(
+        self, member_client, member_agent_def, member_mcp_def
+    ):
+        resp = await member_client.post(
+            f"/definitions/agents/{member_agent_def['id']}/revoke-mcp/{member_mcp_def['id']}",
+            data=_csrf_data(member_client),
+        )
+        assert resp.status_code == 403
+
+    async def test_member_cannot_update_mcp_tools(
+        self, member_client, member_agent_def, member_mcp_def
+    ):
+        resp = await member_client.post(
+            f"/definitions/agents/{member_agent_def['id']}/mcp-tools/{member_mcp_def['id']}",
+            data=_csrf_data(member_client, {"allowed_tools": "tool1"}),
+        )
+        assert resp.status_code == 403
+
+    # --- Read-only endpoints remain accessible to members ---
+
+    async def test_member_can_list_definitions(self, member_client):
+        resp = await member_client.get("/definitions")
+        assert resp.status_code == 200
+
+    async def test_member_can_view_agent_detail(self, member_client, member_agent_def):
+        resp = await member_client.get(f"/definitions/agents/{member_agent_def['id']}")
+        assert resp.status_code == 200
+
+    async def test_member_can_view_skill_detail(self, member_client, member_skill_def):
+        resp = await member_client.get(f"/definitions/skills/{member_skill_def['id']}")
+        assert resp.status_code == 200
+
+    async def test_member_can_view_mcp_detail(self, member_client, member_mcp_def):
+        resp = await member_client.get(f"/definitions/mcp-servers/{member_mcp_def['id']}")
+        assert resp.status_code == 200

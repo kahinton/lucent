@@ -170,21 +170,38 @@ async def list_organizations(
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=20, ge=1, le=100),
 ) -> OrganizationListResponse:
-    """List all organizations.
+    """List organizations visible to the current user.
 
-    Requires owner role.
+    Requires owner role. Only returns the user's own organization.
     """
+    if not user.organization_id:
+        return OrganizationListResponse(
+            organizations=[],
+            total_count=0,
+            offset=offset,
+            limit=limit,
+            has_more=False,
+        )
+
     pool = await get_pool()
     org_repo = OrganizationRepository(pool)
 
-    result = await org_repo.list(offset=offset, limit=limit)
+    org = await org_repo.get_by_id(user.organization_id)
+    if org is None:
+        return OrganizationListResponse(
+            organizations=[],
+            total_count=0,
+            offset=offset,
+            limit=limit,
+            has_more=False,
+        )
 
     return OrganizationListResponse(
-        organizations=[_org_to_response(o) for o in result["organizations"]],
-        total_count=result["total_count"],
-        offset=result["offset"],
-        limit=result["limit"],
-        has_more=result["has_more"],
+        organizations=[_org_to_response(org)],
+        total_count=1,
+        offset=0,
+        limit=limit,
+        has_more=False,
     )
 
 

@@ -1,0 +1,149 @@
+nameOverride: ""
+fullnameOverride: ""
+
+global:
+  imageRegistry: ""
+  imagePullSecrets: []
+
+server:
+  replicaCount: 1
+  image:
+    repository: lucent
+    tag: "0.2.0"
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 8766
+  health:
+    path: /api/health
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+  env:
+    LUCENT_HOST: "0.0.0.0"
+    LUCENT_PORT: "8766"
+    LUCENT_MODE: personal
+    LUCENT_LLM_ENGINE: copilot
+    LUCENT_CHAT_MODEL: claude-opus-4.6
+    LUCENT_RATE_LIMIT_PER_MINUTE: "100"
+    LUCENT_LOGIN_RATE_LIMIT: "5"
+    OTEL_ENABLED: "false"
+    OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+    OTEL_SERVICE_NAME: lucent
+    LUCENT_SECRET_PROVIDER: builtin
+    OLLAMA_HOST: http://ollama:11434
+
+# Embedded DB may be provided by bitnami/postgresql dependency when enabled.
+database:
+  embedded: true
+  image:
+    repository: postgres
+    tag: "16-alpine"
+    pullPolicy: IfNotPresent
+  persistence:
+    enabled: true
+    size: 10Gi
+    storageClass: ""
+  external:
+    host: ""
+    port: 5432
+    secretRef: ""
+
+openbao:
+  embedded: true
+  image:
+    repository: openbao/openbao
+    tag: "2.1.0"
+    pullPolicy: IfNotPresent
+  persistence:
+    enabled: true
+    size: 5Gi
+    storageClass: ""
+  external:
+    address: ""
+    secretRef: ""
+
+llm:
+  engine: copilot
+  daemonModel: claude-opus-4.6
+  providers:
+    anthropic:
+      secretRef: ""
+    openai:
+      secretRef: ""
+    google:
+      secretRef: ""
+
+daemon:
+  enabled: true
+  model: claude-opus-4.6
+  maxConcurrentSessions: 3
+  env:
+    LUCENT_DAEMON_INTERVAL: "15"
+    LUCENT_STALE_HEARTBEAT_MINUTES: "30"
+
+ollama:
+  enabled: false
+  mode: sidecar
+  image:
+    repository: ollama/ollama
+    tag: "latest"
+    pullPolicy: IfNotPresent
+  gpu:
+    enabled: false
+    count: 1
+  nodeSelector: {}
+  tolerations: []
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: lucent.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPU: 80
+
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+
+networkPolicy:
+  enabled: true
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+observability:
+  enabled: false
+  otelCollector:
+    enabled: false
+  prometheus:
+    serviceMonitor: false
+  grafana:
+    dashboards: false
+
+postgresql:
+  enabled: true
+  auth:
+    database: lucent
+    username: lucent
+    existingSecret: ""
+  primary:
+    persistence:
+      enabled: true
+      size: 10Gi

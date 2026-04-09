@@ -1,0 +1,104 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $dbPodSelector := dig "networkPolicy" "database" "podSelector" dict .Values -}}
+{{- $dbNamespaceSelector := dig "networkPolicy" "database" "namespaceSelector" dict .Values -}}
+{{- $openbaoPodSelector := dig "networkPolicy" "openbao" "podSelector" dict .Values -}}
+{{- $openbaoNamespaceSelector := dig "networkPolicy" "openbao" "namespaceSelector" dict .Values -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ printf "%s-default-deny" (include "lucent.fullname" .) }}
+  labels:
+    {{- include "lucent.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ printf "%s-server" (include "lucent.fullname" .) }}
+  labels:
+    {{- include "lucent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "lucent.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: server
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        {{- with .Values.networkPolicy.ingressNamespaceSelector }}
+        - namespaceSelector:
+            {{- toYaml . | nindent 12 }}
+        {{- else }}
+        - podSelector: {}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.server.service.port }}
+    {{- if and .Values.observability.enabled .Values.observability.prometheus.serviceMonitor }}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: {{ .Values.server.service.port }}
+    {{- end }}
+  egress:
+    - to:
+        {{- if .Values.database.embedded }}
+        - podSelector:
+            matchLabels:
+              {{- include "lucent.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: db
+        {{- else if $dbPodSelector }}
+        - podSelector:
+            {{- toYaml $dbPodSelector | nindent 14 }}
+        {{- else if $dbNamespaceSelector }}
+        - namespaceSelector:
+            {{- toYaml $dbNamespaceSelector | nindent 14 }}
+        {{- else }}
+        - ipBlock:
+            cidr: 0.0.0.0/0
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        {{- if .Values.openbao.embedded }}
+        - podSelector:
+            matchLabels:
+              {{- include "lucent.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: openbao
+        {{- else if $openbaoPodSelector }}
+        - podSelector:
+            {{- toYaml $openbaoPodSelector | nindent 14 }}
+        {{- else if $openbaoNamespaceSelector }}
+        - namespaceSelector:
+            {{- toYaml $openbaoNamespaceSelector | nindent 14 }}
+        {{- else }}
+        - ipBlock:
+            cidr: 0.0.0.0/0
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: 8200
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 80
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+{{- end }}

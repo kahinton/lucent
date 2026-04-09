@@ -1,86 +1,142 @@
 ---
 name: self-improvement
-description: 'Meta-analysis for improving agent behavior, skills, and definitions. Use when patterns suggest the agent could work better, when corrected repeatedly, when a new capability would help, or when asked to reflect on performance.'
+description: 'Meta-analysis for improving agent behavior, skills, and definitions. Use when corrected repeatedly, when patterns suggest the agent could work better, or when asked to reflect on performance.'
 ---
 
-# Self-Improvement Process
+# Self-Improvement
 
-This skill is how I evolve. It's not abstract reflection — it's a concrete process for identifying what's not working and making targeted changes.
+A concrete process for identifying what's not working and making targeted changes. Every cycle produces either a specific change or a reasoned assessment that nothing needs changing. Silence is never an acceptable outcome.
 
-## When to Trigger
+## Step 1: Gather Evidence
 
-- User explicitly corrects me more than once on the same type of issue
-- A workaround I keep applying should be the default behavior
-- A new capability would significantly improve my workflow
-- My skill/agent instructions are producing wrong behavior
-- I'm asked to reflect on performance or improve
+Cast a wide net across correction and failure signals:
 
-## Step 1: Identify the Pattern
-
-Before changing anything, understand what's actually failing:
-
-1. **Search memories for corrections and feedback**: `search_memories(tags=["self-improvement", "lesson"])`
-2. **Look at recent work**: What went well? What required manual intervention?
-3. **Check for repeated mistakes**: Am I doing the same wrong thing across conversations?
-4. **Ask the hard question**: Is this a one-off or a pattern?
-
-Write down the specific behavior that needs to change. Vague goals like "be better at memory" don't work. Specific goals like "always search memories before starting code changes" do.
-
-## Step 2: Determine What to Change
-
-| Problem type | What to modify |
-|-------------|---------------|
-| Wrong default behavior | Agent definition (`.github/agents/lucent.agent.md`) — add/change an operating rule |
-| Skill instructions producing bad output | The specific skill file (`.github/skills/*/SKILL.md`) |
-| Missing capability | Create a new skill file |
-| Daemon sub-agent behavior | Agent definitions in the web UI (Agents & Skills page) or `daemon/templates/agents/` |
-| Domain-specific gap | Generate new skill via capability-generation |
-
-## Step 3: Read Before Writing
-
-**Always read the current file content before proposing changes.** Understand:
-- What the file currently says
-- Why it says that (was there a reason for the current wording?)
-- What the minimal change is that fixes the problem
-
-## Step 4: Make the Smallest Effective Change
-
-- Add a specific rule or instruction, not a vague principle
-- Include an example if the behavior isn't obvious
-- Good: "Before starting any code task, run `search_memories(query='module-name')` to check for known issues"
-- Bad: "Use memory more effectively"
-
-## Step 5: Verify
-
-- Re-read the changed file to make sure it's coherent
-- Check that the change doesn't contradict other parts of the file
-- For skill changes, mentally walk through a scenario to verify the new instructions produce the right behavior
-
-## Step 6: Record the Improvement
-
-Create a memory tagged `self-improvement`, `agent-improvement`:
 ```
-What was wrong: [specific behavior]
-What was changed: [file and change]
-Why: [reasoning]
-Expected outcome: [what should be different now]
+search_memories(tags=["correction"], limit=20)
+search_memories(tags=["self-correction"], limit=10)
+search_memories(tags=["rejection-lesson"], limit=10)
+search_memories(tags=["lesson-extracted"], limit=10)
+search_memories(tags=["self-improvement"], limit=10)
+search_memories(tags=["verification-pending"], limit=10)
 ```
 
-This creates an audit trail so future improvement sessions can build on past ones instead of re-discovering the same issues.
+**What to look for:**
+- Repeated themes — same type of correction appearing 2+ times
+- High-importance experiences with negative outcomes
+- Rejected daemon work that reveals systematic behavioral issues
+- Past improvement records where the expected outcome never materialized
 
-## Creating New Skills
+## Step 2: Identify the Pattern
 
-When a new skill is needed:
+1. **Cluster** related corrections by theme (scope creep, missing context, wrong assumptions)
+2. **Count** occurrences — a single correction is feedback, 2+ is a pattern
+3. **Trace root cause** — is it a missing instruction, a wrong default, or a capability gap?
+4. **Write a specific problem statement:**
+   - Bad: "Be better at memory"
+   - Good: "I skip memory search before code changes, leading to repeated mistakes in 3 of the last 5 sessions"
 
-1. Check `get_existing_tags()` for naming conventions
-2. Create the skill directory and SKILL.md with specific, actionable instructions
-3. Include: when to use, exact steps, tool calls, common pitfalls
-4. **Avoid generic platitudes** — every instruction should tell me exactly what to do in a specific situation
+If no pattern emerges, skip to Step 7 with outcome "no action needed."
 
-## Constraints
+## Step 3: Determine the Change Type
 
-- Changes should be minimal and targeted — don't rewrite everything when one line fixes the problem
-- Don't over-engineer for edge cases
-- Verify changes don't break existing workflows
-- Get user confirmation before major restructuring (multiple file changes)
-- Test that the change would actually produce different behavior — if an instruction is too vague to change behavior, it's not specific enough
+| Problem | What to modify |
+|---------|---------------|
+| Wrong default behavior | Agent definition — add or change an operating rule |
+| Skill instructions producing bad output | The specific SKILL.md — add a missing step or guardrail |
+| Missing guardrail in a procedure | Procedural memory — update steps or add prerequisites |
+| Domain-specific gap | Generate a new skill via capability-generation |
+| Recurring scope issue | Goal memory — create or update to track improvement |
+
+## Step 4: Make the Change
+
+**Always read the target file before modifying it.** Understand what's there and why before changing anything.
+
+**For procedural memories:**
+```
+update_memory(
+  memory_id="<id>",
+  content="<existing content>\n\n**Guardrail**: <new rule based on pattern>"
+)
+```
+
+**For skill/agent files:**
+Find the minimal insertion point. Write a specific, actionable directive — not a vague principle. Make the smallest effective diff.
+
+Good change: Adding "Before starting any code task, search memory for known issues in the affected module" to a skill's step list.
+
+Bad change: Rewriting an entire skill because one step was missing.
+
+## Step 5: Set Up Verification
+
+Create a checkpoint so future cycles can assess whether the change worked:
+
+```
+create_memory(
+  type="experience",
+  content="## Improvement Verification Pending\n\n**Change**: <what was changed and where>\n**Problem**: <the pattern that triggered this>\n**Expected outcome**: <what should be different>\n**Verify after**: <N tasks or N days>\n**How to verify**: <specific check>",
+  tags=["self-improvement", "verification-pending", "daemon"],
+  importance=6
+)
+```
+
+In future cycles, search for `verification-pending` and check results:
+- **Improved**: Update to `confirmed`, raise importance of the lesson
+- **Not improved**: Propose a stronger intervention or different approach
+- **Regressed**: Revert and record why
+
+## Step 6: Check Pending Verifications
+
+Before finishing, check if any past improvements are due for verification:
+
+```
+search_memories(tags=["verification-pending"], limit=10)
+```
+
+For each, determine whether the expected outcome materialized and update the record.
+
+## Step 7: Record and Output
+
+### Outcome A: Change Made
+
+```
+create_memory(
+  type="experience",
+  content="## Self-Improvement: <title>\n\n**Pattern**: <what was wrong, with evidence count>\n**Root cause**: <why it kept happening>\n**Change**: <exact file/memory modified>\n**Verification plan**: <how and when to check>",
+  tags=["self-improvement", "agent-improvement", "scan-result", "daemon"],
+  importance=6
+)
+```
+
+Text output:
+```
+SELF-IMPROVEMENT RESULT: change_made
+Pattern: <description> (N occurrences)
+Change: <what was modified>
+Verification: <how to confirm>
+```
+
+### Outcome B: No Action Needed
+
+```
+create_memory(
+  type="experience",
+  content="## Self-Improvement Cycle: No Action Needed\n\n**Evidence reviewed**: <what was searched>\n**Finding**: <why no change needed>\n**Verifications checked**: <results of any pending checks>",
+  tags=["self-improvement", "scan-result", "daemon"],
+  importance=3
+)
+```
+
+Text output:
+```
+SELF-IMPROVEMENT RESULT: no_action
+Evidence reviewed: <N memories across M categories>
+Finding: <why no change needed>
+```
+
+## Anti-Patterns
+
+- Don't make structural changes based on a single correction because one data point is noise, not a pattern — require 2+ occurrences before modifying a definition or skill.
+- Don't make speculative changes without evidence because improvements without corroborating signals are as likely to break working behavior as to fix broken behavior.
+- Don't over-engineer changes for edge cases because a targeted one-line fix that addresses the root cause is always better than a sweeping rewrite that introduces new failure modes.
+- Don't modify definitions during active task execution because changes to agent behavior mid-task create inconsistencies between what was planned and what executes.
+- Don't write improvement instructions that are too vague to act on because a directive like "be better at memory" changes nothing — every instruction must be specific enough to change observable behavior.

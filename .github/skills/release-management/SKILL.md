@@ -1,59 +1,104 @@
 ---
 name: release-management
-description: 'Manage changelog updates, version bumping, Docker image tagging, and release notes generation'
+description: 'Manage changelog updates, version bumping, tagging, and release notes. Use when preparing a release, updating changelog, bumping versions, creating release notes, tagging a release commit, or deciding what changes belong in the next release.'
 ---
 
 # Release Management
 
-Manage changelog updates, version bumping, Docker image tagging, and release notes.
+## Release Procedure
 
-## When to Use
+### 0. Load Release Context
 
-- Preparing a new release
-- Updating the changelog after completing features
-- Bumping version numbers
-- Creating release tags and notes
+Before starting a release, search memory for prior release history:
 
-## Release Process
+```
+search_memories(query="release", tags=["release"], limit=5)
+search_memories(query=<project or repo name>, tags=["release"], limit=3)
+```
 
-### Step 1: Update CHANGELOG.md
+Look for:
+- **Past release notes** — version numbering pattern, what was included
+- **Release issues** — problems from previous releases to avoid repeating
+- **Breaking change history** — how breaking changes were communicated before
 
-1. Follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format
-2. Move items from `[Unreleased]` to a new version section
-3. Categorize changes: Added, Changed, Deprecated, Removed, Fixed, Security
-4. Include meaningful descriptions (not just commit messages)
+### 1. Update the Changelog
 
-### Step 2: Bump Version
+Follow [Keep a Changelog](https://keepachangelog.com/) format:
 
-1. Update `version` in `pyproject.toml`
-2. Follow [Semantic Versioning](https://semver.org/):
-   - **MAJOR**: Breaking API changes
-   - **MINOR**: New features, backward-compatible
-   - **PATCH**: Bug fixes, backward-compatible
-3. Search for any other version references that need updating
+1. Move items from `[Unreleased]` to a new version section: `[X.Y.Z] - YYYY-MM-DD`
+2. Categorize changes: **Added**, **Changed**, **Deprecated**, **Removed**, **Fixed**, **Security**
+3. Write entries as user-facing descriptions, not commit messages
+4. Include breaking changes prominently at the top of the version section
 
-### Step 3: Docker Image
+### 2. Bump the Version
 
-1. Build: `docker compose build`
-2. Tag with version: `docker tag lucent:latest lucent:vX.Y.Z`
-3. Verify the image runs correctly: `docker compose up -d`
+Follow [Semantic Versioning](https://semver.org/):
 
-### Step 4: Create Release
+| Change type | Version bump | Example |
+|------------|-------------|---------|
+| Breaking API changes | **MAJOR** | 1.0.0 → 2.0.0 |
+| New features, backward-compatible | **MINOR** | 1.0.0 → 1.1.0 |
+| Bug fixes, backward-compatible | **PATCH** | 1.0.0 → 1.0.1 |
 
-1. Commit version bump and changelog: `git commit -m "release: vX.Y.Z"`
-2. Create a git tag: `git tag vX.Y.Z`
-3. Push with tags: `git push origin main --tags`
-4. Create GitHub release with `gh release create vX.Y.Z --notes-file <notes>`
+Update the version in the project's manifest file (`pyproject.toml`, `package.json`, `Cargo.toml`, etc.). Search the codebase for any other version references that need updating.
 
-### Step 5: Post-Release
+### 3. Build and Verify
 
-1. Add new `[Unreleased]` section to CHANGELOG.md
-2. Verify the release is visible on GitHub
-3. Announce if appropriate
+```bash
+# Build
+docker compose build                   # or the project's build command
 
-## Best Practices
+# Tag
+docker tag <image>:latest <image>:vX.Y.Z
+
+# Verify — the built artifact should start and pass health checks
+docker compose up -d
+curl -s http://localhost:<port>/health
+```
+
+### 4. Tag and Publish
+
+```bash
+git add -A
+git commit -m "release: vX.Y.Z"
+git tag vX.Y.Z
+git push origin main --tags
+```
+
+Create a GitHub release:
+```bash
+gh release create vX.Y.Z --title "vX.Y.Z" --notes-file RELEASE_NOTES.md
+```
+
+### 5. Post-Release
+
+1. Add a new `[Unreleased]` section to the changelog
+2. Verify the release is visible and the artifacts are correct
+3. Record the release:
+
+```
+create_memory(
+  type="technical",
+  content="## Release vX.Y.Z\n\n**Date**: <date>\n**Highlights**: <key changes>\n**Breaking**: <any breaking changes>\n**Notes**: <anything worth remembering for next release>",
+  tags=["release"],
+  importance=6,
+  shared=true
+)
+```
+
+## Rules
 
 - Never skip the changelog — it's the user-facing record of what changed
 - Write changelog entries as you work, not all at release time
-- Test the Docker image before tagging a release
-- Keep release commits minimal (version bump + changelog only)
+- Test the built artifact before tagging — don't tag a broken release
+- Keep release commits minimal: version bump + changelog only
+
+## Anti-Patterns
+
+| Anti-Pattern | Why It Fails | What To Do Instead |
+|---|---|---|
+| **Cutting a release without running the full test suite** | Broken artifacts reach users; rollback costs more than the time saved skipping tests. | Always run the complete build-and-verify step (§3) before tagging. Treat a passing test suite as a gate, not a suggestion. |
+| **Forgetting to update CHANGELOG.md before tagging** | The tag is immutable — you can't retroactively add changelog entries to a published release without re-tagging or amending release notes. | Update the changelog *first* (§1), then bump, then tag. The changelog commit must precede the tag. |
+| **Bumping version in one place but not all** | Mismatched versions between `pyproject.toml`, `__init__.py`, Docker tags, or docs cause confusing runtime errors and broken installs. | After bumping the manifest, grep the entire repo for the old version string and update every occurrence. |
+| **Tagging a release from a dirty working tree** | Uncommitted changes mean the tagged commit doesn't match what was actually tested, creating irreproducible builds. | Run `git status` before tagging. The working tree must be clean and on the correct branch with all release commits pushed. |
+| **Skipping the release notes review** | Typos, missing breaking-change callouts, or leaked internal details end up in the public release. | Read the rendered release notes end-to-end before publishing. A two-minute review prevents embarrassing post-release edits. |

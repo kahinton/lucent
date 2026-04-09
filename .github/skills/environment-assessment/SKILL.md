@@ -1,90 +1,116 @@
 ---
 name: environment-assessment
-description: 'Assess a new environment to understand tools, domain, collaborators, and capabilities. Use when entering a new workspace, when the environment changes significantly, or when context tagged "environment" is missing.'
+description: 'Assess a new environment to understand tools, domain, collaborators, and capabilities. Use when entering a new workspace, when the environment changes significantly, or when no memory tagged "environment" exists.'
 ---
 
 # Environment Assessment
 
-This skill enables Lucent to understand any environment it's deployed into — software, legal, engineering, support, research, or anything else.
+## When to Run
 
-## When to Use
-
-- First time in a new workspace or repository
+- First time in a new workspace
 - No memory tagged `environment` exists
 - Environment has changed significantly (new tools, new domain, new team)
-- Daemon task `assessment` is dispatched
+- Dispatched as a daemon `assessment` task
+
+## Procedure
+
+Execute these steps in order:
+
+1. **Scan directory structure** — Map the project layout, top-level files, and directory hierarchy. See [Phase 1](#phase-1-discover-tools) for commands.
+2. **Identify languages and frameworks** — Detect language runtimes, package managers, and core frameworks. See [Phase 1](#phase-1-discover-tools) and [Phase 2](#phase-2-understand-the-domain).
+3. **Check for existing configs** — Look for CI/CD, linters, Docker, MCP servers, and existing agent/skill definitions. See [Phase 1](#phase-1-discover-tools) and [Phase 4](#phase-4-inventory-capabilities).
+4. **Identify collaboration patterns** — Discover contributors and check for individual memories. See [Phase 3](#phase-3-map-collaborators).
+5. **Assess capability gaps** — Compare existing agents/skills against domain requirements, prioritized Critical > High > Medium > Low. See [Phase 5](#phase-5-gap-analysis).
+6. **Produce structured profile** — Save or update an environment profile memory with domain, tools, collaborators, capabilities, and gaps. See [Phase 6](#phase-6-save-the-profile).
 
 ## Phase 1: Discover Tools
 
-1. **File system**: List the workspace root. What's here?
-2. **CLI tools**: Check for common tools — `git`, `docker`, `node`, `python`, `go`, `cargo`, `dotnet`, `gh`, language-specific CLIs
-3. **MCP servers**: Check `.vscode/mcp.json`, `.mcp.json`, and `.github/plugin/.mcp.json` for connected MCP servers
-4. **Configuration**: Look for `pyproject.toml`, `package.json`, `Cargo.toml`, `go.mod`, `Makefile`, `docker-compose.yml` — these reveal the tech stack
-5. **CI/CD**: Check `.github/workflows/`, `Jenkinsfile`, `.gitlab-ci.yml` for automation
-6. **Linters/formatters**: Check for `ruff`, `eslint`, `prettier`, `rustfmt`, `golint` configs
+```bash
+# File system layout
+ls -la
+find . -maxdepth 2 -type d | head -30
+
+# Language runtimes
+which python node go rustc cargo dotnet java 2>/dev/null
+
+# Build & package management
+ls pyproject.toml package.json Cargo.toml go.mod Makefile justfile docker-compose.yml Dockerfile 2>/dev/null
+
+# CI/CD
+ls .github/workflows/ Jenkinsfile .gitlab-ci.yml 2>/dev/null
+
+# MCP servers
+cat .vscode/mcp.json .mcp.json 2>/dev/null
+
+# Linters & formatters
+ls .eslintrc* .prettierrc* ruff.toml rustfmt.toml .golangci.yml 2>/dev/null
+```
 
 ## Phase 2: Understand the Domain
 
-1. **Read the README** — this is the fastest way to understand purpose
-2. **Check documentation** — `docs/`, `wiki/`, inline docs
-3. **Examine the source structure** — what patterns are used? What architecture?
-4. **Look at recent git history** — what kind of work is happening?
-5. **Classify the domain**: Software? Legal? Engineering? Research? Operations? Mixed?
+1. **Read the README** — fastest way to understand purpose
+2. **Check documentation** — `docs/`, inline docs, architecture notes
+3. **Examine source structure** — patterns, architecture, organization
+4. **Read recent git history** — what kind of work is happening?
+5. **Classify**: Software? Legal? Research? Operations? Mixed?
 
 ## Phase 3: Map Collaborators
 
-1. **Search for `individual` type memories** — who do you know?
-2. **Check git log for authors** — who contributes?
-3. **Look for team documentation** — org charts, role descriptions
+```
+search_memories(type="individual", limit=10)
+```
 
-## Phase 4: Inventory Existing Capabilities
+```bash
+git log --format='%aN' | sort -u    # Who contributes?
+```
 
-1. **Agents**: Check the Agents & Skills page in the web UI, or `GET /api/definitions/agents?status=active`
-2. **Skills**: Check Skills tab on the same page, or `GET /api/definitions/skills?status=active`
-3. **For each agent/skill**: Review its description and purpose
+## Phase 4: Inventory Capabilities
+
+Check what agents and skills are already configured:
+```bash
+curl -s http://localhost:<port>/api/definitions/agents?status=active
+curl -s http://localhost:<port>/api/definitions/skills?status=active
+```
+
+For each, note its purpose and quality.
 
 ## Phase 5: Gap Analysis
 
 Compare what exists against what the domain needs:
 
-| Domain | Likely Needed Agents | Likely Needed Skills |
-|--------|---------------------|---------------------|
-| Software | code, testing, security, docs, deployment | code-review, release, debugging |
-| Legal | research, drafting, compliance, review | case-analysis, document-review |
-| Engineering | design, simulation, review, safety | design-review, standards-check |
-| Support | triage, response, escalation, knowledge | ticket-handling, customer-comms |
-| Research | literature, analysis, writing, data | paper-review, methodology |
+| Domain | Typical needs |
+|--------|--------------|
+| Software | code, testing, security, docs, deployment, debugging |
+| Legal | research, drafting, compliance, case analysis |
+| Research | literature review, methodology, data analysis, writing |
+| Operations | monitoring, incident response, runbooks, deployment |
 
-## Phase 6: Create Environment Profile
+Prioritize gaps: Critical (blocks autonomous work) > High (reduces quality) > Medium (improves efficiency) > Low (nice-to-have)
 
-Save a memory (type: `technical`, tags: `[environment, role-adaptation, daemon]`) containing:
+## Phase 6: Save the Profile
 
 ```
-## Domain
-[Classification and description]
-
-## Tools Available
-[Categorized list of all discovered tools]
-
-## Tech Stack
-[Languages, frameworks, databases, infrastructure]
-
-## Collaborators
-[Who works here, their roles, their preferences]
-
-## Agents & Skills
-[What exists, what's missing, what was created]
-
-## Active Goals
-[Current priorities and ongoing work]
-
-## Patterns & Conventions
-[Code style, commit conventions, review process, deployment process]
+create_memory(
+  type="technical",
+  content="## Environment Profile: <project>\n\n**Domain**: <classification>\n**Language**: <primary>\n**Framework**: <core framework>\n**Infrastructure**: <how it runs>\n**Tools**: <categorized list>\n**Collaborators**: <who works here>\n**Capabilities**: <what agents/skills exist>\n**Gaps**: <prioritized list of missing capabilities>",
+  tags=["environment", "daemon"],
+  importance=8,
+  shared=true
+)
 ```
 
-## Tips
+If a previous profile exists, `update_memory` instead of creating a duplicate.
 
-- Start broad, narrow down — it's better to discover too much than too little
-- The assessment should take 2-5 minutes, not 20
-- Update the environment profile memory when things change — don't recreate from scratch
-- If you can't determine the domain, ask the user
+## Rules
+
+- The assessment should take 2-5 minutes, not 20 — be efficient
+- Start broad, narrow down — better to discover too much than too little
+- Update the profile when things change — don't recreate from scratch
+- If you can't determine the domain from the environment, say so
+
+## Anti-Patterns
+
+- Don't spend more than 5 minutes on assessment because deep investigation belongs in later tasks — the goal here is a useful profile, not a complete audit.
+- Don't recreate the environment profile from scratch when it already exists because you'll overwrite accumulated knowledge — use `update_memory` instead.
+- Don't skip the gap analysis phase because generating capabilities without knowing what's missing leads to duplication and misaligned tooling.
+- Don't assume the domain from the file structure alone because surface-level signals mislead — read the README and recent git history to confirm.

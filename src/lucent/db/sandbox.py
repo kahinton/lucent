@@ -114,8 +114,9 @@ class SandboxRepository:
         self,
         organization_id: str | None = None,
         status: str | None = None,
-        limit: int = 50,
-    ) -> list[dict]:
+        limit: int = 25,
+        offset: int = 0,
+    ) -> dict:
         """List sandboxes, optionally filtered."""
         conditions = []
         params: list[Any] = []
@@ -131,29 +132,58 @@ class SandboxRepository:
             idx += 1
 
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-        params.append(limit)
 
         async with self.pool.acquire() as conn:
-            rows = await conn.fetch(
-                f"SELECT * FROM sandboxes {where} ORDER BY created_at DESC LIMIT ${idx}",
+            count_row = await conn.fetchrow(
+                f"SELECT COUNT(*) AS total FROM sandboxes {where}",
                 *params,
             )
-            return [dict(r) for r in rows]
+            total_count = count_row["total"] if count_row else 0
+            params.extend([limit, offset])
+            rows = await conn.fetch(
+                f"SELECT * FROM sandboxes {where} ORDER BY created_at DESC LIMIT ${idx} OFFSET ${idx + 1}",
+                *params,
+            )
+            return {
+                "items": [dict(r) for r in rows],
+                "total_count": total_count,
+                "offset": offset,
+                "limit": limit,
+                "has_more": offset + len(rows) < total_count,
+            }
 
-    async def list_active(self, organization_id: str | None = None) -> list[dict]:
+    async def list_active(self, organization_id: str | None = None, limit: int = 25, offset: int = 0) -> dict:
         """List non-destroyed sandboxes."""
-        if organization_id:
-            async with self.pool.acquire() as conn:
+        async with self.pool.acquire() as conn:
+            if organization_id:
+                count_row = await conn.fetchrow(
+                    "SELECT COUNT(*) AS total FROM sandboxes WHERE status != 'destroyed' AND organization_id = $1",
+                    UUID(organization_id),
+                )
+                total_count = count_row["total"] if count_row else 0
                 rows = await conn.fetch(
                     """SELECT * FROM sandboxes
                        WHERE status != 'destroyed' AND organization_id = $1
-                       ORDER BY created_at DESC""",
+                       ORDER BY created_at DESC LIMIT $2 OFFSET $3""",
                     UUID(organization_id),
+                    limit,
+                    offset,
                 )
-        else:
-            async with self.pool.acquire() as conn:
+            else:
+                count_row = await conn.fetchrow(
+                    "SELECT COUNT(*) AS total FROM sandboxes WHERE status != 'destroyed'"
+                )
+                total_count = count_row["total"] if count_row else 0
                 rows = await conn.fetch(
                     """SELECT * FROM sandboxes WHERE status != 'destroyed'
-                       ORDER BY created_at DESC"""
+                       ORDER BY created_at DESC LIMIT $1 OFFSET $2""",
+                    limit,
+                    offset,
                 )
-        return [dict(r) for r in rows]
+        return {
+            "items": [dict(r) for r in rows],
+            "total_count": total_count,
+            "offset": offset,
+            "limit": limit,
+            "has_more": offset + len(rows) < total_count,
+        }

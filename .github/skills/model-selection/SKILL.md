@@ -14,15 +14,58 @@ How to pick the right model for a given task. The goal is matching task demands 
 - Reviewing task failures that might be caused by model mismatch
 - Optimizing cost by downgrading tasks that don't need premium models
 
-## Decision Framework
+## Model Comparison Table
 
-Consider three factors in order:
+| Model | Category | Strengths | Cost Tier | Recommended agent_types |
+|-------|----------|-----------|-----------|------------------------|
+| `claude-haiku-4.5` | Fast | Speed, simple tasks, low cost | Cheap | memory, fast |
+| `gemini-3-flash` | Fast | Speed, lightweight inference | Cheap | memory, fast |
+| `gpt-5-mini` | Fast | Cheap, decent quality | Cheap | memory, fast |
+| `gpt-4.1` | General | Balanced quality/cost, tool use | Standard | code, documentation |
+| `claude-sonnet-4.6` | General | Strong coding, vision, tools | Standard | code, documentation, review |
+| `claude-sonnet-4.5` | General | Coding, tool use | Standard | code, documentation |
+| `gemini-3-pro` | Reasoning | Long context, research synthesis | Premium | research, planning |
+| `claude-opus-4.6` | Reasoning | Deep reasoning, nuanced judgment | Premium | reflection, planning, review |
+| `gpt-5.3-codex` | Agentic | Multi-step execution, edit-test loops | Premium | code (agentic), refactoring |
+| `gpt-5.2-codex` | Agentic | Sustained tool-calling workflows | Premium | code (agentic) |
 
-1. **What does the task actually need?** — Reasoning depth, tool use, speed, vision, context length
-2. **What's the cost tolerance?** — Premium models burn through rate limits faster
-3. **Does it need to be right, or does it need to be fast?** — Not every task needs Opus
+## Procedure
 
-## Task Type → Model Mapping
+### Step 1: Assess Task Complexity
+
+Classify the task into one of these tiers:
+
+| Complexity | Signals | Examples |
+|------------|---------|----------|
+| **Simple** | Single-step, mechanical, no reasoning | Tagging, formatting, status checks, boilerplate |
+| **Standard** | Multi-step but well-defined, moderate reasoning | Feature implementation, bug fixes, test writing, docs |
+| **Complex** | Multi-step reasoning, trade-off analysis, judgment | Architecture decisions, security review, planning |
+| **Agentic** | Sustained autonomous execution, edit-test loops | Large refactors, autonomous coding sessions |
+
+### Step 2: Check agent_type Recommendation
+
+Call `list_available_models(agent_type="<type>")` to get the system's recommended model for the agent. Use the Model Comparison Table above to verify the recommendation fits the task's actual complexity — the default may over- or under-shoot.
+
+### Step 3: Consider Cost/Speed Tradeoff
+
+Apply this decision rule:
+
+- **Must be fast, accuracy non-critical** → Cheap tier (Haiku, Flash, GPT-5-mini)
+- **Must be correct, speed acceptable** → Standard tier (Sonnet, GPT-4.1)
+- **Must be deeply correct, cost acceptable** → Premium tier (Opus, Gemini Pro)
+- **Must run autonomously for many steps** → Agentic tier (Codex models)
+
+If rate limits are being hit, downgrade non-critical tasks one tier.
+
+### Step 4: Select Model
+
+Pick the model that matches the intersection of complexity tier and cost tolerance. If the system recommendation from Step 2 aligns, use it. If not, override with your selection and note the reason.
+
+```
+create_task(request_id=..., title=..., model="<selected-model>", ...)
+```
+
+## Reference: Task Type → Model Mapping
 
 ### Fast / Lightweight
 Tasks: memory tagging, simple lookups, formatting, status checks, boilerplate generation

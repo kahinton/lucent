@@ -79,8 +79,8 @@ Returns: JSON with the created schedule including its ID and next_run_at."""
         if cron_expression:
             import re
 
-            # Accept 5 or 6 space-separated fields
-            cron_pattern = re.compile(r"^(\S+\s+){4,5}\S+$")
+            # Accept exactly 5 space-separated fields (standard cron)
+            cron_pattern = re.compile(r"^(\S+\s+){4}\S+$")
             if not cron_pattern.match(cron_expression.strip()):
                 return json.dumps({"error": f"Invalid cron expression format: {cron_expression}"})
 
@@ -129,13 +129,18 @@ Returns: JSON array of schedules."""
             return json.dumps({"error": "No organization context"})
 
         repo = await _get_schedule_repository()
-        schedules = await repo.list_schedules(
+        result = await repo.list_schedules(
             str(org_id),
             status=status,
             enabled=True if enabled_only else None,
         )
+        serialized_items = [
+            {k: str(v) if hasattr(v, "hex") else str(v) for k, v in s.items()}
+            for s in result["items"]
+        ]
         return json.dumps(
-            [{k: str(v) if hasattr(v, "hex") else str(v) for k, v in s.items()} for s in schedules],
+            {"items": serialized_items, "total_count": result["total_count"],
+             "has_more": result["has_more"]},
             default=str,
         )
 
@@ -149,12 +154,17 @@ Args:
 Returns: JSON with the updated schedule."""
     )
     async def toggle_schedule(schedule_id: str, enabled: bool) -> str:
-        user_id, org_id, _ = await _get_current_user_context()
+        user_id, org_id, user_role = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
 
         repo = await _get_schedule_repository()
-        result = await repo.toggle_schedule(schedule_id, str(org_id), enabled)
+        try:
+            result = await repo.toggle_schedule(
+                schedule_id, str(org_id), enabled, requester_role=user_role,
+            )
+        except ValueError as exc:
+            return json.dumps({"error": str(exc), "code": 403})
         if not result:
             return json.dumps({"error": "Schedule not found"})
         return json.dumps(

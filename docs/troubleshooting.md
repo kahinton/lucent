@@ -56,7 +56,8 @@ On some managed databases (e.g., RDS), you may need to enable this through the p
 
 ### Migration Errors
 
-Migrations run automatically on startup and are tracked in a `_migrations` table. If a migration fails:
+Migrations run automatically on startup and are tracked in `schema_migrations`.
+If a migration fails:
 
 1. Check the logs for the specific SQL error:
 
@@ -70,10 +71,10 @@ docker compose logs lucent | grep -i migration
 
 ```sql
 -- Check applied migrations
-SELECT * FROM _migrations ORDER BY applied_at;
+SELECT name, checksum, applied_at FROM schema_migrations ORDER BY applied_at;
 
--- Remove a failed migration entry to retry
-DELETE FROM _migrations WHERE name = 'failed_migration_file.sql';
+-- Remove a failed migration entry to retry (only after fixing DB state)
+DELETE FROM schema_migrations WHERE name = 'failed_migration_file.sql';
 ```
 
 Then restart the server to re-apply.
@@ -344,6 +345,83 @@ docker ps -a --filter "label=lucent-sandbox=true"
 # Clean up orphaned sandboxes
 docker rm -f $(docker ps -a --filter "label=lucent-sandbox=true" -q)
 ```
+
+## Slack Integration
+
+### Webhooks Not Arriving
+
+1. Verify the Request URL in your Slack app's Event Subscriptions matches your Lucent server:
+
+```
+https://your-lucent-host/integrations/webhook/slack
+```
+
+2. Check that the URL is publicly reachable from the internet (Slack can't reach `localhost`).
+
+3. Look for verification errors in the server logs:
+
+```bash
+docker compose logs lucent | grep -i "webhook\|signature\|slack"
+```
+
+4. Re-verify the URL in Slack's Event Subscriptions page — Slack will send a fresh `url_verification` challenge.
+
+### `401 Invalid signature` on Webhooks
+
+The signing secret in Lucent doesn't match the one in your Slack app.
+
+1. Go to your Slack app → **Basic Information** → copy the **Signing Secret**
+2. Update the integration config:
+
+```bash
+curl -X PATCH https://your-lucent-host/api/v1/integrations/{integration_id} \
+  -H "Authorization: Bearer hs_..." \
+  -H "Content-Type: application/json" \
+  -d '{"config": {"bot_token": "xoxb-...", "signing_secret": "correct-secret"}}'
+```
+
+### `500 Credential encryption not configured`
+
+The `LUCENT_CREDENTIAL_KEY` environment variable is missing or invalid.
+
+```bash
+# Generate a key
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+
+# Set it
+export LUCENT_CREDENTIAL_KEY=your-key-here
+```
+
+Restart the server after setting the variable.
+
+### Bot Doesn't Respond in Channels
+
+1. **Bot not invited**: Use `/invite @Lucent` in the channel
+2. **Channel not allowlisted**: Check the integration's `allowed_channels` list. If it's non-empty, the channel ID must be included.
+3. **User not linked**: The user's Slack identity must be linked to their Lucent account. See [User Linking Guide](slack-user-linking.md).
+
+### Pairing Code Issues
+
+- **Code expired**: Codes expire after 10 minutes. Generate a new one.
+- **Code exhausted**: After 5 failed attempts, the code is exhausted. Generate a new one.
+- **Rate limited**: Max 10 codes per user per hour. Wait before generating another.
+- **"Integration not found"**: The integration ID in the pairing request doesn't match any active integration in your organization.
+
+### User Link Shows "orphaned" Status
+
+User links become orphaned when their parent integration is disabled or revoked. To fix:
+
+1. Re-enable the integration (set status to `active`)
+2. Have affected users re-link with new pairing codes
+
+### Decryption Errors After Server Migration
+
+If you moved the Lucent server and forgot to bring the `LUCENT_CREDENTIAL_KEY`:
+
+1. Set the same key on the new server
+2. If the key is lost, delete the integration and re-create it with fresh Slack credentials
+
+---
 
 ## Schedule Issues
 

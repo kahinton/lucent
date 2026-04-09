@@ -1,87 +1,92 @@
 ---
 name: docker-operations
-description: 'Build, debug, and manage Docker containers and compose services for local dev and deployment'
+description: 'Build, debug, and manage Docker containers and compose services for local development and deployment. Use when debugging container issues, modifying Docker configs, troubleshooting compose services, containers fail to start or crash on launch, rebuilding images after dependency changes, or investigating networking or volume mount problems.'
 ---
 
-# Docker Operations — Lucent Project
+# Docker Operations
 
-## Project Docker Setup
-
-Lucent uses Docker Compose with these services:
-
-| Service | File | Purpose |
-|---------|------|---------|
-| `lucent` (lucent-server) | `Dockerfile.dev` | Main MCP server + FastAPI web app |
-| `postgres` | stock postgres image | Database |
-| `daemon-1`, `daemon-2` | `Dockerfile.dev` (multi-daemon profile) | Autonomous daemon instances |
-
-Key files: `docker-compose.yml`, `Dockerfile`, `Dockerfile.dev`, `docker/init.sql`
-
-## Common Operations
-
-### Rebuild after code changes (hot-reload handles most, but dependency changes need rebuild)
-```bash
-docker compose build lucent
-docker compose up -d lucent
-```
-
-### View logs
-```bash
-docker logs lucent-server --since 5m    # Recent server logs
-docker logs lucent-server -f            # Follow live
-docker compose logs daemon-1 --since 5m # Daemon logs
-```
-
-### Restart a service
-```bash
-docker restart lucent-server
-docker compose restart daemon-1
-```
-
-### Full stack restart
-```bash
-docker compose down && docker compose up -d
-```
-
-### Run tests inside container
-```bash
-docker exec lucent-server pytest tests/ -q --tb=short
-```
-
-### Check container health
-```bash
-docker compose ps                       # Service status
-docker exec lucent-server python -c "import httpx; print(httpx.get('http://localhost:8766/api/health').json())"
-```
-
-## Multi-Daemon Setup
-```bash
-docker compose --profile multi-daemon up -d
-```
-This starts `daemon-1` and `daemon-2` with role-based coordination.
-
-## Environment Variables
-
-Key env vars in `docker-compose.yml`:
-- `DATABASE_URL` — PostgreSQL connection
-- `GITHUB_TOKEN` — Copilot SDK auth
-- `LUCENT_LLM_ENGINE` — `copilot` (default) or `langchain`
-- `LUCENT_CHAT_MODEL` — default model for chat
-- `LUCENT_DAEMON_MODEL` — default model for daemon sessions
-
-## Debugging Container Issues
-
-1. **Container won't start**: Check `docker compose logs lucent` for Python import errors or missing env vars
-2. **Database connection refused**: Ensure postgres is healthy — `docker compose ps` should show postgres as healthy
-3. **Hot-reload not working**: Source files are volume-mounted (`./src:/app/src:cached`). If changes aren't reflected, the volume mount may be stale — rebuild
-4. **Out of disk space**: `docker system prune -f` to clean unused images/containers
-
-## Database Operations
+## Quick Reference
 
 ```bash
-# Connect to postgres directly
-docker exec -it hindsight-postgres-1 psql -U lucent -d lucent
+# Service lifecycle
+docker compose up -d                    # Start all services
+docker compose down                     # Stop all services
+docker compose restart <service>        # Restart one service
+docker compose build <service>          # Rebuild one service image
+docker compose logs <service> --tail 50 # Recent logs
 
-# Run migrations
-docker exec lucent-server python -c "from lucent.db import run_migrations; import asyncio; asyncio.run(run_migrations())"
+# Status
+docker compose ps                       # Running services and health
+docker stats --no-stream                # Resource usage snapshot
+
+# Database access (use actual container name from docker compose ps)
+docker exec -it <postgres-container> psql -U <db_user> -d <db_name>
+docker exec <postgres-container> pg_isready -U <db_user>
 ```
+
+## Debugging Procedures
+
+### Container Won't Start
+
+1. Run in foreground to see the exit reason: `docker compose up <service>` (no `-d`)
+2. Check logs: `docker compose logs <service> --tail 100`
+3. Common causes:
+   - **Missing environment variables** — check `docker-compose.yml` and `.env`
+   - **Import/syntax error** — check the language-specific error in logs
+   - **Port conflict** — `lsof -i :<port>` to find what's using the port
+   - **Missing dependency** — rebuild the image: `docker compose build <service>`
+
+### Container Starts but Service Fails
+
+1. Check health endpoint: `curl http://localhost:<port>/health` (or `/api/health`)
+2. Check logs for runtime errors: `docker compose logs <service> --since 5m`
+3. Verify database connectivity: check that the DB container shows `healthy`, not just `running`
+4. Check if source files are volume-mounted — changes may need a restart vs. a rebuild
+
+### Hot Reload Not Working
+
+- Verify volume mounts in `docker-compose.yml` — source directory should be mounted into the container
+- If stale: `docker compose restart <service>`
+- If new files or dependencies were added: `docker compose build <service> && docker compose up -d <service>`
+
+### Out of Disk Space
+
+```bash
+docker system prune -f                  # Remove unused images, containers, networks
+docker volume prune -f                  # Remove unused volumes (careful — this removes data)
+docker system df                        # See what's using space
+```
+
+## When to Restart vs. Rebuild
+
+| Change type | Action |
+|------------|--------|
+| Source code edit (volume-mounted) | Service may auto-reload, or `docker compose restart <service>` |
+| New file added | `docker compose restart <service>` |
+| Dependency added/updated | `docker compose build <service> && docker compose up -d <service>` |
+| Dockerfile changed | `docker compose build <service> && docker compose up -d <service>` |
+| docker-compose.yml changed | `docker compose up -d <service>` (recreates with new config) |
+| Environment variable changed | `docker compose up -d <service>` (recreates with new env) |
+
+## Anti-Patterns
+
+- Don't debug by making changes inside a running container — any edits are lost on the next restart or rebuild; always make changes to source files or Dockerfiles so fixes persist.
+- Never ignore image layer caching when builds behave unexpectedly — a cached layer may be serving stale code or dependencies; use `docker compose build --no-cache <service>` to force a clean build when diagnosing strange behavior.
+- Don't skip checking resource limits when containers crash or slow down — OOM kills and CPU throttling often manifest as mysterious crashes or timeouts; check `docker stats` and container logs before assuming it's a code bug.
+- Never use `docker volume prune -f` as a routine cleanup step — it irreversibly destroys database volumes and persistent data; always check `docker volume ls` and confirm volumes are truly unused before pruning.
+
+## Recording Issues
+
+After resolving any Docker issue, save the diagnosis — this is mandatory, not optional. Future debugging sessions depend on this knowledge:
+
+```
+create_memory(
+  type="technical",
+  content="## Docker Issue: <description>\n\n**Symptom**: <what you observed>\n**Root cause**: <why it happened>\n**Fix**: <what solved it>",
+  tags=["docker", "debugging"],
+  importance=6,
+  shared=true
+)
+```
+
+For recurring issues, search first and update: `search_memories(query="docker <symptom>", tags=["docker"])`

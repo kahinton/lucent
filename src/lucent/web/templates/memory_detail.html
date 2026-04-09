@@ -128,6 +128,10 @@
                     <dt class="text-xs text-gray-500">Last Accessed</dt>
                     <dd class="mt-1 text-sm font-medium text-gray-900">{{ memory.last_accessed_at | datetime }}</dd>
                 </div>
+                <div>
+                    <dt class="text-xs text-gray-500">Access Count</dt>
+                    <dd class="mt-1 text-sm font-medium text-gray-900">{{ memory.access_count | default(0) }}</dd>
+                </div>
             </dl>
         </div>
         

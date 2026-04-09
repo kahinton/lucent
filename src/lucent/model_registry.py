@@ -23,6 +23,7 @@ class ModelInfo:
     supports_vision: bool = False  # whether the model supports image input
     notes: str = ""  # additional notes about the model
     tags: list[str] = field(default_factory=list)
+    engine: str | None = None  # engine override: None=auto, "copilot", "langchain"
 
 
 # ── Model Registry ────────────────────────────────────────────────────────
@@ -182,13 +183,14 @@ MODELS: list[ModelInfo] = [
         tags=["general", "coding", "agentic", "reasoning"],
     ),
     ModelInfo(
-        id="claude-opus-4.6-fast",
+        id="claude-opus-4.6-1m",
         provider="anthropic",
-        name="Claude Opus 4.6 (fast mode)",
+        name="Claude Opus 4.6 1M",
         category="reasoning",
-        api_model_id="claude-opus-4-6-20260301",
-        notes="Preview. Opus-level reasoning with lower latency.",
-        tags=["reasoning", "fast", "preview"],
+        api_model_id="claude-opus-4-6-1m-20260301",
+        context_window=1000000,
+        notes="Opus 4.6 with 1 million token context window.",
+        tags=["reasoning", "frontier", "large-context"],
     ),
     # ── Google ────────────────────────────────────────────────────────────
     ModelInfo(
@@ -238,6 +240,64 @@ for _m in MODELS:
     _MODELS_BY_CATEGORY.setdefault(_m.category, []).append(_m)
     _MODELS_BY_PROVIDER.setdefault(_m.provider, []).append(_m)
 
+# DB-sourced model cache (populated by load_models_from_db)
+_db_models: list[ModelInfo] | None = None
+_db_model_by_id: dict[str, ModelInfo] = {}
+_db_enabled_ids: set[str] = set()
+
+
+async def load_models_from_db(pool) -> list[ModelInfo]:
+    """Load models from the database, replacing the hardcoded registry.
+
+    Call this at startup (after DB is available). Returns the loaded models.
+    Falls back silently to hardcoded MODELS on any error.
+    """
+    global _db_models, _db_model_by_id, _db_enabled_ids, _MODEL_BY_ID
+    try:
+        from lucent.db.models import ModelRepository
+
+        repo = ModelRepository(pool)
+        rows = (await repo.list_models())["items"]
+        if not rows:
+            return MODELS
+
+        loaded = []
+        enabled_ids = set()
+        by_id = {}
+        for r in rows:
+            m = ModelInfo(
+                id=r["id"],
+                provider=r["provider"],
+                name=r["name"],
+                category=r["category"],
+                api_model_id=r.get("api_model_id", ""),
+                context_window=r.get("context_window", 0),
+                supports_tools=r.get("supports_tools", True),
+                supports_vision=r.get("supports_vision", False),
+                notes=r.get("notes", ""),
+                tags=list(r.get("tags") or []),
+                engine=r.get("engine"),
+            )
+            loaded.append(m)
+            by_id[m.id] = m
+            if r.get("is_enabled", True):
+                enabled_ids.add(m.id)
+
+        _db_models = loaded
+        _db_model_by_id = by_id
+        _db_enabled_ids = enabled_ids
+        _MODEL_BY_ID = by_id
+        return loaded
+    except Exception:
+        return MODELS
+
+
+def is_model_enabled(model_id: str) -> bool:
+    """Check if a model is enabled. Returns True if DB not loaded (permissive)."""
+    if _db_models is None:
+        return True  # DB not loaded yet, allow all
+    return model_id in _db_enabled_ids
+
 
 # ── Public API ────────────────────────────────────────────────────────────
 
@@ -250,9 +310,13 @@ def get_model(model_id: str) -> ModelInfo | None:
 def list_models(
     category: str | None = None,
     provider: str | None = None,
+    include_disabled: bool = False,
 ) -> list[ModelInfo]:
     """List available models, optionally filtered by category or provider."""
-    models = MODELS
+    source = _db_models if _db_models is not None else MODELS
+    models = source
+    if not include_disabled and _db_models is not None:
+        models = [m for m in models if m.id in _db_enabled_ids]
     if category:
         models = [m for m in models if m.category == category]
     if provider:
@@ -261,10 +325,44 @@ def list_models(
 
 
 def validate_model(model_id: str) -> str | None:
-    """Validate a model selection. Returns an error message, or None if valid."""
-    # We don't reject unknown model IDs — new models may be available
-    # before the registry is updated. The API will reject truly invalid ones.
-    return None
+    """Validate a model selection. Returns an error message, or None if valid.
+
+    Checks that the model ID exists in the registry (DB-loaded or hardcoded)
+    and is enabled. In strict mode (default), unknown models are rejected.
+    Set LUCENT_MODEL_VALIDATION=lenient to allow unrecognized model IDs.
+    """
+    import os
+
+    strict = os.environ.get("LUCENT_MODEL_VALIDATION", "strict").lower() != "lenient"
+
+    # DB-loaded registry takes precedence when available
+    if _db_models is not None:
+        if model_id in _db_model_by_id:
+            if model_id not in _db_enabled_ids:
+                return f"Model '{model_id}' is disabled by admin. Choose an enabled model."
+            return None  # Known and enabled
+        # Model not found in DB registry
+        if strict:
+            available = sorted(_db_enabled_ids)
+            return (
+                f"Unknown model '{model_id}'. "
+                f"Available models: {', '.join(available)}. "
+                f"Use list_available_models to see all options."
+            )
+        return None  # Lenient: allow unknown
+
+    # No DB loaded — check against hardcoded registry
+    if model_id in _MODEL_BY_ID:
+        return None  # Known model
+
+    if strict:
+        available = sorted(_MODEL_BY_ID.keys())
+        return (
+            f"Unknown model '{model_id}'. "
+            f"Available models: {', '.join(available)}. "
+            f"Use list_available_models to see all options."
+        )
+    return None  # Lenient: allow unknown
 
 
 def get_recommended_model(task_type: str) -> str:

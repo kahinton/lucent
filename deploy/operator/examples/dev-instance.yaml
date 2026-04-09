@@ -1,0 +1,36 @@
+apiVersion: lucent.io/v1alpha1
+kind: LucentInstance
+metadata:
+  name: dev
+  namespace: lucent
+spec:
+  replicas: 1
+  image:
+    repository: lucent
+    tag: "0.2.0"
+    pullPolicy: IfNotPresent
+  database:
+    embedded: true
+    pvcName: lucent-db-data
+  vault:
+    embedded: true
+    init: true
+  models:
+    - id: claude-sonnet-4.6
+      provider: copilot
+      engine: copilot
+  daemon:
+    defaultModel: claude-sonnet-4.6
+    maxConcurrentSessions: 2
+    intervalMinutes: 15
+  observability:
+    enabled: false
+    prometheusMonitor: false
+  canary:
+    enabled: false
+  backup:
+    enabled: true
+    schedule: "0 3 * * *"
+    retentionDays: 3
+    storage:
+      pvcName: lucent-db-backups

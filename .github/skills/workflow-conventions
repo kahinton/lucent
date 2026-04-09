@@ -1,0 +1,246 @@
+# Workflow Conventions
+
+This skill documents the canonical conventions for requests, tasks, tags, and status lifecycles in the Lucent workflow system.
+
+## When to Use This Skill
+
+Reference this skill when:
+- Creating or processing requests and tasks
+- Applying tags to memories or work items
+- Implementing workflow automation or validation
+- Debugging stuck or incorrectly-routed work
+- Writing code that interacts with the request/task tracking system
+
+## Tag Conventions
+
+### Canonical Tag Names
+
+Use these exact tag names — consistency is critical for routing and visibility:
+
+| Tag | Meaning | Applied When |
+|-----|---------|--------------|
+| `needs-review` | Item requires human review/approval | Work ready for review (NOT `awaiting-approval` or other variants) |
+| `daemon` | Created/managed by daemon | All daemon-created memories and work items |
+| `feedback-approved` | Human approved this item | Review queue: user clicks "approve" |
+| `feedback-rejected` | Human rejected this item | Review queue: user clicks "reject" |
+| `feedback-processed` | Feedback has been processed by daemon | After daemon acts on approval/rejection |
+| `validated` | Pattern/approach confirmed as good | After processing approved feedback |
+| `rejection-lesson` | Learn from this rejection | After analyzing rejected feedback |
+| `pending` | Work item waiting to start | Initial state for daemon tasks (deprecated for tracked tasks) |
+| `claimed-by-{instance_id}` | Task claimed by specific daemon | After atomic claim operation |
+
+### Deprecated/Incorrect Tags
+
+**Never use:**
+- `awaiting-approval` → Use `needs-review` instead
+- `awaiting-review` → Use `needs-review` instead
+- Any custom approval tag → Use `needs-review` instead
+
+## Status Lifecycles
+
+### Request Status Flow
+
+```
+pending → in_progress → completed
+                      → failed
+```
+
+| Status | Meaning | Transitions |
+|--------|---------|-------------|
+| `pending` | Request created, not yet started | → `in_progress` when first task starts |
+| `in_progress` | At least one task is active | → `completed` when all tasks succeed |
+| | | → `failed` when any task fails |
+| `completed` | All tasks finished successfully | Terminal state |
+| `failed` | One or more tasks failed | Terminal state |
+
+### Task Status Flow
+
+```
+pending/planned → claimed → running → completed
+                                   → failed
+```
+
+| Status | Meaning | Transitions |
+|--------|---------|-------------|
+| `pending` | Task created, ready to claim | → `claimed` via atomic claim |
+| `planned` | Task created but not yet ready | → `claimed` via atomic claim |
+| `claimed` | Daemon has claimed this task | → `running` when agent starts |
+| `running` | Agent actively executing task | → `completed` with result |
+| | | → `failed` with error |
+| `completed` | Task finished successfully | Terminal state |
+| `failed` | Task failed with error | Terminal state |
+
+**Important**: 
+- `claim_task` is atomic — only one daemon can claim each task
+- Tasks stuck in `claimed` for >30 minutes are auto-released via stale release mechanism
+- `complete_task` and `fail_task` should only transition from `running` or `claimed` (validation gap noted)
+
+## Agent Type Validation
+
+### Available Agent Types
+
+Only these agent types are valid when creating tasks:
+
+| Agent Type | Description | Model Default |
+|------------|-------------|---------------|
+| `research` | Deep investigation, web access, synthesis | claude-sonnet-4 |
+| `code` | Technical implementation, file operations | claude-sonnet-4 |
+| `memory` | Memory maintenance, consolidation | claude-haiku-4.5 |
+| `reflection` | Self-analysis, behavioral review | claude-sonnet-4 |
+| `documentation` | Docs, guides, knowledge bases | claude-sonnet-4 |
+| `planning` | Goal decomposition, roadmaps | claude-sonnet-4 |
+| `assessment` | Environment discovery, role adaptation | gemini-3-pro-preview |
+
+**Validation**: `create_task` validates agent_type against approved definitions in `.github/agents/definitions/`. Invalid types are rejected with error message.
+
+## Context Passing Conventions
+
+### Parent Request Context
+
+Every task receives:
+1. **Parent request description** — the original work request
+2. **Sibling task results** — completed results from other tasks in the same request
+
+This is fetched via `get_request_context(request_id)` and passed to the agent prompt.
+
+### Size Limits
+
+- **Total context**: ~30KB maximum
+- **Per-task result**: ~8KB maximum (truncated with "[truncated]" marker)
+- Results exceeding limits are trimmed to avoid token bloat
+
+### Format
+
+```markdown
+--- PARENT REQUEST ---
+Title: <request title>
+Description: <request description>
+
+--- COMPLETED SIBLING TASK RESULTS ---
+## Task: <task title> (completed)
+Model: <model> | Agent: <agent_type>
+
+<task result text>
+```
+
+### When Context Is Passed
+
+- **Sequential tasks**: Later tasks see results from earlier completed tasks
+- **Parallel tasks**: Tasks running simultaneously don't see each other's results until next task in sequence
+- **Failed tasks**: Failure messages are NOT passed to siblings (only successful completions)
+
+## Review Routing Rules
+
+### How Items Enter Review Queue
+
+1. **Tag with `needs-review`**: Any memory or work item tagged `needs-review` appears in review queue
+2. **Visibility**: Item must be `shared=True` for org members to see it in queue
+3. **Daemon memories**: Automatically shared (`shared=True` forced for daemon-created memories)
+
+### Review Actions
+
+| Action | Result | Wake Signal |
+|--------|--------|-------------|
+| Approve | Add `feedback-approved` tag | `pg_notify('request_ready')` fired → daemon wakes immediately |
+| Reject | Add `feedback-rejected` tag | `pg_notify('request_ready')` fired → daemon wakes immediately |
+
+### Processing Approved Feedback
+
+When daemon finds `feedback-approved` memories:
+1. Read the approved content carefully
+2. **If it contains actionable items** (findings to fix, plans to implement):
+   - Create tracked request via `create_request`
+   - Break into tasks via `create_task` with appropriate agent assignments
+   - Approval means "go ahead and do this" — not just acknowledgment
+3. Tag memory with `feedback-processed` and `validated`
+4. Note the validated pattern for future reference
+
+### Processing Rejected Feedback
+
+When daemon finds `feedback-rejected` memories:
+1. Read rejection reason carefully
+2. Create self-improvement memory analyzing what went wrong
+3. Cancel or revise any dependent pending tasks
+4. Tag memory with `feedback-processed` and `rejection-lesson`
+
+## Deduplication Rules
+
+### Before Creating Requests
+
+**CRITICAL**: Before creating any new request, check `list_active_work()` to see ALL non-completed requests and their status.
+
+**Deduplication logic**:
+- If existing request covers the same goal → don't create duplicate
+- If existing request needs more tasks → add tasks to it via `create_task`
+- If existing request is in progress → wait for completion
+- If existing request is stuck/stale → investigate why rather than creating parallel effort
+
+**Why this matters**: Without deduplication, cognitive loop creates duplicate work items, wasting resources and confusing task queue.
+
+### Before Creating Tasks
+
+Check if the parent request already has tasks covering this work. If so, update task description or status rather than creating duplicates.
+
+## Special Workflows
+
+### Scheduled Work
+
+Schedules create requests automatically when they fire:
+- Request source is set to `schedule:<schedule_id>`
+- Original schedule title/description flows to request
+- Task agent_type, model, priority come from schedule definition
+
+### Feedback Processing Pipeline
+
+1. User approves/rejects item in review queue
+2. Web API adds `feedback-approved` or `feedback-rejected` tag
+3. Web API fires `pg_notify('request_ready')` with feedback payload
+4. Daemon cognitive loop wakes immediately (no 15-min wait)
+5. Daemon searches for feedback tags and processes FIRST (before new work)
+6. Daemon creates tasks if approved content is actionable
+7. Daemon tags memory with `feedback-processed`
+
+### Stale Task Release
+
+- Tasks stuck in `claimed` status for >30 minutes are auto-released
+- Release sets status back to `pending` and clears `claimed_by`, `claimed_at`
+- Prevents daemon crashes from permanently locking tasks
+
+## Common Issues and Solutions
+
+### Issue: Duplicate requests created
+
+**Symptom**: Multiple requests with similar titles/descriptions
+**Root Cause**: Cognitive loop not checking `list_active_work` before creating requests
+**Solution**: Always call `list_active_work()` in perceive phase and compare before creating
+
+### Issue: Tasks never picked up
+
+**Symptom**: Task stays in `pending` forever
+**Root Cause**: Invalid agent_type or task not visible to daemon
+**Solution**: Verify agent_type against available definitions, check task query filters
+
+### Issue: Review items not visible
+
+**Symptom**: Tagged `needs-review` but not in review queue
+**Root Cause**: Memory not shared (`shared=False`)
+**Solution**: Ensure daemon-created memories use `shared=True` (automatic), user-created memories set `shared=True` explicitly if needed
+
+### Issue: No wake on approval
+
+**Symptom**: 15-minute delay before daemon processes approval
+**Root Cause**: `pg_notify` not fired or daemon not listening
+**Solution**: Verify web API calls `pg_notify('request_ready')` after approval/rejection
+
+## References
+
+These conventions are implemented across:
+- `/src/lucent/db/requests.py` — Request/task status transitions
+- `/src/lucent/api/routers/requests.py` — Request/task API endpoints
+- `/src/lucent/tools/requests.py` — MCP tools for request tracking
+- `/src/lucent/tools/memories.py` — Memory creation with daemon shared logic
+- `/src/lucent/web/routes/daemon.py` — Review queue and feedback processing
+- `/daemon/daemon.py` — Cognitive loop and task dispatch
+- `/daemon/cognitive.md` — Daemon operating protocol
+
+**Last Updated**: 2026-03-18 (Phase 2 gap analysis)

@@ -26,6 +26,7 @@ from lucent.auth_providers import (
     SESSION_COOKIE_NAME,
     create_session,
     set_user_password,
+    validate_session,
 )
 from lucent.db import OrganizationRepository, UserRepository
 
@@ -615,6 +616,35 @@ class TestPasswordChange:
             follow_redirects=False,
         )
         assert resp.status_code == 403
+
+    async def test_password_change_invalidates_old_session(self, client, web_user, db_pool):
+        """Old session token must be invalid after a password change."""
+        _user, _org, old_token = web_user
+
+        # Verify the old token is valid before the change
+        assert await validate_session(db_pool, old_token) is not None
+
+        resp = await client.post(
+            "/settings/password",
+            data=_csrf_data(
+                client,
+                {
+                    "current_password": TEST_PASSWORD,
+                    "new_password": NEW_PASSWORD,
+                    "confirm_password": NEW_PASSWORD,
+                },
+            ),
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+
+        # The old session token should now be invalid
+        assert await validate_session(db_pool, old_token) is None
+
+        # The new token from the response cookie should be valid
+        new_token = resp.cookies.get(SESSION_COOKIE_NAME)
+        assert new_token is not None
+        assert await validate_session(db_pool, new_token) is not None
 
     async def test_password_change_unauthenticated(self, unauthenticated_client, web_user):
         """Unauthenticated user gets redirected to /login."""

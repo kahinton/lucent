@@ -281,7 +281,7 @@
     </form>
 </div>
 
-<script>
+<script nonce="{{ request.state.csp_nonce }}">
 function addTag(tag) {
     const input = document.getElementById('tags');
     const currentTags = input.value.split(',').map(t => t.trim()).filter(t => t);

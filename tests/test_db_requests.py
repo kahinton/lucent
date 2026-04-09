@@ -3,6 +3,8 @@
 Covers: request CRUD, task lifecycle, events, memory links, dashboard queries.
 """
 
+import asyncio
+
 import pytest
 import pytest_asyncio
 
@@ -39,14 +41,36 @@ async def task(repo, req, test_organization):
     )
 
 
+@pytest_asyncio.fixture
+async def other_org(db_pool, clean_test_data):
+    """Create a second organization for cross-org isolation tests."""
+    from lucent.db import OrganizationRepository
+
+    prefix = clean_test_data
+    repo = OrganizationRepository(db_pool)
+    org = await repo.create(name=f"{prefix}other_org")
+    return org
+
+
 @pytest_asyncio.fixture(autouse=True)
-async def cleanup_requests(db_pool, test_organization):
+async def cleanup_requests(db_pool, test_organization, clean_test_data):
     """Clean up request tracking data after each test."""
     yield
-    org_id = test_organization["id"]
+    prefix = clean_test_data
     async with db_pool.acquire() as conn:
         # task_events and task_memories cascade from tasks, tasks cascade from requests
-        await conn.execute("DELETE FROM requests WHERE organization_id = $1", org_id)
+        await conn.execute(
+            "DELETE FROM requests WHERE organization_id = $1",
+            test_organization["id"],
+        )
+        # Also clean up any other-org requests created during cross-org tests
+        other_orgs = await conn.fetch(
+            "SELECT id FROM organizations WHERE name LIKE $1 AND id != $2",
+            f"{prefix}%",
+            test_organization["id"],
+        )
+        for org in other_orgs:
+            await conn.execute("DELETE FROM requests WHERE organization_id = $1", org["id"])
 
 
 class TestCreateRequest:
@@ -108,27 +132,27 @@ class TestGetRequest:
 class TestListRequests:
     @pytest.mark.asyncio
     async def test_list_basic(self, repo, req, test_organization):
-        results = await repo.list_requests(str(test_organization["id"]))
-        assert len(results) >= 1
-        assert any(r["id"] == req["id"] for r in results)
+        result = await repo.list_requests(str(test_organization["id"]))
+        assert len(result["items"]) >= 1
+        assert any(r["id"] == req["id"] for r in result["items"])
 
     @pytest.mark.asyncio
     async def test_list_filter_status(self, repo, req, test_organization):
         org = str(test_organization["id"])
-        results = await repo.list_requests(org, status="pending")
-        assert any(r["id"] == req["id"] for r in results)
+        result = await repo.list_requests(org, status="pending")
+        assert any(r["id"] == req["id"] for r in result["items"])
 
-        results = await repo.list_requests(org, status="completed")
-        assert not any(r["id"] == req["id"] for r in results)
+        result = await repo.list_requests(org, status="completed")
+        assert not any(r["id"] == req["id"] for r in result["items"])
 
     @pytest.mark.asyncio
     async def test_list_filter_source(self, repo, req, test_organization):
         org = str(test_organization["id"])
-        results = await repo.list_requests(org, source="user")
-        assert any(r["id"] == req["id"] for r in results)
+        result = await repo.list_requests(org, source="user")
+        assert any(r["id"] == req["id"] for r in result["items"])
 
-        results = await repo.list_requests(org, source="daemon")
-        assert not any(r["id"] == req["id"] for r in results)
+        result = await repo.list_requests(org, source="daemon")
+        assert not any(r["id"] == req["id"] for r in result["items"])
 
     @pytest.mark.asyncio
     async def test_list_pagination(self, repo, test_organization):
@@ -137,10 +161,10 @@ class TestListRequests:
             await repo.create_request(title=f"Req {i}", org_id=org)
         page1 = await repo.list_requests(org, limit=2, offset=0)
         page2 = await repo.list_requests(org, limit=2, offset=2)
-        assert len(page1) == 2
-        assert len(page2) >= 1
-        ids1 = {r["id"] for r in page1}
-        ids2 = {r["id"] for r in page2}
+        assert len(page1["items"]) == 2
+        assert len(page2["items"]) >= 1
+        ids1 = {r["id"] for r in page1["items"]}
+        ids2 = {r["id"] for r in page2["items"]}
         assert ids1.isdisjoint(ids2)
 
 
@@ -210,8 +234,8 @@ class TestCreateTask:
             org_id=str(test_organization["id"]),
         )
         events = await repo.list_task_events(str(t["id"]))
-        assert len(events) == 1
-        assert events[0]["event_type"] == "created"
+        assert len(events["items"]) == 1
+        assert events["items"][0]["event_type"] == "created"
 
     @pytest.mark.asyncio
     async def test_create_subtask(self, repo, req, task, test_organization):
@@ -222,6 +246,22 @@ class TestCreateTask:
             parent_task_id=str(task["id"]),
         )
         assert sub["parent_task_id"] == task["id"]
+
+    @pytest.mark.asyncio
+    async def test_inherits_requesting_user_from_request_creator(
+        self, repo, test_organization, test_user
+    ):
+        req = await repo.create_request(
+            title="Creator-bound request",
+            org_id=str(test_organization["id"]),
+            created_by=str(test_user["id"]),
+        )
+        task = await repo.create_task(
+            request_id=str(req["id"]),
+            title="Inherited task",
+            org_id=str(test_organization["id"]),
+        )
+        assert task["requesting_user_id"] == test_user["id"]
 
 
 class TestGetTask:
@@ -240,17 +280,17 @@ class TestGetTask:
 class TestListTasks:
     @pytest.mark.asyncio
     async def test_list_by_request(self, repo, req, task, test_organization):
-        tasks = await repo.list_tasks(str(req["id"]))
-        assert len(tasks) >= 1
-        assert any(t["id"] == task["id"] for t in tasks)
+        result = await repo.list_tasks(str(req["id"]))
+        assert len(result["items"]) >= 1
+        assert any(t["id"] == task["id"] for t in result["items"])
 
     @pytest.mark.asyncio
     async def test_list_filter_status(self, repo, req, task, test_organization):
-        tasks = await repo.list_tasks(str(req["id"]), status="pending")
-        assert any(t["id"] == task["id"] for t in tasks)
+        result = await repo.list_tasks(str(req["id"]), status="pending")
+        assert any(t["id"] == task["id"] for t in result["items"])
 
-        tasks = await repo.list_tasks(str(req["id"]), status="completed")
-        assert not any(t["id"] == task["id"] for t in tasks)
+        result = await repo.list_tasks(str(req["id"]), status="completed")
+        assert not any(t["id"] == task["id"] for t in result["items"])
 
     @pytest.mark.asyncio
     async def test_list_ordered_by_sequence(self, repo, req, test_organization):
@@ -261,27 +301,27 @@ class TestListTasks:
         _t1 = await repo.create_task(
             request_id=str(req["id"]), title="Second", org_id=org, sequence_order=1
         )
-        tasks = await repo.list_tasks(str(req["id"]))
-        titles = [t["title"] for t in tasks if t["title"] in ("First", "Second")]
+        result = await repo.list_tasks(str(req["id"]))
+        titles = [t["title"] for t in result["items"] if t["title"] in ("First", "Second")]
         assert titles.index("First") < titles.index("Second")
 
 
 class TestListPendingRequests:
     @pytest.mark.asyncio
     async def test_includes_pending(self, repo, req, test_organization):
-        results = await repo.list_pending_requests(str(test_organization["id"]))
-        assert any(r["id"] == req["id"] for r in results)
+        result = await repo.list_pending_requests(str(test_organization["id"]))
+        assert any(r["id"] == req["id"] for r in result["items"])
 
     @pytest.mark.asyncio
     async def test_excludes_completed(self, repo, req, test_organization):
         await repo.update_request_status(str(req["id"]), "completed")
-        results = await repo.list_pending_requests(str(test_organization["id"]))
-        assert not any(r["id"] == req["id"] for r in results)
+        result = await repo.list_pending_requests(str(test_organization["id"]))
+        assert not any(r["id"] == req["id"] for r in result["items"])
 
     @pytest.mark.asyncio
     async def test_includes_task_count(self, repo, req, task, test_organization):
-        results = await repo.list_pending_requests(str(test_organization["id"]))
-        matching = [r for r in results if r["id"] == req["id"]]
+        result = await repo.list_pending_requests(str(test_organization["id"]))
+        matching = [r for r in result["items"] if r["id"] == req["id"]]
         assert matching[0]["task_count"] >= 1
 
     @pytest.mark.asyncio
@@ -289,22 +329,22 @@ class TestListPendingRequests:
         org = str(test_organization["id"])
         low = await repo.create_request(title="Low", org_id=org, priority="low")
         urgent = await repo.create_request(title="Urgent", org_id=org, priority="urgent")
-        results = await repo.list_pending_requests(org)
-        ids = [r["id"] for r in results]
+        result = await repo.list_pending_requests(org)
+        ids = [r["id"] for r in result["items"]]
         assert ids.index(urgent["id"]) < ids.index(low["id"])
 
 
 class TestListPendingTasks:
     @pytest.mark.asyncio
     async def test_includes_pending_tasks(self, repo, req, task, test_organization):
-        results = await repo.list_pending_tasks(str(test_organization["id"]))
-        assert any(t["id"] == task["id"] for t in results)
+        result = await repo.list_pending_tasks(str(test_organization["id"]))
+        assert any(t["id"] == task["id"] for t in result["items"])
 
     @pytest.mark.asyncio
     async def test_excludes_claimed_tasks(self, repo, req, task, test_organization):
         await repo.claim_task(str(task["id"]), "test-instance")
-        results = await repo.list_pending_tasks(str(test_organization["id"]))
-        assert not any(t["id"] == task["id"] for t in results)
+        result = await repo.list_pending_tasks(str(test_organization["id"]))
+        assert not any(t["id"] == task["id"] for t in result["items"])
 
     @pytest.mark.asyncio
     async def test_sequence_gating(self, repo, req, test_organization):
@@ -317,7 +357,7 @@ class TestListPendingTasks:
             request_id=str(req["id"]), title="Seq1", org_id=org, sequence_order=1
         )
         pending = await repo.list_pending_tasks(org)
-        pending_ids = [t["id"] for t in pending]
+        pending_ids = [t["id"] for t in pending["items"]]
         assert t0["id"] in pending_ids
         assert t1["id"] not in pending_ids
 
@@ -326,13 +366,13 @@ class TestListPendingTasks:
         await repo.start_task(str(t0["id"]))
         await repo.complete_task(str(t0["id"]), "done")
         pending = await repo.list_pending_tasks(org)
-        pending_ids = [t["id"] for t in pending]
+        pending_ids = [t["id"] for t in pending["items"]]
         assert t1["id"] in pending_ids
 
     @pytest.mark.asyncio
     async def test_includes_request_title(self, repo, req, task, test_organization):
-        results = await repo.list_pending_tasks(str(test_organization["id"]))
-        matching = [t for t in results if t["id"] == task["id"]]
+        result = await repo.list_pending_tasks(str(test_organization["id"]))
+        matching = [t for t in result["items"] if t["id"] == task["id"]]
         assert matching[0]["request_title"] == "Test Request"
 
 
@@ -460,15 +500,144 @@ class TestReleaseStale:
         assert count == 0
 
 
+class TestApprovalGate:
+    """Pre-work approval gate for daemon-created requests."""
+
+    @pytest.mark.asyncio
+    async def test_user_request_always_auto_approved(self, repo, test_organization, monkeypatch):
+        monkeypatch.setenv("LUCENT_AUTO_APPROVE", "false")
+        org = str(test_organization["id"])
+        r = await repo.create_request("User test", org, source="user")
+        assert r["approval_status"] == "auto_approved"
+
+    @pytest.mark.asyncio
+    async def test_schedule_request_always_auto_approved(self, repo, test_organization, monkeypatch):
+        """Scheduled requests are always auto-approved — they are user-created or built-in."""
+        monkeypatch.setenv("LUCENT_AUTO_APPROVE", "false")
+        org = str(test_organization["id"])
+        r = await repo.create_request("Schedule test", org, source="schedule")
+        assert r["approval_status"] == "auto_approved"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("source", ["cognitive", "daemon"])
+    async def test_daemon_sources_pending_when_toggle_false(self, repo, test_organization, monkeypatch, source):
+        monkeypatch.setenv("LUCENT_AUTO_APPROVE", "false")
+        org = str(test_organization["id"])
+        r = await repo.create_request(f"{source} gated", org, source=source)
+        assert r["approval_status"] == "pending_approval"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("source", ["cognitive", "daemon"])
+    async def test_daemon_sources_pending_when_toggle_unset(self, repo, test_organization, monkeypatch, source):
+        monkeypatch.delenv("LUCENT_AUTO_APPROVE", raising=False)
+        org = str(test_organization["id"])
+        r = await repo.create_request(f"{source} default", org, source=source)
+        assert r["approval_status"] == "pending_approval"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("source", ["cognitive", "daemon"])
+    async def test_daemon_sources_auto_approved_when_toggle_true(self, repo, test_organization, monkeypatch, source):
+        monkeypatch.setenv("LUCENT_AUTO_APPROVE", "true")
+        org = str(test_organization["id"])
+        r = await repo.create_request(f"{source} auto", org, source=source)
+        assert r["approval_status"] == "auto_approved"
+
+    @pytest.mark.asyncio
+    async def test_approve_request(self, repo, test_organization, test_user, monkeypatch):
+        monkeypatch.setenv("LUCENT_AUTO_APPROVE", "false")
+        org = str(test_organization["id"])
+        r = await repo.create_request("Approve me", org, source="cognitive")
+        result = await repo.approve_request(str(r["id"]), org, str(test_user["id"]), "looks good")
+        assert result is not None
+        assert result["approval_status"] == "approved"
+        assert result["approved_by"] == test_user["id"]
+        assert result["approved_at"] is not None
+        assert result["approval_comment"] == "looks good"
+
+    @pytest.mark.asyncio
+    async def test_reject_request(self, repo, test_organization, test_user, monkeypatch):
+        monkeypatch.setenv("LUCENT_AUTO_APPROVE", "false")
+        org = str(test_organization["id"])
+        r = await repo.create_request("Reject me", org, source="daemon")
+        result = await repo.reject_request(str(r["id"]), org, str(test_user["id"]), "not needed")
+        assert result is not None
+        assert result["approval_status"] == "rejected"
+        assert result["status"] == "rejection_processing"
+        assert result["approval_comment"] == "not needed"
+
+    @pytest.mark.asyncio
+    async def test_dispatch_blocked_for_unapproved(self, repo, test_organization, monkeypatch):
+        monkeypatch.setenv("LUCENT_AUTO_APPROVE", "false")
+        org = str(test_organization["id"])
+        r = await repo.create_request("Blocked request", org, source="cognitive")
+        t = await repo.create_task(
+            request_id=str(r["id"]),
+            title="blocked task",
+            org_id=org,
+            agent_type="code",
+        )
+        # Task should NOT be in pending tasks (blocked by approval gate)
+        pending = await repo.list_pending_tasks(org)
+        task_ids = [str(t2["id"]) for t2 in pending["items"]]
+        assert str(t["id"]) not in task_ids
+
+    @pytest.mark.asyncio
+    async def test_dispatch_unblocked_after_approval(self, repo, test_organization, test_user, monkeypatch):
+        monkeypatch.setenv("LUCENT_AUTO_APPROVE", "false")
+        org = str(test_organization["id"])
+        r = await repo.create_request("Unblock me", org, source="cognitive")
+        t = await repo.create_task(
+            request_id=str(r["id"]),
+            title="unblocked task",
+            org_id=org,
+            agent_type="code",
+        )
+        await repo.approve_request(str(r["id"]), org, str(test_user["id"]))
+        pending = await repo.list_pending_tasks(org)
+        task_ids = [str(t2["id"]) for t2 in pending["items"]]
+        assert str(t["id"]) in task_ids
+
+    @pytest.mark.asyncio
+    async def test_list_pending_approvals(self, repo, test_organization, monkeypatch):
+        monkeypatch.setenv("LUCENT_AUTO_APPROVE", "false")
+        org = str(test_organization["id"])
+        await repo.create_request("Approval 1", org, source="cognitive")
+        await repo.create_request("Approval 2", org, source="daemon")
+        result = await repo.list_pending_approvals(org)
+        assert result["total_count"] >= 2
+        titles = [r["title"] for r in result["items"]]
+        assert "Approval 1" in titles
+        assert "Approval 2" in titles
+
+
 class TestRequestCompletion:
     @pytest.mark.asyncio
-    async def test_auto_complete_when_all_tasks_done(self, repo, req, task):
-        """Request auto-completes when all tasks are completed."""
+    async def test_auto_complete_when_review_skipped(self, repo, req, task, monkeypatch):
+        """Request moves to completed when all tasks are done
+        and LUCENT_SKIP_POST_REVIEW=true."""
+        monkeypatch.setenv("LUCENT_SKIP_POST_REVIEW", "true")
         await repo.claim_task(str(task["id"]), "d1")
         await repo.complete_task(str(task["id"]), "done")
         org_id = str(req["organization_id"])
         updated = await repo.get_request(str(req["id"]), org_id)
         assert updated["status"] == "completed"
+
+    @pytest.mark.asyncio
+    async def test_auto_review_by_default(self, repo, test_organization, monkeypatch):
+        """Request moves to review by default (post-completion review is on)."""
+        monkeypatch.delenv("LUCENT_SKIP_POST_REVIEW", raising=False)
+        org = str(test_organization["id"])
+        r = await repo.create_request("Review required test", org, source="cognitive")
+        t = await repo.create_task(
+            request_id=str(r["id"]),
+            title="task",
+            org_id=org,
+            agent_type="code",
+        )
+        await repo.claim_task(str(t["id"]), "d1")
+        await repo.complete_task(str(t["id"]), "done")
+        updated = await repo.get_request(str(r["id"]), org)
+        assert updated["status"] == "review"
 
     @pytest.mark.asyncio
     async def test_auto_fail_when_any_task_failed(self, repo, test_organization):
@@ -521,8 +690,8 @@ class TestTaskEvents:
         # Task creation already logged one event
         await repo.add_task_event(tid, "info", "extra")
         events = await repo.list_task_events(tid)
-        assert len(events) >= 2
-        types = [e["event_type"] for e in events]
+        assert len(events["items"]) >= 2
+        types = [e["event_type"] for e in events["items"]]
         assert "created" in types
         assert "info" in types
 
@@ -534,21 +703,31 @@ class TestTaskEvents:
         await repo.start_task(tid)
         await repo.complete_task(tid, "done")
         events = await repo.list_task_events(tid)
-        types = [e["event_type"] for e in events]
+        types = [e["event_type"] for e in events["items"]]
         assert "created" in types
         assert "claimed" in types
         assert "running" in types
         assert "completed" in types
+
+    @pytest.mark.asyncio
+    async def test_add_event_rejects_cross_org_task(self, repo, task, other_org):
+        with pytest.raises(ValueError, match="Task not found"):
+            await repo.add_task_event(
+                str(task["id"]),
+                "progress",
+                "blocked",
+                org_id=str(other_org["id"]),
+            )
 
 
 class TestTaskMemoryLinks:
     @pytest.mark.asyncio
     async def test_link_memory(self, repo, task, test_memory):
         await repo.link_memory(str(task["id"]), str(test_memory["id"]), relation="created")
-        memories = await repo.list_task_memories(str(task["id"]))
-        assert len(memories) == 1
-        assert memories[0]["relation"] == "created"
-        assert memories[0]["memory_id"] == test_memory["id"]
+        result = await repo.list_task_memories(str(task["id"]))
+        assert len(result["items"]) == 1
+        assert result["items"][0]["relation"] == "created"
+        assert result["items"][0]["memory_id"] == test_memory["id"]
 
     @pytest.mark.asyncio
     async def test_link_memory_idempotent(self, repo, task, test_memory):
@@ -556,8 +735,8 @@ class TestTaskMemoryLinks:
         tid, mid = str(task["id"]), str(test_memory["id"])
         await repo.link_memory(tid, mid, "read")
         await repo.link_memory(tid, mid, "read")
-        memories = await repo.list_task_memories(tid)
-        read_links = [m for m in memories if m["relation"] == "read"]
+        result = await repo.list_task_memories(tid)
+        read_links = [m for m in result["items"] if m["relation"] == "read"]
         assert len(read_links) == 1
 
     @pytest.mark.asyncio
@@ -565,8 +744,8 @@ class TestTaskMemoryLinks:
         tid, mid = str(task["id"]), str(test_memory["id"])
         await repo.link_memory(tid, mid, "read")
         await repo.link_memory(tid, mid, "updated")
-        memories = await repo.list_task_memories(tid)
-        relations = {m["relation"] for m in memories}
+        result = await repo.list_task_memories(tid)
+        relations = {m["relation"] for m in result["items"]}
         assert "read" in relations
         assert "updated" in relations
 
@@ -574,8 +753,20 @@ class TestTaskMemoryLinks:
     async def test_link_creates_event(self, repo, task, test_memory):
         await repo.link_memory(str(task["id"]), str(test_memory["id"]), "created")
         events = await repo.list_task_events(str(task["id"]))
-        link_events = [e for e in events if e["event_type"] == "memory_created"]
+        link_events = [e for e in events["items"] if e["event_type"] == "memory_created"]
         assert len(link_events) == 1
+
+    @pytest.mark.asyncio
+    async def test_link_memory_rejects_cross_org_task(
+        self, repo, task, test_memory, other_org
+    ):
+        with pytest.raises(ValueError, match="Task not found"):
+            await repo.link_memory(
+                str(task["id"]),
+                str(test_memory["id"]),
+                "created",
+                org_id=str(other_org["id"]),
+            )
 
 
 class TestGetRequestWithTasks:
@@ -671,3 +862,430 @@ class TestDashboardQueries:
             await repo.add_task_event(tid, "progress", f"step {i}")
         events = await repo.get_recent_events(org, limit=3)
         assert len(events) == 3
+
+
+class TestCrossOrgIsolation:
+    """Verify that org_id filtering prevents cross-org access to tasks and requests.
+
+    Each test creates data in org_A (test_organization), then attempts to
+    access/mutate it using org_B (other_org). The cross-org attempt must fail,
+    while the same-org attempt must succeed.
+    """
+
+    # ── 1. get_task ──────────────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_get_task_cross_org_blocked(self, repo, task, other_org):
+        """get_task with wrong org_id returns None."""
+        result = await repo.get_task(str(task["id"]), org_id=str(other_org["id"]))
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_get_task_same_org_allowed(self, repo, task, test_organization):
+        """get_task with correct org_id returns the task."""
+        result = await repo.get_task(str(task["id"]), org_id=str(test_organization["id"]))
+        assert result is not None
+        assert result["id"] == task["id"]
+
+    # ── 2. claim_task ────────────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_claim_task_cross_org_blocked(self, repo, task, other_org):
+        """claim_task with wrong org_id returns None (task stays pending)."""
+        result = await repo.claim_task(
+            str(task["id"]), "attacker-instance", org_id=str(other_org["id"])
+        )
+        assert result is None
+        # Verify task is still pending (not mutated)
+        original = await repo.get_task(str(task["id"]))
+        assert original["status"] == "pending"
+
+    @pytest.mark.asyncio
+    async def test_claim_task_same_org_allowed(self, repo, task, test_organization):
+        """claim_task with correct org_id succeeds."""
+        result = await repo.claim_task(
+            str(task["id"]), "legit-instance", org_id=str(test_organization["id"])
+        )
+        assert result is not None
+        assert result["status"] == "claimed"
+
+    # ── 3. start_task ────────────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_start_task_cross_org_blocked(self, repo, task, other_org):
+        """start_task with wrong org_id returns None."""
+        await repo.claim_task(str(task["id"]), "daemon-1")
+        result = await repo.start_task(str(task["id"]), org_id=str(other_org["id"]))
+        assert result is None
+        # Verify task is still claimed (not mutated)
+        original = await repo.get_task(str(task["id"]))
+        assert original["status"] == "claimed"
+
+    @pytest.mark.asyncio
+    async def test_start_task_same_org_allowed(self, repo, task, test_organization):
+        """start_task with correct org_id succeeds."""
+        await repo.claim_task(str(task["id"]), "daemon-1")
+        result = await repo.start_task(
+            str(task["id"]), org_id=str(test_organization["id"])
+        )
+        assert result is not None
+        assert result["status"] == "running"
+
+    # ── 4. complete_task ─────────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_complete_task_cross_org_blocked(self, repo, task, other_org):
+        """complete_task with wrong org_id returns None."""
+        await repo.claim_task(str(task["id"]), "daemon-1")
+        result = await repo.complete_task(
+            str(task["id"]), "hacked", org_id=str(other_org["id"])
+        )
+        assert result is None
+        original = await repo.get_task(str(task["id"]))
+        assert original["status"] == "claimed"
+
+    @pytest.mark.asyncio
+    async def test_complete_task_same_org_allowed(self, repo, task, test_organization):
+        """complete_task with correct org_id succeeds."""
+        await repo.claim_task(str(task["id"]), "daemon-1")
+        result = await repo.complete_task(
+            str(task["id"]), "done", org_id=str(test_organization["id"])
+        )
+        assert result is not None
+        assert result["status"] == "completed"
+
+    # ── 5. fail_task ─────────────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_fail_task_cross_org_blocked(self, repo, task, other_org):
+        """fail_task with wrong org_id returns None."""
+        await repo.claim_task(str(task["id"]), "daemon-1")
+        result = await repo.fail_task(
+            str(task["id"]), "sabotage", org_id=str(other_org["id"])
+        )
+        assert result is None
+        original = await repo.get_task(str(task["id"]))
+        assert original["status"] == "claimed"
+
+    @pytest.mark.asyncio
+    async def test_fail_task_same_org_allowed(self, repo, task, test_organization):
+        """fail_task with correct org_id succeeds."""
+        await repo.claim_task(str(task["id"]), "daemon-1")
+        result = await repo.fail_task(
+            str(task["id"]), "real error", org_id=str(test_organization["id"])
+        )
+        assert result is not None
+        assert result["status"] == "failed"
+
+    # ── 6. release_task ──────────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_release_task_cross_org_blocked(self, repo, task, other_org):
+        """release_task with wrong org_id returns None."""
+        await repo.claim_task(str(task["id"]), "daemon-1")
+        result = await repo.release_task(str(task["id"]), org_id=str(other_org["id"]))
+        assert result is None
+        original = await repo.get_task(str(task["id"]))
+        assert original["status"] == "claimed"
+
+    @pytest.mark.asyncio
+    async def test_release_task_same_org_allowed(self, repo, task, test_organization):
+        """release_task with correct org_id succeeds."""
+        await repo.claim_task(str(task["id"]), "daemon-1")
+        result = await repo.release_task(
+            str(task["id"]), org_id=str(test_organization["id"])
+        )
+        assert result is not None
+        assert result["status"] == "pending"
+
+    # ── 7. retry_task ────────────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_retry_task_cross_org_blocked(self, repo, task, other_org):
+        """retry_task with wrong org_id returns None."""
+        await repo.claim_task(str(task["id"]), "daemon-1")
+        await repo.fail_task(str(task["id"]), "error")
+        result = await repo.retry_task(str(task["id"]), org_id=str(other_org["id"]))
+        assert result is None
+        original = await repo.get_task(str(task["id"]))
+        assert original["status"] == "failed"
+
+    @pytest.mark.asyncio
+    async def test_retry_task_same_org_allowed(self, repo, task, test_organization):
+        """retry_task with correct org_id succeeds."""
+        await repo.claim_task(str(task["id"]), "daemon-1")
+        await repo.fail_task(str(task["id"]), "error")
+        result = await repo.retry_task(
+            str(task["id"]), org_id=str(test_organization["id"])
+        )
+        assert result is not None
+        assert result["status"] == "pending"
+
+    # ── 8. release_stale_tasks ───────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_release_stale_tasks_cross_org_blocked(
+        self, repo, task, other_org, db_pool
+    ):
+        """release_stale_tasks with wrong org_id returns 0 affected rows."""
+        await repo.claim_task(str(task["id"]), "daemon-1")
+        # Backdate claimed_at to make it stale
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE tasks SET claimed_at = NOW() - interval '60 minutes' WHERE id = $1",
+                task["id"],
+            )
+        count = await repo.release_stale_tasks(
+            stale_minutes=30, org_id=str(other_org["id"])
+        )
+        assert count == 0
+        # Verify task is still claimed (not released by wrong org)
+        original = await repo.get_task(str(task["id"]))
+        assert original["status"] == "claimed"
+
+    @pytest.mark.asyncio
+    async def test_release_stale_tasks_same_org_allowed(
+        self, repo, task, test_organization, db_pool
+    ):
+        """release_stale_tasks with correct org_id releases the task."""
+        await repo.claim_task(str(task["id"]), "daemon-1")
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE tasks SET claimed_at = NOW() - interval '60 minutes' WHERE id = $1",
+                task["id"],
+            )
+        count = await repo.release_stale_tasks(
+            stale_minutes=30, org_id=str(test_organization["id"])
+        )
+        assert count >= 1
+        refreshed = await repo.get_task(str(task["id"]))
+        assert refreshed["status"] == "pending"
+
+    # ── 9. update_request_status ─────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_update_request_status_cross_org_blocked(self, repo, req, other_org):
+        """update_request_status with wrong org_id returns None."""
+        result = await repo.update_request_status(
+            str(req["id"]), "in_progress", org_id=str(other_org["id"])
+        )
+        assert result is None
+        # Verify request is still pending (not mutated)
+        original = await repo.get_request(
+            str(req["id"]), str(req["organization_id"])
+        )
+        assert original["status"] == "pending"
+
+    @pytest.mark.asyncio
+    async def test_update_request_status_same_org_allowed(
+        self, repo, req, test_organization
+    ):
+        """update_request_status with correct org_id succeeds."""
+        result = await repo.update_request_status(
+            str(req["id"]), "in_progress", org_id=str(test_organization["id"])
+        )
+        assert result is not None
+        assert result["status"] == "in_progress"
+
+
+# ── list_active_work tests ────────────────────────────────────────────────
+
+
+class TestListActiveWork:
+    """Tests for list_active_work() — complex aggregation of active requests + task counts."""
+
+    @pytest.mark.asyncio
+    async def test_empty_when_no_requests(self, repo, test_organization):
+        org = str(test_organization["id"])
+        result = await repo.list_active_work(org)
+        assert result["items"] == []
+
+    @pytest.mark.asyncio
+    async def test_returns_pending_request(self, repo, req, test_organization):
+        org = str(test_organization["id"])
+        result = await repo.list_active_work(org)
+        assert len(result["items"]) >= 1
+        ids = [str(r["id"]) for r in result["items"]]
+        assert str(req["id"]) in ids
+
+    @pytest.mark.asyncio
+    async def test_excludes_completed_request(self, repo, req, test_organization):
+        org = str(test_organization["id"])
+        await repo.update_request_status(str(req["id"]), "completed", org_id=org)
+        result = await repo.list_active_work(org)
+        ids = [str(r["id"]) for r in result["items"]]
+        assert str(req["id"]) not in ids
+
+    @pytest.mark.asyncio
+    async def test_excludes_failed_request(self, repo, req, test_organization):
+        org = str(test_organization["id"])
+        await repo.update_request_status(str(req["id"]), "failed", org_id=org)
+        result = await repo.list_active_work(org)
+        ids = [str(r["id"]) for r in result["items"]]
+        assert str(req["id"]) not in ids
+
+    @pytest.mark.asyncio
+    async def test_excludes_cancelled_request(self, repo, req, test_organization):
+        org = str(test_organization["id"])
+        await repo.update_request_status(str(req["id"]), "cancelled", org_id=org)
+        result = await repo.list_active_work(org)
+        ids = [str(r["id"]) for r in result["items"]]
+        assert str(req["id"]) not in ids
+
+    @pytest.mark.asyncio
+    async def test_includes_review_request(self, repo, req, test_organization):
+        org = str(test_organization["id"])
+        await repo.update_request_status(str(req["id"]), "review", org_id=org)
+        result = await repo.list_active_work(org)
+        ids = [str(r["id"]) for r in result["items"]]
+        assert str(req["id"]) in ids
+
+    @pytest.mark.asyncio
+    async def test_task_count_aggregation(self, repo, req, test_organization):
+        """Verify that task status counts are correctly aggregated."""
+        org = str(test_organization["id"])
+        rid = str(req["id"])
+        # Create 3 tasks in different states
+        await repo.create_task(request_id=rid, title="Pending", org_id=org)
+        t2 = await repo.create_task(request_id=rid, title="Running", org_id=org)
+        t3 = await repo.create_task(request_id=rid, title="Done", org_id=org)
+        # Move t2 to claimed
+        await repo.claim_task(str(t2["id"]), "daemon-1")
+        # Move t3 to completed
+        await repo.claim_task(str(t3["id"]), "daemon-2")
+        await repo.start_task(str(t3["id"]))
+        await repo.complete_task(str(t3["id"]), result="done")
+
+        result = await repo.list_active_work(org)
+        row = next(r for r in result["items"] if str(r["id"]) == rid)
+        assert row["tasks_pending"] >= 1
+        assert row["tasks_running"] >= 1  # claimed counts as running
+        assert row["tasks_completed"] >= 1
+        assert row["tasks_total"] >= 3
+
+    @pytest.mark.asyncio
+    async def test_priority_ordering(self, repo, test_organization):
+        """Urgent requests should appear before medium ones."""
+        org = str(test_organization["id"])
+        medium = await repo.create_request(
+            title="Medium", org_id=org, priority="medium"
+        )
+        urgent = await repo.create_request(
+            title="Urgent", org_id=org, priority="urgent"
+        )
+        result = await repo.list_active_work(org)
+        ids = [str(r["id"]) for r in result["items"]]
+        assert ids.index(str(urgent["id"])) < ids.index(str(medium["id"]))
+
+    @pytest.mark.asyncio
+    async def test_cross_org_isolation(self, repo, req, other_org):
+        """list_active_work with wrong org_id returns no data from other org."""
+        result = await repo.list_active_work(str(other_org["id"]))
+        ids = [str(r["id"]) for r in result["items"]]
+        assert str(req["id"]) not in ids
+
+
+class TestRequestDeduplication:
+    """Request deduplication via linked memories."""
+
+    async def test_memory_based_dedup_returns_existing(self, repo, test_organization, db_pool):
+        """Creating a request with same memory_ids returns the active one."""
+        org_id = str(test_organization["id"])
+        # Create a fake memory to link
+        async with db_pool.acquire() as conn:
+            mem = await conn.fetchrow(
+                """INSERT INTO memories (content, type, organization_id, username)
+                   VALUES ('test goal', 'goal', $1::uuid, 'test-user') RETURNING id""",
+                org_id,
+            )
+        mem_id = str(mem["id"])
+
+        r1 = await repo.create_request(
+            title="Work A", org_id=org_id,
+            memory_ids=[{"id": mem_id, "relation": "goal"}],
+        )
+        r2 = await repo.create_request(
+            title="Work B", org_id=org_id,
+            memory_ids=[{"id": mem_id, "relation": "goal"}],
+        )
+        assert str(r1["id"]) == str(r2["id"])
+
+    async def test_completed_request_allows_new_for_same_memory(
+        self, repo, test_organization, db_pool
+    ):
+        """After completing a request, a new one for the same memory is allowed."""
+        org_id = str(test_organization["id"])
+        async with db_pool.acquire() as conn:
+            mem = await conn.fetchrow(
+                """INSERT INTO memories (content, type, organization_id, username)
+                   VALUES ('repeatable goal', 'goal', $1::uuid, 'test-user') RETURNING id""",
+                org_id,
+            )
+        mem_id = str(mem["id"])
+
+        r1 = await repo.create_request(
+            title="First attempt", org_id=org_id,
+            memory_ids=[{"id": mem_id, "relation": "goal"}],
+        )
+        await repo.update_request_status(str(r1["id"]), "completed", org_id=org_id)
+        r2 = await repo.create_request(
+            title="Second attempt", org_id=org_id,
+            memory_ids=[{"id": mem_id, "relation": "goal"}],
+        )
+        assert str(r1["id"]) != str(r2["id"])
+
+    async def test_no_memory_ids_always_creates_new(self, repo, test_organization):
+        """Without memory_ids, duplicate titles are allowed (no dedup)."""
+        org_id = str(test_organization["id"])
+        r1 = await repo.create_request(title="Same Title", org_id=org_id)
+        r2 = await repo.create_request(title="Same Title", org_id=org_id)
+        assert str(r1["id"]) != str(r2["id"])
+
+    async def test_different_memories_not_deduped(self, repo, test_organization, db_pool):
+        """Different memory IDs create separate requests."""
+        org_id = str(test_organization["id"])
+        async with db_pool.acquire() as conn:
+            m1 = await conn.fetchrow(
+                """INSERT INTO memories (content, type, organization_id, username)
+                   VALUES ('goal 1', 'goal', $1::uuid, 'test-user') RETURNING id""",
+                org_id,
+            )
+            m2 = await conn.fetchrow(
+                """INSERT INTO memories (content, type, organization_id, username)
+                   VALUES ('goal 2', 'goal', $1::uuid, 'test-user') RETURNING id""",
+                org_id,
+            )
+        r1 = await repo.create_request(
+            title="Work for goal 1", org_id=org_id,
+            memory_ids=[{"id": str(m1["id"]), "relation": "goal"}],
+        )
+        r2 = await repo.create_request(
+            title="Work for goal 2", org_id=org_id,
+            memory_ids=[{"id": str(m2["id"]), "relation": "goal"}],
+        )
+        assert str(r1["id"]) != str(r2["id"])
+
+    async def test_concurrent_creates_with_same_memory_deduped(
+        self, repo, test_organization, db_pool
+    ):
+        """Concurrent create_request calls with the same memory_id return one request."""
+        org_id = str(test_organization["id"])
+        async with db_pool.acquire() as conn:
+            mem = await conn.fetchrow(
+                """INSERT INTO memories (content, type, organization_id, username)
+                   VALUES ('concurrent goal', 'goal', $1::uuid, 'test-user') RETURNING id""",
+                org_id,
+            )
+        mem_id = str(mem["id"])
+
+        # First call creates the request
+        r1 = await repo.create_request(
+            title="Concurrent Work", org_id=org_id,
+            memory_ids=[{"id": mem_id, "relation": "goal"}],
+        )
+        # Second call with same memory returns existing
+        r2 = await repo.create_request(
+            title="Concurrent Work v2", org_id=org_id,
+            memory_ids=[{"id": mem_id, "relation": "goal"}],
+        )
+        assert str(r1["id"]) == str(r2["id"])

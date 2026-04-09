@@ -1,0 +1,901 @@
+{% extends "base.html" %}
+{% block title %}Chat - Lucent{% endblock %}
+
+{% block extra_head %}
+<style>
+    /* Lucent fluid vaporwave orb */
+    .lucent-orb {
+        aspect-ratio: 1;
+        background:
+            radial-gradient(circle at 25% 25%, rgba(255,255,255,0.35) 0%, transparent 35%),
+            radial-gradient(circle at 70% 30%, #00d4ff 0%, transparent 50%),
+            radial-gradient(circle at 30% 70%, #ff2d95 0%, transparent 50%),
+            radial-gradient(circle at 65% 75%, #7b2dff 0%, transparent 45%),
+            radial-gradient(circle at 50% 50%, #00d4ff 0%, #ff2d95 50%, #7b2dff 100%);
+        background-size: 200% 200%;
+        animation:
+            amoeba 12s ease-in-out infinite,
+            swirl 8s ease-in-out infinite alternate,
+            glow-pulse 4s ease-in-out infinite alternate;
+        box-shadow:
+            inset -2px -2px 6px rgba(0, 0, 0, 0.15),
+            inset 2px 2px 6px rgba(255, 255, 255, 0.25),
+            0 0 12px rgba(255, 45, 149, 0.35),
+            0 0 24px rgba(0, 212, 255, 0.25),
+            0 0 40px rgba(123, 45, 255, 0.15);
+    }
+    .lucent-orb-lg { width: 52px; height: 52px; }
+    .lucent-orb-sm { width: 28px; height: 28px; min-width: 28px; min-height: 28px; }
+
+    @keyframes amoeba {
+        0%    { border-radius: 54% 46% 42% 58% / 48% 44% 56% 52%; }
+        5%    { border-radius: 48% 52% 46% 54% / 52% 48% 50% 50%; }
+        10%   { border-radius: 46% 54% 50% 50% / 56% 44% 46% 54%; }
+        15%   { border-radius: 50% 50% 54% 46% / 44% 52% 54% 46%; }
+        20%   { border-radius: 44% 56% 48% 52% / 50% 46% 48% 54%; }
+        25%   { border-radius: 52% 48% 44% 56% / 46% 54% 52% 48%; }
+        30%   { border-radius: 56% 44% 50% 50% / 54% 42% 46% 58%; }
+        35%   { border-radius: 48% 52% 56% 44% / 42% 56% 50% 48%; }
+        40%   { border-radius: 44% 56% 52% 48% / 56% 48% 44% 52%; }
+        45%   { border-radius: 52% 48% 46% 54% / 48% 44% 56% 50%; }
+        50%   { border-radius: 46% 54% 56% 44% / 54% 50% 42% 56%; }
+        55%   { border-radius: 54% 46% 48% 52% / 46% 56% 52% 44%; }
+        60%   { border-radius: 50% 50% 42% 58% / 52% 42% 56% 48%; }
+        65%   { border-radius: 42% 58% 54% 46% / 48% 54% 44% 54%; }
+        70%   { border-radius: 56% 44% 46% 54% / 44% 48% 58% 46%; }
+        75%   { border-radius: 48% 52% 52% 48% / 56% 46% 46% 52%; }
+        80%   { border-radius: 52% 48% 44% 56% / 42% 52% 50% 54%; }
+        85%   { border-radius: 46% 54% 56% 44% / 54% 44% 48% 50%; }
+        90%   { border-radius: 50% 50% 48% 52% / 48% 56% 44% 52%; }
+        95%   { border-radius: 44% 56% 52% 48% / 52% 46% 54% 46%; }
+        100%  { border-radius: 54% 46% 42% 58% / 48% 44% 56% 52%; }
+    }
+
+    @keyframes swirl {
+        0%   { background-position: 0% 0%; }
+        25%  { background-position: 100% 50%; }
+        50%  { background-position: 50% 100%; }
+        75%  { background-position: 0% 50%; }
+        100% { background-position: 100% 0%; }
+    }
+
+    @keyframes glow-pulse {
+        0%   { box-shadow: inset -2px -2px 6px rgba(0,0,0,0.15), inset 2px 2px 6px rgba(255,255,255,0.25), 0 0 12px rgba(255,45,149,0.35), 0 0 24px rgba(0,212,255,0.25), 0 0 40px rgba(123,45,255,0.15); }
+        100% { box-shadow: inset -2px -2px 6px rgba(0,0,0,0.15), inset 2px 2px 6px rgba(255,255,255,0.25), 0 0 16px rgba(0,212,255,0.4), 0 0 30px rgba(255,45,149,0.3), 0 0 50px rgba(123,45,255,0.2); }
+    }
+
+    @media (prefers-color-scheme: dark) {
+        .lucent-orb {
+            box-shadow:
+                inset -2px -2px 6px rgba(0, 0, 0, 0.35),
+                inset 2px 2px 4px rgba(255, 255, 255, 0.1),
+                0 0 16px rgba(255, 45, 149, 0.4),
+                0 0 32px rgba(0, 212, 255, 0.3),
+                0 0 52px rgba(123, 45, 255, 0.2);
+        }
+    }
+
+    /* Override main content to be full-height for chat */
+    main { padding: 0 !important; height: 100vh; }
+    main > div { max-width: none !important; height: 100%; }
+    
+    /* Chat container fills the viewport below the sidebar header */
+    .chat-container {
+        display: flex;
+        flex-direction: column;
+        height: 100%;
+        overflow: hidden;
+    }
+    
+    /* Empty state: center everything vertically, input right below prompts */
+    .chat-container.empty-mode .messages-area {
+        flex: 1;
+        overflow: visible;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+        padding-bottom: 0;
+    }
+    .chat-container.empty-mode .chat-input-area {
+        flex: none;
+        border-top: none;
+        background: transparent;
+        padding-top: 0;
+        transform: translateY(-30vh);
+    }
+    .chat-container.empty-mode .messages-area #empty-state {
+        transform: translateY(-5vh);
+    }
+    .chat-container.empty-mode .input-footer {
+        display: none;
+    }
+    
+    /* Messages area */
+    .messages-area {
+        flex: 1;
+        overflow-y: auto;
+        scroll-behavior: smooth;
+    }
+    
+    /* Typing indicator animation */
+    @keyframes pulse-dot {
+        0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
+        40% { opacity: 1; transform: scale(1); }
+    }
+    .typing-dot {
+        animation: pulse-dot 1.4s ease-in-out infinite;
+    }
+    .typing-dot:nth-child(2) { animation-delay: 0.2s; }
+    .typing-dot:nth-child(3) { animation-delay: 0.4s; }
+    
+    /* Tool call accordion animation */
+    .tool-details {
+        max-height: 0;
+        overflow: hidden;
+        transition: max-height 0.3s ease-out;
+    }
+    .tool-details.open {
+        max-height: 500px;
+    }
+    
+    /* Reasoning block */
+    .reasoning-block {
+        max-height: 0;
+        overflow: hidden;
+        transition: max-height 0.3s ease-out;
+    }
+    .reasoning-block.open {
+        max-height: 2000px;
+    }
+    
+    /* Fade-in for new messages */
+    @keyframes fade-up {
+        from { opacity: 0; transform: translateY(8px); }
+        to { opacity: 1; transform: translateY(0); }
+    }
+    .msg-enter {
+        animation: fade-up 0.25s ease-out;
+    }
+    
+    /* Input area glow on focus */
+    .input-glow:focus-within {
+        box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1), 0 1px 2px rgba(0, 0, 0, 0.05);
+    }
+    
+    /* Streaming cursor */
+    .streaming-cursor::after {
+        content: '▊';
+        animation: blink 0.8s step-end infinite;
+        color: #6366f1;
+        font-weight: 200;
+    }
+    @keyframes blink {
+        50% { opacity: 0; }
+    }
+    
+    /* Dark mode overrides for chat-specific elements */
+    @media (prefers-color-scheme: dark) {
+        .chat-user-bubble { background-color: #4338ca !important; }
+        .chat-assistant-bg { background-color: transparent !important; }
+        .tool-chip { background-color: #1e293b !important; border-color: #334155 !important; color: #94a3b8 !important; }
+        .tool-chip:hover { background-color: #334155 !important; }
+        .tool-details-content { background-color: #111827 !important; border-color: #1e293b !important; }
+        .chat-input-area { background-color: transparent !important; border-color: #1e293b !important; }
+        .chat-input-field { background-color: #1a2233 !important; border-color: #334155 !important; color: #e2e8f0 !important; }
+        .chat-input-field::placeholder { color: #64748b !important; }
+        .config-select { background-color: #1a2233 !important; border-color: #334155 !important; color: #e2e8f0 !important; }
+        .empty-state-text { color: #64748b !important; }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="chat-container empty-mode" id="chat-root">
+    <!-- Messages area -->
+    <div id="messages" class="messages-area">
+        <!-- Empty state -->
+        <div id="empty-state" class="flex flex-col items-center px-6">
+            <div class="lucent-orb lucent-orb-lg mb-6"></div>
+            <h2 class="text-lg font-semibold text-gray-900 mb-2">Hey — what's on your mind?</h2>
+            <p class="empty-state-text text-sm text-gray-500 text-center max-w-md mb-8">
+                Pick up where we left off, start something new, or just think out loud.
+            </p>
+            <div class="grid grid-cols-2 gap-3 max-w-lg w-full">
+                <button onclick="sendQuickPrompt('What have we been working on lately?')" class="text-left px-4 py-3 rounded-xl border border-gray-200 hover:border-primary-300 hover:bg-primary-50/50 transition-all text-sm text-gray-700 group">
+                    <span class="font-medium text-gray-900 group-hover:text-primary-700">What have we been working on?</span>
+                </button>
+                <button onclick="sendQuickPrompt('Catch me up — anything I should know about?')" class="text-left px-4 py-3 rounded-xl border border-gray-200 hover:border-primary-300 hover:bg-primary-50/50 transition-all text-sm text-gray-700 group">
+                    <span class="font-medium text-gray-900 group-hover:text-primary-700">Catch me up</span>
+                </button>
+                <button onclick="sendQuickPrompt('How are the daemon tasks going?')" class="text-left px-4 py-3 rounded-xl border border-gray-200 hover:border-primary-300 hover:bg-primary-50/50 transition-all text-sm text-gray-700 group">
+                    <span class="font-medium text-gray-900 group-hover:text-primary-700">How are tasks going?</span>
+                </button>
+                <button onclick="sendQuickPrompt('I have an idea I want to talk through')" class="text-left px-4 py-3 rounded-xl border border-gray-200 hover:border-primary-300 hover:bg-primary-50/50 transition-all text-sm text-gray-700 group">
+                    <span class="font-medium text-gray-900 group-hover:text-primary-700">Think through an idea</span>
+                </button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Input area -->
+    <div class="chat-input-area border-t border-gray-200 bg-white px-6 py-4">
+        <div class="max-w-3xl mx-auto">
+            <!-- Status bar -->
+            <div id="status-bar" class="hidden mb-2 px-3">
+                <div class="flex items-center gap-2 text-xs text-gray-500">
+                    <div class="flex gap-1">
+                        <span class="typing-dot w-1.5 h-1.5 bg-primary-500 rounded-full inline-block"></span>
+                        <span class="typing-dot w-1.5 h-1.5 bg-primary-500 rounded-full inline-block"></span>
+                        <span class="typing-dot w-1.5 h-1.5 bg-primary-500 rounded-full inline-block"></span>
+                    </div>
+                    <span id="status-text">Thinking...</span>
+                </div>
+            </div>
+            
+            <form onsubmit="sendMessage(event)" class="input-glow flex items-end gap-3 rounded-2xl border border-gray-200 bg-white px-4 py-3 transition-all">
+                <textarea
+                    id="chat-input"
+                    rows="1"
+                    placeholder="Message Lucent..."
+                    class="chat-input-field flex-1 resize-none border-0 bg-transparent text-sm text-gray-900 placeholder-gray-400 focus:ring-0 focus:outline-none"
+                    style="max-height: 200px;"
+                    onkeydown="handleKey(event)"
+                    oninput="autoResize(this)"
+                ></textarea>
+                <div class="flex items-center gap-2 shrink-0">
+                    <button type="button" id="stop-btn" onclick="stopStreaming()" class="hidden w-8 h-8 rounded-lg bg-red-500 hover:bg-red-600 text-white flex items-center justify-center transition-colors" title="Stop generating">
+                        <svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>
+                    </button>
+                    <button type="submit" id="send-btn" class="w-8 h-8 rounded-lg bg-primary-600 hover:bg-primary-700 text-white flex items-center justify-center transition-colors disabled:opacity-30 disabled:cursor-not-allowed" disabled>
+                        <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 10.5L12 3m0 0l7.5 7.5M12 3v18" />
+                        </svg>
+                    </button>
+                </div>
+            </form>
+            <!-- Controls toolbar below input -->
+            <div class="flex items-center gap-3 mt-2 px-1">
+                <select id="agent-select" class="config-select text-xs rounded-lg border border-gray-200 bg-white px-2 py-1 text-gray-500 focus:border-primary-300 focus:ring-1 focus:ring-primary-100 focus:outline-none cursor-pointer">
+                    <option value="">Lucent</option>
+                </select>
+                <select id="model-select" class="config-select text-xs rounded-lg border border-gray-200 bg-white px-2 py-1 text-gray-500 focus:border-primary-300 focus:ring-1 focus:ring-primary-100 focus:outline-none cursor-pointer">
+                    <option value="">Loading...</option>
+                </select>
+                <button onclick="clearConversation()" class="ml-auto flex items-center gap-1 px-2 py-1 text-xs font-medium text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors" title="New conversation">
+                    <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+                    </svg>
+                    New
+                </button>
+            </div>
+            <p class="input-footer text-[10px] text-gray-400 text-center mt-1">Shift+Enter for new line</p>
+        </div>
+    </div>
+</div>
+
+<script nonce="{{ request.state.csp_nonce }}">
+// ═══════════════════════════════════════════════════════════════════
+// Chat State
+// ═══════════════════════════════════════════════════════════════════
+
+const state = {
+    messages: [],       // {role, content}
+    streaming: false,
+    abortController: null,
+    toolCalls: [],      // Current response's tool calls
+    streamedText: '',   // Current streaming text
+    msgCount: 0,
+};
+
+// ═══════════════════════════════════════════════════════════════════
+// Initialization
+// ═══════════════════════════════════════════════════════════════════
+
+(async function init() {
+    // Load models
+    try {
+        const resp = await fetch('/api/chat/models');
+        const data = await resp.json();
+        const select = document.getElementById('model-select');
+        select.innerHTML = '';
+        const byProvider = {};
+        for (const m of data.models) {
+            (byProvider[m.provider] = byProvider[m.provider] || []).push(m);
+        }
+        for (const [provider, models] of Object.entries(byProvider)) {
+            const group = document.createElement('optgroup');
+            group.label = provider.charAt(0).toUpperCase() + provider.slice(1);
+            for (const m of models) {
+                const opt = document.createElement('option');
+                opt.value = m.id;
+                opt.textContent = m.name;
+                if (m.id === data.default) opt.selected = true;
+                group.appendChild(opt);
+            }
+            select.appendChild(group);
+        }
+    } catch(e) {
+        document.getElementById('model-select').innerHTML = '<option value="">Unavailable</option>';
+    }
+    
+    // Load agents
+    try {
+        const resp = await fetch('/api/definitions/agents?status=active');
+        const agents = await resp.json();
+        const select = document.getElementById('agent-select');
+        if (agents && agents.length > 0) {
+            for (const a of agents) {
+                const opt = document.createElement('option');
+                opt.value = a.id;
+                opt.textContent = a.name + (a.description ? ` — ${a.description.slice(0, 50)}` : '');
+                select.appendChild(opt);
+            }
+        }
+    } catch(e) {
+        // Agents not available — that's fine, default is good
+    }
+    
+    document.getElementById('chat-input').focus();
+})();
+
+// ═══════════════════════════════════════════════════════════════════
+// Message Sending
+// ═══════════════════════════════════════════════════════════════════
+
+function sendQuickPrompt(text) {
+    document.getElementById('chat-input').value = text;
+    sendMessage(new Event('submit'));
+}
+
+async function sendMessage(e) {
+    e.preventDefault();
+    const input = document.getElementById('chat-input');
+    const text = input.value.trim();
+    if (!text || state.streaming) return;
+    
+    // Hide empty state and switch to conversation mode
+    const emptyState = document.getElementById('empty-state');
+    if (emptyState) emptyState.style.display = 'none';
+    document.getElementById('chat-root').classList.remove('empty-mode');
+    
+    // Add user message
+    state.messages.push({ role: 'user', content: text });
+    appendUserMessage(text);
+    input.value = '';
+    input.style.height = 'auto';
+    updateButtons();
+    
+    // Start streaming
+    state.streaming = true;
+    state.toolCalls = [];
+    state.streamedText = '';
+    state.abortController = new AbortController();
+    updateButtons();
+    showStatus('Thinking...');
+    
+    const assistantEl = createAssistantMessage();
+    const contentEl = assistantEl.querySelector('.assistant-content');
+    const toolsEl = assistantEl.querySelector('.tools-container');
+    let reasoningEl = null;
+    let reasoningText = '';
+    
+    try {
+        const selectedModel = document.getElementById('model-select').value;
+        const selectedAgent = document.getElementById('agent-select').value;
+        
+        const resp = await fetch('/api/chat/stream-v2', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                messages: state.messages,
+                model: selectedModel || null,
+                agent_id: selectedAgent || null,
+            }),
+            signal: state.abortController.signal,
+        });
+        
+        if (!resp.ok) {
+            const errText = await resp.text().catch(() => resp.statusText);
+            if (resp.status === 401) {
+                contentEl.innerHTML = '<div class="text-red-500 text-sm">Session expired. Please <a href="/login" class="underline">log in again</a>.</div>';
+            } else {
+                contentEl.innerHTML = `<div class="text-red-500 text-sm">Error ${resp.status}: ${escapeHtml(errText)}</div>`;
+            }
+            hideStatus();
+            state.streaming = false;
+            state.abortController = null;
+            updateButtons();
+            return;
+        }
+        
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let gotDeltas = false;
+        
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
+            
+            for (const line of lines) {
+                if (!line.startsWith('data: ')) continue;
+                try {
+                    const event = JSON.parse(line.slice(6));
+                    
+                    switch (event.type) {
+                        case 'text_delta':
+                            gotDeltas = true;
+                            state.streamedText += event.text;
+                            contentEl.innerHTML = renderMarkdown(state.streamedText);
+                            contentEl.classList.add('streaming-cursor');
+                            showStatus('Writing...');
+                            scrollToBottom();
+                            break;
+                            
+                        case 'message':
+                            if (!gotDeltas) {
+                                // Full message (no deltas were sent)
+                                state.streamedText = event.text;
+                                contentEl.innerHTML = renderMarkdown(event.text);
+                            }
+                            contentEl.classList.remove('streaming-cursor');
+                            hideStatus();
+                            scrollToBottom();
+                            break;
+                            
+                        case 'reasoning':
+                            if (!reasoningEl) {
+                                reasoningEl = createReasoningBlock(toolsEl);
+                            }
+                            reasoningText += event.text;
+                            updateReasoningBlock(reasoningEl, reasoningText);
+                            showStatus('Thinking...');
+                            scrollToBottom();
+                            break;
+                            
+                        case 'tool_call':
+                            state.toolCalls.push({ name: event.tool, input: event.input, output: null });
+                            appendToolCall(toolsEl, event.tool, event.input);
+                            // Close reasoning block when tools start
+                            if (reasoningEl) {
+                                collapseReasoningBlock(reasoningEl);
+                                reasoningEl = null;
+                                reasoningText = '';
+                            }
+                            showStatus(`Using ${event.tool.replace(/^mcp_memory-server_/, '')}...`);
+                            scrollToBottom();
+                            break;
+                            
+                        case 'tool_result':
+                            // Update the last matching tool call
+                            const lastCall = state.toolCalls.findLast(tc => tc.name === event.tool && !tc.output);
+                            if (lastCall) lastCall.output = event.output;
+                            updateToolResult(toolsEl, event.tool, event.output);
+                            showStatus('Thinking...');
+                            scrollToBottom();
+                            break;
+                            
+                        case 'error':
+                            contentEl.innerHTML = `<div class="flex items-center gap-2 text-red-600 text-sm"><svg class="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z"/></svg><span>${escapeHtml(event.error)}</span></div>`;
+                            hideStatus();
+                            break;
+                            
+                        case 'done':
+                            contentEl.classList.remove('streaming-cursor');
+                            if (!gotDeltas && !state.streamedText) {
+                                contentEl.innerHTML = '<div class="text-gray-400 text-sm italic">No response received. The model may be unavailable — try again.</div>';
+                            }
+                            // Finalize any tool calls still showing spinners
+                            finalizeToolCalls(toolsEl);
+                            // Finalize any open reasoning block
+                            if (reasoningEl) {
+                                collapseReasoningBlock(reasoningEl);
+                                reasoningEl = null;
+                            }
+                            hideStatus();
+                            break;
+                    }
+                } catch(e) { /* skip malformed event */ }
+            }
+        }
+    } catch(e) {
+        console.error('Chat stream error:', e);
+        if (e.name !== 'AbortError') {
+            if (contentEl) {
+                contentEl.innerHTML = '<div class="text-red-500 text-sm">Connection error: ' + escapeHtml(String(e.message || e)) + '</div>';
+            }
+        }
+        hideStatus();
+    }
+    
+    contentEl.classList.remove('streaming-cursor');
+    if (state.streamedText) {
+        state.messages.push({ role: 'assistant', content: state.streamedText });
+    }
+    state.streaming = false;
+    state.abortController = null;
+    updateButtons();
+    hideStatus();
+    scrollToBottom();
+}
+
+function stopStreaming() {
+    if (state.abortController) {
+        state.abortController.abort();
+        state.abortController = null;
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Message Rendering
+// ═══════════════════════════════════════════════════════════════════
+
+function appendUserMessage(text) {
+    const msgs = document.getElementById('messages');
+    const div = document.createElement('div');
+    div.className = 'msg-enter px-6 py-4';
+    div.innerHTML = `
+        <div class="max-w-3xl mx-auto flex justify-end">
+            <div class="chat-user-bubble max-w-[75%] bg-primary-600 text-white rounded-2xl rounded-br-sm px-4 py-3 text-sm leading-relaxed shadow-sm">
+                ${escapeHtml(text)}
+            </div>
+        </div>`;
+    msgs.appendChild(div);
+    scrollToBottom();
+}
+
+function createAssistantMessage() {
+    const msgs = document.getElementById('messages');
+    const div = document.createElement('div');
+    div.className = 'msg-enter chat-assistant-bg px-6 py-5';
+    state.msgCount++;
+    const id = `msg-${state.msgCount}`;
+    div.id = id;
+    div.innerHTML = `
+        <div class="max-w-3xl mx-auto flex gap-3">
+            <div class="lucent-orb lucent-orb-sm shrink-0 mt-1"></div>
+            <div class="flex-1 min-w-0">
+                <div class="tools-container mb-3 space-y-2"></div>
+                <div class="assistant-content text-sm text-gray-800 leading-relaxed prose prose-sm prose-gray max-w-none">
+                    <div class="flex gap-1.5">
+                        <span class="typing-dot w-2 h-2 bg-gray-300 rounded-full inline-block"></span>
+                        <span class="typing-dot w-2 h-2 bg-gray-300 rounded-full inline-block"></span>
+                        <span class="typing-dot w-2 h-2 bg-gray-300 rounded-full inline-block"></span>
+                    </div>
+                </div>
+            </div>
+        </div>`;
+    msgs.appendChild(div);
+    scrollToBottom();
+    return div;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Tool Call Rendering
+// ═══════════════════════════════════════════════════════════════════
+
+function appendToolCall(container, toolName, input) {
+    const toolId = `tool-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const div = document.createElement('div');
+    div.className = 'tool-chip-wrapper';
+    div.dataset.tool = toolName;
+    div.dataset.toolId = toolId;
+    
+    // Pretty-format tool name
+    const displayName = toolName.replace(/^mcp_memory-server_/, '').replace(/_/g, ' ');
+    
+    // Parse input for display
+    let inputPreview = '';
+    try {
+        const parsed = JSON.parse(input);
+        const keys = Object.entries(parsed).filter(([_, v]) => v != null);
+        inputPreview = keys.map(([k, v]) => {
+            const val = typeof v === 'string' ? v : JSON.stringify(v);
+            return `<span class="text-gray-500">${escapeHtml(k)}:</span> <span class="text-gray-700">${escapeHtml(val.slice(0, 60))}</span>`;
+        }).join(', ');
+    } catch(e) {
+        inputPreview = escapeHtml((input || '').slice(0, 80));
+    }
+    
+    div.innerHTML = `
+        <button onclick="toggleToolDetails('${toolId}')" class="tool-chip flex items-center gap-2 w-full text-left px-3 py-2 rounded-lg border border-gray-200 bg-gray-50 hover:bg-gray-100 transition-colors text-xs group">
+            <div class="tool-status-icon w-4 h-4 shrink-0">
+                <svg class="w-4 h-4 text-amber-500 animate-pulse" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M11.42 15.17L17.25 21A2.652 2.652 0 0021 17.25l-5.877-5.877M11.42 15.17l2.496-3.03c.317-.384.74-.626 1.208-.766M11.42 15.17l-4.655 5.653a2.548 2.548 0 11-3.586-3.586l6.837-5.63m5.108-.233c.55-.164 1.163-.188 1.743-.14a4.5 4.5 0 004.486-6.336l-3.276 3.277a3.004 3.004 0 01-2.25-2.25l3.276-3.276a4.5 4.5 0 00-6.336 4.486c.049.58.025 1.194-.14 1.743" />
+                </svg>
+            </div>
+            <div class="flex-1 min-w-0">
+                <span class="font-medium text-gray-900">${escapeHtml(displayName)}</span>
+                <span class="tool-inline-detail ml-1.5 text-gray-400">${inputPreview ? `· ${inputPreview}` : ''}</span>
+            </div>
+            <svg class="w-3 h-3 text-gray-400 transition-transform group-hover:text-gray-600 tool-chevron" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
+            </svg>
+        </button>
+        <div id="details-${toolId}" class="tool-details">
+            <div class="tool-details-content mt-1 ml-6 p-3 rounded-lg border border-gray-100 bg-gray-50 text-xs font-mono">
+                <div class="mb-2">
+                    <span class="text-gray-500 font-sans text-[10px] uppercase tracking-wide">Input</span>
+                    <pre class="mt-1 text-gray-700 whitespace-pre-wrap break-words">${escapeHtml(formatJSON(input))}</pre>
+                </div>
+                <div class="tool-output-section hidden">
+                    <span class="text-gray-500 font-sans text-[10px] uppercase tracking-wide">Output</span>
+                    <pre class="tool-output mt-1 text-green-700 whitespace-pre-wrap break-words max-h-48 overflow-y-auto"></pre>
+                </div>
+            </div>
+        </div>`;
+    container.appendChild(div);
+}
+
+function updateToolResult(container, toolName, output) {
+    // Find the last tool chip for this tool that doesn't have a result yet
+    const chips = container.querySelectorAll(`.tool-chip-wrapper[data-tool="${toolName}"]`);
+    for (let i = chips.length - 1; i >= 0; i--) {
+        const chip = chips[i];
+        const outputSection = chip.querySelector('.tool-output-section');
+        if (outputSection && outputSection.classList.contains('hidden')) {
+            // Update to completed hammer icon
+            const icon = chip.querySelector('.tool-status-icon');
+            icon.innerHTML = '<svg class="w-4 h-4 text-green-600" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M11.42 15.17L17.25 21A2.652 2.652 0 0021 17.25l-5.877-5.877M11.42 15.17l2.496-3.03c.317-.384.74-.626 1.208-.766M11.42 15.17l-4.655 5.653a2.548 2.548 0 11-3.586-3.586l6.837-5.63m5.108-.233c.55-.164 1.163-.188 1.743-.14a4.5 4.5 0 004.486-6.336l-3.276 3.277a3.004 3.004 0 01-2.25-2.25l3.276-3.276a4.5 4.5 0 00-6.336 4.486c.049.58.025 1.194-.14 1.743" /></svg>';
+            
+            // Show inline output preview in the chip header
+            const inlineDetail = chip.querySelector('.tool-inline-detail');
+            if (inlineDetail && output) {
+                const preview = (output || '').replace(/[\n\r]+/g, ' ').slice(0, 120);
+                inlineDetail.innerHTML = `· <span class="text-green-600">${escapeHtml(preview)}${output.length > 120 ? '…' : ''}</span>`;
+            }
+            
+            // Show full output in expandable details
+            outputSection.classList.remove('hidden');
+            const outputEl = chip.querySelector('.tool-output');
+            outputEl.textContent = formatJSON(output);
+            return;
+        }
+    }
+}
+
+function toggleToolDetails(toolId) {
+    const details = document.getElementById(`details-${toolId}`);
+    const chip = details.closest('.tool-chip-wrapper');
+    const chevron = chip.querySelector('.tool-chevron');
+    details.classList.toggle('open');
+    chevron.style.transform = details.classList.contains('open') ? 'rotate(90deg)' : '';
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Reasoning Block Rendering
+// ═══════════════════════════════════════════════════════════════════
+
+function createReasoningBlock(container) {
+    const div = document.createElement('div');
+    div.className = 'reasoning-wrapper mb-2';
+    div.innerHTML = `
+        <button onclick="toggleReasoning(this)" class="flex items-center gap-2 w-full text-left px-3 py-2 rounded-lg border border-purple-200 bg-purple-50 hover:bg-purple-100 transition-colors text-xs group">
+            <svg class="w-3.5 h-3.5 text-purple-500 animate-pulse reasoning-icon" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
+            </svg>
+            <span class="font-medium text-purple-700">Thinking</span>
+            <span class="reasoning-preview flex-1 text-purple-400 truncate ml-1"></span>
+            <svg class="w-3 h-3 text-purple-400 transition-transform reasoning-chevron" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
+            </svg>
+        </button>
+        <div class="reasoning-block">
+            <div class="reasoning-content mt-1 ml-6 p-3 rounded-lg border border-purple-100 bg-purple-50/50 text-xs text-purple-800 leading-relaxed whitespace-pre-wrap"></div>
+        </div>`;
+    container.appendChild(div);
+    return div;
+}
+
+function updateReasoningBlock(wrapper, text) {
+    const content = wrapper.querySelector('.reasoning-content');
+    const preview = wrapper.querySelector('.reasoning-preview');
+    content.textContent = text;
+    // Show a truncated preview in the header
+    const firstLine = text.split('\n')[0] || '';
+    preview.textContent = firstLine.slice(0, 80) + (firstLine.length > 80 ? '...' : '');
+}
+
+function collapseReasoningBlock(wrapper) {
+    const block = wrapper.querySelector('.reasoning-block');
+    const icon = wrapper.querySelector('.reasoning-icon');
+    const label = wrapper.querySelector('.font-medium');
+    block.classList.remove('open');
+    icon.classList.remove('animate-pulse');
+    if (label) label.textContent = 'Thought';
+    wrapper.querySelector('.reasoning-chevron').style.transform = '';
+}
+
+function finalizeToolCalls(container) {
+    // Mark any tool calls still showing spinners as completed
+    const spinners = container.querySelectorAll('.tool-status-icon .animate-pulse');
+    spinners.forEach(spinner => {
+        const icon = spinner.closest('.tool-status-icon');
+        icon.innerHTML = '<svg class="w-4 h-4 text-green-600" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M11.42 15.17L17.25 21A2.652 2.652 0 0021 17.25l-5.877-5.877M11.42 15.17l2.496-3.03c.317-.384.74-.626 1.208-.766M11.42 15.17l-4.655 5.653a2.548 2.548 0 11-3.586-3.586l6.837-5.63m5.108-.233c.55-.164 1.163-.188 1.743-.14a4.5 4.5 0 004.486-6.336l-3.276 3.277a3.004 3.004 0 01-2.25-2.25l3.276-3.276a4.5 4.5 0 00-6.336 4.486c.049.58.025 1.194-.14 1.743" /></svg>';
+    });
+}
+
+function toggleReasoning(btn) {
+    const wrapper = btn.closest('.reasoning-wrapper');
+    const block = wrapper.querySelector('.reasoning-block');
+    const chevron = wrapper.querySelector('.reasoning-chevron');
+    block.classList.toggle('open');
+    chevron.style.transform = block.classList.contains('open') ? 'rotate(90deg)' : '';
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// UI Helpers
+// ═══════════════════════════════════════════════════════════════════
+
+function clearConversation() {
+    state.messages = [];
+    state.toolCalls = [];
+    state.streamedText = '';
+    if (state.abortController) {
+        state.abortController.abort();
+        state.abortController = null;
+    }
+    state.streaming = false;
+    
+    const msgs = document.getElementById('messages');
+    msgs.innerHTML = '';
+    
+    // Re-add empty state
+    document.getElementById('chat-root').classList.add('empty-mode');
+    msgs.innerHTML = `
+        <div id="empty-state" class="flex flex-col items-center px-6">
+            <div class="lucent-orb lucent-orb-lg mb-6"></div>
+            <h2 class="text-lg font-semibold text-gray-900 mb-2">Hey — what's on your mind?</h2>
+            <p class="empty-state-text text-sm text-gray-500 text-center max-w-md mb-8">
+                Pick up where we left off, start something new, or just think out loud.
+            </p>
+            <div class="grid grid-cols-2 gap-3 max-w-lg w-full">
+                <button onclick="sendQuickPrompt('What have we been working on lately?')" class="text-left px-4 py-3 rounded-xl border border-gray-200 hover:border-primary-300 hover:bg-primary-50/50 transition-all text-sm text-gray-700 group">
+                    <span class="font-medium text-gray-900 group-hover:text-primary-700">What have we been working on?</span>
+                </button>
+                <button onclick="sendQuickPrompt('Catch me up — anything I should know about?')" class="text-left px-4 py-3 rounded-xl border border-gray-200 hover:border-primary-300 hover:bg-primary-50/50 transition-all text-sm text-gray-700 group">
+                    <span class="font-medium text-gray-900 group-hover:text-primary-700">Catch me up</span>
+                </button>
+                <button onclick="sendQuickPrompt('How are the daemon tasks going?')" class="text-left px-4 py-3 rounded-xl border border-gray-200 hover:border-primary-300 hover:bg-primary-50/50 transition-all text-sm text-gray-700 group">
+                    <span class="font-medium text-gray-900 group-hover:text-primary-700">How are tasks going?</span>
+                </button>
+                <button onclick="sendQuickPrompt('I have an idea I want to talk through')" class="text-left px-4 py-3 rounded-xl border border-gray-200 hover:border-primary-300 hover:bg-primary-50/50 transition-all text-sm text-gray-700 group">
+                    <span class="font-medium text-gray-900 group-hover:text-primary-700">Think through an idea</span>
+                </button>
+            </div>
+        </div>`;
+    
+    updateButtons();
+    hideStatus();
+}
+
+function updateButtons() {
+    const sendBtn = document.getElementById('send-btn');
+    const stopBtn = document.getElementById('stop-btn');
+    const input = document.getElementById('chat-input');
+    
+    sendBtn.disabled = !input.value.trim() || state.streaming;
+    sendBtn.style.display = state.streaming ? 'none' : 'flex';
+    stopBtn.style.display = state.streaming ? 'flex' : 'none';
+    stopBtn.classList.toggle('hidden', !state.streaming);
+}
+
+function showStatus(text) {
+    document.getElementById('status-bar').classList.remove('hidden');
+    document.getElementById('status-text').textContent = text;
+}
+
+function hideStatus() {
+    document.getElementById('status-bar').classList.add('hidden');
+}
+
+function scrollToBottom() {
+    const msgs = document.getElementById('messages');
+    msgs.scrollTop = msgs.scrollHeight;
+}
+
+function handleKey(e) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage(e);
+    }
+    setTimeout(updateButtons, 0);
+}
+
+function autoResize(el) {
+    el.style.height = 'auto';
+    el.style.height = Math.min(el.scrollHeight, 200) + 'px';
+    updateButtons();
+}
+
+function escapeHtml(s) {
+    if (!s) return '';
+    const d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+}
+
+function formatJSON(text) {
+    if (!text) return '';
+    try {
+        return JSON.stringify(JSON.parse(text), null, 2);
+    } catch(e) {
+        return text;
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Markdown Renderer
+// ═══════════════════════════════════════════════════════════════════
+
+function renderMarkdown(text) {
+    if (!text) return '';
+    
+    // Code blocks
+    text = text.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
+        const langLabel = lang ? `<span class="absolute top-2 right-2 text-[10px] text-gray-500 font-sans">${escapeHtml(lang)}</span>` : '';
+        return `<div class="relative my-3"><pre class="bg-gray-900 text-gray-100 rounded-xl p-4 overflow-x-auto text-xs leading-relaxed">${langLabel}<code>${escapeHtml(code.trim())}</code></pre></div>`;
+    });
+    // Inline code
+    text = text.replace(/`([^`]+)`/g, (_, code) =>
+        `<code class="bg-gray-100 text-primary-700 px-1.5 py-0.5 rounded-md text-xs font-medium">${escapeHtml(code)}</code>`
+    );
+    // Bold
+    text = text.replace(/\*\*([^*]+)\*\*/g, '<strong class="font-semibold text-gray-900">$1</strong>');
+    // Italic
+    text = text.replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, '<em>$1</em>');
+    // Headers
+    text = text.replace(/^### (.+)$/gm, '<h4 class="font-semibold text-gray-900 mt-3 mb-1 text-sm">$1</h4>');
+    text = text.replace(/^## (.+)$/gm, '<h3 class="font-semibold text-gray-900 mt-4 mb-1.5">$1</h3>');
+    text = text.replace(/^# (.+)$/gm, '<h2 class="font-bold text-gray-900 mt-4 mb-2 text-lg">$1</h2>');
+    // Horizontal rules
+    text = text.replace(/^---$/gm, '<hr class="my-4 border-gray-200">');
+    // Unordered lists
+    text = text.replace(/^- (.+)$/gm, '<li class="ml-4 list-disc text-gray-700">$1</li>');
+    text = text.replace(/(<li[^>]*>.*<\/li>\n?)+/g, '<ul class="my-2 space-y-0.5">$&</ul>');
+    // Ordered lists
+    text = text.replace(/^\d+\. (.+)$/gm, '<li class="ml-4 list-decimal text-gray-700">$1</li>');
+    // Links
+    text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, label, url) => {
+        const safeUrl = url.trim();
+        if (/^(https?:\/\/|\/|#|mailto:)/i.test(safeUrl)) {
+            return `<a href="${escapeHtml(safeUrl)}" class="text-primary-600 hover:text-primary-700 underline decoration-primary-300" target="_blank" rel="noopener">${escapeHtml(label)}</a>`;
+        }
+        return escapeHtml(label);
+    });
+    // Paragraphs
+    text = text.replace(/\n\n/g, '</p><p class="mt-2">');
+    text = '<p>' + text + '</p>';
+    text = text.replace(/<p>\s*<\/p>/g, '');
+    
+    // Sanitize
+    if (typeof DOMPurify !== 'undefined') {
+        text = DOMPurify.sanitize(text);
+    }
+    return text;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Keyboard Shortcuts
+// ═══════════════════════════════════════════════════════════════════
+
+document.addEventListener('keydown', function(e) {
+    // Focus input on any typing (if not already focused anywhere)
+    if (e.key.length === 1 && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        const active = document.activeElement;
+        if (active.tagName !== 'TEXTAREA' && active.tagName !== 'INPUT' && active.tagName !== 'SELECT') {
+            document.getElementById('chat-input').focus();
+        }
+    }
+    // Escape to stop streaming
+    if (e.key === 'Escape' && state.streaming) {
+        stopStreaming();
+    }
+});
+</script>
+{% endblock %}

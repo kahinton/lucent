@@ -22,8 +22,10 @@
         <a href="/sandboxes?tab=instances" class="px-4 py-2.5 text-sm font-medium border-b-2 transition-colors {% if tab == 'instances' %}-mb-px border-primary-600 text-primary-600{% else %}border-transparent text-gray-500 hover:text-gray-700{% endif %}">Instances</a>
     </div>
 
+    {% from "partials/pagination.html" import pagination_controls %}
     {% if tab == 'templates' %}
     <!-- ═══════════════ TEMPLATES VIEW ═══════════════ -->
+    {{ pagination_controls(base_url="/sandboxes", page=page, per_page=per_page, total_pages=total_pages, total_count=total_count, filter_params={"tab": "templates"}, entity_name="templates") }}
     {% if templates %}
     <div class="grid gap-4 grid-cols-1 md:grid-cols-2 lg:grid-cols-3">
         {% for tpl in templates %}
@@ -31,6 +33,13 @@
             <div class="flex items-start justify-between mb-3">
                 <div>
                     <h3 class="font-semibold text-gray-900">{{ tpl.name }}</h3>
+                    {% if tpl.scope != 'built-in' %}
+                        {% if tpl.owner_user_name %}
+                        <span class="inline-block mt-1 px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-600">Owner: {{ tpl.owner_user_name }}</span>
+                        {% elif tpl.owner_group_name %}
+                        <span class="inline-block mt-1 px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-600">Owner: {{ tpl.owner_group_name }}</span>
+                        {% endif %}
+                    {% endif %}
                     {% if tpl.description %}
                     <p class="text-xs text-gray-500 mt-0.5 line-clamp-2">{{ tpl.description }}</p>
                     {% endif %}
@@ -82,6 +91,7 @@
         </div>
         {% endfor %}
     </div>
+    {{ pagination_controls(base_url="/sandboxes", page=page, per_page=per_page, total_pages=total_pages, total_count=total_count, filter_params={"tab": "templates"}, show_per_page=false, entity_name="templates") }}
     {% else %}
     <div class="bg-white rounded-lg border border-gray-200 p-12 text-center">
         <svg class="w-12 h-12 text-gray-300 mx-auto mb-3" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
@@ -95,9 +105,13 @@
     {% else %}
     <!-- ═══════════════ INSTANCES VIEW ═══════════════ -->
     <div class="flex gap-1 bg-gray-100 rounded-lg p-1 w-fit">
-        <a href="/sandboxes?tab=instances" class="px-3 py-1.5 text-sm rounded-md font-medium transition-colors {% if show_filter == 'all' %}bg-white text-gray-900 shadow-sm{% else %}text-gray-500 hover:text-gray-700{% endif %}">All</a>
-        <a href="/sandboxes?tab=instances&show=active" class="px-3 py-1.5 text-sm rounded-md font-medium transition-colors {% if show_filter == 'active' %}bg-white text-gray-900 shadow-sm{% else %}text-gray-500 hover:text-gray-700{% endif %}">Active</a>
+        <a href="/sandboxes?tab=instances&per_page={{ per_page }}" class="px-3 py-1.5 text-sm rounded-md font-medium transition-colors {% if show_filter == 'all' %}bg-white text-gray-900 shadow-sm{% else %}text-gray-500 hover:text-gray-700{% endif %}">All</a>
+        <a href="/sandboxes?tab=instances&show=active&per_page={{ per_page }}" class="px-3 py-1.5 text-sm rounded-md font-medium transition-colors {% if show_filter == 'active' %}bg-white text-gray-900 shadow-sm{% else %}text-gray-500 hover:text-gray-700{% endif %}">Active</a>
     </div>
+
+    {% set instance_filter_params = {"tab": "instances"} %}
+    {% if show_filter != 'all' %}{% set _ = instance_filter_params.update({"show": show_filter}) %}{% endif %}
+    {{ pagination_controls(base_url="/sandboxes", page=page, per_page=per_page, total_pages=total_pages, total_count=total_count, filter_params=instance_filter_params, entity_name="instances") }}
 
     {% if sandboxes %}
     <div class="bg-white rounded-lg border border-gray-200 overflow-hidden">
@@ -173,6 +187,7 @@
             </tbody>
         </table>
     </div>
+    {{ pagination_controls(base_url="/sandboxes", page=page, per_page=per_page, total_pages=total_pages, total_count=total_count, filter_params=instance_filter_params, show_per_page=false, entity_name="instances") }}
     {% else %}
     <div class="bg-white rounded-lg border border-gray-200 p-12 text-center">
         <svg class="w-12 h-12 text-gray-300 mx-auto mb-3" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
@@ -249,6 +264,15 @@
                 <label class="block text-sm font-medium text-gray-700 mb-1">Environment Variables (KEY=VALUE per line)</label>
                 <textarea name="env_vars" rows="2" placeholder="PYTHONDONTWRITEBYTECODE=1&#10;NODE_ENV=production" class="w-full px-3 py-2 border rounded-lg text-sm font-mono"></textarea>
             </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Owner</label>
+                <select name="owner_scope" class="w-full px-3 py-2 border rounded-lg text-sm">
+                    <option value="me" selected>Me</option>
+                    {% for group in owner_groups %}
+                    <option value="group:{{ group.id }}">{{ group.name }}</option>
+                    {% endfor %}
+                </select>
+            </div>
             <div class="grid grid-cols-3 gap-3">
                 <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">Memory</label>
@@ -317,7 +341,7 @@
 </div>
 {% endblock %}
 {% block extra_scripts %}
-<script>
+<script nonce="{{ request.state.csp_nonce }}">
 let currentSandboxId = null;
 
 function openTerminal(sandboxId) {
@@ -346,9 +370,15 @@ async function runCommand() {
     input.value = '';
 
     try {
-        const resp = await fetch('/api/sandboxes/' + currentSandboxId + '/exec', {
+        const csrfCookie = document.cookie.split('; ')
+            .find(c => c.startsWith('lucent_csrf='));
+        const csrfToken = csrfCookie ? csrfCookie.split('=')[1] : '';
+        const resp = await fetch('/sandboxes/' + currentSandboxId + '/exec', {
             method: 'POST',
-            headers: {'Content-Type': 'application/json'},
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRF-Token': csrfToken
+            },
             body: JSON.stringify({command: cmd, timeout: 30})
         });
         const data = await resp.json();

@@ -13,6 +13,7 @@ from lucent.db.pool import get_pool
 from lucent.logging import get_logger
 from lucent.sandbox.manager import get_sandbox_manager
 from lucent.sandbox.models import SandboxConfig, SandboxStatus
+from lucent.secrets import SecretRegistry, resolve_env_vars
 
 logger = get_logger("api.sandboxes")
 
@@ -112,12 +113,18 @@ async def _get_sandbox_for_user(sandbox_id: str, user: AuthenticatedUser) -> dic
 
 def _validate_sandbox_path(path: str) -> str:
     """Validate and normalize a sandbox file path to prevent traversal."""
+    import os
     import posixpath
 
     normalized = posixpath.normpath(path)
-    if ".." in normalized.split("/"):
+    workspace_root = "/workspace"
+    candidate = normalized if normalized.startswith("/") else posixpath.join(workspace_root, normalized)
+    resolved_candidate = os.path.realpath(candidate)
+    resolved_root = os.path.realpath(workspace_root)
+    root_prefix = resolved_root.rstrip("/") + "/"
+    if resolved_candidate != resolved_root and not resolved_candidate.startswith(root_prefix):
         raise HTTPException(status_code=400, detail="Invalid path")
-    return normalized
+    return resolved_candidate
 
 
 def _to_response(info) -> SandboxResponse:
@@ -156,13 +163,15 @@ async def create_sandbox(
     user: AuthenticatedUser,
 ) -> SandboxResponse:
     """Create a new sandbox environment."""
+    provider = SecretRegistry.get()
+    resolved_env_vars = await resolve_env_vars(body.env_vars, provider)
     config = SandboxConfig(
         name=body.name,
         image=body.image,
         repo_url=body.repo_url,
         branch=body.branch,
         setup_commands=body.setup_commands,
-        env_vars=body.env_vars,
+        env_vars=resolved_env_vars,
         working_dir=body.working_dir,
         memory_limit=body.memory_limit,
         cpu_limit=body.cpu_limit,
@@ -185,12 +194,13 @@ async def create_sandbox(
     return _to_response(info)
 
 
-@router.get("", response_model=list[SandboxResponse])
-async def list_sandboxes(user: AuthenticatedUser) -> list[SandboxResponse]:
+@router.get("")
+async def list_sandboxes(user: AuthenticatedUser):
     """List all sandboxes for the caller's organization."""
     manager = get_sandbox_manager()
-    sandboxes = await manager.list_all(str(user.organization_id))
-    return [_to_response(s) for s in sandboxes]
+    result = await manager.list_all(str(user.organization_id))
+    result["items"] = [_to_response(s) for s in result["items"]]
+    return result
 
 
 @router.get("/{sandbox_id}", response_model=SandboxResponse)
@@ -366,7 +376,11 @@ async def list_templates(user: AuthenticatedUser):
 
     pool = await get_pool()
     repo = SandboxTemplateRepository(pool)
-    return await repo.list_all(str(user.organization_id))
+    return await repo.list_accessible_by(
+        str(user.id),
+        str(user.organization_id),
+        user_role=user.role.value,
+    )
 
 
 @router.get("/templates/{template_id}")
@@ -376,7 +390,12 @@ async def get_template(template_id: str, user: AuthenticatedUser):
 
     pool = await get_pool()
     repo = SandboxTemplateRepository(pool)
-    tpl = await repo.get(template_id, str(user.organization_id))
+    tpl = await repo.get_accessible(
+        template_id,
+        str(user.organization_id),
+        str(user.id),
+        user_role=user.role.value,
+    )
     if not tpl:
         raise HTTPException(404, "Template not found")
     return tpl
@@ -384,10 +403,16 @@ async def get_template(template_id: str, user: AuthenticatedUser):
 
 @router.patch("/templates/{template_id}")
 async def update_template(template_id: str, body: TemplateUpdateRequest, user: AuthenticatedUser):
-    """Update a sandbox template."""
+    """Update a sandbox template. Only owner or admin can modify."""
+    from lucent.access_control import AccessControlService
     from lucent.db.sandbox_template import SandboxTemplateRepository
 
     pool = await get_pool()
+    acl = AccessControlService(pool)
+    if not await acl.can_modify(
+        str(user.id), "sandbox_template", template_id, str(user.organization_id)
+    ):
+        raise HTTPException(404, "Template not found")
     repo = SandboxTemplateRepository(pool)
     updates = body.model_dump(exclude_none=True)
     if not updates:
@@ -400,10 +425,16 @@ async def update_template(template_id: str, body: TemplateUpdateRequest, user: A
 
 @router.delete("/templates/{template_id}")
 async def delete_template(template_id: str, user: AuthenticatedUser):
-    """Delete a sandbox template."""
+    """Delete a sandbox template. Only owner or admin can delete."""
+    from lucent.access_control import AccessControlService
     from lucent.db.sandbox_template import SandboxTemplateRepository
 
     pool = await get_pool()
+    acl = AccessControlService(pool)
+    if not await acl.can_modify(
+        str(user.id), "sandbox_template", template_id, str(user.organization_id)
+    ):
+        raise HTTPException(404, "Template not found")
     repo = SandboxTemplateRepository(pool)
     deleted = await repo.delete(template_id, str(user.organization_id))
     if not deleted:
@@ -422,17 +453,24 @@ async def launch_from_template(
 
     pool = await get_pool()
     tpl_repo = SandboxTemplateRepository(pool)
-    tpl = await tpl_repo.get(template_id, str(user.organization_id))
+    tpl = await tpl_repo.get_accessible(
+        template_id,
+        str(user.organization_id),
+        str(user.id),
+        user_role=user.role.value,
+    )
     if not tpl:
         raise HTTPException(404, "Template not found")
 
+    provider = SecretRegistry.get()
+    resolved_env_vars = await resolve_env_vars(tpl.get("env_vars") or {}, provider)
     config = SandboxConfig(
         name=name or f"{tpl['name']}-instance",
         image=tpl["image"],
         repo_url=tpl.get("repo_url"),
         branch=tpl.get("branch"),
         setup_commands=tpl.get("setup_commands") or [],
-        env_vars=tpl.get("env_vars") or {},
+        env_vars=resolved_env_vars,
         working_dir=tpl.get("working_dir", "/workspace"),
         memory_limit=tpl.get("memory_limit", "2g"),
         cpu_limit=float(tpl.get("cpu_limit", 2.0)),

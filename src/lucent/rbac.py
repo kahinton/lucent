@@ -4,11 +4,12 @@ Provides permission checking for the Lucent memory system.
 
 Roles (hierarchical):
 - member: Standard user, can manage own memories
+- daemon: Service account role — full memory access for consolidation, no user/org management
 - admin: Can manage org users, view org-wide audit/access logs
 - owner: Full control including org settings and deletion
 
 Permission checking is designed to be:
-- Simple: 3 roles cover most use cases
+- Simple: 4 roles cover most use cases
 - Safe: Default deny, explicit allow
 - Fast: Role hierarchy means simple comparisons
 """
@@ -21,6 +22,7 @@ class Role(str, Enum):
     """User roles in order of increasing privilege."""
 
     MEMBER = "member"
+    DAEMON = "daemon"
     ADMIN = "admin"
     OWNER = "owner"
 
@@ -36,28 +38,28 @@ class Role(str, Enum):
         """Check if this role has >= privileges than another."""
         if not isinstance(other, Role):
             return NotImplemented
-        order = {Role.MEMBER: 0, Role.ADMIN: 1, Role.OWNER: 2}
+        order = {Role.MEMBER: 0, Role.DAEMON: 1, Role.ADMIN: 2, Role.OWNER: 3}
         return order[self] >= order[other]
 
     def __gt__(self, other: "Role") -> bool:
         """Check if this role has > privileges than another."""
         if not isinstance(other, Role):
             return NotImplemented
-        order = {Role.MEMBER: 0, Role.ADMIN: 1, Role.OWNER: 2}
+        order = {Role.MEMBER: 0, Role.DAEMON: 1, Role.ADMIN: 2, Role.OWNER: 3}
         return order[self] > order[other]
 
     def __le__(self, other: "Role") -> bool:
         """Check if this role has <= privileges than another."""
         if not isinstance(other, Role):
             return NotImplemented
-        order = {Role.MEMBER: 0, Role.ADMIN: 1, Role.OWNER: 2}
+        order = {Role.MEMBER: 0, Role.DAEMON: 1, Role.ADMIN: 2, Role.OWNER: 3}
         return order[self] <= order[other]
 
     def __lt__(self, other: "Role") -> bool:
         """Check if this role has < privileges than another."""
         if not isinstance(other, Role):
             return NotImplemented
-        order = {Role.MEMBER: 0, Role.ADMIN: 1, Role.OWNER: 2}
+        order = {Role.MEMBER: 0, Role.DAEMON: 1, Role.ADMIN: 2, Role.OWNER: 3}
         return order[self] < order[other]
 
 
@@ -91,6 +93,9 @@ class Permission(str, Enum):
     ORG_DELETE = "org.delete"
     ORG_TRANSFER = "org.transfer"
 
+    # Integration permissions
+    MANAGE_INTEGRATIONS = "integrations.manage"
+
 
 # Permission matrix: which roles have which permissions
 ROLE_PERMISSIONS: dict[Role, set[Permission]] = {
@@ -110,6 +115,24 @@ ROLE_PERMISSIONS: dict[Role, set[Permission]] = {
         # Org (view only)
         Permission.ORG_VIEW,
     },
+    Role.DAEMON: {
+        # Memory — full access for consolidation and maintenance
+        Permission.MEMORY_CREATE,
+        Permission.MEMORY_READ_OWN,
+        Permission.MEMORY_READ_SHARED,
+        Permission.MEMORY_READ_ALL,
+        Permission.MEMORY_UPDATE_OWN,
+        Permission.MEMORY_DELETE_OWN,
+        Permission.MEMORY_DELETE_ANY,
+        Permission.MEMORY_SHARE,
+        # Audit (own only — daemon can see its own actions)
+        Permission.AUDIT_VIEW_OWN,
+        Permission.ACCESS_VIEW_OWN,
+        # Users (view only — daemon needs to look up users for task dispatch)
+        Permission.USERS_VIEW,
+        # Org (view only)
+        Permission.ORG_VIEW,
+    },
     Role.ADMIN: {
         # All member permissions
         Permission.MEMORY_CREATE,
@@ -118,6 +141,7 @@ ROLE_PERMISSIONS: dict[Role, set[Permission]] = {
         Permission.MEMORY_READ_ALL,  # Admin can see all org memories
         Permission.MEMORY_UPDATE_OWN,
         Permission.MEMORY_DELETE_OWN,
+        Permission.MEMORY_DELETE_ANY,  # Admin can delete any org memory
         Permission.MEMORY_SHARE,
         # Audit (org-wide)
         Permission.AUDIT_VIEW_OWN,
@@ -130,6 +154,8 @@ ROLE_PERMISSIONS: dict[Role, set[Permission]] = {
         Permission.USERS_MANAGE,
         # Org (view only)
         Permission.ORG_VIEW,
+        # Integrations
+        Permission.MANAGE_INTEGRATIONS,
     },
     Role.OWNER: {
         # All admin permissions plus...
@@ -155,6 +181,8 @@ ROLE_PERMISSIONS: dict[Role, set[Permission]] = {
         Permission.ORG_UPDATE,
         Permission.ORG_DELETE,
         Permission.ORG_TRANSFER,
+        # Integrations
+        Permission.MANAGE_INTEGRATIONS,
     },
 }
 

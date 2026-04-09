@@ -1,65 +1,125 @@
 ---
 name: security-audit
-description: 'Security review procedures for auth, API keys, rate limiting, RBAC, and memory access control — pairs with the existing security agent'
+description: 'Security review procedures — authentication, authorization, input validation, secrets management, and access control. Use when reviewing authentication, authorization, input validation, or access control code for vulnerabilities.'
 ---
 
-# Security Audit — Lucent Project
+# Security Audit
 
-## Lucent Security Architecture
+## Before Starting
 
-| Layer | Implementation | Key Files |
-|-------|---------------|-----------|
-| Authentication | Session cookies (bcrypt + PyNaCl), API keys, OAuth providers | `auth.py`, `auth_providers.py` |
-| Authorization | RBAC (owner/admin/member) + org-scoped isolation | `rbac.py`, `api/deps.py` |
-| Rate limiting | Token bucket per-user, configurable per-endpoint | `rate_limit.py` |
-| Memory isolation | Organization-scoped — users only see their org's memories | `db/` repositories, SQL queries |
-| MCP auth | Session token or API key via Bearer auth in MCP middleware | `server.py` middleware |
-| CSRF | Double-submit cookie pattern on state-changing endpoints | `api/app.py` |
+Load previous security findings and known vulnerabilities:
+```
+search_memories(query="security audit vulnerability", tags=["security"], limit=10)
+```
 
-## Audit Checklist
+## Audit Sequence
 
-### 1. Authentication
-- [ ] Session cookies: `HttpOnly`, `Secure`, `SameSite=Lax`, proper expiry
-- [ ] Password hashing: bcrypt with adequate work factor
-- [ ] Session tokens: cryptographically random, not guessable
-- [ ] API keys: hashed in database (never stored plaintext)
-- [ ] No auth bypass on sensitive endpoints (check `get_current_user` dependency)
+### 1. Map the Attack Surface
 
-### 2. Authorization (RBAC)
-- [ ] Destructive operations (DELETE) require `admin` or `owner` role
-- [ ] Write operations require `member` or above
-- [ ] Organization isolation: queries always filter by `organization_id`
-- [ ] No IDOR — users can't access resources from other orgs by guessing IDs
-- [ ] Daemon API key has minimal permissions (read/write, not admin)
+Identify every entry point where external data enters the system:
 
-### 3. Input Validation
-- [ ] All API inputs validated via Pydantic models
-- [ ] SQL queries use parameterized queries (asyncpg `$1` placeholders, never f-strings)
-- [ ] File paths validated and sandboxed (sandbox module)
-- [ ] Search queries sanitized (no SQL injection via search)
+```bash
+# Find route handlers / API endpoints
+grep -rn "route\|endpoint\|@app\|@router\|handler\|controller" src/ --include="*.py" --include="*.ts" --include="*.go" --include="*.rs" --include="*.java"
 
-### 4. Rate Limiting
-- [ ] Auth endpoints (login, register) have strict rate limits
-- [ ] API endpoints have per-user rate limits
-- [ ] Rate limit headers returned in responses
-- [ ] Failed auth attempts tracked and limited
+# Find form/request parsing
+grep -rn "request\.\|req\.\|body\.\|params\.\|query\." src/
+```
 
-### 5. Memory Access Control
-- [ ] Memories scoped to organization — cross-org access impossible
-- [ ] Shared memories only visible within the same org
-- [ ] Memory operations validate user.organization_id against memory.organization_id
-- [ ] Daemon operations use the daemon's own identity, not impersonation
+For each entry point, determine:
+- What authentication is required (or not)
+- What authorization checks are applied
+- What input validation exists
+- What data is returned in responses
 
-### 6. MCP Protocol Security
-- [ ] MCP middleware validates session token or API key on every request
-- [ ] Tool operations respect the authenticated user's permissions
-- [ ] No tools expose internal server state or other users' data
+### 2. Authentication Review
 
-## How to Run an Audit
+Trace the auth flow end-to-end:
 
-1. **Search memories** for past audit results: `search_memories(tags=["security", "code-review"])`
-2. **Read the auth chain**: `auth.py` → `auth_providers.py` → `api/deps.py` → router endpoints
-3. **Check every route** in `api/routers/` — verify auth dependency is present and RBAC is correct
-4. **Grep for red flags**: `f"SELECT`, `f"INSERT`, `f"UPDATE`, `f"DELETE` (SQL injection risk), `password` in logs, hardcoded secrets
-5. **Test boundary conditions**: What happens with expired sessions? Revoked API keys? Wrong org ID?
-6. **Save findings** as a memory tagged `security`, `code-review` with importance 8-9
+1. **Credential handling:** How are passwords/tokens stored? (Must be hashed, never plaintext)
+2. **Session management:** How are sessions created, validated, and expired? Cookie attributes? (`HttpOnly`, `Secure`, `SameSite`)
+3. **Token validation:** Is it possible to bypass validation? What happens with expired, malformed, or missing tokens?
+4. **Every protected endpoint:** Verify the auth middleware/dependency is actually applied — not just present in the codebase but skipped on certain routes.
+
+### 3. Authorization Review
+
+For every endpoint that handles data:
+
+1. **Ownership checks:** Can user A access user B's data? Test by checking whether resource lookups include the owner/org filter.
+2. **Role enforcement:** Are admin-only operations actually restricted? Check the middleware, not just the route declaration.
+3. **Horizontal privilege escalation:** Can a user modify another user's resources by guessing IDs?
+4. **Response codes:** 404 (not 403) for resources that don't belong to the user — don't leak existence.
+
+### 4. Input Validation & Injection
+
+```bash
+# SQL injection — string interpolation in queries
+grep -rn 'f"SELECT\|f"INSERT\|f"UPDATE\|f"DELETE\|`SELECT\|`INSERT' src/
+
+# Command injection — user input in shell commands
+grep -rn 'exec\|system\|popen\|subprocess\|child_process\|os.system' src/
+
+# Template injection
+grep -rn 'render\|template\|format(' src/ | grep -v "test"
+```
+
+Verify:
+- All SQL uses parameterized queries (never string interpolation)
+- All shell commands use arrays/lists (never string concatenation)
+- All user input is validated before use (type, length, format)
+- File uploads are validated (type, size, content — not just extension)
+
+### 5. Secrets Management
+
+```bash
+# Hardcoded credentials
+grep -rn 'password\|secret\|api_key\|token\|credential' src/ | grep -v 'test\|mock\|example\|\.env\.example'
+
+# Secrets in logs
+grep -rn 'log\|print\|console\|logger' src/ | grep -i 'password\|secret\|token\|key'
+```
+
+Verify:
+- No secrets in source code, config files committed to git, or environment variable defaults
+- Secrets are loaded from environment variables or a secrets manager
+- Error messages don't expose internal details (stack traces, SQL errors, file paths)
+- Logs don't contain sensitive data
+
+### 6. Rate Limiting & Abuse Prevention
+
+- Are authentication endpoints rate-limited? (login, token refresh, password reset)
+- Are expensive operations rate-limited? (search, bulk operations, file uploads)
+- Is there protection against enumeration attacks? (consistent timing on login failures)
+
+## Recording Findings
+
+Every finding gets a memory:
+
+```
+create_memory(
+  type="technical",
+  content="## Security Finding: <title>\n\n**Location**: <file and line/function>\n**Severity**: Critical / High / Medium / Low\n**Issue**: <what's wrong>\n**Exploit scenario**: <how an attacker could use this>\n**Fix**: <specific remediation>\n**Status**: Needs fix / Fixed / Accepted risk",
+  tags=["security", "<severity>"],
+  importance=9,
+  shared=true
+)
+```
+
+**Severity calibration:**
+| Severity | Criteria |
+|----------|----------|
+| Critical | Unauthenticated access to sensitive data, remote code execution, full auth bypass |
+| High | Authenticated access to other users' data, privilege escalation, SQL injection |
+| Medium | Information disclosure, missing rate limiting, weak session management |
+| Low | Missing security headers, verbose error messages, minor configuration issues |
+
+## Anti-Patterns
+
+| Anti-Pattern | Why It Fails | What To Do Instead |
+|---|---|---|
+| **Testing only happy-path inputs** | Attackers don't send well-formed requests — if you only verify that valid input works, you miss how the system handles malicious, malformed, or boundary-value input. | For every input field, test with null, empty string, maximum-length values, special characters, and known injection payloads. |
+| **Ignoring transitive dependencies** | A direct dependency may be secure, but its transitive dependencies can introduce vulnerabilities — supply-chain attacks target deep deps that nobody audits. | Run `pip audit`, `npm audit`, or equivalent on the full dependency tree. Don't stop at direct dependencies. |
+| **Missing TOCTOU race conditions** | Time-of-check-to-time-of-use gaps allow attackers to change state between an authorization check and the authorized action, bypassing access control. | Use atomic operations or database-level constraints where possible. If a check-then-act pattern is unavoidable, re-verify inside the transaction. |
+| **Treating internal endpoints as safe** | Any endpoint reachable over HTTP — even "internal" ones behind a reverse proxy — can be reached by an attacker who compromises any part of the network. | Apply authentication and authorization to every HTTP-accessible endpoint regardless of its intended audience. Internal is a network topology, not a security boundary. |
+| **Scanning for known CVEs but not logic flaws** | Automated scanners catch known vulnerability patterns but miss business logic issues like broken access control, insecure direct object references, and privilege escalation. | Use automated tools as a baseline, then manually trace every auth decision and data flow against the audit checklist (§§2–3). |
+| **Reporting "possible" vulnerabilities without confirming** | Unverified findings waste remediation time and erode trust in the audit — teams start ignoring findings if too many turn out to be false positives. | Trace the actual code path to confirm exploitability before reporting. State the severity, the exploit scenario, and whether you verified it. |

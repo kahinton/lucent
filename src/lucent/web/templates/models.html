@@ -1,0 +1,292 @@
+{% extends "base.html" %}
+{% block title %}Models - Lucent{% endblock %}
+{% block content %}
+<div class="mb-8">
+    <div class="flex items-center justify-between mb-2">
+        <div>
+            <h1 class="text-2xl font-bold text-gray-900">Models</h1>
+            <p class="text-sm text-gray-500">{{ enabled_count }} of {{ total_count }} models enabled</p>
+        </div>
+        <button onclick="document.getElementById('add-model-modal').classList.remove('hidden')" class="px-4 py-2 text-sm bg-primary-600 text-white rounded-md hover:bg-primary-700 font-medium">+ Add Model</button>
+    </div>
+</div>
+
+{% if request.query_params.get('error') %}
+<div class="mb-4 bg-red-50 border border-red-200 rounded-xl p-4">
+    <p class="text-sm font-medium text-red-800">{{ request.query_params.get('error') }}</p>
+</div>
+{% endif %}
+
+{% if request.query_params.get('success') %}
+<div class="mb-4 bg-green-50 border border-green-200 rounded-xl p-4">
+    <p class="text-sm font-medium text-green-800">{{ request.query_params.get('success') }}</p>
+</div>
+{% endif %}
+
+{% if request.query_params.get('warning') %}
+<div class="mb-4 bg-amber-50 border border-amber-200 rounded-xl p-4">
+    <p class="text-sm font-medium text-amber-800">{{ request.query_params.get('warning') }}</p>
+</div>
+{% endif %}
+
+<!-- Group by provider -->
+{% for provider in providers %}
+<div class="mb-8">
+    <h2 class="text-lg font-semibold text-gray-700 mb-3 capitalize">{{ provider }}</h2>
+    <div class="bg-white rounded-xl border border-gray-200 overflow-hidden">
+        <table class="w-full">
+            <thead class="bg-gray-50">
+                <tr>
+                    <th class="text-left text-xs font-medium text-gray-500 uppercase px-4 py-3">Model</th>
+                    <th class="text-left text-xs font-medium text-gray-500 uppercase px-4 py-3">Category</th>
+                    <th class="text-left text-xs font-medium text-gray-500 uppercase px-4 py-3 hidden sm:table-cell">Context</th>
+                    <th class="text-left text-xs font-medium text-gray-500 uppercase px-4 py-3 hidden md:table-cell">Tags</th>
+                    <th class="text-left text-xs font-medium text-gray-500 uppercase px-4 py-3">Status</th>
+                    <th class="text-right text-xs font-medium text-gray-500 uppercase px-4 py-3">Actions</th>
+                </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-100">
+                {% for model in models if model.provider == provider %}
+                <tr class="{% if not model.is_enabled %}opacity-50{% endif %}">
+                    <td class="px-4 py-3">
+                        <div class="font-medium text-gray-900 text-sm">{{ model.name }}</div>
+                        <div class="text-xs text-gray-500 font-mono">{{ model.id }}</div>
+                    </td>
+                    <td class="px-4 py-3">
+                        <span class="px-2 py-0.5 rounded text-xs
+                            {% if model.category == 'reasoning' %}bg-purple-100 text-purple-700
+                            {% elif model.category == 'agentic' %}bg-blue-100 text-blue-700
+                            {% elif model.category == 'fast' %}bg-green-100 text-green-700
+                            {% elif model.category == 'visual' %}bg-amber-100 text-amber-700
+                            {% elif model.category == 'frontier' %}bg-rose-100 text-rose-700
+                            {% elif model.category == 'research' %}bg-teal-100 text-teal-700
+                            {% else %}bg-gray-100 text-gray-600{% endif %}">{{ model.category }}</span>
+                    </td>
+                    <td class="px-4 py-3 hidden sm:table-cell">
+                        {% if model.context_window > 0 %}
+                        <span class="text-xs text-gray-600 font-mono">{{ (model.context_window / 1000)|int }}k</span>
+                        {% else %}
+                        <span class="text-xs text-gray-400">—</span>
+                        {% endif %}
+                    </td>
+                    <td class="px-4 py-3 hidden md:table-cell">
+                        {% for tag in model.tags[:4] %}
+                        <span class="inline-block px-1.5 py-0.5 rounded text-xs bg-gray-100 text-gray-600 mr-1 mb-0.5">{{ tag }}</span>
+                        {% endfor %}
+                        {% if model.tags|length > 4 %}
+                        <span class="text-xs text-gray-400">+{{ model.tags|length - 4 }}</span>
+                        {% endif %}
+                    </td>
+                    <td class="px-4 py-3">
+                        {% if model.is_enabled %}
+                        <span class="px-2 py-0.5 rounded text-xs bg-green-100 text-green-700">enabled</span>
+                        {% else %}
+                        <span class="px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-500">disabled</span>
+                        {% endif %}
+                    </td>
+                    <td class="px-4 py-3 text-right">
+                        <div class="flex items-center justify-end gap-2">
+                            <button onclick="openEditModal(this)"
+                                data-id="{{ model.id }}"
+                                data-name="{{ model.name }}"
+                                data-provider="{{ model.provider }}"
+                                data-category="{{ model.category }}"
+                                data-api-model-id="{{ model.api_model_id or '' }}"
+                                data-context-window="{{ model.context_window or 0 }}"
+                                data-notes="{{ model.notes or '' }}"
+                                data-tags="{{ (model.tags or [])|join(', ') }}"
+                                data-supports-tools="{{ 'true' if model.supports_tools else 'false' }}"
+                                data-supports-vision="{{ 'true' if model.supports_vision else 'false' }}"
+                                data-engine="{{ model.engine or '' }}"
+                                class="px-3 py-1 text-xs rounded-md font-medium bg-primary-50 text-primary-700 hover:bg-primary-100">Edit</button>
+                            <form method="POST" action="/models/{{ model.id }}/toggle">
+                                <button type="submit" class="px-3 py-1 text-xs rounded-md font-medium
+                                    {% if model.is_enabled %}bg-gray-100 text-gray-700 hover:bg-gray-200{% else %}bg-green-50 text-green-700 hover:bg-green-100{% endif %}">
+                                    {% if model.is_enabled %}Disable{% else %}Enable{% endif %}
+                                </button>
+                            </form>
+                            <form method="POST" action="/models/{{ model.id }}/delete" onsubmit="return confirm('Remove {{ model.name }}?')">
+                                <button type="submit" class="px-3 py-1 text-xs rounded-md font-medium bg-red-50 text-red-700 hover:bg-red-100">Remove</button>
+                            </form>
+                        </div>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endfor %}
+
+<!-- Add Model Modal -->
+<div id="add-model-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/30">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-lg mx-4 p-6 max-h-[90vh] overflow-y-auto">
+        <div class="flex items-center justify-between mb-4">
+            <h3 class="text-lg font-semibold text-gray-900">Add Model</h3>
+            <button onclick="document.getElementById('add-model-modal').classList.add('hidden')" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
+        </div>
+        <form method="POST" action="/models/add" class="space-y-4">
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Model ID</label>
+                    <input name="model_id" required placeholder="e.g. gpt-6-turbo" class="w-full px-3 py-2 border rounded-lg text-sm">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Display Name</label>
+                    <input name="name" required placeholder="e.g. GPT-6 Turbo" class="w-full px-3 py-2 border rounded-lg text-sm">
+                </div>
+            </div>
+            <div class="grid grid-cols-3 gap-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Provider</label>
+                    <select name="provider" class="w-full px-3 py-2 border rounded-lg text-sm">
+                        {% for p in all_providers %}<option value="{{ p }}">{{ p|capitalize }}</option>{% endfor %}
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Category</label>
+                    <select name="category" class="w-full px-3 py-2 border rounded-lg text-sm">
+                        {% for c in all_categories %}<option value="{{ c }}">{{ c|capitalize }}</option>{% endfor %}
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Context Window</label>
+                    <input name="context_window" type="number" value="0" class="w-full px-3 py-2 border rounded-lg text-sm">
+                </div>
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">API Model ID <span class="text-gray-400 font-normal">(optional)</span></label>
+                <input name="api_model_id" placeholder="e.g. gpt-6-turbo-20260401" class="w-full px-3 py-2 border rounded-lg text-sm">
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Engine</label>
+                <select name="engine" class="w-full px-3 py-2 border rounded-lg text-sm">
+                    <option value="">Auto (recommended)</option>
+                    <option value="copilot">Copilot SDK</option>
+                    <option value="langchain">LangChain</option>
+                </select>
+                <p class="mt-1 text-xs text-gray-500">Auto selects the best engine for this provider. Override if you want to use a specific backend (e.g. LangChain for direct API access to Anthropic).</p>
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Tags <span class="text-gray-400 font-normal">(comma-separated)</span></label>
+                <input name="tags" id="add-tags-input" placeholder="e.g. coding, frontier, reasoning" class="w-full px-3 py-2 border rounded-lg text-sm">
+                <div class="mt-1 flex flex-wrap gap-1">
+                    {% for t in all_tags %}<button type="button" onclick="addTag(this, 'add-tags-input')" class="px-1.5 py-0.5 rounded text-xs bg-gray-100 text-gray-500 hover:bg-gray-200 cursor-pointer">{{ t }}</button>{% endfor %}
+                </div>
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Notes</label>
+                <input name="notes" placeholder="Brief description of capabilities" class="w-full px-3 py-2 border rounded-lg text-sm">
+            </div>
+            <div class="flex items-center gap-6">
+                <label class="flex items-center gap-2 text-sm text-gray-700"><input type="checkbox" name="supports_tools" value="true" checked class="rounded"> Tool use</label>
+                <label class="flex items-center gap-2 text-sm text-gray-700"><input type="checkbox" name="supports_vision" value="true" class="rounded"> Vision</label>
+            </div>
+            <div class="flex justify-end gap-3 pt-2">
+                <button type="button" onclick="document.getElementById('add-model-modal').classList.add('hidden')" class="px-4 py-2 text-sm text-gray-700 border rounded-lg hover:bg-gray-50">Cancel</button>
+                <button type="submit" class="px-4 py-2 text-sm bg-primary-600 text-white rounded-lg hover:bg-primary-700 font-medium">Add Model</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Edit Model Modal -->
+<div id="edit-model-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/30">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-lg mx-4 p-6 max-h-[90vh] overflow-y-auto">
+        <div class="flex items-center justify-between mb-4">
+            <h3 class="text-lg font-semibold text-gray-900">Edit Model</h3>
+            <button onclick="document.getElementById('edit-model-modal').classList.add('hidden')" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
+        </div>
+        <form id="edit-model-form" method="POST" class="space-y-4">
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Model ID</label>
+                    <input id="edit-model-id" class="w-full px-3 py-2 border rounded-lg text-sm bg-gray-50 text-gray-500" readonly>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Display Name</label>
+                    <input name="name" id="edit-name" required class="w-full px-3 py-2 border rounded-lg text-sm">
+                </div>
+            </div>
+            <div class="grid grid-cols-3 gap-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Provider</label>
+                    <select name="provider" id="edit-provider" class="w-full px-3 py-2 border rounded-lg text-sm">
+                        {% for p in all_providers %}<option value="{{ p }}">{{ p|capitalize }}</option>{% endfor %}
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Category</label>
+                    <select name="category" id="edit-category" class="w-full px-3 py-2 border rounded-lg text-sm">
+                        {% for c in all_categories %}<option value="{{ c }}">{{ c|capitalize }}</option>{% endfor %}
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Context Window</label>
+                    <input name="context_window" id="edit-context-window" type="number" class="w-full px-3 py-2 border rounded-lg text-sm">
+                </div>
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">API Model ID</label>
+                <input name="api_model_id" id="edit-api-model-id" class="w-full px-3 py-2 border rounded-lg text-sm">
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Engine</label>
+                <select name="engine" id="edit-engine" class="w-full px-3 py-2 border rounded-lg text-sm">
+                    <option value="">Auto (recommended)</option>
+                    <option value="copilot">Copilot SDK</option>
+                    <option value="langchain">LangChain</option>
+                </select>
+                <p class="mt-1 text-xs text-gray-500">Auto selects the best engine for this provider. Override if you want to use a specific backend (e.g. LangChain for direct API access to Anthropic).</p>
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Tags <span class="text-gray-400 font-normal">(comma-separated)</span></label>
+                <input name="tags" id="edit-tags" class="w-full px-3 py-2 border rounded-lg text-sm">
+                <div class="mt-1 flex flex-wrap gap-1">
+                    {% for t in all_tags %}<button type="button" onclick="addTag(this, 'edit-tags')" class="px-1.5 py-0.5 rounded text-xs bg-gray-100 text-gray-500 hover:bg-gray-200 cursor-pointer">{{ t }}</button>{% endfor %}
+                </div>
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Notes</label>
+                <input name="notes" id="edit-notes" class="w-full px-3 py-2 border rounded-lg text-sm">
+            </div>
+            <div class="flex items-center gap-6">
+                <label class="flex items-center gap-2 text-sm text-gray-700"><input type="checkbox" name="supports_tools" id="edit-supports-tools" value="true" class="rounded"> Tool use</label>
+                <label class="flex items-center gap-2 text-sm text-gray-700"><input type="checkbox" name="supports_vision" id="edit-supports-vision" value="true" class="rounded"> Vision</label>
+            </div>
+            <div class="flex justify-end gap-3 pt-2">
+                <button type="button" onclick="document.getElementById('edit-model-modal').classList.add('hidden')" class="px-4 py-2 text-sm text-gray-700 border rounded-lg hover:bg-gray-50">Cancel</button>
+                <button type="submit" class="px-4 py-2 text-sm bg-primary-600 text-white rounded-lg hover:bg-primary-700 font-medium">Save Changes</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<script nonce="{{ request.state.csp_nonce }}">
+function openEditModal(btn) {
+    const d = btn.dataset;
+    document.getElementById('edit-model-id').value = d.id;
+    document.getElementById('edit-name').value = d.name;
+    document.getElementById('edit-provider').value = d.provider;
+    document.getElementById('edit-category').value = d.category;
+    document.getElementById('edit-api-model-id').value = d.apiModelId || '';
+    document.getElementById('edit-context-window').value = d.contextWindow || '';
+    document.getElementById('edit-notes').value = d.notes || '';
+    document.getElementById('edit-tags').value = d.tags || '';
+    document.getElementById('edit-supports-tools').checked = d.supportsTools === 'true';
+    document.getElementById('edit-supports-vision').checked = d.supportsVision === 'true';
+    document.getElementById('edit-engine').value = d.engine || '';
+    document.getElementById('edit-model-form').action = '/models/' + encodeURIComponent(d.id) + '/edit';
+    document.getElementById('edit-model-modal').classList.remove('hidden');
+}
+function addTag(btn, inputId) {
+    const tag = btn.textContent.trim();
+    const input = document.getElementById(inputId);
+    const current = input.value.split(',').map(t => t.trim()).filter(Boolean);
+    if (!current.includes(tag)) {
+        current.push(tag);
+        input.value = current.join(', ');
+    }
+}
+</script>
+{% endblock %}

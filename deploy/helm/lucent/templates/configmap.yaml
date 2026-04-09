@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ printf "%s-config" (include "lucent.fullname" .) }}
+  labels:
+    {{- include "lucent.labels" . | nindent 4 }}
+data:
+  LUCENT_LLM_ENGINE: {{ .Values.llm.engine | quote }}
+  LUCENT_DAEMON_MODEL: {{ .Values.daemon.model | quote }}
+  LUCENT_MAX_SESSIONS: {{ .Values.daemon.maxConcurrentSessions | quote }}
+  OTEL_EXPORTER_OTLP_ENDPOINT: {{ .Values.server.env.OTEL_EXPORTER_OTLP_ENDPOINT | quote }}
+  OTEL_ENABLED: {{ .Values.server.env.OTEL_ENABLED | quote }}
+  {{- with .Values.daemon.env }}
+  {{- range $key, $value := . }}
+  {{ $key }}: {{ $value | quote }}
+  {{- end }}
+  {{- end }}

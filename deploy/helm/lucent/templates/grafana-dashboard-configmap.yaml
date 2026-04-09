@@ -1,0 +1,45 @@
+{{- if and .Values.observability.enabled .Values.observability.grafana.dashboards }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ printf "%s-grafana-dashboard" (include "lucent.fullname" .) }}
+  labels:
+    {{- include "lucent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: observability
+    grafana_dashboard: "1"
+data:
+  lucent-overview.json: |
+    {
+      "title": "Lucent Overview",
+      "tags": ["lucent"],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "version": 1,
+      "panels": [
+        {
+          "id": 1,
+          "type": "stat",
+          "title": "Up",
+          "targets": [
+            {
+              "expr": "sum(up{job=~\".*lucent.*\"})",
+              "refId": "A"
+            }
+          ],
+          "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0}
+        },
+        {
+          "id": 2,
+          "type": "timeseries",
+          "title": "HTTP Requests",
+          "targets": [
+            {
+              "expr": "sum(rate(http_server_requests_seconds_count{job=~\".*lucent.*\"}[5m]))",
+              "refId": "A"
+            }
+          ],
+          "gridPos": {"h": 8, "w": 18, "x": 6, "y": 0}
+        }
+      ]
+    }
+{{- end }}

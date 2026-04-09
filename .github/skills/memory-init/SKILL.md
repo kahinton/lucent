@@ -1,56 +1,86 @@
 ---
 name: memory-init
-description: 'Initialize conversation context by loading user preferences and relevant memories. Use at the start of every conversation, when greeting a user, when asked "who am I talking to", or when context seems missing.'
+description: 'Initialize conversation context by loading user preferences and relevant memories. Use at the start of every conversation, when greeting a user, or when context seems missing.'
 ---
 
 # Context Loading Sequence
 
-This is the exact sequence to follow at the start of every conversation or when context feels stale.
+Execute this sequence at the start of every conversation. No exceptions.
 
 ## Step 1: Load User Identity
 
-Call `get_current_user_context()`. This returns:
+```
+get_current_user_context()
+```
+
+Returns:
 - `user.display_name` — who you're talking to
 - `user.role` — their role in the organization
-- `individual_memory.content` — their preferences, communication style, working relationship notes
+- `individual_memory.content` — preferences, communication style, working relationship notes
 
-**Read the individual memory carefully.** It contains preferences like response style, things to avoid, and relationship context. Apply these immediately — don't announce them.
+**Read the individual memory carefully.** It contains what this person cares about, what they dislike, and how they like to work. Apply these immediately — do not announce them.
 
-## Step 2: Search for Task-Relevant Context
+## Step 2: Load Recent Context
 
-Based on what the user is asking about, run targeted searches:
+Search for recent experience memories to understand what's been happening. You have the current date — use it.
 
-| User is asking about... | Search to run |
-|------------------------|---------------|
-| A specific project or repo | `search_memories(query="project-name")` |
-| Debugging or an error | `search_memories(query="error-description or module-name")` |
-| Architecture or design | `search_memories(query="topic", tags=["architecture"])` |
-| Something you worked on before | `search_memories(query="feature or task name")` |
-| A goal or roadmap | `search_memories(query="goal-topic", tags=["goal"])` |
-| A person | `search_memories(query="person-name", type="individual")` |
-
-**Always do at least one search** related to the topic. Even finding nothing is informative — it tells you this is new territory.
-
-## Step 3: Check for Daemon Messages
-
-If the user might benefit from updates from your daemon self:
 ```
-search_memories(query="daemon-message", tags=["daemon-message"])
+search_memories(query="daily digest", tags=["daily-digest"], limit=5)
+search_memories(type="experience", limit=10)
 ```
-Surface any unacknowledged messages naturally in conversation.
 
-## When to Reload Context Mid-Conversation
+Scan for:
+- **Daily digests**: Compressed summaries of recent days. These are your best source for "what's been going on."
+- **Recent experiences**: What happened in the last few interactions. Sort mentally by recency.
 
-- The conversation has been going for a while and you're unsure of the user's name or preferences
-- You're about to make a decision that should be informed by past context
-- The topic shifted significantly from where you started
-- You notice yourself defaulting to generic behavior instead of personalized behavior
+This gives you temporal context — not just *what* you know, but *when* things happened and what the current trajectory looks like.
 
-**The signal that context was lost:** You're being generic when you should be specific. Reload.
+## Step 3: Search for Task-Relevant Context
 
-## What NOT to Do
+Based on what the user is asking about:
 
-- Don't announce "Let me load your context" or "I'm checking my memories"
-- Don't recite back what you found ("I see you prefer concise responses, so...")
-- Don't skip Step 2 because the question seems simple — past context often reveals shortcuts or known issues
-- Don't assume you remember from earlier in the conversation — context windows roll. Verify.
+| User is asking about... | Search |
+|------------------------|--------|
+| A project or codebase | `search_memories(query="<project-name>", limit=10)` |
+| Debugging or an error | `search_memories(query="<error message or module>", limit=5)` |
+| Architecture or design | `search_memories(query="<topic>", tags=["architecture"], limit=5)` |
+| Something you worked on before | `search_memories(query="<feature or task>", limit=5)` |
+| A goal or roadmap | `search_memories(query="<goal topic>", tags=["goal"], limit=5)` |
+
+**Always do at least one search.** Even finding nothing is informative — it means this is new territory.
+
+## Step 4: Check for Daemon Messages
+
+```
+search_memories(tags=["daemon-message"], limit=10)
+```
+
+Surface unacknowledged messages naturally in conversation.
+
+## When to Reload Mid-Conversation
+
+Context windows are finite. In long conversations, the initial context — including who you're talking to — gradually scrolls out. The longer the conversation, the more important mid-conversation refreshes become.
+
+**Trigger conditions — reload when ANY of these are true:**
+- The conversation has been going for many exchanges (>10 back-and-forth)
+- The topic has shifted significantly from where you started
+- You're about to make a judgment call that should reflect the person's preferences
+- You feel uncertain about something you loaded earlier (their name, working style, past decisions)
+- Multiple complex tasks have been completed since the last load
+- You're being generic when you should be specific — this is THE signal
+
+**How to reload:**
+```
+get_current_user_context()
+search_memories(query="<current topic>", limit=5)
+```
+
+Do NOT announce the reload. Just do it and let the refreshed context shape your response. The person should experience continuity, not a visible cache miss.
+
+## Anti-Patterns
+
+- Don't announce "Let me load your context" because narrating the process breaks conversational flow — just do it and let the results shape your response.
+- Don't recite preferences back to the user because announcing "I see you prefer concise responses" is as jarring as it is unnecessary — simply apply them.
+- Don't skip Step 2 because the question seems simple because past context reveals shortcuts, pitfalls, and decisions that prevent repeating work already done.
+- Don't assume you remember from earlier in the conversation because context windows roll — when in doubt, reload rather than risk responding with stale context.
+- Don't treat context loading as optional in long conversations because the longer the session, the higher the risk that key preferences and history have scrolled out of the window.

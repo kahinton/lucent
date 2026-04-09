@@ -97,6 +97,10 @@
                         <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-700">
                             {{ task.agent_type }}
                         </span>
+                        <!-- Model -->
+                        {% if task.model %}
+                        <span class="px-1.5 py-0.5 rounded text-xs bg-violet-50 text-violet-600 font-mono">{{ task.model }}</span>
+                        {% endif %}
                         <!-- Status text -->
                         <span class="text-xs text-gray-400">
                             {% if task.status == 'claimed' and task.claimed_by %}

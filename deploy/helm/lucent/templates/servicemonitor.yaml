@@ -1,0 +1,25 @@
+{{- if and .Values.observability.enabled .Values.observability.prometheus.serviceMonitor }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ printf "%s-server" (include "lucent.fullname" .) }}
+  labels:
+    {{- include "lucent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+    {{- with .Values.observability.prometheus.serviceMonitorLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "lucent.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: server
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  endpoints:
+    - port: http
+      path: {{ .Values.server.health.path | default "/api/health" }}
+      interval: {{ .Values.observability.prometheus.interval | default "30s" }}
+      scrapeTimeout: {{ .Values.observability.prometheus.scrapeTimeout | default "10s" }}
+{{- end }}

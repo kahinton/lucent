@@ -363,6 +363,7 @@ class TestListByUser:
     async def test_returns_empty_list_when_no_keys(self):
         """Test that list_by_user returns empty list for user with no keys."""
         mock_conn = AsyncMock()
+        mock_conn.fetchrow.return_value = {"total": 0}
         mock_conn.fetch.return_value = []
 
         pool = _make_mock_pool(mock_conn)
@@ -370,13 +371,15 @@ class TestListByUser:
         repo = ApiKeyRepository(pool)
         result = await repo.list_by_user(uuid4())
 
-        assert result == []
+        assert result["items"] == []
+        assert result["total_count"] == 0
 
     async def test_returns_list_of_dicts(self):
         """Test that list_by_user returns a list of dicts."""
         row1, _ = _make_mock_row({"name": "key1"})
         row2, _ = _make_mock_row({"name": "key2"})
         mock_conn = AsyncMock()
+        mock_conn.fetchrow.return_value = {"total": 2}
         mock_conn.fetch.return_value = [row1, row2]
 
         pool = _make_mock_pool(mock_conn)
@@ -384,8 +387,8 @@ class TestListByUser:
         repo = ApiKeyRepository(pool)
         result = await repo.list_by_user(uuid4())
 
-        assert len(result) == 2
-        names = [r["name"] for r in result]
+        assert len(result["items"]) == 2
+        names = [r["name"] for r in result["items"]]
         assert "key1" in names
         assert "key2" in names
 

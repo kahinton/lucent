@@ -46,6 +46,11 @@ from lucent.tools.schedules import register_schedule_tools  # noqa: E402
 
 register_schedule_tools(mcp)
 
+# Register definition management tools
+from lucent.tools.definitions import register_definition_tools  # noqa: E402
+
+register_definition_tools(mcp)
+
 # Get logger for this module
 logger = get_logger("server")
 
@@ -162,7 +167,7 @@ class MCPAuthMiddleware:
                                     set_current_api_key_id(None)
                                 return
                 except Exception as e:
-                    logger.error("API key auth error", exc_info=e)
+                    logger.error("API key auth error: %s", type(e).__name__)
 
             # Not an hs_ key — try session token auth
             # This allows the chat agent to pass the user's web session
@@ -236,7 +241,7 @@ class MCPAuthMiddleware:
                     else:
                         logger.warning("MCP session token auth: no pool available")
                 except Exception as e:
-                    logger.error("Session token auth error on MCP", exc_info=e)
+                    logger.error("Session token auth error on MCP: %s", type(e).__name__)
 
             # Auth failed
             logger.warning("MCP auth failed: invalid credentials on %s", path)
@@ -353,8 +358,13 @@ def main() -> None:
     for route in mcp_app.routes:
         app.routes.append(route)
 
+    # Wrap with webhook signature verification (only /integrations/webhook/*)
+    from lucent.integrations.middleware import SignatureVerificationMiddleware
+
+    wrapped_app = SignatureVerificationMiddleware(app)
+
     # Wrap the entire app with our auth middleware (only applies to /mcp paths)
-    wrapped_app = MCPAuthMiddleware(app)
+    wrapped_app = MCPAuthMiddleware(wrapped_app)
 
     logger.info(f"Starting Lucent server on http://{HOST}:{PORT}")
     logger.info(f"  MCP endpoint: http://{HOST}:{PORT}/mcp")

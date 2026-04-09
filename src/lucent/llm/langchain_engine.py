@@ -28,7 +28,7 @@ PROVIDER_MODEL_MAP: dict[str, tuple[str, str]] = {
     "claude-sonnet-4.0": ("anthropic", "claude-sonnet-4-20250514"),
     "claude-sonnet-4.5": ("anthropic", "claude-sonnet-4-5-20250620"),
     "claude-sonnet-4.6": ("anthropic", "claude-sonnet-4-6-20260115"),
-    "claude-opus-4.6-fast": ("anthropic", "claude-opus-4-6-20260301"),
+    "claude-opus-4.6-1m": ("anthropic", "claude-opus-4-6-1m-20260301"),
     # OpenAI
     "gpt-4.1": ("openai", "gpt-4.1"),
     "gpt-5-mini": ("openai", "gpt-5-mini"),
@@ -47,6 +47,44 @@ PROVIDER_MODEL_MAP: dict[str, tuple[str, str]] = {
     "gemini-3.1-pro": ("google_genai", "gemini-3.1-pro"),
 }
 
+# Runtime registry for models not in the static map (e.g. Ollama models).
+# Populated from the DB at daemon startup via register_model().
+_runtime_model_registry: dict[str, tuple[str, str, str | None]] = {}
+
+
+def _normalize_engine(engine: str | None) -> str | None:
+    """Normalize explicit engine override; None means auto-detect."""
+    if engine is None:
+        return None
+    normalized = engine.strip().lower()
+    if normalized in ("", "auto"):
+        return None
+    if normalized in ("copilot", "langchain"):
+        return normalized
+    return None
+
+
+def register_model(
+    model_id: str,
+    provider: str,
+    api_model_id: str = "",
+    engine: str | None = None,
+) -> None:
+    """Register a model at runtime for provider resolution."""
+    _runtime_model_registry[model_id] = (
+        provider,
+        api_model_id or model_id,
+        _normalize_engine(engine),
+    )
+
+
+def get_registered_engine(model_id: str) -> str | None:
+    """Get explicit runtime engine override for model, if present."""
+    entry = _runtime_model_registry.get(model_id)
+    if not entry:
+        return None
+    return entry[2]
+
 
 def _resolve_model(model_id: str) -> tuple[str, str]:
     """Resolve a Lucent model ID to (provider, provider_model_id).
@@ -56,6 +94,11 @@ def _resolve_model(model_id: str) -> tuple[str, str]:
     if model_id in PROVIDER_MODEL_MAP:
         return PROVIDER_MODEL_MAP[model_id]
 
+    # Check runtime registry (DB-populated Ollama/custom models)
+    if model_id in _runtime_model_registry:
+        provider, api_model_id, _engine = _runtime_model_registry[model_id]
+        return provider, api_model_id
+
     # Infer provider from model name prefix
     if model_id.startswith("claude"):
         return "anthropic", model_id
@@ -64,7 +107,7 @@ def _resolve_model(model_id: str) -> tuple[str, str]:
     elif model_id.startswith("gemini"):
         return "google_genai", model_id
 
-    # Default: try as-is with init_chat_model's auto-detection
+    # Check DB for provider (handles ollama and other custom providers)
     return "", model_id
 
 
@@ -84,6 +127,12 @@ def _get_chat_model(model_id: str, timeout: int = 300) -> Any:
     kwargs: dict[str, Any] = {"timeout": timeout}
     if provider:
         kwargs["model_provider"] = provider
+
+    # Ollama: pass base_url from env so Docker containers can reach the host
+    if provider == "ollama":
+        import os
+        ollama_host = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+        kwargs["base_url"] = ollama_host
 
     return init_chat_model(provider_model, **kwargs)
 
@@ -131,7 +180,8 @@ class LangChainEngine(LLMEngine):
         prompt: str,
         mcp_config: dict | None = None,
         on_event: Callable[[SessionEvent], None] | None = None,
-        timeout: int = 600,
+        timeout: int = 3600,
+        idle_timeout: int = 300,
     ) -> str | None:
         """Run a streaming session with event callbacks (daemon pattern)."""
         try:
@@ -239,6 +289,7 @@ class LangChainEngine(LLMEngine):
                             SessionEvent(
                                 type=SessionEventType.TOOL_CALL,
                                 tool_name=tool_name,
+                                tool_input=tool_args,
                             )
                         )
 

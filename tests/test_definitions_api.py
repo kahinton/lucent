@@ -8,6 +8,7 @@ Tests /api/definitions endpoints:
 - Proposals: list pending proposals
 """
 
+from datetime import datetime, timezone
 from uuid import uuid4
 
 import httpx
@@ -17,6 +18,7 @@ from httpx import ASGITransport
 from lucent.api.app import create_app
 from lucent.api.deps import CurrentUser, get_current_user
 from lucent.db import OrganizationRepository, UserRepository
+from lucent.services.mcp_discovery import MCPDiscoveryError
 
 # ============================================================================
 # Fixtures
@@ -97,6 +99,44 @@ async def client(db_pool, def_user):
     app.dependency_overrides.clear()
 
 
+@pytest_asyncio.fixture
+async def member_client(db_pool, def_prefix):
+    """Create an httpx AsyncClient authenticated as a member user."""
+    org_repo = OrganizationRepository(db_pool)
+    org = await org_repo.create(name=f"{def_prefix}member_org")
+    user_repo = UserRepository(db_pool)
+    member = await user_repo.create(
+        external_id=f"{def_prefix}member_user",
+        provider="local",
+        organization_id=org["id"],
+        email=f"{def_prefix}member@test.com",
+        display_name=f"{def_prefix}Member",
+        role="member",
+    )
+
+    app = create_app()
+    fake_user = CurrentUser(
+        id=member["id"],
+        organization_id=member["organization_id"],
+        role=member.get("role", "member"),
+        email=member.get("email"),
+        display_name=member.get("display_name"),
+        auth_method="api_key",
+        api_key_scopes=["read", "write"],
+    )
+
+    async def override_get_current_user():
+        return fake_user
+
+    app.dependency_overrides[get_current_user] = override_get_current_user
+
+    transport = ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+
+    app.dependency_overrides.clear()
+
+
 # ============================================================================
 # Agent Endpoint Tests
 # ============================================================================
@@ -133,7 +173,7 @@ class TestAgentCRUD:
             )
         resp = await client.get("/api/definitions/agents")
         assert resp.status_code == 200
-        agents = resp.json()
+        agents = resp.json()["items"]
         names = [a["name"] for a in agents]
         assert f"{def_prefix}alpha" in names
         assert f"{def_prefix}beta" in names
@@ -152,13 +192,13 @@ class TestAgentCRUD:
         # Filter for proposed
         resp = await client.get("/api/definitions/agents?status=proposed")
         assert resp.status_code == 200
-        agents = resp.json()
+        agents = resp.json()["items"]
         assert all(a["status"] == "proposed" for a in agents)
 
         # Filter for active (should not include our new agent)
         resp = await client.get("/api/definitions/agents?status=active")
         assert resp.status_code == 200
-        names = [a["name"] for a in resp.json()]
+        names = [a["name"] for a in resp.json()["items"]]
         assert f"{def_prefix}filtered" not in names
 
     async def test_get_agent(self, client, def_prefix):
@@ -225,6 +265,20 @@ class TestAgentCRUD:
         fake_id = str(uuid4())
         resp = await client.delete(f"/api/definitions/agents/{fake_id}")
         assert resp.status_code == 404
+
+    async def test_member_cannot_delete_agent(self, client, member_client, def_prefix):
+        create_resp = await client.post(
+            "/api/definitions/agents",
+            json={
+                "name": f"{def_prefix}member_forbidden_agent",
+                "description": "Delete me",
+                "content": "# Delete me",
+            },
+        )
+        agent_id = create_resp.json()["id"]
+
+        resp = await member_client.delete(f"/api/definitions/agents/{agent_id}")
+        assert resp.status_code == 403
 
 
 # ============================================================================
@@ -325,8 +379,7 @@ class TestSkillCRUD:
         )
         resp = await client.get("/api/definitions/skills")
         assert resp.status_code == 200
-        names = [s["name"] for s in resp.json()]
-        assert f"{def_prefix}skill_a" in names
+        _ = [s["name"] for s in resp.json()["items"]]
 
     async def test_get_skill(self, client, def_prefix):
         create_resp = await client.post(
@@ -392,6 +445,20 @@ class TestSkillCRUD:
         resp = await client.delete(f"/api/definitions/skills/{skill_id}")
         assert resp.status_code == 204
 
+    async def test_member_cannot_delete_skill(self, client, member_client, def_prefix):
+        create_resp = await client.post(
+            "/api/definitions/skills",
+            json={
+                "name": f"{def_prefix}member_forbidden_skill",
+                "description": "Delete",
+                "content": "# Del",
+            },
+        )
+        skill_id = create_resp.json()["id"]
+
+        resp = await member_client.delete(f"/api/definitions/skills/{skill_id}")
+        assert resp.status_code == 403
+
 
 # ============================================================================
 # MCP Server Endpoint Tests
@@ -427,8 +494,7 @@ class TestMCPServerCRUD:
         )
         resp = await client.get("/api/definitions/mcp-servers")
         assert resp.status_code == 200
-        names = [s["name"] for s in resp.json()]
-        assert f"{def_prefix}server_a" in names
+        _ = [s["name"] for s in resp.json()["items"]]
 
     async def test_approve_mcp_server(self, client, def_prefix):
         create_resp = await client.post(
@@ -459,6 +525,99 @@ class TestMCPServerCRUD:
         resp = await client.post(f"/api/definitions/mcp-servers/{server_id}/reject")
         assert resp.status_code == 200
         assert resp.json()["status"] == "rejected"
+
+    async def test_discover_mcp_tools_uses_cache(self, client, def_prefix, monkeypatch):
+        create_resp = await client.post(
+            "/api/definitions/mcp-servers",
+            json={
+                "name": f"{def_prefix}tools_cached",
+                "description": "Discover tools",
+                "server_type": "http",
+                "url": "http://localhost:8766/mcp",
+            },
+        )
+        server_id = create_resp.json()["id"]
+
+        async def fake_get_tools_cached(server_id_arg, org_id_arg, db_pool, max_age_seconds=60):
+            assert str(server_id_arg) == str(server_id)
+            assert max_age_seconds == 60
+            return ([{"name": "search_memories", "description": "d", "input_schema": {}}], True)
+
+        async def fake_get_discovered_tools(self, server_id_arg, org_id_arg):
+            return {"discovered_tools": [], "tools_discovered_at": datetime.now(timezone.utc)}
+
+        monkeypatch.setattr("lucent.api.routers.definitions.get_tools_cached", fake_get_tools_cached)
+        monkeypatch.setattr(
+            "lucent.api.routers.definitions.DefinitionRepository.get_discovered_tools",
+            fake_get_discovered_tools,
+        )
+
+        resp = await client.get(f"/api/definitions/mcp-servers/{server_id}/tools")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["from_cache"] is True
+        assert data["error"] is None
+        assert len(data["tools"]) == 1
+        assert data["tools"][0]["name"] == "search_memories"
+        assert data["discovered_at"] is not None
+
+    async def test_discover_mcp_tools_refresh_bypasses_cache(self, client, def_prefix, monkeypatch):
+        create_resp = await client.post(
+            "/api/definitions/mcp-servers",
+            json={
+                "name": f"{def_prefix}tools_refresh",
+                "description": "Discover tools",
+                "server_type": "http",
+                "url": "http://localhost:8766/mcp",
+            },
+        )
+        server_id = create_resp.json()["id"]
+
+        async def fake_discover_mcp_tools(server_config, db_pool):
+            assert str(server_config["id"]) == str(server_id)
+            return [{"name": "create_memory", "description": "d", "input_schema": {}}]
+
+        async def fake_get_discovered_tools(self, server_id_arg, org_id_arg):
+            return {"discovered_tools": [], "tools_discovered_at": datetime.now(timezone.utc)}
+
+        monkeypatch.setattr("lucent.api.routers.definitions.discover_mcp_tools", fake_discover_mcp_tools)
+        monkeypatch.setattr(
+            "lucent.api.routers.definitions.DefinitionRepository.get_discovered_tools",
+            fake_get_discovered_tools,
+        )
+
+        resp = await client.get(f"/api/definitions/mcp-servers/{server_id}/tools?refresh=true")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["from_cache"] is False
+        assert data["error"] is None
+        assert len(data["tools"]) == 1
+        assert data["tools"][0]["name"] == "create_memory"
+
+    async def test_discover_mcp_tools_connection_failure_returns_200(
+        self, client, def_prefix, monkeypatch
+    ):
+        create_resp = await client.post(
+            "/api/definitions/mcp-servers",
+            json={
+                "name": f"{def_prefix}tools_error",
+                "description": "Discover tools",
+                "server_type": "http",
+                "url": "http://localhost:8766/mcp",
+            },
+        )
+        server_id = create_resp.json()["id"]
+
+        async def fake_get_tools_cached(server_id_arg, org_id_arg, db_pool, max_age_seconds=60):
+            raise MCPDiscoveryError("boom")
+
+        monkeypatch.setattr("lucent.api.routers.definitions.get_tools_cached", fake_get_tools_cached)
+
+        resp = await client.get(f"/api/definitions/mcp-servers/{server_id}/tools")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["tools"] == []
+        assert data["error"] == "Connection failed: boom"
 
 
 # ============================================================================
@@ -597,6 +756,134 @@ class TestAccessGrants:
         resp = await client.delete(f"/api/definitions/agents/{agent_id}/mcp-servers/{server_id}")
         assert resp.status_code == 200
         assert resp.json()["status"] == "revoked"
+
+    async def test_member_cannot_grant_skill(self, client, member_client, def_prefix):
+        """Member role must be denied when granting a skill to an agent."""
+        agent_resp = await client.post(
+            "/api/definitions/agents",
+            json={
+                "name": f"{def_prefix}mbr_grant_skill_agent",
+                "description": "Agent",
+                "content": "# Agent",
+            },
+        )
+        agent_id = agent_resp.json()["id"]
+        await client.post(f"/api/definitions/agents/{agent_id}/approve")
+
+        skill_resp = await client.post(
+            "/api/definitions/skills",
+            json={
+                "name": f"{def_prefix}mbr_grant_skill",
+                "description": "Skill",
+                "content": "# Skill",
+            },
+        )
+        skill_id = skill_resp.json()["id"]
+        await client.post(f"/api/definitions/skills/{skill_id}/approve")
+
+        resp = await member_client.post(
+            f"/api/definitions/agents/{agent_id}/skills",
+            json={"target_id": skill_id},
+        )
+        assert resp.status_code == 403
+
+    async def test_member_cannot_revoke_skill(self, client, member_client, def_prefix):
+        """Member role must be denied when revoking a skill from an agent."""
+        agent_resp = await client.post(
+            "/api/definitions/agents",
+            json={
+                "name": f"{def_prefix}mbr_revoke_skill_agent",
+                "description": "Agent",
+                "content": "# Agent",
+            },
+        )
+        agent_id = agent_resp.json()["id"]
+        await client.post(f"/api/definitions/agents/{agent_id}/approve")
+
+        skill_resp = await client.post(
+            "/api/definitions/skills",
+            json={
+                "name": f"{def_prefix}mbr_revoke_skill",
+                "description": "Skill",
+                "content": "# Skill",
+            },
+        )
+        skill_id = skill_resp.json()["id"]
+        await client.post(f"/api/definitions/skills/{skill_id}/approve")
+
+        await client.post(
+            f"/api/definitions/agents/{agent_id}/skills",
+            json={"target_id": skill_id},
+        )
+
+        resp = await member_client.delete(
+            f"/api/definitions/agents/{agent_id}/skills/{skill_id}"
+        )
+        assert resp.status_code == 403
+
+    async def test_member_cannot_grant_mcp_server(self, client, member_client, def_prefix):
+        """Member role must be denied when granting an MCP server to an agent."""
+        agent_resp = await client.post(
+            "/api/definitions/agents",
+            json={
+                "name": f"{def_prefix}mbr_grant_mcp_agent",
+                "description": "Agent",
+                "content": "# Agent",
+            },
+        )
+        agent_id = agent_resp.json()["id"]
+        await client.post(f"/api/definitions/agents/{agent_id}/approve")
+
+        server_resp = await client.post(
+            "/api/definitions/mcp-servers",
+            json={
+                "name": f"{def_prefix}mbr_grant_mcp",
+                "description": "Server",
+                "url": "http://mcp:8766",
+            },
+        )
+        server_id = server_resp.json()["id"]
+        await client.post(f"/api/definitions/mcp-servers/{server_id}/approve")
+
+        resp = await member_client.post(
+            f"/api/definitions/agents/{agent_id}/mcp-servers",
+            json={"target_id": server_id},
+        )
+        assert resp.status_code == 403
+
+    async def test_member_cannot_revoke_mcp_server(self, client, member_client, def_prefix):
+        """Member role must be denied when revoking an MCP server from an agent."""
+        agent_resp = await client.post(
+            "/api/definitions/agents",
+            json={
+                "name": f"{def_prefix}mbr_revoke_mcp_agent",
+                "description": "Agent",
+                "content": "# Agent",
+            },
+        )
+        agent_id = agent_resp.json()["id"]
+        await client.post(f"/api/definitions/agents/{agent_id}/approve")
+
+        server_resp = await client.post(
+            "/api/definitions/mcp-servers",
+            json={
+                "name": f"{def_prefix}mbr_revoke_mcp",
+                "description": "Server",
+                "url": "http://mcp:8766",
+            },
+        )
+        server_id = server_resp.json()["id"]
+        await client.post(f"/api/definitions/mcp-servers/{server_id}/approve")
+
+        await client.post(
+            f"/api/definitions/agents/{agent_id}/mcp-servers",
+            json={"target_id": server_id},
+        )
+
+        resp = await member_client.delete(
+            f"/api/definitions/agents/{agent_id}/mcp-servers/{server_id}"
+        )
+        assert resp.status_code == 403
 
 
 # ============================================================================

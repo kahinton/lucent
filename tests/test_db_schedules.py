@@ -154,6 +154,50 @@ class TestParseCron:
         assert result.weekday() == 5  # Python weekday 5 = Saturday
         assert result.day == 21  # Next Saturday
 
+    def test_dom_and_dow_combined_uses_or(self):
+        """When both DOM and DOW are explicit, standard cron uses OR logic.
+
+        '0 9 15 * 1' means 'at 09:00 on the 15th of each month OR every Monday'.
+        2026-03-15 is a Sunday. The next Monday is 2026-03-16.
+        The 15th is also valid but at 09:00. Starting after 10:00 on the 15th,
+        the next match should be Monday 2026-03-16 at 09:00.
+        """
+        # Sunday 2026-03-15 at 10:00 — past 09:00 on the 15th
+        now = datetime(2026, 3, 15, 10, 0, 0, tzinfo=timezone.utc)
+        result = _parse_cron("0 9 15 * 1", now)
+        # Next match: Monday 2026-03-16 at 09:00 (DOW=Monday wins via OR)
+        assert result.day == 16
+        assert result.hour == 9
+        assert result.weekday() == 0  # Monday
+
+    def test_dom_and_dow_or_prefers_earlier(self):
+        """DOM OR DOW should fire on whichever comes first.
+
+        '0 9 18 * 1' starting from 2026-03-15 (Sunday) at 08:00:
+        - Next Monday: 2026-03-16 at 09:00
+        - Next 18th: 2026-03-18 at 09:00
+        Monday comes first via OR.
+        """
+        now = datetime(2026, 3, 15, 8, 0, 0, tzinfo=timezone.utc)
+        result = _parse_cron("0 9 18 * 1", now)
+        assert result.day == 16  # Monday wins (earlier than 18th)
+        assert result.hour == 9
+        assert result.weekday() == 0  # Monday
+
+    def test_dom_only_uses_and_with_dow_star(self):
+        """When DOW is *, DOM alone is active (AND logic, but DOW matches all)."""
+        now = datetime(2026, 3, 15, 10, 0, 0, tzinfo=timezone.utc)
+        result = _parse_cron("0 9 20 * *", now)
+        assert result.day == 20
+        assert result.hour == 9
+
+    def test_dow_only_uses_and_with_dom_star(self):
+        """When DOM is *, DOW alone is active (AND logic, but DOM matches all)."""
+        # 2026-03-15 is Sunday, next Wednesday is 2026-03-18
+        now = datetime(2026, 3, 15, 10, 0, 0, tzinfo=timezone.utc)
+        result = _parse_cron("0 9 * * 3", now)
+        assert result.weekday() == 2  # Python Wednesday
+
 
 # ── _next_cron_utc timezone tests ─────────────────────────────────────────
 
@@ -339,27 +383,27 @@ class TestGetSchedule:
 class TestListSchedules:
     @pytest.mark.asyncio
     async def test_list_basic(self, repo, schedule, test_organization):
-        results = await repo.list_schedules(str(test_organization["id"]))
-        assert any(s["id"] == schedule["id"] for s in results)
+        result = await repo.list_schedules(str(test_organization["id"]))
+        assert any(s["id"] == schedule["id"] for s in result["items"])
 
     @pytest.mark.asyncio
     async def test_list_filter_status(self, repo, schedule, test_organization):
         org = str(test_organization["id"])
-        results = await repo.list_schedules(org, status="active")
-        assert any(s["id"] == schedule["id"] for s in results)
+        result = await repo.list_schedules(org, status="active")
+        assert any(s["id"] == schedule["id"] for s in result["items"])
 
-        results = await repo.list_schedules(org, status="completed")
-        assert not any(s["id"] == schedule["id"] for s in results)
+        result = await repo.list_schedules(org, status="completed")
+        assert not any(s["id"] == schedule["id"] for s in result["items"])
 
     @pytest.mark.asyncio
     async def test_list_filter_enabled(self, repo, schedule, test_organization):
         org = str(test_organization["id"])
-        results = await repo.list_schedules(org, enabled=True)
-        assert any(s["id"] == schedule["id"] for s in results)
+        result = await repo.list_schedules(org, enabled=True)
+        assert any(s["id"] == schedule["id"] for s in result["items"])
 
         await repo.toggle_schedule(str(schedule["id"]), org, False)
-        results = await repo.list_schedules(org, enabled=True)
-        assert not any(s["id"] == schedule["id"] for s in results)
+        result = await repo.list_schedules(org, enabled=True)
+        assert not any(s["id"] == schedule["id"] for s in result["items"])
 
     @pytest.mark.asyncio
     async def test_list_limit(self, repo, test_organization):
@@ -370,8 +414,8 @@ class TestListSchedules:
                 org_id=org,
                 schedule_type="once",
             )
-        results = await repo.list_schedules(org, limit=3)
-        assert len(results) == 3
+        result = await repo.list_schedules(org, limit=3)
+        assert len(result["items"]) == 3
 
     @pytest.mark.asyncio
     async def test_list_combined_filters(self, repo, test_organization):
@@ -383,12 +427,12 @@ class TestListSchedules:
             schedule_type="interval",
             interval_seconds=60,
         )
-        results = await repo.list_schedules(org, status="active", enabled=True)
-        assert any(r["id"] == s["id"] for r in results)
+        result = await repo.list_schedules(org, status="active", enabled=True)
+        assert any(r["id"] == s["id"] for r in result["items"])
 
         await repo.toggle_schedule(str(s["id"]), org, False)
-        results = await repo.list_schedules(org, status="active", enabled=True)
-        assert not any(r["id"] == s["id"] for r in results)
+        result = await repo.list_schedules(org, status="active", enabled=True)
+        assert not any(r["id"] == s["id"] for r in result["items"])
 
     @pytest.mark.asyncio
     async def test_list_empty_org(self, repo, db_pool, clean_test_data):
@@ -397,8 +441,8 @@ class TestListSchedules:
 
         prefix = clean_test_data
         empty_org = await OrganizationRepository(db_pool).create(name=f"{prefix}empty_org")
-        results = await repo.list_schedules(str(empty_org["id"]))
-        assert results == []
+        result = await repo.list_schedules(str(empty_org["id"]))
+        assert result["items"] == []
 
 
 class TestUpdateSchedule:
@@ -451,6 +495,16 @@ class TestUpdateSchedule:
         # updated_at is refreshed (may differ by microseconds either way)
         assert updated["updated_at"] is not None
         assert updated["description"] == "changed"
+
+    @pytest.mark.asyncio
+    async def test_update_rejects_invalid_column_name(self, repo, schedule, test_organization):
+        org = str(test_organization["id"])
+        with pytest.raises(ValueError, match="Invalid schedule update column"):
+            await repo.update_schedule(
+                str(schedule["id"]),
+                org,
+                **{"title = 'hacked'": "x"},
+            )
 
 
 class TestToggleSchedule:
@@ -911,8 +965,8 @@ class TestListRuns:
         await repo.mark_schedule_run(str(s["id"]))
         await _make_due(db_pool, s["id"])
         await repo.mark_schedule_run(str(s["id"]))
-        runs = await repo.list_runs(str(s["id"]))
-        assert len(runs) == 2
+        result = await repo.list_runs(str(s["id"]))
+        assert len(result["items"]) == 2
 
     @pytest.mark.asyncio
     async def test_list_runs_limit(self, repo, test_organization, db_pool):
@@ -926,8 +980,8 @@ class TestListRuns:
         for _ in range(5):
             await _make_due(db_pool, s["id"])
             await repo.mark_schedule_run(str(s["id"]))
-        runs = await repo.list_runs(str(s["id"]), limit=3)
-        assert len(runs) == 3
+        result = await repo.list_runs(str(s["id"]), limit=3)
+        assert len(result["items"]) == 3
 
 
 class TestGetScheduleWithRuns:
@@ -1143,3 +1197,99 @@ class TestSchedulerDeduplication:
         due_after = await repo.get_due_schedules(org)
         due_ids_after = [str(d["id"]) for d in due_after]
         assert str(s["id"]) not in due_ids_after
+
+
+# ── Cross-org isolation tests for schedules ────────────────────────────────
+
+
+class TestCrossOrgScheduleIsolation:
+    """Verify that org_id filtering prevents cross-org access to schedules.
+
+    Each test creates a schedule in org_A (test_organization), then attempts
+    to access/mutate it using org_B (other_org). Cross-org attempts must fail.
+    """
+
+    @pytest_asyncio.fixture
+    async def other_org(self, db_pool, clean_test_data):
+        """Create a second organization for cross-org isolation tests."""
+        from lucent.db import OrganizationRepository
+
+        prefix = clean_test_data
+        repo = OrganizationRepository(db_pool)
+        return await repo.create(name=f"{prefix}other_schedule_org")
+
+    @pytest.mark.asyncio
+    async def test_get_schedule_cross_org_blocked(self, repo, schedule, other_org):
+        """get_schedule with wrong org_id returns None."""
+        found = await repo.get_schedule(str(schedule["id"]), str(other_org["id"]))
+        assert found is None
+
+    @pytest.mark.asyncio
+    async def test_toggle_schedule_cross_org_blocked(self, repo, schedule, other_org):
+        """toggle_schedule with wrong org_id returns None and doesn't mutate."""
+        result = await repo.toggle_schedule(
+            str(schedule["id"]), str(other_org["id"]), enabled=False
+        )
+        assert result is None
+        # Verify schedule is still enabled
+        original = await repo.get_schedule(
+            str(schedule["id"]), str(schedule["organization_id"])
+        )
+        assert original["enabled"] is True
+
+    @pytest.mark.asyncio
+    async def test_update_schedule_cross_org_blocked(self, repo, schedule, other_org):
+        """update_schedule with wrong org_id returns None and doesn't mutate."""
+        result = await repo.update_schedule(
+            str(schedule["id"]), str(other_org["id"]), title="Hacked"
+        )
+        assert result is None
+        original = await repo.get_schedule(
+            str(schedule["id"]), str(schedule["organization_id"])
+        )
+        assert original["title"] == "Test Schedule"
+
+    @pytest.mark.asyncio
+    async def test_delete_schedule_cross_org_blocked(self, repo, schedule, other_org):
+        """delete_schedule with wrong org_id returns False and doesn't delete."""
+        deleted = await repo.delete_schedule(str(schedule["id"]), str(other_org["id"]))
+        assert deleted is False
+        original = await repo.get_schedule(
+            str(schedule["id"]), str(schedule["organization_id"])
+        )
+        assert original is not None
+
+    @pytest.mark.asyncio
+    async def test_get_schedule_with_runs_cross_org_blocked(
+        self, repo, schedule, other_org
+    ):
+        """get_schedule_with_runs with wrong org_id returns None."""
+        result = await repo.get_schedule_with_runs(
+            str(schedule["id"]), str(other_org["id"])
+        )
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_list_schedules_cross_org_isolation(
+        self, repo, schedule, other_org, test_organization
+    ):
+        """list_schedules only returns schedules for the requested org."""
+        own_list = await repo.list_schedules(str(test_organization["id"]))
+        other_list = await repo.list_schedules(str(other_org["id"]))
+        own_ids = [str(s["id"]) for s in own_list["items"]]
+        other_ids = [str(s["id"]) for s in other_list["items"]]
+        assert str(schedule["id"]) in own_ids
+        assert str(schedule["id"]) not in other_ids
+
+    @pytest.mark.asyncio
+    async def test_get_due_schedules_cross_org_isolation(
+        self, repo, schedule, other_org, test_organization, db_pool
+    ):
+        """get_due_schedules only returns schedules for the requested org."""
+        await _make_due(db_pool, schedule["id"])
+        own_due = await repo.get_due_schedules(str(test_organization["id"]))
+        other_due = await repo.get_due_schedules(str(other_org["id"]))
+        own_ids = [str(s["id"]) for s in own_due]
+        other_ids = [str(s["id"]) for s in other_due]
+        assert str(schedule["id"]) in own_ids
+        assert str(schedule["id"]) not in other_ids

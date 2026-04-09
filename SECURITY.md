@@ -19,7 +19,8 @@ You should receive a response within 72 hours acknowledging your report. We will
 
 | Version | Supported |
 | ------- | --------- |
-| 0.1.x   | ✅        |
+| 0.2.x   | ✅        |
+| < 0.2   | ❌        |
 
 ## Scope
 
@@ -31,6 +32,18 @@ The following are in scope for security reports:
 - API key leakage or mishandling
 - Denial of service vulnerabilities
 - MCP protocol security issues
+
+## Session Management
+
+Lucent uses a **single-session-per-user** model by design. Each user can have only one active session at a time — logging in on a new device or browser immediately invalidates the previous session.
+
+This is an intentional security choice, not a limitation:
+
+- **Limits blast radius of credential theft.** If a session token is compromised, the attacker's access is revoked as soon as the legitimate user logs in again.
+- **Matches Lucent's deployment model.** Lucent is an admin/developer tool typically used by one person at one workstation, not a consumer app requiring simultaneous multi-device access.
+- **Simpler security posture.** No need for session listing, revocation UI, or background cleanup of expired sessions.
+
+If multi-device support becomes necessary in the future, a clean migration path exists: a dedicated `sessions` table (many-to-one with users) can replace the current single-token column without breaking the authentication flow.
 
 ## Disclosure Policy
 

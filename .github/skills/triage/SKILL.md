@@ -1,61 +1,99 @@
 ---
 name: triage
-description: 'Issue triage and classification process'
+description: 'Issue triage and classification — severity assessment, routing, and initial response. Use when a new issue or bug report arrives and needs severity assessment and routing.'
 ---
 
 # Triage
 
-Issue triage and classification process
+## Severity Matrix
 
-## When to Use
+| Priority | Label | Criteria | User Impact | Response Time |
+|----------|-------|----------|-------------|---------------|
+| **P0** | Critical | System down, data loss, active security breach | All users blocked, data at risk | Immediate — drop everything |
+| **P1** | High | Major feature broken, no workaround available | Many users affected, workflow blocked | Within 1 hour |
+| **P2** | Medium | Feature degraded, workaround exists | Limited users affected, productivity reduced | Within 1 business day |
+| **P3** | Low | Cosmetic issue, minor inconvenience, enhancement | Minimal impact, no workflow disruption | Next planning cycle |
 
-- New support ticket or issue arrives
-- Customer reports a problem
-- Escalation from another agent or team member
-- Recurring issue pattern detected
+**Escalation triggers** — upgrade one priority level if:
+- Multiple independent reports of the same issue
+- Issue is worsening over time (progressive data loss, spreading failure)
+- A deadline or SLA is at risk
 
-## Triage Process
+## Procedure
 
-### Step 1: Classify
+### Step 1: Identify Symptoms
 
-1. **Severity**: Critical (system down) / High (major impact) / Medium (workaround exists) / Low (minor inconvenience)
-2. **Category**: Bug / Feature request / Question / Configuration / Security
-3. **Urgency**: Immediate / Business hours / Next cycle / Backlog
+Collect the raw facts before classifying:
 
-### Step 2: Research
+1. **What is the reported behavior?** — exact error messages, screenshots, logs
+2. **What is the expected behavior?** — what should have happened instead
+3. **When did it start?** — timestamp, recent deployment, config change
+4. **Who is affected?** — one user, a group, all users
+5. **Is there a workaround?** — can users continue working another way
 
-1. Search memories for similar past issues
-2. Check knowledge base and documentation
-3. Look for known workarounds or fixes
-4. Identify if this is a new issue or recurrence
+### Step 2: Classify Severity
 
-### Step 3: Respond or Escalate
+Use the Severity Matrix above. Assign a priority (P0–P3) by matching the symptoms to the criteria.
 
-**If solution is known:**
-1. Provide the solution with clear steps
-2. Include relevant documentation links
-3. Follow up to confirm resolution
+Also classify the **category**:
 
-**If solution is unknown:**
-1. Gather diagnostic information
-2. Escalate with full context and research done so far
-3. Set expectations on timeline
+| Category | Indicators |
+|----------|-----------|
+| **Bug** | "It used to work" / "I expected X but got Y" / error messages |
+| **Security** | Auth bypass, data exposure, injection, unauthorized access |
+| **Feature request** | "It would be nice if..." / "Can you add..." |
+| **Configuration** | Environment setup, deployment, misconfiguration |
+| **Question** | "How do I..." / "What does X do?" |
 
-**If security-related:**
-1. Escalate immediately
-2. Do NOT share details broadly
-3. Follow security incident protocol
+If category is **Security**, immediately set to P0 and go to Step 4 (escalate — do not reproduce the exploit).
 
-### Step 4: Document
+### Step 3: Determine Scope
 
-1. Save the resolution as a memory for future reference
-2. Update knowledge base if this is a new solution
-3. Note any patterns (3+ similar issues = systemic problem)
+Search memory for prior occurrences and related context:
 
-## Best Practices
+```
+search_memories(query="<error message or symptom>", limit=10)
+search_memories(query="<affected module or feature>", tags=["bugs", "incident"], limit=5)
+```
 
-- Respond quickly, even if just to acknowledge receipt
-- Be empathetic — the person has a problem they need solved
-- Don't assume technical knowledge — match the audience
-- Follow up on open issues — don't let them go stale
-- Capture resolution patterns for the knowledge base
+Determine:
+- **Known issue?** — If a prior resolution exists, skip to Step 4 with the known fix.
+- **Systemic or isolated?** — 3+ similar reports indicates a systemic problem needing root-cause fix.
+- **Regression?** — Check if this worked before a recent change.
+
+### Step 4: Assign and Route
+
+| Priority | Action |
+|----------|--------|
+| **P0** | Escalate immediately. Invoke the **incident-response** skill. Alert the team. |
+| **P1** | If solution is known, provide it with specific steps. If unknown, gather diagnostics and escalate with full context. |
+| **P2** | Provide solution or workaround. Create a tracked request if a code fix is needed. |
+| **P3** | Acknowledge, document, and add to backlog for next planning cycle. |
+
+### Step 5: Communicate and Record
+
+**Communicate** — respond to the reporter with: priority assigned, what action is being taken, and expected timeline.
+
+**Record** — save the resolution for future triage:
+
+## Anti-Patterns
+
+- Don't escalate everything as high severity — severity inflation causes alert fatigue and trains responders to ignore escalations; use the Severity Matrix strictly and push back on pressure to over-classify.
+- Never triage without reproduction steps — a bug report with no reproducible case can't be meaningfully diagnosed or prioritized; collect steps to reproduce before assigning severity or routing.
+- Don't close issues without documenting root cause — closing without a root cause means the next occurrence starts from zero; even "couldn't reproduce" should note what was checked and under what conditions.
+- Never skip the memory search before responding — the issue may be a known pattern with a documented fix; searching first avoids duplicating investigation work and gets users a faster, more accurate answer.
+
+## Recording Results
+
+Save resolutions for future reference:
+```
+create_memory(
+  type="technical",
+  content="## Issue: <title>\n\n**Symptom**: <what was reported>\n**Root cause**: <what was wrong>\n**Resolution**: <what fixed it>\n**Pattern**: <when to suspect this in the future>",
+  tags=["bugs", "triage"],
+  importance=6,
+  shared=true
+)
+```
+
+If you see 3+ similar issues, flag it as a systemic problem — it needs a root-cause fix, not repeated triage.

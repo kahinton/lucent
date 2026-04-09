@@ -46,15 +46,21 @@ class SandboxTemplateRepository:
         allowed_hosts: list[str] | None = None,
         timeout_seconds: int = 1800,
         created_by: str | None = None,
+        owner_user_id: str | None = None,
+        owner_group_id: str | None = None,
     ) -> dict:
+        # Default owner to creator when no explicit ownership is provided
+        if owner_user_id is None and owner_group_id is None and created_by:
+            owner_user_id = created_by
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 """INSERT INTO sandbox_templates
                    (name, organization_id, description, image, repo_url, branch,
                     setup_commands, env_vars, working_dir, memory_limit, cpu_limit,
-                    disk_limit, network_mode, allowed_hosts, timeout_seconds, created_by)
+                    disk_limit, network_mode, allowed_hosts, timeout_seconds, created_by,
+                    owner_user_id, owner_group_id)
                    VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9,
-                           $10, $11, $12, $13, $14::jsonb, $15, $16)
+                           $10, $11, $12, $13, $14::jsonb, $15, $16, $17, $18)
                    RETURNING *""",
                 name,
                 UUID(organization_id),
@@ -72,6 +78,8 @@ class SandboxTemplateRepository:
                 json.dumps(allowed_hosts or []),
                 timeout_seconds,
                 UUID(created_by) if created_by else None,
+                UUID(owner_user_id) if owner_user_id else None,
+                UUID(owner_group_id) if owner_group_id else None,
             )
             return self._parse_row(row)
 
@@ -90,6 +98,36 @@ class SandboxTemplateRepository:
                 )
             return self._parse_row(row) if row else None
 
+    async def get_accessible(
+        self,
+        template_id: str,
+        organization_id: str,
+        user_id: str,
+        user_role: str | None = None,
+    ) -> dict | None:
+        """Get template only if user can access it."""
+        role = user_role or "member"
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT *
+                FROM sandbox_templates
+                WHERE id = $1
+                  AND organization_id = $2
+                  AND (
+                      scope = 'built-in'
+                      OR owner_user_id = $3
+                      OR owner_group_id IN (SELECT group_id FROM user_groups WHERE user_id = $3)
+                      OR $4 IN ('admin', 'owner')
+                  )
+                """,
+                UUID(template_id),
+                UUID(organization_id),
+                UUID(user_id),
+                role,
+            )
+        return self._parse_row(row) if row else None
+
     async def get_by_name(self, name: str, organization_id: str) -> dict | None:
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -99,15 +137,28 @@ class SandboxTemplateRepository:
             )
             return self._parse_row(row) if row else None
 
-    async def list_all(self, organization_id: str) -> list[dict]:
+    async def list_all(self, organization_id: str, limit: int = 25, offset: int = 0) -> dict:
         async with self.pool.acquire() as conn:
+            count_row = await conn.fetchrow(
+                "SELECT COUNT(*) AS total FROM sandbox_templates WHERE organization_id = $1",
+                UUID(organization_id),
+            )
+            total_count = count_row["total"] if count_row else 0
             rows = await conn.fetch(
                 """SELECT * FROM sandbox_templates
                    WHERE organization_id = $1
-                   ORDER BY name""",
+                   ORDER BY name LIMIT $2 OFFSET $3""",
                 UUID(organization_id),
+                limit,
+                offset,
             )
-            return [self._parse_row(r) for r in rows]
+            return {
+                "items": [self._parse_row(r) for r in rows],
+                "total_count": total_count,
+                "offset": offset,
+                "limit": limit,
+                "has_more": offset + len(rows) < total_count,
+            }
 
     async def update(self, template_id: str, organization_id: str, **kwargs) -> dict | None:
         """Update template fields. Only non-None kwargs are applied."""
@@ -129,6 +180,8 @@ class SandboxTemplateRepository:
             "timeout_seconds": "timeout_seconds",
         }
         json_fields = {"setup_commands", "env_vars", "allowed_hosts"}
+        # Ownership fields allow None values (to clear ownership)
+        ownership_fields = {"owner_user_id", "owner_group_id"}
 
         for key, col in field_map.items():
             if key in kwargs and kwargs[key] is not None:
@@ -140,6 +193,13 @@ class SandboxTemplateRepository:
             if key in kwargs and kwargs[key] is not None:
                 sets.append(f"{key} = ${idx}::jsonb")
                 params.append(json.dumps(kwargs[key]))
+                idx += 1
+
+        for key in ownership_fields:
+            if key in kwargs:
+                sets.append(f"{key} = ${idx}")
+                val = kwargs[key]
+                params.append(UUID(val) if val else None)
                 idx += 1
 
         if len(sets) == 1:  # Only updated_at
@@ -178,4 +238,42 @@ class SandboxTemplateRepository:
             "network_mode": template.get("network_mode", "none"),
             "allowed_hosts": template.get("allowed_hosts") or [],
             "timeout_seconds": template.get("timeout_seconds", 1800),
+        }
+
+    async def list_accessible_by(
+        self,
+        user_id: str,
+        organization_id: str,
+        limit: int = 100,
+        offset: int = 0,
+        user_role: str | None = None,
+    ) -> dict:
+        """List sandbox templates accessible to a user: owned, group-owned, or built-in."""
+        role = user_role or "member"
+        base = """
+            FROM sandbox_templates
+            WHERE organization_id = $1
+            AND (
+                scope = 'built-in'
+                OR owner_user_id = $2
+                OR owner_group_id IN (SELECT group_id FROM user_groups WHERE user_id = $2)
+                OR $3 IN ('admin', 'owner')
+            )
+        """
+        async with self.pool.acquire() as conn:
+            count_row = await conn.fetchrow(
+                f"SELECT COUNT(*) AS total {base}",
+                UUID(organization_id), UUID(user_id), role,
+            )
+            total_count = count_row["total"] if count_row else 0
+            rows = await conn.fetch(
+                f"SELECT * {base} ORDER BY name LIMIT $4 OFFSET $5",
+                UUID(organization_id), UUID(user_id), role, limit, offset,
+            )
+        return {
+            "items": [self._parse_row(r) for r in rows],
+            "total_count": total_count,
+            "offset": offset,
+            "limit": limit,
+            "has_more": offset + len(rows) < total_count,
         }

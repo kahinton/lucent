@@ -1,106 +1,132 @@
 ---
 name: onboarding
-description: 'Guide new contributors through project setup, architecture overview, coding conventions, and first-contribution workflow'
+description: 'Guide new contributors through project setup, architecture overview, and first-contribution workflow. Use when a new contributor needs setup, architecture overview, guidance on their first contribution, someone asks how to contribute, or a development environment needs to be configured from scratch.'
 ---
 
 # Onboarding
 
-Guide new contributors through project setup, architecture overview, coding conventions, and first-contribution workflow.
+## Procedure
 
-## When to Use
+### Step 1: Verify Environment
 
-- A new contributor is setting up the project for the first time
-- Someone asks how the project is structured or how to get started
-- A contributor needs help understanding coding conventions or the development workflow
-- Onboarding documentation needs to be reviewed or updated
+Confirm all prerequisites before proceeding — missing tools cause cryptic failures later.
 
-## Prerequisites
+| Prerequisite | How to verify | If missing |
+|-------------|---------------|------------|
+| Git + repo access | `git --version` and `git ls-remote <repo-url>` | Install git, configure SSH keys or token |
+| Docker + Compose | `docker --version && docker compose version` | Install Docker Desktop or engine |
+| Language runtime | Check `pyproject.toml`, `package.json`, or build config for version | Install the required version |
 
-- **Python 3.12+** installed
-- **Docker** and **Docker Compose** installed
-- **Git** configured with access to the repository
+If any prerequisite fails, stop and resolve it before continuing.
 
-## Project Setup
+### Step 2: Explain Architecture
 
-### Step 1: Clone and Install
+Read the project structure and explain the codebase layout to the contributor:
+
+```bash
+ls -la                     # Root directory layout
+find . -maxdepth 2 -type d | head -30   # Directory structure
+cat README.md              # Project description and setup
+```
+
+Identify and explain these key directories:
+
+| Directory type | What to look for | Why it matters |
+|---------------|-----------------|----------------|
+| **Source code** | `src/`, `lib/`, `app/` | Where the main application lives |
+| **Tests** | `tests/`, `test/`, `__tests__/` | Test suite location and organization |
+| **Configuration** | `docker-compose.yml`, CI configs, linter configs | How the project is built and deployed |
+| **Documentation** | `docs/`, `README.md` | Existing guides and references |
+| **Agent definitions** | `.github/agents/`, `.github/skills/` | AI agent and skill definitions |
+
+Search memory for architecture context: `search_memories(query="architecture", tags=["environment"], limit=5)`
+
+### Step 3: Set Up Dev Environment
+
+#### 3a. Clone and Install
 
 ```bash
 git clone <repository-url>
-cd hindsight
-
-# Create a virtual environment
-python3 -m venv .venv
-source .venv/bin/activate
-
-# Install the project in development mode
-pip install -e ".[dev]"
+cd <project-directory>
 ```
 
-### Step 2: Start Local Services
+Check the project root for setup instructions:
+- `README.md` — usually has setup steps
+- `Makefile` / `justfile` — may have a `setup` or `install` target
+- `docker-compose.yml` — may be the primary dev environment
 
-The project uses Docker Compose to run PostgreSQL and the Lucent server locally:
+For local development (if not purely Docker-based):
+```bash
+# Python
+python3 -m venv .venv && source .venv/bin/activate && pip install -e ".[dev]"
+
+# Node
+npm install
+
+# Or the equivalent for the project's ecosystem
+```
+
+#### 3b. Start Services
 
 ```bash
 docker compose up -d
 ```
 
-This starts:
-- **PostgreSQL** — data store for memories
-- **Lucent server** — the MCP-compatible memory API
-
-Verify services are running: `docker compose ps`
-
-### Step 3: Run Tests
-
+Wait for health checks to pass:
 ```bash
-pytest tests/
+docker compose ps     # All services should show "healthy" or "running"
+curl http://localhost:<port>/health   # Application health check
 ```
 
-All tests should pass on a clean checkout. If tests fail, check that Docker services are running and healthy.
-
-### Step 4: Verify Code Formatting
-
-The project uses **ruff** for linting and formatting:
+#### 3c. Run Tests
 
 ```bash
-ruff check .        # Lint
-ruff format --check .  # Check formatting
-ruff format .       # Auto-format
+# Use the project's test runner — check build config for the command
+# Common: pytest tests/ -v --tb=short | npm test | go test ./... | cargo test
 ```
 
-## Project Structure
+**Tests passing is the only reliable signal that setup succeeded.** "Services running" is not sufficient. If tests fail, debug before proceeding.
 
-| Directory | Purpose |
-|---|---|
-| `src/lucent/` | Core application — MCP server, tools, memory operations, API |
-| `daemon/` | Autonomous daemon loop — perceive→reason→decide→act cognitive cycle |
-| `tests/` | Test suite (pytest) |
-| `.github/skills/` | Skill definitions for the AI agent |
-| `.github/agents/` | Agent definitions |
-| `docker/` | Docker configuration files |
-| `docs/` | Project documentation |
-| `examples/` | Usage examples |
+### Step 4: Guide First Contribution
 
-## Coding Conventions
+Walk the contributor through the full cycle:
 
-- **Type hints** are required on all function signatures
-- **Docstrings** are required on public APIs
-- **Import order**: stdlib → third-party → local (enforced by ruff)
-- **Formatting**: enforced by `ruff format` — do not manually override
-- **Tests**: every new feature or bug fix should include tests in `tests/`
-- Configuration lives in `pyproject.toml`
+1. Create a branch: `git checkout -b <feature-or-fix-description>`
+2. Make a focused change — one concern per commit
+3. Run tests and linting before committing
+4. Commit with a clear message: `fix: description` or `feat: description`
+5. Push and create a pull request
 
-## First Contribution Workflow
+Confirm project-specific conventions — branch naming, commit message format, and PR requirements vary by project. Check `CONTRIBUTING.md` if present.
 
-1. Create a feature branch from `main`
-2. Make your changes with tests
-3. Run `ruff check . && ruff format --check . && pytest tests/` to validate
-4. Commit with a clear, descriptive message
-5. Open a pull request against `main`
+### Step 5: Establish Communication Patterns
 
-## Getting Help
+Set the contributor up for ongoing success:
 
-- Read `README.md` for a project overview
-- Read `CONTRIBUTING.md` for detailed contribution guidelines
-- Check `docs/` for architecture and design documentation
-- Review existing tests in `tests/` for examples of how components are used
+1. **Show how to search memory** — `search_memories(query="<topic>", limit=10)` for past decisions, conventions, and known gotchas
+2. **Identify key contacts** — who reviews PRs, who owns which modules
+3. **Point to documentation** — where to find guides, API docs, architectural decision records
+4. **Explain the workflow** — how issues are triaged, how work is planned, how the daemon operates (if applicable)
+
+## Anti-Patterns
+
+- Don't skip prerequisite verification before setup because missing Docker, the correct language runtime, or repository access will cause cryptic failures mid-onboarding.
+- Don't rush through the architecture overview because a contributor who doesn't understand the codebase structure will make changes in the wrong place and miss existing conventions.
+- Don't skip running tests after setup because passing tests are the only reliable signal that the environment is actually working — "services running" is not sufficient.
+- Don't assume the first contribution workflow is obvious because branch naming, commit conventions, and PR requirements vary by project and must be explicitly confirmed.
+
+## Recording Results
+
+After completing an onboarding session, save the outcome for future onboardings:
+
+```
+create_memory(
+  type="experience",
+  content="## Onboarding: <contributor name or context>\n\n**Project**: <repo/project name>\n**Setup issues**: <any problems encountered during setup and how they were resolved>\n**Environment notes**: <OS, runtime versions, or config that mattered>\n**Gaps found**: <missing docs, unclear steps, or broken tooling discovered>",
+  tags=["onboarding"],
+  importance=5,
+  shared=true
+)
+```
+
+This captures setup friction that should be fixed — missing docs, broken scripts, unclear steps. Search before creating: `search_memories(query="onboarding <project>", tags=["onboarding"])`

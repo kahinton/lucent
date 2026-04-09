@@ -1,5 +1,6 @@
 """Tests for database connection pool management (lucent.db.pool)."""
 
+import hashlib
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID
@@ -7,7 +8,18 @@ from uuid import UUID
 import pytest
 
 import lucent.db.pool as pool_module
-from lucent.db.pool import _init_connection, _run_migrations, close_db, get_pool, init_db
+from lucent.db.pool import (
+    _bootstrap_schema_migrations,
+    _discover_forward_migration_files,
+    _file_checksum,
+    _parse_migration_metadata,
+    _rollback_migrations,
+    _init_connection,
+    _run_migrations,
+    close_db,
+    get_pool,
+    init_db,
+)
 
 
 def _make_mock_pool(mock_conn=None):
@@ -224,6 +236,7 @@ class TestRunMigrations:
 
         mock_conn = AsyncMock()
         mock_conn.fetch.return_value = []
+        mock_conn.fetchval.return_value = False  # no legacy _migrations table
         # transaction() is sync, returns an async context manager
         mock_tx = MagicMock()
         mock_tx.__aenter__ = AsyncMock()
@@ -238,18 +251,21 @@ class TestRunMigrations:
 
         # Should have created tracking table and executed both migrations
         execute_calls = [str(c) for c in mock_conn.execute.call_args_list]
-        assert any("_migrations" in str(c) for c in execute_calls)
+        assert any("schema_migrations" in str(c) for c in execute_calls)
 
     async def test_skips_already_applied_migrations(self, tmp_path):
         """Test that already-applied migrations are skipped."""
         migrations_dir = tmp_path / "migrations"
         migrations_dir.mkdir()
-        (migrations_dir / "001_init.sql").write_text("CREATE TABLE test (id INT);")
+        f1 = migrations_dir / "001_init.sql"
+        f1.write_text("CREATE TABLE test (id INT);")
         (migrations_dir / "002_new.sql").write_text("ALTER TABLE test ADD COLUMN name TEXT;")
 
-        mock_row = {"name": "001_init.sql"}
+        checksum = hashlib.sha256(f1.read_text().encode()).hexdigest()
+        mock_row = {"name": "001_init.sql", "checksum": checksum}
         mock_conn = AsyncMock()
         mock_conn.fetch.return_value = [mock_row]
+        mock_conn.fetchval.return_value = False  # no legacy _migrations table
         mock_tx = MagicMock()
         mock_tx.__aenter__ = AsyncMock()
         mock_tx.__aexit__ = AsyncMock(return_value=False)
@@ -264,3 +280,268 @@ class TestRunMigrations:
         # Should only execute the 002 migration SQL (not 001)
         execute_sql_texts = [str(c) for c in mock_conn.execute.call_args_list]
         assert not any("CREATE TABLE test (id INT)" in str(c) for c in execute_sql_texts)
+
+    async def test_records_checksum_on_apply(self, tmp_path):
+        """Test that SHA-256 checksum is stored when a migration is applied."""
+        migrations_dir = tmp_path / "migrations"
+        migrations_dir.mkdir()
+        content = "CREATE TABLE test (id INT);"
+        (migrations_dir / "001_init.sql").write_text(content)
+
+        expected_checksum = hashlib.sha256(content.encode()).hexdigest()
+
+        mock_conn = AsyncMock()
+        mock_conn.fetch.return_value = []
+        mock_conn.fetchval.return_value = False
+        mock_tx = MagicMock()
+        mock_tx.__aenter__ = AsyncMock()
+        mock_tx.__aexit__ = AsyncMock(return_value=False)
+        mock_conn.transaction = MagicMock(return_value=mock_tx)
+
+        mock_pool = _make_mock_pool(mock_conn)
+
+        with patch("lucent.db.pool.Path") as mock_path_cls:
+            mock_path_cls.return_value.parent.__truediv__ = MagicMock(return_value=migrations_dir)
+            await _run_migrations(mock_pool)
+
+        # Find the INSERT call with checksum
+        insert_calls = [
+            c for c in mock_conn.execute.call_args_list
+            if "INSERT INTO schema_migrations" in str(c)
+        ]
+        assert len(insert_calls) == 1
+        assert insert_calls[0][0][1] == "001_init.sql"
+        assert insert_calls[0][0][2] == expected_checksum
+
+    async def test_warns_on_checksum_mismatch(self, tmp_path, caplog):
+        """Test that a warning is logged when file content changed after application."""
+        import logging
+
+        migrations_dir = tmp_path / "migrations"
+        migrations_dir.mkdir()
+        (migrations_dir / "001_init.sql").write_text("CREATE TABLE test (id INT);")
+
+        # Recorded checksum doesn't match current file content
+        mock_row = {"name": "001_init.sql", "checksum": "0" * 64}
+        mock_conn = AsyncMock()
+        mock_conn.fetch.return_value = [mock_row]
+        mock_conn.fetchval.return_value = False
+        mock_pool = _make_mock_pool(mock_conn)
+
+        with patch("lucent.db.pool.Path") as mock_path_cls:
+            mock_path_cls.return_value.parent.__truediv__ = MagicMock(return_value=migrations_dir)
+            with caplog.at_level(logging.WARNING, logger="lucent.db.pool"):
+                await _run_migrations(mock_pool)
+
+        assert any("modified after application" in r.message for r in caplog.records)
+
+
+class TestBootstrapSchemaMigrations:
+    """Tests for _bootstrap_schema_migrations()."""
+
+    async def test_creates_table_fresh(self):
+        """Test that schema_migrations table is created on fresh database."""
+        mock_conn = AsyncMock()
+        mock_conn.fetchval.return_value = False  # no legacy table
+
+        await _bootstrap_schema_migrations(mock_conn, [])
+
+        execute_calls = [str(c) for c in mock_conn.execute.call_args_list]
+        assert any("CREATE TABLE IF NOT EXISTS schema_migrations" in s for s in execute_calls)
+
+    async def test_migrates_from_legacy_table(self, tmp_path):
+        """Test that data is copied from _migrations to schema_migrations."""
+        migrations_dir = tmp_path / "migrations"
+        migrations_dir.mkdir()
+        f1 = migrations_dir / "001_init.sql"
+        f1.write_text("CREATE TABLE test (id INT);")
+
+        mock_conn = AsyncMock()
+        mock_conn.fetchval.return_value = True  # legacy table exists
+        mock_conn.fetch.return_value = [{"name": "001_init.sql"}]  # migrated rows
+
+        await _bootstrap_schema_migrations(mock_conn, [f1])
+
+        execute_calls = [str(c) for c in mock_conn.execute.call_args_list]
+        # Should have: CREATE schema_migrations, INSERT from _migrations,
+        # UPDATE checksum, DROP _migrations
+        assert any("DROP TABLE _migrations" in s for s in execute_calls)
+        assert any("UPDATE schema_migrations SET checksum" in s for s in execute_calls)
+
+    async def test_skips_when_no_legacy_table(self):
+        """Test that bootstrap skips legacy migration when _migrations doesn't exist."""
+        mock_conn = AsyncMock()
+        mock_conn.fetchval.return_value = False
+
+        await _bootstrap_schema_migrations(mock_conn, [])
+
+        execute_calls = [str(c) for c in mock_conn.execute.call_args_list]
+        assert not any("DROP TABLE" in s for s in execute_calls)
+
+
+class TestRollbackMigrations:
+    """Tests for _rollback_migrations()."""
+
+    async def test_single_rollback(self, tmp_path):
+        """Rollback latest migration and delete tracking row."""
+        migrations_dir = tmp_path / "migrations"
+        migrations_dir.mkdir()
+        (migrations_dir / "001_init.sql").write_text("CREATE TABLE test (id INT);")
+        (migrations_dir / "001_init.down.sql").write_text("DROP TABLE test;")
+        (migrations_dir / "002_add_col.sql").write_text("ALTER TABLE test ADD COLUMN name TEXT;")
+        (migrations_dir / "002_add_col.down.sql").write_text("ALTER TABLE test DROP COLUMN name;")
+
+        mock_conn = AsyncMock()
+        mock_conn.fetchval.return_value = False
+        mock_conn.fetch.return_value = [
+            {"name": "002_add_col.sql", "checksum": hashlib.sha256("ALTER TABLE test ADD COLUMN name TEXT;".encode()).hexdigest()},
+            {"name": "001_init.sql", "checksum": hashlib.sha256("CREATE TABLE test (id INT);".encode()).hexdigest()},
+        ]
+        mock_tx = MagicMock()
+        mock_tx.__aenter__ = AsyncMock()
+        mock_tx.__aexit__ = AsyncMock(return_value=False)
+        mock_conn.transaction = MagicMock(return_value=mock_tx)
+        mock_pool = _make_mock_pool(mock_conn)
+
+        with patch("lucent.db.pool.Path") as mock_path_cls:
+            mock_path_cls.return_value.parent.__truediv__ = MagicMock(return_value=migrations_dir)
+            rolled_back = await _rollback_migrations(mock_pool, steps=1)
+
+        assert rolled_back == 1
+        execute_calls = [str(c) for c in mock_conn.execute.call_args_list]
+        assert any("ALTER TABLE test DROP COLUMN name;" in s for s in execute_calls)
+        assert any("DELETE FROM schema_migrations WHERE name = $1" in s for s in execute_calls)
+
+    async def test_multi_step_rollback(self, tmp_path):
+        """Rollback multiple migrations in reverse order."""
+        migrations_dir = tmp_path / "migrations"
+        migrations_dir.mkdir()
+        (migrations_dir / "001_base.sql").write_text("CREATE TABLE test (id INT);")
+        (migrations_dir / "001_base.down.sql").write_text("DROP TABLE test;")
+        (migrations_dir / "002_a.sql").write_text("ALTER TABLE test ADD COLUMN a INT;")
+        (migrations_dir / "002_a.down.sql").write_text("ALTER TABLE test DROP COLUMN a;")
+        (migrations_dir / "003_b.sql").write_text("ALTER TABLE test ADD COLUMN b INT;")
+        (migrations_dir / "003_b.down.sql").write_text("ALTER TABLE test DROP COLUMN b;")
+
+        mock_conn = AsyncMock()
+        mock_conn.fetchval.return_value = False
+        mock_conn.fetch.return_value = [
+            {"name": "003_b.sql", "checksum": hashlib.sha256("ALTER TABLE test ADD COLUMN b INT;".encode()).hexdigest()},
+            {"name": "002_a.sql", "checksum": hashlib.sha256("ALTER TABLE test ADD COLUMN a INT;".encode()).hexdigest()},
+            {"name": "001_base.sql", "checksum": hashlib.sha256("CREATE TABLE test (id INT);".encode()).hexdigest()},
+        ]
+        mock_tx = MagicMock()
+        mock_tx.__aenter__ = AsyncMock()
+        mock_tx.__aexit__ = AsyncMock(return_value=False)
+        mock_conn.transaction = MagicMock(return_value=mock_tx)
+        mock_pool = _make_mock_pool(mock_conn)
+
+        with patch("lucent.db.pool.Path") as mock_path_cls:
+            mock_path_cls.return_value.parent.__truediv__ = MagicMock(return_value=migrations_dir)
+            rolled_back = await _rollback_migrations(mock_pool, steps=2)
+
+        assert rolled_back == 2
+        sql_calls = [c[0][0] for c in mock_conn.execute.call_args_list if c[0]]
+        rollback_sqls = [s for s in sql_calls if "DROP COLUMN" in s]
+        assert rollback_sqls == [
+            "ALTER TABLE test DROP COLUMN b;",
+            "ALTER TABLE test DROP COLUMN a;",
+        ]
+
+    async def test_rollback_irreversible_migration_fails(self, tmp_path, caplog):
+        """Rollback fails for irreversible migrations without allow_irreversible."""
+        import logging
+
+        migrations_dir = tmp_path / "migrations"
+        migrations_dir.mkdir()
+        (migrations_dir / "001_base.sql").write_text("CREATE TABLE test (id INT);")
+        (migrations_dir / "001_base.down.sql").write_text("DROP TABLE test;")
+        (migrations_dir / "002_data.sql").write_text(
+            "-- lucent: rollback=irreversible\nINSERT INTO test (id) VALUES (1);"
+        )
+
+        mock_conn = AsyncMock()
+        mock_conn.fetchval.return_value = False
+        mock_conn.fetch.return_value = [
+            {"name": "002_data.sql", "checksum": hashlib.sha256("-- lucent: rollback=irreversible\nINSERT INTO test (id) VALUES (1);".encode()).hexdigest()},
+            {"name": "001_base.sql", "checksum": hashlib.sha256("CREATE TABLE test (id INT);".encode()).hexdigest()},
+        ]
+        mock_tx = MagicMock()
+        mock_tx.__aenter__ = AsyncMock()
+        mock_tx.__aexit__ = AsyncMock(return_value=False)
+        mock_conn.transaction = MagicMock(return_value=mock_tx)
+        mock_pool = _make_mock_pool(mock_conn)
+
+        with patch("lucent.db.pool.Path") as mock_path_cls:
+            mock_path_cls.return_value.parent.__truediv__ = MagicMock(return_value=migrations_dir)
+            with caplog.at_level(logging.WARNING, logger="lucent.db.pool"):
+                with pytest.raises(RuntimeError, match="irreversible"):
+                    await _rollback_migrations(mock_pool, steps=1)
+
+        assert any("irreversible" in r.message for r in caplog.records)
+
+    async def test_rollback_no_migrations_to_reverse(self, tmp_path):
+        """Rollback is a no-op when no migrations were applied."""
+        migrations_dir = tmp_path / "migrations"
+        migrations_dir.mkdir()
+        (migrations_dir / "001_init.sql").write_text("CREATE TABLE test (id INT);")
+        (migrations_dir / "001_init.down.sql").write_text("DROP TABLE test;")
+
+        mock_conn = AsyncMock()
+        mock_conn.fetchval.return_value = False
+        mock_conn.fetch.return_value = []
+        mock_pool = _make_mock_pool(mock_conn)
+
+        with patch("lucent.db.pool.Path") as mock_path_cls:
+            mock_path_cls.return_value.parent.__truediv__ = MagicMock(return_value=migrations_dir)
+            rolled_back = await _rollback_migrations(mock_pool, steps=1)
+
+        assert rolled_back == 0
+        execute_sqls = [str(c) for c in mock_conn.execute.call_args_list]
+        assert not any("DELETE FROM schema_migrations" in s for s in execute_sqls)
+
+
+class TestMigrationFileMetadata:
+    """Tests for migration file discovery and metadata parsing."""
+
+    def test_forward_discovery_excludes_down_files(self, tmp_path):
+        migrations_dir = tmp_path / "migrations"
+        migrations_dir.mkdir()
+        up = migrations_dir / "001_init.sql"
+        down = migrations_dir / "001_init.down.sql"
+        up.write_text("SELECT 1;")
+        down.write_text("SELECT 2;")
+
+        files = _discover_forward_migration_files(migrations_dir)
+        assert files == [up]
+
+    def test_parse_metadata(self, tmp_path):
+        migration = tmp_path / "001_test.sql"
+        migration.write_text(
+            "-- lucent: rollback=irreversible\n"
+            "-- lucent: warning=Data loss expected\n"
+            "CREATE TABLE x (id INT);\n"
+        )
+        metadata = _parse_migration_metadata(migration)
+        assert metadata["rollback"] == "irreversible"
+        assert metadata["warning"] == "Data loss expected"
+
+
+class TestFileChecksum:
+    """Tests for _file_checksum()."""
+
+    def test_computes_sha256(self, tmp_path):
+        """Test that _file_checksum returns correct SHA-256."""
+        f = tmp_path / "test.sql"
+        content = "CREATE TABLE test (id INT);"
+        f.write_text(content)
+
+        expected = hashlib.sha256(content.encode()).hexdigest()
+        assert _file_checksum(f) == expected
+
+    def test_deterministic(self, tmp_path):
+        """Test that same content produces same checksum."""
+        f = tmp_path / "test.sql"
+        f.write_text("hello world")
+
+        assert _file_checksum(f) == _file_checksum(f)

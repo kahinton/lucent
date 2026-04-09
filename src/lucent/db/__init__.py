@@ -21,12 +21,17 @@ from lucent.db.audit import AuditRepository
 
 # Repositories
 from lucent.db.definitions import DefinitionRepository
+from lucent.db.groups import GroupRepository
+from lucent.db.integrations import IntegrationRepository
 from lucent.db.memory import MemoryRepository, VersionConflictError
+from lucent.db.models import ModelRepository
 from lucent.db.organization import OrganizationRepository
 from lucent.db.pool import close_db, get_pool, init_db
+from lucent.db.reviews import ReviewRepository
 
 # TypedDict definitions for repository return values
 from lucent.db.types import (
+    AccessFrequencyRecord,
     AccessLogRecord,
     AccessLogResult,
     ApiKeyRecord,
@@ -54,11 +59,15 @@ __all__ = [
     "MemoryRepository",
     "VersionConflictError",
     "DefinitionRepository",
+    "GroupRepository",
+    "IntegrationRepository",
     "UserRepository",
     "ApiKeyRepository",
     "OrganizationRepository",
     "AuditRepository",
     "AccessRepository",
+    "ModelRepository",
+    "ReviewRepository",
     # TypedDict definitions
     "MemoryRecord",
     "MemorySearchRecord",
@@ -74,5 +83,6 @@ __all__ = [
     "AuditLogResult",
     "AccessLogRecord",
     "AccessLogResult",
+    "AccessFrequencyRecord",
     "MostAccessedRecord",
 ]

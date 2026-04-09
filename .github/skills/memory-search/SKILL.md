@@ -1,72 +1,81 @@
 ---
 name: memory-search
-description: 'Find relevant past knowledge efficiently. Use when you need context about projects, decisions, or past work, when asked "what do I know about", "find previous", "recall", or when a topic feels familiar.'
+description: 'Find relevant past knowledge efficiently. Use when you need context about projects, decisions, or past work.'
 ---
 
-# Memory Search — Tool Reference
+# Memory Search
 
-| Tool | When to Use | Query Required? |
-|------|------------|----------------|
-| `search_memories(query, tags, type, limit)` | Most searches — content search with optional tag/type filters | No (but recommended) |
-| `search_memories_full(query, tags, type, limit)` | Broad search across content + tags + metadata | Yes |
-| `get_memory(memory_ids)` | Get full content of specific memories (when search results were truncated) | N/A — pass IDs |
+## Disambiguation
 
-# Search Strategies by Situation
+This skill is for **finding relevant past knowledge** — search strategies, tool selection, and query patterns. Use it when you need to retrieve context from memory.
 
-## Starting work on a project
-```
-search_memories(query="project-name")
-search_memories(query="repo-name", tags=["architecture"])
-```
-Look for: past decisions, known issues, architecture context, previous work sessions.
+- To decide **what to save** and how to structure new memories → use **memory-capture**
+- To **clean up, deduplicate, or reorganize** existing memories → use **memory-management**
 
-## Debugging a problem
-```
-search_memories(query="error message or module name")
-search_memories(query="module-name debugging", tags=["bugs"])
-```
-Look for: past root causes, known failure modes, previous debugging sessions.
+## Which Tool to Use
 
-## Making a decision
+| Situation | Tool |
+|-----------|------|
+| Know specific tags to filter by | `search_memories(tags=["tag1", "tag2"], limit=10)` |
+| Searching for content about a topic | `search_memories(query="topic")` |
+| Topic might be in metadata or tags, not just content | `search_memories_full(query="topic")` |
+| Need full text of truncated search results | `get_memories(memory_ids=["id1", "id2"])` |
+| Start of conversation — always | `get_current_user_context()` |
+
+## Search Strategies
+
+### Starting work on a project
 ```
-search_memories(query="topic", tags=["architecture", "decision"])
-search_memories(query="previous-approach-name")
+search_memories(query="<project-name>", limit=10)
+search_memories(query="<project>", tags=["architecture"], limit=5)
+```
+Look for: past decisions, known issues, architecture context.
+
+### Debugging a problem
+```
+search_memories(query="<error message or module name>", limit=5)
+search_memories(query="<module> debugging", tags=["bugs"], limit=5)
+```
+Look for: past root causes, known failure modes.
+
+### Making a decision
+```
+search_memories(query="<topic>", tags=["architecture"], limit=5)
 ```
 Look for: past decisions on similar topics, rejected alternatives, lessons from previous approaches.
 
-## Working with someone
+### Checking daemon activity
 ```
-get_current_user_context()  # Always do this first
-search_memories(query="person-name", type="individual")
+search_memories(tags=["daemon-message"], limit=10)
+search_memories(tags=["daemon-result", "needs-review"], limit=10)
 ```
-Look for: their preferences, past interactions, working style.
 
-## Checking what the daemon has done
+### Before creating a memory
 ```
-search_memories(tags=["daemon-message"])
-search_memories(tags=["daemon-result", "needs-review"])
+search_memories(query="<topic of upcoming memory>", limit=5)
 ```
-Look for: unacknowledged messages, work needing review, task outcomes.
+Always — to avoid creating duplicates.
 
-## Before creating a memory
-```
-search_memories(query="topic of the memory you're about to create")
-```
-Look for: existing memories to update instead of creating duplicates.
+## Rules
 
-# Tips
+1. **Start broad, then narrow.** `search_memories(query="auth")` first, then `search_memories(query="auth middleware", tags=["bugs"])` if needed.
+2. **Check for truncation.** If content ends with `...`, call `get_memories(memory_ids=[id])` for the full text.
+3. **Combine text + tags** for precision. `search_memories(query="rate limiting", tags=["architecture"])` beats either alone.
+4. **Use `search_memories_full`** for broad discovery when you're not sure what tags to filter by.
+5. **Set reasonable limits.** Default is 5. Use 10-15 for broader results. Don't go excessive.
+6. **Search even when you think you know.** Past context often reveals caveats and shortcuts.
 
-1. **Start broad, then narrow.** `search_memories(query="auth")` first, then `search_memories(query="auth middleware cookie", tags=["bugs"])` if needed.
-2. **Check for truncation.** If a memory's content ends with `...` in search results, call `get_memory(memory_ids=[id])` to get the full text.
-3. **Combine text + tags.** `search_memories(query="rate limiting", tags=["architecture"])` is more precise than either alone.
-4. **Use `search_memories_full` for broad discovery.** When you're not sure what tags to filter by, `search_memories_full` searches across content, tags, AND metadata.
-5. **Set reasonable limits.** Default limit is 5. Use `limit=10` or `limit=15` when you need broader results. Don't go excessive.
-6. **Search even when you think you know.** Past context often reveals details, caveats, or known issues that save significant time.
-
-# When to Search
+## When to Search
 
 - **Always** before starting any substantive task
-- **Always** before creating a new memory (avoid duplicates)
-- When a topic feels familiar (trust that instinct — you probably have context)
+- **Always** before creating a new memory
+- When a topic feels familiar — trust that instinct
 - When debugging something that should have been solved before
-- When a user references past work or decisions
+- When someone references past work or decisions
+
+## Anti-Patterns
+
+- Skipping search because "it's a simple task"
+- Using `limit=50` on every search — floods context with noise
+- Getting 0 results with an overly specific query and stopping — start broader
+- Not reading truncated memories — missing critical details

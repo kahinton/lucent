@@ -1,10 +1,12 @@
 """Authentication and authorization dependencies for API endpoints."""
 
+import re
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, Request, status
 
+from lucent.access_control import AccessControlService
 from lucent.auth import (
     set_current_user,
 )
@@ -27,6 +29,7 @@ class CurrentUser:
         api_key_scopes: list[str] | None = None,  # Scopes from API key
         impersonator_id: UUID | None = None,  # Set when being impersonated
         impersonator_display_name: str | None = None,  # For UI display
+        external_id: str | None = None,  # External provider ID (e.g. "daemon-service")
     ):
         self.id = id
         self.organization_id = organization_id
@@ -38,6 +41,7 @@ class CurrentUser:
         self.api_key_scopes = api_key_scopes or ["read", "write"]
         self.impersonator_id = impersonator_id
         self.impersonator_display_name = impersonator_display_name
+        self.external_id = external_id
 
     @property
     def is_impersonated(self) -> bool:
@@ -126,10 +130,12 @@ async def _authenticate_with_api_key(api_key: str) -> CurrentUser | None:
         auth_method="api_key",
         api_key_id=key_info["id"],  # Include the API key ID for auditing
         api_key_scopes=key_info.get("scopes", ["read", "write"]),
+        external_id=user.get("external_id"),
     )
 
 
 async def get_current_user(
+    request: Request,
     authorization: Annotated[str | None, Header()] = None,
 ) -> CurrentUser:
     """Get the current authenticated user for API routes.
@@ -143,6 +149,20 @@ async def get_current_user(
     if authorization:
         user = await _authenticate_with_api_key(authorization)
         if user:
+            # Sandbox bridge scoped keys are restricted to specific API endpoints.
+            has_sandbox_scope = any(scope.startswith("sandbox-") for scope in user.api_key_scopes)
+            if user.auth_method == "api_key" and has_sandbox_scope:
+                allowed_path_patterns = (
+                    r"^/api/memories(?:$|/[^/]+$|/tags/(?:list|suggest)$)",
+                    r"^/api/search(?:$|/full$)",
+                    r"^/api/requests/tasks/[^/]+/(?:events|memories)$",
+                )
+                path = request.url.path
+                if not any(re.match(pattern, path) for pattern in allowed_path_patterns):
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="API key scope does not allow this endpoint",
+                    )
             return user
 
         # Invalid API key
@@ -232,6 +252,12 @@ def require_scope_dep(scope: str):
         return user
 
     return check_scope
+
+
+async def get_access_control() -> AccessControlService:
+    """Get access control service for resource ACL checks."""
+    pool = await get_pool()
+    return AccessControlService(pool)
 
 
 # Type alias for dependency injection

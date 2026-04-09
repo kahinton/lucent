@@ -172,8 +172,13 @@ class TestCreateSchedule:
         assert "error" in result
 
     @pytest.mark.asyncio
-    async def test_with_model(self, mcp, auth_user):
-        """Model validation accepts any string (new models may exist before registry update)."""
+    async def test_with_model(self, mcp, auth_user, monkeypatch):
+        """Known model from hardcoded registry is accepted in strict mode."""
+        from lucent import model_registry
+        from lucent.model_registry import MODELS
+
+        monkeypatch.setattr(model_registry, "_db_models", None)
+        monkeypatch.setattr(model_registry, "_MODEL_BY_ID", {m.id: m for m in MODELS})
         result = await _call(
             mcp,
             "create_schedule",
@@ -184,6 +189,21 @@ class TestCreateSchedule:
             },
         )
         assert "id" in result
+
+    @pytest.mark.asyncio
+    async def test_unknown_model_rejected(self, mcp, auth_user):
+        """Unknown model ID is rejected with helpful error message."""
+        result = await _call(
+            mcp,
+            "create_schedule",
+            {
+                "title": "Bad Model Schedule",
+                "schedule_type": "once",
+                "model": "totally-fake-model-xyz",
+            },
+        )
+        assert "error" in result
+        assert "Unknown model" in result["error"]
 
     @pytest.mark.asyncio
     async def test_no_auth(self, mcp, test_user):
@@ -214,7 +234,9 @@ class TestListSchedules:
     @pytest.mark.asyncio
     async def test_empty_list(self, mcp, auth_user):
         result = await _call(mcp, "list_schedules")
-        assert isinstance(result, list)
+        assert isinstance(result, dict)
+        assert result["items"] == []
+        assert result["total_count"] == 0
 
     @pytest.mark.asyncio
     async def test_returns_schedules(self, mcp, auth_user, schedule_repo, test_organization):
@@ -224,9 +246,10 @@ class TestListSchedules:
             schedule_type="once",
         )
         result = await _call(mcp, "list_schedules")
-        assert isinstance(result, list)
-        assert len(result) >= 1
-        titles = [s["title"] for s in result]
+        assert isinstance(result, dict)
+        items = result["items"]
+        assert len(items) >= 1
+        titles = [s["title"] for s in items]
         assert "Listed Schedule" in titles
 
     @pytest.mark.asyncio
@@ -237,7 +260,8 @@ class TestListSchedules:
             schedule_type="once",
         )
         result = await _call(mcp, "list_schedules", {"status": "active"})
-        assert isinstance(result, list)
+        assert isinstance(result, dict)
+        assert isinstance(result["items"], list)
 
     @pytest.mark.asyncio
     async def test_enabled_only(self, mcp, auth_user, schedule_repo, test_organization):
@@ -247,7 +271,8 @@ class TestListSchedules:
             schedule_type="once",
         )
         result = await _call(mcp, "list_schedules", {"enabled_only": True})
-        assert isinstance(result, list)
+        assert isinstance(result, dict)
+        assert isinstance(result["items"], list)
 
     @pytest.mark.asyncio
     async def test_no_auth(self, mcp, test_user):

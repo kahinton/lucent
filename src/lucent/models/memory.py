@@ -60,10 +60,10 @@ class TechnicalMetadata(BaseModel):
     )
     version_info: str | None = Field(default=None, description="Version-specific information")
     repo: str | None = Field(
-        default=None, description="Repository name or URL related to this knowledge"
+        default=None, description="Repository name this knowledge relates to (e.g. 'hindsight')"
     )
     filename: str | None = Field(
-        default=None, description="Specific file this knowledge relates to"
+        default=None, description="File or directory path this knowledge relates to (e.g. 'src/lucent/api/' for directory, 'src/lucent/db/memory.py' for file). Null for repo-level knowledge."
     )
 
 
@@ -224,7 +224,9 @@ class CreateMemoryInput(BaseModel):
         default=None, description="Username for this memory (defaults to authenticated user)"
     )
     type: MemoryType = Field(..., description="Type of memory to create")
-    content: str = Field(..., min_length=1, description="Main content of the memory")
+    content: str = Field(
+        ..., min_length=1, max_length=100_000, description="Main content of the memory"
+    )
     tags: list[str] = Field(default_factory=list, description="Tags for categorization")
     importance: int = Field(default=5, ge=1, le=10, description="Importance rating 1-10")
     related_memory_ids: list[UUID] = Field(
@@ -244,7 +246,9 @@ class CreateMemoryInput(BaseModel):
 class UpdateMemoryInput(BaseModel):
     """Input for updating an existing memory."""
 
-    content: str | None = Field(default=None, min_length=1, description="Updated content")
+    content: str | None = Field(
+        default=None, min_length=1, max_length=100_000, description="Updated content"
+    )
     tags: list[str] | None = Field(default=None, description="Updated tags")
     importance: int | None = Field(default=None, ge=1, le=10, description="Updated importance")
     related_memory_ids: list[UUID] | None = Field(

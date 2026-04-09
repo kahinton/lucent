@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lucent-operator
+  namespace: lucent-system
+  labels:
+    app.kubernetes.io/name: lucent-operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: lucent-operator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: lucent-operator
+    spec:
+      serviceAccountName: lucent-operator
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: operator
+          image: ghcr.io/lucent/operator:0.2.0
+          imagePullPolicy: IfNotPresent
+          command: ["kopf"]
+          args:
+            - run
+            - --standalone=false
+            - --all-namespaces
+            - /app/operator.py
+          env:
+            - name: KOPF_RUN_NAMESPACE
+              value: ""
+          ports:
+            - containerPort: 8080
+              name: healthz
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+            runAsUser: 10001
+            runAsGroup: 10001
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi

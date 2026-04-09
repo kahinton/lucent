@@ -151,12 +151,14 @@ class ApiKeyRepository:
                 break
 
         if matched_row is None:
-            logger.warning("API key verification failed: hash mismatch for prefix=%s", key_prefix)
+            logger.warning("API key verification failed: hash mismatch for key_id=<redacted>")
             return None
 
         # Check expiration
         if matched_row["expires_at"] and matched_row["expires_at"] < datetime.now(timezone.utc):
-            logger.warning("API key verification failed: expired key prefix=%s", key_prefix)
+            logger.warning(
+                "API key verification failed: expired key_id=%s", matched_row["id"]
+            )
             return None
 
         # Update last used timestamp and count
@@ -174,14 +176,20 @@ class ApiKeyRepository:
         result["user_role"] = matched_row["user_role"]
         return result
 
-    async def list_by_user(self, user_id: UUID) -> list[dict[str, Any]]:
+    async def list_by_user(self, user_id: UUID, limit: int = 25, offset: int = 0) -> dict:
         """List all API keys for a user.
 
         Args:
             user_id: The user ID.
+            limit: Maximum number of results.
+            offset: Pagination offset.
 
         Returns:
-            List of API key records (without hashes).
+            Dict with items list and pagination info.
+        """
+        count_query = """
+            SELECT COUNT(*) AS total FROM api_keys
+            WHERE user_id = $1 AND revoked_at IS NULL
         """
         query = """
             SELECT id, user_id, organization_id, name, key_prefix, scopes,
@@ -189,12 +197,21 @@ class ApiKeyRepository:
             FROM api_keys
             WHERE user_id = $1 AND revoked_at IS NULL
             ORDER BY created_at DESC
+            LIMIT $2 OFFSET $3
         """
 
         async with self.pool.acquire() as conn:
-            rows = await conn.fetch(query, str(user_id))
+            count_row = await conn.fetchrow(count_query, str(user_id))
+            total_count = count_row["total"] if count_row else 0
+            rows = await conn.fetch(query, str(user_id), limit, offset)
 
-        return [self._row_to_dict(row) for row in rows]
+        return {
+            "items": [self._row_to_dict(row) for row in rows],
+            "total_count": total_count,
+            "offset": offset,
+            "limit": limit,
+            "has_more": offset + len(rows) < total_count,
+        }
 
     async def get_by_id(self, key_id: UUID, user_id: UUID) -> dict[str, Any] | None:
         """Get an API key by ID (must belong to user).

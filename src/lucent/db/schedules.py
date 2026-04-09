@@ -11,6 +11,34 @@ from zoneinfo import ZoneInfo
 
 from asyncpg import Pool
 
+ALLOWED_SCHEDULE_COLUMNS = frozenset(
+    {
+        "title",
+        "description",
+        "enabled",
+        "agent_type",
+        "model",
+        "prompt",
+        "task_template",
+        "sandbox_config",
+        "sandbox_template_id",
+        "schedule_type",
+        "cron_expression",
+        "interval_seconds",
+        "next_run_at",
+        "priority",
+        "timezone",
+        "max_runs",
+        "expires_at",
+    }
+)
+
+
+SYSTEM_SCHEDULE_PROTECTION_MSG = (
+    "Built-in system schedules cannot be modified by the daemon. "
+    "Update the on-disk source file instead."
+)
+
 
 def _parse_cron(expression: str, after: datetime) -> datetime:
     """Calculate next run time from a cron expression (minute hour dom month dow).
@@ -47,15 +75,25 @@ def _parse_cron(expression: str, after: datetime) -> datetime:
     cron_dows = _expand(parts[4], 0, 6)
     dows = {(d - 1) % 7 for d in cron_dows}
 
+    # Standard cron: when both DOM and DOW are explicitly set (not *),
+    # fire on DOM OR DOW. When either is *, AND is equivalent.
+    dom_restricted = parts[2] != "*"
+    dow_restricted = parts[4] != "*"
+    use_or = dom_restricted and dow_restricted
+
     # Walk forward minute by minute from after, capped at 366 days
     candidate = after.replace(second=0, microsecond=0) + timedelta(minutes=1)
     limit = after + timedelta(days=366)
 
     while candidate < limit:
+        day_match = (
+            (candidate.day in doms or candidate.weekday() in dows)
+            if use_or
+            else (candidate.day in doms and candidate.weekday() in dows)
+        )
         if (
             candidate.month in months
-            and candidate.day in doms
-            and (candidate.weekday()) in dows  # Python weekday: 0=Monday
+            and day_match
             and candidate.hour in hours
             and candidate.minute in minutes
         ):
@@ -94,6 +132,88 @@ class ScheduleRepository:
 
     def __init__(self, pool: Pool):
         self.pool = pool
+
+    async def _check_system_schedule_protection(
+        self,
+        schedule_id: str,
+        org_id: str,
+        requester_role: str | None,
+    ) -> None:
+        """Raise ValueError if a daemon tries to modify a system schedule.
+
+        System (built-in) schedules have their source of truth on disk or in the
+        seeding logic.  The daemon should not modify them — changes would be
+        overwritten on restart.
+        """
+        if requester_role != "daemon":
+            return
+        async with self.pool.acquire() as conn:
+            is_sys = await conn.fetchval(
+                "SELECT is_system FROM schedules "
+                "WHERE id = $1::uuid AND organization_id = $2::uuid",
+                schedule_id, org_id,
+            )
+        if is_sys:
+            raise ValueError(SYSTEM_SCHEDULE_PROTECTION_MSG)
+
+    # ── System schedules ──────────────────────────────────────────────────
+
+    async def ensure_system_schedule(
+        self,
+        title: str,
+        org_id: str,
+        description: str,
+        agent_type: str,
+        schedule_type: str,
+        interval_seconds: int | None = None,
+        cron_expression: str | None = None,
+        priority: str = "low",
+        prompt: str = "",
+        created_by: str | None = None,
+    ) -> dict:
+        """Create a system schedule if it doesn't exist, or return the existing one.
+
+        System schedules are identified by title + org_id + is_system=true.
+        They can be modified by users but never deleted.
+        """
+        async with self.pool.acquire() as conn:
+            existing = await conn.fetchrow(
+                """SELECT * FROM schedules
+                   WHERE title = $1 AND organization_id = $2::uuid AND is_system = true""",
+                title,
+                org_id,
+            )
+            if existing:
+                return dict(existing)
+
+            now = datetime.now(timezone.utc)
+            if schedule_type == "interval" and interval_seconds:
+                next_run_at = now + timedelta(seconds=interval_seconds)
+            elif schedule_type == "cron" and cron_expression:
+                next_run_at = _next_cron_utc(cron_expression, now, "UTC")
+            else:
+                next_run_at = now
+
+            row = await conn.fetchrow(
+                """INSERT INTO schedules
+                   (title, organization_id, description, agent_type, schedule_type,
+                    interval_seconds, cron_expression, next_run_at, priority, prompt,
+                    created_by, is_system)
+                   VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10, $11::uuid, true)
+                   RETURNING *""",
+                title,
+                org_id,
+                description,
+                agent_type,
+                schedule_type,
+                interval_seconds,
+                cron_expression,
+                next_run_at,
+                priority,
+                prompt,
+                created_by,
+            )
+            return dict(row)
 
     # ── Schedules ─────────────────────────────────────────────────────────
 
@@ -174,8 +294,9 @@ class ScheduleRepository:
         org_id: str,
         status: str | None = None,
         enabled: bool | None = None,
-        limit: int = 100,
-    ) -> list[dict]:
+        limit: int = 25,
+        offset: int = 0,
+    ) -> dict:
         async with self.pool.acquire() as conn:
             conditions = ["organization_id = $1::uuid"]
             params: list[Any] = [org_id]
@@ -190,19 +311,35 @@ class ScheduleRepository:
                 params.append(enabled)
                 idx += 1
 
-            params.append(limit)
+            where = " AND ".join(conditions)
+            count_row = await conn.fetchrow(
+                f"SELECT COUNT(*) AS total FROM schedules WHERE {where}",
+                *params,
+            )
+            total_count = count_row["total"] if count_row else 0
+
+            params.extend([limit, offset])
             rows = await conn.fetch(
                 f"""SELECT * FROM schedules
-                    WHERE {" AND ".join(conditions)}
+                    WHERE {where}
                     ORDER BY
                         CASE WHEN enabled AND status = 'active' THEN 0 ELSE 1 END,
                         next_run_at ASC NULLS LAST
-                    LIMIT ${idx}""",
+                    LIMIT ${idx} OFFSET ${idx + 1}""",
                 *params,
             )
-            return [dict(r) for r in rows]
+            return {
+                "items": [dict(r) for r in rows],
+                "total_count": total_count,
+                "offset": offset,
+                "limit": limit,
+                "has_more": offset + len(rows) < total_count,
+            }
 
-    async def update_schedule(self, schedule_id: str, org_id: str, **fields) -> dict | None:
+    async def update_schedule(
+        self, schedule_id: str, org_id: str, *, requester_role: str | None = None, **fields,
+    ) -> dict | None:
+        await self._check_system_schedule_protection(schedule_id, org_id, requester_role)
         if not fields:
             return await self.get_schedule(schedule_id, org_id)
 
@@ -210,6 +347,8 @@ class ScheduleRepository:
         params: list[Any] = []
         idx = 1
         for key, val in fields.items():
+            if key not in ALLOWED_SCHEDULE_COLUMNS:
+                raise ValueError(f"Invalid schedule update column: {key}")
             if key == "task_template":
                 sets.append(f"task_template = ${idx}::jsonb")
                 params.append(json.dumps(val))
@@ -235,13 +374,33 @@ class ScheduleRepository:
             )
             return dict(row) if row else None
 
-    async def toggle_schedule(self, schedule_id: str, org_id: str, enabled: bool) -> dict | None:
-        return await self.update_schedule(schedule_id, org_id, enabled=enabled)
+    async def toggle_schedule(
+        self, schedule_id: str, org_id: str, enabled: bool,
+        *, requester_role: str | None = None,
+    ) -> dict | None:
+        return await self.update_schedule(
+            schedule_id, org_id, requester_role=requester_role, enabled=enabled,
+        )
 
     async def delete_schedule(self, schedule_id: str, org_id: str) -> bool:
         async with self.pool.acquire() as conn:
+            # System schedules cannot be deleted — only modified or disabled
+            is_sys = await conn.fetchval(
+                (
+                    "SELECT is_system FROM schedules "
+                    "WHERE id = $1::uuid AND organization_id = $2::uuid"
+                ),
+                schedule_id,
+                org_id,
+            )
+            if is_sys:
+                raise ValueError("System schedules cannot be deleted. Disable it instead.")
             result = await conn.execute(
-                "DELETE FROM schedules WHERE id = $1::uuid AND organization_id = $2::uuid",
+                (
+                    "DELETE FROM schedules "
+                    "WHERE id = $1::uuid AND organization_id = $2::uuid "
+                    "AND (is_system IS NOT TRUE)"
+                ),
                 schedule_id,
                 org_id,
             )
@@ -384,25 +543,46 @@ class ScheduleRepository:
             )
             return dict(row) if row else None
 
+    async def link_run_to_request(self, run_id: str, request_id: str) -> None:
+        """Set the request_id on a schedule run after the request is created."""
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE schedule_runs SET request_id = $2::uuid WHERE id = $1::uuid",
+                run_id,
+                request_id,
+            )
+
     # ── Run history ───────────────────────────────────────────────────────
 
-    async def list_runs(self, schedule_id: str, limit: int = 20) -> list[dict]:
+    async def list_runs(self, schedule_id: str, limit: int = 25, offset: int = 0) -> dict:
         async with self.pool.acquire() as conn:
+            count_row = await conn.fetchrow(
+                "SELECT COUNT(*) AS total FROM schedule_runs WHERE schedule_id = $1::uuid",
+                schedule_id,
+            )
+            total_count = count_row["total"] if count_row else 0
             rows = await conn.fetch(
                 """SELECT * FROM schedule_runs
                    WHERE schedule_id = $1::uuid
-                   ORDER BY created_at DESC LIMIT $2""",
+                   ORDER BY created_at DESC LIMIT $2 OFFSET $3""",
                 schedule_id,
                 limit,
+                offset,
             )
-            return [dict(r) for r in rows]
+            return {
+                "items": [dict(r) for r in rows],
+                "total_count": total_count,
+                "offset": offset,
+                "limit": limit,
+                "has_more": offset + len(rows) < total_count,
+            }
 
     async def get_schedule_with_runs(self, schedule_id: str, org_id: str) -> dict | None:
         """Load a schedule with its recent run history."""
         sched = await self.get_schedule(schedule_id, org_id)
         if not sched:
             return None
-        sched["runs"] = await self.list_runs(schedule_id)
+        sched["runs"] = (await self.list_runs(schedule_id))["items"]
         return sched
 
     # ── Summary ───────────────────────────────────────────────────────────

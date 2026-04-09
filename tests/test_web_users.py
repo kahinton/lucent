@@ -152,7 +152,7 @@ def _csrf_data(client: httpx.AsyncClient, extra: dict | None = None) -> dict:
 
 
 @pytest.mark.asyncio
-@patch("lucent.web.routes.is_team_mode", return_value=True)
+@patch("lucent.web.routes.admin.is_team_mode", return_value=True)
 async def test_users_list_in_team_mode(_mock_tm, client):
     """With team mode on and an owner user, GET /users returns 200."""
     resp = await client.get("/users")
@@ -174,7 +174,7 @@ async def test_users_list_not_team_mode_returns_404(client):
 
 @pytest.mark.asyncio
 @patch("secrets.token_urlsafe", return_value="TempPass1safe")
-@patch("lucent.web.routes.is_team_mode", return_value=True)
+@patch("lucent.web.routes.admin.is_team_mode", return_value=True)
 async def test_create_user_as_owner(_mock_tm, _mock_pw, client):
     """Owner can create a new user; expect 303 redirect to /users?success=."""
     resp = await client.post(
@@ -195,7 +195,7 @@ async def test_create_user_as_owner(_mock_tm, _mock_pw, client):
 
 
 @pytest.mark.asyncio
-@patch("lucent.web.routes.is_team_mode", return_value=True)
+@patch("lucent.web.routes.admin.is_team_mode", return_value=True)
 async def test_create_user_without_permission_returns_403(_mock_tm, member_client):
     """A member user cannot create users; expect 403."""
     resp = await member_client.post(
@@ -219,7 +219,7 @@ async def test_create_user_without_permission_returns_403(_mock_tm, member_clien
 
 
 @pytest.mark.asyncio
-@patch("lucent.web.routes.is_team_mode", return_value=True)
+@patch("lucent.web.routes.admin.is_team_mode", return_value=True)
 async def test_impersonate_user(_mock_tm, client, member_user):
     """Owner can impersonate a member; expect 303 redirect."""
     target_user, _, _ = member_user
@@ -233,7 +233,7 @@ async def test_impersonate_user(_mock_tm, client, member_user):
 
 
 @pytest.mark.asyncio
-@patch("lucent.web.routes.is_team_mode", return_value=True)
+@patch("lucent.web.routes.admin.is_team_mode", return_value=True)
 async def test_impersonate_self_redirects_with_error(_mock_tm, client, owner_user):
     """Owner cannot impersonate themselves; expect redirect to /users?error=."""
     owner, _, _ = owner_user
@@ -252,7 +252,7 @@ async def test_impersonate_self_redirects_with_error(_mock_tm, client, owner_use
 
 
 @pytest.mark.asyncio
-@patch("lucent.web.routes.is_team_mode", return_value=True)
+@patch("lucent.web.routes.admin.is_team_mode", return_value=True)
 async def test_stop_impersonation(_mock_tm, client):
     """POST /users/stop-impersonation returns 303 redirect to /users."""
     resp = await client.post(

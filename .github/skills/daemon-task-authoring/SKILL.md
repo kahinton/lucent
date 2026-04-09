@@ -1,122 +1,129 @@
 ---
 name: daemon-task-authoring
-description: 'Guide creation of well-structured daemon tasks — clear descriptions, appropriate agent_type, priority calibration, and context fields that lead to high validation rates'
+description: 'Guide creation of well-structured daemon tasks — clear descriptions, appropriate agent_type, priority calibration, and context that leads to high validation rates. Use when creating requests or tasks for the daemon, calibrating priority, writing task descriptions, task validation rates are low, or restructuring existing tasks that failed or were rejected.'
 ---
 
 # Daemon Task Authoring
 
-How to create daemon tasks that get picked up, executed successfully, and pass validation.
+## Procedure
 
-## When to Use
+Follow these steps in order when creating daemon work items.
 
-- User asks to create work for the daemon
-- Scheduling recurring tasks
-- Submitting requests for agent creation, code changes, research, etc.
+1. **Check active work** — Call `list_active_work()` to see what already exists. Do not create duplicate requests. If an existing request covers the same intent, add tasks to it instead.
+2. **Define the request** — Write a clear title (under 80 chars) and a description following the [Description Checklist](#description-checklist). The description is the daemon's entire brief — make it self-contained.
+3. **Set priority** — Follow the [Priority Calibration](#priority-calibration) rules (high = blocks other work, medium = standard, low = nice-to-have).
+4. **Submit the request** — Call `create_request()` with title, description, source, and priority. See [Creating a Request](#creating-a-request) for the API shape.
+5. **Break into tasks** — Decompose the request into individual tasks. For each task, follow the [Per-Task Authoring](#per-task-authoring) steps below. Keep each task completable within a single 720-second session (see [Task Size](#task-size)).
+6. **Verify task descriptions** — Each task description must be self-contained. An agent reading only the description should understand what to do without external context. Run every description through the [Description Checklist](#description-checklist).
+7. **Submit tasks** — Call `create_task()` for each task, setting `request_id` to the ID returned in step 4.
 
-## How to Create a Request
+## Per-Task Authoring
 
-**Use the `create_request` MCP tool.** This is a single call:
+For each task within a request, follow these steps:
+
+1. **Define the goal** — State the single, specific outcome this task must produce. One task = one deliverable.
+2. **Write the description** — Follow the [Description Checklist](#description-checklist). The description must be self-contained — an agent reading only this should know exactly what to do.
+3. **Choose agent_type** — Match the task to an agent using the [Agent Type Selection](#agent-type-selection) table. If it edits files → `code`. If it reads and synthesizes → `research`.
+4. **Set priority and size** — Use [Priority Calibration](#priority-calibration) for priority. Ensure the task fits within a single 720-second session (see [Task Size](#task-size)); decompose if too large.
+5. **Add context** — Include specific file paths, search terms, constraints, and references to prior task results stored in memory. Omit nothing the agent would need.
+6. **Submit** — Call `create_task(request_id=..., title=..., description=..., agent_type=..., model=..., priority=..., sequence_order=...)`. Set `model` per the model-selection skill (MANDATORY).
+
+## Creating a Request
+
+Use the `create_request` MCP tool:
 
 ```
 create_request(
   title="Short title for the work",
-  description="Full instructions for the daemon — everything it needs to do.",
+  description="Full instructions — everything the daemon needs to do.",
   source="user",
   priority="medium"
 )
 ```
 
-That's it. The daemon picks it up, creates tasks, and dispatches to the appropriate agent.
+The daemon picks it up, creates tasks, and dispatches to the appropriate agent.
 
-## Key Fields
+## Writing Descriptions That Work
 
-| Field | Required | Notes |
-|-------|----------|-------|
-| `title` | Yes | Short label (1-256 chars) |
-| `description` | Yes | Full instructions. Must be self-contained. This is what the daemon reads. |
-| `source` | No | `"user"` (default), `"cognitive"`, `"api"`, `"schedule"` |
-| `priority` | No | `"low"`, `"medium"` (default), `"high"`, `"urgent"` |
+The description is the sub-agent's **entire understanding of what to do** (combined with its agent definition). Write it as instructions for a competent engineer who has never seen the codebase.
 
-## Writing Good Descriptions
+**Good:**
+> Review the test files in `tests/` and identify which core modules in the database layer lack test coverage. List specific functions that have no corresponding tests. Focus on memory operations, search, and API key management.
 
-The description is the sub-agent's **entire prompt context** (plus its agent definition). Write it like instructions for a competent engineer who has never seen the codebase.
-
-**Good description:**
-> Review the test files in `tests/` and identify which core modules in `src/lucent/db/` lack test coverage. List specific functions/methods that have no corresponding tests. Focus on `memory.py`, `search.py`, and `api_key.py`.
-
-**Bad description:**
+**Bad:**
 > Improve test coverage.
 
 ### Description Checklist
 
 - [ ] States the objective clearly (what to produce, not just what area)
 - [ ] Names specific files or directories when relevant
-- [ ] Defines success criteria (what does "done" look like?)
+- [ ] Defines "done" (what does the output look like?)
 - [ ] Includes constraints (don't modify X, only look at Y)
 - [ ] Self-contained — no references to "the thing we discussed"
 
 ## Agent Type Selection
 
-| Agent Type | Use For | Tools Available |
-|-----------|---------|-----------------|
-| `code` | File editing, testing, building, linting | All CLI + file tools |
-| `research` | Investigation, web lookups, synthesis | Web + search tools |
-| `memory` | Memory cleanup, consolidation, tagging | Memory tools |
-| `reflection` | Self-analysis, behavioral review, planning | Memory + search |
-| `documentation` | Docs, guides, READMEs | File + search tools |
-| `planning` | Goal decomposition, roadmaps, task breakdown | Memory + search |
+| Agent type | Use when | Examples |
+|-----------|----------|---------|
+| `code` | Task edits files, runs tests, builds, or lints | Fix a bug, write tests, refactor a module |
+| `research` | Task investigates, reads, and synthesizes | Compare approaches, audit a dependency, analyze patterns |
+| `memory` | Task reads/writes/consolidates memories | Deduplication, tag cleanup, knowledge synthesis |
+| `reflection` | Task analyzes behavior and proposes improvements | Review task outcomes, check for recurring failures |
+| `documentation` | Task creates or updates documentation | Write a guide, update a README, document an API |
+| `planning` | Task decomposes goals into actionable steps | Break down a feature, create a roadmap |
+| `assessment` | Task discovers and profiles an environment | New workspace analysis, tool inventory |
+| `definition-engineer` | Task creates or improves agent definitions or skills | Build a new agent for a domain, improve an existing skill, extract capability from a pattern |
 
-**Rule of thumb**: If the task edits files, it's `code`. If it reads and synthesizes, it's `research`. If it touches memories, it's `memory`.
+**Rule of thumb:** If it edits files → `code`. If it reads and synthesizes → `research`. If it touches memories → `memory`.
 
 ## Priority Calibration
 
-| Priority | When to Use | Dispatch Behavior |
-|----------|------------|-------------------|
-| `high` | Blocking other work, user-requested, bug fixes | Dispatched first |
-| `medium` | Normal development work, improvements | Default queue order |
-| `low` | Nice-to-have, cleanup, exploration | Dispatched when queue is empty |
+| Priority | When to use |
+|----------|------------|
+| `high` | Blocking other work, user-requested, or a bug fix |
+| `medium` | Normal development work (default) |
+| `low` | Cleanup, exploration, nice-to-have |
 
-The cognitive cycle dispatches up to 2 tasks per cycle, highest priority first.
+The daemon dispatches up to 2 tasks per cycle, highest priority first.
+
+## Task Size
+
+Tasks must complete within a single 720-second session. If a task is too large, decompose it:
+
+### Sequential Pattern (each builds on the last)
+```
+Task 1 (research): "Analyze test coverage gaps in the database layer"
+  → Result stored in memory
+Task 2 (code): "Write tests for the gaps identified in Task 1. Search memory for the analysis results."
+  → References Task 1 via memory
+Task 3 (code): "Run the new tests and fix any failures."
+```
+
+### Parallel Pattern (independent tasks, same cycle)
+```
+Task A (code, high): "Fix the SQL injection vulnerability in the search module"
+Task B (documentation, low): "Update README with the new API endpoints"
+Task C (research, medium): "Investigate connection pool sizing best practices"
+```
 
 ## Validation
 
-After a sub-agent completes, the daemon validates the result (`_validate_task_result()`):
-
-- Result must be non-empty (>50 chars)
+After completion, the daemon validates task results:
+- Result must be non-empty (>50 characters)
 - Must not contain only error messages
 - Must reference the task objective
 
-**Tasks fail validation when:**
-1. Description was too vague → agent produced generic output
-2. Task required tools the agent_type doesn't have
-3. Task was too large for a single session (>720s timeout)
+**Common validation failures and their causes:**
+| Failure | Root cause | Fix |
+|---------|-----------|-----|
+| Generic output | Description too vague | Be more specific about what to produce |
+| Timeout | Scope too large | Decompose into smaller tasks |
+| Error-only output | Wrong agent_type or missing tools | Match agent to required capabilities |
+| Empty result | Agent couldn't find what was described | Verify file paths and search terms exist |
 
-## Examples
+## Anti-Patterns
 
-### Good Task: Code Analysis
-```json
-{
-  "description": "Run `ruff check src/lucent/` and fix any auto-fixable lint errors. Then run `python -m pytest tests/ -x` to verify nothing breaks. Report the number of fixes applied and test results.",
-  "agent_type": "code",
-  "priority": "medium"
-}
-```
-
-### Good Task: Research
-```json
-{
-  "description": "Search the codebase for all places where `asyncpg` pool connections are acquired but not properly released. Check for missing `async with` patterns in `src/lucent/db/`. List any connection leak risks found.",
-  "agent_type": "research",
-  "priority": "high",
-  "context": "We've seen occasional 'too many connections' errors in production logs."
-}
-```
-
-### Good Task: Memory Maintenance
-```json
-{
-  "description": "Search for memories tagged 'daemon-heartbeat' older than 24 hours and delete them. Then search for duplicate memories with the same content (>90% similarity) and consolidate them. Report what was cleaned up.",
-  "agent_type": "memory",
-  "priority": "low"
-}
-```
+- **Circular tasks:** "Review the last task's output and create a new task" → infinite loop
+- **Approval-dependent chains:** Task B needs Task A approved, but approval is async → B stalls
+- **Overly ambitious scope:** "Refactor the entire auth system" → timeout, partial results, validation failure
+- **Vague instructions:** "Make it better" → agent has no way to determine success

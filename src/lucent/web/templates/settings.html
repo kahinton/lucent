@@ -290,11 +290,11 @@
                 <pre class="text-xs font-mono bg-gray-900 text-gray-100 p-4 rounded-lg overflow-x-auto">
 <span class="text-gray-500"># Search memories (with API key)</span>
 curl "http://localhost:8766/api/search?query=python" \
-  -H "Authorization: Bearer mcp_your_api_key_here"
+  -H "Authorization: Bearer hs_your_api_key_here"
 
 <span class="text-gray-500"># Create a memory</span>
 curl -X POST "http://localhost:8766/api/memories" \
-  -H "Authorization: Bearer mcp_your_api_key_here" \
+  -H "Authorization: Bearer hs_your_api_key_here" \
   -H "Content-Type: application/json" \
   -d '{"type": "technical", "content": "How to fix X..."}'</pre>
             </div>
@@ -309,7 +309,7 @@ curl -X POST "http://localhost:8766/api/memories" \
       "url": "http://localhost:8766/mcp",
       "type": "http",
       "headers": {
-        "Authorization": "Bearer mcp_your_api_key_here"
+        "Authorization": "Bearer hs_your_api_key_here"
       }
     }
   }
@@ -319,7 +319,7 @@ curl -X POST "http://localhost:8766/api/memories" \
     </div>
 </div>
 
-<script>
+<script nonce="{{ request.state.csp_nonce }}">
 function copyApiKey() {
     const keyElement = document.getElementById('new-api-key');
     navigator.clipboard.writeText(keyElement.textContent).then(() => {

@@ -11,11 +11,11 @@
 </div>
 <div class="border-b border-gray-200 mb-6">
     <nav class="flex gap-6">
-        <a href="/definitions?tab=agents" class="py-2 px-1 border-b-2 text-sm font-medium {% if tab == 'agents' %}border-primary-500 text-primary-600{% else %}border-transparent text-gray-500 hover:text-gray-700{% endif %}">Agents {% if agents %}({{ agents|length }}){% endif %}</a>
-        <a href="/definitions?tab=skills" class="py-2 px-1 border-b-2 text-sm font-medium {% if tab == 'skills' %}border-primary-500 text-primary-600{% else %}border-transparent text-gray-500 hover:text-gray-700{% endif %}">Skills {% if skills %}({{ skills|length }}){% endif %}</a>
-        <a href="/definitions?tab=mcp" class="py-2 px-1 border-b-2 text-sm font-medium {% if tab == 'mcp' %}border-primary-500 text-primary-600{% else %}border-transparent text-gray-500 hover:text-gray-700{% endif %}">MCP Servers {% if mcp_servers %}({{ mcp_servers|length }}){% endif %}</a>
+        <a href="/definitions?tab=agents&per_page={{ per_page }}" class="py-2 px-1 border-b-2 text-sm font-medium {% if tab == 'agents' %}border-primary-500 text-primary-600{% else %}border-transparent text-gray-500 hover:text-gray-700{% endif %}">Agents {% if agents_total is defined %}({{ agents_total }}){% elif agents %}({{ agents|length }}){% endif %}</a>
+        <a href="/definitions?tab=skills&per_page={{ per_page }}" class="py-2 px-1 border-b-2 text-sm font-medium {% if tab == 'skills' %}border-primary-500 text-primary-600{% else %}border-transparent text-gray-500 hover:text-gray-700{% endif %}">Skills {% if skills_total is defined %}({{ skills_total }}){% elif skills %}({{ skills|length }}){% endif %}</a>
+        <a href="/definitions?tab=mcp&per_page={{ per_page }}" class="py-2 px-1 border-b-2 text-sm font-medium {% if tab == 'mcp' %}border-primary-500 text-primary-600{% else %}border-transparent text-gray-500 hover:text-gray-700{% endif %}">MCP Servers {% if mcp_total is defined %}({{ mcp_total }}){% elif mcp_servers %}({{ mcp_servers|length }}){% endif %}</a>
         {% if proposals and proposals.total > 0 %}
-        <a href="/definitions?tab=proposals" class="py-2 px-1 border-b-2 text-sm font-medium {% if tab == 'proposals' %}border-primary-500 text-primary-600{% else %}border-transparent text-gray-500 hover:text-gray-700{% endif %}">Pending <span class="ml-1 bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full text-xs">{{ proposals.total }}</span></a>
+        <a href="/definitions?tab=proposals&per_page={{ per_page }}" class="py-2 px-1 border-b-2 text-sm font-medium {% if tab == 'proposals' %}border-primary-500 text-primary-600{% else %}border-transparent text-gray-500 hover:text-gray-700{% endif %}">Pending <span class="ml-1 bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full text-xs">{{ proposals.total }}</span></a>
         {% endif %}
     </nav>
 </div>
@@ -28,6 +28,16 @@
 {% if item.scope == 'built-in' %}<span class="px-2 py-0.5 rounded text-xs bg-indigo-100 text-indigo-700 font-medium">built-in</span>{% elif item.scope == 'instance' %}<span class="px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-500">instance</span>{% endif %}
 {% endmacro %}
 
+{% macro owner_badge(item) %}
+{% if item.scope != 'built-in' %}
+    {% if item.owner_user_name %}
+        <span class="px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-600">Owner: {{ item.owner_user_name }}</span>
+    {% elif item.owner_group_name %}
+        <span class="px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-600">Owner: {{ item.owner_group_name }}</span>
+    {% endif %}
+{% endif %}
+{% endmacro %}
+
 {% macro approval_buttons(type, id) %}
 <div class="flex gap-2 shrink-0">
     <form method="POST" action="/definitions/{{ type }}/{{ id }}/approve"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit" class="px-3 py-1.5 text-sm bg-green-50 text-green-700 rounded-md hover:bg-green-100 font-medium">Approve</button></form>
@@ -35,8 +45,11 @@
 </div>
 {% endmacro %}
 
+{% from "partials/pagination.html" import pagination_controls %}
+
 {% if tab == 'agents' %}
-<div class="mb-4 flex justify-end">
+<div class="mb-4 flex items-center justify-between">
+    {{ pagination_controls(base_url="/definitions", page=page, per_page=per_page, total_pages=total_pages, total_count=total_count, filter_params={"tab": "agents"}, entity_name="agents") }}
     <button onclick="document.getElementById('create-agent-modal').classList.remove('hidden')" class="px-4 py-2 text-sm bg-primary-600 text-white rounded-md hover:bg-primary-700 font-medium">+ New Agent</button>
 </div>
 <div class="space-y-3">
@@ -49,6 +62,7 @@
                     <a href="/definitions/agents/{{ agent.id }}" class="font-medium text-gray-900 hover:text-primary-600">{{ agent.name }}</a>
                     {{ status_badge(agent.status) }}
                     {{ scope_badge(agent) }}
+                    {{ owner_badge(agent) }}
                     {% if agent.skills %}<span class="text-xs text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded">{{ agent.skills|length }} skill{{ 's' if agent.skills|length != 1 }}</span>{% endif %}
                     {% if agent.mcp_servers %}<span class="text-xs text-purple-600 bg-purple-50 px-1.5 py-0.5 rounded">{{ agent.mcp_servers|length }} MCP</span>{% endif %}
                 </div>
@@ -92,6 +106,7 @@
     <div class="bg-white rounded-lg border border-gray-200 p-8 text-center text-gray-500"><p>No agents defined yet.</p></div>
     {% endfor %}
 </div>
+{{ pagination_controls(base_url="/definitions", page=page, per_page=per_page, total_pages=total_pages, total_count=total_count, filter_params={"tab": "agents"}, show_per_page=false, entity_name="agents") }}
 <div id="create-agent-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/40">
     <div class="bg-white rounded-lg shadow-xl w-full max-w-2xl mx-4 max-h-[90vh] overflow-y-auto">
         <form method="POST" action="/definitions/agents/create">
@@ -101,6 +116,15 @@
                 <div><label class="block text-sm font-medium text-gray-700 mb-1">Name</label><input name="name" required class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm" placeholder="e.g. my-agent"></div>
                 <div><label class="block text-sm font-medium text-gray-700 mb-1">Description</label><input name="description" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm" placeholder="Brief description"></div>
                 <div><label class="block text-sm font-medium text-gray-700 mb-1">Content (Markdown)</label><textarea name="content" rows="10" required class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono" placeholder="# Agent Name"></textarea></div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Owner</label>
+                    <select name="owner_scope" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
+                        <option value="me" selected>Me</option>
+                        {% for group in owner_groups %}
+                        <option value="group:{{ group.id }}">{{ group.name }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
             </div>
             <div class="p-6 border-t border-gray-200 flex justify-end gap-3"><button type="button" onclick="this.closest('.fixed').classList.add('hidden')" class="px-4 py-2 text-sm text-gray-600">Cancel</button><button type="submit" class="px-4 py-2 text-sm bg-primary-600 text-white rounded-md hover:bg-primary-700 font-medium">Create Agent</button></div>
         </form>
@@ -108,7 +132,8 @@
 </div>
 
 {% elif tab == 'skills' %}
-<div class="mb-4 flex justify-end">
+<div class="mb-4 flex items-center justify-between">
+    {{ pagination_controls(base_url="/definitions", page=page, per_page=per_page, total_pages=total_pages, total_count=total_count, filter_params={"tab": "skills"}, entity_name="skills") }}
     <button onclick="document.getElementById('create-skill-modal').classList.remove('hidden')" class="px-4 py-2 text-sm bg-primary-600 text-white rounded-md hover:bg-primary-700 font-medium">+ New Skill</button>
 </div>
 <div class="space-y-3">
@@ -120,6 +145,7 @@
                     <a href="/definitions/skills/{{ skill.id }}" class="font-medium text-gray-900 hover:text-primary-600">{{ skill.name }}</a>
                     {{ status_badge(skill.status) }}
                     {{ scope_badge(skill) }}
+                    {{ owner_badge(skill) }}
                 </div>
                 {% if skill.description %}<p class="text-sm text-gray-500 mt-1">{{ skill.description }}</p>{% endif %}
             </div>
@@ -130,6 +156,7 @@
     <div class="bg-white rounded-lg border border-gray-200 p-8 text-center text-gray-500"><p>No skills defined yet.</p></div>
     {% endfor %}
 </div>
+{{ pagination_controls(base_url="/definitions", page=page, per_page=per_page, total_pages=total_pages, total_count=total_count, filter_params={"tab": "skills"}, show_per_page=false, entity_name="skills") }}
 <div id="create-skill-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/40">
     <div class="bg-white rounded-lg shadow-xl w-full max-w-2xl mx-4 max-h-[90vh] overflow-y-auto">
         <form method="POST" action="/definitions/skills/create">
@@ -139,6 +166,15 @@
                 <div><label class="block text-sm font-medium text-gray-700 mb-1">Name</label><input name="name" required class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm" placeholder="e.g. my-skill"></div>
                 <div><label class="block text-sm font-medium text-gray-700 mb-1">Description</label><input name="description" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm" placeholder="Brief description"></div>
                 <div><label class="block text-sm font-medium text-gray-700 mb-1">Content (Markdown)</label><textarea name="content" rows="10" required class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono" placeholder="# Skill Name"></textarea></div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Owner</label>
+                    <select name="owner_scope" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
+                        <option value="me" selected>Me</option>
+                        {% for group in owner_groups %}
+                        <option value="group:{{ group.id }}">{{ group.name }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
             </div>
             <div class="p-6 border-t border-gray-200 flex justify-end gap-3"><button type="button" onclick="this.closest('.fixed').classList.add('hidden')" class="px-4 py-2 text-sm text-gray-600">Cancel</button><button type="submit" class="px-4 py-2 text-sm bg-primary-600 text-white rounded-md hover:bg-primary-700 font-medium">Create Skill</button></div>
         </form>
@@ -146,7 +182,8 @@
 </div>
 
 {% elif tab == 'mcp' %}
-<div class="mb-4 flex justify-end">
+<div class="mb-4 flex items-center justify-between">
+    {{ pagination_controls(base_url="/definitions", page=page, per_page=per_page, total_pages=total_pages, total_count=total_count, filter_params={"tab": "mcp"}, entity_name="MCP servers") }}
     <button onclick="document.getElementById('create-mcp-modal').classList.remove('hidden')" class="px-4 py-2 text-sm bg-primary-600 text-white rounded-md hover:bg-primary-700 font-medium">+ New MCP Server</button>
 </div>
 <div class="space-y-3">
@@ -158,6 +195,7 @@
                     <a href="/definitions/mcp-servers/{{ server.id }}" class="font-medium text-gray-900 hover:text-primary-600">{{ server.name }}</a>
                     {{ status_badge(server.status) }}
                     {{ scope_badge(server) }}
+                    {{ owner_badge(server) }}
                     <span class="text-xs text-gray-400 font-mono">{{ server.server_type }}</span>
                     {% if server.url %}<span class="text-xs text-gray-400 font-mono truncate">{{ server.url }}</span>{% endif %}
                 </div>
@@ -170,6 +208,7 @@
     <div class="bg-white rounded-lg border border-gray-200 p-8 text-center text-gray-500"><p>No MCP server connections configured.</p></div>
     {% endfor %}
 </div>
+{{ pagination_controls(base_url="/definitions", page=page, per_page=per_page, total_pages=total_pages, total_count=total_count, filter_params={"tab": "mcp"}, show_per_page=false, entity_name="MCP servers") }}
 <div id="create-mcp-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/40">
     <div class="bg-white rounded-lg shadow-xl w-full max-w-2xl mx-4 max-h-[90vh] overflow-y-auto">
         <form method="POST" action="/definitions/mcp-servers/create">
@@ -184,6 +223,15 @@
                 <div><label class="block text-sm font-medium text-gray-700 mb-1">URL (HTTP)</label><input name="url" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono" placeholder="http://localhost:3100/mcp"></div>
                 <div><label class="block text-sm font-medium text-gray-700 mb-1">Command (stdio)</label><input name="command" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono" placeholder="npx -y @modelcontextprotocol/server-github"></div>
                 <div><label class="block text-sm font-medium text-gray-700 mb-1">Headers (JSON)</label><textarea name="headers" rows="2" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono">{}</textarea></div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Owner</label>
+                    <select name="owner_scope" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
+                        <option value="me" selected>Me</option>
+                        {% for group in owner_groups %}
+                        <option value="group:{{ group.id }}">{{ group.name }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
             </div>
             <div class="p-6 border-t border-gray-200 flex justify-end gap-3"><button type="button" onclick="this.closest('.fixed').classList.add('hidden')" class="px-4 py-2 text-sm text-gray-600">Cancel</button><button type="submit" class="px-4 py-2 text-sm bg-primary-600 text-white rounded-md hover:bg-primary-700 font-medium">Create MCP Server</button></div>
         </form>

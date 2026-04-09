@@ -11,17 +11,20 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from lucent.api.routers import admin_models as admin_models_router
 from lucent.api.routers import daemon_messages as daemon_messages_router
 from lucent.api.routers import daemon_tasks as daemon_tasks_router
 from lucent.api.routers import export, memories, search
 from lucent.db import close_db, init_db
-from lucent.logging import get_logger, set_correlation_id
+from lucent.logging import get_correlation_id, get_logger, set_correlation_id
 from lucent.mode import is_team_mode
+from lucent.rate_limit import get_rate_limiter
+from lucent.secrets import initialize_secret_provider
 from lucent.web.routes import router as web_router
 
 # Get logger for this module
@@ -38,6 +41,30 @@ def set_mcp_session_manager(session_manager):
     """Set the MCP session manager for lifecycle integration."""
     global _mcp_session_manager
     _mcp_session_manager = session_manager
+
+
+def _instrument_otel(app: FastAPI) -> None:
+    """Apply OTEL auto-instrumentation when enabled.
+
+    Instruments FastAPI for automatic HTTP span creation. DB query tracing
+    (asyncpg) is handled by the DB layer in pool.py during init_db().
+    Safe to call when OTEL is disabled (no-op).
+    """
+    from lucent.telemetry import is_enabled
+
+    if not is_enabled():
+        return
+
+    try:
+        from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+
+        FastAPIInstrumentor.instrument_app(
+            app,
+            excluded_urls="health",  # skip /api/health from tracing
+        )
+        logger.info("OTEL: FastAPI instrumentation enabled")
+    except Exception as e:
+        logger.warning(f"OTEL: Failed to instrument FastAPI: {e}")
 
 
 async def _sync_built_in_definitions():
@@ -79,15 +106,96 @@ async def _sync_built_in_definitions():
         logger.warning(f"Failed to sync built-in definitions: {e}")
 
 
+# Known insecure default values that must not be used in production.
+_INSECURE_DEFAULTS = {
+    "LUCENT_SECRET_KEY": "lucent-dev-secret-key-change-in-production",
+    "POSTGRES_PASSWORD": "change-me-insecure-dev-password",
+    "VAULT_TOKEN": "change-me-insecure-dev-root-token",
+    "BAO_DEV_ROOT_TOKEN_ID": "change-me-insecure-dev-root-token",
+}
+
+
+def _check_security_defaults() -> None:
+    """Emit warnings when insecure default credentials are detected.
+
+    In team mode (multi-user), insecure defaults are treated as errors
+    logged at CRITICAL level. In personal mode they produce warnings.
+
+    Also warns when critical secrets (like LUCENT_SIGNING_SECRET) are
+    not explicitly configured.
+    """
+    import os
+
+    mode = os.environ.get("LUCENT_MODE", "personal")
+    issues: list[str] = []
+
+    for var, insecure_value in _INSECURE_DEFAULTS.items():
+        current = os.environ.get(var, "")
+        if current == insecure_value:
+            issues.append(var)
+
+    # Check for missing critical secrets that default to random values
+    _REQUIRED_SECRETS = ["LUCENT_SIGNING_SECRET"]
+    missing: list[str] = [v for v in _REQUIRED_SECRETS if not os.environ.get(v)]
+
+    if issues:
+        msg = (
+            "SECURITY: Insecure default values detected for: %s. "
+            "These MUST be changed before production deployment. "
+            "Generate strong values with: openssl rand -base64 32"
+        )
+        if mode == "team":
+            logger.critical(msg, ", ".join(issues))
+        else:
+            logger.warning(msg, ", ".join(issues))
+
+    if missing:
+        msg = (
+            "SECURITY: The following secrets are not set and will use "
+            "ephemeral random values that do not persist across restarts: %s. "
+            "Set them explicitly for production. "
+            "Generate with: openssl rand -base64 32"
+        )
+        if mode == "team":
+            logger.critical(msg, ", ".join(missing))
+        else:
+            logger.warning(msg, ", ".join(missing))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifespan - startup and shutdown."""
+    # Security: warn about insecure defaults at startup
+    _check_security_defaults()
+
+    # Startup: Initialize telemetry (no-op if OTEL_ENABLED is false)
+    from lucent.telemetry import init_telemetry, shutdown_telemetry
+
+    init_telemetry(service_name="lucent-api")
+    _instrument_otel(app)
+
     # Startup: Initialize database pool
     import os
 
     database_url = os.environ.get("DATABASE_URL")
     if database_url:
         await init_db(database_url)
+        from lucent.db import get_pool as _get_pool_for_secrets
+
+        _secret_pool = await _get_pool_for_secrets()
+        await initialize_secret_provider(_secret_pool)
+
+    # Load model registry from database
+    try:
+        from lucent.db import get_pool as _get_pool
+
+        _pool = await _get_pool()
+        if _pool:
+            from lucent.model_registry import load_models_from_db
+
+            await load_models_from_db(_pool)
+    except Exception:
+        pass  # Fall back to hardcoded registry
 
     # Sync built-in skills from .github/skills/ into the DB
     await _sync_built_in_definitions()
@@ -99,16 +207,19 @@ async def lifespan(app: FastAPI):
     else:
         yield
 
-    # Shutdown: Close database pool
+    # Shutdown: Close database pool, then telemetry
     await close_db()
+    shutdown_telemetry()
 
 
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application."""
+    from lucent import __version__
+
     app = FastAPI(
         title="Lucent Admin API",
         description="REST API for managing the Lucent memory system",
-        version="1.0.0",
+        version=__version__,
         lifespan=lifespan,
         docs_url="/api/docs",
         redoc_url="/api/redoc",
@@ -144,15 +255,197 @@ def create_app() -> FastAPI:
     )
 
     @app.middleware("http")
+    async def otel_http_metrics_middleware(request: Request, call_next):
+        """Record HTTP request metrics when OTEL is enabled."""
+        from lucent.telemetry import is_enabled
+
+        if not is_enabled():
+            return await call_next(request)
+
+        import time
+
+        from lucent.metrics import metrics
+
+        start = time.monotonic()
+        response = await call_next(request)
+        duration = time.monotonic() - start
+
+        attrs = {
+            "method": request.method,
+            "route": request.url.path,
+            "status_code": response.status_code,
+        }
+        metrics.http_request_duration.record(duration, attrs)
+        metrics.http_requests_total.add(1, attrs)
+
+        if response.status_code >= 400:
+            error_attrs = {
+                "status_code": response.status_code,
+                "error_category": "5xx" if response.status_code >= 500 else "4xx",
+            }
+            metrics.http_errors_total.add(1, error_attrs)
+
+        return response
+
+    @app.middleware("http")
+    async def security_headers_middleware(request: Request, call_next):
+        """Add security headers including nonce-based CSP to all responses."""
+        import secrets
+
+        # Generate a per-request nonce for inline scripts.  Templates
+        # access it via ``request.state.csp_nonce``.
+        nonce = secrets.token_urlsafe(24)
+        request.state.csp_nonce = nonce
+
+        response = await call_next(request)
+
+        # Content-Security-Policy with nonce-based inline script protection.
+        # 'unsafe-eval' is still required for the Tailwind CSS JIT compiler
+        # (tailwindcss-3.4.17.js) which uses eval() at runtime.  When
+        # Tailwind is replaced with a pre-built CSS build, remove it.
+        csp = (
+            "default-src 'self'; "
+            f"script-src 'self' 'nonce-{nonce}' 'unsafe-eval'; "
+            "style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data:; "
+            "font-src 'self'; "
+            "connect-src 'self'; "
+            "frame-ancestors 'none'; "
+            "base-uri 'self'; "
+            "form-action 'self'"
+        )
+        response.headers["Content-Security-Policy"] = csp
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        return response
+
+    @app.middleware("http")
+    async def review_badge_middleware(request: Request, call_next):
+        """Attach pending approval count for web templates."""
+        request.state.pending_approval_count = 0
+
+        # Only needed for web page rendering, not API/static/other methods.
+        if request.method == "GET" and not request.url.path.startswith(("/api/", "/static/")):
+            try:
+                from lucent.auth_providers import SESSION_COOKIE_NAME, validate_session
+                from lucent.db import get_pool
+
+                session_token = request.cookies.get(SESSION_COOKIE_NAME)
+                if session_token:
+                    pool = await get_pool()
+                    user = await validate_session(pool, session_token)
+                    if user:
+                        org_id = user.get("organization_id")
+                        async with pool.acquire() as conn:
+                            count = await conn.fetchval(
+                                """SELECT COUNT(*) FROM requests
+                                   WHERE organization_id = $1
+                                     AND approval_status = 'pending_approval'
+                                     AND status NOT IN ('cancelled', 'rejection_processing')""",
+                                org_id,
+                            )
+                        request.state.pending_approval_count = count or 0
+            except Exception:
+                # Best-effort UI enhancement only — never block request on badge count.
+                pass
+
+        return await call_next(request)
+
+    @app.middleware("http")
     async def correlation_id_middleware(request: Request, call_next):
-        """Generate or propagate a correlation ID for every request."""
-        cid = request.headers.get("X-Request-ID")
-        if cid:
-            set_correlation_id(cid)
-        else:
-            cid = set_correlation_id()
+        """Generate or propagate a correlation ID for every request.
+
+        When OTEL is active, extracts trace_id from the OTEL span context and
+        uses it as the correlation ID for log-trace correlation. Falls back to
+        the X-Request-ID header or generates a 12-char hex ID when OTEL is
+        inactive.
+        """
+        from lucent.telemetry import (
+            bridge_correlation_id,
+            is_enabled,
+            sync_trace_to_correlation_id,
+            unbind_correlation_id,
+        )
+
+        cid = None
+        otel_token = None
+
+        # When OTEL is active, extract trace_id as correlation ID
+        if is_enabled():
+            sync_trace_to_correlation_id()
+            cid = get_correlation_id()
+
+        # Fall back to X-Request-ID header or generate a new one
+        if not cid:
+            header_cid = request.headers.get("X-Request-ID")
+            if header_cid:
+                set_correlation_id(header_cid)
+                cid = header_cid
+            else:
+                cid = set_correlation_id()
+
+        # Bridge correlation ID into OTEL baggage and span attributes
+        if is_enabled():
+            otel_token = bridge_correlation_id()
+
         response = await call_next(request)
         response.headers["X-Request-ID"] = cid
+
+        # Clean up OTEL baggage context
+        if otel_token is not None:
+            unbind_correlation_id(otel_token)
+
+        return response
+
+    @app.middleware("http")
+    async def api_rate_limit_middleware(request: Request, call_next):
+        """Apply per-key rate limiting to all /api/* endpoints.
+
+        Uses the same RateLimiter singleton and LUCENT_RATE_LIMIT_PER_MINUTE
+        config as the MCP rate limiting in server.py.
+        """
+        path = request.url.path
+        if not path.startswith("/api/") or path == "/api/health":
+            return await call_next(request)
+
+        rate_limiter = get_rate_limiter()
+
+        # Determine rate limit key: always include client IP to prevent
+        # bypass via rotating Authorization header values (security fix).
+        # For Bearer tokens, use the key prefix (stable per-key) + IP.
+        from lucent.rate_limit import get_client_ip
+
+        client_ip = get_client_ip(request)
+        auth_header = request.headers.get("authorization", "")
+        if auth_header.startswith("Bearer ") and len(auth_header) > 18:
+            # Use key prefix (e.g. "hs_XXXXXXXX") + IP to rate limit.
+            # Same key from same IP shares a bucket; rotating bogus tokens
+            # still hits the same IP-anchored bucket.
+            key_prefix = auth_header[7:18]
+            rate_key = f"api:{key_prefix}:{client_ip}"
+        else:
+            rate_key = f"api:ip:{client_ip}"
+
+        rate_result = rate_limiter.check_rate_limit(rate_key)
+
+        if not rate_result.allowed:
+            logger.warning(
+                "API rate limit exceeded: key=%s, path=%s, retry_after=%s",
+                rate_key[:20] + "...",
+                path,
+                rate_result.headers.get("Retry-After"),
+            )
+            return JSONResponse(
+                status_code=429,
+                content={"error": "Rate limit exceeded. Please slow down your requests."},
+                headers=rate_result.headers,
+            )
+
+        response = await call_next(request)
+        for name, value in rate_result.headers.items():
+            response.headers[name] = value
         return response
 
     # Include core API routers
@@ -171,14 +464,20 @@ def create_app() -> FastAPI:
         prefix="/api/daemon/messages",
         tags=["Daemon Messages"],
     )
+    app.include_router(
+        admin_models_router.router,
+        prefix="/api/admin/models",
+        tags=["Admin Models"],
+    )
 
     # Include team-only API routers
     if is_team_mode():
-        from lucent.api.routers import access, audit, organizations, users
+        from lucent.api.routers import access, audit, groups, organizations, users
 
         app.include_router(audit.router, prefix="/api/audit", tags=["Audit"])
         app.include_router(access.router, prefix="/api/access", tags=["Access"])
         app.include_router(users.router, prefix="/api/users", tags=["Users"])
+        app.include_router(groups.router, prefix="/api", tags=["Groups"])
         app.include_router(
             organizations.router, prefix="/api/organizations", tags=["Organizations"]
         )
@@ -193,6 +492,11 @@ def create_app() -> FastAPI:
 
     app.include_router(requests_router.router, prefix="/api", tags=["Requests"])
 
+    # Include reviews router
+    from lucent.api.routers import reviews as reviews_router
+
+    app.include_router(reviews_router.router, prefix="/api", tags=["Reviews"])
+
     # Include schedule management router
     from lucent.api.routers import schedules as schedules_router
 
@@ -203,10 +507,30 @@ def create_app() -> FastAPI:
 
     app.include_router(chat_router.router, prefix="/api", tags=["Chat"])
 
+    # Include integrations routers
+    from lucent.integrations.router import admin_router as integrations_admin_router
+    from lucent.integrations.router import webhook_router as integrations_webhook_router
+
+    app.include_router(
+        integrations_admin_router,
+        prefix="/api/v1/integrations",
+        tags=["Integrations"],
+    )
+    app.include_router(
+        integrations_webhook_router,
+        prefix="/integrations",
+        tags=["Integrations - Webhooks"],
+    )
+
     # Include sandbox management router
     from lucent.api.routers import sandboxes as sandboxes_router
 
     app.include_router(sandboxes_router.router, prefix="/api/sandboxes", tags=["Sandboxes"])
+
+    # Include secret storage router
+    from lucent.api.routers import secrets as secrets_router
+
+    app.include_router(secrets_router.router, prefix="/api", tags=["Secrets"])
 
     # Include web interface routes (excluded from API docs)
     app.include_router(web_router, include_in_schema=False)
@@ -220,10 +544,72 @@ def create_app() -> FastAPI:
         """Health check endpoint."""
         return {"status": "healthy"}
 
+    def _is_web_request(request: Request) -> bool:
+        """Check if the request is for the web UI (not API)."""
+        path = request.url.path
+        accept = request.headers.get("accept", "")
+        if path.startswith("/api/") or path.startswith("/mcp"):
+            return False
+        return "text/html" in accept or not path.startswith("/api/")
+
+    def _error_title(status_code: int) -> str:
+        titles = {
+            400: "Bad Request",
+            403: "Forbidden",
+            404: "Page Not Found",
+            405: "Method Not Allowed",
+            500: "Server Error",
+        }
+        return titles.get(status_code, "Something Went Wrong")
+
+    @app.exception_handler(HTTPException)
+    async def http_exception_handler(request: Request, exc: HTTPException):
+        """Render HTML error pages for web UI, JSON for API."""
+        # Pass through redirects (3xx) — don't render error pages for them
+        if 300 <= exc.status_code < 400:
+            headers = getattr(exc, "headers", None) or {}
+            return JSONResponse(
+                status_code=exc.status_code,
+                content={"detail": exc.detail},
+                headers=headers,
+            )
+        if _is_web_request(request):
+            from lucent.web.routes._shared import templates
+
+            ctx = {
+                "request": request,
+                "status_code": exc.status_code,
+                "title": _error_title(exc.status_code),
+                "detail": exc.detail or _error_title(exc.status_code),
+                "user": None,
+                "is_admin": False,
+                "team_mode": is_team_mode,
+            }
+            return templates.TemplateResponse(
+                request, "error.html", ctx, status_code=exc.status_code
+            )
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.detail},
+        )
+
     @app.exception_handler(Exception)
     async def global_exception_handler(request: Request, exc: Exception):
         """Handle unhandled exceptions — log detail, return generic error."""
         logger.error(f"Unhandled exception on {request.method} {request.url.path}", exc_info=exc)
+        if _is_web_request(request):
+            from lucent.web.routes._shared import templates
+
+            ctx = {
+                "request": request,
+                "status_code": 500,
+                "title": "Server Error",
+                "detail": "An unexpected error occurred. Please try again.",
+                "user": None,
+                "is_admin": False,
+                "team_mode": is_team_mode,
+            }
+            return templates.TemplateResponse(request, "error.html", ctx, status_code=500)
         return JSONResponse(
             status_code=500,
             content={"error": "Internal server error"},

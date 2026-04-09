@@ -840,7 +840,9 @@ class AdaptationPipeline:
                     headers=api_headers,
                 )
                 if resp.status_code == 200:
-                    existing_names = {a["name"] for a in resp.json()}
+                    data = resp.json()
+                    agents = data.get("items", data) if isinstance(data, dict) else data
+                    existing_names = {a["name"] for a in agents}
         except Exception:
             logger.debug("Failed to list existing agent definitions", exc_info=True)
 
@@ -902,7 +904,9 @@ class AdaptationPipeline:
                     headers=api_headers,
                 )
                 if resp.status_code == 200:
-                    existing_names = {s["name"] for s in resp.json()}
+                    data = resp.json()
+                    skills = data.get("items", data) if isinstance(data, dict) else data
+                    existing_names = {s["name"] for s in skills}
         except Exception:
             logger.debug("Failed to list existing skill definitions", exc_info=True)
 

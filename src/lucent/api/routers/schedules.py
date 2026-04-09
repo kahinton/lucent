@@ -5,7 +5,8 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from lucent.api.deps import get_current_user, get_pool
+from lucent.api.deps import AuthenticatedUser, get_pool
+from lucent.constants import REQUEST_SOURCE_SCHEDULE
 
 router = APIRouter(prefix="/schedules", tags=["schedules"])
 
@@ -17,6 +18,7 @@ class ScheduleCreate(BaseModel):
     title: str = Field(..., min_length=1, max_length=256)
     description: str = ""
     agent_type: str = "code"
+    model: str | None = Field(default=None, max_length=64, description="LLM model override for tasks created by this schedule")
     task_template: dict | None = None
     sandbox_template_id: str | None = None  # Reference a saved sandbox template
     sandbox_config: dict | None = None  # Or inline sandbox config
@@ -34,6 +36,7 @@ class ScheduleUpdate(BaseModel):
     title: str | None = None
     description: str | None = None
     agent_type: str | None = None
+    model: str | None = Field(default=None, max_length=64, description="LLM model override for tasks created by this schedule")
     task_template: dict | None = None
     sandbox_template_id: str | None = None
     sandbox_config: dict | None = None
@@ -54,7 +57,7 @@ class ScheduleToggle(BaseModel):
 
 @router.post("")
 async def create_schedule(
-    body: ScheduleCreate, user=Depends(get_current_user), pool=Depends(get_pool)
+    body: ScheduleCreate, user: AuthenticatedUser, pool=Depends(get_pool)
 ):
     from lucent.db.schedules import ScheduleRepository
 
@@ -65,6 +68,7 @@ async def create_schedule(
         schedule_type=body.schedule_type,
         description=body.description,
         agent_type=body.agent_type,
+        model=body.model,
         task_template=body.task_template,
         sandbox_config=body.sandbox_config,
         sandbox_template_id=body.sandbox_template_id,
@@ -81,9 +85,9 @@ async def create_schedule(
 
 @router.get("")
 async def list_schedules(
+    user: AuthenticatedUser,
     status: str | None = None,
     enabled: bool | None = None,
-    user=Depends(get_current_user),
     pool=Depends(get_pool),
 ):
     from lucent.db.schedules import ScheduleRepository
@@ -93,7 +97,7 @@ async def list_schedules(
 
 
 @router.get("/summary")
-async def schedule_summary(user=Depends(get_current_user), pool=Depends(get_pool)):
+async def schedule_summary(user: AuthenticatedUser, pool=Depends(get_pool)):
     from lucent.db.schedules import ScheduleRepository
 
     repo = ScheduleRepository(pool)
@@ -101,7 +105,7 @@ async def schedule_summary(user=Depends(get_current_user), pool=Depends(get_pool
 
 
 @router.get("/due")
-async def get_due_schedules(user=Depends(get_current_user), pool=Depends(get_pool)):
+async def get_due_schedules(user: AuthenticatedUser, pool=Depends(get_pool)):
     from lucent.db.schedules import ScheduleRepository
 
     repo = ScheduleRepository(pool)
@@ -109,7 +113,7 @@ async def get_due_schedules(user=Depends(get_current_user), pool=Depends(get_poo
 
 
 @router.get("/{schedule_id}")
-async def get_schedule(schedule_id: str, user=Depends(get_current_user), pool=Depends(get_pool)):
+async def get_schedule(schedule_id: str, user: AuthenticatedUser, pool=Depends(get_pool)):
     from lucent.db.schedules import ScheduleRepository
 
     repo = ScheduleRepository(pool)
@@ -123,7 +127,7 @@ async def get_schedule(schedule_id: str, user=Depends(get_current_user), pool=De
 async def update_schedule(
     schedule_id: str,
     body: ScheduleUpdate,
-    user=Depends(get_current_user),
+    user: AuthenticatedUser,
     pool=Depends(get_pool),
 ):
     from lucent.db.schedules import ScheduleRepository
@@ -132,7 +136,13 @@ async def update_schedule(
     fields = {k: v for k, v in body.model_dump(exclude_unset=True).items()}
     if "timezone" in fields:
         fields["timezone_str"] = fields.pop("timezone")
-    result = await repo.update_schedule(schedule_id, str(user.organization_id), **fields)
+    try:
+        result = await repo.update_schedule(
+            schedule_id, str(user.organization_id),
+            requester_role=user.role.value, **fields,
+        )
+    except ValueError as e:
+        raise HTTPException(403, str(e))
     if not result:
         raise HTTPException(404, "Schedule not found")
     return result
@@ -142,31 +152,40 @@ async def update_schedule(
 async def toggle_schedule(
     schedule_id: str,
     body: ScheduleToggle,
-    user=Depends(get_current_user),
+    user: AuthenticatedUser,
     pool=Depends(get_pool),
 ):
     from lucent.db.schedules import ScheduleRepository
 
     repo = ScheduleRepository(pool)
-    result = await repo.toggle_schedule(schedule_id, str(user.organization_id), body.enabled)
+    try:
+        result = await repo.toggle_schedule(
+            schedule_id, str(user.organization_id), body.enabled,
+            requester_role=user.role.value,
+        )
+    except ValueError as e:
+        raise HTTPException(403, str(e))
     if not result:
         raise HTTPException(404, "Schedule not found")
     return result
 
 
 @router.delete("/{schedule_id}")
-async def delete_schedule(schedule_id: str, user=Depends(get_current_user), pool=Depends(get_pool)):
+async def delete_schedule(schedule_id: str, user: AuthenticatedUser, pool=Depends(get_pool)):
     from lucent.db.schedules import ScheduleRepository
 
     repo = ScheduleRepository(pool)
-    ok = await repo.delete_schedule(schedule_id, str(user.organization_id))
+    try:
+        ok = await repo.delete_schedule(schedule_id, str(user.organization_id))
+    except ValueError as e:
+        raise HTTPException(409, str(e))
     if not ok:
         raise HTTPException(404, "Schedule not found")
     return {"deleted": True}
 
 
 @router.get("/{schedule_id}/runs")
-async def list_runs(schedule_id: str, user=Depends(get_current_user), pool=Depends(get_pool)):
+async def list_runs(schedule_id: str, user: AuthenticatedUser, pool=Depends(get_pool)):
     from lucent.db.schedules import ScheduleRepository
 
     repo = ScheduleRepository(pool)
@@ -180,8 +199,8 @@ async def list_runs(schedule_id: str, user=Depends(get_current_user), pool=Depen
 @router.post("/{schedule_id}/trigger")
 async def trigger_now(
     schedule_id: str,
+    user: AuthenticatedUser,
     force: bool = False,
-    user=Depends(get_current_user),
     pool=Depends(get_pool),
 ):
     """Trigger a schedule. Pass force=true to bypass the time guard (manual run)."""
@@ -223,14 +242,68 @@ async def trigger_now(
             template = {}
     prompt = sched.get("prompt") or ""
     try:
+        # Skip if this schedule already has an active (non-terminal) request.
+        # Prevents duplicate tasks when a scheduled request is pending approval
+        # or still running.
+        async with (await get_pool()).acquire() as conn:
+            active_request = await conn.fetchval(
+                """SELECT id FROM requests
+                   WHERE title = $1
+                     AND organization_id = $2::uuid
+                     AND status NOT IN ('completed', 'failed', 'cancelled')
+                   LIMIT 1""",
+                f"[Scheduled] {sched['title']}",
+                str(user.organization_id),
+            )
+        if active_request:
+            logger.info(
+                "Schedule %s skipped — active request %s exists",
+                schedule_id, str(active_request)[:8],
+            )
+            return {"schedule": sched, "skipped": True, "active_request": str(active_request)}
+
         req = await req_repo.create_request(
             title=f"[Scheduled] {sched['title']}",
             org_id=str(user.organization_id),
             description=sched.get("description", ""),
-            source="schedule",
+            source=REQUEST_SOURCE_SCHEDULE,
             priority=sched.get("priority", "medium"),
             created_by=str(user.id),
         )
+
+        # Validate agent_type against approved definitions (workflow-audit/phase-4)
+        from lucent.db.definitions import DefinitionRepository
+
+        agent_type = sched.get("agent_type", "code")
+        def_repo = DefinitionRepository(pool)
+        agents = (
+            await def_repo.list_agents(
+                str(user.organization_id),
+                status="active",
+                requester_user_id=str(user.id),
+                requester_role=user.role.value,
+            )
+        )["items"]
+        active_names = {a["name"] for a in agents}
+        if agent_type and agent_type not in active_names:
+            logger.warning(
+                "Schedule %s references unknown agent_type '%s' — falling back to 'code'",
+                schedule_id, agent_type,
+            )
+            agent_type = "code"
+
+        # Validate model against registry (workflow-audit/phase-4)
+        task_model = sched.get("model")
+        if task_model:
+            from lucent.model_registry import validate_model
+
+            model_error = validate_model(task_model)
+            if model_error:
+                logger.warning(
+                    "Schedule %s has invalid model '%s': %s — clearing override",
+                    schedule_id, task_model, model_error,
+                )
+                task_model = None
 
         # Create the task — use prompt as description if set, else fall back to template/description
         task_description = prompt or template.get("description", sched.get("description", ""))
@@ -238,15 +311,18 @@ async def trigger_now(
             request_id=str(req["id"]),
             title=template.get("title", sched["title"]),
             description=task_description,
-            agent_type=sched.get("agent_type", "code"),
+            agent_type=agent_type,
             priority=sched.get("priority", "medium"),
-            model=sched.get("model"),
+            model=task_model,
             sandbox_template_id=str(sched["sandbox_template_id"])
             if sched.get("sandbox_template_id")
             else None,
             sandbox_config=sched.get("sandbox_config"),
             org_id=str(user.organization_id),
         )
+
+        # Link the run to the request so completion hooks can find it
+        await sched_repo.link_run_to_request(str(run["id"]), str(req["id"]))
     except Exception as e:
         # Schedule was already advanced — log and fail the run record
         logger.error(f"Schedule {schedule_id} triggered but task creation failed: {e}")

@@ -1,6 +1,6 @@
 # Deployment Guide
 
-This guide covers deploying Lucent in production. For local development, see the [README](../README.md#development).
+This guide covers deploying Lucent in production. For local development, see the [Development Guide](development.md).
 
 ## Quick Start (Docker Compose)
 
@@ -30,7 +30,15 @@ A single process serving three interfaces on one port (default 8766):
 
 External dependency: PostgreSQL 16+.
 
-### 2. Daemon (optional)
+### 2. OpenBao (default sidecar)
+
+An [OpenBao](https://openbao.org/) instance (Vault-compatible, MPL-2.0) runs as a sidecar in the default Docker Compose configuration. It provides the Transit secrets engine for key-isolated encryption — Lucent encrypts and decrypts secrets through OpenBao without ever seeing the encryption key.
+
+OpenBao starts automatically with `docker compose up` and requires no manual configuration. See the [Secret Storage Guide](secret-storage.md) for details on the Transit provider and the tiered security model.
+
+> **Opting out:** If you don't want the OpenBao sidecar, set `LUCENT_SECRET_PROVIDER=builtin` and the builtin Fernet provider will be used instead. You can also remove the `openbao` and `openbao-init` services from your compose file.
+
+### 3. Daemon (optional)
 
 An autonomous background process that provides:
 - **Cognitive reasoning** — perceive/reason/decide/act cycles
@@ -40,9 +48,13 @@ An autonomous background process that provides:
 
 The daemon connects to the server via MCP and REST API. It requires a GitHub Copilot SDK token (`GITHUB_TOKEN`) for LLM access.
 
-### 3. Sandboxes (optional)
+### 4. Sandboxes (optional)
 
-Tasks can run in isolated Docker containers. The server needs access to the Docker socket (`/var/run/docker.sock`) to manage sandbox containers. Sandbox base images must be pre-pulled or built.
+Tasks can run in isolated Docker containers.
+
+For security, prefer a Docker socket proxy (for example `docker-socket-proxy`) instead of mounting `/var/run/docker.sock` directly into the Lucent app container. Direct socket mounts allow broad Docker API access and can become a container-escape path if the app is compromised.
+
+Sandbox base images must be pre-pulled or built.
 
 ## Docker Deployment
 
@@ -89,10 +101,13 @@ Key variables for Docker Compose:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `POSTGRES_PASSWORD` | `lucent_dev_password` | Database password |
+| `POSTGRES_PASSWORD` | `change-me-insecure-dev-password` | Database password |
 | `LUCENT_DB_PORT` | `5433` | Host port for PostgreSQL |
 | `LUCENT_PORT` | `8766` | Host port for Lucent |
 | `LUCENT_MODE` | `personal` | `personal` or `team` |
+| `LUCENT_SECRET_PROVIDER` | `auto` | Secret backend: `auto`, `builtin`, `transit`, `vault` |
+| `LUCENT_SECRET_KEY` | `lucent-dev-secret-key-change-in-production` | Fernet key (only needed for `builtin` provider) |
+| `VAULT_TOKEN` | `change-me-insecure-dev-root-token` | OpenBao/Vault token |
 
 ## PostgreSQL Setup
 
@@ -139,7 +154,22 @@ export DATABASE_URL=postgresql://lucent:your_secure_password@your-host:5432/luce
 
 ### Migrations
 
-Lucent runs migrations automatically on startup. A `_migrations` table tracks which SQL files have been applied. No manual migration steps are needed.
+Lucent runs migrations automatically on startup. A `schema_migrations` table tracks
+applied migration files and checksums.
+
+Rollback support is available for migrations that provide paired rollback files:
+
+- Forward migration: `NNN_description.sql`
+- Rollback migration: `NNN_description.down.sql`
+
+Migration metadata comments are supported at the top of migration files:
+
+```sql
+-- lucent: rollback=irreversible
+-- lucent: warning=Data loss possible when rolling back
+```
+
+If a migration is marked irreversible (or has no `.down.sql` file), rollback fails by default.
 
 ### Backups
 
@@ -175,9 +205,15 @@ docker run --rm -v lucent_data:/data -v $(pwd):/backup alpine \
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `LUCENT_AUTH_PROVIDER` | `basic` | `basic` (username/password) or `api_key` |
-| `LUCENT_SESSION_TTL_HOURS` | `72` | Web session cookie lifetime |
-| `LUCENT_SECURE_COOKIES` | `false` | Set `true` behind HTTPS |
+| `LUCENT_SESSION_TTL_HOURS` | `24` | Web session cookie lifetime |
+| `LUCENT_SECURE_COOKIES` | `true` | Set `false` for local HTTP development without HTTPS |
 | `LUCENT_SIGNING_SECRET` | *(random)* | HMAC secret for impersonation cookies — set a fixed value for persistence across restarts |
+
+### Integrations
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LUCENT_CREDENTIAL_KEY` | — | Fernet encryption key for integration credentials. Generate with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`. Required for Slack/Discord integrations. |
 
 ### Rate Limiting & CORS
 
@@ -212,12 +248,14 @@ docker run --rm -v lucent_data:/data -v $(pwd):/backup alpine \
 |----------|---------|-------------|
 | `DOCKER_HOST` | *(system default)* | Docker daemon URL (for sandbox containers) |
 
-The server container needs the Docker socket mounted to manage sandboxes:
+Use a socket proxy endpoint when running Lucent in a container:
 
 ```yaml
-volumes:
-  - /var/run/docker.sock:/var/run/docker.sock
+environment:
+  DOCKER_HOST: tcp://docker-socket-proxy:2375
 ```
+
+If you must mount `/var/run/docker.sock`, treat it as highly privileged host access, mount it read-only where possible, and isolate the service aggressively (non-root, seccomp, network policy, minimal capabilities).
 
 ## Production Configuration
 
@@ -268,6 +306,10 @@ server {
 ### Connection Pool Tuning
 
 The default pool settings (min=2, max=10 connections) work for most single-user and small team deployments. For larger teams, increase PostgreSQL's `max_connections` accordingly.
+
+### Observability
+
+Lucent includes an OpenTelemetry-based observability stack (OTEL Collector, Prometheus, Jaeger, Grafana) behind a Docker Compose profile. See the [Observability Guide](observability.md) for setup, configuration, and production recommendations.
 
 ### Security Checklist
 

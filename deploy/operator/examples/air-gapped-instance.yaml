@@ -1,0 +1,93 @@
+# Air-gapped deployment using Ollama with locally hosted models.
+# No external API keys or internet access required.
+#
+# Prerequisites:
+#   1. Ollama DaemonSet (or Deployment) running in the cluster with models pre-pulled:
+#        ollama pull qwen2.5-coder-7b
+#        ollama pull nomic-embed-text
+#   2. Lucent and dependency images pre-loaded into the cluster's container registry
+#      or node image cache (e.g. via `ctr images import` or a private registry mirror).
+#   3. A PVC named `lucent-db-backups` and `lucent-db-data` pre-created.
+#
+# Typical air-gapped registry setup:
+#   - Mirror ghcr.io/lucent/* → registry.internal.corp/lucent/*
+#   - Mirror postgres:16-alpine → registry.internal.corp/postgres:16-alpine
+#   - Set spec.image.repository to your internal registry path.
+apiVersion: lucent.io/v1alpha1
+kind: LucentInstance
+metadata:
+  name: air-gapped
+  namespace: lucent
+  annotations:
+    lucent.io/environment: air-gapped
+spec:
+  replicas: 1
+
+  image:
+    # Point to your internal registry mirror
+    repository: registry.internal.corp/lucent/lucent
+    tag: "0.2.0"
+    pullPolicy: IfNotPresent
+
+  database:
+    embedded: true
+    pvcName: lucent-db-data
+
+  vault:
+    embedded: true
+    init: true
+
+  models:
+    # Primary: Qwen2.5 Coder 7B via Ollama (good balance of quality and speed)
+    - id: qwen2.5-coder-7b
+      provider: ollama
+      engine: langchain
+    # Lightweight fallback for fast tasks
+    - id: qwen2.5-coder-3b
+      provider: ollama
+      engine: langchain
+
+  daemon:
+    defaultModel: qwen2.5-coder-7b
+    maxConcurrentSessions: 2
+    intervalMinutes: 30
+
+  observability:
+    # Disable external OTEL export — no egress in air-gapped env.
+    # Enable if you have an in-cluster collector.
+    enabled: false
+    prometheusMonitor: false
+
+  canary:
+    enabled: false
+
+  backup:
+    enabled: true
+    schedule: "0 2 * * *"
+    retentionDays: 7
+    storage:
+      pvcName: lucent-db-backups
+      # No S3 — backups stay on-cluster PVC only
+
+  helm:
+    valuesOverrides:
+      # Point Lucent at the in-cluster Ollama service.
+      # Deploy Ollama as a DaemonSet or Deployment in the same namespace
+      # and expose it as a ClusterIP Service named "ollama" on port 11434.
+      server:
+        env:
+          OLLAMA_HOST: "http://ollama.lucent.svc.cluster.local:11434"
+          LUCENT_LLM_ENGINE: langchain
+          # Disable model validation — local model IDs won't match cloud registry
+          LUCENT_MODEL_VALIDATION: "permissive"
+
+      # Use the internal registry for all sub-chart images
+      database:
+        image:
+          repository: registry.internal.corp/postgres
+          tag: "16-alpine"
+
+      openbao:
+        image:
+          repository: registry.internal.corp/openbao/openbao
+          tag: "latest"

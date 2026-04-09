@@ -99,6 +99,23 @@ class TestCreateMemoryInput:
                 importance=0,
             )
 
+    def test_content_max_length(self):
+        # Content at the limit should succeed
+        input_data = CreateMemoryInput(
+            username="testuser",
+            type=MemoryType.EXPERIENCE,
+            content="x" * 100_000,
+        )
+        assert len(input_data.content) == 100_000
+
+        # Content exceeding limit should fail
+        with pytest.raises(ValueError):
+            CreateMemoryInput(
+                username="testuser",
+                type=MemoryType.EXPERIENCE,
+                content="x" * 100_001,
+            )
+
 
 class TestUpdateMemoryInput:
     def test_partial_update(self):
@@ -110,6 +127,15 @@ class TestUpdateMemoryInput:
     def test_tags_normalized_on_update(self):
         input_data = UpdateMemoryInput(tags=["NEW", "Tags"])
         assert set(input_data.tags) == {"new", "tags"}
+
+    def test_content_max_length_on_update(self):
+        # At limit should work
+        input_data = UpdateMemoryInput(content="x" * 100_000)
+        assert len(input_data.content) == 100_000
+
+        # Exceeding limit should fail
+        with pytest.raises(ValueError):
+            UpdateMemoryInput(content="x" * 100_001)
 
 
 class TestSearchMemoriesInput:

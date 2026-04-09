@@ -287,6 +287,181 @@ class AccessRepository:
             for row in rows
         ]
 
+    async def get_least_accessed(
+        self,
+        organization_id: UUID | None = None,
+        user_id: UUID | None = None,
+        since: datetime | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Get the least frequently accessed memories.
+
+        Includes memories with zero accesses, scoped to a user or organization.
+
+        Args:
+            organization_id: Optional filter by organization.
+            user_id: Optional filter by user ownership.
+            since: Optional datetime to count accesses after.
+            limit: Maximum results to return.
+
+        Returns:
+            List of {memory_id, access_count, last_accessed} sorted ascending by access_count.
+        """
+        memory_conditions = ["m.deleted_at IS NULL"]
+        memory_params: list[Any] = []
+        access_conditions = []
+        access_params: list[Any] = []
+        param_idx = 1
+
+        if user_id:
+            memory_conditions.append(f"m.user_id = ${param_idx}")
+            memory_params.append(str(user_id))
+            param_idx += 1
+            access_conditions.append(f"al.user_id = ${param_idx}")
+            access_params.append(str(user_id))
+            param_idx += 1
+
+        elif organization_id:
+            memory_conditions.append(f"m.organization_id = ${param_idx}")
+            memory_params.append(str(organization_id))
+            param_idx += 1
+            access_conditions.append(f"al.organization_id = ${param_idx}")
+            access_params.append(str(organization_id))
+            param_idx += 1
+
+        if since:
+            access_conditions.append(f"al.accessed_at >= ${param_idx}")
+            access_params.append(since)
+            param_idx += 1
+
+        access_on_clause = "al.memory_id = m.id"
+        if access_conditions:
+            access_on_clause += " AND " + " AND ".join(access_conditions)
+
+        where_clause = " AND ".join(memory_conditions)
+        query = f"""
+            SELECT
+                m.id AS memory_id,
+                COUNT(al.id) AS access_count,
+                MAX(al.accessed_at) AS last_accessed
+            FROM memories m
+            LEFT JOIN memory_access_log al
+                ON {access_on_clause}
+            WHERE {where_clause}
+            GROUP BY m.id
+            ORDER BY access_count ASC, last_accessed ASC NULLS FIRST, m.id ASC
+            LIMIT ${param_idx}
+        """
+
+        params = [*memory_params, *access_params, limit]
+
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(query, *params)
+
+        return [
+            {
+                "memory_id": row["memory_id"]
+                if isinstance(row["memory_id"], UUID)
+                else UUID(row["memory_id"]),
+                "access_count": row["access_count"],
+                "last_accessed": row["last_accessed"],
+            }
+            for row in rows
+        ]
+
+    async def get_access_frequency(
+        self,
+        bucket: str = "day",
+        organization_id: UUID | None = None,
+        user_id: UUID | None = None,
+        since: datetime | None = None,
+        limit: int = 90,
+    ) -> list[dict[str, Any]]:
+        """Get access frequency over time.
+
+        Args:
+            bucket: Time bucket, one of 'hour', 'day', 'week'.
+            organization_id: Optional filter by organization.
+            user_id: Optional filter by user.
+            since: Optional datetime lower bound.
+            limit: Maximum number of buckets to return.
+
+        Returns:
+            List of {bucket_start, access_count} sorted by time descending.
+        """
+        bucket_map = {"hour": "hour", "day": "day", "week": "week"}
+        bucket_unit = bucket_map.get(bucket, "day")
+
+        conditions = []
+        params: list[Any] = []
+        param_idx = 1
+
+        if organization_id:
+            conditions.append(f"organization_id = ${param_idx}")
+            params.append(str(organization_id))
+            param_idx += 1
+
+        if user_id:
+            conditions.append(f"user_id = ${param_idx}")
+            params.append(str(user_id))
+            param_idx += 1
+
+        if since:
+            conditions.append(f"accessed_at >= ${param_idx}")
+            params.append(since)
+            param_idx += 1
+
+        where_clause = " AND ".join(conditions) if conditions else "TRUE"
+        query = f"""
+            SELECT
+                DATE_TRUNC('{bucket_unit}', accessed_at) AS bucket_start,
+                COUNT(*) AS access_count
+            FROM memory_access_log
+            WHERE {where_clause}
+            GROUP BY bucket_start
+            ORDER BY bucket_start DESC
+            LIMIT ${param_idx}
+        """
+
+        params.append(limit)
+
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(query, *params)
+
+        return [
+            {
+                "bucket_start": row["bucket_start"],
+                "access_count": row["access_count"],
+            }
+            for row in rows
+        ]
+
+    async def get_access_counts(self, memory_ids: list[UUID]) -> dict[UUID, int]:
+        """Get lifetime access counts for specific memories."""
+        if not memory_ids:
+            return {}
+
+        placeholders = ", ".join(f"${i + 1}" for i in range(len(memory_ids)))
+        query = f"""
+            SELECT memory_id, COUNT(*) AS access_count
+            FROM memory_access_log
+            WHERE memory_id IN ({placeholders})
+            GROUP BY memory_id
+        """
+
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(query, *[str(mid) for mid in memory_ids])
+
+        counts: dict[UUID, int] = {}
+        for row in rows:
+            memory_id = (
+                row["memory_id"]
+                if isinstance(row["memory_id"], UUID)
+                else UUID(row["memory_id"])
+            )
+            counts[memory_id] = row["access_count"]
+        return counts
+
     def _row_to_dict(self, row: asyncpg.Record) -> dict[str, Any]:
         """Convert a database row to a dictionary."""
         user_id = None

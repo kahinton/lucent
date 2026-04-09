@@ -1,0 +1,41 @@
+server:
+  replicaCount: 2
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: 1500m
+      memory: 2Gi
+
+database:
+  embedded: false
+  external:
+    host: lucent-postgres-staging
+    port: 5432
+    secretRef: lucent-db-credentials
+
+openbao:
+  embedded: false
+  external:
+    address: http://openbao-staging:8200
+    secretRef: lucent-openbao-credentials
+
+ingress:
+  enabled: true
+  className: nginx
+  hosts:
+    - host: lucent-staging.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+
+autoscaling:
+  enabled: false
+
+observability:
+  enabled: true
+  otelCollector:
+    enabled: true
+  prometheus:
+    serviceMonitor: true
