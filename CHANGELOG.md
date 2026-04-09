@@ -26,10 +26,48 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Cards fade out smoothly after approve/reject action
 - Approval status badge shown on request detail page
 
+#### Goal-Aware Request Tracking
+- Request-to-memory linking (`request_memories`) for explicit goal/context/reference relationships
+- Goal-aware deduplication path for tracked requests tied to memory IDs
+- Dashboard and request detail UI enhancements for linked-memory visibility
+
+#### Memory Usage Analytics
+- Memory access logging infrastructure for reads and search results
+- Access analytics API endpoints for history, frequency trends, and most/least accessed memories
+- New Memory Analytics UI page for surfacing stale and never-accessed memories
+
+#### Memory Lifecycle
+- Memory decay module with test coverage to support lifecycle/retention behavior
+
+#### Runtime Coordination
+- Multi-daemon safety improvements for task distribution
+- Migration 054: daemon instance registry plus task claim lease/heartbeat metadata
+
+#### Configuration
+- `LUCENT_CREDENTIAL_KEY` added to `.env.example`, `docker-compose.yml`, and `docker-compose.prod.yml` for integration credential encryption
+- `LUCENT_SIGNING_SECRET` now included in dev compose defaults for stable cookie signing across restarts
+
 ### Changed
 - `_check_request_completion` now respects `LUCENT_REQUIRE_APPROVAL` — completed requests go straight to `completed` status by default instead of `review`
 - `list_pending_tasks` query now filters out tasks from unapproved requests
 - Learning extraction skill updated to search for `approval-rejected` tagged memories
+- Rejected request lifecycle now uses an explicit `rejection_processing` phase before cancellation (migration 053)
+- `LUCENT_REQUIRE_APPROVAL` documented in `docs/configuration.md`
+- `GITHUB_TOKEN` guidance expanded in `.env.example` and `docs/getting-started.md` (Copilot scope/daemon requirements)
+- Documentation refresh across `docs/configuration.md` and `docs/deployment-guide.md` for launch-readiness
+
+### Fixed
+- `.env.example` session TTL comment corrected to default `24` hours (`LUCENT_SESSION_TTL_HOURS`)
+- `.env.example` daemon MCP API key placeholder updated from `mcp_...` to `hs_...`
+- `docs/deployment-guide.md` corrected `LUCENT_SECURE_COOKIES` default to `true` (with local HTTP override guidance)
+- Tool-calling robustness improved in MCP bridges/LLM integration paths
+- Skills approval acceptance handling corrected in definitions web routes
+
+### Removed
+- Dead `LUCENT_DAEMON_RESEARCH_MODEL` entry removed from `.env.example`
+
+### Security
+- Protected built-in agent/skill/MCP definitions from daemon-driven modification paths
 
 ## [0.3.0] - 2026-03-27
 
