@@ -348,18 +348,17 @@ Returns:
             if result is None:
                 return _error_response(f"Memory not found or not accessible: {memory_id}")
 
-            # Log the access (team mode only)
-            if is_team_mode():
-                try:
-                    access_repo = await _get_access_repository()
-                    await access_repo.log_access(
-                        memory_id=uuid_id,
-                        access_type="view",
-                        user_id=user_id,
-                        organization_id=org_id,
-                    )
-                except Exception:
-                    logger.debug("Access log failed for get_memory", exc_info=True)
+            # Log the access
+            try:
+                access_repo = await _get_access_repository()
+                await access_repo.log_access(
+                    memory_id=uuid_id,
+                    access_type="view",
+                    user_id=user_id,
+                    organization_id=org_id,
+                )
+            except Exception:
+                logger.debug("Access log failed for get_memory", exc_info=True)
 
             return json.dumps(_serialize_memory(result), indent=2)
 
@@ -423,17 +422,16 @@ Returns:
                     not_found.append(original_id)
                 else:
                     memories.append(_serialize_memory(result))
-                    # Log access (team mode only)
-                    if is_team_mode():
-                        try:
-                            await access_repo.log_access(
-                                memory_id=uuid_id,
-                                access_type="view",
-                                user_id=user_id,
-                                organization_id=org_id,
-                            )
-                        except Exception:
-                            logger.debug("Access log failed for get_memories", exc_info=True)
+                    # Log access
+                    try:
+                        await access_repo.log_access(
+                            memory_id=uuid_id,
+                            access_type="view",
+                            user_id=user_id,
+                            organization_id=org_id,
+                        )
+                    except Exception:
+                        logger.debug("Access log failed for get_memories", exc_info=True)
 
             return json.dumps(
                 {
@@ -589,8 +587,8 @@ Returns:
                 requesting_org_id=org_id,
             )
 
-            # Log access for returned memories (team mode only)
-            if result["memories"] and is_team_mode():
+            # Log access for returned memories
+            if result["memories"]:
                 try:
                     access_repo = await _get_access_repository()
                     memory_ids_accessed = [m["id"] for m in result["memories"]]
@@ -684,8 +682,8 @@ Returns:
                 requesting_org_id=org_id,
             )
 
-            # Log access for returned memories (team mode only)
-            if result["memories"] and is_team_mode():
+            # Log access for returned memories
+            if result["memories"]:
                 try:
                     access_repo = await _get_access_repository()
                     memory_ids_accessed = [m["id"] for m in result["memories"]]
