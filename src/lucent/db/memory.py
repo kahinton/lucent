@@ -4,7 +4,8 @@ Handles CRUD operations for memories including search functionality.
 """
 
 import logging
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
+from math import ceil
 from typing import Any
 from uuid import UUID
 
@@ -36,11 +37,13 @@ class MemoryRepository:
     _FULL_COLUMNS = (
         "id, username, type, content, tags, importance, related_memory_ids, metadata, "
         "created_at, updated_at, deleted_at, user_id, "
-        "organization_id, shared, last_accessed_at, version"
+        "organization_id, shared, last_accessed_at, version, "
+        "lifecycle_stage, vitality_score, vitality_computed_at"
     )
     _SEARCH_COLUMNS = (
         "id, username, type, content, tags, importance, related_memory_ids, "
-        "created_at, updated_at, user_id, organization_id, shared, last_accessed_at"
+        "created_at, updated_at, user_id, organization_id, shared, last_accessed_at, "
+        "lifecycle_stage"
     )
 
     def __init__(self, pool: Pool):
@@ -1149,6 +1152,181 @@ class MemoryRepository:
             "total": len(memories),
         }
 
+    async def compute_vitality_scores(self, batch_size: int = 500) -> dict[str, Any]:
+        """Compute and persist vitality scores for all non-deleted, non-forgotten memories."""
+        from lucent.memory.decay import DecayConfig, MemoryDecayInput, compute_memory_vitality
+
+        cfg = DecayConfig.from_env()
+        now = datetime.now(UTC)
+        processed = 0
+        updated = 0
+        stage_transitions = 0
+        offset = 0
+
+        while True:
+            async with self.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    f"""
+                    SELECT {self._FULL_COLUMNS}
+                    FROM memories
+                    WHERE deleted_at IS NULL
+                      AND lifecycle_stage != 'forgotten'
+                    ORDER BY created_at ASC
+                    LIMIT $1 OFFSET $2
+                    """,
+                    batch_size,
+                    offset,
+                )
+
+            if not rows:
+                break
+
+            memory_dicts = [self._row_to_dict(row) for row in rows]
+            memory_ids = [item["id"] for item in memory_dicts]
+            access_counts = await self._get_access_counts_last_n_days(memory_ids, days=90, now=now)
+            frequency_baseline = self._compute_p75_baseline(
+                counts=[access_counts.get(memory_id, 0) for memory_id in memory_ids],
+                default=cfg.frequency_baseline,
+            )
+
+            for mem in memory_dicts:
+                profile = MemoryDecayInput(
+                    memory_id=mem["id"],
+                    memory_type=mem["type"],
+                    importance=mem["importance"],
+                    created_at=self._utc(mem["created_at"]),
+                    updated_at=self._utc(mem["updated_at"]),
+                    last_accessed_at=self._utc(mem["last_accessed_at"])
+                    if mem.get("last_accessed_at")
+                    else None,
+                    access_count=access_counts.get(mem["id"], 0),
+                    tags=mem.get("tags") or [],
+                    metadata=mem.get("metadata") or {},
+                )
+                score_result = compute_memory_vitality(
+                    profile,
+                    config=cfg,
+                    now=now,
+                    frequency_baseline=frequency_baseline,
+                )
+                computed_stage = self._map_action_to_lifecycle_stage(score_result.action)
+
+                async with self.pool.acquire() as conn:
+                    await conn.execute(
+                        """
+                        UPDATE memories
+                        SET vitality_score = $2,
+                            vitality_computed_at = $3,
+                            lifecycle_stage = $4
+                        WHERE id = $1
+                          AND deleted_at IS NULL
+                        """,
+                        str(mem["id"]),
+                        score_result.score,
+                        now,
+                        computed_stage,
+                    )
+
+                processed += 1
+                updated += 1
+                if (mem.get("lifecycle_stage") or "active") != computed_stage:
+                    stage_transitions += 1
+
+            offset += batch_size
+
+        return {
+            "processed": processed,
+            "updated": updated,
+            "stage_transitions": stage_transitions,
+            "computed_at": now,
+        }
+
+    async def get_lifecycle_stats(
+        self,
+        organization_id: UUID | None = None,
+    ) -> dict[str, Any]:
+        """Return lifecycle distribution and vitality histogram for observability."""
+        params: list[Any] = []
+        org_filter = ""
+        if organization_id:
+            org_filter = "AND organization_id = $1"
+            params.append(str(organization_id))
+
+        async with self.pool.acquire() as conn:
+            stage_rows = await conn.fetch(
+                f"""
+                SELECT lifecycle_stage, COUNT(*) AS count
+                FROM memories
+                WHERE deleted_at IS NULL {org_filter}
+                GROUP BY lifecycle_stage
+                """,
+                *params,
+            )
+            histogram_rows = await conn.fetch(
+                f"""
+                SELECT
+                    CASE
+                        WHEN vitality_score IS NULL THEN 'unscored'
+                        WHEN vitality_score < 0.1 THEN '0.0-0.1'
+                        WHEN vitality_score < 0.2 THEN '0.1-0.2'
+                        WHEN vitality_score < 0.3 THEN '0.2-0.3'
+                        WHEN vitality_score < 0.4 THEN '0.3-0.4'
+                        WHEN vitality_score < 0.5 THEN '0.4-0.5'
+                        WHEN vitality_score < 0.6 THEN '0.5-0.6'
+                        WHEN vitality_score < 0.7 THEN '0.6-0.7'
+                        WHEN vitality_score < 0.8 THEN '0.7-0.8'
+                        WHEN vitality_score < 0.9 THEN '0.8-0.9'
+                        ELSE '0.9-1.0'
+                    END AS bucket,
+                    COUNT(*) AS count
+                FROM memories
+                WHERE deleted_at IS NULL {org_filter}
+                GROUP BY bucket
+                """,
+                *params,
+            )
+            total_count_row = await conn.fetchrow(
+                f"""
+                SELECT COUNT(*) AS total
+                FROM memories
+                WHERE deleted_at IS NULL {org_filter}
+                """,
+                *params,
+            )
+
+        default_stages = {
+            "active": 0,
+            "consolidating": 0,
+            "archived": 0,
+            "forgotten": 0,
+        }
+        stage_distribution = {
+            row["lifecycle_stage"] or "active": row["count"] for row in stage_rows
+        }
+        stage_distribution = {**default_stages, **stage_distribution}
+
+        default_histogram = {
+            "unscored": 0,
+            "0.0-0.1": 0,
+            "0.1-0.2": 0,
+            "0.2-0.3": 0,
+            "0.3-0.4": 0,
+            "0.4-0.5": 0,
+            "0.5-0.6": 0,
+            "0.6-0.7": 0,
+            "0.7-0.8": 0,
+            "0.8-0.9": 0,
+            "0.9-1.0": 0,
+        }
+        vitality_histogram = {row["bucket"]: row["count"] for row in histogram_rows}
+        vitality_histogram = {**default_histogram, **vitality_histogram}
+
+        return {
+            "stage_distribution": stage_distribution,
+            "vitality_histogram": vitality_histogram,
+            "total_memories": total_count_row["total"] if total_count_row else 0,
+        }
+
     async def _validate_related_ids(
         self,
         related_ids: list[UUID],
@@ -1234,6 +1412,9 @@ class MemoryRepository:
             "organization_id": org_id,
             "shared": row["shared"],
             "last_accessed_at": row["last_accessed_at"],
+            "lifecycle_stage": (
+                row["lifecycle_stage"] if "lifecycle_stage" in row.keys() else "active"
+            ),
         }
 
     def _row_to_dict(self, row: asyncpg.Record) -> dict[str, Any]:
@@ -1284,4 +1465,68 @@ class MemoryRepository:
             "shared": shared,
             "last_accessed_at": last_accessed_at,
             "version": row["version"] if "version" in row.keys() else 1,
+            "lifecycle_stage": (
+                row["lifecycle_stage"] if "lifecycle_stage" in row.keys() else "active"
+            ),
+            "vitality_score": row["vitality_score"] if "vitality_score" in row.keys() else None,
+            "vitality_computed_at": (
+                row["vitality_computed_at"] if "vitality_computed_at" in row.keys() else None
+            ),
         }
+
+    async def _get_access_counts_last_n_days(
+        self,
+        memory_ids: list[UUID],
+        *,
+        days: int,
+        now: datetime,
+    ) -> dict[UUID, int]:
+        if not memory_ids:
+            return {}
+
+        cutoff = now - timedelta(days=days)
+        placeholders = ", ".join(f"${i + 1}" for i in range(len(memory_ids)))
+        cutoff_param = len(memory_ids) + 1
+        query = f"""
+            SELECT memory_id, COUNT(*) AS access_count
+            FROM memory_access_log
+            WHERE memory_id IN ({placeholders})
+              AND accessed_at >= ${cutoff_param}
+            GROUP BY memory_id
+        """
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(query, *[str(mid) for mid in memory_ids], cutoff)
+
+        counts: dict[UUID, int] = {memory_id: 0 for memory_id in memory_ids}
+        for row in rows:
+            memory_id = (
+                row["memory_id"] if isinstance(row["memory_id"], UUID) else UUID(row["memory_id"])
+            )
+            counts[memory_id] = row["access_count"]
+        return counts
+
+    @staticmethod
+    def _compute_p75_baseline(*, counts: list[int], default: int) -> int:
+        non_negative = sorted(max(0, c) for c in counts)
+        if not non_negative:
+            return max(1, default)
+
+        rank = max(1, ceil(0.75 * len(non_negative)))
+        p75 = non_negative[rank - 1]
+        return max(1, p75 if p75 > 0 else default)
+
+    @staticmethod
+    def _map_action_to_lifecycle_stage(action: str) -> str:
+        if action == "archive-candidate":
+            return "archived"
+        if action == "suggest-cleanup":
+            return "consolidating"
+        return "active"
+
+    @staticmethod
+    def _utc(value: datetime | None) -> datetime:
+        if value is None:
+            return datetime.now(UTC)
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)

@@ -1,8 +1,8 @@
 """Tests for daemon system schedule seeding."""
 
-from datetime import datetime, timezone
 import sys
 import types
+from datetime import datetime, timezone
 from uuid import UUID
 
 import pytest
@@ -52,3 +52,11 @@ async def test_seed_system_schedules_includes_procedural_consolidation(monkeypat
     assert proc_row[9] == daemon_module.PROCEDURAL_CONSOLIDATION_PROMPT
     assert isinstance(proc_row[7], datetime)
     assert proc_row[7].tzinfo == timezone.utc
+
+    vitality = [row for row in inserted_rows if row[0] == "Memory Vitality Scoring"]
+    assert len(vitality) == 1
+    vit_row = vitality[0]
+    assert vit_row[3] == "memory"  # agent_type
+    assert vit_row[4] == "interval"  # schedule_type
+    assert vit_row[5] == daemon_module.VITALITY_SCORING_MINUTES * 60
+    assert vit_row[9] == daemon_module.MEMORY_VITALITY_SCORING_PROMPT

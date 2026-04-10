@@ -286,6 +286,8 @@ LEARNING_MINUTES = int(
 PROCEDURAL_CONSOLIDATION_MINUTES = int(
     os.environ.get("LUCENT_PROCEDURAL_CONSOLIDATION_MINUTES", "300")
 )
+# Memory vitality scoring: runs every 6 hours by default (360 minutes)
+VITALITY_SCORING_MINUTES = int(os.environ.get("LUCENT_VITALITY_SCORING_MINUTES", "360"))
 # Daily experience compression: runs once per day (default 1440 minutes = 24 hours)
 COMPRESSION_MINUTES = int(os.environ.get("LUCENT_COMPRESSION_MINUTES", "1440"))
 
@@ -420,6 +422,16 @@ PROCEDURAL_CONSOLIDATION_PROMPT = (
     "must be created.\n"
     "- Preserve the newest, most complete procedure as canonical.\n"
     "- Keep procedural memories actionable: ordered steps, prerequisites, pitfalls, and success criteria."
+)
+
+MEMORY_VITALITY_SCORING_PROMPT = (
+    "Run memory lifecycle vitality scoring in SHADOW MODE.\n\n"
+    "Required actions:\n"
+    "1. Compute vitality scores for all non-deleted memories not in forgotten stage.\n"
+    "2. Persist vitality_score and vitality_computed_at.\n"
+    "3. Apply lifecycle_stage transitions using configured thresholds.\n"
+    "4. Do NOT change search ranking or retrieval behavior.\n"
+    "5. Report processed, updated, and stage transition counts."
 )
 
 # Approval flow: when enabled, tasks go to needs-review before completing.
@@ -2230,6 +2242,18 @@ class LucentDaemon:
                         "interval_seconds": PROCEDURAL_CONSOLIDATION_MINUTES * 60,
                         "priority": "low",
                         "prompt": PROCEDURAL_CONSOLIDATION_PROMPT,
+                    },
+                    {
+                        "title": "Memory Vitality Scoring",
+                        "description": (
+                            "Compute and persist memory vitality scores and lifecycle stages "
+                            "for shadow-mode observability. No search behavior changes."
+                        ),
+                        "agent_type": "memory",
+                        "schedule_type": "interval",
+                        "interval_seconds": VITALITY_SCORING_MINUTES * 60,
+                        "priority": "low",
+                        "prompt": MEMORY_VITALITY_SCORING_PROMPT,
                     },
                 ]
 

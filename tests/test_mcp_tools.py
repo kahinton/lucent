@@ -10,13 +10,18 @@ Tests the MCP tool layer that wraps the DB layer, verifying:
 import json
 import os
 from unittest.mock import patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest_asyncio
 from mcp.server.fastmcp import FastMCP
 
 from lucent.auth import set_current_user
-from lucent.db import MemoryRepository
+from lucent.db import (
+    MemoryRepository,
+    OrganizationRepository,
+    UserRepository,
+    get_pool,
+)
 from lucent.tools.memories import register_tools
 
 # ============================================================================
@@ -1592,6 +1597,308 @@ class TestImportMemories:
             },
         )
 
+        assert "error" in result
+
+
+# ============================================================================
+# get_memory_stats
+# ============================================================================
+
+
+class TestGetMemoryStats:
+    """Tests for get_memory_stats MCP tool."""
+
+    async def test_get_memory_stats_returns_expected_shape(
+        self, mcp_tools, auth_user, clean_test_data
+    ):
+        prefix = clean_test_data
+        await _call(
+            mcp_tools,
+            "create_memory",
+            {
+                "type": "experience",
+                "content": f"{prefix} Stats memory 1",
+                "tags": ["stats-test"],
+                "importance": 5,
+            },
+        )
+        await _call(
+            mcp_tools,
+            "create_memory",
+            {
+                "type": "technical",
+                "content": f"{prefix} Stats memory 2",
+                "tags": ["stats-test"],
+                "importance": 8,
+            },
+        )
+
+        result = await _call(mcp_tools, "get_memory_stats", {})
+        assert "stage_distribution" in result
+        assert "vitality_histogram" in result
+        assert "total_memories" in result
+        assert isinstance(result["total_memories"], int)
+        assert "active" in result["stage_distribution"]
+        assert "unscored" in result["vitality_histogram"]
+
+    async def test_get_memory_stats_stage_distribution_counts(
+        self, mcp_tools, db_pool, clean_test_data
+    ):
+        """Stats should return correct per-stage counts for an isolated org."""
+        prefix = clean_test_data
+        org_repo = OrganizationRepository(db_pool)
+        user_repo = UserRepository(db_pool)
+        org = await org_repo.create(name=f"{prefix}stats-stage-org")
+        user = await user_repo.create(
+            external_id=f"{prefix}stats-stage-user",
+            provider="local",
+            organization_id=org["id"],
+            email=f"{prefix}stats-stage@test.com",
+            display_name="Stats Stage User",
+        )
+
+        set_current_user(
+            {
+                "id": user["id"],
+                "organization_id": org["id"],
+                "role": "member",
+                "display_name": "Stats Stage User",
+                "email": f"{prefix}stats-stage@test.com",
+            }
+        )
+        try:
+            # Users auto-get an individual memory; clear org memories for deterministic counts.
+            async with db_pool.acquire() as conn:
+                await conn.execute("DELETE FROM memories WHERE organization_id = $1", org["id"])
+
+            created_ids = []
+            for i in range(4):
+                created = await _call(
+                    mcp_tools,
+                    "create_memory",
+                    {
+                        "type": "experience",
+                        "content": f"{prefix} Stage memory {i}",
+                        "tags": ["stats-stage"],
+                        "importance": 5,
+                    },
+                )
+                created_ids.append(UUID(created["id"]))
+
+            # Re-map 3 of 4 rows to non-default stages; leave one as active.
+            async with db_pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE memories
+                    SET lifecycle_stage = 'consolidating'
+                    WHERE id = $1
+                    """,
+                    created_ids[0],
+                )
+                await conn.execute(
+                    """
+                    UPDATE memories
+                    SET lifecycle_stage = 'archived'
+                    WHERE id = $1
+                    """,
+                    created_ids[1],
+                )
+                await conn.execute(
+                    """
+                    UPDATE memories
+                    SET lifecycle_stage = 'forgotten'
+                    WHERE id = $1
+                    """,
+                    created_ids[2],
+                )
+
+            result = await _call(mcp_tools, "get_memory_stats", {})
+            assert result["stage_distribution"]["active"] == 1
+            assert result["stage_distribution"]["consolidating"] == 1
+            assert result["stage_distribution"]["archived"] == 1
+            assert result["stage_distribution"]["forgotten"] == 1
+            assert result["total_memories"] == 4
+        finally:
+            set_current_user(None)
+
+    async def test_get_memory_stats_histogram_counts(self, mcp_tools, db_pool, clean_test_data):
+        """Stats should bucket vitality scores into expected histogram ranges."""
+        prefix = clean_test_data
+        org_repo = OrganizationRepository(db_pool)
+        user_repo = UserRepository(db_pool)
+        org = await org_repo.create(name=f"{prefix}stats-hist-org")
+        user = await user_repo.create(
+            external_id=f"{prefix}stats-hist-user",
+            provider="local",
+            organization_id=org["id"],
+            email=f"{prefix}stats-hist@test.com",
+            display_name="Stats Histogram User",
+        )
+
+        set_current_user(
+            {
+                "id": user["id"],
+                "organization_id": org["id"],
+                "role": "member",
+                "display_name": "Stats Histogram User",
+                "email": f"{prefix}stats-hist@test.com",
+            }
+        )
+        try:
+            # Users auto-get an individual memory; clear org memories for deterministic counts.
+            async with db_pool.acquire() as conn:
+                await conn.execute("DELETE FROM memories WHERE organization_id = $1", org["id"])
+
+            created_ids = []
+            for i in range(4):
+                created = await _call(
+                    mcp_tools,
+                    "create_memory",
+                    {
+                        "type": "experience",
+                        "content": f"{prefix} Histogram memory {i}",
+                        "tags": ["stats-hist"],
+                        "importance": 5,
+                    },
+                )
+                created_ids.append(UUID(created["id"]))
+
+            # Force deterministic bucket distribution:
+            # unscored=1, 0.0-0.1=1 (0.05), 0.4-0.5=1 (0.45), 0.9-1.0=1 (0.95)
+            async with db_pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE memories
+                    SET vitality_score = NULL
+                    WHERE id = $1
+                    """,
+                    created_ids[0],
+                )
+                await conn.execute(
+                    """
+                    UPDATE memories
+                    SET vitality_score = 0.05
+                    WHERE id = $1
+                    """,
+                    created_ids[1],
+                )
+                await conn.execute(
+                    """
+                    UPDATE memories
+                    SET vitality_score = 0.45
+                    WHERE id = $1
+                    """,
+                    created_ids[2],
+                )
+                await conn.execute(
+                    """
+                    UPDATE memories
+                    SET vitality_score = 0.95
+                    WHERE id = $1
+                    """,
+                    created_ids[3],
+                )
+
+            result = await _call(mcp_tools, "get_memory_stats", {})
+            assert result["vitality_histogram"]["unscored"] == 1
+            assert result["vitality_histogram"]["0.0-0.1"] == 1
+            assert result["vitality_histogram"]["0.4-0.5"] == 1
+            assert result["vitality_histogram"]["0.9-1.0"] == 1
+            assert result["total_memories"] == 4
+        finally:
+            set_current_user(None)
+
+    async def test_get_memory_stats_invalid_org_id(self, mcp_tools, auth_user):
+        result = await _call(mcp_tools, "get_memory_stats", {"organization_id": "not-a-uuid"})
+        assert "error" in result
+        assert "organization_id" in result["error"]
+
+    async def test_get_memory_stats_handles_empty_org(self, mcp_tools, db_pool, clean_test_data):
+        """Empty org should return zeroed distributions and counts."""
+        prefix = clean_test_data
+        org_repo = OrganizationRepository(db_pool)
+        user_repo = UserRepository(db_pool)
+        org = await org_repo.create(name=f"{prefix}empty-org")
+        user = await user_repo.create(
+            external_id=f"{prefix}empty-user",
+            provider="local",
+            organization_id=org["id"],
+            email=f"{prefix}empty@test.com",
+            display_name="Empty User",
+        )
+        # Users auto-get an individual memory; clear org memories to validate empty handling.
+        async with db_pool.acquire() as conn:
+            await conn.execute("DELETE FROM memories WHERE organization_id = $1", org["id"])
+
+        set_current_user(
+            {
+                "id": user["id"],
+                "organization_id": org["id"],
+                "role": "member",
+                "display_name": "Empty User",
+                "email": f"{prefix}empty@test.com",
+            }
+        )
+        try:
+            result = await _call(mcp_tools, "get_memory_stats", {})
+            assert result["total_memories"] == 0
+            assert result["stage_distribution"]["active"] == 0
+            assert result["stage_distribution"]["consolidating"] == 0
+            assert result["stage_distribution"]["archived"] == 0
+            assert result["stage_distribution"]["forgotten"] == 0
+            assert result["vitality_histogram"]["unscored"] == 0
+        finally:
+            set_current_user(None)
+
+    async def test_get_memory_stats_is_read_only(self, mcp_tools, auth_user, clean_test_data):
+        """Calling stats should not mutate memory rows."""
+        prefix = clean_test_data
+        created = await _call(
+            mcp_tools,
+            "create_memory",
+            {
+                "type": "experience",
+                "content": f"{prefix} Read-only stats memory",
+                "tags": ["stats-test", "read-only"],
+                "importance": 4,
+            },
+        )
+        repo = MemoryRepository(await get_pool())
+        before = await repo.get(UUID(created["id"]))
+        result = await _call(mcp_tools, "get_memory_stats", {})
+        after = await repo.get(UUID(created["id"]))
+
+        assert "stage_distribution" in result
+        assert before is not None and after is not None
+        assert before["updated_at"] == after["updated_at"]
+        assert before["last_accessed_at"] == after["last_accessed_at"]
+        assert before["vitality_score"] == after["vitality_score"]
+        assert before["vitality_computed_at"] == after["vitality_computed_at"]
+
+
+class TestComputeVitalityScores:
+    """Tests for compute_vitality_scores MCP tool."""
+
+    async def test_compute_vitality_scores_runs(self, mcp_tools, auth_user, clean_test_data):
+        prefix = clean_test_data
+        await _call(
+            mcp_tools,
+            "create_memory",
+            {
+                "type": "experience",
+                "content": f"{prefix} Compute vitality memory",
+                "tags": ["vitality-test"],
+                "importance": 6,
+            },
+        )
+        result = await _call(mcp_tools, "compute_vitality_scores", {"batch_size": 100})
+        assert "processed" in result
+        assert "updated" in result
+        assert "stage_transitions" in result
+        assert "computed_at" in result
+
+    async def test_compute_vitality_scores_invalid_batch_size(self, mcp_tools, auth_user):
+        result = await _call(mcp_tools, "compute_vitality_scores", {"batch_size": 0})
         assert "error" in result
 
 

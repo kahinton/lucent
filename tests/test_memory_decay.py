@@ -1,4 +1,4 @@
-"""Tests for memory decay scoring and maintenance reporting."""
+"""Tests for memory lifecycle vitality scoring and maintenance reporting."""
 
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
@@ -9,6 +9,8 @@ from lucent.memory.decay import (
     DecayAction,
     DecayConfig,
     MemoryDecayInput,
+    classify_decay_action,
+    compute_memory_vitality,
     dry_run_decay_report,
     run_memory_decay_maintenance_cycle,
     score_memories_batch,
@@ -43,41 +45,16 @@ def _profile(
     )
 
 
-def test_brand_new_memory_is_protected():
-    now = datetime.now(UTC)
-    profile = MemoryDecayInput(
-        memory_id=uuid4(),
-        memory_type="experience",
-        importance=3,
-        created_at=now - timedelta(days=1),
-        updated_at=now - timedelta(days=1),
-        last_accessed_at=None,
-        access_count=0,
-    )
-    result = score_memory_decay(profile, now=now)
-    assert result.protected is True
-    assert "new-memory-protection" in result.reasons
-    assert result.action == DecayAction.LEAVE
-
-
-def test_old_high_importance_memory_protected():
-    profile = _profile(importance=10, age_days=800, updated_days=300, last_accessed_days=400)
-    result = score_memory_decay(profile)
-    assert result.protected is True
-    assert "high-importance-protection" in result.reasons
-    assert result.score < 0.6
-
-
-def test_frequently_accessed_scores_lower_than_never_accessed():
-    old_frequent = _profile(access_count=200, age_days=400, updated_days=300, last_accessed_days=3)
+def test_frequently_accessed_scores_higher_than_never_accessed():
+    old_frequent = _profile(access_count=20, age_days=400, updated_days=300, last_accessed_days=3)
     old_never = _profile(access_count=0, age_days=400, updated_days=300, last_accessed_days=None)
 
     frequent_result = score_memory_decay(old_frequent)
     never_result = score_memory_decay(old_never)
-    assert frequent_result.score < never_result.score
+    assert frequent_result.score > never_result.score
 
 
-def test_very_old_never_accessed_low_importance_is_high_decay():
+def test_very_old_never_accessed_low_importance_is_low_vitality():
     profile = _profile(
         importance=1,
         access_count=0,
@@ -87,26 +64,56 @@ def test_very_old_never_accessed_low_importance_is_high_decay():
     )
     result = score_memory_decay(profile)
     assert result.action in (DecayAction.SUGGEST, DecayAction.ARCHIVE_CANDIDATE)
-    assert result.score >= 0.55
+    assert result.score < 0.35
 
 
-def test_active_goal_and_recent_update_protections_apply():
+def test_higher_importance_increases_vitality():
+    high = _profile(importance=10, age_days=300, updated_days=300, last_accessed_days=100, access_count=1)
+    low = _profile(importance=1, age_days=300, updated_days=300, last_accessed_days=100, access_count=1)
+
+    high_result = compute_memory_vitality(high)
+    low_result = compute_memory_vitality(low)
+    assert high_result.score > low_result.score
+
+
+def test_individual_memory_hard_exempt_even_if_stale():
     profile = _profile(
-        memory_type="goal",
-        importance=6,
-        age_days=200,
-        updated_days=2,
-        last_accessed_days=200,
-        metadata={"status": "active"},
-        linked_to_active_goal=True,
+        memory_type="individual",
+        importance=1,
+        age_days=2000,
+        updated_days=2000,
+        last_accessed_days=2000,
+        access_count=0,
     )
     result = score_memory_decay(profile)
     assert result.protected is True
-    assert "recent-update-protection" in result.reasons
-    assert "active-goal-protection" in result.reasons
+    assert result.action == DecayAction.EXEMPT
+    assert "hard-exempt-individual" in result.reasons
 
 
-def test_batch_results_sorted_by_score_desc():
+def test_active_goal_memory_hard_exempt_even_if_stale():
+    profile = _profile(
+        memory_type="goal",
+        importance=1,
+        age_days=1200,
+        updated_days=1200,
+        last_accessed_days=1200,
+        access_count=0,
+        metadata={"status": "active"},
+    )
+    result = score_memory_decay(profile)
+    assert result.protected is True
+    assert result.action == DecayAction.EXEMPT
+    assert "hard-exempt-active-goal" in result.reasons
+
+
+def test_classify_decay_action_short_circuits_for_exempt_profile():
+    profile = _profile(memory_type="individual", age_days=999, last_accessed_days=999, importance=1)
+    # Even with a score that would otherwise archive, exemption should win.
+    assert classify_decay_action(0.0, profile=profile) == DecayAction.EXEMPT
+
+
+def test_batch_results_sorted_by_score_asc():
     memories = [
         _profile(
             importance=10,
@@ -132,11 +139,11 @@ def test_batch_results_sorted_by_score_desc():
     ]
     results = score_memories_batch(memories)
     scores = [r.score for r in results]
-    assert scores == sorted(scores, reverse=True)
+    assert scores == sorted(scores)
 
 
 def test_dry_run_report_is_reporting_only():
-    config = DecayConfig(suggest_threshold=0.4, archive_threshold=0.7)
+    config = DecayConfig(suggest_threshold=0.4, archive_threshold=0.2)
     scored = score_memories_batch(
         [
             _profile(
@@ -191,19 +198,20 @@ async def test_maintenance_cycle_dry_run_no_side_effects(db_pool, test_user, cle
         organization_id=test_user["organization_id"],
     )
 
-    # Backdate one memory to make it a stronger decay candidate.
+    # Backdate one memory to make it a stronger low-vitality candidate.
     async with db_pool.acquire() as conn:
         await conn.execute(
             """
             UPDATE memories
             SET created_at = NOW() - INTERVAL '800 days',
-                updated_at = NOW() - INTERVAL '800 days'
+                updated_at = NOW() - INTERVAL '800 days',
+                last_accessed_at = NOW() - INTERVAL '800 days'
             WHERE id = $1
             """,
             old_memory["id"],
         )
 
-    # Link goal memory to an active request to verify protection path.
+    # Link goal memory to an active request to verify hard exemption path.
     req = await request_repo.create_request(
         title=f"{prefix}goal work",
         description="active work",
@@ -229,6 +237,10 @@ async def test_maintenance_cycle_dry_run_no_side_effects(db_pool, test_user, cle
     persisted_goal = await memory_repo.get(goal_memory["id"])
     assert persisted_old is not None and persisted_old["deleted_at"] is None
     assert persisted_goal is not None and persisted_goal["deleted_at"] is None
+
+    # Goal memory should be present as exempt in report output.
+    exempt_ids = {entry["memory_id"] for entry in report.get("exempt", [])}
+    assert str(goal_memory["id"]) in exempt_ids
 
     # Explicit cleanup for request rows (fixture cleanup does not currently remove requests).
     async with db_pool.acquire() as conn:

@@ -28,7 +28,7 @@ from lucent.constants import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_TASK_LEASE_SECONDS = int(os.environ.get("LUCENT_TASK_LEASE_SECONDS", "1800"))
-DEFAULT_INSTANCE_STALE_SECONDS = int(os.environ.get("LUCENT_INSTANCE_STALE_SECONDS", "120"))
+DEFAULT_INSTANCE_STALE_SECONDS = int(os.environ.get("LUCENT_INSTANCE_STALE_SECONDS", "1800"))
 
 # Approval statuses for the pre-work gate
 APPROVAL_AUTO = "auto_approved"

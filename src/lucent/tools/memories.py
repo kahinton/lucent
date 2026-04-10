@@ -899,10 +899,13 @@ Returns:
 
             # Check ownership OR MEMORY_DELETE_ANY permission
             if old_memory.get("user_id") != user_id:
-                from lucent.rbac import Permission, has_permission, Role
+                from lucent.rbac import Permission, Role, has_permission
+
                 role = Role.from_string(user_role or "member")
                 if not has_permission(role, Permission.MEMORY_DELETE_ANY):
-                    return _error_response("Permission denied: only the owner can delete this memory")
+                    return _error_response(
+                        "Permission denied: only the owner can delete this memory"
+                    )
 
             # Individual memories cannot be deleted via MCP
             # - they are deleted when users are removed
@@ -1702,6 +1705,65 @@ Returns:
             logger.error("import_memories failed", exc_info=e)
             return _error_response(f"Failed to import memories: {str(e)}")
 
+    @mcp.tool()
+    async def get_memory_stats(
+        organization_id: str | None = None,
+    ) -> str:
+        """Return memory lifecycle statistics for observability.
+
+        Surfaces lifecycle stage distribution, vitality histogram, and total count.
+        This is a read-only shadow mode tool (no memory mutations).
+
+        Args:
+            organization_id: Optional organization UUID override. Defaults to caller org.
+
+        Returns:
+            JSON string with lifecycle stage counts, vitality buckets, and total memory count.
+        """
+        try:
+            user_id, org_id, user_role = await _get_current_user_context()
+            effective_org_id = organization_id or (str(org_id) if org_id else None)
+
+            repo = await _get_repository()
+            stats = await repo.get_lifecycle_stats(
+                UUID(effective_org_id) if effective_org_id else None
+            )
+            return json.dumps(stats, indent=2, default=str)
+        except ValueError as e:
+            return _error_response(f"Invalid organization_id format: {str(e)}")
+        except Exception as e:
+            logger.error("get_memory_stats failed", exc_info=e)
+            return _error_response(f"Failed to retrieve memory stats: {str(e)}")
+
+    @mcp.tool()
+    async def compute_vitality_scores(
+        batch_size: int = 500,
+    ) -> str:
+        """Compute and persist vitality scores for shadow-mode lifecycle observation.
+
+        This mutates only lifecycle observability fields:
+        - vitality_score
+        - vitality_computed_at
+        - lifecycle_stage
+
+        It does NOT change search ranking behavior.
+
+        Args:
+            batch_size: Number of memories to process per batch (default 500).
+
+        Returns:
+            JSON string with processed counts and computation timestamp.
+        """
+        try:
+            if batch_size < 1 or batch_size > 5000:
+                return _error_response("batch_size must be between 1 and 5000")
+            repo = await _get_repository()
+            result = await repo.compute_vitality_scores(batch_size=batch_size)
+            return json.dumps(result, indent=2, default=str)
+        except Exception as e:
+            logger.error("compute_vitality_scores failed", exc_info=e)
+            return _error_response(f"Failed to compute vitality scores: {str(e)}")
+
 
 def _serialize_memory(memory: dict[str, Any]) -> dict[str, Any]:
     """Serialize a memory dict for JSON output."""
@@ -1725,6 +1787,11 @@ def _serialize_memory(memory: dict[str, Any]) -> dict[str, Any]:
         "shared": memory.get("shared", False),
         "last_accessed_at": memory["last_accessed_at"].isoformat()
         if memory.get("last_accessed_at")
+        else None,
+        "lifecycle_stage": memory.get("lifecycle_stage", "active"),
+        "vitality_score": memory.get("vitality_score"),
+        "vitality_computed_at": memory["vitality_computed_at"].isoformat()
+        if memory.get("vitality_computed_at")
         else None,
     }
 
@@ -1751,4 +1818,5 @@ def _serialize_truncated_memory(memory: dict[str, Any]) -> dict[str, Any]:
         "last_accessed_at": memory["last_accessed_at"].isoformat()
         if memory.get("last_accessed_at")
         else None,
+        "lifecycle_stage": memory.get("lifecycle_stage", "active"),
     }

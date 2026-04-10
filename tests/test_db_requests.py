@@ -479,8 +479,9 @@ class TestTaskLifecycle:
 
 class TestReleaseStale:
     @pytest.mark.asyncio
-    async def test_releases_stale_tasks(self, repo, task, db_pool):
+    async def test_releases_stale_tasks(self, repo, task, db_pool, test_organization):
         tid = str(task["id"])
+        org_id = str(test_organization["id"])
         await repo.claim_task(tid, "daemon-1")
         # Manually backdate claimed_at
         async with db_pool.acquire() as conn:
@@ -488,15 +489,16 @@ class TestReleaseStale:
                 "UPDATE tasks SET claimed_at = NOW() - interval '60 minutes' WHERE id = $1",
                 task["id"],
             )
-        count = await repo.release_stale_tasks(stale_minutes=30)
+        count = await repo.release_stale_tasks(stale_minutes=30, org_id=org_id)
         assert count >= 1
         refreshed = await repo.get_task(tid)
         assert refreshed["status"] == "pending"
 
     @pytest.mark.asyncio
-    async def test_does_not_release_fresh_tasks(self, repo, task):
+    async def test_does_not_release_fresh_tasks(self, repo, task, test_organization):
+        org_id = str(test_organization["id"])
         await repo.claim_task(str(task["id"]), "daemon-1")
-        count = await repo.release_stale_tasks(stale_minutes=30)
+        count = await repo.release_stale_tasks(stale_minutes=30, org_id=org_id)
         assert count == 0
 
 

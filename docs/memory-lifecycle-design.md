@@ -1099,14 +1099,14 @@ An overly eager agent that searches broadly could inflate access counts, keeping
 
 ### Open Questions
 
-**Q1: Should consolidated summaries inherit the vitality score of their source cluster, or start fresh?**  
-Starting fresh means a summary could immediately decay if not accessed. Inheriting means it starts with the (low) vitality of its decayed sources. Proposed: Start summaries with a vitality floor of 0.5 for their first 30 days, giving them time to prove useful.
+**Q1 (Resolved, Phase 0): Should consolidated summaries inherit the vitality score of their source cluster, or start fresh?**  
+Resolved: Start summaries with a vitality floor of 0.5 for their first 30 days, then return to normal vitality computation. Rationale: avoids immediate re-decay while still requiring future access signals to remain active.
 
 **Q2: Should the lifecycle system track access by different users differently?**  
 A memory accessed by 5 different users may be more valuable than one accessed 5 times by the same user. The `memory_access_log` tracks `user_id`, so this is feasible. Proposed: Defer to v2. Use raw access count for v1 simplicity.
 
-**Q3: How should lifecycle interact with shared memories?**  
-If a memory is shared across an organization, one user's access patterns shouldn't control the lifecycle for all users. Proposed: For shared memories, compute vitality using org-wide access patterns (all users' access counts and recency). For private memories, use only the owner's access patterns.
+**Q3 (Resolved, Phase 0): How should lifecycle interact with shared memories?**  
+Resolved: For shared memories, compute vitality using organization-wide access patterns (all users). For private memories, compute vitality from the owner's access patterns only.
 
 **Q4: Should there be a maximum number of memories per lifecycle stage?**  
 If consolidation is too slow and memories accumulate in the Consolidating stage, the system degrades. Proposed: Add a monitoring metric. If Consolidating count exceeds 2× Active count, increase consolidation frequency or batch size.
@@ -1114,8 +1114,8 @@ If consolidation is too slow and memories accumulate in the Consolidating stage,
 **Q5: What's the right frequency for vitality computation?**  
 Every 6 hours is proposed. Too frequent wastes compute; too infrequent means stage transitions lag behind actual value changes. This should be tunable and may need adjustment based on observed patterns.
 
-**Q6: Should the system support "memory importance decay"?**  
-Currently, importance is static (set at creation, manually changeable). Should the lifecycle system automatically reduce importance over time for memories that aren't accessed? Proposed: No for v1. Importance is a human judgment and auto-modifying it conflates two signals. Vitality score already captures the decay signal without altering the original importance.
+**Q6 (Resolved, Phase 0): Should the system support "memory importance decay"?**  
+Resolved: No for v1. Importance remains a human/agent judgment and is not auto-decayed. Vitality scoring already models staleness without mutating the original importance signal.
 
 **Q7: How to handle cross-organization memory lifecycle?**  
 Shared memories visible to multiple organizations could have different value to each. Proposed: Defer. Current system is single-organization. Revisit when multi-org is a real use case.
