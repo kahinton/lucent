@@ -59,7 +59,7 @@ Returns: JSON with the created schedule including its ID and next_run_at."""
         max_runs: int | None = None,
         sandbox_template_id: str | None = None,
     ) -> str:
-        user_id, org_id, _ = await _get_current_user_context()
+        user_id, org_id, _, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
 
@@ -124,7 +124,7 @@ Returns: JSON array of schedules."""
         status: str | None = None,
         enabled_only: bool = False,
     ) -> str:
-        user_id, org_id, _ = await _get_current_user_context()
+        user_id, org_id, _, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
 
@@ -154,7 +154,7 @@ Args:
 Returns: JSON with the updated schedule."""
     )
     async def toggle_schedule(schedule_id: str, enabled: bool) -> str:
-        user_id, org_id, user_role = await _get_current_user_context()
+        user_id, org_id, user_role, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
 
@@ -180,7 +180,7 @@ Args:
 Returns: JSON with the schedule details and its run history."""
     )
     async def get_schedule_details(schedule_id: str) -> str:
-        user_id, org_id, _ = await _get_current_user_context()
+        user_id, org_id, _, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
 

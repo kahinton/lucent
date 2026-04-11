@@ -87,9 +87,10 @@ class MemoryRepository:
             RETURNING {self._FULL_COLUMNS}
         """
 
-        # Goal memories are always shared so the daemon's cognitive cycle can
-        # discover them for task planning regardless of which user created them.
-        effective_shared = True if type == "goal" else shared
+        # Sharing is now managed by the tool layer with type-based defaults.
+        # Goals are no longer force-shared here — the daemon processes goals
+        # per-user with scoped keys, so it doesn't need org-wide visibility.
+        effective_shared = shared
 
         async with self.pool.acquire() as conn:
             # Validate related memory IDs exist and are not deleted
@@ -140,6 +141,7 @@ class MemoryRepository:
         memory_id: UUID,
         user_id: UUID,
         organization_id: UUID,
+        memory_scope: str | None = None,
     ) -> dict[str, Any] | None:
         """Get a memory by ID with access control.
 
@@ -147,23 +149,31 @@ class MemoryRepository:
         - The user owns the memory, OR
         - The memory is shared within the user's organization
 
+        When memory_scope is 'user', only the user's own memories are returned.
+        When memory_scope is 'org_shared_only', only shared org memories are returned.
+
         Args:
             memory_id: The UUID of the memory to retrieve.
             user_id: The ID of the requesting user.
             organization_id: The organization of the requesting user.
+            memory_scope: Optional memory scope restriction ('user' or 'org_shared_only').
 
         Returns:
             The memory record, or None if not found, deleted, or not accessible.
         """
+        if memory_scope == "user":
+            acl_clause = "user_id = $2"
+        elif memory_scope == "org_shared_only":
+            acl_clause = "(organization_id = $3 AND shared = true)"
+        else:
+            acl_clause = "(user_id = $2 OR (organization_id = $3 AND shared = true))"
+
         query = f"""
             SELECT {self._FULL_COLUMNS}
             FROM memories
             WHERE id = $1
               AND deleted_at IS NULL
-              AND (
-                  user_id = $2
-                  OR (organization_id = $3 AND shared = true)
-              )
+              AND {acl_clause}
         """
 
         async with self.pool.acquire() as conn:
@@ -510,6 +520,7 @@ class MemoryRepository:
         # Access control parameters
         requesting_user_id: UUID | None = None,
         requesting_org_id: UUID | None = None,
+        memory_scope: str | None = None,
     ) -> dict[str, Any]:
         """Search for memories with fuzzy matching and filters.
 
@@ -541,13 +552,24 @@ class MemoryRepository:
 
         # Add access control condition if user context is provided
         if requesting_user_id is not None and requesting_org_id is not None:
-            conditions.append(
-                f"(user_id = ${param_idx} OR "
-                f"(organization_id = ${param_idx + 1} AND shared = true))"
-            )
-            params.append(str(requesting_user_id))
-            params.append(str(requesting_org_id))
-            param_idx += 2
+            if memory_scope == "user":
+                conditions.append(f"user_id = ${param_idx}")
+                params.append(str(requesting_user_id))
+                param_idx += 1
+            elif memory_scope == "org_shared_only":
+                conditions.append(
+                    f"(organization_id = ${param_idx} AND shared = true)"
+                )
+                params.append(str(requesting_org_id))
+                param_idx += 1
+            else:
+                conditions.append(
+                    f"(user_id = ${param_idx} OR "
+                    f"(organization_id = ${param_idx + 1} AND shared = true))"
+                )
+                params.append(str(requesting_user_id))
+                params.append(str(requesting_org_id))
+                param_idx += 2
 
         # Build WHERE conditions
         if username is not None:
@@ -667,6 +689,7 @@ class MemoryRepository:
         # Access control parameters
         requesting_user_id: UUID | None = None,
         requesting_org_id: UUID | None = None,
+        memory_scope: str | None = None,
     ) -> dict[str, Any]:
         """Search across all text fields: content, tags, and metadata.
 
@@ -697,13 +720,24 @@ class MemoryRepository:
 
         # Add access control condition if user context is provided
         if requesting_user_id is not None and requesting_org_id is not None:
-            conditions.append(
-                f"(user_id = ${param_idx} OR "
-                f"(organization_id = ${param_idx + 1} AND shared = true))"
-            )
-            params.append(str(requesting_user_id))
-            params.append(str(requesting_org_id))
-            param_idx += 2
+            if memory_scope == "user":
+                conditions.append(f"user_id = ${param_idx}")
+                params.append(str(requesting_user_id))
+                param_idx += 1
+            elif memory_scope == "org_shared_only":
+                conditions.append(
+                    f"(organization_id = ${param_idx} AND shared = true)"
+                )
+                params.append(str(requesting_org_id))
+                param_idx += 1
+            else:
+                conditions.append(
+                    f"(user_id = ${param_idx} OR "
+                    f"(organization_id = ${param_idx + 1} AND shared = true))"
+                )
+                params.append(str(requesting_user_id))
+                params.append(str(requesting_org_id))
+                param_idx += 2
 
         if username is not None:
             conditions.append(f"username = ${param_idx}")

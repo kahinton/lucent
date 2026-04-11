@@ -50,6 +50,16 @@ For every endpoint that handles data:
 3. **Horizontal privilege escalation:** Can a user modify another user's resources by guessing IDs?
 4. **Response codes:** 404 (not 403) for resources that don't belong to the user — don't leak existence.
 
+#### Memory Scope Enforcement
+
+Lucent uses scoped API keys for multi-user memory isolation. Verify:
+
+1. **Consolidation tasks use scoped keys**: Check that `_get_required_memory_scope()` in `daemon/daemon.py` classifies all memory-touching tasks.
+2. **Repository enforces scope**: Check that `MemoryRepository.search()`, `get_accessible()`, and `search_full()` respect the `memory_scope` parameter.
+3. **No scope bypass**: Verify that the daemon role does NOT have `MEMORY_READ_ALL` or `MEMORY_DELETE_ANY` permissions.
+4. **Scoped key creation**: Check that `_mint_scoped_api_key()` correctly sets `memory_scope_user_id` and `memory_scope` on temporary keys.
+5. **Protected tags**: Verify consolidation prompts skip `pinned` and `do_not_consolidate` tagged memories.
+
 ### 4. Input Validation & Injection
 
 ```bash

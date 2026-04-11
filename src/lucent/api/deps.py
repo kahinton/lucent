@@ -30,6 +30,8 @@ class CurrentUser:
         impersonator_id: UUID | None = None,  # Set when being impersonated
         impersonator_display_name: str | None = None,  # For UI display
         external_id: str | None = None,  # External provider ID (e.g. "daemon-service")
+        memory_scope_user_id: UUID | None = None,  # Restricts memory ops to this user
+        memory_scope: str | None = None,  # 'user' or 'org_shared_only'
     ):
         self.id = id
         self.organization_id = organization_id
@@ -42,6 +44,20 @@ class CurrentUser:
         self.impersonator_id = impersonator_id
         self.impersonator_display_name = impersonator_display_name
         self.external_id = external_id
+        self.memory_scope_user_id = memory_scope_user_id
+        self.memory_scope = memory_scope
+
+    @property
+    def effective_memory_user_id(self) -> UUID:
+        """The user ID to use for memory operations. Returns scoped user if set, else self."""
+        if self.memory_scope == 'user' and self.memory_scope_user_id is not None:
+            return self.memory_scope_user_id
+        return self.id
+
+    @property
+    def is_memory_scoped(self) -> bool:
+        """Whether this session has restricted memory scope."""
+        return self.memory_scope is not None
 
     @property
     def is_impersonated(self) -> bool:
@@ -120,7 +136,15 @@ async def _authenticate_with_api_key(api_key: str) -> CurrentUser | None:
     if not user:
         return None
 
+    # Thread memory scope from API key into the context dict
+    user["memory_scope_user_id"] = key_info.get("memory_scope_user_id")
+    user["memory_scope"] = key_info.get("memory_scope")
     set_current_user(user)
+
+    # Parse memory_scope_user_id to UUID if present
+    raw_scope_uid = key_info.get("memory_scope_user_id")
+    scope_user_id = UUID(str(raw_scope_uid)) if raw_scope_uid else None
+
     return CurrentUser(
         id=user["id"],
         organization_id=user.get("organization_id"),
@@ -131,6 +155,8 @@ async def _authenticate_with_api_key(api_key: str) -> CurrentUser | None:
         api_key_id=key_info["id"],  # Include the API key ID for auditing
         api_key_scopes=key_info.get("scopes", ["read", "write"]),
         external_id=user.get("external_id"),
+        memory_scope_user_id=scope_user_id,
+        memory_scope=key_info.get("memory_scope"),
     )
 
 

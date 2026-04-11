@@ -24,6 +24,17 @@ search_memories(query="<topic>", limit=10)
 ```
 If a relevant memory exists, `update_memory` instead of creating a duplicate.
 
+## Scoped Operations
+
+Memory maintenance may run under a **scoped API key** that restricts access:
+
+- **User scope**: Only this user's memories are visible. Consolidation should only merge and organize within this user's memories.
+- **Org-shared-only scope**: Only shared memories are visible. Consolidation should only merge shared technical or procedural knowledge.
+
+The system enforces scoping at the database layer — you cannot accidentally access out-of-scope memories. Just work with what your searches return.
+
+**Protected tags**: Skip any memory tagged `pinned` or `do_not_consolidate` during maintenance. These are exempt from consolidation, deduplication, and deletion.
+
 ## Maintenance Procedure
 
 Execute these steps in order when performing a maintenance pass:

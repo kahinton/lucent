@@ -48,7 +48,7 @@ Returns: JSON with items array, total_count, and pagination info."""
         limit: int = 25,
         offset: int = 0,
     ) -> str:
-        user_id, org_id, role = await _get_current_user_context()
+        user_id, org_id, role, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
 
@@ -74,7 +74,7 @@ Args:
 Returns: JSON with the agent details, or an error if not found."""
     )
     async def get_agent_definition(agent_id: str) -> str:
-        user_id, org_id, role = await _get_current_user_context()
+        user_id, org_id, role, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
 
@@ -107,7 +107,7 @@ Returns: JSON with items array, total_count, and pagination info."""
         limit: int = 25,
         offset: int = 0,
     ) -> str:
-        user_id, org_id, role = await _get_current_user_context()
+        user_id, org_id, role, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
 
@@ -133,7 +133,7 @@ Args:
 Returns: JSON with the skill details, or an error if not found."""
     )
     async def get_skill_definition(skill_id: str) -> str:
-        user_id, org_id, role = await _get_current_user_context()
+        user_id, org_id, role, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
 
@@ -155,7 +155,7 @@ awaiting approval).
 Returns: JSON with agents, skills, mcp_servers arrays and total count."""
     )
     async def list_proposals() -> str:
-        _, org_id, _ = await _get_current_user_context()
+        _, org_id, _, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
 
@@ -183,7 +183,7 @@ Returns: JSON with the created agent including its ID and status."""
         description: str = "",
         content: str = "",
     ) -> str:
-        user_id, org_id, _ = await _get_current_user_context()
+        user_id, org_id, _, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         if not user_id:
@@ -222,7 +222,7 @@ Returns: JSON with the created skill including its ID and status."""
         description: str = "",
         content: str = "",
     ) -> str:
-        user_id, org_id, _ = await _get_current_user_context()
+        user_id, org_id, _, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         if not user_id:
@@ -259,7 +259,7 @@ Returns: JSON with status 'granted', or an error if either is not found."""
         agent_id: str,
         skill_id: str,
     ) -> str:
-        user_id, org_id, role = await _get_current_user_context()
+        user_id, org_id, role, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         if not user_id:
@@ -317,7 +317,7 @@ Returns: JSON with the updated agent, or an error if not found."""
         description: str | None = None,
         content: str | None = None,
     ) -> str:
-        user_id, org_id, user_role = await _get_current_user_context()
+        user_id, org_id, user_role, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         if not user_id:
@@ -353,7 +353,7 @@ Args:
 Returns: JSON with the updated agent, or an error if not found or not in proposed status."""
     )
     async def approve_agent_definition(agent_id: str) -> str:
-        user_id, org_id, user_role = await _get_current_user_context()
+        user_id, org_id, user_role, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         if not user_id:
@@ -378,7 +378,7 @@ Args:
 Returns: JSON with the updated agent, or an error if not found or not in proposed status."""
     )
     async def reject_agent_definition(agent_id: str) -> str:
-        user_id, org_id, user_role = await _get_current_user_context()
+        user_id, org_id, user_role, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         if not user_id:
@@ -401,7 +401,7 @@ Args:
 Returns: JSON with status 'deleted', or an error if not found."""
     )
     async def delete_agent_definition(agent_id: str) -> str:
-        user_id, org_id, user_role = await _get_current_user_context()
+        user_id, org_id, user_role, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         if not user_id:
@@ -427,7 +427,7 @@ Args:
 Returns: JSON with status 'revoked', or an error if not found."""
     )
     async def revoke_skill_from_agent(agent_id: str, skill_id: str) -> str:
-        user_id, org_id, role = await _get_current_user_context()
+        user_id, org_id, role, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         if not user_id:
@@ -459,7 +459,7 @@ Args:
 Returns: JSON with status 'granted', or an error if not found."""
     )
     async def grant_mcp_server_to_agent(agent_id: str, definition_id: str) -> str:
-        user_id, org_id, role = await _get_current_user_context()
+        user_id, org_id, role, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         if not user_id:
@@ -495,7 +495,7 @@ Args:
 Returns: JSON with status 'revoked', or an error if not found."""
     )
     async def revoke_mcp_server_from_agent(agent_id: str, server_id: str) -> str:
-        user_id, org_id, role = await _get_current_user_context()
+        user_id, org_id, role, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         if not user_id:
@@ -530,7 +530,7 @@ Args:
 Returns: JSON with the updated skill, or an error if not found or not in proposed status."""
     )
     async def approve_skill_definition(skill_id: str) -> str:
-        user_id, org_id, user_role = await _get_current_user_context()
+        user_id, org_id, user_role, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         if not user_id:
@@ -555,7 +555,7 @@ Args:
 Returns: JSON with the updated skill, or an error if not found or not in proposed status."""
     )
     async def reject_skill_definition(skill_id: str) -> str:
-        user_id, org_id, user_role = await _get_current_user_context()
+        user_id, org_id, user_role, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         if not user_id:
@@ -578,7 +578,7 @@ Args:
 Returns: JSON with status 'deleted', or an error if not found."""
     )
     async def delete_skill_definition(skill_id: str) -> str:
-        user_id, org_id, user_role = await _get_current_user_context()
+        user_id, org_id, user_role, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         if not user_id:
@@ -613,7 +613,7 @@ Returns: JSON with items array, total_count, and pagination info."""
         limit: int = 25,
         offset: int = 0,
     ) -> str:
-        user_id, org_id, role = await _get_current_user_context()
+        user_id, org_id, role, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
 
@@ -653,7 +653,7 @@ Returns: JSON with the created server including its ID and status."""
         args: str | None = None,
         env_vars: str | None = None,
     ) -> str:
-        user_id, org_id, _ = await _get_current_user_context()
+        user_id, org_id, _, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         if not user_id:
@@ -710,7 +710,7 @@ Returns: JSON with the updated server, or an error if not found."""
         server_type: str | None = None,
         command: str | None = None,
     ) -> str:
-        user_id, org_id, user_role = await _get_current_user_context()
+        user_id, org_id, user_role, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         if not user_id:
@@ -750,7 +750,7 @@ Args:
 Returns: JSON with the updated server, or an error if not found or not in proposed status."""
     )
     async def approve_mcp_server_definition(server_id: str) -> str:
-        user_id, org_id, user_role = await _get_current_user_context()
+        user_id, org_id, user_role, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         if not user_id:
@@ -775,7 +775,7 @@ Args:
 Returns: JSON with the updated server, or an error if not found or not in proposed status."""
     )
     async def reject_mcp_server_definition(server_id: str) -> str:
-        user_id, org_id, user_role = await _get_current_user_context()
+        user_id, org_id, user_role, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         if not user_id:

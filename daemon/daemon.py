@@ -337,6 +337,7 @@ MEMORY_CONSOLIDATION_PROMPT = (
     "- The total memory count must go DOWN or stay the same, never up.\n"
     "- Each scope should have AT MOST one technical memory.\n"
     "- Do NOT treat metadata normalization as optional; it is a required pass every run.\n"
+    "- NEVER touch memories tagged 'pinned' or 'do_not_consolidate'.\n"
     "- Content should be practical: what does a developer need to know to work here?"
 )
 
@@ -385,7 +386,8 @@ EXPERIENCE_COMPRESSION_PROMPT = (
     "- If a daily digest already exists for a date, update it instead of creating a new one.\n"
     "- The narrative should be practical: what happened and why it matters, not raw logs.\n"
     "- Total memory count must go DOWN.\n"
-    "- Keep digests concise - aim for 200-500 words per day, not a transcript."
+    "- Keep digests concise - aim for 200-500 words per day, not a transcript.\n"
+    "- NEVER touch memories tagged 'pinned' or 'do_not_consolidate'."
 )
 
 PROCEDURAL_CONSOLIDATION_PROMPT = (
@@ -421,6 +423,7 @@ PROCEDURAL_CONSOLIDATION_PROMPT = (
     "- Total memory count should go DOWN or stay the same unless a true missing canonical procedure "
     "must be created.\n"
     "- Preserve the newest, most complete procedure as canonical.\n"
+    "- NEVER touch memories tagged 'pinned' or 'do_not_consolidate'.\n"
     "- Keep procedural memories actionable: ordered steps, prerequisites, pitfalls, and success criteria."
 )
 
@@ -703,6 +706,114 @@ async def _revoke_current_key() -> None:
     finally:
         _current_key_db_id = None
         _current_key_expires_at = None
+
+
+async def _mint_scoped_api_key(
+    *,
+    memory_scope: str,  # 'user' or 'org_shared_only'
+    memory_scope_user_id: str | None = None,
+    org_id: str,
+    ttl_minutes: int = 60,
+) -> str | None:
+    """Mint a temporary scoped API key for per-user memory operations.
+
+    The scoped key restricts all memory operations to a specific user's
+    memories (memory_scope='user') or to shared-only org memories
+    (memory_scope='org_shared_only'). This is the security boundary for
+    multi-user memory isolation — sub-agents holding a scoped key cannot
+    access data outside their scope regardless of prompt manipulation.
+
+    Returns the plain-text hs_ key, or None on failure.
+    """
+    import secrets
+
+    import asyncpg
+    import bcrypt
+
+    try:
+        conn = await asyncpg.connect(DATABASE_URL)
+    except Exception as e:
+        log(f"DB connect failed minting scoped key: {e}", "WARN")
+        return None
+
+    try:
+        # Look up the daemon service user
+        user = await conn.fetchrow(
+            "SELECT id, organization_id FROM users "
+            "WHERE external_id = 'daemon-service' AND is_active = true"
+        )
+        if not user:
+            log("Cannot mint scoped key — no daemon-service user", "WARN")
+            return None
+
+        daemon_user_id = str(user["id"])
+
+        # Generate key
+        raw_key = secrets.token_urlsafe(32)
+        plain_key = f"hs_{raw_key}"
+        key_prefix = plain_key[:11]
+        key_hash = bcrypt.hashpw(plain_key.encode(), bcrypt.gensalt()).decode()
+
+        # Create scoped key with short TTL
+        scope_suffix = memory_scope_user_id[:8] if memory_scope_user_id else "shared"
+        key_name = f"scoped-{memory_scope}-{scope_suffix}-{secrets.token_hex(4)}"
+
+        row = await conn.fetchrow(
+            "INSERT INTO api_keys "
+            "(user_id, organization_id, name, key_prefix, key_hash, scopes, "
+            " expires_at, memory_scope, memory_scope_user_id) "
+            "VALUES ($1, $2, $3, $4, $5, $6, NOW() + INTERVAL '1 minute' * $7, $8, $9) "
+            "RETURNING id, expires_at",
+            daemon_user_id,
+            org_id,
+            key_name,
+            key_prefix,
+            key_hash,
+            ["read", "write"],
+            ttl_minutes,
+            memory_scope,
+            memory_scope_user_id,
+        )
+        log(f"Minted {memory_scope} scoped key (prefix: {key_prefix}, "
+            f"scope_user: {scope_suffix}, ttl: {ttl_minutes}m)")
+        return plain_key
+
+    except Exception as e:
+        log(f"Scoped key provisioning failed: {e}", "ERROR")
+        return None
+    finally:
+        await conn.close()
+
+
+# Schedule titles that require per-user scoped processing
+_PER_USER_SCHEDULE_TITLES = frozenset({
+    "Experience Compression",
+    "Learning Extraction",
+    "Memory Vitality Scoring",
+    "Cognitive Planning",
+})
+
+# Schedule titles that require org-shared-only processing
+_ORG_SHARED_SCHEDULE_TITLES = frozenset({
+    "Memory Consolidation",
+    "Procedural Consolidation",
+})
+
+
+def _get_required_memory_scope(task_title: str, request_title: str) -> str | None:
+    """Determine if a task requires a scoped memory key.
+
+    Returns 'user' for per-user tasks, 'org_shared_only' for shared-only tasks,
+    or None for tasks that use the daemon's normal key.
+    """
+    # Check the request title (schedule-generated requests use [Scheduled] prefix)
+    clean_title = request_title.replace("[Scheduled] ", "")
+
+    if clean_title in _PER_USER_SCHEDULE_TITLES:
+        return "user"
+    if clean_title in _ORG_SHARED_SCHEDULE_TITLES:
+        return "org_shared_only"
+    return None
 
 
 async def _verify_api_key(api_key: str) -> bool:
@@ -3249,7 +3360,40 @@ class LucentDaemon:
                         task_mcp_config[f"mcp-{server['id']}"] = conf
                 finally:
                     set_current_user(None)
-            if MCP_CONFIG.get("memory-server"):
+
+            # Determine memory scope for this task
+            _request_title = ""
+            if request_id:
+                try:
+                    _req = await RequestAPI.get_request(request_id)
+                    _request_title = (_req or {}).get("title", "")
+                except Exception:
+                    pass
+            _scope_type = _get_required_memory_scope(title, _request_title)
+
+            if _scope_type and MCP_CONFIG.get("memory-server"):
+                # Mint a scoped key for memory isolation
+                _scope_user = requesting_user_id if _scope_type == "user" else None
+                _scoped_key = await _mint_scoped_api_key(
+                    memory_scope=_scope_type,
+                    memory_scope_user_id=_scope_user,
+                    org_id=org_id,
+                    ttl_minutes=60,
+                )
+                if _scoped_key:
+                    task_mcp_config["memory-server"] = {
+                        "type": "http",
+                        "url": MCP_URL,
+                        "headers": {"Authorization": f"Bearer {_scoped_key}"},
+                        "tools": ["*"],
+                    }
+                    log(f"Task {task_id[:8]} using {_scope_type} scoped key"
+                        f" (user: {_scope_user[:8] if _scope_user else 'shared'})")
+                else:
+                    log(f"Failed to mint scoped key for {task_id[:8]} — "
+                        "falling back to daemon key", "WARN")
+                    task_mcp_config["memory-server"] = MCP_CONFIG["memory-server"]
+            elif MCP_CONFIG.get("memory-server"):
                 task_mcp_config["memory-server"] = MCP_CONFIG["memory-server"]
 
             # Mark running only after requester-scoped resources resolve successfully

@@ -66,7 +66,7 @@ Returns: JSON with the created request including its ID."""
         dependency_policy: str = "strict",
         goal_id: str = "",
     ) -> str:
-        user_id, org_id, _ = await _get_current_user_context()
+        user_id, org_id, _, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
 
@@ -150,7 +150,7 @@ if the agent type is not approved."""
         sandbox_config: dict | None = None,
         output_contract: dict | None = None,
     ) -> str:
-        user_id, org_id, user_role = await _get_current_user_context()
+        user_id, org_id, user_role, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         if not user_id:
@@ -246,7 +246,7 @@ Returns: JSON confirmation."""
         detail: str = "",
     ) -> str:
         # Anti-spoofing V6: require authentication
-        user_id, org_id, _ = await _get_current_user_context()
+        user_id, org_id, _, _, _ = await _get_current_user_context()
         if not user_id:
             return json.dumps({"error": "Authentication required"})
         if not org_id:
@@ -279,7 +279,7 @@ Returns: JSON confirmation."""
         relation: str = "created",
     ) -> str:
         # Anti-spoofing V6: require authentication
-        user_id, org_id, _ = await _get_current_user_context()
+        user_id, org_id, _, _, _ = await _get_current_user_context()
         if not user_id:
             return json.dumps({"error": "Authentication required"})
         if not org_id:
@@ -312,7 +312,7 @@ Returns: JSON confirmation."""
         memory_id: str,
         relation: str = "goal",
     ) -> str:
-        user_id, org_id, _ = await _get_current_user_context()
+        user_id, org_id, _, _, _ = await _get_current_user_context()
         if not user_id:
             return json.dumps({"error": "Authentication required"})
         if not org_id:
@@ -341,7 +341,7 @@ Args:
 Returns: JSON with request details, task breakdown, events timeline, memory links, and reviews."""
     )
     async def get_request_details(request_id: str) -> str:
-        _, org_id, _ = await _get_current_user_context()
+        _, org_id, _, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
 
@@ -377,7 +377,7 @@ Requests with 0 tasks need to be broken into tasks before they can be dispatched
 Use this during cognitive cycles to discover new work."""
     )
     async def list_pending_requests() -> str:
-        _, org_id, _ = await _get_current_user_context()
+        _, org_id, _, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
 
@@ -403,7 +403,7 @@ cognitive cycles to understand what's already being worked on BEFORE creating
 new requests. This prevents duplicate work items."""
     )
     async def list_active_work() -> str:
-        _, org_id, _ = await _get_current_user_context()
+        _, org_id, _, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
 
@@ -466,7 +466,7 @@ Returns tasks that are waiting to be claimed and executed, ordered by priority.
 Use this to see what work is queued up."""
     )
     async def list_pending_tasks() -> str:
-        _, org_id, _ = await _get_current_user_context()
+        _, org_id, _, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
 
@@ -505,7 +505,7 @@ Returns: JSON error for approval/rejection attempts from MCP."""
         comments: str | None = None,
         source: str = "agent",
     ) -> str:
-        user_id, org_id, _ = await _get_current_user_context()
+        user_id, org_id, _, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
 
@@ -585,7 +585,7 @@ Returns: JSON with paginated review list."""
         limit: int = 25,
         offset: int = 0,
     ) -> str:
-        _, org_id, _ = await _get_current_user_context()
+        _, org_id, _, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
 

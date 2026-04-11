@@ -114,6 +114,18 @@ Every memory should answer three questions:
 | `goal` | Objectives tracked over time — status updates appended |
 | `individual` | Info about people — preferences, roles, working style |
 
+### Default Sharing by Type
+
+| Type | Default `shared` | Rationale |
+|------|------------------|----------|
+| `technical` | `true` (shared) | Org knowledge about code and systems |
+| `procedural` | `true` (shared) | Standard operating procedures |
+| `experience` | `false` (private) | Personal work log |
+| `goal` | respect caller | Working contract between user and Lucent |
+| `individual` | `false` (always private) | Contact info, preferences — never shared |
+
+Users can override these defaults. Private technical/procedural memories serve as personal "overlays" — your own techniques layered on top of shared org knowledge.
+
 ### Importance Scale
 
 | Score | Use for |
