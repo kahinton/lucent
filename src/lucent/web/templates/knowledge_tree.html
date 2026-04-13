@@ -1,0 +1,359 @@
+{% extends "base.html" %}
+
+{% block title %}Knowledge Tree - Lucent{% endblock %}
+
+{% block content %}
+<div class="mb-6">
+    <div class="flex items-center justify-between">
+        <div>
+            <h1 class="text-2xl font-bold text-gray-900">Knowledge Tree</h1>
+            <p class="mt-1 text-sm text-gray-500">{{ total_memories }} memories across {{ tree|length }} repositories</p>
+        </div>
+        <div class="flex items-center gap-2">
+            <div class="flex items-center gap-3 text-[10px] text-gray-400">
+                <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-full bg-emerald-400 inline-block"></span> healthy</span>
+                <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-full bg-amber-400 inline-block"></span> stale</span>
+                <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-full bg-red-400 inline-block"></span> decaying</span>
+                <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-full bg-gray-300 inline-block"></span> unscored</span>
+            </div>
+            <a href="/memories" class="inline-flex items-center gap-2 px-3 py-2 bg-white border border-gray-300 text-gray-700 rounded-lg font-medium text-xs hover:bg-gray-50 transition-colors shadow-sm">
+                <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M8.25 6.75h12M8.25 12h12M8.25 17.25h12M3.75 6.75h.007v.008H3.75V6.75zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zM3.75 12h.007v.008H3.75V12zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm-.375 5.25h.007v.008H3.75v-.008zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0z" />
+                </svg>
+                List View
+            </a>
+        </div>
+    </div>
+</div>
+
+<!-- Tree visualization container -->
+<div id="tree-container" class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-auto" style="min-height: 500px;">
+    <svg id="tree-svg" width="100%" height="600" style="font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;"></svg>
+</div>
+
+<!-- Detail panel (appears on node click) -->
+<div id="detail-panel" class="hidden fixed right-6 top-24 w-96 bg-white rounded-xl border border-gray-200 shadow-2xl z-50 overflow-hidden" style="max-height: calc(100vh - 120px);">
+    <div class="flex items-center justify-between px-4 py-3 border-b border-gray-100 bg-gray-50">
+        <h3 id="detail-title" class="text-sm font-semibold text-gray-900 truncate"></h3>
+        <button id="detail-close" class="p-1 text-gray-400 hover:text-gray-600 rounded transition-colors">
+            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+        </button>
+    </div>
+    <div id="detail-body" class="px-4 py-3 overflow-y-auto text-sm text-gray-700 leading-relaxed" style="max-height: calc(100vh - 200px);"></div>
+    <div class="px-4 py-2.5 border-t border-gray-100 bg-gray-50">
+        <a id="detail-link" href="#" class="text-xs text-primary-600 hover:text-primary-700 font-medium">View full memory →</a>
+    </div>
+</div>
+
+<script nonce="{{ request.state.csp_nonce }}">
+const treeData = {{ tree_json | safe }};
+
+const NODE_H = 30;
+const NODE_GAP = 5;
+const INDENT = 220;
+const REPO_X = 30;
+const NODE_W_REPO = 180;
+const NODE_W_DIR = 170;
+const NODE_W_FILE = 170;
+
+function vColor(v) {
+    if (v == null) return '#d1d5db';
+    if (v >= 0.6) return '#34d399';
+    if (v >= 0.3) return '#fbbf24';
+    return '#f87171';
+}
+function vBg(v) {
+    if (v == null) return '#f9fafb';
+    if (v >= 0.6) return '#ecfdf5';
+    if (v >= 0.3) return '#fffbeb';
+    return '#fef2f2';
+}
+function trunc(s, n) { return !s ? '' : s.length > n ? s.slice(0, n-1) + '…' : s; }
+
+// ── Build the logical tree (no positions yet) ───────────────
+const allNodes = [];
+const collapsed = new Set(); // node indices that are collapsed
+
+for (const [repoName, rd] of Object.entries(treeData).sort((a,b) => b[1].total - a[1].total)) {
+    const repoIdx = allNodes.length;
+    const rn = {
+        idx: repoIdx,
+        id: rd.memory ? rd.memory.id : 'repo-' + repoName,
+        label: repoName, type: 'repo',
+        depth: 0, w: NODE_W_REPO,
+        memory: rd.memory,
+        vitality: rd.memory ? rd.memory.vitality_score : null,
+        importance: rd.memory ? rd.memory.importance : 5,
+        childCount: (rd.root_files||[]).length + Object.keys(rd.dirs).length,
+        childIdxs: [],
+        parentIdx: null,
+    };
+    allNodes.push(rn);
+    // Start repos collapsed
+    collapsed.add(repoIdx);
+
+    // Root-level files
+    for (const f of (rd.root_files || [])) {
+        const fi = allNodes.length;
+        rn.childIdxs.push(fi);
+        allNodes.push({
+            idx: fi,
+            id: f.id, label: trunc(f.filename || '?', 22), fullLabel: f.filename,
+            type: 'file', depth: 1, w: NODE_W_FILE,
+            memory: f, parentIdx: repoIdx,
+            vitality: f.vitality_score, importance: f.importance,
+            childIdxs: [], childCount: 0,
+        });
+    }
+
+    const dirs = Object.entries(rd.dirs).sort((a,b) => (a[0]||'zzz').localeCompare(b[0]||'zzz'));
+    for (const [dp, dd] of dirs) {
+        const dirIdx = allNodes.length;
+        const dn = {
+            idx: dirIdx,
+            id: dd.memory ? dd.memory.id : 'dir-' + dp,
+            label: trunc(dp || '(root)', 24), fullLabel: dp,
+            type: 'dir', depth: 1, w: NODE_W_DIR,
+            memory: dd.memory, parentIdx: repoIdx,
+            vitality: dd.memory ? dd.memory.vitality_score : null,
+            importance: dd.memory ? dd.memory.importance : 5,
+            childIdxs: [],
+            childCount: (dd.files||[]).length,
+        };
+        rn.childIdxs.push(dirIdx);
+        rn.childCount += (dd.files||[]).length;
+        allNodes.push(dn);
+
+        for (const f of (dd.files || [])) {
+            const fi = allNodes.length;
+            dn.childIdxs.push(fi);
+            allNodes.push({
+                idx: fi,
+                id: f.id, label: trunc(f.filename ? f.filename.split('/').pop() : '?', 22),
+                fullLabel: f.filename, type: 'file', depth: 2, w: NODE_W_FILE,
+                memory: f, parentIdx: dirIdx,
+                vitality: f.vitality_score, importance: f.importance,
+                childIdxs: [], childCount: 0,
+            });
+        }
+    }
+}
+
+// ── Layout + render function ────────────────────────────────
+function isVisible(n) {
+    // Walk up the parent chain — if any ancestor is collapsed, this node is hidden
+    let p = n.parentIdx;
+    while (p != null) {
+        if (collapsed.has(p)) return false;
+        p = allNodes[p].parentIdx;
+    }
+    return true;
+}
+
+function render() {
+    // Assign Y positions to visible nodes
+    let y = 24;
+    const positions = new Map(); // idx -> {x, y}
+    for (const n of allNodes) {
+        if (!isVisible(n)) continue;
+        const x = REPO_X + n.depth * INDENT;
+        positions.set(n.idx, { x, y });
+        y += NODE_H + NODE_GAP;
+        // Extra gap after repo's last visible child (or repo itself if collapsed)
+        if (n.type === 'repo') {
+            // Check if collapsed — add gap after the repo row
+            if (collapsed.has(n.idx)) y += 8;
+        }
+        // Check if this is the last child of a repo
+        if (n.parentIdx != null && allNodes[n.parentIdx].type === 'repo') {
+            const siblings = allNodes[n.parentIdx].childIdxs;
+            if (n.idx === siblings[siblings.length - 1]) y += 12;
+        }
+    }
+
+    const svg = document.getElementById('tree-svg');
+    const totalH = Math.max(400, y + 30);
+    const totalW = REPO_X + INDENT * 2 + NODE_W_FILE + 40;
+    svg.setAttribute('height', totalH);
+    svg.setAttribute('viewBox', `0 0 ${totalW} ${totalH}`);
+    svg.style.minWidth = totalW + 'px';
+    document.getElementById('tree-container').style.minHeight = totalH + 'px';
+
+    let html = '';
+
+    // Edges
+    for (const n of allNodes) {
+        if (n.parentIdx == null || !positions.has(n.idx) || !positions.has(n.parentIdx)) continue;
+        const pp = positions.get(n.parentIdx);
+        const cp = positions.get(n.idx);
+        const pw = allNodes[n.parentIdx].w;
+        const sx = pp.x + pw;
+        const sy = pp.y + NODE_H / 2;
+        const ex = cp.x;
+        const ey = cp.y + NODE_H / 2;
+        const mx = sx + (ex - sx) * 0.5;
+        html += `<path d="M${sx} ${sy} C${mx} ${sy}, ${mx} ${ey}, ${ex} ${ey}" fill="none" stroke="${vColor(n.vitality)}" stroke-width="1.5" stroke-opacity="0.4"/>`;
+    }
+
+    // Nodes
+    for (const n of allNodes) {
+        if (!positions.has(n.idx)) continue;
+        const pos = positions.get(n.idx);
+        const c = vColor(n.vitality);
+        const bg = vBg(n.vitality);
+        const isRepo = n.type === 'repo';
+        const isDir = n.type === 'dir';
+        const hasChildren = n.childIdxs.length > 0;
+        const isCollapsed = collapsed.has(n.idx);
+        const w = n.w;
+        const h = NODE_H;
+
+        html += `<g class="tree-node" data-idx="${n.idx}" style="cursor:pointer">`;
+
+        // Background rect
+        const rx = isRepo ? 10 : isDir ? 7 : 5;
+        const sw = isRepo ? 2 : 1.5;
+        html += `<rect x="${pos.x}" y="${pos.y}" width="${w}" height="${h}" rx="${rx}" fill="${bg}" stroke="${c}" stroke-width="${sw}"/>`;
+
+        // Collapse/expand chevron for parents
+        if (hasChildren) {
+            const cx = pos.x + 6;
+            const cy = pos.y + h / 2;
+            if (isCollapsed) {
+                // Right chevron ▶
+                html += `<polygon points="${cx},${cy-4} ${cx+6},${cy} ${cx},${cy+4}" fill="#9ca3af" class="toggle-chevron"/>`;
+            } else {
+                // Down chevron ▼
+                html += `<polygon points="${cx-2},${cy-2} ${cx+4},${cy-2} ${cx+1},${cy+3}" fill="#6b7280" class="toggle-chevron"/>`;
+            }
+        }
+
+        // Vitality dot (shifted right if has children)
+        const dotX = hasChildren ? pos.x + 20 : pos.x + 14;
+        const dotR = isRepo ? 5 : 4;
+        html += `<circle cx="${dotX}" cy="${pos.y + h/2}" r="${dotR}" fill="${c}"/>`;
+
+        // Label
+        const labelX = hasChildren ? pos.x + 32 : pos.x + 26;
+        const fontSize = isRepo ? 12 : 11;
+        const fontWeight = isRepo ? 700 : isDir ? 600 : 400;
+        const fill = isRepo ? '#111827' : '#374151';
+        html += `<text x="${labelX}" y="${pos.y + h/2 + 1}" font-size="${fontSize}" font-weight="${fontWeight}" fill="${fill}" dominant-baseline="middle">${trunc(n.label, isRepo ? 18 : 20)}</text>`;
+
+        // Right side: child count badge for collapsed parents, importance for leaves
+        const badgeX = pos.x + w - 12;
+        if (hasChildren && isCollapsed) {
+            html += `<text x="${badgeX}" y="${pos.y + h/2 + 1}" font-size="9" fill="#6b7280" dominant-baseline="middle" text-anchor="end">${n.childCount}</text>`;
+        } else {
+            html += `<text x="${badgeX}" y="${pos.y + h/2 + 1}" font-size="9" fill="#9ca3af" dominant-baseline="middle" text-anchor="end">${n.importance}</text>`;
+        }
+
+        html += '</g>';
+    }
+
+    svg.innerHTML = html;
+}
+
+render();
+
+// ── Toggle collapse on click ────────────────────────────────
+const svg = document.getElementById('tree-svg');
+const panel = document.getElementById('detail-panel');
+const dTitle = document.getElementById('detail-title');
+const dBody = document.getElementById('detail-body');
+const dLink = document.getElementById('detail-link');
+
+svg.addEventListener('click', function(e) {
+    const g = e.target.closest('.tree-node');
+    if (!g) { panel.classList.add('hidden'); return; }
+    const idx = parseInt(g.dataset.idx);
+    const n = allNodes[idx];
+    if (!n) return;
+
+    // If clicking on a parent node (repo or dir with children), toggle collapse
+    if (n.childIdxs.length > 0) {
+        if (collapsed.has(idx)) {
+            collapsed.delete(idx);
+        } else {
+            collapsed.add(idx);
+        }
+        render();
+        return;
+    }
+
+    // Leaf node — show detail panel
+    if (n.memory) {
+        const m = n.memory;
+        dTitle.textContent = n.fullLabel || n.label;
+        const v = m.vitality_score != null ? m.vitality_score.toFixed(2) : 'n/a';
+        const tags = (m.tags||[]).slice(0,8).map(t => '<span class="inline-block px-1.5 py-0.5 bg-gray-100 text-gray-600 rounded text-[10px]">'+t+'</span>').join(' ');
+        dBody.innerHTML = `
+            <div class="flex items-center gap-3 mb-3 text-xs text-gray-500">
+                <span>importance: <strong class="text-gray-700">${m.importance}</strong></span>
+                <span>vitality: <strong class="text-gray-700">${v}</strong></span>
+                <span>stage: <strong class="text-gray-700">${m.lifecycle_stage||'active'}</strong></span>
+            </div>
+            <div class="mb-3 flex flex-wrap gap-1">${tags}</div>
+            <div class="text-xs text-gray-600 leading-relaxed whitespace-pre-line">${(m.preview||'').replace(/</g,'&lt;')}</div>`;
+        dLink.href = '/memories/' + m.id;
+        dLink.style.display = '';
+    } else {
+        dTitle.textContent = n.fullLabel || n.label;
+        dBody.innerHTML = '<p class="text-gray-400 text-xs italic">No memory at this scope yet.</p>';
+        dLink.style.display = 'none';
+    }
+    panel.classList.remove('hidden');
+});
+
+// Also allow detail panel on parent nodes via double-click
+svg.addEventListener('dblclick', function(e) {
+    const g = e.target.closest('.tree-node');
+    if (!g) return;
+    const n = allNodes[parseInt(g.dataset.idx)];
+    if (!n || !n.memory) return;
+    const m = n.memory;
+    dTitle.textContent = n.fullLabel || n.label;
+    const v = m.vitality_score != null ? m.vitality_score.toFixed(2) : 'n/a';
+    const tags = (m.tags||[]).slice(0,8).map(t => '<span class="inline-block px-1.5 py-0.5 bg-gray-100 text-gray-600 rounded text-[10px]">'+t+'</span>').join(' ');
+    dBody.innerHTML = `
+        <div class="flex items-center gap-3 mb-3 text-xs text-gray-500">
+            <span>importance: <strong class="text-gray-700">${m.importance}</strong></span>
+            <span>vitality: <strong class="text-gray-700">${v}</strong></span>
+            <span>stage: <strong class="text-gray-700">${m.lifecycle_stage||'active'}</strong></span>
+        </div>
+        <div class="mb-3 flex flex-wrap gap-1">${tags}</div>
+        <div class="text-xs text-gray-600 leading-relaxed whitespace-pre-line">${(m.preview||'').replace(/</g,'&lt;')}</div>`;
+    dLink.href = '/memories/' + m.id;
+    dLink.style.display = '';
+    panel.classList.remove('hidden');
+});
+
+document.getElementById('detail-close').addEventListener('click', function() {
+    panel.classList.add('hidden');
+});
+
+document.addEventListener('click', function(e) {
+    if (!panel.contains(e.target) && !svg.contains(e.target)) panel.classList.add('hidden');
+});
+
+// Hover effect
+svg.addEventListener('mouseover', function(e) {
+    const g = e.target.closest('.tree-node');
+    if (g) { const r = g.querySelector('rect'); if (r) r.style.filter = 'drop-shadow(0 2px 4px rgba(0,0,0,0.10))'; }
+});
+svg.addEventListener('mouseout', function(e) {
+    const g = e.target.closest('.tree-node');
+    if (g) { const r = g.querySelector('rect'); if (r) r.style.filter = ''; }
+});
+</script>
+
+{% if not tree %}
+<div class="bg-white rounded-xl border border-gray-200 shadow-sm px-8 py-16 text-center">
+    <svg class="w-12 h-12 text-gray-300 mx-auto mb-4" fill="none" viewBox="0 0 24 24" stroke-width="1" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z" />
+    </svg>
+    <h3 class="text-lg font-medium text-gray-600 mb-1">No knowledge mapped yet</h3>
+    <p class="text-sm text-gray-400">Technical memories with repo metadata will appear here as a navigable tree.</p>
+</div>
+{% endif %}
+{% endblock %}

@@ -670,3 +670,81 @@ async def memory_restore(request: Request, memory_id: UUID, version: int):
     )
 
     return RedirectResponse(f"/memories/{memory_id}", status_code=303)
+
+
+@router.get("/knowledge", response_class=HTMLResponse)
+async def knowledge_tree(request: Request):
+    """Knowledge tree — technical memories organized by repo/directory/file hierarchy."""
+    user = await get_user_context(request)
+    pool = await get_pool()
+    repo = MemoryRepository(pool)
+
+    # Query technical memories with repo metadata, grouped into tree structure
+    query = """
+        SELECT id, metadata->>'repo' as repo,
+               metadata->>'directory' as directory,
+               metadata->>'filename' as filename,
+               LEFT(content, 200) as preview,
+               importance, tags,
+               vitality_score, lifecycle_stage,
+               updated_at, created_at
+        FROM memories
+        WHERE deleted_at IS NULL
+          AND type = 'technical'
+          AND metadata->>'repo' IS NOT NULL
+          AND (user_id = $1 OR (organization_id = $2 AND shared = true))
+        ORDER BY metadata->>'repo', metadata->>'directory' NULLS FIRST, metadata->>'filename' NULLS FIRST
+    """
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(query, str(user.id), str(user.organization_id))
+
+    # Build tree structure: {repo: {dirs: {dir: {files: [...], memory: ...}}, memory: ..., root_files: [...]}}
+    tree = {}
+    for row in rows:
+        r = dict(row)
+        repo_name = r["repo"] or "unknown"
+        directory = r["directory"]
+        filename = r["filename"]
+
+        if repo_name not in tree:
+            tree[repo_name] = {"memory": None, "dirs": {}, "root_files": [], "file_count": 0, "total": 0}
+
+        node = tree[repo_name]
+        node["total"] += 1
+
+        if not directory and not filename:
+            # Repo-level memory
+            node["memory"] = r
+        elif directory and not filename:
+            # Directory-level memory
+            if directory not in node["dirs"]:
+                node["dirs"][directory] = {"memory": None, "files": []}
+            node["dirs"][directory]["memory"] = r
+        elif directory:
+            # File within a directory
+            if directory not in node["dirs"]:
+                node["dirs"][directory] = {"memory": None, "files": []}
+            node["dirs"][directory]["files"].append(r)
+            node["file_count"] += 1
+        else:
+            # Root-level file (no directory)
+            node["root_files"].append(r)
+            node["file_count"] += 1
+
+    import json as _json
+    from datetime import datetime
+
+    def _serialize(obj):
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        if isinstance(obj, UUID):
+            return str(obj)
+        return obj
+
+    tree_json = _json.dumps(tree, default=_serialize)
+
+    return templates.TemplateResponse(
+        request,
+        "knowledge_tree.html",
+        {"user": user, "tree": tree, "tree_json": tree_json, "total_memories": len(rows)},
+    )
