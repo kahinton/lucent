@@ -302,6 +302,22 @@ async def chat_status(request: Request):
     }
 
 
+@router.get("/agents")
+async def chat_agents(request: Request):
+    """List available agents for the chat agent picker (session-authenticated)."""
+    user, pool = await _get_session_user(request)
+    from lucent.db.definitions import DefinitionRepository
+
+    repo = DefinitionRepository(pool)
+    result = await repo.list_agents(
+        str(user["organization_id"]),
+        status="active",
+        requester_user_id=str(user["id"]),
+        requester_role=user.get("role", "member"),
+    )
+    return result.get("items", result) if isinstance(result, dict) else result
+
+
 @router.post("/stream-v2")
 async def chat_stream_v2(
     request: Request,

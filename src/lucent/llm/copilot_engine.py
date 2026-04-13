@@ -29,13 +29,28 @@ def _ensure_sdk() -> bool:
     if _sdk_available is not None:
         return _sdk_available
     try:
-        from copilot import CopilotClient, PermissionHandler
-        from copilot.types import SubprocessConfig, SystemMessageReplaceConfig
+        from copilot import CopilotClient, SubprocessConfig
 
         _CopilotClient = CopilotClient
-        _PermissionHandler = PermissionHandler
         _SubprocessConfig = SubprocessConfig
-        _SystemMessageReplaceConfig = SystemMessageReplaceConfig
+        # PermissionHandler and SystemMessageReplaceConfig moved to
+        # copilot.session in SDK >=0.2.1 (removed from top-level copilot)
+        try:
+            from copilot.session import PermissionHandler, SystemMessageReplaceConfig
+            _PermissionHandler = PermissionHandler
+            _SystemMessageReplaceConfig = SystemMessageReplaceConfig
+        except ImportError:
+            # Older SDK had these at top level or in copilot.types
+            try:
+                from copilot import PermissionHandler
+                _PermissionHandler = PermissionHandler
+            except ImportError:
+                _PermissionHandler = None
+            try:
+                from copilot.types import SystemMessageReplaceConfig
+                _SystemMessageReplaceConfig = SystemMessageReplaceConfig
+            except ImportError:
+                _SystemMessageReplaceConfig = None
         _sdk_available = True
     except ImportError:
         _sdk_available = False
@@ -54,7 +69,7 @@ class CopilotEngine(LLMEngine):
         self._log_level = log_level
 
     def _make_client(self) -> Any:
-        """Create a CopilotClient with typed SubprocessConfig."""
+        """Create a CopilotClient with SubprocessConfig."""
         config_kwargs: dict[str, Any] = {"log_level": self._log_level}
         if self._github_token:
             config_kwargs["github_token"] = self._github_token
@@ -62,14 +77,19 @@ class CopilotEngine(LLMEngine):
 
     def _make_session_kwargs(self, model: str, system_message: str, mcp_config: dict | None) -> dict:
         """Build create_session kwargs."""
-        return {
-            "on_permission_request": _PermissionHandler.approve_all,
+        kwargs: dict[str, Any] = {
             "model": model,
-            "system_message": _SystemMessageReplaceConfig(
-                mode="replace", content=system_message
-            ),
             "mcp_servers": mcp_config or {},
         }
+        if _PermissionHandler is not None:
+            kwargs["on_permission_request"] = _PermissionHandler.approve_all
+        if _SystemMessageReplaceConfig is not None:
+            kwargs["system_message"] = _SystemMessageReplaceConfig(
+                mode="replace", content=system_message
+            )
+        else:
+            kwargs["system_message"] = system_message
+        return kwargs
 
     @property
     def name(self) -> str:

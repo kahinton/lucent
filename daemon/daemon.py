@@ -198,7 +198,14 @@ except ImportError:
 
 # Legacy import for backward compat (daemon may be run outside the package)
 try:
-    from copilot import CopilotClient, PermissionHandler
+    from copilot import CopilotClient, SubprocessConfig
+
+    # PermissionHandler and SystemMessageReplaceConfig moved to copilot.session in SDK >=0.2.1
+    try:
+        from copilot.session import PermissionHandler, SystemMessageReplaceConfig
+    except ImportError:
+        from copilot import PermissionHandler
+        from copilot.types import SystemMessageReplaceConfig
 
     _COPILOT_SDK_AVAILABLE = True
 except ImportError:
@@ -2753,8 +2760,6 @@ class LucentDaemon:
         client = None
 
         try:
-            from copilot.types import SubprocessConfig, SystemMessageReplaceConfig
-
             client = CopilotClient(config=SubprocessConfig(log_level="warning"))
             await client.start()
 
