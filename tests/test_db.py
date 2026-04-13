@@ -394,6 +394,57 @@ class TestMemoryRepository:
 
         assert result is None
 
+    async def test_get_accessible_user_scope_uses_fixed_bind_shape(
+        self, db_pool, test_memory, test_user
+    ):
+        """User scope path should work with stable query placeholders."""
+        repo = MemoryRepository(db_pool)
+
+        result = await repo.get_accessible(
+            test_memory["id"],
+            test_user["id"],
+            test_user["organization_id"],
+            memory_scope="user",
+        )
+
+        assert result is not None
+        assert result["id"] == test_memory["id"]
+
+    async def test_get_accessible_org_shared_scope_uses_fixed_bind_shape(
+        self, db_pool, test_user, test_organization, clean_test_data
+    ):
+        """Org-shared-only scope path should work with stable query placeholders."""
+        prefix = clean_test_data
+        repo = MemoryRepository(db_pool)
+        user_repo = UserRepository(db_pool)
+
+        other_user = await user_repo.create(
+            external_id=f"{prefix}other_scope",
+            provider="local",
+            organization_id=test_organization["id"],
+            email=f"{prefix}other_scope@test.com",
+            display_name=f"{prefix}Other Scope User",
+        )
+
+        memory = await repo.create(
+            username=f"{prefix}other_scope_user",
+            type="experience",
+            content="Org shared scope content",
+            user_id=other_user["id"],
+            organization_id=test_organization["id"],
+            shared=True,
+        )
+
+        result = await repo.get_accessible(
+            memory["id"],
+            test_user["id"],
+            test_user["organization_id"],
+            memory_scope="org_shared_only",
+        )
+
+        assert result is not None
+        assert result["id"] == memory["id"]
+
     async def test_update_with_version_conflict(self, db_pool, test_memory):
         """Test that expected_version mismatch raises VersionConflictError."""
         from lucent.db import VersionConflictError

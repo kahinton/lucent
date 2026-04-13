@@ -161,23 +161,32 @@ class MemoryRepository:
         Returns:
             The memory record, or None if not found, deleted, or not accessible.
         """
-        if memory_scope == "user":
-            acl_clause = "user_id = $2"
-        elif memory_scope == "org_shared_only":
-            acl_clause = "(organization_id = $3 AND shared = true)"
-        else:
-            acl_clause = "(user_id = $2 OR (organization_id = $3 AND shared = true))"
+        normalized_scope = (
+            memory_scope if memory_scope in {"user", "org_shared_only"} else None
+        )
 
+        # Keep placeholder numbering stable to avoid scope-dependent
+        # bind count mismatches in prepared statement execution paths.
         query = f"""
             SELECT {self._FULL_COLUMNS}
             FROM memories
             WHERE id = $1
               AND deleted_at IS NULL
-              AND {acl_clause}
+              AND (
+                    ($4 = 'user' AND user_id = $2)
+                 OR ($4 = 'org_shared_only' AND organization_id = $3 AND shared = true)
+                 OR ($4 IS NULL AND (user_id = $2 OR (organization_id = $3 AND shared = true)))
+              )
         """
 
         async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(query, str(memory_id), str(user_id), str(organization_id))
+            row = await conn.fetchrow(
+                query,
+                str(memory_id),
+                str(user_id),
+                str(organization_id),
+                normalized_scope,
+            )
 
         if row is None:
             return None
