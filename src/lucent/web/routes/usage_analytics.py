@@ -1,4 +1,10 @@
-"""Usage analytics routes for memory access insights."""
+"""Usage analytics routes for memory access insights.
+
+NOTE: This page is not currently registered or linked in the UI.
+The route and template are preserved for potential future use.
+To re-enable, add the import and router.include_router() call
+back to routes/__init__.py and restore the nav link in base.html.
+"""
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
