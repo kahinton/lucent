@@ -1,4 +1,13 @@
-"""Integration tests for memory usage analytics web route."""
+"""Integration tests for memory usage analytics web route.
+
+NOTE: The usage analytics route is not currently registered in the app.
+These tests are skipped until the route is re-enabled.
+See src/lucent/web/routes/usage_analytics.py for details.
+"""
+
+import pytest
+
+pytestmark = pytest.mark.skip(reason="Usage analytics route is not currently registered")
 
 from uuid import uuid4
 

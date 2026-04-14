@@ -50,7 +50,10 @@
 {% if tab == 'agents' %}
 <div class="mb-4 flex items-center justify-between">
     {{ pagination_controls(base_url="/definitions", page=page, per_page=per_page, total_pages=total_pages, total_count=total_count, filter_params={"tab": "agents"}, entity_name="agents") }}
+    <div class="flex gap-2">
+    <button id="open-import-btn-agents" class="inline-flex items-center gap-1.5 px-4 py-2 text-sm bg-primary-50 border border-primary-200 text-primary-700 rounded-md hover:bg-primary-100 hover:border-primary-300 font-medium transition-colors"><svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="4" r="2"/><path d="M12 6v4"/><path d="M7 14l5 6 5-6"/><path d="M4 14c0-2 1.5-4 4-5"/><path d="M20 14c0-2-1.5-4-4-5"/><path d="M4 14h16"/><path d="M6 18h12"/><path d="M8 22h8"/></svg>Import</button>
     <button onclick="document.getElementById('create-agent-modal').classList.remove('hidden')" class="px-4 py-2 text-sm bg-primary-600 text-white rounded-md hover:bg-primary-700 font-medium">+ New Agent</button>
+    </div>
 </div>
 <div class="space-y-3">
     {% for agent in agents %}
@@ -134,7 +137,10 @@
 {% elif tab == 'skills' %}
 <div class="mb-4 flex items-center justify-between">
     {{ pagination_controls(base_url="/definitions", page=page, per_page=per_page, total_pages=total_pages, total_count=total_count, filter_params={"tab": "skills"}, entity_name="skills") }}
+    <div class="flex gap-2">
+    <button id="open-import-btn-skills" class="inline-flex items-center gap-1.5 px-4 py-2 text-sm bg-primary-50 border border-primary-200 text-primary-700 rounded-md hover:bg-primary-100 hover:border-primary-300 font-medium transition-colors"><svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="4" r="2"/><path d="M12 6v4"/><path d="M7 14l5 6 5-6"/><path d="M4 14c0-2 1.5-4 4-5"/><path d="M20 14c0-2-1.5-4-4-5"/><path d="M4 14h16"/><path d="M6 18h12"/><path d="M8 22h8"/></svg>Import</button>
     <button onclick="document.getElementById('create-skill-modal').classList.remove('hidden')" class="px-4 py-2 text-sm bg-primary-600 text-white rounded-md hover:bg-primary-700 font-medium">+ New Skill</button>
+    </div>
 </div>
 <div class="space-y-3">
     {% for skill in skills %}
@@ -268,4 +274,268 @@
 {% endif %}
 {% endif %}
 {% endif %}
+
+<!-- Import modal -->
+<div id="import-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+    <div class="bg-white rounded-xl shadow-2xl w-full max-w-2xl mx-4 overflow-hidden">
+        <div class="p-5 border-b border-gray-200 flex items-center justify-between">
+            <h2 class="text-lg font-semibold text-gray-900">Import Definition</h2>
+            <button id="import-modal-close" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
+        </div>
+        <div class="p-5 space-y-4">
+            <!-- Source type -->
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Source</label>
+                <div class="flex gap-2">
+                    <button class="import-source-btn px-3 py-1.5 text-sm rounded-lg border border-primary-300 bg-primary-50 text-primary-700 font-medium" data-source="url">URL</button>
+                    <button class="import-source-btn px-3 py-1.5 text-sm rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50" data-source="github">GitHub</button>
+                    <button class="import-source-btn px-3 py-1.5 text-sm rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50" data-source="raw">Paste</button>
+                </div>
+            </div>
+            <!-- URL/path input -->
+            <div id="import-url-field">
+                <label class="block text-sm font-medium text-gray-700 mb-1">URL or GitHub path</label>
+                <input id="import-source-input" type="text" placeholder="https://raw.githubusercontent.com/owner/repo/main/SKILL.md" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:border-primary-300 focus:ring-2 focus:ring-primary-100 focus:outline-none">
+                <p class="text-xs text-gray-400 mt-1">GitHub shorthand: <code class="bg-gray-100 px-1 rounded">owner/repo/path/to/SKILL.md</code></p>
+            </div>
+            <!-- Raw paste input -->
+            <div id="import-raw-field" class="hidden">
+                <label class="block text-sm font-medium text-gray-700 mb-1">Paste definition content</label>
+                <textarea id="import-raw-input" rows="10" placeholder="---
+name: my-skill
+description: What this skill does
+---
+
+# My Skill
+
+Instructions here..." class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:border-primary-300 focus:ring-2 focus:ring-primary-100 focus:outline-none"></textarea>
+            </div>
+            <!-- Type hint -->
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Type (auto-detected if not set)</label>
+                <select id="import-type-select" class="px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                    <option value="">Auto-detect</option>
+                    <option value="agent">Agent</option>
+                    <option value="skill">Skill</option>
+                </select>
+            </div>
+            <!-- Preview results -->
+            <div id="import-preview" class="hidden">
+                <div class="border border-gray-200 rounded-lg overflow-hidden">
+                    <div class="px-4 py-2 bg-gray-50 border-b border-gray-200 flex items-center justify-between">
+                        <span class="text-sm font-medium text-gray-700">Scan Results</span>
+                        <span id="import-status-badge" class="px-2 py-0.5 rounded text-xs font-medium"></span>
+                    </div>
+                    <div id="import-preview-body" class="p-4 text-sm space-y-3"></div>
+                </div>
+            </div>
+        </div>
+        <div class="p-5 border-t border-gray-100 bg-gray-50 flex items-center justify-between">
+            <span id="import-error" class="text-sm text-red-600 hidden"></span>
+            <div class="flex gap-2 ml-auto">
+                <button id="import-scan-btn" class="px-4 py-2 text-sm bg-white border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 font-medium">Scan &amp; Preview</button>
+                <button id="import-commit-btn" class="px-4 py-2 text-sm bg-primary-600 text-white rounded-lg hover:bg-primary-700 font-medium hidden">Import</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script nonce="{{ request.state.csp_nonce }}">
+(function() {
+    const modal = document.getElementById('import-modal');
+    if (!modal) return;
+    
+    let currentSource = 'url';
+    let lastPreview = null;
+    
+    // Open modal buttons (both agents and skills tabs)
+    document.querySelectorAll('[id^="open-import-btn"]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            // Set type hint based on which tab's button was clicked
+            const typeSelect = document.getElementById('import-type-select');
+            if (btn.id.includes('agents')) typeSelect.value = 'agent';
+            else if (btn.id.includes('skills')) typeSelect.value = 'skill';
+            else typeSelect.value = '';
+            modal.classList.remove('hidden');
+        });
+    });
+    
+    // Close
+    document.getElementById('import-modal-close').addEventListener('click', () => modal.classList.add('hidden'));
+    modal.addEventListener('click', e => { if (e.target === modal) modal.classList.add('hidden'); });
+    
+    // Source type toggle
+    document.querySelectorAll('.import-source-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            currentSource = btn.dataset.source;
+            document.querySelectorAll('.import-source-btn').forEach(b => {
+                b.className = b.dataset.source === currentSource
+                    ? 'import-source-btn px-3 py-1.5 text-sm rounded-lg border border-primary-300 bg-primary-50 text-primary-700 font-medium'
+                    : 'import-source-btn px-3 py-1.5 text-sm rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50';
+            });
+            document.getElementById('import-url-field').classList.toggle('hidden', currentSource === 'raw');
+            document.getElementById('import-raw-field').classList.toggle('hidden', currentSource !== 'raw');
+            // Update placeholder
+            const input = document.getElementById('import-source-input');
+            if (currentSource === 'github') input.placeholder = 'owner/repo/path/to/SKILL.md';
+            else input.placeholder = 'https://raw.githubusercontent.com/owner/repo/main/SKILL.md';
+        });
+    });
+    
+    // Scan & Preview
+    document.getElementById('import-scan-btn').addEventListener('click', async () => {
+        const source = currentSource === 'raw'
+            ? document.getElementById('import-raw-input').value
+            : document.getElementById('import-source-input').value;
+        
+        if (!source.trim()) return;
+        
+        const errEl = document.getElementById('import-error');
+        errEl.classList.add('hidden');
+        const scanBtn = document.getElementById('import-scan-btn');
+        scanBtn.textContent = 'Scanning...';
+        scanBtn.disabled = true;
+        
+        try {
+            const resp = await fetch('/definitions/import/preview', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    source_type: currentSource,
+                    source: source,
+                    definition_type: document.getElementById('import-type-select').value || null,
+                }),
+            });
+            const data = await resp.json();
+            lastPreview = data;
+            renderPreview(data);
+        } catch (e) {
+            errEl.textContent = 'Scan failed: ' + e.message;
+            errEl.classList.remove('hidden');
+        } finally {
+            scanBtn.textContent = 'Scan & Preview';
+            scanBtn.disabled = false;
+        }
+    });
+    
+    // Commit
+    document.getElementById('import-commit-btn').addEventListener('click', async () => {
+        const source = currentSource === 'raw'
+            ? document.getElementById('import-raw-input').value
+            : document.getElementById('import-source-input').value;
+        
+        const commitBtn = document.getElementById('import-commit-btn');
+        commitBtn.textContent = 'Importing...';
+        commitBtn.disabled = true;
+        const errEl = document.getElementById('import-error');
+        errEl.classList.add('hidden');
+        
+        try {
+            const resp = await fetch('/definitions/import/commit', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    source_type: currentSource,
+                    source: source,
+                    definition_type: document.getElementById('import-type-select').value || null,
+                }),
+            });
+            const data = await resp.json();
+            
+            if (data.status === 'imported') {
+                modal.classList.add('hidden');
+                window.location.reload();
+            } else if (data.status === 'blocked') {
+                lastPreview = data;
+                renderPreview(data);
+                errEl.textContent = 'Blocked: Critical security findings. Review above.';
+                errEl.classList.remove('hidden');
+            } else {
+                errEl.textContent = data.detail || data.error || 'Import failed';
+                errEl.classList.remove('hidden');
+            }
+        } catch (e) {
+            errEl.textContent = 'Import failed: ' + e.message;
+            errEl.classList.remove('hidden');
+        } finally {
+            commitBtn.textContent = 'Import';
+            commitBtn.disabled = false;
+        }
+    });
+    
+    function renderPreview(data) {
+        const preview = document.getElementById('import-preview');
+        const body = document.getElementById('import-preview-body');
+        const badge = document.getElementById('import-status-badge');
+        const commitBtn = document.getElementById('import-commit-btn');
+        
+        preview.classList.remove('hidden');
+        
+        if (!data.success) {
+            badge.textContent = 'Error';
+            badge.className = 'px-2 py-0.5 rounded text-xs font-medium bg-red-100 text-red-700';
+            body.innerHTML = '<p class="text-red-600">' + (data.error || 'Unknown error') + '</p>';
+            commitBtn.classList.add('hidden');
+            return;
+        }
+        
+        const hasCritical = data.has_critical_findings;
+        const hasWarnings = data.has_warnings;
+        
+        if (hasCritical) {
+            badge.textContent = 'Critical Issues';
+            badge.className = 'px-2 py-0.5 rounded text-xs font-medium bg-red-100 text-red-700';
+        } else if (hasWarnings) {
+            badge.textContent = 'Warnings';
+            badge.className = 'px-2 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-700';
+        } else {
+            badge.textContent = 'Clean';
+            badge.className = 'px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-700';
+        }
+        
+        let html = '<div class="space-y-2">';
+        html += '<div class="flex items-center gap-3 text-xs text-gray-500">';
+        html += '<span><strong>Name:</strong> ' + escapeHtml(data.name || '?') + '</span>';
+        html += '<span><strong>Type:</strong> ' + escapeHtml(data.definition_type || '?') + '</span>';
+        html += '<span><strong>Size:</strong> ' + (data.content_length || 0) + ' bytes</span>';
+        if (data.content_hash) html += '<span><strong>Hash:</strong> ' + escapeHtml(data.content_hash.slice(0, 12)) + '…</span>';
+        html += '</div>';
+        
+        if (data.description) {
+            html += '<p class="text-xs text-gray-600 bg-gray-50 rounded px-3 py-2">' + escapeHtml(data.description.slice(0, 200)) + '</p>';
+        }
+        
+        if (data.security_findings && data.security_findings.length > 0) {
+            html += '<div class="space-y-1">';
+            html += '<p class="text-xs font-medium text-gray-700">Security Findings (' + data.security_findings.length + '):</p>';
+            for (const f of data.security_findings) {
+                const color = f.severity === 'critical' ? 'red' : f.severity === 'warning' ? 'amber' : 'gray';
+                html += '<div class="flex items-start gap-2 text-xs px-3 py-1.5 rounded bg-' + color + '-50 text-' + color + '-700">';
+                html += '<span class="font-medium uppercase shrink-0">' + escapeHtml(f.severity) + '</span>';
+                html += '<span>' + escapeHtml(f.detail) + ' <span class="text-' + color + '-500">(' + escapeHtml(f.category) + ')</span></span>';
+                html += '</div>';
+            }
+            html += '</div>';
+        } else {
+            html += '<p class="text-xs text-green-600">✓ No security issues detected</p>';
+        }
+        
+        html += '</div>';
+        body.innerHTML = html;
+        
+        // Show/hide commit button based on findings
+        if (hasCritical) {
+            commitBtn.classList.add('hidden');
+        } else {
+            commitBtn.classList.remove('hidden');
+        }
+    }
+    
+    function escapeHtml(str) {
+        const div = document.createElement('div');
+        div.appendChild(document.createTextNode(str));
+        return div.innerHTML;
+    }
+})();
+</script>
 {% endblock %}

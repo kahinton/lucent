@@ -14,12 +14,16 @@ from lucent.api.deps import AdminUser, AuthenticatedUser
 from lucent.db import DefinitionRepository, get_pool
 from lucent.db.audit import AuditRepository
 from lucent.db.definitions import BuiltInProtectionError
+from lucent.logging import get_logger
+from lucent.security import scan_content_for_injection
 from lucent.services.mcp_discovery import (
     MCPDiscoveryError,
     discover_mcp_tools,
     get_tools_cached,
 )
 from lucent.url_validation import SSRFError, validate_url
+
+logger = get_logger("security")
 
 router = APIRouter(prefix="/definitions", tags=["definitions"])
 
@@ -65,6 +69,13 @@ class GrantAccess(BaseModel):
     target_id: str  # skill_id or mcp_server_id
 
 
+class ImportRequest(BaseModel):
+    """Request body for importing a definition from an external source."""
+    source_type: str = Field(..., pattern=r"^(url|github|raw)$", description="Import source: 'url', 'github', or 'raw'")
+    source: str = Field(..., min_length=1, max_length=100000, description="URL, GitHub path (owner/repo/path), or raw markdown content")
+    definition_type: str | None = Field(None, pattern=r"^(agent|skill)$", description="Hint: 'agent' or 'skill'. Auto-detected if not provided.")
+
+
 # ── Agent Endpoints ──────────────────────────────────────────────────────
 
 
@@ -91,7 +102,7 @@ async def list_agents(
 async def create_agent(body: CreateAgent, user: AuthenticatedUser):
     pool = await get_pool()
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
-    return await repo.create_agent(
+    result = await repo.create_agent(
         name=body.name,
         description=body.description or "",
         content=body.content,
@@ -99,6 +110,13 @@ async def create_agent(body: CreateAgent, user: AuthenticatedUser):
         created_by=str(user.id),
         owner_user_id=str(user.id),
     )
+    security_flags = scan_content_for_injection(body.content or "")
+    if body.description:
+        security_flags.extend(scan_content_for_injection(body.description))
+    if security_flags:
+        logger.warning("Definition '%s' flagged: %s", body.name, security_flags)
+        result["security_warnings"] = security_flags
+    return result
 
 
 @router.get("/agents/{agent_id}")
@@ -267,7 +285,7 @@ async def list_skills(
 async def create_skill(body: CreateSkill, user: AuthenticatedUser):
     pool = await get_pool()
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
-    return await repo.create_skill(
+    result = await repo.create_skill(
         name=body.name,
         description=body.description or "",
         content=body.content,
@@ -275,6 +293,13 @@ async def create_skill(body: CreateSkill, user: AuthenticatedUser):
         created_by=str(user.id),
         owner_user_id=str(user.id),
     )
+    security_flags = scan_content_for_injection(body.content or "")
+    if body.description:
+        security_flags.extend(scan_content_for_injection(body.description))
+    if security_flags:
+        logger.warning("Definition '%s' flagged: %s", body.name, security_flags)
+        result["security_warnings"] = security_flags
+    return result
 
 
 @router.get("/skills/{skill_id}")
@@ -467,3 +492,93 @@ async def list_proposals(user: AuthenticatedUser):
     pool = await get_pool()
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     return await repo.get_pending_proposals(str(user.organization_id))
+
+
+# ── Import Endpoints ──────────────────────────────────────────────────────
+
+
+@router.post("/import/preview")
+async def preview_import(body: ImportRequest, user: AuthenticatedUser):
+    """Preview an import — fetch, parse, and scan without creating anything.
+
+    Returns the parsed definition, security findings, and what would be created.
+    Use this to review before committing the import.
+    """
+    from lucent.services.definition_import import ImportSourceType, import_definition
+
+    result = await import_definition(
+        source_type=ImportSourceType(body.source_type),
+        source=body.source,
+        definition_type_hint=body.definition_type,
+    )
+    return result.to_dict()
+
+
+@router.post("/import/commit", status_code=201)
+async def commit_import(body: ImportRequest, user: AuthenticatedUser):
+    """Import a definition — fetch, parse, scan, and create in proposed status.
+
+    The definition goes through the normal approval workflow.
+    Security findings are included in the response for admin review.
+    """
+    from lucent.services.definition_import import (
+        DefinitionType,
+        ImportSourceType,
+        SecuritySeverity,
+        import_definition,
+    )
+
+    result = await import_definition(
+        source_type=ImportSourceType(body.source_type),
+        source=body.source,
+        definition_type_hint=body.definition_type,
+    )
+
+    if not result.success:
+        raise HTTPException(400, result.error or "Import failed")
+
+    if result.has_critical_findings:
+        # Don't create — return the findings for review
+        return {
+            "status": "blocked",
+            "reason": "Critical security findings detected. Review findings before importing.",
+            **result.to_dict(),
+        }
+
+    pool = await get_pool()
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+
+    created = None
+    if result.definition_type == DefinitionType.AGENT:
+        created = await repo.create_agent(
+            name=result.name,
+            description=result.description,
+            content=result.content,
+            org_id=str(user.organization_id),
+            created_by=str(user.id),
+        )
+        # If skill_names were specified, log them (can't auto-grant without existing skill IDs)
+        if result.skill_names:
+            created["suggested_skills"] = result.skill_names
+    elif result.definition_type == DefinitionType.SKILL:
+        created = await repo.create_skill(
+            name=result.name,
+            description=result.description,
+            content=result.content,
+            org_id=str(user.organization_id),
+            created_by=str(user.id),
+        )
+
+    if not created:
+        raise HTTPException(500, "Failed to create definition")
+
+    return {
+        "status": "imported",
+        "definition": created,
+        "security_findings": [
+            {"severity": f.severity.value, "category": f.category, "detail": f.detail}
+            for f in result.security_findings
+        ],
+        "source_url": result.source_url,
+        "content_hash": result.content_hash,
+    }
