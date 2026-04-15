@@ -42,7 +42,7 @@ class MemoryRepository:
     )
     _SEARCH_COLUMNS = (
         "id, username, type, content, tags, importance, related_memory_ids, "
-        "created_at, updated_at, user_id, organization_id, shared, last_accessed_at, "
+        "metadata, created_at, updated_at, user_id, organization_id, shared, last_accessed_at, "
         "lifecycle_stage"
     )
 
@@ -1448,6 +1448,7 @@ class MemoryRepository:
             "tags": row["tags"],
             "importance": row["importance"],
             "related_memory_ids": related_ids,
+            "metadata": row["metadata"] if "metadata" in row.keys() else {},
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
             "similarity_score": row["sim_score"],

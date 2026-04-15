@@ -17,6 +17,7 @@ from lucent.db import (
     get_pool,
     init_db,
 )
+from lucent.integrations.github_repo_access_service import GitHubRepoAccessService
 from lucent.logging import get_logger
 from lucent.mode import is_team_mode
 from lucent.models.memory import (
@@ -27,6 +28,7 @@ from lucent.models.memory import (
 )
 from lucent.models.validation import normalize_tags, validate_metadata
 from lucent.security import scan_content_for_injection
+from lucent.services.memory_access_service import MemoryAccessService
 
 logger = get_logger("tools.memories")
 
@@ -173,6 +175,18 @@ async def _get_access_repository() -> AccessRepository:
     return AccessRepository(pool)
 
 
+async def _get_memory_access_service() -> MemoryAccessService:
+    repo = await _get_repository()
+    try:
+        pool = await get_pool()
+    except RuntimeError:
+        database_url = os.environ.get("DATABASE_URL")
+        if not database_url:
+            raise RuntimeError("DATABASE_URL environment variable is required")
+        pool = await init_db(database_url)
+    return MemoryAccessService(repo, GitHubRepoAccessService(pool))
+
+
 def register_tools(mcp: FastMCP) -> None:
     """Register all memory tools with the MCP server."""
 
@@ -302,7 +316,6 @@ Returns:
                 effective_shared = True
 
             repo = await _get_repository()
-
             result = await repo.create(
                 username=effective_username,
                 type=input_data.type.value,
@@ -364,14 +377,19 @@ Returns:
 
             logger.debug("get_memory: id=%s", memory_id)
 
-            repo = await _get_repository()
+            memory_access = await _get_memory_access_service()
 
             # Get current user context for access control
             user_id, org_id, user_role, memory_scope, memory_scope_user_id = await _get_current_user_context()
 
             if user_id is not None and org_id is not None:
                 # Use access-controlled get
-                result = await repo.get_accessible(uuid_id, user_id, org_id, memory_scope=memory_scope)
+                result = await memory_access.get_accessible(
+                    uuid_id,
+                    user_id,
+                    org_id,
+                    memory_scope=memory_scope,
+                )
             else:
                 # No auth context — deny access rather than falling back to unscoped query
                 return _error_response(
@@ -432,7 +450,7 @@ Returns:
             except ValueError as e:
                 return _error_response(f"Invalid memory ID format: {e}")
 
-            repo = await _get_repository()
+            memory_access = await _get_memory_access_service()
             access_repo = await _get_access_repository()
 
             # Get current user context for access control
@@ -443,7 +461,12 @@ Returns:
 
             for uuid_id, original_id in zip(uuid_ids, memory_ids):
                 if user_id is not None and org_id is not None:
-                    result = await repo.get_accessible(uuid_id, user_id, org_id, memory_scope=memory_scope)
+                    result = await memory_access.get_accessible(
+                        uuid_id,
+                        user_id,
+                        org_id,
+                        memory_scope=memory_scope,
+                    )
                 else:
                     # No auth context — deny access rather than falling back to unscoped query
                     return _error_response(
@@ -599,12 +622,13 @@ Returns:
                 limit=min(limit, 50),
             )
 
-            repo = await _get_repository()
+            memory_access = await _get_memory_access_service()
 
             # Get current user context for access control
             user_id, org_id, user_role, memory_scope, memory_scope_user_id = await _get_current_user_context()
 
-            result = await repo.search(
+            result = await memory_access.search(
+                user_id=user_id,
                 query=search_input.query,
                 username=search_input.username,
                 type=search_input.type.value if search_input.type else None,
@@ -699,12 +723,13 @@ Returns:
 
             memory_type = MemoryType(type) if type else None
 
-            repo = await _get_repository()
+            memory_access = await _get_memory_access_service()
 
             # Get current user context for access control
             user_id, org_id, user_role, memory_scope, memory_scope_user_id = await _get_current_user_context()
 
-            result = await repo.search_full(
+            result = await memory_access.search_full(
+                user_id=user_id,
                 query=query.strip(),
                 username=username,
                 type=memory_type.value if memory_type else None,
@@ -1652,6 +1677,8 @@ Returns:
                 requesting_user_id=user_id,
                 requesting_org_id=org_id,
             )
+            memory_access = await _get_memory_access_service()
+            memories = await memory_access.filter_memories(memories, user_id)
 
             serialized = [_serialize_memory(m) for m in memories]
 

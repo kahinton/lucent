@@ -12,7 +12,9 @@ from lucent.db import (
     UserRepository,
     get_pool,
 )
+from lucent.integrations.github_repo_access_service import GitHubRepoAccessService
 from lucent.mode import is_team_mode
+from lucent.services.memory_access_service import MemoryAccessService
 
 from ._shared import _build_metadata_from_form, _check_csrf, get_user_context, templates
 
@@ -36,6 +38,7 @@ async def memories_list(
     user = await get_user_context(request)
     pool = await get_pool()
     repo = MemoryRepository(pool)
+    memory_access = MemoryAccessService(repo, GitHubRepoAccessService(pool))
     access_repo = AccessRepository(pool)
 
     # Treat empty strings as None
@@ -49,7 +52,8 @@ async def memories_list(
     limit = 20
     offset = (page - 1) * limit
 
-    result = await repo.search(
+    result = await memory_access.search(
+        user_id=user.id,
         query=q,
         type=type,
         tags=tag_list,
@@ -275,10 +279,16 @@ async def memory_detail(request: Request, memory_id: UUID):
     pool = await get_pool()
 
     repo = MemoryRepository(pool)
+    memory_access = MemoryAccessService(repo, GitHubRepoAccessService(pool))
     audit_repo = AuditRepository(pool)
     access_repo = AccessRepository(pool)
 
-    memory = await repo.get_accessible(memory_id, user.id, user.organization_id)
+    memory = await memory_access.get_accessible(
+        memory_id=memory_id,
+        user_id=user.id,
+        organization_id=user.organization_id,
+        memory_scope=getattr(user, "memory_scope", None),
+    )
     if memory is None:
         raise HTTPException(status_code=404, detail="Memory not found")
 
@@ -325,9 +335,15 @@ async def memory_edit_form(request: Request, memory_id: UUID):
     user = await get_user_context(request)
     pool = await get_pool()
     repo = MemoryRepository(pool)
+    memory_access = MemoryAccessService(repo, GitHubRepoAccessService(pool))
     user_repo = UserRepository(pool)
 
-    memory = await repo.get_accessible(memory_id, user.id, user.organization_id)
+    memory = await memory_access.get_accessible(
+        memory_id=memory_id,
+        user_id=user.id,
+        organization_id=user.organization_id,
+        memory_scope=getattr(user, "memory_scope", None),
+    )
     if memory is None:
         raise HTTPException(status_code=404, detail="Memory not found")
 
@@ -401,10 +417,16 @@ async def memory_edit_submit(
     pool = await get_pool()
 
     repo = MemoryRepository(pool)
+    memory_access = MemoryAccessService(repo, GitHubRepoAccessService(pool))
     audit_repo = AuditRepository(pool)
 
     # Get existing to check ownership
-    existing = await repo.get_accessible(memory_id, user.id, user.organization_id)
+    existing = await memory_access.get_accessible(
+        memory_id=memory_id,
+        user_id=user.id,
+        organization_id=user.organization_id,
+        memory_scope=getattr(user, "memory_scope", None),
+    )
     if existing is None:
         raise HTTPException(status_code=404, detail="Memory not found")
 
@@ -505,9 +527,15 @@ async def memory_share(request: Request, memory_id: UUID):
     pool = await get_pool()
 
     repo = MemoryRepository(pool)
+    memory_access = MemoryAccessService(repo, GitHubRepoAccessService(pool))
     audit_repo = AuditRepository(pool)
 
-    memory = await repo.get_accessible(memory_id, user.id, user.organization_id)
+    memory = await memory_access.get_accessible(
+        memory_id=memory_id,
+        user_id=user.id,
+        organization_id=user.organization_id,
+        memory_scope=getattr(user, "memory_scope", None),
+    )
     if memory is None:
         raise HTTPException(status_code=404, detail="Memory not found")
 
@@ -549,9 +577,15 @@ async def memory_delete(request: Request, memory_id: UUID):
     pool = await get_pool()
 
     repo = MemoryRepository(pool)
+    memory_access = MemoryAccessService(repo, GitHubRepoAccessService(pool))
     audit_repo = AuditRepository(pool)
 
-    memory = await repo.get_accessible(memory_id, user.id, user.organization_id)
+    memory = await memory_access.get_accessible(
+        memory_id=memory_id,
+        user_id=user.id,
+        organization_id=user.organization_id,
+        memory_scope=getattr(user, "memory_scope", None),
+    )
     if memory is None:
         raise HTTPException(status_code=404, detail="Memory not found")
 
@@ -602,9 +636,15 @@ async def memory_restore(request: Request, memory_id: UUID, version: int):
     pool = await get_pool()
 
     repo = MemoryRepository(pool)
+    memory_access = MemoryAccessService(repo, GitHubRepoAccessService(pool))
     audit_repo = AuditRepository(pool)
 
-    memory = await repo.get_accessible(memory_id, user.id, user.organization_id)
+    memory = await memory_access.get_accessible(
+        memory_id=memory_id,
+        user_id=user.id,
+        organization_id=user.organization_id,
+        memory_scope=getattr(user, "memory_scope", None),
+    )
     if memory is None:
         raise HTTPException(status_code=404, detail="Memory not found")
 

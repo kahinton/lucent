@@ -3,11 +3,16 @@
 from lucent.integrations.adapters import AdapterRegistry, AdapterResponse, DiscordAdapter
 from lucent.integrations.base import IntegrationAdapter, IntegrationError
 from lucent.integrations.encryption import (
+    BackendCredentialEncryptor,
     CredentialEncryptor,
+    EncryptionBackend,
     EncryptionError,
+    FernetBackend,
     FernetEncryptor,
+    VaultTransitBackend,
     decrypt_credential,
     encrypt_credential,
+    get_encryption_backend,
 )
 from lucent.integrations.identity import (
     IdentityResolver,
@@ -63,10 +68,14 @@ from lucent.integrations.webhooks import WebhookSignatureMiddleware  # noqa: E40
 __all__ = [
     "AdapterRegistry",
     "AdapterResponse",
+    "BackendCredentialEncryptor",
     "CredentialEncryptor",
+    "EncryptionBackend",
     "EncryptionError",
     "EventType",
     "FernetEncryptor",
+    "FernetBackend",
+    "VaultTransitBackend",
     "IdentityResolver",
     "IdentityResult",
     "IntegrationAdapter",
@@ -101,5 +110,6 @@ __all__ = [
     "admin_router",
     "decrypt_credential",
     "encrypt_credential",
+    "get_encryption_backend",
     "webhook_router",
 ]

@@ -203,3 +203,40 @@ class TestDashboard:
         assert 'href="/daemon/review"' in resp.text
         assert "Needs Approval" in resp.text
         assert re.search(r'bg-amber-100[^>]*>\s*\d+\s*</span>', resp.text, re.S)
+
+    @pytest.mark.asyncio
+    async def test_dashboard_filters_repo_tagged_memories_when_acl_denied(
+        self, client, db_pool, web_user, web_prefix, monkeypatch
+    ):
+        user, org, _token = web_user
+        repo = MemoryRepository(db_pool)
+        await repo.create(
+            username=f"{web_prefix}User",
+            type="technical",
+            content=f"{web_prefix}Hidden repo dashboard memory",
+            tags=["dashboard", "acl"],
+            metadata={"repo": "org/private-repo"},
+            user_id=user["id"],
+            organization_id=org["id"],
+        )
+        await repo.create(
+            username=f"{web_prefix}User",
+            type="experience",
+            content=f"{web_prefix}Visible dashboard memory",
+            tags=["dashboard", "acl"],
+            user_id=user["id"],
+            organization_id=org["id"],
+        )
+
+        async def _deny_access(self, user_id, repo_full_name):  # pragma: no cover - signature shim
+            return False
+
+        monkeypatch.setattr(
+            "lucent.integrations.github_repo_access_service.GitHubRepoAccessService.check_access",
+            _deny_access,
+        )
+
+        resp = await client.get("/")
+        assert resp.status_code == 200
+        assert f"{web_prefix}Visible dashboard memory" in resp.text
+        assert f"{web_prefix}Hidden repo dashboard memory" not in resp.text

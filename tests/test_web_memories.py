@@ -209,6 +209,42 @@ class TestMemoriesList:
             assert resp.status_code == 303
             assert "/login" in resp.headers.get("location", "")
 
+    async def test_list_repo_acl_filters_repo_tagged_memories(
+        self, client, db_pool, web_user, web_prefix, monkeypatch
+    ):
+        user, org, _token = web_user
+        repo = MemoryRepository(db_pool)
+        await repo.create(
+            username=f"{web_prefix}User",
+            type="technical",
+            content=f"{web_prefix}Hidden repo list memory",
+            tags=["acl-list"],
+            metadata={"repo": "org/private-repo"},
+            user_id=user["id"],
+            organization_id=org["id"],
+        )
+        await repo.create(
+            username=f"{web_prefix}User",
+            type="experience",
+            content=f"{web_prefix}Visible list memory",
+            tags=["acl-list"],
+            user_id=user["id"],
+            organization_id=org["id"],
+        )
+
+        async def _deny_access(self, user_id, repo_full_name):  # pragma: no cover - signature shim
+            return False
+
+        monkeypatch.setattr(
+            "lucent.integrations.github_repo_access_service.GitHubRepoAccessService.check_access",
+            _deny_access,
+        )
+
+        resp = await client.get("/memories", params={"tag": "acl-list"})
+        assert resp.status_code == 200
+        assert f"{web_prefix}Visible list memory" in resp.text
+        assert f"{web_prefix}Hidden repo list memory" not in resp.text
+
 
 # ============================================================================
 # GET /memories/new — new memory form
@@ -328,6 +364,32 @@ class TestMemoryDetail:
             assert resp.status_code == 303
             assert "/login" in resp.headers.get("location", "")
 
+    async def test_detail_repo_tagged_memory_denied_when_acl_fails(
+        self, client, db_pool, web_user, web_prefix, monkeypatch
+    ):
+        user, org, _token = web_user
+        repo = MemoryRepository(db_pool)
+        memory = await repo.create(
+            username=f"{web_prefix}User",
+            type="technical",
+            content=f"{web_prefix}Hidden repo detail memory",
+            tags=["acl-detail"],
+            metadata={"repo": "org/private-repo"},
+            user_id=user["id"],
+            organization_id=org["id"],
+        )
+
+        async def _deny_access(self, user_id, repo_full_name):  # pragma: no cover - signature shim
+            return False
+
+        monkeypatch.setattr(
+            "lucent.integrations.github_repo_access_service.GitHubRepoAccessService.check_access",
+            _deny_access,
+        )
+
+        resp = await client.get(f"/memories/{memory['id']}")
+        assert resp.status_code == 404
+
 
 # ============================================================================
 # GET /memories/{id}/edit — edit form
@@ -358,6 +420,32 @@ class TestMemoryEditForm:
             )
             assert resp.status_code == 303
             assert "/login" in resp.headers.get("location", "")
+
+    async def test_edit_form_repo_tagged_memory_denied_when_acl_fails(
+        self, client, db_pool, web_user, web_prefix, monkeypatch
+    ):
+        user, org, _token = web_user
+        repo = MemoryRepository(db_pool)
+        memory = await repo.create(
+            username=f"{web_prefix}User",
+            type="technical",
+            content=f"{web_prefix}Hidden repo edit memory",
+            tags=["acl-edit"],
+            metadata={"repo": "org/private-repo"},
+            user_id=user["id"],
+            organization_id=org["id"],
+        )
+
+        async def _deny_access(self, user_id, repo_full_name):  # pragma: no cover - signature shim
+            return False
+
+        monkeypatch.setattr(
+            "lucent.integrations.github_repo_access_service.GitHubRepoAccessService.check_access",
+            _deny_access,
+        )
+
+        resp = await client.get(f"/memories/{memory['id']}/edit")
+        assert resp.status_code == 404
 
 
 # ============================================================================
@@ -536,6 +624,36 @@ class TestMemoryDelete:
             follow_redirects=False,
         )
         assert resp.status_code == 403
+
+    async def test_delete_repo_tagged_memory_denied_when_acl_fails(
+        self, client, db_pool, web_user, web_prefix, monkeypatch
+    ):
+        user, org, _token = web_user
+        repo = MemoryRepository(db_pool)
+        memory = await repo.create(
+            username=f"{web_prefix}User",
+            type="technical",
+            content=f"{web_prefix}Hidden repo delete memory",
+            tags=["acl-delete"],
+            metadata={"repo": "org/private-repo"},
+            user_id=user["id"],
+            organization_id=org["id"],
+        )
+
+        async def _deny_access(self, user_id, repo_full_name):  # pragma: no cover - signature shim
+            return False
+
+        monkeypatch.setattr(
+            "lucent.integrations.github_repo_access_service.GitHubRepoAccessService.check_access",
+            _deny_access,
+        )
+
+        resp = await client.post(
+            f"/memories/{memory['id']}/delete",
+            data=_csrf_data(client),
+            follow_redirects=False,
+        )
+        assert resp.status_code == 404
 
 
 # ============================================================================

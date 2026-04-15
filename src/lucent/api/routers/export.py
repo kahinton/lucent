@@ -16,7 +16,9 @@ from lucent.api.models import (
     MemoryResponse,
 )
 from lucent.db import MemoryRepository, get_pool
+from lucent.integrations.github_repo_access_service import GitHubRepoAccessService
 from lucent.logging import get_logger
+from lucent.services.memory_access_service import MemoryAccessService
 
 logger = get_logger("api.export")
 
@@ -95,6 +97,7 @@ async def export_memories(
     """
     pool = await get_pool()
     repo = MemoryRepository(pool)
+    memory_access = MemoryAccessService(repo, GitHubRepoAccessService(pool))
 
     memories = await repo.export(
         type=type,
@@ -106,6 +109,7 @@ async def export_memories(
         requesting_user_id=user.id,
         requesting_org_id=user.organization_id,
     )
+    memories = await memory_access.filter_memories(memories, user.id)
 
     filters = _build_filters_dict(
         type,

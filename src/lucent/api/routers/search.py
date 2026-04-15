@@ -12,7 +12,9 @@ from lucent.api.models import (
     SearchResultMemory,
 )
 from lucent.db import AccessRepository, MemoryRepository, get_pool
+from lucent.integrations.github_repo_access_service import GitHubRepoAccessService
 from lucent.logging import get_logger
+from lucent.services.memory_access_service import MemoryAccessService
 
 logger = get_logger("api.search")
 
@@ -53,13 +55,15 @@ async def search_memories(
     """Search memories by content with fuzzy matching."""
     pool = await get_pool()
     repo = MemoryRepository(pool)
+    memory_access = MemoryAccessService(repo, GitHubRepoAccessService(pool))
     access_repo = AccessRepository(pool)
 
     logger.info(
         "Search: query=%s, type=%s, tags=%s, user=%s", data.query, data.type, data.tags, user.id
     )
 
-    result = await repo.search(
+    result = await memory_access.search(
+        user_id=user.id,
         query=data.query,
         username=data.username,
         type=data.type,
@@ -154,9 +158,11 @@ async def search_memories_full(
 
     pool = await get_pool()
     repo = MemoryRepository(pool)
+    memory_access = MemoryAccessService(repo, GitHubRepoAccessService(pool))
     access_repo = AccessRepository(pool)
 
-    result = await repo.search_full(
+    result = await memory_access.search_full(
+        user_id=user.id,
         query=data.query,
         username=data.username,
         type=data.type,

@@ -7,7 +7,9 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 
 from lucent.db import AccessRepository, MemoryRepository, get_pool
+from lucent.integrations.github_repo_access_service import GitHubRepoAccessService
 from lucent.mode import is_team_mode
+from lucent.services.memory_access_service import MemoryAccessService
 
 from ._shared import get_user_context, templates
 
@@ -27,9 +29,11 @@ async def dashboard(request: Request):
 
     # Get stats
     memory_repo = MemoryRepository(pool)
+    memory_access = MemoryAccessService(memory_repo, GitHubRepoAccessService(pool))
 
     # Recent memories
-    recent = await memory_repo.search(
+    recent = await memory_access.search(
+        user_id=user.id,
         limit=5,
         requesting_user_id=user.id,
         requesting_org_id=user.organization_id,
@@ -91,7 +95,8 @@ async def dashboard(request: Request):
     active_request_count = active_requests["total_count"] + pending_requests["total_count"]
 
     # Daemon status (heartbeat + state summary)
-    daemon_heartbeat = await memory_repo.search(
+    daemon_heartbeat = await memory_access.search(
+        user_id=user.id,
         tags=["daemon-heartbeat"],
         limit=1,
         requesting_user_id=user.id,
@@ -101,7 +106,8 @@ async def dashboard(request: Request):
         daemon_heartbeat.get("memories", [])[0] if daemon_heartbeat.get("memories") else None
     )
 
-    daemon_state = await memory_repo.search(
+    daemon_state = await memory_access.search(
+        user_id=user.id,
         tags=["daemon", "daemon-state"],
         limit=1,
         requesting_user_id=user.id,

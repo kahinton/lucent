@@ -781,6 +781,89 @@ class TestSearchAccessLogging:
 
 
 # ============================================================================
+# GitHub Repo ACL Integration
+# ============================================================================
+
+
+class TestSearchRepoAcl:
+    """Search endpoints enforce repo-tag ACL filtering."""
+
+    async def test_search_filters_repo_tagged_memories_by_access(
+        self, srch_client, db_pool, srch_user, srch_prefix, monkeypatch
+    ):
+        repo = MemoryRepository(db_pool)
+        blocked = await repo.create(
+            username=f"{srch_prefix}user",
+            type="technical",
+            content=f"{srch_prefix}Blocked repo memory",
+            tags=["acl", "blocked"],
+            metadata={"repo": "org/private-repo"},
+            user_id=srch_user["id"],
+            organization_id=srch_user["organization_id"],
+        )
+        visible = await repo.create(
+            username=f"{srch_prefix}user",
+            type="technical",
+            content=f"{srch_prefix}Untagged memory",
+            tags=["acl", "open"],
+            metadata={},
+            user_id=srch_user["id"],
+            organization_id=srch_user["organization_id"],
+        )
+
+        async def _deny_access(self, user_id, repo_full_name):  # pragma: no cover - signature shim
+            return False
+
+        monkeypatch.setattr(
+            "lucent.integrations.github_repo_access_service.GitHubRepoAccessService.check_access",
+            _deny_access,
+        )
+
+        resp = await srch_client.post("/api/search", json={"query": srch_prefix, "limit": 20})
+        assert resp.status_code == 200
+        returned_ids = {m["id"] for m in resp.json()["memories"]}
+        assert str(visible["id"]) in returned_ids
+        assert str(blocked["id"]) not in returned_ids
+
+    async def test_search_full_blocks_repo_tagged_when_user_has_no_credentials(
+        self, srch_client, db_pool, srch_user, srch_prefix, monkeypatch
+    ):
+        repo = MemoryRepository(db_pool)
+        blocked = await repo.create(
+            username=f"{srch_prefix}user",
+            type="technical",
+            content=f"{srch_prefix}Private repo note",
+            tags=["acl", "private"],
+            metadata={"repo": "org/private-repo"},
+            user_id=srch_user["id"],
+            organization_id=srch_user["organization_id"],
+        )
+        visible = await repo.create(
+            username=f"{srch_prefix}user",
+            type="experience",
+            content=f"{srch_prefix}General note",
+            tags=["acl", "general"],
+            metadata={},
+            user_id=srch_user["id"],
+            organization_id=srch_user["organization_id"],
+        )
+
+        async def _deny_access(self, user_id, repo_full_name):  # pragma: no cover - signature shim
+            return False
+
+        monkeypatch.setattr(
+            "lucent.integrations.github_repo_access_service.GitHubRepoAccessService.check_access",
+            _deny_access,
+        )
+
+        resp = await srch_client.post("/api/search/full", json={"query": srch_prefix, "limit": 20})
+        assert resp.status_code == 200
+        returned_ids = {m["id"] for m in resp.json()["memories"]}
+        assert str(visible["id"]) in returned_ids
+        assert str(blocked["id"]) not in returned_ids
+
+
+# ============================================================================
 # Edge Cases & Validation
 # ============================================================================
 

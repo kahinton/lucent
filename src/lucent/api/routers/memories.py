@@ -18,10 +18,12 @@ from lucent.api.models import (
     TagSuggestionsResponse,
 )
 from lucent.db import AccessRepository, AuditRepository, MemoryRepository, get_pool
+from lucent.integrations.github_repo_access_service import GitHubRepoAccessService
 from lucent.logging import get_logger
 from lucent.models.validation import normalize_tags, validate_metadata
 from lucent.rbac import Permission
 from lucent.security import scan_content_for_injection
+from lucent.services.memory_access_service import MemoryAccessService
 
 logger = get_logger("api.memories")
 
@@ -230,13 +232,15 @@ async def get_memory(
     """Get a memory by ID."""
     pool = await get_pool()
     repo = MemoryRepository(pool)
+    memory_access = MemoryAccessService(repo, GitHubRepoAccessService(pool))
     access_repo = AccessRepository(pool)
 
     # Use access-controlled get
-    result = await repo.get_accessible(
+    result = await memory_access.get_accessible(
         memory_id=memory_id,
         user_id=user.id,
         organization_id=user.organization_id,
+        memory_scope=user.memory_scope,
     )
 
     if result is None:
@@ -244,8 +248,7 @@ async def get_memory(
         if user.has_permission(Permission.MEMORY_READ_ALL):
             result = await repo.get(memory_id)
             if result and result.get("organization_id") == user.organization_id:
-                # Admin can see org memories
-                pass
+                result = await memory_access.filter_memory(result, user.id)
             else:
                 result = None
 
@@ -284,10 +287,16 @@ async def update_memory(
 
     pool = await get_pool()
     repo = MemoryRepository(pool)
+    memory_access = MemoryAccessService(repo, GitHubRepoAccessService(pool))
     audit_repo = AuditRepository(pool)
 
     # Get the memory first to check ownership - use get_accessible to prevent leaking existence
-    existing = await repo.get_accessible(memory_id, user.id, user.organization_id)
+    existing = await memory_access.get_accessible(
+        memory_id=memory_id,
+        user_id=user.id,
+        organization_id=user.organization_id,
+        memory_scope=user.memory_scope,
+    )
     if existing is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -379,10 +388,16 @@ async def delete_memory(
     """Delete a memory (soft delete)."""
     pool = await get_pool()
     repo = MemoryRepository(pool)
+    memory_access = MemoryAccessService(repo, GitHubRepoAccessService(pool))
     audit_repo = AuditRepository(pool)
 
     # Get memory first - use get_accessible to prevent leaking existence of other org's memories
-    existing = await repo.get_accessible(memory_id, user.id, user.organization_id)
+    existing = await memory_access.get_accessible(
+        memory_id=memory_id,
+        user_id=user.id,
+        organization_id=user.organization_id,
+        memory_scope=user.memory_scope,
+    )
     if existing is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

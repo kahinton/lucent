@@ -818,7 +818,6 @@ _PER_USER_SCHEDULE_TITLES = frozenset({
     "Experience Compression",
     "Learning Extraction",
     "Memory Vitality Scoring",
-    "Cognitive Planning",
 })
 
 # Schedule titles that require org-shared-only processing

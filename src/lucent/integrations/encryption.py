@@ -1,17 +1,19 @@
-"""Credential encryption for integration configs (tokens, signing secrets).
+"""Credential encryption backends and adapters.
 
-Phase 1 uses Fernet symmetric encryption with a key from LUCENT_CREDENTIAL_KEY
-(falls back to LUCENT_ENCRYPTION_KEY for backwards compatibility).
-The CredentialEncryptor protocol allows swapping to envelope encryption (KMS)
-in Phase 2 without changing callers.
+Supports pluggable encryption backends selected by ``ENCRYPTION_BACKEND``:
+
+- ``fernet`` (default): local symmetric encryption using ``LUCENT_CREDENTIAL_KEY``
+- ``vault_transit``: Vault/OpenBao transit API based encryption
 """
 
 from __future__ import annotations
 
 import json
 import os
+from base64 import b64decode, b64encode
 from typing import Any, Protocol, runtime_checkable
 
+import httpx
 from cryptography.fernet import Fernet, InvalidToken, MultiFernet
 
 
@@ -20,11 +22,21 @@ class EncryptionError(Exception):
 
 
 @runtime_checkable
-class CredentialEncryptor(Protocol):
-    """Interface for encrypting/decrypting integration credential configs.
+class EncryptionBackend(Protocol):
+    """String encryption backend abstraction."""
 
-    Implementations must be synchronous — encryption is CPU-bound and fast.
-    """
+    def encrypt(self, plaintext: str) -> str:
+        """Encrypt plaintext and return ciphertext."""
+        ...
+
+    def decrypt(self, ciphertext: str) -> str:
+        """Decrypt ciphertext and return plaintext."""
+        ...
+
+
+@runtime_checkable
+class CredentialEncryptor(Protocol):
+    """Interface for encrypting/decrypting integration credential configs."""
 
     def encrypt(self, config: dict[str, Any]) -> bytes:
         """Serialize and encrypt a config dict.
@@ -75,8 +87,8 @@ def _make_fernet(key: str | bytes) -> Fernet:
         raise EncryptionError(f"Invalid Fernet key: {exc}") from exc
 
 
-class FernetEncryptor:
-    """Fernet-based credential encryptor.
+class FernetBackend:
+    """Fernet backend implementing :class:`EncryptionBackend`.
 
     Reads the key from LUCENT_CREDENTIAL_KEY (preferred) or
     LUCENT_ENCRYPTION_KEY (legacy fallback).
@@ -102,42 +114,16 @@ class FernetEncryptor:
         self._fernet = _make_fernet(raw)
         self._multi: MultiFernet | None = None
 
-    # --- dict-based API (for encrypted_config BYTEA column) ---
-
-    def encrypt(self, config: dict[str, Any]) -> bytes:
-        """Serialize config to JSON and encrypt with Fernet."""
-        try:
-            plaintext = json.dumps(config, separators=(",", ":"), sort_keys=True).encode()
-            return self._active_fernet.encrypt(plaintext)
-        except (TypeError, ValueError) as exc:
-            raise EncryptionError(f"Failed to serialize config for encryption: {exc}") from exc
-
-    def decrypt(self, data: bytes) -> dict[str, Any]:
-        """Decrypt Fernet ciphertext and deserialize back to a config dict."""
-        try:
-            plaintext = self._active_fernet.decrypt(data)
-            return json.loads(plaintext)
-        except InvalidToken as exc:
-            raise EncryptionError(
-                "Decryption failed — wrong key or corrupted data"
-            ) from exc
-        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            raise EncryptionError(
-                f"Decrypted data is not valid JSON config: {exc}"
-            ) from exc
-
-    # --- string-based API (for individual credential values) ---
-
-    def encrypt_str(self, plaintext: str) -> str:
-        """Encrypt a plaintext string, returning URL-safe base64."""
+    def encrypt(self, plaintext: str) -> str:
+        """Encrypt plaintext string with Fernet."""
         try:
             token = self._active_fernet.encrypt(plaintext.encode("utf-8"))
             return token.decode("ascii")
         except Exception as exc:
             raise EncryptionError(f"Encryption failed: {exc}") from exc
 
-    def decrypt_str(self, ciphertext: str) -> str:
-        """Decrypt a URL-safe base64 ciphertext string back to plaintext."""
+    def decrypt(self, ciphertext: str) -> str:
+        """Decrypt Fernet ciphertext string back to plaintext."""
         try:
             plaintext = self._active_fernet.decrypt(ciphertext.encode("ascii"))
             return plaintext.decode("utf-8")
@@ -146,14 +132,8 @@ class FernetEncryptor:
                 "Decryption failed — wrong key or corrupted data"
             ) from exc
 
-    # --- key rotation ---
-
     def rotate_key(self, old_key: str | bytes, new_key: str | bytes) -> None:
-        """Rotate to a new key while retaining ability to decrypt with old key.
-
-        New encryptions use *new_key*. Decryption tries *new_key* first,
-        then falls back to *old_key*.
-        """
+        """Rotate to a new key while retaining ability to decrypt with old key."""
         new_fernet = _make_fernet(new_key)
         old_fernet = _make_fernet(old_key)
         self._fernet = new_fernet
@@ -165,18 +145,184 @@ class FernetEncryptor:
         return self._multi if self._multi is not None else self._fernet
 
 
+class VaultTransitBackend:
+    """Vault/OpenBao transit backend implementing :class:`EncryptionBackend`."""
+
+    def __init__(
+        self,
+        *,
+        vault_addr: str | None = None,
+        vault_token: str | None = None,
+        key_name: str | None = None,
+        mount: str | None = None,
+        timeout: float = 10.0,
+        client: httpx.Client | None = None,
+    ) -> None:
+        self._vault_addr = (vault_addr or os.environ.get("VAULT_ADDR", "")).rstrip("/")
+        self._vault_token = vault_token or os.environ.get("VAULT_TOKEN", "")
+        self._key_name = key_name or os.environ.get("VAULT_TRANSIT_KEY_NAME", "lucent-credentials")
+        self._mount = mount or os.environ.get("VAULT_TRANSIT_MOUNT", "transit")
+
+        if not self._vault_addr:
+            raise EncryptionError("Vault transit backend requires VAULT_ADDR")
+        if not self._vault_token:
+            raise EncryptionError("Vault transit backend requires VAULT_TOKEN")
+
+        headers = {"X-Vault-Token": self._vault_token}
+        namespace = os.environ.get("VAULT_NAMESPACE")
+        if namespace:
+            headers["X-Vault-Namespace"] = namespace
+
+        self._client = client or httpx.Client(
+            base_url=self._vault_addr,
+            headers=headers,
+            timeout=timeout,
+        )
+
+    def encrypt(self, plaintext: str) -> str:
+        encoded = b64encode(plaintext.encode("utf-8")).decode("ascii")
+        endpoint = f"/v1/{self._mount}/encrypt/{self._key_name}"
+        try:
+            resp = self._client.post(endpoint, json={"plaintext": encoded})
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise EncryptionError(
+                f"Vault transit encrypt request failed: {type(exc).__name__}"
+            ) from exc
+        try:
+            return resp.json()["data"]["ciphertext"]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise EncryptionError("Vault transit encrypt response missing ciphertext") from exc
+
+    def decrypt(self, ciphertext: str) -> str:
+        endpoint = f"/v1/{self._mount}/decrypt/{self._key_name}"
+        try:
+            resp = self._client.post(endpoint, json={"ciphertext": ciphertext})
+            resp.raise_for_status()
+            encoded = resp.json()["data"]["plaintext"]
+            return b64decode(encoded).decode("utf-8")
+        except httpx.HTTPError as exc:
+            raise EncryptionError(
+                f"Vault transit decrypt request failed: {type(exc).__name__}"
+            ) from exc
+        except (KeyError, TypeError, ValueError) as exc:
+            raise EncryptionError("Vault transit decrypt response missing plaintext") from exc
+        except Exception as exc:
+            raise EncryptionError(f"Vault transit decrypt decode failed: {exc}") from exc
+
+
+_default_backend: EncryptionBackend | None = None
+
+
+def get_encryption_backend(backend_name: str | None = None) -> EncryptionBackend:
+    """Get configured encryption backend from ``ENCRYPTION_BACKEND``."""
+    global _default_backend  # noqa: PLW0603
+    selected = (backend_name or os.environ.get("ENCRYPTION_BACKEND", "fernet")).strip().lower()
+    if _default_backend is not None and backend_name is None:
+        return _default_backend
+
+    if selected in {"", "fernet"}:
+        backend: EncryptionBackend = FernetBackend()
+    elif selected in {"vault", "transit", "vault_transit", "vault-transit"}:
+        backend = VaultTransitBackend()
+    else:
+        raise EncryptionError(
+            f"Unsupported ENCRYPTION_BACKEND='{selected}'. Use 'fernet' or 'vault_transit'."
+        )
+    if backend_name is None:
+        _default_backend = backend
+    return backend
+
+
+def reset_default_encryption_backend() -> None:
+    """Reset cached encryption backend (for tests)."""
+    global _default_backend  # noqa: PLW0603
+    _default_backend = None
+
+
+class BackendCredentialEncryptor:
+    """CredentialEncryptor adapter over a pluggable string backend."""
+
+    def __init__(
+        self,
+        backend: EncryptionBackend | None = None,
+        *,
+        legacy_fernet: "FernetEncryptor | None" = None,
+    ) -> None:
+        self._backend = backend or get_encryption_backend()
+        self._legacy_fernet = legacy_fernet
+        if self._legacy_fernet is None and not isinstance(self._backend, FernetBackend):
+            try:
+                self._legacy_fernet = FernetEncryptor()
+            except EncryptionError:
+                self._legacy_fernet = None
+
+    def encrypt(self, config: dict[str, Any]) -> bytes:
+        """Serialize config to JSON and encrypt through selected backend."""
+        try:
+            plaintext = json.dumps(config, separators=(",", ":"), sort_keys=True)
+            return self._backend.encrypt(plaintext).encode("utf-8")
+        except (TypeError, ValueError) as exc:
+            raise EncryptionError(f"Failed to serialize config for encryption: {exc}") from exc
+
+    def decrypt(self, data: bytes) -> dict[str, Any]:
+        """Decrypt ciphertext bytes back into a config dict."""
+        try:
+            plaintext = self._backend.decrypt(data.decode("utf-8"))
+            return json.loads(plaintext)
+        except (EncryptionError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            if self._legacy_fernet is not None and not isinstance(self._backend, FernetBackend):
+                return self._legacy_fernet.decrypt(data)
+            if isinstance(exc, EncryptionError):
+                raise exc
+            raise EncryptionError("Decryption failed with configured encryption backend") from exc
+
+    def encrypt_str(self, plaintext: str) -> str:
+        return self._backend.encrypt(plaintext)
+
+    def decrypt_str(self, ciphertext: str) -> str:
+        try:
+            return self._backend.decrypt(ciphertext)
+        except EncryptionError as exc:
+            if self._legacy_fernet is not None and not isinstance(self._backend, FernetBackend):
+                return self._legacy_fernet.decrypt_str(ciphertext)
+            raise exc
+
+    def rotate_key(self, old_key: str | bytes, new_key: str | bytes) -> None:
+        if isinstance(self._backend, FernetBackend):
+            self._backend.rotate_key(old_key=old_key, new_key=new_key)
+            return
+        raise EncryptionError("Key rotation is not supported for this backend")
+
+
+class FernetEncryptor(BackendCredentialEncryptor):
+    """Backwards-compatible credential encryptor using Fernet backend."""
+
+    def __init__(self, key: str | bytes | None = None) -> None:
+        super().__init__(backend=FernetBackend(key=key))
+
+    @property
+    def _fernet_backend(self) -> FernetBackend:
+        backend = self._backend
+        assert isinstance(backend, FernetBackend)
+        return backend
+
+    def rotate_key(self, old_key: str | bytes, new_key: str | bytes) -> None:
+        self._fernet_backend.rotate_key(old_key=old_key, new_key=new_key)
+
+
 # ---------------------------------------------------------------------------
 # Module-level helper functions
 # ---------------------------------------------------------------------------
 
-_default_encryptor: FernetEncryptor | None = None
+_default_encryptor: CredentialEncryptor | None = None
 
 
-def _get_default_encryptor() -> FernetEncryptor:
-    """Lazily create a module-level FernetEncryptor from environment."""
+def _get_default_encryptor() -> CredentialEncryptor:
+    """Lazily create a module-level credential encryptor from environment."""
     global _default_encryptor  # noqa: PLW0603
     if _default_encryptor is None:
-        _default_encryptor = FernetEncryptor()
+        _default_encryptor = BackendCredentialEncryptor()
     return _default_encryptor
 
 
@@ -202,3 +348,4 @@ def reset_default_encryptor() -> None:
     """Reset the cached default encryptor (for testing)."""
     global _default_encryptor  # noqa: PLW0603
     _default_encryptor = None
+    reset_default_encryption_backend()

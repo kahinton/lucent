@@ -508,6 +508,7 @@ def create_app() -> FastAPI:
     app.include_router(chat_router.router, prefix="/api", tags=["Chat"])
 
     # Include integrations routers
+    from lucent.integrations.credential_router import router as credentials_router
     from lucent.integrations.router import admin_router as integrations_admin_router
     from lucent.integrations.router import webhook_router as integrations_webhook_router
 
@@ -520,6 +521,11 @@ def create_app() -> FastAPI:
         integrations_webhook_router,
         prefix="/integrations",
         tags=["Integrations - Webhooks"],
+    )
+    app.include_router(
+        credentials_router,
+        prefix="/api/v1/integrations",
+        tags=["Credentials"],
     )
 
     # Include sandbox management router

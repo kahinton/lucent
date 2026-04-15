@@ -229,6 +229,39 @@ class TestGetMemory:
         assert "error" in result
         assert "Invalid" in result["error"]
 
+    async def test_get_memory_repo_acl_blocks_when_access_denied(
+        self, mcp_tools, auth_user, clean_test_data, monkeypatch
+    ):
+        prefix = clean_test_data
+        created = await _call(
+            mcp_tools,
+            "create_memory",
+            {
+                "type": "technical",
+                "content": f"{prefix} Private repo memory",
+                "username": f"{prefix}user",
+                "metadata": {"repo": "org/private-repo"},
+            },
+        )
+
+        async def _deny_access(self, user_id, repo_full_name):  # pragma: no cover - signature shim
+            return False
+
+        monkeypatch.setattr(
+            "lucent.integrations.github_repo_access_service.GitHubRepoAccessService.check_access",
+            _deny_access,
+        )
+
+        result = await _call(
+            mcp_tools,
+            "get_memory",
+            {
+                "memory_id": created["id"],
+            },
+        )
+        assert "error" in result
+        assert "not found" in result["error"].lower()
+
 
 # ============================================================================
 # get_memories (batch)
@@ -370,6 +403,53 @@ class TestSearchMemories:
         assert result["total_count"] >= 1
         for mem in result["memories"]:
             assert mem["type"] == "technical"
+
+    async def test_search_repo_acl_filters_repo_tagged_results(
+        self, mcp_tools, auth_user, clean_test_data, monkeypatch
+    ):
+        prefix = clean_test_data
+        await _call(
+            mcp_tools,
+            "create_memory",
+            {
+                "type": "technical",
+                "content": f"{prefix} private repo result",
+                "username": f"{prefix}user",
+                "metadata": {"repo": "org/private-repo"},
+                "tags": ["acl", "private"],
+            },
+        )
+        visible = await _call(
+            mcp_tools,
+            "create_memory",
+            {
+                "type": "experience",
+                "content": f"{prefix} visible result",
+                "username": f"{prefix}user",
+                "tags": ["acl", "visible"],
+            },
+        )
+
+        async def _deny_access(self, user_id, repo_full_name):  # pragma: no cover - signature shim
+            return False
+
+        monkeypatch.setattr(
+            "lucent.integrations.github_repo_access_service.GitHubRepoAccessService.check_access",
+            _deny_access,
+        )
+
+        result = await _call(
+            mcp_tools,
+            "search_memories",
+            {
+                "query": prefix,
+                "limit": 20,
+            },
+        )
+
+        ids = {m["id"] for m in result["memories"]}
+        assert visible["id"] in ids
+        assert all("private repo result" not in m["content"] for m in result["memories"])
 
     async def test_search_limit_and_offset(self, mcp_tools, auth_user, clean_test_data):
         """Test pagination with limit and offset."""
@@ -1505,6 +1585,50 @@ class TestExportMemories:
         assert "memories" in result
         for mem in result["memories"]:
             assert mem["importance"] >= 8
+
+    async def test_export_repo_acl_filters_repo_tagged_results(
+        self, mcp_tools, auth_user, clean_test_data, monkeypatch
+    ):
+        prefix = clean_test_data
+        await _call(
+            mcp_tools,
+            "create_memory",
+            {
+                "type": "technical",
+                "content": f"{prefix} Private repo export",
+                "username": f"{prefix}user",
+                "metadata": {"repo": "org/private-repo"},
+                "tags": ["acl-export", "private"],
+            },
+        )
+        await _call(
+            mcp_tools,
+            "create_memory",
+            {
+                "type": "technical",
+                "content": f"{prefix} Untagged export",
+                "username": f"{prefix}user",
+                "tags": ["acl-export", "visible"],
+            },
+        )
+
+        async def _deny_access(self, user_id, repo_full_name):  # pragma: no cover - signature shim
+            return False
+
+        monkeypatch.setattr(
+            "lucent.integrations.github_repo_access_service.GitHubRepoAccessService.check_access",
+            _deny_access,
+        )
+
+        result = await _call(
+            mcp_tools,
+            "export_memories",
+            {"tags": ["acl-export"]},
+        )
+
+        contents = {m["content"] for m in result["memories"]}
+        assert f"{prefix} Private repo export" not in contents
+        assert f"{prefix} Untagged export" in contents
 
 
 # ============================================================================
