@@ -1,0 +1,208 @@
+{% extends "base.html" %}
+
+{% block title %}Connections - Lucent{% endblock %}
+
+{% block content %}
+<div class="mb-8">
+    <h1 class="text-2xl font-bold text-gray-900">Connections</h1>
+    <p class="mt-1 text-sm text-gray-500">Connect Lucent to your tools — via environment tokens, personal access tokens, or OAuth</p>
+</div>
+
+{% if request.query_params.get('connected') %}
+<div class="mb-6 px-4 py-3 bg-green-50 border border-green-200 rounded-lg text-sm text-green-700">
+    ✓ Successfully connected! Your integration is now active.
+</div>
+{% endif %}
+{% if request.query_params.get('error') %}
+<div class="mb-6 px-4 py-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
+    Connection failed: {{ request.query_params.get('error') }}
+</div>
+{% endif %}
+
+<div class="space-y-5">
+    {% for provider in providers %}
+    {% set cred = connected.get(provider.id) %}
+    {% set env = env_connections.get(provider.id) %}
+    <div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+        <div class="p-5">
+            <!-- Provider header -->
+            <div class="flex items-center gap-3 mb-4">
+                {% if provider.id == 'github' %}
+                <div class="w-10 h-10 bg-gray-900 rounded-lg flex items-center justify-center shrink-0">
+                    <svg class="w-6 h-6 text-white" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
+                </div>
+                {% elif provider.id == 'slack' %}
+                <div class="w-10 h-10 bg-purple-600 rounded-lg flex items-center justify-center shrink-0">
+                    <svg class="w-5 h-5 text-white" fill="currentColor" viewBox="0 0 24 24"><path d="M5.042 15.165a2.528 2.528 0 0 1-2.52 2.523A2.528 2.528 0 0 1 0 15.165a2.527 2.527 0 0 1 2.522-2.52h2.52v2.52zM6.313 15.165a2.527 2.527 0 0 1 2.521-2.52 2.527 2.527 0 0 1 2.521 2.52v6.313A2.528 2.528 0 0 1 8.834 24a2.528 2.528 0 0 1-2.521-2.522v-6.313zM8.834 5.042a2.528 2.528 0 0 1-2.521-2.52A2.528 2.528 0 0 1 8.834 0a2.528 2.528 0 0 1 2.521 2.522v2.52H8.834zM8.834 6.313a2.528 2.528 0 0 1 2.521 2.521 2.528 2.528 0 0 1-2.521 2.521H2.522A2.528 2.528 0 0 1 0 8.834a2.528 2.528 0 0 1 2.522-2.521h6.312zM18.956 8.834a2.528 2.528 0 0 1 2.522-2.521A2.528 2.528 0 0 1 24 8.834a2.528 2.528 0 0 1-2.522 2.521h-2.522V8.834zM17.688 8.834a2.528 2.528 0 0 1-2.523 2.521 2.527 2.527 0 0 1-2.52-2.521V2.522A2.527 2.527 0 0 1 15.165 0a2.528 2.528 0 0 1 2.523 2.522v6.312zM15.165 18.956a2.528 2.528 0 0 1 2.523 2.522A2.528 2.528 0 0 1 15.165 24a2.527 2.527 0 0 1-2.52-2.522v-2.522h2.52zM15.165 17.688a2.527 2.527 0 0 1-2.52-2.523 2.526 2.526 0 0 1 2.52-2.52h6.313A2.527 2.527 0 0 1 24 15.165a2.528 2.528 0 0 1-2.522 2.523h-6.313z"/></svg>
+                </div>
+                {% elif provider.id == 'jira' %}
+                <div class="w-10 h-10 bg-blue-600 rounded-lg flex items-center justify-center shrink-0">
+                    <svg class="w-5 h-5 text-white" fill="currentColor" viewBox="0 0 24 24"><path d="M11.571 11.513H0a5.218 5.218 0 0 0 5.232 5.215h2.13v2.057A5.215 5.215 0 0 0 12.575 24V12.518a1.005 1.005 0 0 0-1.005-1.005zm5.723-5.756H5.736a5.215 5.215 0 0 0 5.215 5.214h2.129v2.058a5.218 5.218 0 0 0 5.215 5.214V6.758a1.001 1.001 0 0 0-1.001-1.001zM23.013 0H11.455a5.215 5.215 0 0 0 5.215 5.215h2.129v2.057A5.215 5.215 0 0 0 24.013 12.5V1.005A1.005 1.005 0 0 0 23.013 0z"/></svg>
+                </div>
+                {% endif %}
+                <div class="flex-1 min-w-0">
+                    <h3 class="text-base font-semibold text-gray-900">{{ provider.name }}</h3>
+                    <p class="text-xs text-gray-500">{{ provider.description }}</p>
+                </div>
+                {% if cred or env %}
+                <span class="flex items-center gap-1.5 px-2.5 py-1 bg-green-50 border border-green-200 rounded-full text-xs font-medium text-green-700">
+                    <span class="w-2 h-2 bg-green-500 rounded-full"></span>
+                    Connected
+                </span>
+                {% else %}
+                <span class="flex items-center gap-1.5 px-2.5 py-1 bg-gray-50 border border-gray-200 rounded-full text-xs text-gray-500">
+                    <span class="w-2 h-2 bg-gray-300 rounded-full"></span>
+                    Not connected
+                </span>
+                {% endif %}
+            </div>
+
+            <!-- Connection details / methods -->
+            {% if env and not cred %}
+            <!-- Env var connection (auto-detected) -->
+            <div class="px-4 py-3 bg-blue-50 border border-blue-100 rounded-lg">
+                <div class="flex items-center gap-2 text-xs">
+                    <svg class="w-3.5 h-3.5 text-blue-500" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" /></svg>
+                    <span class="font-medium text-blue-700">Auto-detected from environment</span>
+                    <span class="text-blue-500 ml-auto font-mono">{{ env.env_var }} = {{ env.masked_token }}</span>
+                </div>
+                <p class="text-[10px] text-blue-500 mt-1">This token is set as a server environment variable. It's available to all sessions.</p>
+            </div>
+            {% elif cred %}
+            <!-- Stored credential -->
+            <div class="px-4 py-3 bg-green-50 border border-green-100 rounded-lg">
+                <div class="flex items-center justify-between text-xs">
+                    <div class="flex items-center gap-2">
+                        <span class="font-medium text-green-700">{{ cred.display_name }}</span>
+                        <span class="px-1.5 py-0.5 bg-green-100 text-green-600 rounded text-[10px]">{{ cred.credential_kind }}</span>
+                    </div>
+                    <span class="text-green-600">{{ cred.scopes|join(', ') if cred.scopes else 'default scopes' }}</span>
+                </div>
+                {% if cred.access_token_expires_at %}
+                <p class="text-[10px] text-gray-500 mt-1">Token expires: {{ cred.access_token_expires_at.strftime('%Y-%m-%d %H:%M') }}</p>
+                {% endif %}
+            </div>
+            <div class="mt-3">
+                <form method="POST" action="/connections/{{ cred.id }}/revoke">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <button type="submit" class="px-3 py-1.5 text-xs font-medium text-red-600 bg-red-50 border border-red-200 rounded-lg hover:bg-red-100 transition-colors">Disconnect</button>
+                </form>
+            </div>
+            {% else %}
+            <!-- Not connected — show connection methods -->
+            <div class="space-y-3">
+                <!-- PAT input -->
+                <div class="border border-gray-200 rounded-lg p-3">
+                    <div class="flex items-center gap-2 mb-2">
+                        <svg class="w-3.5 h-3.5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 5.25a3 3 0 013 3m3 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121.75 8.25z" /></svg>
+                        <span class="text-xs font-medium text-gray-700">Personal Access Token</span>
+                        <a href="{{ provider.pat_url }}" target="_blank" rel="noopener" class="text-[10px] text-primary-600 hover:text-primary-700 ml-auto">Create a token →</a>
+                    </div>
+                    <div class="flex gap-2">
+                        <input type="password" data-pat-input="{{ provider.id }}" placeholder="{% if provider.pat_prefix %}{{ provider.pat_prefix }}...{% else %}Paste your token{% endif %}" class="flex-1 px-3 py-1.5 text-xs border border-gray-200 rounded-lg bg-gray-50 focus:bg-white focus:border-primary-300 focus:ring-2 focus:ring-primary-100 focus:outline-none font-mono">
+                        <button data-pat-save="{{ provider.id }}" class="px-3 py-1.5 text-xs font-medium text-white bg-primary-600 rounded-lg hover:bg-primary-700 transition-colors disabled:opacity-40">Save</button>
+                    </div>
+                    {% if not encryption_available %}
+                    <p class="text-[10px] text-amber-600 mt-1.5">⚠ Credential encryption not available. Ensure Vault/OpenBao is running and transit is configured.</p>
+                    {% endif %}
+                </div>
+
+                <!-- OAuth (if configured) -->
+                {% if oauth_configured.get(provider.id) %}
+                <div class="border border-gray-200 rounded-lg p-3">
+                    <div class="flex items-center justify-between">
+                        <div class="flex items-center gap-2">
+                            <svg class="w-3.5 h-3.5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M13.19 8.688a4.5 4.5 0 011.242 7.244l-4.5 4.5a4.5 4.5 0 01-6.364-6.364l1.757-1.757m13.35-.622l1.757-1.757a4.5 4.5 0 00-6.364-6.364l-4.5 4.5a4.5 4.5 0 001.242 7.244" /></svg>
+                            <span class="text-xs font-medium text-gray-700">OAuth</span>
+                        </div>
+                        <button data-oauth-connect="{{ provider.id }}" class="px-3 py-1.5 text-xs font-medium text-primary-700 bg-primary-50 border border-primary-200 rounded-lg hover:bg-primary-100 transition-colors">Connect with {{ provider.name }}</button>
+                    </div>
+                </div>
+                {% endif %}
+            </div>
+            {% endif %}
+        </div>
+    </div>
+    {% endfor %}
+</div>
+
+<script nonce="{{ request.state.csp_nonce }}">
+// PAT save handlers
+document.querySelectorAll('[data-pat-save]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+        const provider = btn.dataset.patSave;
+        const input = document.querySelector('[data-pat-input="' + provider + '"]');
+        const token = input.value.trim();
+        if (!token) return;
+        
+        btn.textContent = 'Saving...';
+        btn.disabled = true;
+        
+        try {
+            const resp = await fetch('/connections/pat', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ provider, token }),
+            });
+            const data = await resp.json();
+            
+            if (data.status === 'saved') {
+                window.location.reload();
+            } else {
+                alert(data.error || 'Failed to save token');
+                btn.textContent = 'Save';
+                btn.disabled = false;
+            }
+        } catch (e) {
+            alert('Save failed: ' + e.message);
+            btn.textContent = 'Save';
+            btn.disabled = false;
+        }
+    });
+});
+
+// Allow Enter key in PAT inputs
+document.querySelectorAll('[data-pat-input]').forEach(input => {
+    input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            const provider = input.dataset.patInput;
+            document.querySelector('[data-pat-save="' + provider + '"]').click();
+        }
+    });
+});
+
+// OAuth connect handlers
+document.querySelectorAll('[data-oauth-connect]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+        const provider = btn.dataset.oauthConnect;
+        btn.textContent = 'Connecting...';
+        btn.disabled = true;
+        
+        try {
+            const resp = await fetch('/connections/oauth/start', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    provider: provider,
+                    redirect_uri: window.location.origin + '/connections/oauth/callback',
+                }),
+            });
+            const data = await resp.json();
+            
+            if (data.authorization_url) {
+                window.location.href = data.authorization_url;
+            } else {
+                alert(data.error || 'Failed to start OAuth flow');
+                btn.textContent = 'Connect with ' + provider.charAt(0).toUpperCase() + provider.slice(1);
+                btn.disabled = false;
+            }
+        } catch (e) {
+            alert('Connection failed: ' + e.message);
+            btn.textContent = 'Connect with ' + provider.charAt(0).toUpperCase() + provider.slice(1);
+            btn.disabled = false;
+        }
+    });
+});
+</script>
+{% endblock %}

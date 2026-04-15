@@ -137,9 +137,9 @@ services:
       LUCENT_SECRET_PROVIDER: ${LUCENT_SECRET_PROVIDER:-builtin}
       LUCENT_SECRET_KEY: ${LUCENT_SECRET_KEY:-lucent-dev-secret-key-change-in-production}
       # Credential encryption for integrations (Slack/Discord). Only needed if you
-      # enable integrations. Generate with:
-      #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-      LUCENT_CREDENTIAL_KEY: ${LUCENT_CREDENTIAL_KEY:-}
+      # Credential encryption — uses Vault transit by default (no key management needed).
+      # Falls back to Fernet with LUCENT_CREDENTIAL_KEY if Vault is unavailable.
+      ENCRYPTION_BACKEND: vault_transit
       # OpenBao / Vault connectivity
       VAULT_ADDR: http://openbao:8200
       VAULT_TOKEN: ${VAULT_TOKEN:-change-me-insecure-dev-root-token}

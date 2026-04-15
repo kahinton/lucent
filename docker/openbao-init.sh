@@ -27,6 +27,10 @@ curl -sf -X POST "${VAULT_ADDR}/v1/sys/mounts/transit" \
 curl -sf -X POST "${VAULT_ADDR}/v1/transit/keys/lucent-secrets" \
   -H "X-Vault-Token: ${VAULT_TOKEN}" > /dev/null 2>&1 || true
 
+# Create Transit encryption key for credential storage
+curl -sf -X POST "${VAULT_ADDR}/v1/transit/keys/lucent-credentials" \
+  -H "X-Vault-Token: ${VAULT_TOKEN}" > /dev/null 2>&1 || true
+
 # Create lucent-policy
 curl -sf -X PUT "${VAULT_ADDR}/v1/sys/policies/acl/lucent-policy" \
   -H "X-Vault-Token: ${VAULT_TOKEN}" \

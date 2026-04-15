@@ -11,6 +11,7 @@ from . import (
     audit,
     auth,
     chat,
+    connections,
     daemon,
     dashboard,
     definitions,
@@ -44,3 +45,4 @@ router.include_router(settings.router)
 router.include_router(requests_routes.router)
 router.include_router(schedules.router)
 router.include_router(secrets.router)
+router.include_router(connections.router)
