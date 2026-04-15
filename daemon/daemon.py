@@ -2390,18 +2390,10 @@ class LucentDaemon:
                         org_id,
                     )
                     if existing:
-                        # Update prompt + description on existing system schedules so
-                        # maintenance behavior changes take effect without manual DB edits.
-                        await conn.execute(
-                            """UPDATE schedules
-                               SET prompt = $1,
-                                   description = $2,
-                                   updated_at = now()
-                               WHERE id = $3""",
-                            sched["prompt"],
-                            sched["description"],
-                            existing["id"],
-                        )
+                        # System schedule already exists — do NOT overwrite the prompt.
+                        # The database is the source of truth for schedule prompts.
+                        # Prompts are editable via the Schedules UI/API.
+                        # The Python constants are only used for initial seeding.
                         updated += 1
                         continue
 
@@ -2436,7 +2428,7 @@ class LucentDaemon:
                 if created:
                     log(f"Seeded {created} system schedule(s)")
                 if updated:
-                    log(f"Refreshed prompts for {updated} system schedule(s)")
+                    log(f"Verified {updated} existing system schedule(s)")
                 if not created and not updated:
                     log("System schedules verified (all exist)")
 
