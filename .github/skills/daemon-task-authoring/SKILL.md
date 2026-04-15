@@ -43,6 +43,12 @@ create_request(
 
 The daemon picks it up, creates tasks, and dispatches to the appropriate agent.
 
+### Target Repository
+
+Every request that involves code work MUST set `target_repo` in owner/repo format. This enables automatic injection of technical memories into the working agent's context. Optionally set `target_paths` to narrow which areas' conventions are loaded.
+
+Without `target_repo`, the working agent starts with no codebase context and must discover conventions through manual memory searches — which is slow and unreliable.
+
 ## Writing Descriptions That Work
 
 The description is the sub-agent's **entire understanding of what to do** (combined with its agent definition). Write it as instructions for a competent engineer who has never seen the codebase.

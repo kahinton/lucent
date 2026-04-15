@@ -54,6 +54,21 @@ create_request(
 )
 ```
 
+### Repository Targeting
+
+When a request involves work on a specific codebase, set `target_repo` (owner/repo format) and optionally `target_paths` (specific directories). This automatically injects relevant technical memories into the working agent's context at dispatch time.
+
+```
+create_request(
+    title="Add rate limiting to the search endpoint",
+    description="...",
+    target_repo="octocat/hello-world",
+    target_paths=["src/api/", "src/middleware/"]
+)
+```
+
+This eliminates the need to manually instruct agents to "search for relevant memories" — the system handles it. Always set `target_repo` when the work involves code changes.
+
 Then create each task with the fields specified in the **daemon-task-authoring** skill. Use `sequence_order` to express dependencies:
 
 **Sequential** (builds on prior results): `0 → 1 → 2`

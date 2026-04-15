@@ -350,7 +350,23 @@ MEMORY_CONSOLIDATION_PROMPT = (
     "- Each scope should have AT MOST one technical memory.\n"
     "- Do NOT treat metadata normalization as optional; it is a required pass every run.\n"
     "- NEVER touch memories tagged 'pinned' or 'do_not_consolidate'.\n"
-    "- Content should be practical: what does a developer need to know to work here?"
+    "- Content should be practical: what does a developer need to know to work here?\n\n"
+    "## Content Quality: Focus on WHY, not WHAT\n\n"
+    "Technical memories are used as working context for agents executing tasks. "
+    "They should describe conventions, patterns, design decisions, and constraints — "
+    "NOT be a changelog of what was done.\n\n"
+    "GOOD (why/how — useful for future work):\n"
+    "- 'Uses repository pattern with asyncpg connection pools'\n"
+    "- 'ACL enforcement: user_id = caller OR (org_id AND shared = true)'\n"
+    "- 'All API endpoints require AuthenticatedUser dependency for API key auth'\n"
+    "- 'Migrations are sequential numbered SQL files, applied on startup'\n\n"
+    "BAD (what — reads like a commit log, not useful as context):\n"
+    "- 'Added memory_scope_user_id column in migration 057'\n"
+    "- 'Fixed bug where get_accessible() failed under scoped keys'\n"
+    "- 'Implemented multi-engine LLM abstraction in March 2026'\n\n"
+    "When consolidating, strip out changelog-style entries and distill the "
+    "underlying conventions and patterns. A developer reading this memory should "
+    "understand HOW to work in this area, not WHAT was historically done."
 )
 
 LEARNING_EXTRACTION_PROMPT = (
@@ -3247,6 +3263,15 @@ class LucentDaemon:
                     )
                 task_context = "\n\n".join(context_parts)
 
+                # Inject relevant technical memories if request targets a repo
+                if request_id:
+                    try:
+                        tech_context = await self._get_technical_context_for_request(request_id)
+                        if tech_context:
+                            task_context = task_context + "\n\n" + tech_context if task_context else tech_context
+                    except Exception as e:
+                        log(f"Technical context injection failed (non-fatal): {e}", "DEBUG")
+
             # Build and run the sub-agent
             agent_def_id = task.get("agent_definition_id")
             sandbox_config = task.get("sandbox_config")
@@ -3667,6 +3692,96 @@ class LucentDaemon:
         manager = get_sandbox_manager()
         await manager.destroy(sandbox_id)
         log(f"Sandbox {sandbox_id[:12]} destroyed")
+
+    async def _get_technical_context_for_request(self, request_id: str) -> str | None:
+        """Look up the request's target_repo and inject relevant technical memories.
+
+        Returns a formatted context string with relevant technical memories,
+        or None if the request has no target_repo.
+        """
+        try:
+            req = await RequestAPI.get_request(request_id)
+            if not req:
+                return None
+
+            target_repo = req.get("target_repo")
+            target_paths = req.get("target_paths") or []
+
+            if not target_repo:
+                return None
+
+            # Search for technical memories matching this repo
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(
+                    f"{API_BASE}/search",
+                    headers=API_HEADERS,
+                    params={
+                        "q": target_repo,
+                        "type": "technical",
+                        "limit": "20",
+                    },
+                )
+                if resp.status_code != 200:
+                    return None
+
+                memories = resp.json().get("memories", [])
+
+            if not memories:
+                return None
+
+            # Filter to memories that match the target repo
+            relevant = []
+            for mem in memories:
+                meta = mem.get("metadata") or {}
+                mem_repo = meta.get("repo", "")
+                if mem_repo != target_repo:
+                    continue
+                relevant.append(mem)
+
+            if not relevant:
+                return None
+
+            # If target_paths specified, prioritize those but include repo-level too
+            if target_paths:
+                prioritized = []
+                general = []
+                for mem in relevant:
+                    meta = mem.get("metadata") or {}
+                    mem_dir = meta.get("directory", "")
+                    mem_file = meta.get("filename", "")
+                    is_targeted = any(
+                        (mem_dir and mem_dir.startswith(p)) or
+                        (mem_file and mem_file.startswith(p)) or
+                        (not mem_dir and not mem_file)  # repo-level always included
+                        for p in target_paths
+                    )
+                    if is_targeted:
+                        prioritized.append(mem)
+                    else:
+                        general.append(mem)
+                # Show prioritized first, then general context (limited)
+                relevant = prioritized + general[:3]
+
+            # Format the context
+            parts = [
+                f"--- TECHNICAL CONTEXT ({target_repo}) ---",
+                f"The following technical memories describe the codebase conventions and patterns for this repository.",
+                f"Follow these conventions in your work. These represent the established standards.\n",
+            ]
+
+            for mem in relevant:
+                meta = mem.get("metadata") or {}
+                scope = meta.get("filename") or meta.get("directory") or "(repo-level)"
+                content = mem.get("content", "")
+                parts.append(f"### {scope}")
+                parts.append(content)
+                parts.append("")
+
+            return "\n".join(parts)
+
+        except Exception as e:
+            log(f"Failed to fetch technical context: {e}", "DEBUG")
+            return None
 
     async def _resolve_sandbox_template(
         self,

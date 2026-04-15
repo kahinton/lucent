@@ -114,6 +114,20 @@ Every memory should answer three questions:
 | `goal` | Objectives tracked over time — status updates appended |
 | `individual` | Info about people — preferences, roles, working style |
 
+### Technical Memory Content Quality
+
+Technical memories are injected as working context for agents executing tasks. Write them as reference material, not changelogs.
+
+**Focus on WHY and HOW — not WHAT was done:**
+
+| Good (conventions/patterns) | Bad (changelog entries) |
+|---|---|
+| "Uses repository pattern with asyncpg pools" | "Added memory_scope column in migration 057" |
+| "All API endpoints require AuthenticatedUser" | "Implemented scoped API keys on April 10" |
+| "ACL: user_id = caller OR (org AND shared)" | "Fixed bug where search showed wrong results" |
+
+When creating or updating technical memories, distill the underlying convention — the thing a future developer needs to know to work correctly in this area. Strip specific dates, migration numbers, and "we did X" language unless it's a critical constraint.
+
 ### Default Sharing by Type
 
 | Type | Default `shared` | Rationale |

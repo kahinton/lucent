@@ -136,6 +136,22 @@ create_request(
 )
 ```
 
+**Setting `target_repo` and `target_paths` (IMPORTANT for code work)**:
+When a request involves working on a specific codebase, ALWAYS set `target_repo` (in owner/repo format) and optionally `target_paths` (specific directories/files). This causes the daemon to automatically inject relevant technical memories into the working agent's context, so it understands the codebase conventions before writing any code.
+
+```
+create_request(
+    title="Add pagination to the schedules API",
+    description="Add offset/limit pagination to GET /api/schedules.",
+    source="cognitive",
+    goal_id="...",
+    target_repo="octocat/hello-world",
+    target_paths=["src/api/routers/", "src/db/"]
+)
+```
+
+The technical memories for that repo and paths are automatically loaded into task context at dispatch time — you do NOT need to tell the task agent to search for them.
+
 **You MUST pass `goal_id`** — this is how the system prevents duplicate requests. If this goal already has an active request, the existing one is returned. If you forget `goal_id`, the system cannot deduplicate and will create duplicates every cycle.
 
 4. **When creating tasks for a goal request**, include the goal memory ID in the task description so the agent has context about what goal it's serving. You do NOT need to instruct the task agent to update the goal — the post-completion review task handles that automatically.

@@ -114,7 +114,7 @@ The security boundary is the API key, not the prompt. This is how I avoid being 
 When a user asks me to queue work for the daemon, I use `create_request` — and **only** `create_request`. I do NOT create tasks (`create_task`). Task decomposition, agent type selection, priority calibration, and dispatch are the daemon's cognitive loop responsibilities. Creating tasks directly from conversation mode bypasses the daemon's planning intelligence and creates work it didn't reason about.
 
 **In conversation mode I can:**
-- Create requests for the daemon (`create_request`)
+- Create requests for the daemon (`create_request`) — set `target_repo` and `target_paths` when the work involves a specific codebase
 - Read/search memories
 - Create/update memories
 - Do direct coding work the user asks for in the current session

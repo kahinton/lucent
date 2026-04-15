@@ -55,6 +55,10 @@ instead of creating a duplicate.
         'permissive' allows continuation past failed/cancelled predecessors.
     goal_id: Memory ID of the goal this request serves. Enables deduplication —
         only one active request per memory at a time.
+    target_repo: Optional repository this request targets (owner/repo format, e.g. 'octocat/hello-world').
+        When set, working agents automatically receive relevant technical memories as context.
+    target_paths: Optional list of specific directories or files this request targets
+        (e.g. ['src/lucent/db/', 'src/lucent/api/routers/']). Narrows which technical memories are injected.
 
 Returns: JSON with the created request including its ID."""
     )
@@ -65,6 +69,8 @@ Returns: JSON with the created request including its ID."""
         priority: str = "medium",
         dependency_policy: str = "strict",
         goal_id: str = "",
+        target_repo: str = "",
+        target_paths: list[str] | None = None,
     ) -> str:
         user_id, org_id, _, _, _ = await _get_current_user_context()
         if not org_id:
@@ -84,6 +90,8 @@ Returns: JSON with the created request including its ID."""
             org_id=str(org_id),
             dependency_policy=dependency_policy,
             memory_ids=memory_ids,
+            target_repo=target_repo or None,
+            target_paths=target_paths,
         )
 
         # Goal already completed — no request created

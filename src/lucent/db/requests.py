@@ -246,6 +246,8 @@ class RequestRepository:
         created_by: str | None = None,
         dependency_policy: str = "strict",
         memory_ids: list[dict] | None = None,
+        target_repo: str | None = None,
+        target_paths: list[str] | None = None,
     ) -> dict:
         if source not in VALID_REQUEST_SOURCES:
             valid_sources = ", ".join(sorted(VALID_REQUEST_SOURCES))
@@ -300,8 +302,9 @@ class RequestRepository:
                 """INSERT INTO requests
                    (title, description, source, priority, created_by,
                     organization_id, dependency_policy,
-                    approval_status, approved_at)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    approval_status, approved_at,
+                    target_repo, target_paths)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                    RETURNING *""",
                 title,
                 description,
@@ -312,6 +315,8 @@ class RequestRepository:
                 dependency_policy,
                 approval,
                 now,
+                target_repo,
+                target_paths,
             )
 
             # Link memories to the new request
