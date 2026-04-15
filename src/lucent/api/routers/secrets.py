@@ -16,7 +16,7 @@ from lucent.access_control import AccessControlService
 from lucent.api.deps import AdminUser, AuthenticatedUser
 from lucent.db import get_pool
 from lucent.db.audit import AuditRepository
-from lucent.integrations.encryption import EncryptionError, FernetEncryptor
+from lucent.integrations.encryption import BackendCredentialEncryptor, EncryptionError
 from lucent.secrets import SecretRegistry, SecretScope
 from lucent.secrets.utils import SECRET_REF_PREFIX
 
@@ -311,7 +311,7 @@ async def migrate_plaintext_configs(user: AdminUser):
         )
         if integration_rows:
             try:
-                encryptor = FernetEncryptor()
+                encryptor = BackendCredentialEncryptor()
             except EncryptionError as exc:
                 raise HTTPException(
                     status_code=500,

@@ -30,7 +30,7 @@ from lucent.db.audit import (
     AuditRepository,
 )
 from lucent.db.pool import get_pool
-from lucent.integrations.encryption import EncryptionError, FernetEncryptor
+from lucent.integrations.encryption import BackendCredentialEncryptor, EncryptionError
 from lucent.integrations.models import (
     IntegrationCreate,
     IntegrationListResponse,
@@ -68,15 +68,15 @@ admin_router = APIRouter(tags=["Integrations - Admin"])
 # ---------------------------------------------------------------------------
 
 
-def _get_encryptor() -> FernetEncryptor:
-    """Lazily create a FernetEncryptor from the environment."""
+def _get_encryptor() -> BackendCredentialEncryptor:
+    """Lazily create a BackendCredentialEncryptor from the environment."""
     try:
-        return FernetEncryptor()
+        return BackendCredentialEncryptor()
     except EncryptionError as exc:
         logger.error("Credential encryption not configured: %s", exc)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Credential encryption not configured on this server",
+            detail="Secret store (Vault/OpenBao) not configured. Credential encryption requires a running transit backend.",
         ) from exc
 
 
@@ -207,7 +207,7 @@ async def receive_webhook(
             integration = dict(rows[0])
 
             # Build adapter
-            encryptor = FernetEncryptor()
+            encryptor = BackendCredentialEncryptor()
             config = encryptor.decrypt(integration["encrypted_config"])
             config = await _resolve_integration_config_secrets(config, integration)
 

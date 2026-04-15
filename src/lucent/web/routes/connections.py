@@ -55,7 +55,7 @@ async def connections_page(request: Request):
     # Detect env var connections
     env_connections = _detect_env_connections()
 
-    # Check if encryption is available (Vault transit or Fernet)
+    # Check if encryption is available (Vault transit)
     encryption_available = False
     encryption_method = None
     try:
@@ -63,8 +63,8 @@ async def connections_page(request: Request):
         backend = get_encryption_backend()
         encryption_available = True
         encryption_method = type(backend).__name__
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Credential encryption unavailable: %s", exc)
 
     # Check which OAuth providers are configured
     oauth_configured = {}

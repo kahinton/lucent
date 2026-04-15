@@ -17,13 +17,49 @@ from lucent.integrations.credential_models import (
     CredentialScopeType,
 )
 from lucent.integrations.credential_service import CredentialService
-from lucent.integrations.encryption import FernetEncryptor
+from lucent.integrations.encryption import BackendCredentialEncryptor, VaultTransitBackend
 from lucent.integrations.oauth import OAuthTokenResponse
 
 
+class _FakeResponse:
+    def __init__(self, status_code, payload=None):
+        self.status_code = status_code
+        self._payload = payload or {}
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            import httpx
+            raise httpx.HTTPStatusError("fail", request=httpx.Request("POST", "http://vault.test"), response=httpx.Response(self.status_code))
+    def json(self):
+        return self._payload
+
+class _FakeClient:
+    def __init__(self):
+        self._store = {}
+        self._counter = 0
+    def post(self, url, json):
+        if "/encrypt/" in url:
+            self._counter += 1
+            ct = f"vault:v1:ct{self._counter}"
+            self._store[ct] = json["plaintext"]
+            return _FakeResponse(200, {"data": {"ciphertext": ct}})
+        elif "/decrypt/" in url:
+            ct = json["ciphertext"]
+            if ct not in self._store:
+                return _FakeResponse(400)
+            return _FakeResponse(200, {"data": {"plaintext": self._store[ct]}})
+        return _FakeResponse(404)
+
+
 @pytest.fixture
-def encryptor() -> FernetEncryptor:
-    return FernetEncryptor(key="j4Gpi8xvXWMmV1YvKdxAab4Q7Q2lmfLBN8f2Scf8CIY=")
+def encryptor() -> BackendCredentialEncryptor:
+    client = _FakeClient()
+    backend = VaultTransitBackend(
+        vault_addr="http://vault.test",
+        vault_token="test-token",
+        key_name="lucent-credentials",
+        client=client,
+    )
+    return BackendCredentialEncryptor(backend=backend)
 
 
 @pytest.fixture
@@ -51,7 +87,7 @@ def admin_user() -> CurrentUser:
 @pytest.mark.asyncio
 async def test_member_cannot_create_agent_scoped_credential(
     member_user: CurrentUser,
-    encryptor: FernetEncryptor,
+    encryptor: BackendCredentialEncryptor,
 ) -> None:
     repo = AsyncMock()
     svc = CredentialService(repo, oauth=SimpleNamespace(), encryptor=encryptor)
@@ -72,7 +108,7 @@ async def test_member_cannot_create_agent_scoped_credential(
 @pytest.mark.asyncio
 async def test_refresh_rotates_refresh_token_version(
     admin_user: CurrentUser,
-    encryptor: FernetEncryptor,
+    encryptor: BackendCredentialEncryptor,
 ) -> None:
     credential_id = uuid4()
     org_id = admin_user.organization_id
@@ -125,7 +161,7 @@ async def test_refresh_rotates_refresh_token_version(
 @pytest.mark.asyncio
 async def test_refresh_fails_without_refresh_token(
     admin_user: CurrentUser,
-    encryptor: FernetEncryptor,
+    encryptor: BackendCredentialEncryptor,
 ) -> None:
     credential_id = uuid4()
 

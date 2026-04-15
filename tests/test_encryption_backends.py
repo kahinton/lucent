@@ -6,13 +6,10 @@ from base64 import b64encode
 
 import httpx
 import pytest
-from cryptography.fernet import Fernet
 
 from lucent.integrations.encryption import (
     BackendCredentialEncryptor,
     EncryptionError,
-    FernetBackend,
-    FernetEncryptor,
     VaultTransitBackend,
     get_encryption_backend,
     reset_default_encryption_backend,
@@ -35,13 +32,26 @@ class _FakeResponse:
 
 
 class _FakeClient:
-    def __init__(self, responses: list[_FakeResponse]) -> None:
-        self._responses = responses
+    """Deterministic fake Vault HTTP client."""
+
+    def __init__(self) -> None:
         self.calls: list[tuple[str, dict]] = []
+        self._store: dict[str, str] = {}
+        self._counter = 0
 
     def post(self, url: str, json: dict) -> _FakeResponse:
         self.calls.append((url, json))
-        return self._responses.pop(0)
+        if "/encrypt/" in url:
+            self._counter += 1
+            ct = f"vault:v1:ct{self._counter}"
+            self._store[ct] = json["plaintext"]
+            return _FakeResponse(200, {"data": {"ciphertext": ct}})
+        elif "/decrypt/" in url:
+            ct = json["ciphertext"]
+            if ct not in self._store:
+                return _FakeResponse(400)
+            return _FakeResponse(200, {"data": {"plaintext": self._store[ct]}})
+        return _FakeResponse(404)
 
 
 class _FailingVaultBackend:
@@ -52,18 +62,8 @@ class _FailingVaultBackend:
         raise EncryptionError("nope")
 
 
-def test_fernet_backend_round_trip() -> None:
-    backend = FernetBackend(key=Fernet.generate_key())
-    ciphertext = backend.encrypt("hello")
-    assert backend.decrypt(ciphertext) == "hello"
-
-
 def test_vault_transit_backend_encrypt_decrypt_round_trip() -> None:
-    responses = [
-        _FakeResponse(200, {"data": {"ciphertext": "vault:v1:abc123"}}),
-        _FakeResponse(200, {"data": {"plaintext": b64encode(b"hello").decode("ascii")}}),
-    ]
-    client = _FakeClient(responses)
+    client = _FakeClient()
     backend = VaultTransitBackend(
         vault_addr="http://vault.test",
         vault_token="token",
@@ -72,14 +72,14 @@ def test_vault_transit_backend_encrypt_decrypt_round_trip() -> None:
     )
 
     ciphertext = backend.encrypt("hello")
-    assert ciphertext == "vault:v1:abc123"
+    assert ciphertext == "vault:v1:ct1"
     assert client.calls[0][0] == "/v1/transit/encrypt/lucent-credentials"
     assert client.calls[0][1]["plaintext"] == b64encode(b"hello").decode("ascii")
 
     plaintext = backend.decrypt(ciphertext)
     assert plaintext == "hello"
     assert client.calls[1][0] == "/v1/transit/decrypt/lucent-credentials"
-    assert client.calls[1][1]["ciphertext"] == "vault:v1:abc123"
+    assert client.calls[1][1]["ciphertext"] == "vault:v1:ct1"
 
 
 def test_vault_transit_backend_missing_config_raises(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -103,35 +103,51 @@ def test_vault_transit_backend_unreachable_raises() -> None:
         backend.encrypt("hello")
 
 
-def test_backend_factory_uses_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_backend_factory_returns_vault(monkeypatch: pytest.MonkeyPatch) -> None:
     reset_default_encryption_backend()
-    monkeypatch.setenv("ENCRYPTION_BACKEND", "fernet")
-    monkeypatch.setenv("LUCENT_CREDENTIAL_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("VAULT_ADDR", "http://vault.test")
+    monkeypatch.setenv("VAULT_TOKEN", "test-token")
     backend = get_encryption_backend()
-    assert isinstance(backend, FernetBackend)
-
-
-def test_backend_factory_rejects_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert isinstance(backend, VaultTransitBackend)
     reset_default_encryption_backend()
-    monkeypatch.setenv("ENCRYPTION_BACKEND", "unknown")
-    with pytest.raises(EncryptionError, match="Unsupported ENCRYPTION_BACKEND"):
+
+
+def test_backend_factory_missing_vault_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    reset_default_encryption_backend()
+    monkeypatch.delenv("VAULT_ADDR", raising=False)
+    monkeypatch.delenv("VAULT_TOKEN", raising=False)
+    with pytest.raises(EncryptionError, match="VAULT_ADDR"):
         get_encryption_backend()
+    reset_default_encryption_backend()
 
 
 def test_backend_credential_encryptor_contract() -> None:
-    encryptor = BackendCredentialEncryptor(backend=FernetBackend(key=Fernet.generate_key()))
+    client = _FakeClient()
+    backend = VaultTransitBackend(
+        vault_addr="http://vault.test",
+        vault_token="token",
+        client=client,
+    )
+    encryptor = BackendCredentialEncryptor(backend=backend)
     payload = {"access_token": "token", "refresh_token": "refresh"}
     ciphertext = encryptor.encrypt(payload)
     assert isinstance(ciphertext, bytes)
     assert encryptor.decrypt(ciphertext) == payload
 
 
-def test_backend_credential_encryptor_fallback_to_legacy_fernet() -> None:
-    legacy = FernetEncryptor(key=Fernet.generate_key())
-    legacy_ciphertext = legacy.encrypt({"token": "legacy"})
+def test_backend_credential_encryptor_decrypt_failure_raises() -> None:
+    encryptor = BackendCredentialEncryptor(backend=_FailingVaultBackend())
+    with pytest.raises(EncryptionError, match="nope"):
+        encryptor.decrypt(b"some-ciphertext")
 
-    encryptor = BackendCredentialEncryptor(
-        backend=_FailingVaultBackend(),
-        legacy_fernet=legacy,
+
+def test_backend_credential_encryptor_rotate_key_raises() -> None:
+    client = _FakeClient()
+    backend = VaultTransitBackend(
+        vault_addr="http://vault.test",
+        vault_token="token",
+        client=client,
     )
-    assert encryptor.decrypt(legacy_ciphertext) == {"token": "legacy"}
+    encryptor = BackendCredentialEncryptor(backend=backend)
+    with pytest.raises(EncryptionError, match="managed by the secret store"):
+        encryptor.rotate_key("old", "new")

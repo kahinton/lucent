@@ -342,7 +342,7 @@ class CredentialService:
             except EncryptionError as exc:
                 raise HTTPException(
                     status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    "Credential encryption not configured on this server",
+                    "Secret store (Vault/OpenBao) not configured. Credential encryption requires a running transit backend.",
                 ) from exc
         return self._encryptor
 
