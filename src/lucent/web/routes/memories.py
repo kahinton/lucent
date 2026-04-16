@@ -14,9 +14,19 @@ from lucent.db import (
 )
 from lucent.integrations.github_repo_access_service import GitHubRepoAccessService
 from lucent.mode import is_team_mode
+from lucent.rbac import Role
 from lucent.services.memory_access_service import MemoryAccessService
 
 from ._shared import _build_metadata_from_form, _check_csrf, get_user_context, templates
+
+
+def _build_memory_access(pool, user) -> MemoryAccessService:
+    """Build a MemoryAccessService with admin detection from the current user."""
+    return MemoryAccessService(
+        MemoryRepository(pool),
+        GitHubRepoAccessService(pool),
+        is_admin=user.role in (Role.ADMIN, Role.OWNER),
+    )
 
 router = APIRouter()
 
@@ -38,7 +48,7 @@ async def memories_list(
     user = await get_user_context(request)
     pool = await get_pool()
     repo = MemoryRepository(pool)
-    memory_access = MemoryAccessService(repo, GitHubRepoAccessService(pool))
+    memory_access = _build_memory_access(pool, user)
     access_repo = AccessRepository(pool)
 
     # Treat empty strings as None
@@ -279,7 +289,7 @@ async def memory_detail(request: Request, memory_id: UUID):
     pool = await get_pool()
 
     repo = MemoryRepository(pool)
-    memory_access = MemoryAccessService(repo, GitHubRepoAccessService(pool))
+    memory_access = _build_memory_access(pool, user)
     audit_repo = AuditRepository(pool)
     access_repo = AccessRepository(pool)
 
@@ -291,6 +301,13 @@ async def memory_detail(request: Request, memory_id: UUID):
     )
     if memory is None:
         raise HTTPException(status_code=404, detail="Memory not found")
+    if memory.get("_access_denied"):
+        repo_name = (memory.get("metadata") or {}).get("repo", "unknown")
+        raise HTTPException(
+            status_code=403,
+            detail=f"Access denied — you don't have access to the repository '{repo_name}'. "
+                   f"Connect your GitHub account on the Connections page to verify access.",
+        )
 
     # Log access
     await access_repo.log_access(
@@ -335,7 +352,7 @@ async def memory_edit_form(request: Request, memory_id: UUID):
     user = await get_user_context(request)
     pool = await get_pool()
     repo = MemoryRepository(pool)
-    memory_access = MemoryAccessService(repo, GitHubRepoAccessService(pool))
+    memory_access = _build_memory_access(pool, user)
     user_repo = UserRepository(pool)
 
     memory = await memory_access.get_accessible(
@@ -417,7 +434,7 @@ async def memory_edit_submit(
     pool = await get_pool()
 
     repo = MemoryRepository(pool)
-    memory_access = MemoryAccessService(repo, GitHubRepoAccessService(pool))
+    memory_access = _build_memory_access(pool, user)
     audit_repo = AuditRepository(pool)
 
     # Get existing to check ownership
@@ -527,7 +544,7 @@ async def memory_share(request: Request, memory_id: UUID):
     pool = await get_pool()
 
     repo = MemoryRepository(pool)
-    memory_access = MemoryAccessService(repo, GitHubRepoAccessService(pool))
+    memory_access = _build_memory_access(pool, user)
     audit_repo = AuditRepository(pool)
 
     memory = await memory_access.get_accessible(
@@ -577,7 +594,7 @@ async def memory_delete(request: Request, memory_id: UUID):
     pool = await get_pool()
 
     repo = MemoryRepository(pool)
-    memory_access = MemoryAccessService(repo, GitHubRepoAccessService(pool))
+    memory_access = _build_memory_access(pool, user)
     audit_repo = AuditRepository(pool)
 
     memory = await memory_access.get_accessible(
@@ -636,7 +653,7 @@ async def memory_restore(request: Request, memory_id: UUID, version: int):
     pool = await get_pool()
 
     repo = MemoryRepository(pool)
-    memory_access = MemoryAccessService(repo, GitHubRepoAccessService(pool))
+    memory_access = _build_memory_access(pool, user)
     audit_repo = AuditRepository(pool)
 
     memory = await memory_access.get_accessible(
@@ -738,9 +755,37 @@ async def knowledge_tree(request: Request):
     async with pool.acquire() as conn:
         rows = await conn.fetch(query, str(user.id), str(user.organization_id))
 
-    # Build tree structure: {repo: {dirs: {dir: {files: [...], memory: ...}}, memory: ..., root_files: [...]}}
-    tree = {}
+    # Filter by GitHub repo existence — flag repos that don't actually exist
+    # Admins always see everything but get warnings about non-existent repos
+    from lucent.integrations.github_repo_access_service import GitHubRepoAccessService
+    from lucent.rbac import Role
+
+    github_access = GitHubRepoAccessService(pool)
+    is_admin = user.role in (Role.ADMIN, Role.OWNER)
+
+    accessible_rows = []
+    inaccessible_rows = []
     for row in rows:
+        r = dict(row)
+        repo_name = r.get("repo", "")
+        if repo_name and "/" in repo_name:
+            exists = await github_access.check_repo_exists(repo_name)
+            if exists is False:
+                # Repo confirmed not to exist — this is a data error
+                inaccessible_rows.append(r)
+                if is_admin:
+                    # Admins still see it in the tree, but it's also flagged
+                    accessible_rows.append(r)
+            else:
+                # Repo exists (True) or we can't determine (None) — show it
+                accessible_rows.append(r)
+        else:
+            accessible_rows.append(r)
+
+    # Build tree structure from accessible rows only
+    tree = {}
+    for row in accessible_rows:
+        r = row if isinstance(row, dict) else dict(row)
         r = dict(row)
         repo_name = r["repo"] or "unknown"
         directory = r["directory"]
@@ -783,8 +828,24 @@ async def knowledge_tree(request: Request):
 
     tree_json = _json.dumps(tree, default=_serialize)
 
+    # Build inaccessible repos summary for admin view
+    inaccessible_repos = {}
+    for r in inaccessible_rows:
+        rname = r.get("repo", "unknown")
+        if rname not in inaccessible_repos:
+            inaccessible_repos[rname] = 0
+        inaccessible_repos[rname] += 1
+
     return templates.TemplateResponse(
         request,
         "knowledge_tree.html",
-        {"user": user, "tree": tree, "tree_json": tree_json, "total_memories": len(rows)},
+        {
+            "user": user,
+            "tree": tree,
+            "tree_json": tree_json,
+            "total_memories": len(accessible_rows),
+            "inaccessible_repos": inaccessible_repos if is_admin else {},
+            "inaccessible_count": len(inaccessible_rows),
+            "is_admin": is_admin,
+        },
     )

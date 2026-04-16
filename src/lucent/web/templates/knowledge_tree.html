@@ -356,4 +356,37 @@ svg.addEventListener('mouseout', function(e) {
     <p class="text-sm text-gray-400">Technical memories with repo metadata will appear here as a navigable tree.</p>
 </div>
 {% endif %}
+
+{% if is_admin and inaccessible_repos %}
+<div class="mt-6 bg-amber-50 rounded-xl border border-amber-200 shadow-sm overflow-hidden">
+    <div class="px-5 py-3 border-b border-amber-100 flex items-center gap-2">
+        <svg class="w-4 h-4 text-amber-500" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+        </svg>
+        <h3 class="text-sm font-semibold text-amber-800">Invalid Repository References (Admin View)</h3>
+            <span class="text-xs text-amber-600 ml-auto">{{ inaccessible_count }} memories referencing non-existent repos</span>
+    </div>
+    <div class="px-5 py-3">
+        <p class="text-xs text-amber-700 mb-3">These memories reference GitHub repositories that don't exist. The repo name in the memory metadata is likely incorrect and needs to be updated. Click a repo name to view and fix the affected memories.</p>
+        <div class="space-y-2">
+            {% for repo_name, count in inaccessible_repos.items() %}
+            <div class="flex items-center justify-between px-3 py-2 bg-white rounded-lg border border-amber-100">
+                <div class="flex items-center gap-2">
+                    <svg class="w-4 h-4 text-amber-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z" />
+                    </svg>
+                    <span class="text-sm font-mono text-amber-800">{{ repo_name }}</span>
+                </div>
+                <span class="text-xs text-amber-600">{{ count }} memor{{ 'y' if count == 1 else 'ies' }}</span>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+</div>
+{% elif inaccessible_count > 0 and not is_admin %}
+<div class="mt-6 px-4 py-3 bg-gray-50 rounded-lg border border-gray-200 text-xs text-gray-500 text-center">
+    {{ inaccessible_count }} memor{{ 'y references a' if inaccessible_count == 1 else 'ies reference' }} repository name{{ '' if inaccessible_count == 1 else 's' }} that couldn't be verified on GitHub.
+    Contact an admin to review.
+</div>
+{% endif %}
 {% endblock %}

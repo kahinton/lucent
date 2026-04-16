@@ -188,3 +188,59 @@ class GitHubRepoAccessService:
             return False
         owner, repo = repo_full_name.split("/", 1)
         return bool(owner and repo and "/" not in repo)
+
+    async def check_repo_exists(self, repo_full_name: str) -> bool | None:
+        """Check if a GitHub repo exists using any available token.
+
+        Returns True if repo exists, False if it does not (404),
+        or None if we can't determine (no token available).
+        """
+        normalized = repo_full_name.strip().lower()
+        if not self._is_valid_repo_name(normalized):
+            return None
+
+        # Try to find any active GitHub token in the system
+        token = await self._get_any_github_token()
+        if not token:
+            return None
+
+        url = f"https://api.github.com/repos/{normalized}"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+                resp = await client.get(url, headers=headers)
+            if resp.status_code == 200:
+                return True
+            if resp.status_code == 404:
+                return False
+            return None  # Can't determine (403, rate limit, etc.)
+        except Exception:
+            return None
+
+    async def _get_any_github_token(self) -> str | None:
+        """Get any active GitHub token from the system for existence checks."""
+        import os
+        # Try env var first (cheapest)
+        env_token = os.environ.get("GITHUB_TOKEN", "")
+        if env_token:
+            return env_token
+        # Try any stored credential
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """SELECT encrypted_secret_payload FROM enterprise_credentials
+                   WHERE integration_type = 'github' AND status = 'active'
+                   ORDER BY updated_at DESC LIMIT 1""",
+            )
+        if not row:
+            return None
+        encryptor = self._get_encryptor()
+        if not encryptor:
+            return None
+        try:
+            payload = encryptor.decrypt(row["encrypted_secret_payload"])
+            return str(payload.get("access_token", "")) or None
+        except Exception:
+            return None

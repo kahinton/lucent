@@ -13,9 +13,16 @@ from lucent.integrations.github_repo_access_service import GitHubRepoAccessServi
 class MemoryAccessService:
     """Wraps memory reads and filters by metadata.repo access."""
 
-    def __init__(self, repo: MemoryRepository, github_repo_access: GitHubRepoAccessService) -> None:
+    def __init__(
+        self,
+        repo: MemoryRepository,
+        github_repo_access: GitHubRepoAccessService,
+        *,
+        is_admin: bool = False,
+    ) -> None:
         self.repo = repo
         self.github_repo_access = github_repo_access
+        self._is_admin = is_admin
 
     async def get_accessible(
         self,
@@ -23,11 +30,23 @@ class MemoryAccessService:
         user_id: UUID,
         organization_id: UUID,
         memory_scope: str | None = None,
+        is_admin: bool | None = None,
     ) -> dict[str, Any] | None:
         memory = await self.repo.get_accessible(memory_id, user_id, organization_id, memory_scope)
         if not memory:
             return None
-        return await self.filter_memory(memory, user_id)
+        # Admins/owners always have full access (check per-call flag OR constructor flag)
+        if (is_admin is True) or self._is_admin:
+            return memory
+        # Shared memories are accessible to anyone in the org
+        if memory.get("shared"):
+            return memory
+        filtered = await self.filter_memory(memory, user_id)
+        if filtered is None:
+            # Memory exists but repo access denied — attach a flag
+            # so callers can distinguish 404 vs 403
+            return {"_access_denied": True, "id": memory.get("id"), "metadata": memory.get("metadata", {})}
+        return filtered
 
     async def filter_memory(
         self,
