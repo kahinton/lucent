@@ -100,10 +100,37 @@ class DockerBackend(SandboxBackend):
                 external routing).  For ``allowlist`` mode this should be
                 False — egress is controlled by iptables rules applied
                 post-create, not by Docker's internal flag.
+
+        If an existing network has a different ``internal`` setting, it will
+        be recreated (disconnecting any containers on it first).
         """
         client = self._docker()
         try:
-            client.networks.get(self._network_name)
+            existing = client.networks.get(self._network_name)
+            # Check if the existing network matches the requested internal flag.
+            # Docker stores this in attrs as "Internal" (capitalized).
+            current_internal = bool(existing.attrs.get("Internal", False))
+            if current_internal != internal:
+                logger.warning(
+                    "Sandbox network '%s' has internal=%s but internal=%s was requested; "
+                    "recreating network to match",
+                    self._network_name, current_internal, internal,
+                )
+                # Disconnect any attached containers before removing the network
+                for container_info in existing.attrs.get("Containers", {}).keys():
+                    try:
+                        existing.disconnect(container_info, force=True)
+                    except docker.errors.APIError:
+                        pass
+                try:
+                    existing.remove()
+                except docker.errors.APIError as exc:
+                    logger.warning("Could not remove stale network %s: %s",
+                                   self._network_name, exc)
+                    return
+                client.networks.create(self._network_name, driver="bridge", internal=internal)
+                logger.info("Recreated sandbox network: %s (internal=%s)",
+                            self._network_name, internal)
         except docker.errors.NotFound:
             client.networks.create(self._network_name, driver="bridge", internal=internal)
             logger.info("Created sandbox network: %s (internal=%s)", self._network_name, internal)
@@ -127,6 +154,25 @@ class DockerBackend(SandboxBackend):
 
             # Clone repo if configured
             if config.repo_url:
+                # Ensure git is installed — many base images (python:*-slim, node:*-slim,
+                # alpine, debian:*-slim) don't ship with it.
+                install_git_result = await self.exec(
+                    sandbox_id,
+                    "command -v git >/dev/null 2>&1 || "
+                    "( (command -v apt-get >/dev/null 2>&1 && apt-get update -qq && "
+                    "apt-get install -y -qq git >/dev/null 2>&1) || "
+                    "(command -v apk >/dev/null 2>&1 && apk add --no-cache git >/dev/null 2>&1) || "
+                    "(command -v yum >/dev/null 2>&1 && yum install -y -q git >/dev/null 2>&1) )",
+                    timeout=120,
+                )
+                if install_git_result.exit_code != 0:
+                    info.status = SandboxStatus.FAILED
+                    info.error = (
+                        "Git not available in sandbox image and auto-install failed. "
+                        "Use an image with git pre-installed, or set setup_commands to install it."
+                    )
+                    return info
+
                 clone_env = None
                 if config.git_credentials and config.repo_url.startswith("https://"):
                     await self._ensure_git_askpass_script(sandbox_id)
@@ -386,8 +432,25 @@ class DockerBackend(SandboxBackend):
                 else:
                     raise
 
-        container = client.containers.run(**container_kwargs)
-        return container
+        try:
+            container = client.containers.run(**container_kwargs)
+            return container
+        except docker.errors.APIError as exc:
+            # Name conflict from a stale/orphan container (e.g. from a previous
+            # failed attempt). Force-remove and retry once.
+            if exc.status_code == 409 and "already in use" in str(exc).lower():
+                logger.warning(
+                    "Container name '%s' already exists; removing orphan and retrying",
+                    name,
+                )
+                try:
+                    stale = client.containers.get(name)
+                    stale.remove(force=True)
+                except docker.errors.NotFound:
+                    pass
+                container = client.containers.run(**container_kwargs)
+                return container
+            raise
 
     async def _start_mcp_bridge(self, sandbox_id: str, config: SandboxConfig) -> bool:
         """Inject and start the MCP bridge process inside the container."""
@@ -398,7 +461,7 @@ class DockerBackend(SandboxBackend):
 
         source = bridge_source_path.read_bytes()
         bridge_path = "/tmp/lucent_mcp_bridge.py"
-        await self.write_file(sandbox_id, bridge_path, source)
+        await self._write_file_unchecked(sandbox_id, bridge_path, source)
 
         port = int(config.mcp_bridge_port or 8765)
         start_cmd = (
@@ -503,7 +566,7 @@ class DockerBackend(SandboxBackend):
             '  *) printf "\\n" ;;\n'
             "esac\n"
         )
-        await self.write_file(sandbox_id, _GIT_ASKPASS_PATH, script.encode("utf-8"))
+        await self._write_file_unchecked(sandbox_id, _GIT_ASKPASS_PATH, script.encode("utf-8"))
         await self.exec(sandbox_id, f"chmod 700 {shlex.quote(_GIT_ASKPASS_PATH)}", timeout=10)
 
     @staticmethod
@@ -624,24 +687,42 @@ class DockerBackend(SandboxBackend):
         return result.stdout.encode("utf-8")
 
     async def write_file(self, sandbox_id: str, path: str, content: bytes) -> None:
-        container = self._find_container(sandbox_id)
-        if container is None:
-            raise FileNotFoundError(f"Sandbox {sandbox_id} not found")
+        """Write a file into the sandbox. Path must be inside the workspace root.
 
-        import io
-        import tarfile
-
+        For internal/trusted paths outside the workspace (e.g., the MCP bridge
+        installed at /tmp), use ``_write_file_unchecked`` instead.
+        """
         safe_path = self._validate_workspace_path(path)
+        await self._write_file_unchecked(sandbox_id, safe_path, content)
 
-        # Create a tar archive with the file
-        tar_stream = io.BytesIO()
-        with tarfile.open(fileobj=tar_stream, mode="w") as tar:
-            file_info = tarfile.TarInfo(name=safe_path.lstrip("/"))
-            file_info.size = len(content)
-            tar.addfile(file_info, io.BytesIO(content))
-        tar_stream.seek(0)
+    async def _write_file_unchecked(self, sandbox_id: str, path: str, content: bytes) -> None:
+        """Write a file into the sandbox without workspace-path validation.
 
-        await asyncio.to_thread(container.put_archive, "/", tar_stream.read())
+        Only call this for paths the caller has already validated (e.g., hard-coded
+        internal paths like /tmp/lucent_mcp_bridge.py).
+
+        Uses base64-encoded stdin via exec rather than Docker's put_archive API —
+        put_archive has been observed to silently fail for /tmp on some Docker
+        Desktop backends (returns truthy but the file doesn't land).
+        """
+        import base64
+
+        abs_path = path if path.startswith("/") else f"/{path}"
+        parent_dir = os.path.dirname(abs_path) or "/"
+
+        # Ensure parent dir exists, then write via base64 pipe.
+        encoded = base64.b64encode(content).decode("ascii")
+        cmd = (
+            f"mkdir -p {shlex.quote(parent_dir)} && "
+            f"printf '%s' {shlex.quote(encoded)} | base64 -d > {shlex.quote(abs_path)}"
+        )
+        result = await self.exec(sandbox_id, cmd, timeout=30)
+        if result.exit_code != 0:
+            logger.error(
+                "Failed to write file %s in sandbox %s: %s",
+                abs_path, sandbox_id[:12], result.stderr[:200],
+            )
+            raise RuntimeError(f"File write failed for {path}: {result.stderr[:200]}")
 
     @staticmethod
     def _validate_iptables_destination(value: str) -> str | None:

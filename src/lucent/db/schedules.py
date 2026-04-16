@@ -265,7 +265,9 @@ class ScheduleRepository:
                 agent_type,
                 model,
                 json.dumps(task_template or {}),
-                json.dumps(sandbox_config) if sandbox_config else None,
+                json.dumps(sandbox_config) if isinstance(sandbox_config, dict)
+                else sandbox_config if isinstance(sandbox_config, str) and sandbox_config
+                else None,
                 sandbox_template_id,
                 schedule_type,
                 cron_expression,

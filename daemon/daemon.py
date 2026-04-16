@@ -1964,7 +1964,7 @@ async def get_secret_provider():
     try:
         from lucent.db import get_pool
         pool = await get_pool()
-        return initialize_secret_provider(pool)
+        return await initialize_secret_provider(pool)
     except Exception:
         # DB pool not available in daemon process — return None
         # MCP server secret resolution will be skipped
@@ -2055,7 +2055,7 @@ async def build_subagent_prompt(
                             break  # Only need one request for all skills
             except Exception:
                 log(f"Failed to load skills for agent '{agent_type}'", "DEBUG")
-        log(f"Using approved DB definition for '{agent_type}' agent (id: {db_agent['id'][:8]})")
+        log(f"Using approved DB definition for '{agent_type}' agent (id: {str(db_agent['id'])[:8]})")
     else:
         raise AgentNotFoundError(
             f"No approved agent definition found for '{agent_type}'. "
@@ -2230,6 +2230,19 @@ class LucentDaemon:
         # Initialize OTEL telemetry (no-op if unavailable or OTEL_ENABLED=false)
         if _TELEMETRY_AVAILABLE:
             init_telemetry(service_name="lucent-daemon")
+
+        # Initialize the lucent DB pool so that subsystems using `get_pool()`
+        # (sandbox manager, repo access service, memory access service, etc.)
+        # can operate. The daemon also has its own direct asyncpg connections
+        # for polling, but shared services use the pool.
+        try:
+            from lucent.db.pool import init_db as _init_db
+            # The daemon uses DAEMON_DATABASE_URL (or falls back to DATABASE_URL).
+            # Pass explicitly so init_db uses the same connection the daemon does.
+            await _init_db(database_url=DATABASE_URL)
+            log("Lucent DB pool initialized")
+        except Exception as e:
+            log(f"Failed to initialize Lucent DB pool: {e}", "WARN")
 
         # Ensure we have a valid API key before anything else
         await ensure_valid_api_key(self.instance_id)
@@ -3274,6 +3287,13 @@ class LucentDaemon:
             # Build and run the sub-agent
             agent_def_id = task.get("agent_definition_id")
             sandbox_config = task.get("sandbox_config")
+            # Defensive: if sandbox_config is a string (double-encoded JSON), parse it
+            if isinstance(sandbox_config, str):
+                try:
+                    import json as _sc_json
+                    sandbox_config = _sc_json.loads(sandbox_config)
+                except Exception:
+                    sandbox_config = None
             task_output_mode = task.get("output_mode")
             task_commit_approved = bool(task.get("commit_approved", False))
             sandbox_template_id = task.get("sandbox_template_id")
@@ -3442,6 +3462,7 @@ class LucentDaemon:
                     f"```json\n{_json.dumps(sandbox_config, indent=2, default=str)}\n```"
                 )
             elif sandbox_config:
+                sandbox_failed_reason = None
                 try:
                     sandbox_id, task_sandbox_runtime_config = await self._create_task_sandbox(
                         task_id,
@@ -3449,7 +3470,12 @@ class LucentDaemon:
                         requesting_user_id=requesting_user_id,
                         org_id=org_id,
                     )
-                    if sandbox_id:
+                    if not sandbox_id:
+                        sandbox_failed_reason = (
+                            "Sandbox creation returned no sandbox_id. "
+                            "Check sandbox manager logs for details."
+                        )
+                    else:
                         # Inject sandbox context into the task description
                         description = (
                             f"{description}\n\n"
@@ -3466,12 +3492,24 @@ class LucentDaemon:
                         )
                 except Exception as e:
                     log(f"Sandbox creation failed for task {task_id[:8]}: {e}", "WARN")
+                    sandbox_failed_reason = f"Sandbox creation failed: {e}"
+
+                # If sandbox was required and failed, fail the task — do NOT
+                # run it locally. Sandboxes are a security boundary; silent
+                # fallback to local execution defeats the purpose.
+                if sandbox_failed_reason:
                     await RequestAPI.add_event(
                         task_id,
                         "sandbox_failed",
-                        f"Sandbox creation failed: {e}",
+                        sandbox_failed_reason,
                     )
-                    # Continue without sandbox — task can still run
+                    await _fail_owned(
+                        task_id,
+                        f"{sandbox_failed_reason} Task requires sandbox execution for "
+                        f"security and will not fall back to local execution.",
+                    )
+                    dispatched += 1
+                    continue
 
             result = await self.run_session(
                 f"{agent_type}-{task_id[:8]}",
@@ -3657,6 +3695,27 @@ class LucentDaemon:
             env_vars = await resolve_secret_env_vars(sandbox_config.get("env_vars", {}), provider)
         finally:
             set_current_user(None)
+        # If a repo_url is set but no explicit network_mode, promote to
+        # "allowlist" with common package/git endpoints so git+apt can work.
+        # Pure "none" is incompatible with cloning a remote repo.
+        default_network_mode = "none"
+        default_allowed_hosts: list[str] = []
+        if sandbox_config.get("repo_url") and "network_mode" not in sandbox_config:
+            default_network_mode = "allowlist"
+            default_allowed_hosts = [
+                "github.com",
+                "api.github.com",
+                "raw.githubusercontent.com",
+                "codeload.github.com",
+                "objects.githubusercontent.com",
+                # Package repositories for git auto-install in base images
+                "deb.debian.org",
+                "security.debian.org",
+                "archive.ubuntu.com",
+                "security.ubuntu.com",
+                "dl-cdn.alpinelinux.org",
+            ]
+
         config = SandboxConfig(
             name=sandbox_config.get("name", f"task-{task_id[:12]}"),
             image=sandbox_config.get("image", "python:3.12-slim"),
@@ -3668,8 +3727,8 @@ class LucentDaemon:
             working_dir=sandbox_config.get("working_dir", "/workspace"),
             memory_limit=sandbox_config.get("memory_limit", "2g"),
             cpu_limit=sandbox_config.get("cpu_limit", 2.0),
-            network_mode=sandbox_config.get("network_mode", "none"),
-            allowed_hosts=sandbox_config.get("allowed_hosts", []),
+            network_mode=sandbox_config.get("network_mode", default_network_mode),
+            allowed_hosts=sandbox_config.get("allowed_hosts", default_allowed_hosts),
             timeout_seconds=sandbox_config.get("timeout_seconds", 1800),
             output_mode=sandbox_config.get("output_mode"),
             commit_approved=bool(sandbox_config.get("commit_approved", False)),
@@ -4532,8 +4591,12 @@ class LucentDaemon:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                log(f"Dispatch loop error: {e}", "ERROR")
+                import traceback as _tb
+                log(f"Dispatch loop error: {e}\n{_tb.format_exc()}", "ERROR")
                 await asyncio.sleep(5)
+                # Reconnect LISTEN if connection dropped
+                if self._listen_conn is None or self._listen_conn.is_closed():
+                    await self._setup_listen()
                 # Reconnect LISTEN if connection dropped
                 if self._listen_conn is None or self._listen_conn.is_closed():
                     await self._setup_listen()

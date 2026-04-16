@@ -24,6 +24,10 @@ class GitHubRepoAccessService:
 
     POSITIVE_TTL = timedelta(minutes=15)
     NEGATIVE_TTL = timedelta(minutes=5)
+    EXISTENCE_CACHE_TTL = timedelta(hours=1)
+
+    # Module-level cache for repo existence — shared across requests
+    _repo_exists_cache: dict[str, tuple[bool | None, datetime]] = {}
 
     def __init__(
         self,
@@ -194,10 +198,19 @@ class GitHubRepoAccessService:
 
         Returns True if repo exists, False if it does not (404),
         or None if we can't determine (no token available).
+        Uses an in-memory cache with 1-hour TTL for performance.
         """
         normalized = repo_full_name.strip().lower()
         if not self._is_valid_repo_name(normalized):
             return None
+
+        # Check in-memory cache first
+        now = datetime.now(UTC)
+        cached = self._repo_exists_cache.get(normalized)
+        if cached:
+            result, expires = cached
+            if expires > now:
+                return result
 
         # Try to find any active GitHub token in the system
         token = await self._get_any_github_token()
@@ -209,16 +222,22 @@ class GitHubRepoAccessService:
             "Authorization": f"Bearer {token}",
             "Accept": "application/vnd.github+json",
         }
+        result = None
         try:
             async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
                 resp = await client.get(url, headers=headers)
             if resp.status_code == 200:
-                return True
-            if resp.status_code == 404:
-                return False
-            return None  # Can't determine (403, rate limit, etc.)
+                result = True
+            elif resp.status_code == 404:
+                result = False
         except Exception:
-            return None
+            pass
+
+        # Cache the result
+        if result is not None:
+            self._repo_exists_cache[normalized] = (result, now + self.EXISTENCE_CACHE_TTL)
+
+        return result
 
     async def _get_any_github_token(self) -> str | None:
         """Get any active GitHub token from the system for existence checks."""

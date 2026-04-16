@@ -767,7 +767,9 @@ class RequestRepository:
                 UUID(org_id),
                 model,
                 UUID(sandbox_template_id) if sandbox_template_id else None,
-                json.dumps(sandbox_config) if sandbox_config else None,
+                (json.dumps(sandbox_config) if isinstance(sandbox_config, dict)
+                 else sandbox_config if isinstance(sandbox_config, str) and sandbox_config
+                 else None),
                 UUID(requesting_user_id) if requesting_user_id else None,
                 json.dumps(output_contract) if output_contract else None,
             )

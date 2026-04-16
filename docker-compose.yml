@@ -79,12 +79,11 @@ services:
       NETWORKS: 1
       VOLUMES: 1
       POST: 1
+      EXEC: 1             # Required for sandbox setup (clone, install, etc.)
       # Explicitly disabled high-risk capabilities.
       AUTH: 0
       BUILD: 0
       COMMIT: 0
-      EXEC: 0             # NOTE: Sandboxes using exec (e.g. devcontainer setup) need EXEC=1.
-                           # Enable if sandbox tasks fail silently on exec operations.
       NODES: 0
       PLUGINS: 0
       SECRETS: 0
@@ -94,7 +93,11 @@ services:
       TASKS: 0
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-    read_only: true
+    # Note: read_only was attempted but the tecnativa image writes its haproxy
+    # config at runtime from a template in the same directory, which conflicts
+    # with read-only filesystems. Security is enforced via the restricted
+    # environment variables above (only specific API endpoints exposed) plus
+    # the socket being mounted read-only.
     restart: unless-stopped
 
   lucent:

@@ -26,6 +26,28 @@
     </div>
 </div>
 
+<!-- Scan a repo section -->
+<div class="mb-6 bg-white rounded-xl border border-gray-200 shadow-sm p-5">
+    <div class="flex items-center gap-3 mb-3">
+        <svg class="w-5 h-5 text-primary-500" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
+        </svg>
+        <div>
+            <h2 class="text-sm font-semibold text-gray-900">Scan a Repository</h2>
+            <p class="text-xs text-gray-500">Search for a GitHub repo to analyze and build knowledge memories</p>
+        </div>
+    </div>
+    <div class="relative">
+        <input id="repo-search" type="text" placeholder="Search GitHub repositories..." autocomplete="off"
+            class="w-full px-4 py-2.5 text-sm border border-gray-200 rounded-lg bg-gray-50 focus:bg-white focus:border-primary-300 focus:ring-2 focus:ring-primary-100 focus:outline-none transition-all">
+        <!-- Search results dropdown -->
+        <div id="repo-results" class="hidden absolute top-full left-0 right-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-lg z-40 max-h-64 overflow-y-auto">
+        </div>
+    </div>
+    <!-- Scan status -->
+    <div id="scan-status" class="hidden mt-3 px-4 py-2.5 rounded-lg text-sm"></div>
+</div>
+
 <!-- Tree visualization container -->
 <div id="tree-container" class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-auto" style="min-height: 500px;">
     <svg id="tree-svg" width="100%" height="600" style="font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;"></svg>
@@ -345,6 +367,117 @@ svg.addEventListener('mouseout', function(e) {
     const g = e.target.closest('.tree-node');
     if (g) { const r = g.querySelector('rect'); if (r) r.style.filter = ''; }
 });
+
+// ═══════════════════════════════════════════════════════════════════
+// Repo Search + Scan
+// ═══════════════════════════════════════════════════════════════════
+
+(function() {
+    const searchInput = document.getElementById('repo-search');
+    const resultsEl = document.getElementById('repo-results');
+    const statusEl = document.getElementById('scan-status');
+    if (!searchInput) return;
+    
+    let debounceTimer = null;
+    
+    function escHtml(s) {
+        const d = document.createElement('div');
+        d.textContent = s;
+        return d.innerHTML;
+    }
+    
+    searchInput.addEventListener('input', function() {
+        clearTimeout(debounceTimer);
+        const q = searchInput.value.trim();
+        if (q.length < 2) {
+            resultsEl.classList.add('hidden');
+            return;
+        }
+        debounceTimer = setTimeout(async () => {
+            try {
+                const resp = await fetch('/knowledge/search-repos?q=' + encodeURIComponent(q));
+                const data = await resp.json();
+                if (data.error) {
+                    resultsEl.innerHTML = '<div class="px-4 py-3 text-xs text-red-600">' + escHtml(data.error) + '</div>';
+                    resultsEl.classList.remove('hidden');
+                    return;
+                }
+                if (!data.length) {
+                    resultsEl.innerHTML = '<div class="px-4 py-3 text-xs text-gray-400">No repositories found</div>';
+                    resultsEl.classList.remove('hidden');
+                    return;
+                }
+                resultsEl.innerHTML = data.map(r => `
+                    <div class="repo-result px-4 py-2.5 hover:bg-primary-50 cursor-pointer border-b border-gray-50 last:border-0 transition-colors" data-repo="${escHtml(r.full_name)}">
+                        <div class="flex items-center justify-between">
+                            <span class="text-sm font-medium text-gray-900">${escHtml(r.full_name)}</span>
+                            <div class="flex items-center gap-2 text-[10px] text-gray-400">
+                                ${r.private ? '<span class="px-1.5 py-0.5 bg-amber-50 text-amber-600 rounded">private</span>' : ''}
+                                ${r.language ? '<span>' + escHtml(r.language) + '</span>' : ''}
+                                <span>★ ${r.stars}</span>
+                            </div>
+                        </div>
+                        ${r.description ? '<p class="text-xs text-gray-500 mt-0.5 truncate">' + escHtml(r.description) + '</p>' : ''}
+                    </div>
+                `).join('');
+                resultsEl.classList.remove('hidden');
+            } catch (e) {
+                resultsEl.classList.add('hidden');
+            }
+        }, 300);
+    });
+    
+    // Click to scan
+    resultsEl.addEventListener('click', async function(e) {
+        const item = e.target.closest('.repo-result');
+        if (!item) return;
+        const repoName = item.dataset.repo;
+        
+        resultsEl.classList.add('hidden');
+        searchInput.value = repoName;
+        
+        statusEl.className = 'mt-3 px-4 py-2.5 rounded-lg text-sm bg-primary-50 text-primary-700 border border-primary-200';
+        statusEl.textContent = 'Starting knowledge scan for ' + repoName + '...';
+        statusEl.classList.remove('hidden');
+        
+        try {
+            const resp = await fetch('/knowledge/scan-repo', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ repo: repoName }),
+            });
+            const data = await resp.json();
+            
+            if (data.status === 'scanning') {
+                statusEl.className = 'mt-3 px-4 py-2.5 rounded-lg text-sm bg-green-50 text-green-700 border border-green-200';
+                statusEl.innerHTML = '✓ ' + escHtml(data.message) + ' <a href="/activity" class="underline font-medium ml-1">View progress →</a>';
+            } else if (data.status === 'already_scanning') {
+                statusEl.className = 'mt-3 px-4 py-2.5 rounded-lg text-sm bg-amber-50 text-amber-700 border border-amber-200';
+                statusEl.innerHTML = escHtml(data.message) + ' <a href="/activity" class="underline font-medium ml-1">View progress →</a>';
+            } else {
+                statusEl.className = 'mt-3 px-4 py-2.5 rounded-lg text-sm bg-red-50 text-red-700 border border-red-200';
+                statusEl.textContent = data.error || 'Failed to start scan';
+            }
+        } catch (e) {
+            statusEl.className = 'mt-3 px-4 py-2.5 rounded-lg text-sm bg-red-50 text-red-700 border border-red-200';
+            statusEl.textContent = 'Scan failed: ' + e.message;
+        }
+    });
+    
+    // Close dropdown when clicking outside
+    document.addEventListener('click', function(e) {
+        if (!searchInput.contains(e.target) && !resultsEl.contains(e.target)) {
+            resultsEl.classList.add('hidden');
+        }
+    });
+    
+    // Re-show on focus if there's text
+    searchInput.addEventListener('focus', function() {
+        if (resultsEl.innerHTML.trim() && searchInput.value.trim().length >= 2) {
+            resultsEl.classList.remove('hidden');
+        }
+    });
+})();
 </script>
 
 {% if not tree %}

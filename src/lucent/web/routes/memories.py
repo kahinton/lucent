@@ -3,7 +3,7 @@
 from uuid import UUID
 
 from fastapi import APIRouter, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from lucent.db import (
     AccessRepository,
@@ -755,29 +755,40 @@ async def knowledge_tree(request: Request):
     async with pool.acquire() as conn:
         rows = await conn.fetch(query, str(user.id), str(user.organization_id))
 
-    # Filter by GitHub repo existence — flag repos that don't actually exist
-    # Admins always see everything but get warnings about non-existent repos
+    # Validate repo existence — batch check unique repos in parallel
+    # Uses cached results (15min positive, 5min negative TTL) so repeat loads are instant
+    import asyncio
     from lucent.integrations.github_repo_access_service import GitHubRepoAccessService
     from lucent.rbac import Role
 
     github_access = GitHubRepoAccessService(pool)
     is_admin = user.role in (Role.ADMIN, Role.OWNER)
 
+    # Collect unique repo names
+    unique_repos = sorted({
+        dict(row).get("repo", "") for row in rows
+        if dict(row).get("repo", "") and "/" in dict(row).get("repo", "")
+    })
+
+    # Check all repos in parallel
+    if unique_repos:
+        checks = await asyncio.gather(
+            *(github_access.check_repo_exists(r) for r in unique_repos)
+        )
+        repo_exists = dict(zip(unique_repos, checks))
+    else:
+        repo_exists = {}
+
+    # Filter rows based on existence results
     accessible_rows = []
     inaccessible_rows = []
     for row in rows:
         r = dict(row)
         repo_name = r.get("repo", "")
-        if repo_name and "/" in repo_name:
-            exists = await github_access.check_repo_exists(repo_name)
-            if exists is False:
-                # Repo confirmed not to exist — this is a data error
-                inaccessible_rows.append(r)
-                if is_admin:
-                    # Admins still see it in the tree, but it's also flagged
-                    accessible_rows.append(r)
-            else:
-                # Repo exists (True) or we can't determine (None) — show it
+        exists = repo_exists.get(repo_name)
+        if exists is False:
+            inaccessible_rows.append(r)
+            if is_admin:
                 accessible_rows.append(r)
         else:
             accessible_rows.append(r)
@@ -849,3 +860,136 @@ async def knowledge_tree(request: Request):
             "is_admin": is_admin,
         },
     )
+
+
+@router.get("/knowledge/search-repos")
+async def search_github_repos(request: Request, q: str = ""):
+    """Search GitHub repos using the current user's token."""
+    user = await get_user_context(request)
+    if not q or len(q) < 2:
+        return JSONResponse([])
+
+    pool = await get_pool()
+
+    # Get the user's GitHub token
+    import os
+    token = None
+
+    # Try stored credential first
+    github_svc = GitHubRepoAccessService(pool)
+    token = await github_svc._get_user_github_token(user.id)
+
+    # Fall back to env var
+    if not token:
+        token = os.environ.get("GITHUB_TOKEN", "")
+
+    if not token:
+        return JSONResponse({"error": "No GitHub token available. Connect GitHub on the Connections page."}, status_code=400)
+
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                "https://api.github.com/search/repositories",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/vnd.github+json",
+                },
+                params={"q": q, "per_page": "8", "sort": "updated"},
+            )
+            if resp.status_code != 200:
+                return JSONResponse([])
+
+            items = resp.json().get("items", [])
+            results = [
+                {
+                    "full_name": r["full_name"],
+                    "description": (r.get("description") or "")[:120],
+                    "language": r.get("language"),
+                    "stars": r.get("stargazers_count", 0),
+                    "updated_at": r.get("updated_at"),
+                    "private": r.get("private", False),
+                }
+                for r in items[:8]
+            ]
+            return JSONResponse(results)
+    except Exception:
+        return JSONResponse([])
+
+
+@router.post("/knowledge/scan-repo")
+async def scan_repo(request: Request):
+    """Create a request to scan a GitHub repo and build knowledge tree memories.
+    
+    Only creates the request — the daemon's cognitive planner will decompose
+    it into tasks with proper agent assignment, model selection, and sandbox config.
+    """
+    user = await get_user_context(request)
+    body = await request.json()
+    repo_full_name = body.get("repo", "").strip()
+
+    if not repo_full_name or "/" not in repo_full_name:
+        return JSONResponse({"error": "Invalid repo name"}, status_code=400)
+
+    pool = await get_pool()
+    from lucent.db.requests import RequestRepository
+    req_repo = RequestRepository(pool)
+
+    # Check if there's already an active scan for this repo
+    async with pool.acquire() as conn:
+        existing = await conn.fetchval(
+            """SELECT id FROM requests
+               WHERE target_repo = $1
+                 AND organization_id = $2
+                 AND status NOT IN ('completed', 'failed', 'cancelled')
+               LIMIT 1""",
+            repo_full_name,
+            str(user.organization_id),
+        )
+    if existing:
+        return JSONResponse({
+            "status": "already_scanning",
+            "request_id": str(existing),
+            "message": f"A scan is already in progress for {repo_full_name}",
+        })
+
+    # Create the scan request — daemon will plan the tasks
+    req = await req_repo.create_request(
+        title=f"Knowledge Scan: {repo_full_name}",
+        description=(
+            f"Deep-dive analysis of the {repo_full_name} repository to build "
+            f"the knowledge tree.\n\n"
+            f"## What to do\n\n"
+            f"Clone {repo_full_name} in a sandbox and analyze the codebase to create "
+            f"technical memories at three levels:\n\n"
+            f"1. **Directory-level memories** — For each significant directory, document "
+            f"what it's for, key patterns, conventions, and how it relates to other parts. "
+            f"Set metadata: repo='{repo_full_name}', directory='path/', filename=null\n\n"
+            f"2. **File-level memories** — For key files (config, entrypoints, core modules, "
+            f"schemas), document what the file does, key functions/classes, patterns, and "
+            f"gotchas. Set metadata: repo='{repo_full_name}', directory='parent/', "
+            f"filename='parent/file.ext'\n\n"
+            f"3. **Repo-level overview** (last) — After all directory and file analysis, "
+            f"synthesize one repo-level memory covering architecture, conventions, tech stack, "
+            f"and build/test/deploy patterns. Set metadata: repo='{repo_full_name}', "
+            f"directory=null, filename=null. Update existing repo memory if one exists.\n\n"
+            f"## Quality guidelines\n\n"
+            f"Focus on WHY and HOW — conventions, patterns, design decisions. "
+            f"Not WHAT files exist or changelog-style entries. Each memory should be "
+            f"useful working context for an agent making changes in that area.\n\n"
+            f"## Sandbox requirement\n\n"
+            f"All tasks must run in a sandbox with the repo cloned from "
+            f"https://github.com/{repo_full_name}.git"
+        ),
+        source="user",
+        priority="high",
+        created_by=str(user.id),
+        org_id=str(user.organization_id),
+        target_repo=repo_full_name,
+    )
+
+    return JSONResponse({
+        "status": "scanning",
+        "request_id": str(req["id"]),
+        "message": f"Knowledge scan requested for {repo_full_name}. The daemon will plan and execute the tasks.",
+    })
