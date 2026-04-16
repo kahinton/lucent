@@ -37,6 +37,31 @@ def _detect_env_connections() -> dict[str, dict]:
     return found
 
 
+async def _verify_github_token(token: str) -> dict | None:
+    """Verify a GitHub token and return user info, or None on failure."""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                "https://api.github.com/user",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/vnd.github+json",
+                },
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                return {
+                    "login": data.get("login"),
+                    "name": data.get("name"),
+                    "avatar_url": data.get("avatar_url"),
+                    "html_url": data.get("html_url"),
+                }
+    except Exception as e:
+        logger.warning("GitHub token verification failed: %s", e)
+    return None
+
+
 @router.get("/connections", response_class=HTMLResponse)
 async def connections_page(request: Request):
     """Connections page — manage enterprise OAuth integrations."""
@@ -161,6 +186,70 @@ async def save_pat_web(request: Request):
         return JSONResponse({"status": "saved", "id": str(result["id"])})
     except Exception as e:
         logger.error("PAT save failed: %s", e)
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+@router.post("/connections/env/claim")
+async def claim_env_token(request: Request):
+    """Verify an env var token against the provider API and store it as a user credential."""
+    user = await get_user_context(request)
+    body = await request.json()
+    provider = body.get("provider")
+
+    if provider not in _ENV_TOKEN_MAP:
+        return JSONResponse({"error": "Invalid provider"}, status_code=400)
+
+    env_var = _ENV_TOKEN_MAP[provider]
+    token = os.environ.get(env_var, "")
+    if not token:
+        return JSONResponse({"error": f"{env_var} is not set"}, status_code=400)
+
+    # Verify the token against the provider API
+    github_user = None
+    if provider == "github":
+        github_user = await _verify_github_token(token)
+        if not github_user:
+            return JSONResponse({"error": "Token verification failed — could not authenticate with GitHub API"}, status_code=400)
+
+    # Store as a proper user credential
+    pool = await get_pool()
+    from lucent.integrations.credential_repository import CredentialRepository
+    from lucent.integrations.credential_service import CredentialService
+    from lucent.integrations.credential_models import CredentialCreate, CredentialKind
+
+    repo = CredentialRepository(pool)
+    service = CredentialService(repo)
+
+    display_name = f"GitHub (@{github_user['login']})" if github_user else f"{provider.title()} (env)"
+    metadata = {}
+    if github_user:
+        metadata = {
+            "github_login": github_user["login"],
+            "github_name": github_user.get("name") or "",
+            "github_avatar": github_user.get("avatar_url") or "",
+            "source": "env_var",
+            "env_var": env_var,
+        }
+
+    try:
+        result = await service.create_credential(
+            payload=CredentialCreate(
+                integration_type=provider,
+                credential_kind=CredentialKind.API_KEY,
+                display_name=display_name,
+                access_token=token,
+                scopes=[],
+                metadata=metadata,
+            ),
+            user=user,
+        )
+        return JSONResponse({
+            "status": "claimed",
+            "id": str(result["id"]),
+            "github_user": github_user,
+        })
+    except Exception as e:
+        logger.error("Env token claim failed: %s", e)
         return JSONResponse({"error": str(e)}, status_code=400)
 
 

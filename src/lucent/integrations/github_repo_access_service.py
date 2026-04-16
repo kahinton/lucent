@@ -40,7 +40,10 @@ class GitHubRepoAccessService:
         """Return whether the user can access ``owner/repo`` on GitHub."""
         normalized_repo = repo_full_name.strip().lower()
         if not self._is_valid_repo_name(normalized_repo):
-            return False
+            # Invalid repo format (e.g. bare name without owner/) — allow access
+            # rather than blocking. These memories predate the repo ACL system.
+            logger.debug("Repo name '%s' is not in owner/repo format — allowing access", repo_full_name)
+            return True
 
         cached = await self._get_cached(user_id=user_id, repo_full_name=normalized_repo)
         now = datetime.now(UTC)
@@ -48,9 +51,13 @@ class GitHubRepoAccessService:
             return bool(cached["has_access"])
 
         token = await self._get_user_github_token(user_id)
-        has_access = False
-        if token:
-            has_access = await self._check_github_repo(token=token, repo_full_name=normalized_repo)
+        if not token:
+            # No GitHub credential — allow access rather than blocking.
+            # Users who haven't connected GitHub shouldn't lose access to
+            # existing repo memories. Access enforcement only kicks in
+            # when a credential exists to verify against.
+            return True
+        has_access = await self._check_github_repo(token=token, repo_full_name=normalized_repo)
 
         ttl = self.POSITIVE_TTL if has_access else self.NEGATIVE_TTL
         await self._upsert_cache(

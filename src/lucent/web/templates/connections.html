@@ -44,10 +44,15 @@
                     <h3 class="text-base font-semibold text-gray-900">{{ provider.name }}</h3>
                     <p class="text-xs text-gray-500">{{ provider.description }}</p>
                 </div>
-                {% if cred or env %}
+                {% if cred %}
                 <span class="flex items-center gap-1.5 px-2.5 py-1 bg-green-50 border border-green-200 rounded-full text-xs font-medium text-green-700">
                     <span class="w-2 h-2 bg-green-500 rounded-full"></span>
                     Connected
+                </span>
+                {% elif env %}
+                <span class="flex items-center gap-1.5 px-2.5 py-1 bg-blue-50 border border-blue-200 rounded-full text-xs font-medium text-blue-700">
+                    <span class="w-2 h-2 bg-blue-400 rounded-full"></span>
+                    Token detected
                 </span>
                 {% else %}
                 <span class="flex items-center gap-1.5 px-2.5 py-1 bg-gray-50 border border-gray-200 rounded-full text-xs text-gray-500">
@@ -59,14 +64,19 @@
 
             <!-- Connection details / methods -->
             {% if env and not cred %}
-            <!-- Env var connection (auto-detected) -->
+            <!-- Env var detected but not claimed -->
             <div class="px-4 py-3 bg-blue-50 border border-blue-100 rounded-lg">
                 <div class="flex items-center gap-2 text-xs">
                     <svg class="w-3.5 h-3.5 text-blue-500" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" /></svg>
-                    <span class="font-medium text-blue-700">Auto-detected from environment</span>
-                    <span class="text-blue-500 ml-auto font-mono">{{ env.env_var }} = {{ env.masked_token }}</span>
+                    <span class="font-medium text-blue-700">Token detected in environment</span>
+                    <span class="text-blue-500 ml-auto font-mono text-[10px]">{{ env.env_var }} = {{ env.masked_token }}</span>
                 </div>
-                <p class="text-[10px] text-blue-500 mt-1">This token is set as a server environment variable. It's available to all sessions.</p>
+                <p class="text-[10px] text-blue-500 mt-1">Verify this token against {{ provider.name }} to confirm your identity and create a connection.</p>
+            </div>
+            <div class="mt-3">
+                <button data-env-claim="{{ provider.id }}" class="w-full px-3 py-2 text-xs font-medium text-white bg-primary-600 rounded-lg hover:bg-primary-700 transition-colors">
+                    Verify & Connect
+                </button>
             </div>
             {% elif cred %}
             <!-- Stored credential -->
@@ -127,6 +137,36 @@
 </div>
 
 <script nonce="{{ request.state.csp_nonce }}">
+// Env token claim handlers
+document.querySelectorAll('[data-env-claim]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+        const provider = btn.dataset.envClaim;
+        btn.textContent = 'Verifying...';
+        btn.disabled = true;
+        
+        try {
+            const resp = await fetch('/connections/env/claim', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ provider }),
+            });
+            const data = await resp.json();
+            
+            if (data.status === 'claimed') {
+                window.location.reload();
+            } else {
+                alert(data.error || 'Verification failed');
+                btn.textContent = 'Verify & Connect';
+                btn.disabled = false;
+            }
+        } catch (e) {
+            alert('Verification failed: ' + e.message);
+            btn.textContent = 'Verify & Connect';
+            btn.disabled = false;
+        }
+    });
+});
+
 // PAT save handlers
 document.querySelectorAll('[data-pat-save]').forEach(btn => {
     btn.addEventListener('click', async () => {
