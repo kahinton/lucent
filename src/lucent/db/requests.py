@@ -636,6 +636,30 @@ class RequestRepository:
             return None
         req["tasks"] = (await self.list_tasks(request_id))["items"]
 
+        # asyncpg returns jsonb columns as strings unless a codec is registered
+        # at the connection level. Parse the columns the UI cares about so
+        # templates can index into them as dicts/lists.
+        import json as _json
+
+        def _parse_jsonb(row: dict, *cols: str) -> None:
+            for col in cols:
+                val = row.get(col)
+                if isinstance(val, str):
+                    try:
+                        row[col] = _json.loads(val)
+                    except (ValueError, TypeError):
+                        # Leave the original string if it isn't valid JSON.
+                        pass
+
+        for task in req["tasks"]:
+            _parse_jsonb(
+                task,
+                "sandbox_config",
+                "output_contract",
+                "result_structured",
+                "validation_errors",
+            )
+
         # Batch-load events and memory links for ALL tasks (avoids N+1)
         task_ids = [task["id"] for task in req["tasks"]]
         if task_ids:
@@ -657,7 +681,9 @@ class RequestRepository:
             events_by_task: dict[str, list[dict]] = {}
             for row in event_rows:
                 tid = str(row["task_id"])
-                events_by_task.setdefault(tid, []).append(dict(row))
+                event = dict(row)
+                _parse_jsonb(event, "metadata")
+                events_by_task.setdefault(tid, []).append(event)
 
             memories_by_task: dict[str, list[dict]] = {}
             for row in memory_rows:

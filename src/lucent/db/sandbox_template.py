@@ -48,9 +48,19 @@ class SandboxTemplateRepository:
         created_by: str | None = None,
         owner_user_id: str | None = None,
         owner_group_id: str | None = None,
+        scope: str = "instance",
+        status: str = "approved",
+        proposed_by: str | None = None,
+        proposal_reason: str | None = None,
     ) -> dict:
-        # Default owner to creator when no explicit ownership is provided
-        if owner_user_id is None and owner_group_id is None and created_by:
+        # Default owner to creator when no explicit ownership is provided.
+        # Built-in templates are owned by the system and don't require a user owner.
+        if (
+            owner_user_id is None
+            and owner_group_id is None
+            and created_by
+            and scope != "built-in"
+        ):
             owner_user_id = created_by
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -58,9 +68,11 @@ class SandboxTemplateRepository:
                    (name, organization_id, description, image, repo_url, branch,
                     setup_commands, env_vars, working_dir, memory_limit, cpu_limit,
                     disk_limit, network_mode, allowed_hosts, timeout_seconds, created_by,
-                    owner_user_id, owner_group_id)
+                    owner_user_id, owner_group_id, scope, status,
+                    proposed_by, proposal_reason)
                    VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9,
-                           $10, $11, $12, $13, $14::jsonb, $15, $16, $17, $18)
+                           $10, $11, $12, $13, $14::jsonb, $15, $16, $17, $18,
+                           $19, $20, $21, $22)
                    RETURNING *""",
                 name,
                 UUID(organization_id),
@@ -80,6 +92,10 @@ class SandboxTemplateRepository:
                 UUID(created_by) if created_by else None,
                 UUID(owner_user_id) if owner_user_id else None,
                 UUID(owner_group_id) if owner_group_id else None,
+                scope,
+                status,
+                UUID(proposed_by) if proposed_by else None,
+                proposal_reason,
             )
             return self._parse_row(row)
 
@@ -277,3 +293,153 @@ class SandboxTemplateRepository:
             "limit": limit,
             "has_more": offset + len(rows) < total_count,
         }
+
+    async def list_dispatchable(self, organization_id: str) -> list[dict]:
+        """Return all approved templates in the org — those a planner is
+        allowed to reference when creating a task. Excludes proposed and
+        rejected templates."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT * FROM sandbox_templates
+                   WHERE organization_id = $1
+                     AND status = 'approved'
+                   ORDER BY scope DESC, name""",
+                UUID(organization_id),
+            )
+        return [self._parse_row(r) for r in rows]
+
+    async def list_proposed(self, organization_id: str) -> list[dict]:
+        """Return templates awaiting human approval."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT * FROM sandbox_templates
+                   WHERE organization_id = $1
+                     AND status = 'proposed'
+                   ORDER BY created_at""",
+                UUID(organization_id),
+            )
+        return [self._parse_row(r) for r in rows]
+
+    async def set_status(
+        self,
+        template_id: str,
+        organization_id: str,
+        status: str,
+        reviewed_by: str | None = None,
+    ) -> dict | None:
+        if status not in {"approved", "proposed", "rejected"}:
+            raise ValueError(f"Invalid status: {status}")
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """UPDATE sandbox_templates
+                   SET status = $3,
+                       reviewed_by = $4,
+                       reviewed_at = NOW(),
+                       updated_at = NOW()
+                   WHERE id = $1 AND organization_id = $2
+                   RETURNING *""",
+                UUID(template_id),
+                UUID(organization_id),
+                status,
+                UUID(reviewed_by) if reviewed_by else None,
+            )
+            return self._parse_row(row) if row else None
+
+    async def mark_used(self, template_id: str) -> None:
+        """Record that a template was just dispatched. Best-effort."""
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE sandbox_templates SET last_used_at = NOW() WHERE id = $1",
+                    UUID(template_id),
+                )
+        except Exception:
+            pass
+
+    async def sync_built_in_templates(
+        self, organization_id: str, templates_dir: str
+    ) -> int:
+        """Load built-in sandbox templates from a directory of YAML files
+        and upsert them into the org as ``scope='built-in', status='approved'``.
+
+        Returns the number of templates synced (created or updated).
+        """
+        from pathlib import Path
+
+        try:
+            import yaml  # type: ignore[import-not-found]
+        except ImportError:  # pragma: no cover - PyYAML is a project dep
+            return 0
+
+        path = Path(templates_dir)
+        if not path.is_dir():
+            return 0
+
+        synced = 0
+        for tpl_file in sorted(path.glob("*.yaml")):
+            try:
+                spec = yaml.safe_load(tpl_file.read_text()) or {}
+            except yaml.YAMLError:
+                continue
+            name = spec.get("name")
+            if not name:
+                continue
+
+            existing = await self.get_by_name(name, organization_id)
+            payload = dict(
+                description=spec.get("description", ""),
+                image=spec.get("image", "python:3.12-slim"),
+                repo_url=spec.get("repo_url"),
+                branch=spec.get("branch"),
+                setup_commands=spec.get("setup_commands") or [],
+                env_vars=spec.get("env_vars") or {},
+                working_dir=spec.get("working_dir", "/workspace"),
+                memory_limit=spec.get("memory_limit", "2g"),
+                cpu_limit=float(spec.get("cpu_limit", 2.0)),
+                disk_limit=spec.get("disk_limit", "10g"),
+                network_mode=spec.get("network_mode", "none"),
+                allowed_hosts=spec.get("allowed_hosts") or [],
+                timeout_seconds=int(spec.get("timeout_seconds", 1800)),
+            )
+
+            if existing:
+                # Refresh fields and ensure built-in/approved status.
+                async with self.pool.acquire() as conn:
+                    await conn.execute(
+                        """UPDATE sandbox_templates
+                           SET description = $3, image = $4, repo_url = $5, branch = $6,
+                               setup_commands = $7::jsonb, env_vars = $8::jsonb,
+                               working_dir = $9, memory_limit = $10, cpu_limit = $11,
+                               disk_limit = $12, network_mode = $13,
+                               allowed_hosts = $14::jsonb, timeout_seconds = $15,
+                               scope = 'built-in', status = 'approved',
+                               owner_user_id = NULL, owner_group_id = NULL,
+                               updated_at = NOW()
+                           WHERE id = $1 AND organization_id = $2""",
+                        UUID(existing["id"]) if isinstance(existing["id"], str)
+                        else existing["id"],
+                        UUID(organization_id),
+                        payload["description"],
+                        payload["image"],
+                        payload["repo_url"],
+                        payload["branch"],
+                        json.dumps(payload["setup_commands"]),
+                        json.dumps(payload["env_vars"]),
+                        payload["working_dir"],
+                        payload["memory_limit"],
+                        payload["cpu_limit"],
+                        payload["disk_limit"],
+                        payload["network_mode"],
+                        json.dumps(payload["allowed_hosts"]),
+                        payload["timeout_seconds"],
+                    )
+            else:
+                await self.create(
+                    name=name,
+                    organization_id=organization_id,
+                    scope="built-in",
+                    status="approved",
+                    **payload,
+                )
+            synced += 1
+        return synced

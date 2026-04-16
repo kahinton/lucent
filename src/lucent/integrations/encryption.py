@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 from base64 import b64decode, b64encode
+from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 import httpx
@@ -90,6 +91,17 @@ class VaultTransitBackend:
     ) -> None:
         self._vault_addr = (vault_addr or os.environ.get("VAULT_ADDR", "")).rstrip("/")
         self._vault_token = vault_token or os.environ.get("VAULT_TOKEN", "")
+        # Allow the token to be read from a file on disk. Used by the compose
+        # stack where openbao-init writes the root token to a shared volume
+        # after init/unseal completes, so services don't need a pre-shared
+        # token env var.
+        if not self._vault_token:
+            token_file = os.environ.get("VAULT_TOKEN_FILE", "")
+            if token_file and os.path.exists(token_file):
+                try:
+                    self._vault_token = Path(token_file).read_text().strip()
+                except OSError:
+                    pass
         self._key_name = key_name or os.environ.get("VAULT_TRANSIT_KEY_NAME", "lucent-credentials")
         self._mount = mount or os.environ.get("VAULT_TRANSIT_MOUNT", "transit")
 

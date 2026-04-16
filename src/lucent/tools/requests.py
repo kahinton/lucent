@@ -126,6 +126,12 @@ IMPORTANT: The agent_type must match an approved agent definition in /definition
 Tasks with unrecognized agent types will be rejected. Use list_available_agents or
 check /definitions to see which agents are available.
 
+SANDBOX POLICY: Tasks that need a sandbox MUST reference an approved sandbox
+template via ``sandbox_template_id``. Inline ``sandbox_config`` is no longer
+accepted from planners — first call ``list_sandbox_templates`` to see what's
+approved, and if nothing fits, call ``propose_sandbox_template`` to submit a
+new design for review.
+
 Args:
     request_id: ID of the parent request
     title: Short descriptive title for the task
@@ -136,14 +142,17 @@ Args:
     priority: 'low', 'medium', 'high', or 'urgent'
     sequence_order: Execution order (0-based, lower runs first)
     parent_task_id: Optional \u2014 ID of parent task for sub-tasks
-    sandbox_template_id: Optional UUID of a saved sandbox template to use
-    sandbox_config: Optional inline sandbox config dict (keys: image, repo_url,
-        branch, working_dir, timeout_seconds, output_mode, env_vars, etc.)
+    sandbox_template_id: UUID of an approved sandbox template (required for
+        tasks that need a sandbox; use list_sandbox_templates to discover IDs).
+    sandbox_overrides: Optional dict of fields to override on top of the
+        template (currently supports: ``repo_url``, ``branch``,
+        ``timeout_seconds``, ``output_mode``, ``commit_approved``). All other
+        sandbox parameters come from the template and cannot be overridden.
     output_contract: Optional structured output contract dict:
         {json_schema: {...}, on_failure: fail|fallback|retry_then_fallback, max_retries: int}
 
 Returns: JSON with the created task including its ID, or an error
-if the agent type is not approved."""
+if the agent type is not approved or the sandbox template is invalid."""
     )
     async def create_task(
         request_id: str,
@@ -155,7 +164,7 @@ if the agent type is not approved."""
         sequence_order: int = 0,
         parent_task_id: str | None = None,
         sandbox_template_id: str | None = None,
-        sandbox_config: dict | None = None,
+        sandbox_overrides: dict | None = None,
         output_contract: dict | None = None,
     ) -> str:
         user_id, org_id, user_role, _, _ = await _get_current_user_context()
@@ -201,6 +210,84 @@ if the agent type is not approved."""
                 }
             )
 
+        # Sandbox policy: template-only. Resolve and validate the template
+        # here, materializing the inline sandbox_config the daemon expects so
+        # we keep a single dispatch path. Overrides are limited to a small,
+        # safe whitelist.
+        sandbox_config: dict | None = None
+        if sandbox_template_id:
+            from lucent.db.sandbox_template import SandboxTemplateRepository
+
+            tpl_repo = SandboxTemplateRepository(pool)
+            try:
+                tpl = await tpl_repo.get(sandbox_template_id, str(org_id))
+            except Exception as exc:
+                return json.dumps(
+                    {"error": f"Invalid sandbox_template_id: {exc}"}
+                )
+            if not tpl:
+                approved = await tpl_repo.list_dispatchable(str(org_id))
+                return json.dumps(
+                    {
+                        "error": (
+                            f"Sandbox template {sandbox_template_id} not found "
+                            f"in this organization."
+                        ),
+                        "available_templates": [
+                            {"id": str(t["id"]), "name": t["name"]} for t in approved
+                        ],
+                        "hint": (
+                            "Call list_sandbox_templates to discover IDs, or "
+                            "propose_sandbox_template to submit a new design."
+                        ),
+                    }
+                )
+            if tpl.get("status") != "approved":
+                return json.dumps(
+                    {
+                        "error": (
+                            f"Sandbox template '{tpl.get('name')}' has status "
+                            f"{tpl.get('status')!r} — only 'approved' templates "
+                            "may be referenced by tasks. A human admin must "
+                            "approve it first."
+                        )
+                    }
+                )
+            sandbox_config = tpl_repo.to_sandbox_config(tpl)
+
+            allowed_overrides = {
+                "repo_url",
+                "branch",
+                "timeout_seconds",
+                "output_mode",
+                "commit_approved",
+            }
+            if sandbox_overrides:
+                bad = set(sandbox_overrides) - allowed_overrides
+                if bad:
+                    return json.dumps(
+                        {
+                            "error": (
+                                f"sandbox_overrides may only set "
+                                f"{sorted(allowed_overrides)}; rejected keys: "
+                                f"{sorted(bad)}. Anything else must be baked "
+                                "into a new sandbox template via "
+                                "propose_sandbox_template."
+                            )
+                        }
+                    )
+                for k, v in sandbox_overrides.items():
+                    sandbox_config[k] = v
+        elif sandbox_overrides:
+            return json.dumps(
+                {
+                    "error": (
+                        "sandbox_overrides requires sandbox_template_id. "
+                        "Pick an approved template first."
+                    )
+                }
+            )
+
         repo = await _get_request_repository()
         parent_request = await repo.get_request(request_id, str(org_id))
         if not parent_request:
@@ -231,6 +318,179 @@ if the agent type is not approved."""
                 "status": task["status"],
                 "agent_type": task["agent_type"],
                 "model": task.get("model"),
+                "sandbox_template_id": (
+                    str(task["sandbox_template_id"])
+                    if task.get("sandbox_template_id")
+                    else None
+                ),
+            }
+        )
+
+    @mcp.tool(
+        description="""List approved sandbox templates the planner can reference.
+
+Use this BEFORE calling create_task whenever a task needs to run in a sandbox.
+Returns the templates currently approved for dispatch in this organization,
+including built-in templates and any organization-approved custom templates.
+
+If none of the returned templates fit the work you're planning, call
+propose_sandbox_template to submit a new design for human review — do NOT
+fall back to inline sandbox_config (it's no longer accepted)."""
+    )
+    async def list_sandbox_templates() -> str:
+        _, org_id, _, _, _ = await _get_current_user_context()
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+        from lucent.db import get_pool
+        from lucent.db.sandbox_template import SandboxTemplateRepository
+
+        pool = await get_pool()
+        repo = SandboxTemplateRepository(pool)
+        approved = await repo.list_dispatchable(str(org_id))
+        proposed = await repo.list_proposed(str(org_id))
+
+        def _summary(tpl: dict) -> dict:
+            return {
+                "id": str(tpl["id"]),
+                "name": tpl["name"],
+                "scope": tpl.get("scope"),
+                "description": tpl.get("description", ""),
+                "image": tpl.get("image"),
+                "network_mode": tpl.get("network_mode"),
+                "allowed_hosts": tpl.get("allowed_hosts") or [],
+                "memory_limit": tpl.get("memory_limit"),
+                "cpu_limit": float(tpl.get("cpu_limit", 0)) if tpl.get("cpu_limit") else None,
+                "timeout_seconds": tpl.get("timeout_seconds"),
+            }
+
+        return json.dumps(
+            {
+                "approved": [_summary(t) for t in approved],
+                "proposed_pending_review": [_summary(t) for t in proposed],
+                "hint": (
+                    "Reference one of the approved templates by id via "
+                    "create_task(sandbox_template_id=...). If none fit the "
+                    "work, call propose_sandbox_template instead of falling "
+                    "back to inline configs."
+                ),
+            }
+        )
+
+    @mcp.tool(
+        description="""Propose a new sandbox template for human approval.
+
+Use when none of the templates returned by list_sandbox_templates fit the
+work you need to do. The proposed template is saved with status='proposed'
+and shows up in the admin's review queue. It cannot be referenced by a task
+until a human approves it (status='approved').
+
+Be specific in ``reason`` — explain what the planner needs that no existing
+template provides, so the reviewer can decide whether to approve it as a
+one-off or promote it to a built-in.
+
+Args:
+    name: Unique template name (snake-case-or-dash, e.g. ``rust-cargo-builder``)
+    description: What this sandbox is for and when to use it
+    image: Docker image (must be a public/known image; reviewers verify this)
+    reason: Why no existing template suffices and what's special about this one
+    network_mode: 'none' (default), 'bridge', or 'allowlist'
+    allowed_hosts: List of hosts (required when network_mode='allowlist')
+    setup_commands: Commands to run after clone, before the agent task starts
+    env_vars: Static environment variables (NEVER put secrets here)
+    memory_limit: e.g. '2g'  (default '2g')
+    cpu_limit: e.g. 2.0      (default 2.0)
+    disk_limit: e.g. '10g'   (default '10g')
+    timeout_seconds: Max wall-clock time per task (default 1800)
+    working_dir: Default '/workspace'
+
+Returns: JSON with the proposed template id and status."""
+    )
+    async def propose_sandbox_template(
+        name: str,
+        description: str,
+        image: str,
+        reason: str,
+        network_mode: str = "none",
+        allowed_hosts: list[str] | None = None,
+        setup_commands: list[str] | None = None,
+        env_vars: dict[str, str] | None = None,
+        memory_limit: str = "2g",
+        cpu_limit: float = 2.0,
+        disk_limit: str = "10g",
+        timeout_seconds: int = 1800,
+        working_dir: str = "/workspace",
+    ) -> str:
+        user_id, org_id, _, _, _ = await _get_current_user_context()
+        if not user_id or not org_id:
+            return json.dumps({"error": "Authentication required"})
+
+        if network_mode not in {"none", "bridge", "allowlist"}:
+            return json.dumps({"error": "network_mode must be 'none', 'bridge', or 'allowlist'"})
+        if network_mode == "allowlist" and not allowed_hosts:
+            return json.dumps(
+                {
+                    "error": (
+                        "allowed_hosts is required when network_mode='allowlist'."
+                    )
+                }
+            )
+
+        from lucent.db import get_pool
+        from lucent.db.sandbox_template import SandboxTemplateRepository
+
+        pool = await get_pool()
+        repo = SandboxTemplateRepository(pool)
+
+        existing = await repo.get_by_name(name, str(org_id))
+        if existing:
+            return json.dumps(
+                {
+                    "error": (
+                        f"A template named '{name}' already exists "
+                        f"(status={existing.get('status')}). Pick a different "
+                        "name or wait for the existing proposal to be reviewed."
+                    ),
+                    "existing_id": str(existing["id"]),
+                }
+            )
+
+        try:
+            tpl = await repo.create(
+                name=name,
+                organization_id=str(org_id),
+                description=description,
+                image=image,
+                network_mode=network_mode,
+                allowed_hosts=allowed_hosts or [],
+                setup_commands=setup_commands or [],
+                env_vars=env_vars or {},
+                memory_limit=memory_limit,
+                cpu_limit=cpu_limit,
+                disk_limit=disk_limit,
+                timeout_seconds=timeout_seconds,
+                working_dir=working_dir,
+                created_by=str(user_id),
+                owner_user_id=str(user_id),
+                scope="instance",
+                status="proposed",
+                proposed_by=str(user_id),
+                proposal_reason=reason,
+            )
+        except Exception as exc:
+            return json.dumps({"error": f"Failed to create proposal: {exc}"})
+
+        return json.dumps(
+            {
+                "id": str(tpl["id"]),
+                "name": tpl["name"],
+                "status": tpl["status"],
+                "note": (
+                    "Submitted for human review. The template cannot be "
+                    "referenced by a task until an admin approves it. Either "
+                    "wait for approval, or — if the work is urgent — pick the "
+                    "closest existing approved template and adapt the task "
+                    "description to match its constraints."
+                ),
             }
         )
 

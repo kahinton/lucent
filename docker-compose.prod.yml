@@ -142,6 +142,7 @@ services:
     volumes:
       - ./.github/skills:/app/.github/skills:ro
       - ./.github/agents/definitions:/app/.github/agents/definitions:ro
+      - ./.github/sandbox-templates:/app/.github/sandbox-templates:ro
     ports:
       - "${LUCENT_PORT:-8766}:8766"
     healthcheck:

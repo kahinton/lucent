@@ -37,6 +37,7 @@ dependencies = [
     "langchain-google-genai>=4.0.0",
     "langchain-ollama>=1.0.0",
     "jsonschema>=4.23.0",
+    "PyYAML>=6.0",
 ]
 
 [project.urls]

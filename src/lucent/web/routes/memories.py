@@ -953,15 +953,19 @@ async def scan_repo(request: Request):
             "message": f"A scan is already in progress for {repo_full_name}",
         })
 
-    # Create the scan request — daemon will plan the tasks
+    # Create the scan request — daemon will plan a single sandboxed task.
+    # Consolidated into one task so we provision one sandbox and clone the repo once.
     req = await req_repo.create_request(
         title=f"Knowledge Scan: {repo_full_name}",
         description=(
             f"Deep-dive analysis of the {repo_full_name} repository to build "
             f"the knowledge tree.\n\n"
             f"## What to do\n\n"
-            f"Clone {repo_full_name} in a sandbox and analyze the codebase to create "
-            f"technical memories at three levels:\n\n"
+            f"Plan this as **a single sandboxed task** — one sandbox, one clone of "
+            f"https://github.com/{repo_full_name}.git, one agent session that produces "
+            f"all memories in one pass. Do not split this into multiple tasks; double "
+            f"cloning wastes time and sandbox resources.\n\n"
+            f"In that single session, the agent should create technical memories at three levels:\n\n"
             f"1. **Directory-level memories** — For each significant directory, document "
             f"what it's for, key patterns, conventions, and how it relates to other parts. "
             f"Set metadata: repo='{repo_full_name}', directory='path/', filename=null\n\n"
@@ -969,17 +973,19 @@ async def scan_repo(request: Request):
             f"schemas), document what the file does, key functions/classes, patterns, and "
             f"gotchas. Set metadata: repo='{repo_full_name}', directory='parent/', "
             f"filename='parent/file.ext'\n\n"
-            f"3. **Repo-level overview** (last) — After all directory and file analysis, "
-            f"synthesize one repo-level memory covering architecture, conventions, tech stack, "
-            f"and build/test/deploy patterns. Set metadata: repo='{repo_full_name}', "
-            f"directory=null, filename=null. Update existing repo memory if one exists.\n\n"
+            f"3. **Repo-level overview** — Synthesize one repo-level memory covering "
+            f"architecture, conventions, tech stack, and build/test/deploy patterns. "
+            f"Set metadata: repo='{repo_full_name}', directory=null, filename=null. "
+            f"Update existing repo memory if one exists. Link related directory/file memories "
+            f"via related_memory_ids.\n\n"
             f"## Quality guidelines\n\n"
             f"Focus on WHY and HOW — conventions, patterns, design decisions. "
             f"Not WHAT files exist or changelog-style entries. Each memory should be "
             f"useful working context for an agent making changes in that area.\n\n"
             f"## Sandbox requirement\n\n"
-            f"All tasks must run in a sandbox with the repo cloned from "
-            f"https://github.com/{repo_full_name}.git"
+            f"The task must run in a sandbox with the repo cloned from "
+            f"https://github.com/{repo_full_name}.git — the research/code agent will "
+            f"explore the working copy directly."
         ),
         source="user",
         priority="high",

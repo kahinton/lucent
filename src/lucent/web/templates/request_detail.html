@@ -158,6 +158,185 @@
                 </div>
                 {% endif %}
 
+                <!-- Execution Details: sandbox, model, validation, timing -->
+                <details class="bg-gray-50 rounded-lg border border-gray-200">
+                    <summary class="cursor-pointer px-3 py-2 text-xs font-semibold text-gray-500 uppercase tracking-wider hover:bg-gray-100 rounded-lg">
+                        Execution Details
+                    </summary>
+                    <div class="px-3 pb-3 pt-1 space-y-2 text-xs text-gray-700">
+                        <dl class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
+                            <dt class="text-gray-400">Task ID</dt>
+                            <dd class="font-mono text-gray-600 break-all">{{ task.id }}</dd>
+
+                            {% if task.description %}
+                            <dt class="text-gray-400">Description</dt>
+                            <dd class="whitespace-pre-wrap">{{ task.description }}</dd>
+                            {% endif %}
+
+                            <dt class="text-gray-400">Agent</dt>
+                            <dd>{{ task.agent_type or '—' }}</dd>
+
+                            <dt class="text-gray-400">Model</dt>
+                            <dd class="font-mono">{{ task.model or 'default' }}</dd>
+
+                            <dt class="text-gray-400">Priority</dt>
+                            <dd>{{ task.priority }}</dd>
+
+                            <dt class="text-gray-400">Sequence</dt>
+                            <dd>#{{ task.sequence_order + 1 }}</dd>
+
+                            {% if task.requesting_user_id %}
+                            <dt class="text-gray-400">Requesting user</dt>
+                            <dd class="font-mono text-gray-500">{{ task.requesting_user_id }}</dd>
+                            {% endif %}
+
+                            {% if task.claimed_by %}
+                            <dt class="text-gray-400">Claimed by</dt>
+                            <dd class="font-mono text-gray-500">{{ task.claimed_by }}</dd>
+                            {% endif %}
+
+                            {% if task.claim_version and task.claim_version > 1 %}
+                            <dt class="text-gray-400">Claim attempts</dt>
+                            <dd>{{ task.claim_version }}</dd>
+                            {% endif %}
+
+                            {% if task.claim_expires_at %}
+                            <dt class="text-gray-400">Claim expires</dt>
+                            <dd>{{ task.claim_expires_at.strftime('%Y-%m-%d %H:%M:%S UTC') }}</dd>
+                            {% endif %}
+
+                            {% if task.last_heartbeat_at %}
+                            <dt class="text-gray-400">Last heartbeat</dt>
+                            <dd>{{ task.last_heartbeat_at.strftime('%Y-%m-%d %H:%M:%S UTC') }}</dd>
+                            {% endif %}
+
+                            <dt class="text-gray-400">Created</dt>
+                            <dd>{{ task.created_at.strftime('%Y-%m-%d %H:%M:%S UTC') }}</dd>
+
+                            {% if task.claimed_at %}
+                            <dt class="text-gray-400">Started</dt>
+                            <dd>{{ task.claimed_at.strftime('%Y-%m-%d %H:%M:%S UTC') }}</dd>
+                            {% endif %}
+
+                            {% if task.completed_at %}
+                            <dt class="text-gray-400">Completed</dt>
+                            <dd>
+                                {{ task.completed_at.strftime('%Y-%m-%d %H:%M:%S UTC') }}
+                                {% if task.claimed_at %}
+                                <span class="text-gray-400">(ran for {{ ((task.completed_at - task.claimed_at).total_seconds() | int) }}s)</span>
+                                {% endif %}
+                            </dd>
+                            {% endif %}
+
+                            <dt class="text-gray-400">Validation</dt>
+                            <dd>
+                                <span class="px-1.5 py-0.5 rounded text-[11px]
+                                    {% if task.validation_status == 'valid' %}bg-green-50 text-green-600
+                                    {% elif task.validation_status in ('invalid', 'repair_failed') %}bg-red-50 text-red-600
+                                    {% elif task.validation_status == 'repair_succeeded' %}bg-yellow-50 text-yellow-700
+                                    {% else %}bg-gray-100 text-gray-500{% endif %}">
+                                    {{ task.validation_status }}
+                                </span>
+                                {% if task.validation_errors %}
+                                <span class="text-red-600 ml-1">{{ task.validation_errors | length }} errors</span>
+                                {% endif %}
+                            </dd>
+
+                            {% if task.parent_task_id %}
+                            <dt class="text-gray-400">Parent task</dt>
+                            <dd class="font-mono text-gray-500">{{ task.parent_task_id }}</dd>
+                            {% endif %}
+                        </dl>
+
+                        {% if task.sandbox_config or task.sandbox_template_id %}
+                        <div class="mt-3 pt-2 border-t border-gray-200">
+                            <h5 class="text-[11px] font-semibold text-gray-400 uppercase tracking-wider mb-1">Sandbox</h5>
+                            <dl class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
+                                {% if task.sandbox_template_id %}
+                                <dt class="text-gray-400">Template</dt>
+                                <dd class="font-mono text-gray-500">{{ task.sandbox_template_id }}</dd>
+                                {% endif %}
+                                {% set sb = task.sandbox_config or {} %}
+                                {% if sb.image %}
+                                <dt class="text-gray-400">Image</dt>
+                                <dd class="font-mono">{{ sb.image }}</dd>
+                                {% endif %}
+                                {% if sb.repo_url %}
+                                <dt class="text-gray-400">Repo</dt>
+                                <dd class="font-mono break-all">{{ sb.repo_url }}{% if sb.branch %} @ {{ sb.branch }}{% endif %}</dd>
+                                {% endif %}
+                                {% if sb.working_dir %}
+                                <dt class="text-gray-400">Working dir</dt>
+                                <dd class="font-mono">{{ sb.working_dir }}</dd>
+                                {% endif %}
+                                {% if sb.network_mode %}
+                                <dt class="text-gray-400">Network</dt>
+                                <dd>
+                                    <span class="font-mono">{{ sb.network_mode }}</span>
+                                    {% if sb.allowed_hosts %}
+                                    <span class="text-gray-400">({{ sb.allowed_hosts | length }} allowed hosts)</span>
+                                    {% endif %}
+                                </dd>
+                                {% endif %}
+                                {% if sb.allowed_hosts %}
+                                <dt class="text-gray-400">Allowed hosts</dt>
+                                <dd class="font-mono text-[11px] text-gray-600">{{ sb.allowed_hosts | join(', ') }}</dd>
+                                {% endif %}
+                                {% if sb.memory_limit %}
+                                <dt class="text-gray-400">Memory limit</dt>
+                                <dd class="font-mono">{{ sb.memory_limit }}</dd>
+                                {% endif %}
+                                {% if sb.cpu_limit %}
+                                <dt class="text-gray-400">CPU limit</dt>
+                                <dd class="font-mono">{{ sb.cpu_limit }}</dd>
+                                {% endif %}
+                                {% if sb.timeout_seconds %}
+                                <dt class="text-gray-400">Timeout</dt>
+                                <dd class="font-mono">{{ sb.timeout_seconds }}s</dd>
+                                {% endif %}
+                                {% if sb.output_mode %}
+                                <dt class="text-gray-400">Output mode</dt>
+                                <dd class="font-mono">{{ sb.output_mode }}</dd>
+                                {% endif %}
+                                {% if sb.setup_commands %}
+                                <dt class="text-gray-400">Setup commands</dt>
+                                <dd class="font-mono text-[11px]">{{ sb.setup_commands | length }} command(s)</dd>
+                                {% endif %}
+                                {% if sb.env_vars %}
+                                <dt class="text-gray-400">Env vars</dt>
+                                <dd class="font-mono text-[11px]">{{ sb.env_vars.keys() | list | join(', ') }}</dd>
+                                {% endif %}
+                                {% if sb.commit_approved %}
+                                <dt class="text-gray-400">Git commits</dt>
+                                <dd>approved</dd>
+                                {% endif %}
+                            </dl>
+                        </div>
+                        {% endif %}
+
+                        {% if task.output_contract %}
+                        <div class="mt-3 pt-2 border-t border-gray-200">
+                            <h5 class="text-[11px] font-semibold text-gray-400 uppercase tracking-wider mb-1">Output Contract</h5>
+                            <div class="bg-white rounded p-2 font-mono text-[11px] text-gray-600 max-h-32 overflow-auto whitespace-pre-wrap">{{ task.output_contract | tojson(indent=2) }}</div>
+                        </div>
+                        {% endif %}
+
+                        {% if task.validation_errors %}
+                        <div class="mt-3 pt-2 border-t border-gray-200">
+                            <h5 class="text-[11px] font-semibold text-red-400 uppercase tracking-wider mb-1">Validation Errors</h5>
+                            <div class="bg-red-50 rounded p-2 font-mono text-[11px] text-red-700 max-h-32 overflow-auto whitespace-pre-wrap">{{ task.validation_errors | tojson(indent=2) }}</div>
+                        </div>
+                        {% endif %}
+
+                        {% if task.result_structured %}
+                        <div class="mt-3 pt-2 border-t border-gray-200">
+                            <h5 class="text-[11px] font-semibold text-gray-400 uppercase tracking-wider mb-1">Structured Result</h5>
+                            <div class="bg-white rounded p-2 font-mono text-[11px] text-gray-600 max-h-48 overflow-auto whitespace-pre-wrap">{{ task.result_structured | tojson(indent=2) }}</div>
+                        </div>
+                        {% endif %}
+                    </div>
+                </details>
+
                 <!-- Result (shown for both completed and failed tasks) -->
                 {% if task.result %}
                 <div>
@@ -179,7 +358,17 @@
                 {% if task.error and task.status == 'failed' %}
                 <div>
                     <h4 class="text-xs font-semibold text-red-400 uppercase tracking-wider mb-1">Error</h4>
-                    <div class="bg-red-50 rounded p-2 text-sm text-red-700 font-mono text-xs">{{ task.error }}</div>
+                    <div class="bg-red-50 rounded p-2 text-sm text-red-700 font-mono text-xs whitespace-pre-wrap">{{ task.error }}</div>
+                    {% set failure_events = task.events | selectattr('event_type', 'equalto', 'sandbox_failed') | list %}
+                    {% if failure_events %}
+                    {% set fe = failure_events[-1] %}
+                    {% if fe.metadata %}
+                    <div class="mt-2">
+                        <h4 class="text-xs font-semibold text-red-400 uppercase tracking-wider mb-1">Sandbox Failure Metadata</h4>
+                        <div class="bg-red-50 rounded p-2 text-red-700 font-mono text-[11px] whitespace-pre-wrap">{{ fe.metadata | tojson(indent=2) }}</div>
+                    </div>
+                    {% endif %}
+                    {% endif %}
                 </div>
                 {% endif %}
 

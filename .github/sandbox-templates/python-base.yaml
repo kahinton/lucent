@@ -1,0 +1,23 @@
+name: python-base
+description: |
+  General-purpose Python sandbox for tasks that need to clone a repo, run
+  Python code, and read/write files. Includes git via the standard
+  python:3.12-slim base image. Use this for code analysis, knowledge scans,
+  documentation generation, and any task that doesn't require system-level
+  packages or non-Python tooling.
+image: python:3.12-slim
+working_dir: /workspace
+network_mode: allowlist
+allowed_hosts:
+  - github.com
+  - api.github.com
+  - codeload.github.com
+  - objects.githubusercontent.com
+  - pypi.org
+  - files.pythonhosted.org
+setup_commands: []
+env_vars: {}
+memory_limit: 2g
+cpu_limit: 2.0
+disk_limit: 10g
+timeout_seconds: 1800

@@ -1,0 +1,20 @@
+name: node-base
+description: |
+  General-purpose Node.js sandbox for JavaScript / TypeScript repos. Use for
+  npm/pnpm-based projects that need lint, type-check, or build commands.
+image: node:20-slim
+working_dir: /workspace
+network_mode: allowlist
+allowed_hosts:
+  - github.com
+  - api.github.com
+  - codeload.github.com
+  - objects.githubusercontent.com
+  - registry.npmjs.org
+  - registry.yarnpkg.com
+setup_commands: []
+env_vars: {}
+memory_limit: 2g
+cpu_limit: 2.0
+disk_limit: 10g
+timeout_seconds: 1800

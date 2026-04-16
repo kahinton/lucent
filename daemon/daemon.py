@@ -37,6 +37,34 @@ if TYPE_CHECKING:
     from lucent.sandbox.models import SandboxConfig
 
 # ---------------------------------------------------------------------------
+# Dev ergonomics — auto-load VAULT_ADDR/VAULT_TOKEN when running on the host
+# ---------------------------------------------------------------------------
+# The daemon needs OpenBao access to decrypt stored credentials (e.g. GitHub
+# tokens for private-repo sandbox clones). When run inside docker-compose the
+# env vars are set automatically; when run on the host we resolve them from
+# the compose setup:
+#   - VAULT_ADDR defaults to http://127.0.0.1:8200 (exposed by
+#     docker-compose.override.yml)
+#   - VAULT_TOKEN is read from ./.openbao/shared/vault-token, written by the
+#     openbao-init container after init+unseal.
+# This runs at import time so all downstream imports of encryption.py see the
+# resolved values.
+def _auto_load_vault_env() -> None:
+    if os.environ.get("VAULT_ADDR") and (
+        os.environ.get("VAULT_TOKEN") or os.environ.get("VAULT_TOKEN_FILE")
+    ):
+        return
+    repo_root = Path(__file__).resolve().parent.parent
+    shared_token = repo_root / ".openbao" / "shared" / "vault-token"
+    if not shared_token.exists():
+        return
+    os.environ.setdefault("VAULT_ADDR", "http://127.0.0.1:8200")
+    os.environ.setdefault("VAULT_TOKEN_FILE", str(shared_token))
+
+
+_auto_load_vault_env()
+
+# ---------------------------------------------------------------------------
 # Redaction helper — strip known secret patterns from logged tool output
 # ---------------------------------------------------------------------------
 _SECRET_PATTERNS = re.compile(
@@ -3463,18 +3491,24 @@ class LucentDaemon:
                 )
             elif sandbox_config:
                 sandbox_failed_reason = None
+                sandbox_failure_meta: dict | None = None
                 try:
-                    sandbox_id, task_sandbox_runtime_config = await self._create_task_sandbox(
+                    (
+                        sandbox_id,
+                        task_sandbox_runtime_config,
+                        sandbox_failure_meta,
+                    ) = await self._create_task_sandbox(
                         task_id,
                         sandbox_config,
                         requesting_user_id=requesting_user_id,
                         org_id=org_id,
                     )
                     if not sandbox_id:
-                        sandbox_failed_reason = (
-                            "Sandbox creation returned no sandbox_id. "
-                            "Check sandbox manager logs for details."
+                        detail = (
+                            (sandbox_failure_meta or {}).get("detail")
+                            or "Sandbox manager returned no sandbox_id"
                         )
+                        sandbox_failed_reason = f"Sandbox creation failed: {detail}"
                     else:
                         # Inject sandbox context into the task description
                         description = (
@@ -3488,20 +3522,40 @@ class LucentDaemon:
                             task_id,
                             "sandbox_created",
                             f"Sandbox {sandbox_id[:12]} created for task",
-                            {"sandbox_id": sandbox_id},
+                            {
+                                "sandbox_id": sandbox_id,
+                                "image": sandbox_config.get("image"),
+                                "repo_url": sandbox_config.get("repo_url"),
+                                "branch": sandbox_config.get("branch"),
+                                "network_mode": sandbox_config.get("network_mode"),
+                            },
                         )
                 except Exception as e:
                     log(f"Sandbox creation failed for task {task_id[:8]}: {e}", "WARN")
                     sandbox_failed_reason = f"Sandbox creation failed: {e}"
+                    sandbox_failure_meta = {
+                        "stage": "sandbox_create_exception",
+                        "detail": str(e),
+                        "exception_type": type(e).__name__,
+                    }
 
                 # If sandbox was required and failed, fail the task — do NOT
                 # run it locally. Sandboxes are a security boundary; silent
                 # fallback to local execution defeats the purpose.
                 if sandbox_failed_reason:
+                    event_detail = sandbox_failed_reason
+                    if sandbox_failure_meta and sandbox_failure_meta.get("image"):
+                        event_detail = (
+                            f"{sandbox_failed_reason} "
+                            f"[image={sandbox_failure_meta.get('image')!r}, "
+                            f"repo_url={sandbox_failure_meta.get('repo_url')!r}, "
+                            f"network_mode={sandbox_failure_meta.get('network_mode')!r}]"
+                        )
                     await RequestAPI.add_event(
                         task_id,
                         "sandbox_failed",
-                        sandbox_failed_reason,
+                        event_detail,
+                        sandbox_failure_meta,
                     )
                     await _fail_owned(
                         task_id,
@@ -3684,8 +3738,14 @@ class LucentDaemon:
         *,
         requesting_user_id: str,
         org_id: str,
-    ) -> tuple[str | None, "SandboxConfig | None"]:
-        """Create a sandbox for a task. Returns (sandbox_id, resolved_config)."""
+    ) -> tuple[str | None, "SandboxConfig | None", dict | None]:
+        """Create a sandbox for a task.
+
+        Returns ``(sandbox_id, resolved_config, failure)`` where ``failure``
+        is ``None`` on success, or a dict ``{"stage": str, "detail": str}``
+        describing what went wrong so the caller can surface it to the task's
+        error field and a task event.
+        """
         from lucent.sandbox.manager import get_sandbox_manager
         from lucent.sandbox.models import SandboxConfig
 
@@ -3695,6 +3755,76 @@ class LucentDaemon:
             env_vars = await resolve_secret_env_vars(sandbox_config.get("env_vars", {}), provider)
         finally:
             set_current_user(None)
+
+        # Auto-resolve GitHub credentials for private repo cloning.
+        # If the task didn't supply git_credentials explicitly but has a repo_url
+        # pointing at GitHub, look up the requesting user's stored GitHub token.
+        git_credentials = sandbox_config.get("git_credentials")
+        repo_url = sandbox_config.get("repo_url") or ""
+        if not git_credentials and repo_url and "github.com" in repo_url:
+            try:
+                from lucent.db import get_pool
+                from lucent.integrations.encryption import (
+                    BackendCredentialEncryptor,
+                    EncryptionError,
+                )
+                from uuid import UUID
+
+                pool = await get_pool()
+
+                # Direct query + decrypt so we can distinguish "no credential"
+                # from "credential exists but decryption failed" (the latter
+                # happens when openbao's transit key is reset, e.g. dev restart).
+                async with pool.acquire() as conn:
+                    cred_row = await conn.fetchrow(
+                        """
+                        SELECT id, encrypted_secret_payload
+                        FROM enterprise_credentials
+                        WHERE integration_type = 'github'
+                          AND scope_type = 'user'
+                          AND owner_user_id = $1::uuid
+                          AND status = 'active'
+                        ORDER BY updated_at DESC
+                        LIMIT 1
+                        """,
+                        requesting_user_id,
+                    )
+
+                if not cred_row:
+                    log(
+                        f"No GitHub token on file for user {requesting_user_id[:8]}; "
+                        "private repo clones will fail. User can connect GitHub in settings.",
+                        "WARN",
+                    )
+                else:
+                    try:
+                        encryptor = BackendCredentialEncryptor()
+                        payload = encryptor.decrypt(cred_row["encrypted_secret_payload"])
+                        token = payload.get("access_token")
+                        if token:
+                            git_credentials = f"x-access-token:{token}"
+                            log(
+                                f"Resolved GitHub token for user "
+                                f"{requesting_user_id[:8]} for sandbox clone"
+                            )
+                        else:
+                            log(
+                                f"GitHub credential row for user {requesting_user_id[:8]} "
+                                "decrypted but has no access_token field",
+                                "WARN",
+                            )
+                    except EncryptionError as dec_err:
+                        log(
+                            f"GitHub credential for user {requesting_user_id[:8]} "
+                            f"could not be decrypted ({dec_err}). This usually means "
+                            "the OpenBao transit key has been rotated/reset since the "
+                            "credential was stored — the user must reconnect GitHub "
+                            "in Settings → Integrations.",
+                            "WARN",
+                        )
+            except Exception as e:
+                log(f"GitHub token lookup failed (non-fatal): {e}", "WARN")
+
         # If a repo_url is set but no explicit network_mode, promote to
         # "allowlist" with common package/git endpoints so git+apt can work.
         # Pure "none" is incompatible with cloning a remote repo.
@@ -3708,7 +3838,7 @@ class LucentDaemon:
                 "raw.githubusercontent.com",
                 "codeload.github.com",
                 "objects.githubusercontent.com",
-                # Package repositories for git auto-install in base images
+                # Package repositories for git/iptables auto-install in base images
                 "deb.debian.org",
                 "security.debian.org",
                 "archive.ubuntu.com",
@@ -3721,7 +3851,7 @@ class LucentDaemon:
             image=sandbox_config.get("image", "python:3.12-slim"),
             repo_url=sandbox_config.get("repo_url"),
             branch=sandbox_config.get("branch"),
-            git_credentials=sandbox_config.get("git_credentials"),
+            git_credentials=git_credentials,
             setup_commands=sandbox_config.get("setup_commands", []),
             env_vars=env_vars,
             working_dir=sandbox_config.get("working_dir", "/workspace"),
@@ -3738,10 +3868,25 @@ class LucentDaemon:
         info = await manager.create(config)
         if info.status.value == "ready":
             log(f"Sandbox {info.id[:12]} created for task {task_id[:8]}")
-            return info.id, config
+            return info.id, config, None
         else:
-            log(f"Sandbox creation failed for task {task_id[:8]}: {info.error}", "WARN")
-            return None, None
+            err = info.error or "Sandbox creation failed without a specific error"
+            log(
+                f"Sandbox creation failed for task {task_id[:8]}: {err} "
+                f"(image={config.image!r}, repo_url={config.repo_url!r}, "
+                f"network_mode={config.network_mode!r})",
+                "WARN",
+            )
+            return None, None, {
+                "stage": "sandbox_create",
+                "detail": err,
+                "image": config.image,
+                "repo_url": config.repo_url,
+                "branch": config.branch,
+                "network_mode": config.network_mode,
+                "allowed_hosts": list(config.allowed_hosts or []),
+                "working_dir": config.working_dir,
+            }
 
     async def _destroy_task_sandbox(self, sandbox_id: str) -> None:
         """Destroy a task's sandbox."""
@@ -3874,7 +4019,16 @@ class LucentDaemon:
             if not tpl:
                 log(f"Sandbox template {template_id[:8]} not found", "WARN")
                 return None
+            if tpl.get("status") and tpl["status"] != "approved":
+                log(
+                    f"Sandbox template '{tpl.get('name', template_id[:8])}' has "
+                    f"status={tpl['status']!r} — refusing dispatch. Only approved "
+                    "templates can be used by tasks.",
+                    "WARN",
+                )
+                return None
             config = repo.to_sandbox_config(tpl)
+            await repo.mark_used(template_id)
             log(f"Resolved sandbox template '{tpl.get('name', template_id[:8])}' for dispatch")
             return config
         except Exception as e:

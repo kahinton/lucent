@@ -149,10 +149,10 @@ Returns: JSON with the skill details, or an error if not found."""
         return json.dumps(skill, default=_serialize)
 
     @mcp.tool(
-        description="""List all pending proposals (agents, skills, and MCP servers
-awaiting approval).
+        description="""List all pending proposals (agents, skills, MCP servers,
+and sandbox templates awaiting approval).
 
-Returns: JSON with agents, skills, mcp_servers arrays and total count."""
+Returns: JSON with agents, skills, mcp_servers, sandbox_templates arrays and total count."""
     )
     async def list_proposals() -> str:
         _, org_id, _, _, _ = await _get_current_user_context()
@@ -161,6 +161,41 @@ Returns: JSON with agents, skills, mcp_servers arrays and total count."""
 
         repo = await _get_definition_repository()
         result = await repo.get_pending_proposals(str(org_id))
+
+        # Include proposed sandbox templates so the planner sees what's
+        # already been proposed (and won't duplicate) and admins can review
+        # them in one place.
+        try:
+            from lucent.db import get_pool
+            from lucent.db.sandbox_template import SandboxTemplateRepository
+
+            pool = await get_pool()
+            tpl_repo = SandboxTemplateRepository(pool)
+            proposed_templates = await tpl_repo.list_proposed(str(org_id))
+            result["sandbox_templates"] = [
+                {
+                    "id": str(t["id"]),
+                    "name": t["name"],
+                    "description": t.get("description", ""),
+                    "image": t.get("image"),
+                    "network_mode": t.get("network_mode"),
+                    "proposal_reason": t.get("proposal_reason"),
+                    "proposed_by": str(t["proposed_by"]) if t.get("proposed_by") else None,
+                    "created_at": (
+                        t["created_at"].isoformat()
+                        if hasattr(t.get("created_at"), "isoformat")
+                        else t.get("created_at")
+                    ),
+                }
+                for t in proposed_templates
+            ]
+            result["total"] = (
+                result.get("total", 0) + len(proposed_templates)
+            )
+        except Exception:
+            # Don't break the existing tool if sandbox lookup fails.
+            result.setdefault("sandbox_templates", [])
+
         return json.dumps(result, default=_serialize)
 
     # ── Write tools ──────────────────────────────────────────────────────

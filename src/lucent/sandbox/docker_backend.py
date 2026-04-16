@@ -137,7 +137,15 @@ class DockerBackend(SandboxBackend):
 
     async def create(self, config: SandboxConfig) -> SandboxInfo:
         sandbox_id = str(uuid.uuid4())
-        name = config.name or f"lucent-sandbox-{sandbox_id[:12]}"
+        # Always suffix the caller-provided base name with a unique slice of the
+        # sandbox UUID. This guarantees retries of the same task never collide
+        # on the container name even if a previous attempt's container is still
+        # in the middle of being cleaned up (or was leaked entirely). Without
+        # this suffix, re-running a failed task hits a Docker 409 conflict.
+        if config.name:
+            name = f"{config.name}-{sandbox_id[:8]}"
+        else:
+            name = f"lucent-sandbox-{sandbox_id[:12]}"
         info = SandboxInfo(
             id=sandbox_id,
             name=name,
@@ -235,7 +243,12 @@ class DockerBackend(SandboxBackend):
             # Apply network allowlist after all setup is complete so clone and
             # package installation can proceed freely beforehand.
             if config.network_mode == "allowlist":
-                await self._apply_network_allowlist(sandbox_id, config)
+                try:
+                    await self._apply_network_allowlist(sandbox_id, config)
+                except RuntimeError as exc:
+                    info.status = SandboxStatus.FAILED
+                    info.error = str(exc)
+                    return info
 
             info.status = SandboxStatus.READY
             info.ready_at = datetime.now(timezone.utc)
@@ -255,6 +268,19 @@ class DockerBackend(SandboxBackend):
             info.status = SandboxStatus.FAILED
             info.error = str(e)
             logger.error("Failed to create sandbox %s: %s", name, e)
+
+        # If we left CREATING but never reached READY, the container (if any)
+        # is a failed partial sandbox — destroy it so orphan containers don't
+        # pile up and block retries on the same name. This runs regardless of
+        # whether we hit an exception or returned early with FAILED status.
+        if info.status != SandboxStatus.READY and info.container_id:
+            try:
+                await asyncio.to_thread(self._force_remove_container, info.container_id)
+            except Exception as cleanup_err:
+                logger.warning(
+                    "Failed to clean up partial sandbox container %s: %s",
+                    info.container_id[:12], cleanup_err,
+                )
 
         return info
 
@@ -412,7 +438,10 @@ class DockerBackend(SandboxBackend):
             security_opt=["no-new-privileges"],
             read_only=False,  # Repos need write access
             volumes={workspace_volume: {"bind": "/workspace", "mode": "rw"}},
-            tmpfs={"/tmp": "size=512m"},
+            # Docker's default tmpfs options include `noexec`, which breaks
+            # scripts we stage to /tmp (notably the git askpass helper used
+            # for authenticated repo clones). Explicitly allow exec here.
+            tmpfs={"/tmp": "size=512m,exec"},
             stop_signal="SIGTERM",
             auto_remove=False,
         )
@@ -499,51 +528,110 @@ class DockerBackend(SandboxBackend):
         loopback and already-established flows) and drop everything else.
 
         Requires the container to have the NET_ADMIN capability and iptables
-        available in the image.  Failures are logged as warnings rather than
-        surfaced as hard errors so a missing iptables binary doesn't break
-        non-security-sensitive deployments.
+        available in the image. If iptables is missing we attempt to install
+        it via the container's package manager. If installation fails the
+        sandbox is marked failed — silently downgrading allowlist to bridge
+        would defeat the whole point of the security boundary.
+
+        Raises:
+            RuntimeError: If iptables cannot be installed or any rule fails.
+                The caller must mark the sandbox as failed.
         """
+        # Ensure iptables is available before anything else. If it's missing
+        # we MUST refuse to continue rather than silently leaving the sandbox
+        # with full network access.
+        check = await self.exec(sandbox_id, "command -v iptables", timeout=5)
+        if check.exit_code != 0:
+            install = await self.exec(
+                sandbox_id,
+                "( (command -v apt-get >/dev/null 2>&1 && apt-get update -qq && "
+                "apt-get install -y -qq iptables >/dev/null 2>&1) || "
+                "(command -v apk >/dev/null 2>&1 && apk add --no-cache iptables >/dev/null 2>&1) || "
+                "(command -v yum >/dev/null 2>&1 && yum install -y -q iptables >/dev/null 2>&1) )",
+                timeout=120,
+            )
+            recheck = await self.exec(sandbox_id, "command -v iptables", timeout=5)
+            if recheck.exit_code != 0:
+                raise RuntimeError(
+                    f"Network allowlist requested but iptables is unavailable in image "
+                    f"{config.image!r} and could not be installed. Use an image with "
+                    f"iptables pre-installed, or change network_mode to 'bridge' or 'none'."
+                )
+
         # Resolve allowed hosts to IP addresses inside the container.
+        # Use getent ahosts (not just hosts) so we can filter to IPv4-only —
+        # iptables-legacy doesn't handle IPv6 addresses, and picking the first
+        # DNS result blindly often gives an IPv6 record we'd then skip,
+        # leaving the host effectively blocked.
         allowed_ips: list[str] = []
+        unresolved: list[str] = []
         for host in config.allowed_hosts:
             literal_ip = self._validate_iptables_destination(host)
             if literal_ip is not None:
                 allowed_ips.append(literal_ip)
-            else:
-                res = await self.exec(
-                    sandbox_id,
-                    f"getent hosts {shlex.quote(host)} | awk '{{print $1}}' | head -n1",
-                    timeout=10,
-                )
-                ip = self._validate_iptables_destination(res.stdout.strip())
+                continue
+
+            # Get all IPv4 addresses, not just the first DNS result
+            res = await self.exec(
+                sandbox_id,
+                # `getent ahosts` returns one row per address; STREAM keeps order.
+                # Filter to IPv4 (no colons) and take unique addresses.
+                f"getent ahosts {shlex.quote(host)} 2>/dev/null | "
+                f"awk '$1 !~ /:/ {{print $1}}' | sort -u",
+                timeout=10,
+            )
+            host_ips: list[str] = []
+            for line in res.stdout.strip().splitlines():
+                ip = self._validate_iptables_destination(line.strip())
                 if ip:
-                    allowed_ips.append(ip)
-                else:
-                    logger.warning(
-                        "Allowlist: invalid or unresolvable host %r in sandbox %s; skipping",
-                        host, sandbox_id[:12],
-                    )
+                    host_ips.append(ip)
+            if host_ips:
+                allowed_ips.extend(host_ips)
+            else:
+                unresolved.append(host)
+                logger.warning(
+                    "Allowlist: no IPv4 addresses found for host %r in sandbox %s",
+                    host, sandbox_id[:12],
+                )
+
+        if not allowed_ips:
+            raise RuntimeError(
+                f"Network allowlist requested but no allowed_hosts could be resolved "
+                f"to IPv4 addresses (unresolved: {unresolved}). Refusing to apply "
+                f"a no-op allowlist that would leave egress wide open."
+            )
+
+        # De-duplicate while preserving order (handles literal + resolved overlap)
+        seen: set[str] = set()
+        unique_ips = [ip for ip in allowed_ips if not (ip in seen or seen.add(ip))]
 
         rules: list[str] = [
             "iptables -F OUTPUT",
             "iptables -A OUTPUT -o lo -j ACCEPT",
             "iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT",
+            # Allow DNS to the container's own resolver (Docker injects 127.0.0.11
+            # as a stub resolver on bridge networks). Without this, name lookups
+            # inside the sandbox break the moment the policy switches to DROP.
+            "iptables -A OUTPUT -p udp --dport 53 -j ACCEPT",
+            "iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT",
         ]
-        for ip in allowed_ips:
+        for ip in unique_ips:
             rules.append(f"iptables -A OUTPUT -d {shlex.quote(ip)} -j ACCEPT")
         rules.append("iptables -P OUTPUT DROP")
 
         for rule in rules:
             res = await self.exec(sandbox_id, rule, timeout=10)
             if res.exit_code != 0:
-                logger.warning(
-                    "Allowlist iptables rule failed in sandbox %s: %r — %s",
-                    sandbox_id[:12], rule, res.stderr[:200],
+                # Any rule failure is a hard failure — partial rules leave the
+                # sandbox in an undefined security state.
+                raise RuntimeError(
+                    f"Allowlist iptables rule {rule!r} failed: {res.stderr[:200]}. "
+                    "Sandbox security policy could not be applied."
                 )
 
         logger.info(
-            "Applied network allowlist in sandbox %s (%d allowed IPs)",
-            sandbox_id[:12], len(allowed_ips),
+            "Applied network allowlist in sandbox %s (%d allowed IPs from %d hosts)",
+            sandbox_id[:12], len(unique_ips), len(config.allowed_hosts),
         )
 
     def _build_clone_command(self, config: SandboxConfig) -> str:
@@ -875,3 +963,19 @@ class DockerBackend(SandboxBackend):
             filters={"label": f"{LABEL_PREFIX}.id={sandbox_id}"},
         )
         return containers[0] if containers else None
+
+    def _force_remove_container(self, container_id: str) -> None:
+        """Force-remove a container by ID, ignoring NotFound.
+
+        Used to clean up partial sandboxes when creation fails — leaving them
+        behind causes name conflicts on retry and wastes resources.
+        """
+        client = self._docker()
+        try:
+            container = client.containers.get(container_id)
+        except docker.errors.NotFound:
+            return
+        try:
+            container.remove(force=True)
+        except docker.errors.NotFound:
+            pass

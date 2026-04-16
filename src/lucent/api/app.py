@@ -102,6 +102,20 @@ async def _sync_built_in_definitions():
                 if count:
                     logger.info(f"Synced {count} built-in agent definitions")
                 break
+
+        # Sync sandbox templates from .github/sandbox-templates/
+        from lucent.db.sandbox_template import SandboxTemplateRepository
+
+        tpl_repo = SandboxTemplateRepository(pool)
+        for candidate in [
+            Path("/app/.github/sandbox-templates"),
+            Path(__file__).resolve().parents[3] / ".github" / "sandbox-templates",
+        ]:
+            if candidate.is_dir():
+                count = await tpl_repo.sync_built_in_templates(org_id, str(candidate))
+                if count:
+                    logger.info(f"Synced {count} built-in sandbox templates")
+                break
     except Exception as e:
         logger.warning(f"Failed to sync built-in definitions: {e}")
 

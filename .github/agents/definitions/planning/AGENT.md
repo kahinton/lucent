@@ -81,6 +81,45 @@ Follow the **daemon-task-authoring** skill's validation section:
 - Are dependencies correct in `sequence_order`?
 - Is any task too large for a 720-second session?
 - Are agent types appropriate?
+- Does every sandboxed task reference an **approved** `sandbox_template_id`?
+  Inline `sandbox_config` is rejected — see the sandbox section below.
+
+### Sandbox Selection (required for any task that needs to run code)
+
+Tasks that execute code, clone repos, or read filesystem state must run in a
+sandbox. Sandboxes must come from approved templates only — the planner
+cannot ad-hoc a sandbox config.
+
+```
+list_sandbox_templates()      # discover approved templates
+```
+
+Pick the closest fit and pass its id as `sandbox_template_id` on `create_task`.
+You may set a small whitelist of overrides via `sandbox_overrides` (currently
+just `repo_url`, `branch`, `timeout_seconds`, `output_mode`, `commit_approved`).
+
+If none of the approved templates fit:
+
+```
+propose_sandbox_template(
+    name="...",
+    description="...",
+    image="...",
+    reason="why no existing template suffices",
+    network_mode="allowlist",
+    allowed_hosts=[...],
+    ...
+)
+```
+
+Proposed templates land in the admin review queue. You cannot reference a
+proposed template in a task — wait for approval, or pick the closest existing
+approved template and shape the task description around its constraints.
+
+**For repos that ship `.devcontainer/devcontainer.json`**, prefer the built-in
+`devcontainer-builder` template — the sandbox runtime detects the manifest
+and rebuilds the container with the image/Dockerfile and lifecycle commands
+the repo declares.
 
 ### 5. Record the Plan
 
