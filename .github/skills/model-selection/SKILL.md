@@ -25,7 +25,7 @@ How to pick the right model for a given task. The goal is matching task demands 
 | `claude-sonnet-4.6` | General | Strong coding, vision, tools | Standard | code, documentation, review |
 | `claude-sonnet-4.5` | General | Coding, tool use | Standard | code, documentation |
 | `gemini-3-pro` | Reasoning | Long context, research synthesis | Premium | research, planning |
-| `claude-opus-4.6` | Reasoning | Deep reasoning, nuanced judgment | Premium | reflection, planning, review |
+| `claude-opus-4.7` | Reasoning | Deep reasoning, nuanced judgment | Premium | reflection, planning, review, agentic |
 | `gpt-5.3-codex` | Agentic | Multi-step execution, edit-test loops | Premium | code (agentic), refactoring |
 | `gpt-5.2-codex` | Agentic | Sustained tool-calling workflows | Premium | code (agentic) |
 
@@ -84,7 +84,7 @@ The workhorse tier. Sonnet 4.6 is the default for a reason — it handles most c
 ### Deep Reasoning / Analysis
 Tasks: architecture decisions, complex debugging, security review, code analysis, planning
 
-**Pick:** `claude-opus-4.6`, `gpt-5.4`, or `gemini-3-pro`
+**Pick:** `claude-opus-4.7`, `gpt-5.4`, or `gemini-3-pro`
 
 When the task requires thinking through multiple steps, weighing trade-offs, or analyzing a large codebase. Opus is strongest here. GPT-5.4 and Gemini 3 Pro are alternatives if you need provider diversity.
 
@@ -105,7 +105,7 @@ Google's models handle long contexts well and are strong at research-style synth
 ### Reflection / Self-Assessment
 Tasks: reviewing own output quality, extracting lessons, meta-analysis
 
-**Pick:** `claude-opus-4.6`
+**Pick:** `claude-opus-4.7`
 
 Reflection benefits from the highest reasoning capability available. This is where you want the model that's best at nuanced judgment.
 
@@ -115,7 +115,7 @@ Models have different premium request costs. In rough order from cheapest to mos
 
 1. **Cheapest:** Haiku 4.5, Gemini 3 Flash, GPT-5 mini
 2. **Standard:** Sonnet 4.5/4.6, GPT-4.1, Qwen2.5
-3. **Premium:** Opus 4.5/4.6, GPT-5.1+, Gemini 3 Pro
+3. **Premium:** Opus 4.5/4.6/4.7, GPT-5.1+, Gemini 3 Pro
 4. **Most expensive:** GPT-5.1-codex-max, GPT-5.3-codex
 
 Don't use premium models for tasks that a standard model handles fine. Save the expensive ones for where they make a real difference.

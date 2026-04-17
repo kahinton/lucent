@@ -56,7 +56,7 @@ class LLMEngine(ABC):
         This is used by the chat endpoint (send_and_wait pattern).
 
         Args:
-            model: Model identifier (e.g. "claude-opus-4.6").
+            model: Model identifier (e.g. "claude-opus-4.7").
             system_message: System prompt text.
             prompt: User prompt text.
             mcp_config: MCP server configuration dict for tool access.

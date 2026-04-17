@@ -107,6 +107,13 @@ class TestModelResolve:
         assert provider == "anthropic"
         assert model_id == "claude-opus-4-6-20260301"
 
+    def test_resolve_anthropic_latest_default(self):
+        from lucent.llm.langchain_engine import _resolve_model
+
+        provider, model_id = _resolve_model("claude-opus-4.7")
+        assert provider == "anthropic"
+        assert model_id == "claude-opus-4-7-20260416"
+
     def test_resolve_openai(self):
         from lucent.llm.langchain_engine import _resolve_model
 
@@ -240,6 +247,7 @@ class TestModelRegistry:
         from lucent.model_registry import get_api_model_id
 
         assert get_api_model_id("claude-opus-4.6") == "claude-opus-4-6-20260301"
+        assert get_api_model_id("claude-opus-4.7") == "claude-opus-4-7-20260416"
         assert get_api_model_id("gpt-5.2") == "gpt-5.2"
         assert get_api_model_id("unknown-model") == "unknown-model"
 
@@ -247,6 +255,7 @@ class TestModelRegistry:
         from lucent.model_registry import get_provider
 
         assert get_provider("claude-opus-4.6") == "anthropic"
+        assert get_provider("claude-opus-4.7") == "anthropic"
         assert get_provider("gpt-5.2") == "openai"
         assert get_provider("gemini-3-pro") == "google"
         assert get_provider("unknown") is None

@@ -28,7 +28,7 @@ class ModelInfo:
 
 # ── Model Registry ────────────────────────────────────────────────────────
 # Source: https://docs.github.com/en/copilot/reference/ai-models/model-comparison
-# Last updated: 2026-03-12
+# Last updated: 2026-04-17
 
 MODELS: list[ModelInfo] = [
     # ── OpenAI ────────────────────────────────────────────────────────────
@@ -151,6 +151,19 @@ MODELS: list[ModelInfo] = [
         api_model_id="claude-opus-4-6-20260301",
         notes="Anthropic's most powerful model. Improves on Claude Opus 4.5.",
         tags=["reasoning", "analysis", "premium"],
+    ),
+    ModelInfo(
+        id="claude-opus-4.7",
+        provider="anthropic",
+        name="Claude Opus 4.7",
+        category="reasoning",
+        api_model_id="claude-opus-4-7-20260416",
+        context_window=200000,
+        notes=(
+            "Anthropic's latest frontier model. "
+            "Default for high-stakes reasoning and agentic work."
+        ),
+        tags=["default", "reasoning", "frontier", "agentic", "analysis", "premium"],
     ),
     ModelInfo(
         id="claude-sonnet-4.0",
@@ -375,12 +388,12 @@ def get_recommended_model(task_type: str) -> str:
         "code": "claude-sonnet-4.6",
         "research": "gemini-3-pro",
         "memory": "claude-haiku-4.5",
-        "reflection": "claude-opus-4.6",
+        "reflection": "claude-opus-4.7",
         "documentation": "claude-sonnet-4.6",
-        "planning": "claude-opus-4.6",
+        "planning": "claude-opus-4.7",
         "review": "claude-sonnet-4.5",
         "fast": "claude-haiku-4.5",
-        "agentic": "gpt-5.3-codex",
+        "agentic": "claude-opus-4.7",
     }
     return recommendations.get(task_type, "claude-sonnet-4.6")
 

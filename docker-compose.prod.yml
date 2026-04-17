@@ -120,7 +120,7 @@ services:
       DAEMON_DATABASE_URL: postgresql://lucent_daemon:${DAEMON_DB_PASSWORD:?DAEMON_DB_PASSWORD is required}@postgres:5432/lucent
       LUCENT_MODE: ${LUCENT_MODE:-team}
       LUCENT_LICENSE_KEY: ${LUCENT_LICENSE_KEY:?LUCENT_LICENSE_KEY is required for team mode}
-      LUCENT_CHAT_MODEL: ${LUCENT_CHAT_MODEL:-claude-opus-4.6}
+      LUCENT_CHAT_MODEL: ${LUCENT_CHAT_MODEL:-claude-opus-4.7}
       LUCENT_LLM_ENGINE: ${LUCENT_LLM_ENGINE:-copilot}
       # Secret storage
       LUCENT_SECRET_PROVIDER: ${LUCENT_SECRET_PROVIDER:-builtin}

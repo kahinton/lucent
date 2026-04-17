@@ -282,7 +282,7 @@ class AuthFailureDetectedError(Exception):
 
 MAX_CONCURRENT_SESSIONS = int(os.environ.get("LUCENT_MAX_SESSIONS", "3"))
 DAEMON_INTERVAL_MINUTES = int(os.environ.get("LUCENT_DAEMON_INTERVAL", "15"))
-MODEL = os.environ.get("LUCENT_DAEMON_MODEL", "claude-opus-4.6")
+MODEL = os.environ.get("LUCENT_DAEMON_MODEL", "claude-opus-4.7")
 STALE_HEARTBEAT_MINUTES = int(os.environ.get("LUCENT_STALE_HEARTBEAT_MINUTES", "30"))
 # Overall timeout for an entire run_session call (client start + create + response)
 SESSION_TOTAL_TIMEOUT = int(os.environ.get("LUCENT_SESSION_TIMEOUT", "3600"))
@@ -503,7 +503,7 @@ REQUIRE_APPROVAL = os.environ.get("LUCENT_REQUIRE_APPROVAL", "false").lower() in
 
 # Multi-model review: comma-separated list of models to use for reviewing task output.
 # When set, completed tasks are re-evaluated by each model before final completion.
-# The cognitive model is always claude-opus-4.6; these are for sub-agent review.
+# The cognitive model is always claude-opus-4.7; these are for sub-agent review.
 REVIEW_MODELS = [
     m.strip() for m in os.environ.get("LUCENT_REVIEW_MODELS", "").split(",") if m.strip()
 ]

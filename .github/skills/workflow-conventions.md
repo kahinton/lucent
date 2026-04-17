@@ -78,7 +78,7 @@ When creating tasks (`create_task`), choose the model based on complexity:
 
 | Task Type | Recommended Model | Rationale |
 |-----------|-------------------|-----------|
-| **Complex Logic / Architecture** | `claude-opus-4.6` | Highest reasoning capability, best for subtle bugs and design. |
+| **Complex Logic / Architecture** | `claude-opus-4.7` | Highest reasoning capability, best for subtle bugs and design. |
 | **Code Generation / Refactoring** | `gpt-5.3-codex` | Excellent code fluency and standard library knowledge. |
 | **Documentation / summarization** | `gemini-3.1-pro` | Strong context window and natural language generation. |
 | **Routine / Simple Tasks** | `claude-sonnet-4.6` | Cost-effective for well-defined, lower-risk tasks. |
