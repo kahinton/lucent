@@ -18,7 +18,7 @@ INSERT INTO models (
     'anthropic',
     'Claude Opus 4.7',
     'reasoning',
-    'claude-opus-4-7-20260416',
+    'claude-opus-4.7',
     200000,
     true,
     false,

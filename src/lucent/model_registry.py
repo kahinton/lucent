@@ -157,7 +157,7 @@ MODELS: list[ModelInfo] = [
         provider="anthropic",
         name="Claude Opus 4.7",
         category="reasoning",
-        api_model_id="claude-opus-4-7-20260416",
+        api_model_id="claude-opus-4.7",
         context_window=200000,
         notes=(
             "Anthropic's latest frontier model. "

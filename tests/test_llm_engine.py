@@ -112,7 +112,7 @@ class TestModelResolve:
 
         provider, model_id = _resolve_model("claude-opus-4.7")
         assert provider == "anthropic"
-        assert model_id == "claude-opus-4-7-20260416"
+        assert model_id == "claude-opus-4.7"
 
     def test_resolve_openai(self):
         from lucent.llm.langchain_engine import _resolve_model
@@ -247,7 +247,7 @@ class TestModelRegistry:
         from lucent.model_registry import get_api_model_id
 
         assert get_api_model_id("claude-opus-4.6") == "claude-opus-4-6-20260301"
-        assert get_api_model_id("claude-opus-4.7") == "claude-opus-4-7-20260416"
+        assert get_api_model_id("claude-opus-4.7") == "claude-opus-4.7"
         assert get_api_model_id("gpt-5.2") == "gpt-5.2"
         assert get_api_model_id("unknown-model") == "unknown-model"
 

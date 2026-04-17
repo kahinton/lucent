@@ -25,7 +25,7 @@ PROVIDER_MODEL_MAP: dict[str, tuple[str, str]] = {
     "claude-haiku-4.5": ("anthropic", "claude-haiku-4-5-20251001"),
     "claude-opus-4.5": ("anthropic", "claude-opus-4-5-20251101"),
     "claude-opus-4.6": ("anthropic", "claude-opus-4-6-20260301"),
-    "claude-opus-4.7": ("anthropic", "claude-opus-4-7-20260416"),
+    "claude-opus-4.7": ("anthropic", "claude-opus-4.7"),
     "claude-sonnet-4.0": ("anthropic", "claude-sonnet-4-20250514"),
     "claude-sonnet-4.5": ("anthropic", "claude-sonnet-4-5-20250620"),
     "claude-sonnet-4.6": ("anthropic", "claude-sonnet-4-6-20260115"),
