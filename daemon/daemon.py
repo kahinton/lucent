@@ -2664,8 +2664,8 @@ class LucentDaemon:
             duration = time.time() - start_time
             if self._tracer:
                 self._sessions_active.add(-1)
-                self._sessions_total.add(1, {"status": status, "model": selected_model})
-                self._session_duration.record(duration, {"session_name": name, "status": status})
+                self._sessions_total.add(1, attributes={"status": status, "model": selected_model})
+                self._session_duration.record(duration, attributes={"session_name": name, "status": status})
             if span_ctx:
                 span_ctx.__exit__(None, None, None)
 
@@ -3245,7 +3245,7 @@ class LucentDaemon:
 
             log(f"Dispatching tracked task {task_id[:8]} to {agent_type} model={selected_model}: {title[:80]}...")
             if self._tracer:
-                self._tasks_dispatched_total.add(1, {"agent_type": agent_type})
+                self._tasks_dispatched_total.add(1, attributes={"agent_type": agent_type})
 
             # Fetch parent request context and completed sibling results
             request_id = str(task.get("request_id", ""))
@@ -3715,20 +3715,20 @@ class LucentDaemon:
 
                 log(f"Tracked task {task_id[:8]} completed ({len(result) if result else 0} chars)")
                 if self._tracer:
-                    self._tasks_completed_total.add(1, {"status": "success", "agent_type": agent_type})
+                    self._tasks_completed_total.add(1, attributes={"status": "success", "agent_type": agent_type})
             else:
                 if self._is_request_review_task(task):
                     await self._handle_review_task_failure(task, reason)
                     if self._tracer:
                         self._tasks_completed_total.add(
-                            1, {"status": "manual_review", "agent_type": agent_type}
+                            1, attributes={"status": "manual_review", "agent_type": agent_type}
                         )
                 else:
                     await _fail_owned(task_id, reason)
                     log(f"Tracked task {task_id[:8]} failed: {reason}", "WARN")
                     if self._tracer:
                         self._tasks_completed_total.add(
-                            1, {"status": "failed", "agent_type": agent_type}
+                            1, attributes={"status": "failed", "agent_type": agent_type}
                         )
 
     async def _create_task_sandbox(
