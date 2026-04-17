@@ -28,7 +28,7 @@ server:
     LUCENT_PORT: "8766"
     LUCENT_MODE: personal
     LUCENT_LLM_ENGINE: copilot
-    LUCENT_CHAT_MODEL: claude-opus-4.7
+    LUCENT_CHAT_MODEL: claude-opus-4.6
     LUCENT_RATE_LIMIT_PER_MINUTE: "100"
     LUCENT_LOGIN_RATE_LIMIT: "5"
     OTEL_ENABLED: "false"
@@ -69,7 +69,7 @@ openbao:
 
 llm:
   engine: copilot
-  daemonModel: claude-opus-4.7
+  daemonModel: claude-opus-4.6
   providers:
     anthropic:
       secretRef: ""
@@ -80,7 +80,7 @@ llm:
 
 daemon:
   enabled: true
-  model: claude-opus-4.7
+  model: claude-opus-4.6
   maxConcurrentSessions: 3
   env:
     LUCENT_DAEMON_INTERVAL: "15"

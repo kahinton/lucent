@@ -22,7 +22,7 @@ logger = get_logger("chat")
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
-CHAT_MODEL = os.environ.get("LUCENT_CHAT_MODEL", "claude-opus-4.7")
+CHAT_MODEL = os.environ.get("LUCENT_CHAT_MODEL", "claude-opus-4.6")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 # MCP server URL — localhost inside the container, configurable for external
 MCP_URL = os.environ.get("LUCENT_CHAT_MCP_URL", "http://localhost:8766/mcp")

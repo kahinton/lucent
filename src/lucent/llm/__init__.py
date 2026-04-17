@@ -8,7 +8,7 @@ Usage:
 
     engine = get_engine()
     result = await engine.run_session(
-        model="claude-opus-4.7",
+        model="claude-opus-4.6",
         system_message="You are a helpful assistant.",
         prompt="Hello!",
     )

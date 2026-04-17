@@ -53,7 +53,7 @@ For detailed secret storage configuration, see [Secret Storage](secret-storage.m
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `LUCENT_LLM_ENGINE` | `copilot` | LLM backend: `copilot` (GitHub Copilot SDK) or `langchain` |
-| `LUCENT_CHAT_MODEL` | `claude-opus-4.7` | Default model for chat sessions |
+| `LUCENT_CHAT_MODEL` | `claude-opus-4.6` | Default model for chat sessions |
 | `LUCENT_MODEL_VALIDATION` | `strict` | Model validation mode: `strict` rejects unknown models, `lenient` allows them |
 | `LUCENT_CHAT_MCP_URL` | `http://localhost:8766/mcp` | MCP URL for chat-initiated tool calls |
 | `LUCENT_CHAT_TIMEOUT` | `300` | Chat session timeout in seconds |
@@ -69,7 +69,7 @@ For detailed secret storage configuration, see [Secret Storage](secret-storage.m
 |----------|---------|-------------|
 | `LUCENT_MAX_SESSIONS` | `3` | Max concurrent sub-agent sessions |
 | `LUCENT_DAEMON_INTERVAL` | `15` | Minutes between cognitive cycles |
-| `LUCENT_DAEMON_MODEL` | `claude-opus-4.7` | Default model for daemon sessions |
+| `LUCENT_DAEMON_MODEL` | `claude-opus-4.6` | Default model for daemon sessions |
 | `LUCENT_DAEMON_ROLES` | `all` | Enable specific loops: `cognitive`, `dispatcher`, `scheduler`, `autonomic` (comma-separated, or `all`) |
 | `LUCENT_MCP_URL` | `http://localhost:8766/mcp` | MCP server URL for memory access |
 | `LUCENT_MCP_API_KEY` | — | API key for MCP authentication |

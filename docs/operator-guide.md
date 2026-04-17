@@ -152,7 +152,7 @@ An array of LLM model configurations. Each entry has:
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `id` | string | yes | Model identifier (e.g. `claude-opus-4.7`, `qwen2.5-coder-3b`). |
+| `id` | string | yes | Model identifier (e.g. `claude-opus-4.6`, `qwen2.5-coder-3b`). |
 | `provider` | string | yes | One of `anthropic`, `openai`, `google`, `ollama`, `copilot`. |
 | `engine` | string | yes | One of `copilot`, `langchain`. Controls which LLM backend processes requests. |
 | `temperature` | number | no | Sampling temperature (provider-specific range). |
@@ -164,7 +164,7 @@ The first model in the list determines the `LUCENT_LLM_ENGINE` setting applied t
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `daemon.defaultModel` | string | `claude-opus-4.7` | Model ID used for daemon cognitive cycles. Must match an `id` in `models`. |
+| `daemon.defaultModel` | string | `claude-opus-4.6` | Model ID used for daemon cognitive cycles. Must match an `id` in `models`. |
 | `daemon.maxConcurrentSessions` | integer | `3` | Maximum number of parallel sub-agent sessions. Range: 1–100. |
 | `daemon.intervalMinutes` | integer | `15` | Minutes between daemon cognitive cycles. Minimum: 1. |
 
@@ -271,11 +271,11 @@ spec:
     embedded: true
     init: true
   models:
-    - id: claude-opus-4.7
+    - id: claude-opus-4.6
       provider: anthropic
       engine: copilot
   daemon:
-    defaultModel: claude-opus-4.7
+    defaultModel: claude-opus-4.6
     maxConcurrentSessions: 5
   observability:
     enabled: true

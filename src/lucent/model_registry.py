@@ -388,12 +388,12 @@ def get_recommended_model(task_type: str) -> str:
         "code": "claude-sonnet-4.6",
         "research": "gemini-3-pro",
         "memory": "claude-haiku-4.5",
-        "reflection": "claude-opus-4.7",
+        "reflection": "claude-opus-4.6",
         "documentation": "claude-sonnet-4.6",
-        "planning": "claude-opus-4.7",
+        "planning": "claude-opus-4.6",
         "review": "claude-sonnet-4.5",
         "fast": "claude-haiku-4.5",
-        "agentic": "claude-opus-4.7",
+        "agentic": "gpt-5.3-codex",
     }
     return recommendations.get(task_type, "claude-sonnet-4.6")
 

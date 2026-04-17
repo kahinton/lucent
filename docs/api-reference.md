@@ -446,7 +446,7 @@ POST /api/requests/{request_id}/tasks
   "description": "Check auth.py for timing attacks",
   "agent_type": "security",
   "priority": "high",
-  "model": "claude-opus-4.7",
+  "model": "claude-opus-4.6",
   "sandbox_template_id": "uuid-of-template",
   "output_contract": {
     "json_schema": {
