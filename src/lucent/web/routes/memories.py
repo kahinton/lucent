@@ -79,8 +79,10 @@ async def memories_list(
     for memory in result["memories"]:
         memory["access_count"] = access_counts.get(memory["id"], 0)
 
-    # Get tags for filter (with access control)
-    tags = await repo.get_existing_tags(
+    # Get tags for filter — go through MemoryAccessService so tag counts
+    # respect the same GitHub repo ACL as the memories listing.
+    tags = await memory_access.get_existing_tags(
+        user_id=user.id,
         limit=20,
         requesting_user_id=user.id,
         requesting_org_id=user.organization_id,
@@ -130,8 +132,10 @@ async def memory_new_form(request: Request):
     pool = await get_pool()
     repo = MemoryRepository(pool)
     user_repo = UserRepository(pool)
+    memory_access = _build_memory_access(pool, user)
 
-    tags = await repo.get_existing_tags(
+    tags = await memory_access.get_existing_tags(
+        user_id=user.id,
         limit=30,
         requesting_user_id=user.id,
         requesting_org_id=user.organization_id,

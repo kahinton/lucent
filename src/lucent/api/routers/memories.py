@@ -21,7 +21,7 @@ from lucent.db import AccessRepository, AuditRepository, MemoryRepository, get_p
 from lucent.integrations.github_repo_access_service import GitHubRepoAccessService
 from lucent.logging import get_logger
 from lucent.models.validation import normalize_tags, validate_metadata
-from lucent.rbac import Permission
+from lucent.rbac import Permission, Role
 from lucent.security import scan_content_for_injection
 from lucent.services.memory_access_service import MemoryAccessService
 
@@ -173,8 +173,14 @@ async def list_tags(
     """Get existing tags with usage counts."""
     pool = await get_pool()
     repo = MemoryRepository(pool)
+    memory_access = MemoryAccessService(
+        repo,
+        GitHubRepoAccessService(pool),
+        is_admin=user.role in (Role.ADMIN, Role.OWNER),
+    )
 
-    result = await repo.get_existing_tags(
+    result = await memory_access.get_existing_tags(
+        user_id=user.id,
         username=username,
         type=type,
         limit=min(limit, 100),
@@ -201,8 +207,14 @@ async def suggest_tags(
     """Get tag suggestions based on fuzzy matching."""
     pool = await get_pool()
     repo = MemoryRepository(pool)
+    memory_access = MemoryAccessService(
+        repo,
+        GitHubRepoAccessService(pool),
+        is_admin=user.role in (Role.ADMIN, Role.OWNER),
+    )
 
-    result = await repo.get_tag_suggestions(
+    result = await memory_access.get_tag_suggestions(
+        user_id=user.id,
         query=query,
         username=username,
         limit=min(limit, 25),

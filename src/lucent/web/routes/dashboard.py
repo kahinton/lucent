@@ -9,6 +9,7 @@ from fastapi.responses import HTMLResponse
 from lucent.db import AccessRepository, MemoryRepository, get_pool
 from lucent.integrations.github_repo_access_service import GitHubRepoAccessService
 from lucent.mode import is_team_mode
+from lucent.rbac import Role
 from lucent.services.memory_access_service import MemoryAccessService
 
 from ._shared import get_user_context, templates
@@ -29,7 +30,11 @@ async def dashboard(request: Request):
 
     # Get stats
     memory_repo = MemoryRepository(pool)
-    memory_access = MemoryAccessService(memory_repo, GitHubRepoAccessService(pool))
+    memory_access = MemoryAccessService(
+        memory_repo,
+        GitHubRepoAccessService(pool),
+        is_admin=user.role in (Role.ADMIN, Role.OWNER),
+    )
 
     # Recent memories
     recent = await memory_access.search(
@@ -48,8 +53,10 @@ async def dashboard(request: Request):
             limit=5,
         )
 
-    # Get tag stats (with access control)
-    tags = await memory_repo.get_existing_tags(
+    # Get tag stats — go through MemoryAccessService so the same GitHub repo
+    # ACL that filters the recent-memories list also filters the tag counts.
+    tags = await memory_access.get_existing_tags(
+        user_id=user.id,
         limit=10,
         requesting_user_id=user.id,
         requesting_org_id=user.organization_id,

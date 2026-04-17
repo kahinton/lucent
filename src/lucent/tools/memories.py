@@ -175,7 +175,7 @@ async def _get_access_repository() -> AccessRepository:
     return AccessRepository(pool)
 
 
-async def _get_memory_access_service() -> MemoryAccessService:
+async def _get_memory_access_service(user_role: str | None = None) -> MemoryAccessService:
     repo = await _get_repository()
     try:
         pool = await get_pool()
@@ -184,7 +184,10 @@ async def _get_memory_access_service() -> MemoryAccessService:
         if not database_url:
             raise RuntimeError("DATABASE_URL environment variable is required")
         pool = await init_db(database_url)
-    return MemoryAccessService(repo, GitHubRepoAccessService(pool))
+    is_admin = (user_role or "").lower() in {"admin", "owner"}
+    return MemoryAccessService(
+        repo, GitHubRepoAccessService(pool), is_admin=is_admin
+    )
 
 
 def register_tools(mcp: FastMCP) -> None:
@@ -1031,12 +1034,12 @@ Returns:
             JSON string with list of {tag, count} sorted by usage count descending.
         """
         try:
-            repo = await _get_repository()
-
             # Get current user context for access control
             user_id, org_id, user_role, memory_scope, memory_scope_user_id = await _get_current_user_context()
+            memory_access = await _get_memory_access_service(user_role)
 
-            result = await repo.get_existing_tags(
+            result = await memory_access.get_existing_tags(
+                user_id=user_id,
                 username=username,
                 type=type,
                 limit=min(limit, 100),
@@ -1079,12 +1082,12 @@ Returns:
             if not query or not query.strip():
                 return _error_response("Query is required")
 
-            repo = await _get_repository()
-
             # Get current user context for access control
             user_id, org_id, user_role, memory_scope, memory_scope_user_id = await _get_current_user_context()
+            memory_access = await _get_memory_access_service(user_role)
 
-            result = await repo.get_tag_suggestions(
+            result = await memory_access.get_tag_suggestions(
+                user_id=user_id,
                 query=query.strip(),
                 username=username,
                 limit=min(limit, 25),

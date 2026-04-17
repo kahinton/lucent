@@ -82,15 +82,66 @@ class MemoryAccessService:
                 filtered.append(memory)
         return filtered
 
+    async def _resolve_accessible_repos(
+        self, user_id: UUID | None
+    ) -> list[str] | None:
+        """Return the lowercased list of repos the user can access, or
+        ``None`` to mean "no repo filter" (admins/owners and the caller
+        explicitly asked to bypass).
+
+        Anonymous callers (``user_id is None``) get an empty list, meaning
+        only memories without a ``metadata.repo`` are visible.
+        """
+        if self._is_admin:
+            return None
+        if user_id is None:
+            return []
+        # Pull every positively cached access decision for this user. Stale
+        # entries (expires_at < now) are excluded so revoked access takes
+        # effect on the next page load.
+        try:
+            async with self.repo.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """SELECT repo_full_name FROM github_repo_access_cache
+                       WHERE user_id = $1 AND has_access = true
+                         AND expires_at > NOW()""",
+                    user_id,
+                )
+        except Exception:
+            # If the cache lookup fails for any reason, fall back to the
+            # safest answer (no repo-tagged memories accessible).
+            return []
+        return [row["repo_full_name"].lower() for row in rows]
+
     async def search(self, *, user_id: UUID | None, **kwargs: Any) -> dict[str, Any]:
-        result = await self.repo.search(**kwargs)
-        filtered = await self.filter_memories(result["memories"], user_id)
-        return self._filtered_result(result, filtered)
+        accessible_repos = await self._resolve_accessible_repos(user_id)
+        result = await self.repo.search(accessible_repos=accessible_repos, **kwargs)
+        # The SQL filter already enforces repo ACL, so total_count is accurate
+        # and the page does not need a second post-filter pass.
+        return result
 
     async def search_full(self, *, user_id: UUID | None, **kwargs: Any) -> dict[str, Any]:
-        result = await self.repo.search_full(**kwargs)
-        filtered = await self.filter_memories(result["memories"], user_id)
-        return self._filtered_result(result, filtered)
+        accessible_repos = await self._resolve_accessible_repos(user_id)
+        result = await self.repo.search_full(accessible_repos=accessible_repos, **kwargs)
+        return result
+
+    async def get_existing_tags(
+        self, *, user_id: UUID | None, **kwargs: Any
+    ) -> list[dict[str, Any]]:
+        """Tag counts that respect both basic ACL and GitHub repo ACL —
+        consistent with what ``search`` exposes."""
+        accessible_repos = await self._resolve_accessible_repos(user_id)
+        return await self.repo.get_existing_tags(
+            accessible_repos=accessible_repos, **kwargs
+        )
+
+    async def get_tag_suggestions(
+        self, *, user_id: UUID | None, **kwargs: Any
+    ) -> list[dict[str, Any]]:
+        accessible_repos = await self._resolve_accessible_repos(user_id)
+        return await self.repo.get_tag_suggestions(
+            accessible_repos=accessible_repos, **kwargs
+        )
 
     @staticmethod
     def _extract_repo(memory: dict[str, Any]) -> str | None:

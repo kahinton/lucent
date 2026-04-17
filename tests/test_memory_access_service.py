@@ -53,6 +53,62 @@ async def test_get_accessible_filters_single_memory_by_repo_access() -> None:
 
 @pytest.mark.asyncio
 async def test_search_updates_counts_after_filtering() -> None:
+    """``search`` resolves the user's accessible repos and pushes them down
+    into the repo as a SQL filter, then trusts repo's count instead of doing
+    a post-filter pass that loses the true total."""
+
+    user_id = uuid4()
+
+    # Mock the github_repo_access_cache lookup that
+    # ``_resolve_accessible_repos`` performs against the pool.
+    cache_rows = [{"repo_full_name": "org/allowed"}]
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=cache_rows)
+
+    class _AcquireCM:
+        async def __aenter__(self):
+            return conn
+
+        async def __aexit__(self, *exc):
+            return False
+
+    pool = AsyncMock()
+    pool.acquire = lambda: _AcquireCM()
+
+    repo = AsyncMock()
+    repo.pool = pool
+    # repo.search must receive the resolved accessible_repos and (in real
+    # life) filter at the SQL level. Here we just confirm it's invoked with
+    # the right kwarg and pass through what it returns.
+    repo.search = AsyncMock(
+        return_value={
+            "memories": [{"id": 1, "metadata": {"repo": "org/allowed"}}],
+            "total_count": 1,
+            "offset": 0,
+            "limit": 5,
+            "has_more": False,
+        }
+    )
+
+    github_access = AsyncMock()
+    service = MemoryAccessService(repo, github_access)
+
+    result = await service.search(user_id=user_id, query="x")
+
+    repo.search.assert_awaited_once()
+    kwargs = repo.search.await_args.kwargs
+    assert kwargs.get("accessible_repos") == ["org/allowed"]
+    assert kwargs["query"] == "x"
+    # No second post-filter pass — service trusts repo's count.
+    assert result["total_count"] == 1
+    assert [m["id"] for m in result["memories"]] == [1]
+
+
+@pytest.mark.asyncio
+async def test_search_admin_skips_repo_filter() -> None:
+    """Admins/owners bypass the repo ACL entirely so they see every memory
+    in their org and the total reflects that."""
+
     user_id = uuid4()
     repo = AsyncMock()
     repo.search = AsyncMock(
@@ -68,14 +124,14 @@ async def test_search_updates_counts_after_filtering() -> None:
         }
     )
     github_access = AsyncMock()
-    github_access.check_access = AsyncMock(side_effect=[True, False])
-    service = MemoryAccessService(repo, github_access)
+    service = MemoryAccessService(repo, github_access, is_admin=True)
 
     result = await service.search(user_id=user_id, query="x")
 
-    assert [m["id"] for m in result["memories"]] == [1]
-    assert result["total_count"] == 1
-    assert result["has_more"] is False
+    kwargs = repo.search.await_args.kwargs
+    assert kwargs.get("accessible_repos") is None
+    assert result["total_count"] == 2
+    assert [m["id"] for m in result["memories"]] == [1, 2]
 
 
 @pytest.mark.asyncio
@@ -123,26 +179,45 @@ async def test_filter_memory_no_user_blocks_repo_tagged_memory() -> None:
 
 @pytest.mark.asyncio
 async def test_search_full_filters_repo_tagged_results() -> None:
+    """``search_full`` mirrors ``search``: it pushes the user's accessible
+    repos into the repo as a SQL filter and trusts the returned counts."""
+
     user_id = uuid4()
+
+    cache_rows = [{"repo_full_name": "org/allowed"}]
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=cache_rows)
+
+    class _AcquireCM:
+        async def __aenter__(self):
+            return conn
+
+        async def __aexit__(self, *exc):
+            return False
+
+    pool = AsyncMock()
+    pool.acquire = lambda: _AcquireCM()
+
     repo = AsyncMock()
+    repo.pool = pool
     repo.search_full = AsyncMock(
         return_value={
             "memories": [
                 {"id": 1, "metadata": {"repo": "org/allowed"}},
-                {"id": 2, "metadata": {"repo": "org/blocked"}},
                 {"id": 3, "metadata": {}},
             ],
-            "total_count": 3,
+            "total_count": 2,
             "offset": 0,
             "limit": 10,
             "has_more": False,
         }
     )
     github_access = AsyncMock()
-    github_access.check_access = AsyncMock(side_effect=[True, False])
     service = MemoryAccessService(repo, github_access)
 
     result = await service.search_full(user_id=user_id, query="repo")
 
+    kwargs = repo.search_full.await_args.kwargs
+    assert kwargs.get("accessible_repos") == ["org/allowed"]
     assert [m["id"] for m in result["memories"]] == [1, 3]
     assert result["total_count"] == 2

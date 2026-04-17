@@ -530,6 +530,7 @@ class MemoryRepository:
         requesting_user_id: UUID | None = None,
         requesting_org_id: UUID | None = None,
         memory_scope: str | None = None,
+        accessible_repos: list[str] | None = None,
     ) -> dict[str, Any]:
         """Search for memories with fuzzy matching and filters.
 
@@ -579,6 +580,16 @@ class MemoryRepository:
                 params.append(str(requesting_user_id))
                 params.append(str(requesting_org_id))
                 param_idx += 2
+
+        # GitHub repo ACL filter (None means caller is admin/owner — no filter).
+        if accessible_repos is not None:
+            conditions.append(
+                f"(metadata IS NULL "
+                f"OR NOT (metadata ? 'repo') "
+                f"OR LOWER(metadata->>'repo') = ANY(${param_idx}::text[]))"
+            )
+            params.append([r.lower() for r in accessible_repos])
+            param_idx += 1
 
         # Build WHERE conditions
         if username is not None:
@@ -699,6 +710,7 @@ class MemoryRepository:
         requesting_user_id: UUID | None = None,
         requesting_org_id: UUID | None = None,
         memory_scope: str | None = None,
+        accessible_repos: list[str] | None = None,
     ) -> dict[str, Any]:
         """Search across all text fields: content, tags, and metadata.
 
@@ -747,6 +759,16 @@ class MemoryRepository:
                 params.append(str(requesting_user_id))
                 params.append(str(requesting_org_id))
                 param_idx += 2
+
+        # GitHub repo ACL filter (None means caller is admin/owner — no filter).
+        if accessible_repos is not None:
+            conditions.append(
+                f"(metadata IS NULL "
+                f"OR NOT (metadata ? 'repo') "
+                f"OR LOWER(metadata->>'repo') = ANY(${param_idx}::text[]))"
+            )
+            params.append([r.lower() for r in accessible_repos])
+            param_idx += 1
 
         if username is not None:
             conditions.append(f"username = ${param_idx}")
@@ -836,6 +858,7 @@ class MemoryRepository:
         # Access control parameters
         requesting_user_id: UUID | None = None,
         requesting_org_id: UUID | None = None,
+        accessible_repos: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Get existing tags with usage counts.
 
@@ -845,6 +868,10 @@ class MemoryRepository:
             limit: Maximum number of tags to return (default 50).
             requesting_user_id: User ID for access control (if provided, enables access control).
             requesting_org_id: Organization ID for access control.
+            accessible_repos: Optional GitHub repo allowlist (lowercased). When
+                provided, tag counts only include memories whose
+                ``metadata.repo`` is null/missing or appears in this list.
+                Pass ``None`` to skip the filter (admin/owner).
 
         Returns:
             List of {tag, count} sorted by count descending.
@@ -862,6 +889,15 @@ class MemoryRepository:
             params.append(str(requesting_user_id))
             params.append(str(requesting_org_id))
             param_idx += 2
+
+        if accessible_repos is not None:
+            conditions.append(
+                f"(metadata IS NULL "
+                f"OR NOT (metadata ? 'repo') "
+                f"OR LOWER(metadata->>'repo') = ANY(${param_idx}::text[]))"
+            )
+            params.append([r.lower() for r in accessible_repos])
+            param_idx += 1
 
         if username is not None:
             conditions.append(f"username = ${param_idx}")
@@ -898,6 +934,7 @@ class MemoryRepository:
         # Access control parameters
         requesting_user_id: UUID | None = None,
         requesting_org_id: UUID | None = None,
+        accessible_repos: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Get tag suggestions based on fuzzy matching.
 
@@ -907,6 +944,7 @@ class MemoryRepository:
             limit: Maximum number of suggestions (default 10).
             requesting_user_id: User ID for access control (if provided, enables access control).
             requesting_org_id: Organization ID for access control.
+            accessible_repos: Optional GitHub repo allowlist; see ``get_existing_tags``.
 
         Returns:
             List of {tag, count, similarity} sorted by similarity descending.
@@ -924,6 +962,15 @@ class MemoryRepository:
             params.append(str(requesting_user_id))
             params.append(str(requesting_org_id))
             param_idx += 2
+
+        if accessible_repos is not None:
+            conditions.append(
+                f"(metadata IS NULL "
+                f"OR NOT (metadata ? 'repo') "
+                f"OR LOWER(metadata->>'repo') = ANY(${param_idx}::text[]))"
+            )
+            params.append([r.lower() for r in accessible_repos])
+            param_idx += 1
 
         if username is not None:
             conditions.append(f"username = ${param_idx}")
