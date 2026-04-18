@@ -35,6 +35,19 @@ class SessionEvent:
     raw: Any = None  # Original event object from the backend
 
 
+class ModelNotAvailableError(Exception):
+    """Raised when the requested model is not available in the runtime.
+
+    This replaces the silent None return that previously hid JSON-RPC -32603
+    errors ("Model X is not available") behind generic "no output" failures.
+    """
+
+    def __init__(self, model: str, original_error: Exception | None = None):
+        self.model = model
+        self.original_error = original_error
+        super().__init__(f"Model '{model}' is not available in the runtime")
+
+
 class LLMEngine(ABC):
     """Abstract base class for LLM backends.
 

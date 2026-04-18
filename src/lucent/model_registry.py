@@ -24,6 +24,7 @@ class ModelInfo:
     notes: str = ""  # additional notes about the model
     tags: list[str] = field(default_factory=list)
     engine: str | None = None  # engine override: None=auto, "copilot", "langchain"
+    enabled: bool = True  # whether the model is available for use
 
 
 # ── Model Registry ────────────────────────────────────────────────────────
@@ -164,6 +165,7 @@ MODELS: list[ModelInfo] = [
             "Default for high-stakes reasoning and agentic work."
         ),
         tags=["default", "reasoning", "frontier", "agentic", "analysis", "premium"],
+        enabled=False,  # Copilot SDK returns "Model not available" (2026-04-18)
     ),
     ModelInfo(
         id="claude-sonnet-4.0",
@@ -204,7 +206,7 @@ MODELS: list[ModelInfo] = [
         context_window=1000000,
         notes="Opus 4.6 with 1 million token context window.",
         tags=["reasoning", "frontier", "large-context"],
-    ),
+    ),  # Untested in Copilot SDK — validate availability separately
     # ── Google ────────────────────────────────────────────────────────────
     ModelInfo(
         id="gemini-2.5-pro",
@@ -242,6 +244,7 @@ MODELS: list[ModelInfo] = [
         api_model_id="gemini-3.1-pro",
         notes="Effective edit-then-test loops with high tool precision.",
         tags=["reasoning", "agentic", "tools"],
+        enabled=False,  # Copilot SDK returns "Model not available" (2026-04-18)
     ),
 ]
 
@@ -249,9 +252,12 @@ MODELS: list[ModelInfo] = [
 _MODEL_BY_ID: dict[str, ModelInfo] = {m.id: m for m in MODELS}
 _MODELS_BY_CATEGORY: dict[str, list[ModelInfo]] = {}
 _MODELS_BY_PROVIDER: dict[str, list[ModelInfo]] = {}
+_HARDCODED_ENABLED_IDS: set[str] = set()
 for _m in MODELS:
     _MODELS_BY_CATEGORY.setdefault(_m.category, []).append(_m)
     _MODELS_BY_PROVIDER.setdefault(_m.provider, []).append(_m)
+    if _m.enabled:
+        _HARDCODED_ENABLED_IDS.add(_m.id)
 
 # DB-sourced model cache (populated by load_models_from_db)
 _db_models: list[ModelInfo] | None = None
@@ -306,10 +312,14 @@ async def load_models_from_db(pool) -> list[ModelInfo]:
 
 
 def is_model_enabled(model_id: str) -> bool:
-    """Check if a model is enabled. Returns True if DB not loaded (permissive)."""
-    if _db_models is None:
-        return True  # DB not loaded yet, allow all
-    return model_id in _db_enabled_ids
+    """Check if a model is enabled.
+
+    When DB models are loaded, checks the DB enabled set.
+    Otherwise, checks the hardcoded model's ``enabled`` field.
+    """
+    if _db_models is not None:
+        return model_id in _db_enabled_ids
+    return model_id in _HARDCODED_ENABLED_IDS
 
 
 # ── Public API ────────────────────────────────────────────────────────────
@@ -328,8 +338,11 @@ def list_models(
     """List available models, optionally filtered by category or provider."""
     source = _db_models if _db_models is not None else MODELS
     models = source
-    if not include_disabled and _db_models is not None:
-        models = [m for m in models if m.id in _db_enabled_ids]
+    if not include_disabled:
+        if _db_models is not None:
+            models = [m for m in models if m.id in _db_enabled_ids]
+        else:
+            models = [m for m in models if m.enabled]
     if category:
         models = [m for m in models if m.category == category]
     if provider:
@@ -366,10 +379,12 @@ def validate_model(model_id: str) -> str | None:
 
     # No DB loaded — check against hardcoded registry
     if model_id in _MODEL_BY_ID:
-        return None  # Known model
+        if not _MODEL_BY_ID[model_id].enabled:
+            return f"Model '{model_id}' is disabled. Choose an enabled model."
+        return None  # Known and enabled
 
     if strict:
-        available = sorted(_MODEL_BY_ID.keys())
+        available = sorted(_HARDCODED_ENABLED_IDS)
         return (
             f"Unknown model '{model_id}'. "
             f"Available models: {', '.join(available)}. "
@@ -383,7 +398,11 @@ def get_recommended_model(task_type: str) -> str:
 
     This is a simple heuristic — the model-selection skill provides
     more nuanced guidance for the cognitive loop.
+
+    Never recommends a disabled model; falls back through alternatives.
     """
+    _DEFAULT_FALLBACK = "claude-sonnet-4.6"
+
     recommendations = {
         "code": "claude-sonnet-4.6",
         "research": "gemini-3-pro",
@@ -395,7 +414,22 @@ def get_recommended_model(task_type: str) -> str:
         "fast": "claude-haiku-4.5",
         "agentic": "gpt-5.3-codex",
     }
-    return recommendations.get(task_type, "claude-sonnet-4.6")
+    candidate = recommendations.get(task_type, _DEFAULT_FALLBACK)
+    if is_model_enabled(candidate):
+        return candidate
+    # Recommended model is disabled — fall back to default
+    if candidate != _DEFAULT_FALLBACK and is_model_enabled(_DEFAULT_FALLBACK):
+        return _DEFAULT_FALLBACK
+    # Default also disabled — pick the first enabled model
+    for m in (_db_models if _db_models is not None else MODELS):
+        if _db_models is not None:
+            if m.id in _db_enabled_ids:
+                return m.id
+        elif m.enabled:
+            return m.id
+    # Nothing enabled — return the default anyway (caller will get a clear
+    # validation error downstream)
+    return _DEFAULT_FALLBACK
 
 
 def get_api_model_id(model_id: str) -> str:

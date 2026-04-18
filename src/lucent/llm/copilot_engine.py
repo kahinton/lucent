@@ -7,10 +7,11 @@ This is the default engine and preserves all existing behavior.
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from typing import Any, Callable
 
-from lucent.llm.engine import LLMEngine, SessionEvent, SessionEventType
+from lucent.llm.engine import LLMEngine, ModelNotAvailableError, SessionEvent, SessionEventType
 from lucent.logging import get_logger
 
 logger = get_logger("llm.copilot")
@@ -136,6 +137,18 @@ class CopilotEngine(LLMEngine):
             logger.warning("Copilot session timed out after %ds", timeout)
             return None
         except Exception as e:
+            error_msg = str(e)
+            if re.search(r"Model\s+\S+\s+is not available", error_msg) or (
+                "-32603" in error_msg and "not available" in error_msg.lower()
+            ):
+                match = re.search(r"Model\s+(\S+)\s+is not available", error_msg)
+                failed_model = match.group(1) if match else model
+                logger.warning(
+                    "Model '%s' is not available (JSON-RPC -32603): %s",
+                    failed_model,
+                    error_msg,
+                )
+                raise ModelNotAvailableError(failed_model, e) from e
             logger.error("Copilot session failed: %s", e)
             return None
         finally:
@@ -337,6 +350,21 @@ class CopilotEngine(LLMEngine):
             return "\n".join(response_parts) if response_parts else None
 
         except Exception as e:
+            # Detect model-not-available JSON-RPC errors (-32603) and raise
+            # a specific exception instead of silently returning None.
+            error_msg = str(e)
+            if re.search(r"Model\s+\S+\s+is not available", error_msg) or (
+                "-32603" in error_msg and "not available" in error_msg.lower()
+            ):
+                # Extract model name from the error message if possible
+                match = re.search(r"Model\s+(\S+)\s+is not available", error_msg)
+                failed_model = match.group(1) if match else model
+                logger.warning(
+                    "Model '%s' is not available (JSON-RPC -32603): %s",
+                    failed_model,
+                    error_msg,
+                )
+                raise ModelNotAvailableError(failed_model, e) from e
             logger.error("Copilot streaming session failed: %s", e)
             return None
         finally:

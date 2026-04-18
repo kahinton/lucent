@@ -213,6 +213,7 @@ from lucent.secrets.utils import resolve_env_vars as resolve_secret_env_vars
 # Import LLM engine abstraction — the daemon no longer calls CopilotClient directly
 try:
     from lucent.llm import (
+        ModelNotAvailableError,
         SessionEvent,
         SessionEventType,
         get_engine,
@@ -223,6 +224,14 @@ try:
     _LLM_ENGINE_AVAILABLE = True
 except ImportError:
     _LLM_ENGINE_AVAILABLE = False
+
+    class ModelNotAvailableError(Exception):  # type: ignore[no-redef]
+        """Stub for when lucent.llm is not available."""
+
+        def __init__(self, model: str = "", original_error: Exception | None = None):
+            self.model = model
+            self.original_error = original_error
+            super().__init__(f"Model '{model}' is not available in the runtime")
 
 # Legacy import for backward compat (daemon may be run outside the package)
 try:
@@ -2657,6 +2666,9 @@ class LucentDaemon:
                     if span:
                         span.set_attribute("daemon.session.error", "timeout")
                     return None
+                except ModelNotAvailableError:
+                    status = "error"
+                    raise  # Let the caller handle model-not-available specifically
                 except Exception as e:
                     status = "error"
                     log(f"Session '{name}' failed: {e}", "ERROR")
@@ -3585,13 +3597,33 @@ class LucentDaemon:
                     dispatched += 1
                     continue
 
-            result = await self.run_session(
-                f"{agent_type}-{task_id[:8]}",
-                system_message,
-                f"Execute this task:\n\n{description}",
-                model=selected_model,
-                mcp_config_override=task_mcp_config,
-            )
+            try:
+                result = await self.run_session(
+                    f"{agent_type}-{task_id[:8]}",
+                    system_message,
+                    f"Execute this task:\n\n{description}",
+                    model=selected_model,
+                    mcp_config_override=task_mcp_config,
+                )
+            except ModelNotAvailableError as exc:
+                log(
+                    f"Tracked task {task_id[:8]}: model '{exc.model}' is not available "
+                    f"in the runtime — failing task",
+                    "WARN",
+                )
+                await _fail_owned(
+                    task_id,
+                    f"Model '{exc.model}' is not available in the runtime. "
+                    f"Use a different model.",
+                )
+                await RequestAPI.add_event(
+                    task_id,
+                    "model_not_available",
+                    f"Model '{exc.model}' is not available. "
+                    f"Original error: {exc.original_error}",
+                )
+                dispatched += 1
+                continue
             dispatched += 1
 
             # Log MCP memory-tool usage summary as a queryable task event
