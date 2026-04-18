@@ -20,6 +20,10 @@ from lucent.api.routers import admin_models as admin_models_router
 from lucent.api.routers import daemon_messages as daemon_messages_router
 from lucent.api.routers import daemon_tasks as daemon_tasks_router
 from lucent.api.routers import export, memories, search
+from lucent.api.system_schedules import (
+    start_server_system_schedule_runner,
+    stop_server_system_schedule_runner,
+)
 from lucent.db import close_db, init_db
 from lucent.logging import get_correlation_id, get_logger, set_correlation_id
 from lucent.mode import is_team_mode
@@ -192,6 +196,7 @@ async def lifespan(app: FastAPI):
     import os
 
     database_url = os.environ.get("DATABASE_URL")
+    started_system_schedule_runner = False
     if database_url:
         await init_db(database_url)
         from lucent.db import get_pool as _get_pool_for_secrets
@@ -214,16 +219,24 @@ async def lifespan(app: FastAPI):
     # Sync built-in skills from .github/skills/ into the DB
     await _sync_built_in_definitions()
 
-    # Start MCP session manager if configured
-    if _mcp_session_manager:
-        async with _mcp_session_manager.run():
-            yield
-    else:
-        yield
+    # Start daemon-independent server-side system schedule runner.
+    if database_url:
+        await start_server_system_schedule_runner()
+        started_system_schedule_runner = True
 
-    # Shutdown: Close database pool, then telemetry
-    await close_db()
-    shutdown_telemetry()
+    try:
+        # Start MCP session manager if configured
+        if _mcp_session_manager:
+            async with _mcp_session_manager.run():
+                yield
+        else:
+            yield
+    finally:
+        # Shutdown: stop runner, close database pool, then telemetry
+        if started_system_schedule_runner:
+            await stop_server_system_schedule_runner()
+        await close_db()
+        shutdown_telemetry()
 
 
 def create_app() -> FastAPI:

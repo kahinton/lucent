@@ -545,6 +545,67 @@ class TestProcessTaskOutput:
 
 
 # ============================================================================
+# 2b. CONSOLIDATION EXECUTION GUARDRAIL TESTS
+# ============================================================================
+
+
+class TestValidateConsolidationExecution:
+    """Tests for consolidation-specific execution validation."""
+
+    def _import(self):
+        import os
+        import sys
+
+        daemon_path = os.path.join(os.path.dirname(__file__), "..", "daemon")
+        if daemon_path not in sys.path:
+            sys.path.insert(0, daemon_path)
+        from output_validation import validate_consolidation_execution
+
+        return validate_consolidation_execution
+
+    def test_rejects_planned_writes_with_zero_execution(self):
+        fn = self._import()
+        ok, reason = fn(
+            result_text=(
+                "Surveyed 63 technical memories.\n"
+                "Identified 4 merge pairs and 2 updates planned.\n"
+                "No write operations were executed."
+            ),
+            task_title="Memory consolidation pass",
+            task_description="Run memory consolidation",
+            tool_counts={"search_memories": 5, "update_memory": 0, "delete_memory": 0},
+        )
+        assert ok is False
+        assert reason == "Plan identified 6 operations but 0 were executed"
+
+    def test_accepts_when_write_tools_executed(self):
+        fn = self._import()
+        ok, reason = fn(
+            result_text="Identified 2 merges planned and completed updates.",
+            task_title="Memory consolidation pass",
+            task_description="Run memory consolidation",
+            tool_counts={"update_memory": 1, "delete_memory": 1},
+        )
+        assert ok is True
+        assert reason == "ok"
+
+    def test_accepts_explicit_no_action_needed_determination(self):
+        fn = self._import()
+        ok, reason = fn(
+            result_text=(
+                "Surveyed 63 memories.\n"
+                "No duplicate pairs found and nothing to consolidate.\n"
+                "No action needed."
+            ),
+            task_title="Memory consolidation pass",
+            task_description="Run memory consolidation",
+            tool_counts={"update_memory": 0, "delete_memory": 0},
+        )
+        assert ok is True
+        assert reason == "no_action_needed"
+
+
+# ============================================================================
 # 3. DATABASE LAYER TESTS — create_task / complete_task with contracts
 # ============================================================================
 

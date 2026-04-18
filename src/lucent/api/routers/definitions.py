@@ -35,12 +35,16 @@ class CreateAgent(BaseModel):
     name: str = Field(max_length=64)
     description: str | None = None
     content: str
+    status: Literal["proposed", "active", "rejected"] = "proposed"
+    scope: Literal["instance", "built-in"] = "instance"
 
 
 class CreateSkill(BaseModel):
     name: str = Field(max_length=64)
     description: str | None = None
     content: str
+    status: Literal["proposed", "active", "rejected"] = "proposed"
+    scope: Literal["instance", "built-in"] = "instance"
 
 
 class CreateMCPServer(BaseModel):
@@ -108,6 +112,8 @@ async def create_agent(body: CreateAgent, user: AuthenticatedUser):
         content=body.content,
         org_id=str(user.organization_id),
         created_by=str(user.id),
+        status=body.status,
+        scope=body.scope,
         owner_user_id=str(user.id),
     )
     security_flags = scan_content_for_injection(body.content or "")
@@ -291,6 +297,8 @@ async def create_skill(body: CreateSkill, user: AuthenticatedUser):
         content=body.content,
         org_id=str(user.organization_id),
         created_by=str(user.id),
+        status=body.status,
+        scope=body.scope,
         owner_user_id=str(user.id),
     )
     security_flags = scan_content_for_injection(body.content or "")

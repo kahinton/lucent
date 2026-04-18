@@ -9,8 +9,8 @@ Pipeline:
   2. Extract domain signals and classify the environment
   3. Map domain classification to agent/skill archetypes
   4. Select appropriate templates based on domain
-  5. Generate agent .md files with domain-specific content
-  6. Generate skill directories with SKILL.md files
+  5. Generate local artifacts for visibility and review
+  6. Persist generated definitions to DB as proposed instance-scoped records
   7. Validate generated artifacts against quality checklist
   8. Store adaptation results as memories via MemoryAPI
 """
@@ -30,7 +30,34 @@ logger = logging.getLogger(__name__)
 
 # Paths
 DAEMON_DIR = Path(__file__).parent
+REPO_ROOT = DAEMON_DIR.parent
 TEMPLATES_DIR = DAEMON_DIR / "templates"
+AGENTS_DIR = DAEMON_DIR / "agents"
+SKILLS_DIR = REPO_ROOT / ".github" / "skills"
+
+
+def _agent_output_path(name: str) -> Path:
+    return AGENTS_DIR / f"{name}.md"
+
+
+def _skill_output_path(name: str) -> Path:
+    return SKILLS_DIR / name / "SKILL.md"
+
+
+def _write_generated_definition(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+
+
+def _cleanup_generated_definition(path: Path) -> None:
+    """Best-effort cleanup when DB persistence fails after file write."""
+    if path.exists():
+        path.unlink()
+    # If this was a skill directory, remove empty leaf dir after deleting SKILL.md
+    if path.name == "SKILL.md":
+        skill_dir = path.parent
+        if skill_dir.exists() and not any(skill_dir.iterdir()):
+            skill_dir.rmdir()
 
 
 # ============================================================================
@@ -863,7 +890,19 @@ class AdaptationPipeline:
             result = validate_agent(content, rec.name)
             self.validation_results[f"agent:{rec.name}"] = result
 
-            # Create in DB as 'proposed' — requires human approval
+            artifact_path = _agent_output_path(rec.name)
+            try:
+                _write_generated_definition(artifact_path, content)
+            except Exception:
+                logger.warning(
+                    "Failed to write generated agent artifact '%s' (%s)",
+                    rec.name,
+                    artifact_path,
+                    exc_info=True,
+                )
+                continue
+
+            # Create in DB as an instance-scoped proposed definition for human approval
             try:
                 async with httpx.AsyncClient(timeout=10) as client:
                     resp = await client.post(
@@ -872,14 +911,44 @@ class AdaptationPipeline:
                             "name": rec.name,
                             "description": rec.purpose,
                             "content": content,
+                            "scope": "instance",
+                            "status": "proposed",
                         },
                         headers=api_headers,
                     )
                     if resp.status_code == 201:
                         created.append(rec.name)
                         self.generated_agents.append(rec.name)
+                        existing_names.add(rec.name)
+                    else:
+                        logger.warning(
+                            "Failed to persist generated agent '%s' (status=%s). "
+                            "Removing local artifact to avoid inconsistency.",
+                            rec.name,
+                            resp.status_code,
+                        )
+                        try:
+                            _cleanup_generated_definition(artifact_path)
+                        except Exception:
+                            logger.warning(
+                                "Inconsistent adaptation state for agent '%s': "
+                                "artifact exists but DB insert failed (%s)",
+                                rec.name,
+                                artifact_path,
+                                exc_info=True,
+                            )
             except Exception:
                 logger.debug("Failed to create agent definition '%s'", rec.name, exc_info=True)
+                try:
+                    _cleanup_generated_definition(artifact_path)
+                except Exception:
+                    logger.warning(
+                        "Inconsistent adaptation state for agent '%s': "
+                        "artifact exists but DB insert raised an exception (%s)",
+                        rec.name,
+                        artifact_path,
+                        exc_info=True,
+                    )
 
         return created
 
@@ -927,7 +996,19 @@ class AdaptationPipeline:
             result = validate_skill(content, rec.name)
             self.validation_results[f"skill:{rec.name}"] = result
 
-            # Create in DB as 'proposed' — requires human approval
+            artifact_path = _skill_output_path(rec.name)
+            try:
+                _write_generated_definition(artifact_path, content)
+            except Exception:
+                logger.warning(
+                    "Failed to write generated skill artifact '%s' (%s)",
+                    rec.name,
+                    artifact_path,
+                    exc_info=True,
+                )
+                continue
+
+            # Create in DB as an instance-scoped proposed definition for human approval
             try:
                 async with httpx.AsyncClient(timeout=10) as client:
                     resp = await client.post(
@@ -936,14 +1017,44 @@ class AdaptationPipeline:
                             "name": rec.name,
                             "description": rec.purpose,
                             "content": content,
+                            "scope": "instance",
+                            "status": "proposed",
                         },
                         headers=api_headers,
                     )
                     if resp.status_code == 201:
                         created.append(rec.name)
                         self.generated_skills.append(rec.name)
+                        existing_names.add(rec.name)
+                    else:
+                        logger.warning(
+                            "Failed to persist generated skill '%s' (status=%s). "
+                            "Removing local artifact to avoid inconsistency.",
+                            rec.name,
+                            resp.status_code,
+                        )
+                        try:
+                            _cleanup_generated_definition(artifact_path)
+                        except Exception:
+                            logger.warning(
+                                "Inconsistent adaptation state for skill '%s': "
+                                "artifact exists but DB insert failed (%s)",
+                                rec.name,
+                                artifact_path,
+                                exc_info=True,
+                            )
             except Exception:
                 logger.debug("Failed to create skill definition '%s'", rec.name, exc_info=True)
+                try:
+                    _cleanup_generated_definition(artifact_path)
+                except Exception:
+                    logger.warning(
+                        "Inconsistent adaptation state for skill '%s': "
+                        "artifact exists but DB insert raised an exception (%s)",
+                        rec.name,
+                        artifact_path,
+                        exc_info=True,
+                    )
 
         return created
 

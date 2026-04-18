@@ -251,9 +251,9 @@ except (ImportError, Exception):
 
 # Structured output contract validation/extraction helpers.
 try:
-    from output_validation import process_task_output
+    from output_validation import process_task_output, validate_consolidation_execution
 except ImportError:
-    from daemon.output_validation import process_task_output
+    from daemon.output_validation import process_task_output, validate_consolidation_execution
 
 # OpenTelemetry instrumentation (optional — graceful when not available)
 try:
@@ -373,11 +373,14 @@ MEMORY_CONSOLIDATION_PROMPT = (
     "## Important Rules\n"
     "- NEVER create new memories. Only update existing ones or delete duplicates.\n"
     "- The ONLY valid operations are: update_memory and delete_memory.\n"
+    "- If you identify merge/update/delete operations, you MUST execute them in this run.\n"
+    "- Do not stop after planning. Planning without writes is an incomplete run.\n"
     "- If two memories cover the same scope, update the better one and delete the other.\n"
     "- The total memory count must go DOWN or stay the same, never up.\n"
     "- Each scope should have AT MOST one technical memory.\n"
     "- Do NOT treat metadata normalization as optional; it is a required pass every run.\n"
     "- NEVER touch memories tagged 'pinned' or 'do_not_consolidate'.\n"
+    "- Final output MUST include: 'Planned operations: <N>' and 'Executed write operations: <M>'.\n"
     "- Content should be practical: what does a developer need to know to work here?\n\n"
     "## Content Quality: Focus on WHY, not WHAT\n\n"
     "Technical memories are used as working context for agents executing tasks. "
@@ -3051,7 +3054,9 @@ class LucentDaemon:
 
     # --- Distributed Coordination ---
 
-    def _validate_task_result(self, result: str) -> tuple[bool, str]:
+    def _validate_task_result(
+        self, result: str, *, task: dict | None = None, tool_counts: dict[str, int] | None = None
+    ) -> tuple[bool, str]:
         """Validate whether a sub-agent result indicates actual work was done.
 
         Returns (success, reason) — success is True only if the result looks
@@ -3059,6 +3064,16 @@ class LucentDaemon:
         """
         if not result:
             return False, "no output"
+
+        if task:
+            consolidation_ok, consolidation_reason = validate_consolidation_execution(
+                result_text=result,
+                task_title=str(task.get("title", "")),
+                task_description=str(task.get("description", "")),
+                tool_counts=tool_counts,
+            )
+            if not consolidation_ok:
+                return False, consolidation_reason
 
         stripped = result.strip()
 
@@ -3140,6 +3155,8 @@ class LucentDaemon:
 
     async def _check_due_schedules(self):
         """Fire any scheduled tasks that are due, creating requests for them."""
+        from lucent.api.system_schedules import STALE_TASK_REAPER_TITLE
+
         try:
             async with httpx.AsyncClient(timeout=15) as client:
                 resp = await client.get(f"{API_BASE}/schedules/due", headers=API_HEADERS)
@@ -3158,6 +3175,9 @@ class LucentDaemon:
                 for sched in due:
                     sched_id = str(sched["id"])
                     title = sched.get("title", "Scheduled task")
+                    if sched.get("is_system") and title == STALE_TASK_REAPER_TITLE:
+                        # Server-side built-in schedule; executed in API process.
+                        continue
 
                     # Trigger the schedule via API (creates request + task + records run)
                     try:
@@ -3639,7 +3659,7 @@ class LucentDaemon:
                     log(f"Sandbox cleanup failed for {sandbox_id[:12]}: {e}", "WARN")
 
             # Validate
-            success, reason = self._validate_task_result(result)
+            success, reason = self._validate_task_result(result, task=task, tool_counts=tool_counts)
 
             if success:
                 output_contract = task.get("output_contract")

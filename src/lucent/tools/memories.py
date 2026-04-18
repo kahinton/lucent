@@ -206,7 +206,7 @@ Args:
     related_memory_ids: Optional list of UUIDs of related memories to link.
     metadata: Optional type-specific metadata. Structure depends on memory type:
         - experience: {context, outcome, lessons_learned[], related_entities[]}
-        - technical: {category, language, code_snippet, references[], version_info, repo, filename}
+        - technical: {category, language, code_snippet, references[], version_info, repo, directory, filename}
         - procedural: {steps[{order, description, notes}],
           prerequisites[], estimated_time, success_criteria,
           common_pitfalls[]}

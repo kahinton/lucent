@@ -9,6 +9,16 @@ from jsonschema.validators import validator_for
 
 _OUTPUT_PATTERN = re.compile(r"<task_output>\s*([\s\S]*?)\s*</task_output>", re.DOTALL)
 _VALID_ON_FAILURE = {"fail", "fallback", "retry_then_fallback"}
+_WRITE_TOOLS = ("update_memory", "delete_memory")
+_PLANNED_LINE_OP_RE = re.compile(
+    r"(\d+)\s+(?:merge(?:s|d| pairs?)?|updates?|deletes?)\b",
+    re.IGNORECASE,
+)
+_EXECUTED_OP_RE = re.compile(
+    r"(\d+)\s+(?:merge(?:s|d)?|update(?:s|d)?|delete(?:s|d)?)\b[^.\n]{0,50}\b"
+    r"(?:executed|applied|performed|completed)\b",
+    re.IGNORECASE,
+)
 
 
 def validate_contract_schema(output_contract: dict | None) -> list[str]:
@@ -114,3 +124,39 @@ def process_task_output(result_text: str | None, output_contract: dict | None) -
         "validation_status": "valid",
         "validation_errors": None,
     }
+
+
+def validate_consolidation_execution(
+    *,
+    result_text: str | None,
+    task_title: str = "",
+    task_description: str = "",
+    tool_counts: dict[str, int] | None = None,
+) -> tuple[bool, str]:
+    """Reject consolidation outputs that plan writes but execute none."""
+    task_text = f"{task_title}\n{task_description}".lower()
+    if "consolidat" not in task_text or "memory" not in task_text:
+        return True, "not_consolidation_task"
+
+    output = result_text or ""
+    output_lower = output.lower()
+    if "no action needed" in output_lower or "nothing to consolidate" in output_lower:
+        return True, "no_action_needed"
+
+    planned_ops = 0
+    for line in output.splitlines():
+        line_lower = line.lower()
+        if "planned" not in line_lower and "identified" not in line_lower:
+            continue
+        planned_ops += sum(int(m.group(1)) for m in _PLANNED_LINE_OP_RE.finditer(line))
+    if planned_ops <= 0:
+        return True, "no_planned_writes_detected"
+
+    if tool_counts is not None:
+        executed_ops = sum(int(tool_counts.get(tool, 0)) for tool in _WRITE_TOOLS)
+    else:
+        executed_ops = sum(int(m.group(1)) for m in _EXECUTED_OP_RE.finditer(output))
+
+    if executed_ops == 0:
+        return False, f"Plan identified {planned_ops} operations but 0 were executed"
+    return True, "ok"

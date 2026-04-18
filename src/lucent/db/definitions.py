@@ -200,6 +200,7 @@ class DefinitionRepository:
         org_id: str,
         created_by: str,
         status: str = "proposed",
+        scope: str = "instance",
         owner_user_id: str | None = None,
         owner_group_id: str | None = None,
     ) -> dict:
@@ -207,14 +208,14 @@ class DefinitionRepository:
         if owner_user_id is None and owner_group_id is None:
             owner_user_id = created_by
         query = """
-            INSERT INTO agent_definitions (name, description, content, status,
+            INSERT INTO agent_definitions (name, description, content, status, scope,
                 created_by, organization_id, owner_user_id, owner_group_id)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             RETURNING *
         """
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
-                query, name, description, content, status, created_by, org_id,
+                query, name, description, content, status, scope, created_by, org_id,
                 owner_user_id, owner_group_id,
             )
         result = dict(row)
@@ -397,6 +398,7 @@ class DefinitionRepository:
         org_id: str,
         created_by: str,
         status: str = "proposed",
+        scope: str = "instance",
         owner_user_id: str | None = None,
         owner_group_id: str | None = None,
     ) -> dict:
@@ -404,14 +406,14 @@ class DefinitionRepository:
         if owner_user_id is None and owner_group_id is None:
             owner_user_id = created_by
         query = """
-            INSERT INTO skill_definitions (name, description, content, status,
+            INSERT INTO skill_definitions (name, description, content, status, scope,
                 created_by, organization_id, owner_user_id, owner_group_id)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             RETURNING *
         """
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
-                query, name, description, content, status, created_by, org_id,
+                query, name, description, content, status, scope, created_by, org_id,
                 owner_user_id, owner_group_id,
             )
         result = dict(row)

@@ -1500,31 +1500,46 @@ class RequestRepository:
         if org_id:
             async with self.pool.acquire() as conn:
                 rows = await conn.fetch(
-                    """UPDATE tasks SET status = 'pending', claimed_by = NULL,
-                       claimed_at = NULL, claim_expires_at = NULL, last_heartbeat_at = NULL,
-                       updated_at = NOW()
-                       WHERE status IN ('claimed', 'running')
-                       AND organization_id = $2
-                        AND (
-                             claim_expires_at < NOW()
-                            OR (
-                                claimed_by IS NOT NULL
-                                AND EXISTS (
-                                    SELECT 1 FROM daemon_instances di
-                                    WHERE di.organization_id = tasks.organization_id
-                                      AND di.instance_id = tasks.claimed_by
-                                      AND (
-                                          di.status <> 'active'
-                                          OR di.last_seen_at < NOW() - make_interval(secs := $3)
-                                      )
-                                )
-                            )
-                            OR (
-                                claimed_at IS NOT NULL
-                                AND claimed_at < NOW() - make_interval(secs := $1)
+                    """WITH stale AS (
+                           SELECT t.id, t.claimed_by
+                           FROM tasks t
+                           WHERE t.status IN ('claimed', 'running')
+                             AND t.organization_id = $2
+                             AND (
+                                 t.claim_expires_at < NOW()
+                                 OR (
+                                     t.claimed_by IS NOT NULL
+                                     AND EXISTS (
+                                         SELECT 1 FROM daemon_instances di
+                                         WHERE di.organization_id = t.organization_id
+                                           AND di.instance_id = t.claimed_by
+                                            AND (
+                                                di.status <> 'active'
+                                                OR di.last_seen_at < NOW()
+                                                    - make_interval(secs := $3)
+                                            )
+                                     )
+                                 )
+                                 OR (
+                                     t.claimed_at IS NOT NULL
+                                     AND t.claimed_at < NOW() - make_interval(secs := $1)
+                                 )
                              )
-                        )
-                       RETURNING id""",
+                           FOR UPDATE
+                       ),
+                       released AS (
+                           UPDATE tasks t
+                           SET status = 'pending',
+                               claimed_by = NULL,
+                               claimed_at = NULL,
+                               claim_expires_at = NULL,
+                               last_heartbeat_at = NULL,
+                               updated_at = NOW()
+                           FROM stale s
+                           WHERE t.id = s.id
+                           RETURNING t.id, s.claimed_by AS previous_claimed_by
+                       )
+                       SELECT id, previous_claimed_by FROM released""",
                     stale_seconds,
                     UUID(org_id),
                     instance_stale_seconds,
@@ -1532,38 +1547,54 @@ class RequestRepository:
         else:
             async with self.pool.acquire() as conn:
                 rows = await conn.fetch(
-                    """UPDATE tasks SET status = 'pending', claimed_by = NULL,
-                       claimed_at = NULL, claim_expires_at = NULL, last_heartbeat_at = NULL,
-                       updated_at = NOW()
-                       WHERE status IN ('claimed', 'running')
-                       AND (
-                            claim_expires_at < NOW()
-                            OR (
-                                claimed_by IS NOT NULL
-                                AND EXISTS (
-                                    SELECT 1 FROM daemon_instances di
-                                    WHERE di.organization_id = tasks.organization_id
-                                      AND di.instance_id = tasks.claimed_by
-                                      AND (
-                                          di.status <> 'active'
-                                          OR di.last_seen_at < NOW() - make_interval(secs := $2)
-                                      )
-                                )
-                            )
-                            OR (
-                                claimed_at IS NOT NULL
-                                AND claimed_at < NOW() - make_interval(secs := $1)
-                            )
+                    """WITH stale AS (
+                           SELECT t.id, t.claimed_by
+                           FROM tasks t
+                           WHERE t.status IN ('claimed', 'running')
+                             AND (
+                                 t.claim_expires_at < NOW()
+                                 OR (
+                                     t.claimed_by IS NOT NULL
+                                     AND EXISTS (
+                                         SELECT 1 FROM daemon_instances di
+                                         WHERE di.organization_id = t.organization_id
+                                           AND di.instance_id = t.claimed_by
+                                            AND (
+                                                di.status <> 'active'
+                                                OR di.last_seen_at < NOW()
+                                                    - make_interval(secs := $2)
+                                            )
+                                     )
+                                 )
+                                 OR (
+                                     t.claimed_at IS NOT NULL
+                                     AND t.claimed_at < NOW() - make_interval(secs := $1)
+                                 )
+                             )
+                           FOR UPDATE
+                       ),
+                       released AS (
+                           UPDATE tasks t
+                           SET status = 'pending',
+                               claimed_by = NULL,
+                               claimed_at = NULL,
+                               claim_expires_at = NULL,
+                               last_heartbeat_at = NULL,
+                               updated_at = NOW()
+                           FROM stale s
+                           WHERE t.id = s.id
+                           RETURNING t.id, s.claimed_by AS previous_claimed_by
                        )
-                       RETURNING id""",
+                       SELECT id, previous_claimed_by FROM released""",
                     stale_seconds,
                     instance_stale_seconds,
                 )
         for row in rows:
+            claimed_by = row["previous_claimed_by"] or "unknown"
             await self.add_task_event(
                 str(row["id"]),
-                "released",
-                f"Auto-released: stale for >{stale_minutes}min",
+                "reaper",
+                f"Claim expired (was claimed by {claimed_by}), task requeued to pending",
             )
         return len(rows)
 

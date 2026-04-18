@@ -9,6 +9,20 @@ from lucent.db.definitions import DefinitionRepository
 from lucent.db.user import UserRepository
 
 
+def test_validate_task_result_rejects_empty_consolidation_execution():
+    daemon = LucentDaemon()
+    success, reason = daemon._validate_task_result(
+        "Identified 3 merges planned. No writes executed.",
+        task={
+            "title": "Memory consolidation pass",
+            "description": "Run memory consolidation and merge duplicates",
+        },
+        tool_counts={"update_memory": 0, "delete_memory": 0},
+    )
+    assert success is False
+    assert reason == "Plan identified 3 operations but 0 were executed"
+
+
 @pytest.mark.asyncio
 async def test_load_accessible_agent_filters_by_requesting_user(
     db_pool, test_organization, test_user, clean_test_data

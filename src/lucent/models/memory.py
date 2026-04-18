@@ -62,8 +62,12 @@ class TechnicalMetadata(BaseModel):
     repo: str | None = Field(
         default=None, description="Repository name in owner/repo format (e.g. 'octocat/hello-world')"
     )
+    directory: str | None = Field(
+        default=None,
+        description="Directory path within the repo this knowledge relates to (e.g. 'src/lucent/api/'). Null for repo-level knowledge.",
+    )
     filename: str | None = Field(
-        default=None, description="File or directory path this knowledge relates to (e.g. 'src/lucent/api/' for directory, 'src/lucent/db/memory.py' for file). Null for repo-level knowledge."
+        default=None, description="Specific file path this knowledge relates to (e.g. 'src/lucent/db/memory.py'). Null for repo-level or directory-level knowledge."
     )
 
 
