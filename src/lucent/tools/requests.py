@@ -72,7 +72,7 @@ Returns: JSON with the created request including its ID."""
         target_repo: str = "",
         target_paths: list[str] | None = None,
     ) -> str:
-        user_id, org_id, _, _, _ = await _get_current_user_context()
+        user_id, org_id, _, memory_scope, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
 
@@ -92,6 +92,7 @@ Returns: JSON with the created request including its ID."""
             memory_ids=memory_ids,
             target_repo=target_repo or None,
             target_paths=target_paths,
+            force_pending_approval=(memory_scope == "user"),
         )
 
         # Goal already completed — no request created

@@ -33,6 +33,18 @@ class MemoryRepository:
 
     TRUNCATE_LENGTH = 1000
 
+    # Mapping from goal metadata.status → lifecycle_stage.
+    # Only applied for goal-type memories.  Other types may have different
+    # lifecycle semantics and are left untouched.
+    _GOAL_STATUS_TO_LIFECYCLE: dict[str, str] = {
+        "active": "active",
+        "paused": "active",       # planner filters paused goals via metadata.status
+        "completed": "archived",
+        "done": "archived",
+        "abandoned": "archived",
+        "cancelled": "archived",
+    }
+
     # Shared column lists to avoid repetition across queries
     _FULL_COLUMNS = (
         "id, username, type, content, tags, importance, related_memory_ids, metadata, "
@@ -79,13 +91,30 @@ class MemoryRepository:
         Returns:
             The created memory record.
         """
-        query = f"""
-            INSERT INTO memories (username, type, content, tags,
-                importance, related_memory_ids, metadata,
-                user_id, organization_id, shared)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-            RETURNING {self._FULL_COLUMNS}
-        """
+        # Auto-sync lifecycle_stage for goal memories created with an
+        # initial metadata.status (e.g. importing a completed goal).
+        initial_stage = self._resolve_goal_lifecycle_stage(type, metadata)
+        if initial_stage and initial_stage != "active":
+            query = f"""
+                INSERT INTO memories (username, type, content, tags,
+                    importance, related_memory_ids, metadata,
+                    user_id, organization_id, shared, lifecycle_stage)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                RETURNING {self._FULL_COLUMNS}
+            """
+            logger.info(
+                "lifecycle auto-sync on create: goal memory with status=%s → lifecycle_stage=%s",
+                metadata.get("status") if metadata else None,
+                initial_stage,
+            )
+        else:
+            query = f"""
+                INSERT INTO memories (username, type, content, tags,
+                    importance, related_memory_ids, metadata,
+                    user_id, organization_id, shared)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                RETURNING {self._FULL_COLUMNS}
+            """
 
         # Sharing is now managed by the tool layer with type-based defaults.
         # Goals are no longer force-shared here — the daemon processes goals
@@ -97,8 +126,7 @@ class MemoryRepository:
             if related_memory_ids:
                 await self._validate_related_ids(related_memory_ids, conn=conn)
 
-            row = await conn.fetchrow(
-                query,
+            create_params: list[Any] = [
                 username,
                 type,
                 content,
@@ -109,7 +137,11 @@ class MemoryRepository:
                 str(user_id) if user_id else None,
                 str(organization_id) if organization_id else None,
                 effective_shared,
-            )
+            ]
+            if initial_stage and initial_stage != "active":
+                create_params.append(initial_stage)
+
+            row = await conn.fetchrow(query, *create_params)
 
         return self._row_to_dict(row)
 
@@ -308,6 +340,26 @@ class MemoryRepository:
             updates.append(f"metadata = ${param_idx}")
             params.append(metadata)
             param_idx += 1
+
+        # Auto-sync lifecycle_stage for goal-type memories when
+        # metadata.status maps to a known lifecycle stage.  Uses a SQL
+        # CASE so non-goal rows are never touched.
+        if metadata is not None:
+            target_stage = self._resolve_goal_lifecycle_stage("goal", metadata)
+            if target_stage is not None:
+                updates.append(
+                    f"lifecycle_stage = CASE WHEN type = 'goal' "
+                    f"THEN ${param_idx} ELSE lifecycle_stage END"
+                )
+                params.append(target_stage)
+                param_idx += 1
+                logger.info(
+                    "lifecycle auto-sync: memory %s metadata.status=%s → lifecycle_stage=%s "
+                    "(applied only if type=goal)",
+                    memory_id,
+                    metadata.get("status"),
+                    target_stage,
+                )
 
         if not updates:
             return await self.get(memory_id)
@@ -1613,6 +1665,24 @@ class MemoryRepository:
         if action == "suggest-cleanup":
             return "consolidating"
         return "active"
+
+    @classmethod
+    def _resolve_goal_lifecycle_stage(
+        cls,
+        memory_type: str,
+        metadata: dict[str, Any] | None,
+    ) -> str | None:
+        """Return the lifecycle_stage implied by a goal's metadata.status.
+
+        Returns None when no sync is needed (non-goal type, no metadata,
+        no status key, or status not in the mapping).
+        """
+        if memory_type != "goal" or not metadata:
+            return None
+        status = metadata.get("status")
+        if not isinstance(status, str):
+            return None
+        return cls._GOAL_STATUS_TO_LIFECYCLE.get(status.lower().strip())
 
     @staticmethod
     def _utc(value: datetime | None) -> datetime:

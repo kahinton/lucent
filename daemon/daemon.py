@@ -29,7 +29,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
@@ -2519,6 +2519,172 @@ class LucentDaemon:
             "tools to create work items. Output a brief summary of your decisions."
         )
 
+    async def _list_active_goal_users(self, org_id: str) -> list[dict[str, Any]]:
+        """Return users with at least one active goal and their goal counts."""
+        import asyncpg
+
+        try:
+            conn = await asyncpg.connect(DATABASE_URL)
+        except Exception as e:
+            log(f"Cognitive fan-out DB connect failed: {e}", "WARN")
+            return []
+
+        try:
+            rows = await conn.fetch(
+                """
+                SELECT user_id::text AS user_id, COUNT(*)::int AS goals_scanned
+                FROM memories
+                WHERE organization_id = $1::uuid
+                  AND type = 'goal'
+                  AND lifecycle_stage = 'active'
+                  AND COALESCE(metadata->>'status', '') = 'active'
+                  AND user_id IS NOT NULL
+                GROUP BY user_id
+                ORDER BY user_id
+                """,
+                org_id,
+            )
+            return [dict(r) for r in rows]
+        except Exception as e:
+            log(f"Cognitive fan-out query failed: {e}", "WARN")
+            return []
+        finally:
+            await conn.close()
+
+    def _build_user_scoped_cognitive_prompt(self) -> str:
+        """Build a prompt for per-user scoped cognitive planning sessions."""
+        return (
+            f"{self._build_cognitive_schedule_prompt()}\n\n"
+            "Per-user fan-out execution mode is active for this run.\n"
+            "You are operating under a user-scoped key and can only see one user's memories.\n"
+            "Focus ONLY on that user's active goals and create tracked requests as needed.\n\n"
+            "Requirements:\n"
+            "1. Use search_memories(type='goal', limit=50) to find active goals.\n"
+            "2. For each unaddressed active goal, call create_request(...).\n"
+            "3. Include goal_id when creating a request for a goal memory.\n"
+            "4. Set source='cognitive'.\n"
+            "5. Do NOT create tasks in this session. Create requests only.\n"
+            "6. Return a concise summary including goals scanned and requests created.\n"
+        )
+
+    async def _count_user_cognitive_requests_since(
+        self,
+        *,
+        org_id: str,
+        user_id: str,
+        since: datetime,
+    ) -> int:
+        """Count cognitive requests created for a user since a timestamp."""
+        import asyncpg
+
+        try:
+            conn = await asyncpg.connect(DATABASE_URL)
+        except Exception:
+            return 0
+
+        try:
+            count = await conn.fetchval(
+                """
+                SELECT COUNT(*)
+                FROM requests
+                WHERE organization_id = $1::uuid
+                  AND created_by = $2::uuid
+                  AND source = 'cognitive'
+                  AND created_at >= $3
+                """,
+                org_id,
+                user_id,
+                since,
+            )
+            return int(count or 0)
+        except Exception:
+            return 0
+        finally:
+            await conn.close()
+
+    async def _run_cognitive_planning_fanout(
+        self,
+        *,
+        task_id: str,
+        org_id: str,
+        system_message: str,
+        mcp_config_base: dict[str, Any],
+    ) -> str:
+        """Run per-user cognitive planning fan-out with scoped keys."""
+        users = await self._list_active_goal_users(org_id)
+        if not users:
+            return "Cognitive fan-out: no users with active goals."
+
+        summaries: list[str] = []
+        prompt = self._build_user_scoped_cognitive_prompt()
+
+        for user_row in users:
+            user_id = str(user_row.get("user_id", "")).strip()
+            goals_scanned = int(user_row.get("goals_scanned") or 0)
+            if not user_id:
+                continue
+
+            started = datetime.now(timezone.utc)
+            start_ts = time.perf_counter()
+            errors: list[str] = []
+            requests_created = 0
+
+            try:
+                scoped_key = await _mint_scoped_api_key(
+                    memory_scope="user",
+                    memory_scope_user_id=user_id,
+                    org_id=org_id,
+                    ttl_minutes=60,
+                )
+                if not scoped_key:
+                    raise RuntimeError("scoped key minting failed")
+
+                scoped_mcp = dict(mcp_config_base)
+                scoped_mcp["memory-server"] = {
+                    "type": "http",
+                    "url": MCP_URL,
+                    "headers": {"Authorization": f"Bearer {scoped_key}"},
+                    "tools": ["*"],
+                }
+
+                session_result = await self.run_session(
+                    f"cognitive-plan-{task_id[:8]}-{user_id[:8]}",
+                    system_message,
+                    prompt,
+                    mcp_config_override=scoped_mcp,
+                )
+                if not session_result:
+                    errors.append("planner session produced no output")
+                requests_created = await self._count_user_cognitive_requests_since(
+                    org_id=org_id,
+                    user_id=user_id,
+                    since=started,
+                )
+            except Exception as e:
+                errors.append(str(e))
+                log(f"Cognitive planning fan-out failed for user {user_id[:8]}: {e}", "WARN")
+            finally:
+                duration_ms = int((time.perf_counter() - start_ts) * 1000)
+                log(
+                    "cognitive_planning_user_iteration "
+                    + json.dumps(
+                        {
+                            "user_id": user_id,
+                            "goals_scanned": goals_scanned,
+                            "requests_created": requests_created,
+                            "errors": errors,
+                            "duration_ms": duration_ms,
+                        },
+                        sort_keys=True,
+                    )
+                )
+                summaries.append(
+                    f"user={user_id[:8]} goals={goals_scanned} "
+                    f"requests={requests_created} errors={len(errors)}"
+                )
+
+        return "Cognitive fan-out complete: " + "; ".join(summaries)
+
     def _handle_shutdown(self):
         """Handle shutdown signal."""
         self.running = False
@@ -3510,6 +3676,28 @@ class LucentDaemon:
                 f"Dispatched to {agent_type} agent",
                 {"agent_type": agent_type, "instance_id": self.instance_id},
             )
+
+            # Special handling: Cognitive Planning schedule runs as per-user fan-out.
+            # We intentionally bypass a single unscoped planner session so each user
+            # gets planning against their private goals via scoped keys.
+            if _request_title.replace("[Scheduled] ", "") == "Cognitive Planning":
+                try:
+                    fanout_result = await self._run_cognitive_planning_fanout(
+                        task_id=task_id,
+                        org_id=org_id,
+                        system_message=system_message,
+                        mcp_config_base=task_mcp_config,
+                    )
+                    await _complete_owned(task_id, fanout_result[:4000])
+                except Exception as e:
+                    await _fail_owned(task_id, f"Cognitive planning fan-out failed: {e}")
+                    await RequestAPI.add_event(
+                        task_id,
+                        "fanout_failed",
+                        f"Cognitive planning fan-out failed: {e}",
+                    )
+                dispatched += 1
+                continue
 
             # Create sandbox if configured.
             # sandbox-orchestrator manages its own sandbox lifecycle — skip daemon-side

@@ -248,6 +248,7 @@ class RequestRepository:
         memory_ids: list[dict] | None = None,
         target_repo: str | None = None,
         target_paths: list[str] | None = None,
+        force_pending_approval: bool = False,
     ) -> dict:
         if source not in VALID_REQUEST_SOURCES:
             valid_sources = ", ".join(sorted(VALID_REQUEST_SOURCES))
@@ -259,7 +260,11 @@ class RequestRepository:
                 "Invalid dependency_policy "
                 f"'{dependency_policy}'. Must be 'strict' or 'permissive'."
             )
-        approval = APPROVAL_PENDING if _requires_approval(source) else APPROVAL_AUTO
+        approval = (
+            APPROVAL_PENDING
+            if force_pending_approval or _requires_approval(source)
+            else APPROVAL_AUTO
+        )
         now = datetime.now(timezone.utc) if approval == APPROVAL_AUTO else None
         async with self.pool.acquire() as conn:
             if memory_ids:
