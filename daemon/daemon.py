@@ -1822,7 +1822,7 @@ async def build_cognitive_prompt() -> str:
                 "3. Update each linked goal memory based on the feedback:\n"
                 "   - If the goal itself is obsolete/already done → set metadata.status to 'abandoned' with the reason\n"
                 "   - If just the approach was wrong → add the rejection feedback to the goal's content\n"
-                "4. Transition the request to 'cancelled' using `update_request_status`\n"
+                "4. Transition the request to 'cancelled' using `mark_rejection_processed(request_id, note=...)`\n"
                 "5. Tag the feedback-rejected memory as 'feedback-processed'\n\n"
                 "Do NOT skip this. Do NOT create new requests for these goals until processing is complete.\n"
             )
@@ -2520,7 +2520,15 @@ class LucentDaemon:
         )
 
     async def _list_active_goal_users(self, org_id: str) -> list[dict[str, Any]]:
-        """Return users with at least one active goal and their goal counts."""
+        """Return users that need a cognitive planning iteration this cycle.
+
+        A user qualifies if they have at least one truly-active goal memory OR
+        at least one request awaiting feedback-loop processing (status
+        'rejection_processing'). Users with rejected requests but no active
+        goals must still be iterated so the planner can consume the rejection
+        feedback and close the loop — otherwise rejected requests remain in
+        rejection_processing forever.
+        """
         import asyncpg
 
         try:
@@ -2532,13 +2540,30 @@ class LucentDaemon:
         try:
             rows = await conn.fetch(
                 """
-                SELECT user_id::text AS user_id, COUNT(*)::int AS goals_scanned
-                FROM memories
-                WHERE organization_id = $1::uuid
-                  AND type = 'goal'
-                  AND lifecycle_stage = 'active'
-                  AND COALESCE(metadata->>'status', '') = 'active'
-                  AND user_id IS NOT NULL
+                SELECT user_id::text AS user_id,
+                       SUM(goals_scanned)::int AS goals_scanned,
+                       SUM(rejections_pending)::int AS rejections_pending
+                FROM (
+                    SELECT user_id,
+                           COUNT(*)::int AS goals_scanned,
+                           0 AS rejections_pending
+                    FROM memories
+                    WHERE organization_id = $1::uuid
+                      AND type = 'goal'
+                      AND lifecycle_stage = 'active'
+                      AND COALESCE(metadata->>'status', '') = 'active'
+                      AND user_id IS NOT NULL
+                    GROUP BY user_id
+                    UNION ALL
+                    SELECT created_by AS user_id,
+                           0 AS goals_scanned,
+                           COUNT(*)::int AS rejections_pending
+                    FROM requests
+                    WHERE organization_id = $1::uuid
+                      AND status = 'rejection_processing'
+                      AND created_by IS NOT NULL
+                    GROUP BY created_by
+                ) AS combined
                 GROUP BY user_id
                 ORDER BY user_id
                 """,

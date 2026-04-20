@@ -752,6 +752,82 @@ Use this to see what work is queued up."""
         return json.dumps(tasks, default=serialize)
 
     @mcp.tool(
+        description="""Close out a rejected request after the feedback loop has been processed.
+
+This is the ONLY MCP-exposed status transition for requests. It is intentionally
+narrow: it can only move a request from `rejection_processing` to `cancelled`,
+and only when the caller is the request's owner. It cannot approve, reject, or
+otherwise change request state.
+
+Use this AFTER you have:
+1. Read the rejection reason on the request,
+2. Updated the linked goal memory (or memories) with the feedback, and
+3. Tagged the related feedback memory as `feedback-processed`.
+
+Calling this closes the rejection feedback loop so the request stops appearing
+in the daemon's `rejection_processing` queue. Without this call, rejected
+requests remain unprocessed forever.
+
+Args:
+    request_id: UUID of the request currently in `rejection_processing` state.
+    note: Optional short note describing what was done with the feedback.
+
+Returns: JSON with the updated request, or an error if the request is not in
+    `rejection_processing` or is not owned by the caller."""
+    )
+    async def mark_rejection_processed(
+        request_id: str,
+        note: str = "",
+    ) -> str:
+        user_id, org_id, _, _, _ = await _get_current_user_context()
+        if not user_id:
+            return json.dumps({"error": "Authentication required"})
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+
+        repo = await _get_request_repository()
+        existing = await repo.get_request(request_id, str(org_id))
+        if not existing:
+            return json.dumps({"error": f"Request {request_id} not found"})
+        if str(existing.get("created_by")) != str(user_id):
+            return json.dumps(
+                {
+                    "error": (
+                        "Only the request's owner may close out a rejected "
+                        "request. The owner is the user the request was created "
+                        "on behalf of."
+                    )
+                }
+            )
+        if existing.get("status") != "rejection_processing":
+            return json.dumps(
+                {
+                    "error": (
+                        f"Request is in status {existing.get('status')!r}, not "
+                        "'rejection_processing'. This tool only closes out "
+                        "requests that have already been rejected by the user."
+                    )
+                }
+            )
+
+        try:
+            updated = await repo.update_request_status(
+                request_id, "cancelled", org_id=str(org_id)
+            )
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)})
+        if not updated:
+            return json.dumps({"error": "Failed to update request"})
+
+        return json.dumps(
+            {
+                "id": str(updated["id"]),
+                "status": updated["status"],
+                "note": note or "feedback processed",
+            }
+        )
+
+    @mcp.tool(
         description="""Create a review for a request or task.
 
 This MCP tool is informational-only and cannot approve/reject requests.

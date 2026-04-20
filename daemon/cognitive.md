@@ -246,7 +246,7 @@ For each `rejection_processing` request:
 3. Update each linked goal memory based on the feedback:
    - If the goal is obsolete or already accomplished → update `metadata.status` to `'abandoned'` and add the reason to the goal's content
    - If the approach was wrong but the goal is still valid → add the rejection feedback to the goal's content so future requests take it into account
-4. Call `update_request_status` to transition the request to `'cancelled'`
+4. Call `mark_rejection_processed(request_id, note=...)` to close out the request (transitions it from `rejection_processing` to `cancelled`)
 5. Search for `feedback-rejected` memories linked to this request and tag them `feedback-processed`
 
 **This is critical for the feedback loop.** Until you process these, the request stays in `rejection_processing` which blocks duplicate creation through dedup. Completing this step closes the loop and ensures your future work reflects the user's feedback.
