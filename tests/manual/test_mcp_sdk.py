@@ -36,7 +36,7 @@ async def test():
 
     session = await client.create_session(
         {
-            "model": "claude-opus-4.6",
+            "model": "claude-opus-4.7",
             "system_message": {
                 "content": (
                     "You are a helpful assistant with access to a memory server via MCP tools. "

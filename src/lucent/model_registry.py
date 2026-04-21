@@ -150,7 +150,7 @@ MODELS: list[ModelInfo] = [
         name="Claude Opus 4.6",
         category="reasoning",
         api_model_id="claude-opus-4-6-20260301",
-        notes="Anthropic's most powerful model. Improves on Claude Opus 4.5.",
+        notes="Previous Opus generation. Kept available for comparison and pinned tasks.",
         tags=["reasoning", "analysis", "premium"],
     ),
     ModelInfo(
@@ -165,7 +165,6 @@ MODELS: list[ModelInfo] = [
             "Default for high-stakes reasoning and agentic work."
         ),
         tags=["default", "reasoning", "frontier", "agentic", "analysis", "premium"],
-        enabled=False,  # Copilot SDK returns "Model not available" (2026-04-18)
     ),
     ModelInfo(
         id="claude-sonnet-4.0",
@@ -407,9 +406,9 @@ def get_recommended_model(task_type: str) -> str:
         "code": "claude-sonnet-4.6",
         "research": "gemini-3-pro",
         "memory": "claude-haiku-4.5",
-        "reflection": "claude-opus-4.6",
+        "reflection": "claude-opus-4.7",
         "documentation": "claude-sonnet-4.6",
-        "planning": "claude-opus-4.6",
+        "planning": "claude-opus-4.7",
         "review": "claude-sonnet-4.5",
         "fast": "claude-haiku-4.5",
         "agentic": "gpt-5.3-codex",

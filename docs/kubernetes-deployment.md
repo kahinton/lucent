@@ -162,7 +162,7 @@ All parameters are set via `--set` flags or `values.yaml` overrides. The chart s
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `llm.engine` | string | `copilot` | LLM backend: `copilot` or `langchain` |
-| `llm.daemonModel` | string | `claude-opus-4.6` | Model for daemon cognitive loop |
+| `llm.daemonModel` | string | `claude-opus-4.7` | Model for daemon cognitive loop |
 | `llm.providers.anthropic.secretRef` | string | `""` | Secret containing `ANTHROPIC_API_KEY` |
 | `llm.providers.openai.secretRef` | string | `""` | Secret containing `OPENAI_API_KEY` |
 | `llm.providers.google.secretRef` | string | `""` | Secret containing `GOOGLE_API_KEY` |
@@ -229,7 +229,7 @@ All parameters are set via `--set` flags or `values.yaml` overrides. The chart s
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `daemon.enabled` | bool | `true` | Enable the autonomous daemon process |
-| `daemon.model` | string | `claude-opus-4.6` | Model for daemon cognitive loop |
+| `daemon.model` | string | `claude-opus-4.7` | Model for daemon cognitive loop |
 | `daemon.maxConcurrentSessions` | int | `3` | Max parallel sub-agent sessions |
 | `daemon.env.LUCENT_DAEMON_INTERVAL` | string | `15` | Minutes between cognitive cycles |
 | `daemon.env.LUCENT_STALE_HEARTBEAT_MINUTES` | string | `30` | Minutes before a claimed task is considered stale |
