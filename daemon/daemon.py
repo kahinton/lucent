@@ -293,6 +293,10 @@ MAX_CONCURRENT_SESSIONS = int(os.environ.get("LUCENT_MAX_SESSIONS", "3"))
 DAEMON_INTERVAL_MINUTES = int(os.environ.get("LUCENT_DAEMON_INTERVAL", "15"))
 MODEL = os.environ.get("LUCENT_DAEMON_MODEL", "claude-opus-4.6")
 STALE_HEARTBEAT_MINUTES = int(os.environ.get("LUCENT_STALE_HEARTBEAT_MINUTES", "30"))
+
+# PG advisory-lock namespace for the request-decomposition backfill.
+# Two-int form: (namespace, hashtext(request_id)::int). Arbitrary unique int.
+DECOMPOSITION_LOCK_NAMESPACE = 0x4C434D50  # "LCMP" — Lucent CoMPose
 # Overall timeout for an entire run_session call (client start + create + response)
 SESSION_TOTAL_TIMEOUT = int(os.environ.get("LUCENT_SESSION_TIMEOUT", "3600"))
 # Idle timeout: kill session if no LLM activity for this long (seconds)
@@ -1677,6 +1681,14 @@ def _configure_daemon_logging():
     os.environ.setdefault("LUCENT_LOG_FILE", str(LOG_FILE))
     os.environ.setdefault("LUCENT_LOG_FILE_MAX_BYTES", "10485760")  # 10 MB
     os.environ.setdefault("LUCENT_LOG_FILE_BACKUP_COUNT", "5")
+    # The daemon is typically launched with stderr redirected to LOG_FILE
+    # (e.g. `nohup python -m daemon.daemon >> daemon/daemon.log 2>&1`).
+    # Without this, every log line would be written twice to the file:
+    # once by the rotating file handler, and again when the stderr handler
+    # flushes to the redirected fd. Any real Python crash/traceback that
+    # bypasses the logger still reaches the file through the stderr
+    # redirection.
+    os.environ.setdefault("LUCENT_LOG_STDERR", "false")
 
     # Add src to path so lucent package is importable
     src_dir = str(DAEMON_DIR.parent / "src")
@@ -2588,8 +2600,13 @@ class LucentDaemon:
             "2. For each unaddressed active goal, call create_request(...).\n"
             "3. Include goal_id when creating a request for a goal memory.\n"
             "4. Set source='cognitive'.\n"
-            "5. Do NOT create tasks in this session. Create requests only.\n"
-            "6. Return a concise summary including goals scanned and requests created.\n"
+            "5. **Immediately after each create_request call, decompose the request "
+            "into tasks via create_task. Every request you create MUST end the cycle "
+            "with at least one child task so the user can see the breakdown when "
+            "they review it for approval. A request with zero tasks is incomplete "
+            "work — never leave one in that state.**\n"
+            "6. Return a concise summary including goals scanned, requests created, "
+            "and tasks created.\n"
         )
 
     async def _count_user_cognitive_requests_since(
@@ -2709,6 +2726,415 @@ class LucentDaemon:
                 )
 
         return "Cognitive fan-out complete: " + "; ".join(summaries)
+
+    async def _list_undecomposed_pending_approval_requests(
+        self,
+        *,
+        org_id: str,
+        min_age_seconds: int,
+    ) -> list[dict[str, Any]]:
+        """Return non-terminal requests with zero tasks older than min_age_seconds.
+
+        Used by the decomposition backfill so that any request reaching the
+        queue has a visible task breakdown — whether it's awaiting human
+        approval (`pending_approval`), auto-approved on creation
+        (`auto_approved`, e.g. user-source requests), or manually approved
+        (`approved`). All three states share the same failure mode: a
+        request with zero tasks is incomplete work.
+        """
+        import asyncpg
+
+        try:
+            conn = await asyncpg.connect(DATABASE_URL)
+        except Exception as e:
+            log(f"Decomp backfill DB connect failed: {e}", "WARN")
+            return []
+
+        try:
+            rows = await conn.fetch(
+                """
+                SELECT r.id::text AS request_id,
+                       r.title,
+                       r.description,
+                       r.created_by::text AS created_by,
+                       r.target_repo,
+                       r.target_paths,
+                       r.priority,
+                       r.source,
+                       r.approval_status
+                FROM requests r
+                WHERE r.organization_id = $1::uuid
+                  AND r.approval_status IN (
+                      'pending_approval', 'auto_approved', 'approved'
+                  )
+                  AND r.status IN ('pending', 'in_progress')
+                  AND r.created_at < NOW() - ($2::int * INTERVAL '1 second')
+                  AND r.created_by IS NOT NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM tasks t WHERE t.request_id = r.id
+                  )
+                ORDER BY r.created_at ASC
+                LIMIT 5
+                """,
+                org_id,
+                min_age_seconds,
+            )
+            return [dict(r) for r in rows]
+        except Exception as e:
+            log(f"Decomp backfill query failed: {e}", "WARN")
+            return []
+        finally:
+            await conn.close()
+
+    def _build_decomposition_prompt(self, request: dict[str, Any]) -> str:
+        """Build a focused prompt that instructs the agent to decompose one request."""
+        title = request.get("title", "")
+        description = request.get("description", "") or ""
+        request_id = request.get("request_id", "")
+        target_repo = request.get("target_repo") or ""
+        target_paths = request.get("target_paths") or []
+        priority = request.get("priority") or "medium"
+
+        target_block = ""
+        if target_repo:
+            target_block += f"\n- target_repo: {target_repo}"
+        if target_paths:
+            target_block += f"\n- target_paths: {target_paths}"
+
+        return (
+            "You are running a focused decomposition session. Your ONLY job is to "
+            "break the following request into a sensible list of tasks so the user "
+            "can see the breakdown before they decide whether to approve it.\n\n"
+            f"REQUEST ID: {request_id}\n"
+            f"TITLE: {title}\n"
+            f"PRIORITY: {priority}\n"
+            f"{target_block}\n\n"
+            f"DESCRIPTION:\n{description}\n\n"
+            "Procedure:\n"
+            "1. Call list_available_models() once to see what models are available.\n"
+            "2. Decide on a task breakdown — typically 1 to 5 tasks. Each task should "
+            "have a clear, actionable title and a short description of what it does.\n"
+            "3. For each task, call create_task(request_id=..., title=..., "
+            "description=..., agent_type=..., model=..., sequence_order=...). Use "
+            "agent_type values like 'research', 'code', or 'documentation' depending "
+            "on the work. Set sequence_order so dependent tasks come after their "
+            "prerequisites (0 for the first batch, 1 for the next, etc.).\n"
+            "4. DO NOT create the request — it already exists. DO NOT call any "
+            "approval, status update, or rejection tools. Your output is a short "
+            "summary of how many tasks you created and why this breakdown.\n"
+            "5. If the request description is too vague to break down meaningfully, "
+            "create a single 'research' task to investigate further and stop there.\n\n"
+            "Stay focused. Do not search memories, do not create new requests, do "
+            "not start sub-agents. Just call create_task one or more times for the "
+            "above request, then return your summary."
+        )
+
+    async def _backfill_pending_decomposition(
+        self,
+        *,
+        org_id: str,
+        min_age_seconds: int = 300,
+    ) -> int:
+        """Decompose any non-terminal request older than min_age_seconds with no tasks.
+
+        Returns the number of requests for which decomposition was attempted.
+        Each attempt runs as a small focused session under a key scoped to the
+        request's owner so the resulting tasks inherit ownership cleanly.
+
+        Concurrency: safe across multiple daemon instances. Each candidate is
+        guarded by a PG session-level advisory lock keyed off the request's
+        UUID. If another daemon holds the lock, this one skips the request
+        and moves on. The in-memory set is just a per-instance fast-path so
+        we don't round-trip to the DB for requests we already know we are
+        actively decomposing locally.
+
+        Backoff: a request that fails to gain any tasks (planner refused,
+        MCP error, scoped-key failure, session crash) is suppressed locally
+        for an exponentially growing window so a single bad request can't
+        burn through sessions every scheduler tick. Backoff state is
+        per-instance — a daemon restart resets it, which is the desired
+        recovery path for transient failures.
+
+        Why min_age_seconds defaults to 300: a normal cognitive cycle takes
+        30–90 seconds, but slow planner sessions can run longer. Waiting 5
+        minutes before backfilling avoids racing a planner that's about to
+        call create_task on a request it just created.
+        """
+        import asyncpg
+
+        if self.draining:
+            return 0
+        if len(self.active_sessions) >= MAX_CONCURRENT_SESSIONS:
+            return 0
+        if not MCP_CONFIG.get("memory-server"):
+            return 0
+
+        # Per-instance fast-path guard. The DB advisory lock is the source
+        # of truth for cross-instance correctness; this just avoids a wasted
+        # DB round-trip when our own scheduler tick re-races itself.
+        if not hasattr(self, "_decomposing_request_ids"):
+            self._decomposing_request_ids = set()
+        # Per-instance backoff: request_id -> (next_retry_monotonic, attempts).
+        if not hasattr(self, "_decomposition_backoff"):
+            self._decomposition_backoff = {}
+
+        candidates = await self._list_undecomposed_pending_approval_requests(
+            org_id=org_id, min_age_seconds=min_age_seconds
+        )
+        now_mono = time.monotonic()
+        filtered: list[dict[str, Any]] = []
+        for req in candidates:
+            rid = req.get("request_id")
+            if not rid:
+                continue
+            if rid in self._decomposing_request_ids:
+                continue
+            backoff_until, _attempts = self._decomposition_backoff.get(rid, (0.0, 0))
+            if backoff_until > now_mono:
+                continue
+            filtered.append(req)
+        candidates = filtered
+        if not candidates:
+            return 0
+
+        # Build the system message once — same context as a normal sub-agent.
+        try:
+            system_message = await build_subagent_prompt(
+                "planning",
+                "Break a pending_approval request into a visible task list.",
+            )
+        except Exception:
+            # Fall back to a minimal system message if the planning agent
+            # definition isn't available — the per-request prompt is fully
+            # self-contained anyway.
+            system_message = (
+                "You are a focused planning sub-agent. Follow the user prompt exactly."
+            )
+
+        attempted = 0
+        for req in candidates:
+            request_id = req.get("request_id", "")
+            owner_user_id = req.get("created_by", "")
+            if not request_id or not owner_user_id:
+                continue
+
+            # Acquire the cross-daemon advisory lock on a dedicated connection.
+            # The lock is bound to the connection's session, so we MUST keep the
+            # connection open for the duration of the decomposition session and
+            # release/close in finally. pg_try_advisory_lock returns immediately
+            # — if another daemon has it, we skip without waiting.
+            lock_conn: asyncpg.Connection | None = None
+            try:
+                try:
+                    lock_conn = await asyncpg.connect(DATABASE_URL)
+                except Exception as e:
+                    log(f"Decomp lock connect failed for {request_id[:8]}: {e}", "WARN")
+                    continue
+
+                acquired = await lock_conn.fetchval(
+                    "SELECT pg_try_advisory_lock($1, hashtext($2)::int)",
+                    DECOMPOSITION_LOCK_NAMESPACE,
+                    request_id,
+                )
+                if not acquired:
+                    log(
+                        f"Decomp backfill: request {request_id[:8]} already "
+                        "being decomposed by another daemon — skipping",
+                    )
+                    await lock_conn.close()
+                    lock_conn = None
+                    continue
+
+                # Re-check candidacy under the lock to avoid the TOCTOU window
+                # where another daemon finished decomposing this very request
+                # between our list query and our lock acquisition.
+                still_undecomposed = await lock_conn.fetchval(
+                    """
+                    SELECT 1
+                    FROM requests r
+                    WHERE r.id = $1::uuid
+                      AND r.approval_status IN (
+                          'pending_approval', 'auto_approved', 'approved'
+                      )
+                      AND r.status IN ('pending', 'in_progress')
+                      AND NOT EXISTS (
+                          SELECT 1 FROM tasks t WHERE t.request_id = r.id
+                      )
+                    """,
+                    request_id,
+                )
+                if not still_undecomposed:
+                    await lock_conn.execute(
+                        "SELECT pg_advisory_unlock($1, hashtext($2)::int)",
+                        DECOMPOSITION_LOCK_NAMESPACE,
+                        request_id,
+                    )
+                    await lock_conn.close()
+                    lock_conn = None
+                    # Clear any stale backoff — the request is now decomposed
+                    # or no longer eligible.
+                    self._decomposition_backoff.pop(request_id, None)
+                    continue
+
+                self._decomposing_request_ids.add(request_id)
+                start_ts = time.perf_counter()
+                tasks_created = 0
+                terminal_after_session = False
+                errors: list[str] = []
+                try:
+                    scoped_key = await _mint_scoped_api_key(
+                        memory_scope="user",
+                        memory_scope_user_id=owner_user_id,
+                        org_id=org_id,
+                        ttl_minutes=30,
+                    )
+                    if not scoped_key:
+                        raise RuntimeError("scoped key minting failed")
+
+                    scoped_mcp = dict(MCP_CONFIG)
+                    scoped_mcp["memory-server"] = {
+                        "type": "http",
+                        "url": MCP_URL,
+                        "headers": {"Authorization": f"Bearer {scoped_key}"},
+                        "tools": ["*"],
+                    }
+
+                    prompt = self._build_decomposition_prompt(req)
+
+                    session_result = await self.run_session(
+                        f"decompose-{request_id[:8]}-{owner_user_id[:8]}",
+                        system_message,
+                        prompt,
+                        mcp_config_override=scoped_mcp,
+                    )
+                    if not session_result:
+                        errors.append("session produced no output")
+
+                    tasks_created = await self._count_tasks_for_request(request_id)
+
+                    # Defensive post-session check: if the user cancelled or
+                    # the request otherwise reached terminal state during the
+                    # session, the planner may have created orphan tasks.
+                    # The dispatch+claim queries now refuse to run tasks
+                    # under terminal parents, so the orphans won't execute,
+                    # but log loudly so we notice the pattern.
+                    terminal_status = await self._get_request_terminal_status(
+                        lock_conn, request_id
+                    )
+                    if terminal_status:
+                        terminal_after_session = True
+                        errors.append(
+                            f"request reached terminal status "
+                            f"'{terminal_status}' during decomposition; "
+                            f"any tasks created will not be dispatched"
+                        )
+                except Exception as e:
+                    errors.append(str(e))
+                    log(
+                        f"Decomp backfill failed for request {request_id[:8]}: {e}",
+                        "WARN",
+                    )
+                finally:
+                    self._decomposing_request_ids.discard(request_id)
+                    attempted += 1
+                    duration_ms = int((time.perf_counter() - start_ts) * 1000)
+                    log(
+                        "request_decomposed_for_review "
+                        + json.dumps(
+                            {
+                                "request_id": request_id,
+                                "owner_user_id": owner_user_id,
+                                "tasks_created": tasks_created,
+                                "terminal_during_session": terminal_after_session,
+                                "errors": errors,
+                                "duration_ms": duration_ms,
+                            },
+                            sort_keys=True,
+                        )
+                    )
+                    # Update backoff: success clears it, failure escalates.
+                    if tasks_created > 0 and not terminal_after_session:
+                        self._decomposition_backoff.pop(request_id, None)
+                    else:
+                        prev_until, prev_attempts = self._decomposition_backoff.get(
+                            request_id, (0.0, 0)
+                        )
+                        attempts = prev_attempts + 1
+                        # 5min, 15min, 1h, then 1h thereafter (capped). After
+                        # the 4th failed attempt we essentially give up until
+                        # the daemon restarts.
+                        if attempts >= 4:
+                            wait_seconds = 24 * 3600
+                            log(
+                                f"Decomp backfill: request {request_id[:8]} "
+                                f"failed {attempts} times — suppressing for 24h "
+                                "(restart the daemon to reset)",
+                                "WARN",
+                            )
+                        elif attempts >= 3:
+                            wait_seconds = 3600
+                        elif attempts >= 2:
+                            wait_seconds = 15 * 60
+                        else:
+                            wait_seconds = 5 * 60
+                        self._decomposition_backoff[request_id] = (
+                            time.monotonic() + wait_seconds,
+                            attempts,
+                        )
+            finally:
+                if lock_conn is not None:
+                    try:
+                        await lock_conn.execute(
+                            "SELECT pg_advisory_unlock($1, hashtext($2)::int)",
+                            DECOMPOSITION_LOCK_NAMESPACE,
+                            request_id,
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        await lock_conn.close()
+                    except Exception:
+                        pass
+
+        return attempted
+
+    async def _get_request_terminal_status(
+        self, conn: "asyncpg.Connection", request_id: str
+    ) -> str | None:
+        """Return the request's status if it has reached a terminal state, else None."""
+        try:
+            row = await conn.fetchrow(
+                """
+                SELECT status FROM requests
+                WHERE id = $1::uuid
+                  AND status IN ('cancelled', 'completed', 'failed')
+                """,
+                request_id,
+            )
+        except Exception:
+            return None
+        if not row:
+            return None
+        return str(row["status"])
+
+    async def _count_tasks_for_request(self, request_id: str) -> int:
+        """Count tasks attached to a request — used to verify decomposition outcome."""
+        import asyncpg
+
+        try:
+            conn = await asyncpg.connect(DATABASE_URL)
+        except Exception:
+            return 0
+        try:
+            count = await conn.fetchval(
+                "SELECT COUNT(*) FROM tasks WHERE request_id = $1::uuid",
+                request_id,
+            )
+            return int(count or 0)
+        except Exception:
+            return 0
+        finally:
+            await conn.close()
 
     def _handle_shutdown(self):
         """Handle shutdown signal."""
@@ -5072,12 +5498,52 @@ class LucentDaemon:
                     continue
 
                 await self._check_due_schedules()
+
+                # Decomposition backfill: any non-terminal request older
+                # than ~5 min with zero tasks gets a focused decomposition
+                # session so the user has a visible breakdown to review.
+                # Backfill covers pending_approval, auto_approved, and
+                # approved requests — the failure mode (zero tasks) is the
+                # same regardless of approval state.
+                try:
+                    org_id = await self._get_daemon_org_id()
+                    if org_id:
+                        await self._backfill_pending_decomposition(
+                            org_id=org_id, min_age_seconds=300
+                        )
+                except Exception as e:
+                    log(f"Decomp backfill loop error: {e}", "WARN")
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 log(f"Scheduler loop error: {e}", "ERROR")
 
             await asyncio.sleep(SCHEDULER_CHECK_SECONDS)
+
+    async def _get_daemon_org_id(self) -> str | None:
+        """Return the daemon-service user's organization id (cached after first lookup)."""
+        cached = getattr(self, "_cached_daemon_org_id", None)
+        if cached:
+            return cached
+
+        import asyncpg
+
+        try:
+            conn = await asyncpg.connect(DATABASE_URL)
+        except Exception:
+            return None
+        try:
+            row = await conn.fetchrow(
+                "SELECT organization_id FROM users "
+                "WHERE external_id = 'daemon-service' AND is_active = true"
+            )
+            if not row or not row["organization_id"]:
+                return None
+            org_id = str(row["organization_id"])
+            self._cached_daemon_org_id = org_id
+            return org_id
+        finally:
+            await conn.close()
 
     async def _autonomic_loop(self):
         """Periodic maintenance: memory consolidation, learning extraction.

@@ -293,7 +293,27 @@ if the agent type is not approved or the sandbox template is invalid."""
         parent_request = await repo.get_request(request_id, str(org_id))
         if not parent_request:
             return json.dumps({"error": "Request not found"})
-        requesting_user_id = parent_request.get("created_by")
+
+        # Ownership gate: a caller may only attach tasks to a request they
+        # own (request.created_by == caller). This aligns with the per-user
+        # cognitive cycle, where each scoped session can only see and act
+        # on its own user's requests. Org admins/owners are exempt so they
+        # can fix or augment work across the org from the UI/MCP.
+        request_owner_id = parent_request.get("created_by")
+        if user_role not in ("admin", "owner"):
+            if not request_owner_id or str(request_owner_id) != str(user_id):
+                return json.dumps(
+                    {
+                        "error": (
+                            "You may only create tasks on a request you own. "
+                            "This request belongs to another user. If you "
+                            "need to add work to it, ask the owner or an "
+                            "organization admin."
+                        )
+                    }
+                )
+
+        requesting_user_id = request_owner_id
         try:
             task = await repo.create_task(
                 request_id=request_id,

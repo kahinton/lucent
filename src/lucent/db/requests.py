@@ -986,6 +986,7 @@ class RequestRepository:
                    WHERE t.organization_id = $1
                      AND t.status IN ('pending', 'planned')
                      AND r.approval_status IN ('auto_approved', 'approved')
+                     AND r.status NOT IN ('cancelled', 'completed', 'failed')
                      AND NOT EXISTS (
                        SELECT 1 FROM (
                            SELECT DISTINCT sequence_order AS seq
@@ -1037,7 +1038,14 @@ class RequestRepository:
         org_id: str | None = None,
         lease_seconds: int = DEFAULT_TASK_LEASE_SECONDS,
     ) -> dict | None:
-        """Atomically claim a pending task. Returns None if already claimed."""
+        """Atomically claim a pending task. Returns None if already claimed.
+
+        Refuses to claim a task whose parent request has already reached a
+        terminal state (cancelled, completed, failed). The dispatch query
+        filters these out, but cancellation can land between dispatch
+        selection and claim — we belt-and-suspender here so a stuck
+        cancellation race doesn't run an LLM session for nothing.
+        """
         now = datetime.now(timezone.utc)
         claim_expires_at = now + timedelta(seconds=lease_seconds)
         if org_id:
@@ -1049,6 +1057,11 @@ class RequestRepository:
                        updated_at = $3
                        WHERE id = $1 AND status IN ('pending', 'planned')
                        AND organization_id = $5
+                       AND EXISTS (
+                           SELECT 1 FROM requests r
+                           WHERE r.id = tasks.request_id
+                             AND r.status NOT IN ('cancelled', 'completed', 'failed')
+                       )
                        RETURNING *""",
                     UUID(task_id),
                     instance_id,
@@ -1064,6 +1077,11 @@ class RequestRepository:
                        claim_expires_at = $4, claim_version = claim_version + 1,
                        updated_at = $3
                        WHERE id = $1 AND status IN ('pending', 'planned')
+                       AND EXISTS (
+                           SELECT 1 FROM requests r
+                           WHERE r.id = tasks.request_id
+                             AND r.status NOT IN ('cancelled', 'completed', 'failed')
+                       )
                        RETURNING *""",
                     UUID(task_id),
                     instance_id,

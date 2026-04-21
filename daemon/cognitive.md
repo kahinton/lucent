@@ -68,7 +68,7 @@ For non-goal work, check `list_active_work()` results before creating requests t
 
 ### Act
 **For tracked work (preferred for significant items), use request tracking tools:**
-- **create_request**: Create a tracked request for significant work items (source: "cognitive"). Pass `goal_id` when the request is for a goal memory.
+- **create_request**: Create a tracked request for significant work items (source: "cognitive"). Pass `goal_id` when the request is for a goal memory. **Every `create_request` you make MUST be followed by one or more `create_task` calls in the same session — never leave a request without tasks. The user's approval review depends on seeing the breakdown.**
 - **create_task**: Break a request into individual tasks with agent_type assignments (validates against approved definitions)
 - **log_task_event**: Record progress during task execution (event_type: "progress", "info", "warning", etc.)
 - **link_task_memory**: Connect memories to tasks for full lineage (relation: "created", "read", "updated")

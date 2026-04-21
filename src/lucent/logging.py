@@ -235,6 +235,11 @@ def configure_logging() -> None:
         LUCENT_LOG_MODULES: Per-module log level overrides, comma-separated.
                             Format: 'module:LEVEL,module:LEVEL'
                             Example: 'lucent.api:DEBUG,lucent.tools:WARNING'
+        LUCENT_LOG_STDERR: If 'false'/'0'/'no', do NOT attach the stderr
+                           handler. Useful for processes (like the daemon)
+                           whose stderr is already redirected to the same
+                           file as LUCENT_LOG_FILE, to avoid every log line
+                           being written twice. Default: 'true'.
     """
     log_level_str = os.environ.get("LUCENT_LOG_LEVEL", "INFO").upper()
     log_format = os.environ.get("LUCENT_LOG_FORMAT", "human").lower()
@@ -242,13 +247,20 @@ def configure_logging() -> None:
     max_bytes = int(os.environ.get("LUCENT_LOG_FILE_MAX_BYTES", "10485760"))
     backup_count = int(os.environ.get("LUCENT_LOG_FILE_BACKUP_COUNT", "5"))
     module_overrides = os.environ.get("LUCENT_LOG_MODULES", "")
+    stderr_enabled = os.environ.get("LUCENT_LOG_STDERR", "true").strip().lower() not in (
+        "false",
+        "0",
+        "no",
+        "off",
+    )
 
     log_level = _parse_level(log_level_str)
 
-    # Always create stderr handler
-    stderr_handler = _make_handler(log_format, log_level)
+    handlers: list[logging.Handler] = []
 
-    handlers: list[logging.Handler] = [stderr_handler]
+    # Stderr handler — on by default, opt-out via LUCENT_LOG_STDERR=false.
+    if stderr_enabled:
+        handlers.append(_make_handler(log_format, log_level))
 
     # Optionally add rotating file handler
     if log_file:
@@ -260,6 +272,12 @@ def configure_logging() -> None:
             backup_count=backup_count,
         )
         handlers.append(file_handler)
+
+    # Always have at least one handler — if the caller disabled both stderr
+    # and didn't set a log file, fall back to stderr so logs aren't silently
+    # dropped.
+    if not handlers:
+        handlers.append(_make_handler(log_format, log_level))
 
     # Configure root logger for lucent
     logger = logging.getLogger("lucent")
