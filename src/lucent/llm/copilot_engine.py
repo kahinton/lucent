@@ -7,8 +7,11 @@ This is the default engine and preserves all existing behavior.
 from __future__ import annotations
 
 import asyncio
+import os
 import re
+import shutil
 import time
+from pathlib import Path
 from typing import Any, Callable
 
 from lucent.llm.engine import LLMEngine, ModelNotAvailableError, SessionEvent, SessionEventType
@@ -22,6 +25,103 @@ _PermissionHandler: Any = None
 _SubprocessConfig: Any = None
 _SystemMessageReplaceConfig: Any = None
 _sdk_available: bool | None = None
+
+# Cache the resolved CLI path for the life of the process so we only run the
+# filesystem / PATH checks once. Use a module-level singleton sentinel for the
+# "not resolved yet" state; creating a new object() per comparison would break
+# the `is` check.
+_UNRESOLVED = object()
+_cli_path_cache: str | None | object = _UNRESOLVED
+
+
+def resolve_copilot_cli_path() -> str | None:
+    """Return the path to the Copilot CLI this process should use, or None.
+
+    Resolution order:
+      1. ``COPILOT_CLI_PATH`` env var. If set to the sentinel value
+         ``"bundled"`` (case-insensitive), skip auto-resolution and let the
+         SDK use whatever binary it ships with. Any other non-empty value
+         is taken literally and must point to an executable — we log a
+         warning if it doesn't exist but still pass it through so failures
+         are visible.
+      2. ``shutil.which("copilot")`` — picks up the binary the user's shell
+         would run. This is typically the VS Code–managed
+         ``copilotCli/copilot`` build that tracks the latest model list.
+      3. The canonical VS Code Insiders / stable paths under
+         ``~/Library/Application Support/Code*/User/globalStorage/
+         github.copilot-chat/copilotCli/copilot`` on macOS, and the
+         equivalent on Linux (``~/.config/Code*/...``).
+      4. None — let the SDK fall back to its bundled CLI.
+
+    Rationale: the SDK currently ships a pinned CLI that can lag behind the
+    VS Code–managed one by weeks, so new models (e.g. ``claude-opus-4.7``)
+    aren't visible until we point at the fresher binary. In general the
+    bundled install should be trusted, but we keep the override available
+    for exactly this kind of lag.
+    """
+    global _cli_path_cache
+    if _cli_path_cache is not _UNRESOLVED:
+        return _cli_path_cache  # type: ignore[return-value]
+
+    env_value = os.environ.get("COPILOT_CLI_PATH", "").strip()
+    if env_value.lower() == "bundled":
+        logger.info("COPILOT_CLI_PATH=bundled — using SDK's bundled CLI")
+        _cli_path_cache = None
+        return None
+    if env_value:
+        if not os.path.exists(env_value):
+            logger.warning(
+                "COPILOT_CLI_PATH=%s does not exist; passing through anyway so "
+                "the SDK raises a clear error",
+                env_value,
+            )
+        else:
+            logger.info("Using Copilot CLI from COPILOT_CLI_PATH=%s", env_value)
+        _cli_path_cache = env_value
+        return env_value
+
+    which_path = shutil.which("copilot")
+    if which_path:
+        logger.info("Using Copilot CLI from PATH: %s", which_path)
+        _cli_path_cache = which_path
+        return which_path
+
+    candidates: list[Path] = []
+    home = Path.home()
+    # macOS
+    candidates.extend(
+        [
+            home
+            / "Library/Application Support/Code - Insiders/User/globalStorage/"
+            "github.copilot-chat/copilotCli/copilot",
+            home
+            / "Library/Application Support/Code/User/globalStorage/"
+            "github.copilot-chat/copilotCli/copilot",
+        ]
+    )
+    # Linux
+    candidates.extend(
+        [
+            home
+            / ".config/Code - Insiders/User/globalStorage/"
+            "github.copilot-chat/copilotCli/copilot",
+            home
+            / ".config/Code/User/globalStorage/"
+            "github.copilot-chat/copilotCli/copilot",
+        ]
+    )
+    for c in candidates:
+        if c.exists() and os.access(c, os.X_OK):
+            logger.info("Using Copilot CLI discovered at %s", c)
+            _cli_path_cache = str(c)
+            return str(c)
+
+    logger.info(
+        "No external Copilot CLI found; falling back to SDK-bundled CLI. "
+        "Set COPILOT_CLI_PATH to override."
+    )
+    _cli_path_cache = None
+    return None
 
 
 def _ensure_sdk() -> bool:
@@ -74,6 +174,9 @@ class CopilotEngine(LLMEngine):
         config_kwargs: dict[str, Any] = {"log_level": self._log_level}
         if self._github_token:
             config_kwargs["github_token"] = self._github_token
+        cli_path = resolve_copilot_cli_path()
+        if cli_path:
+            config_kwargs["cli_path"] = cli_path
         return _CopilotClient(config=_SubprocessConfig(**config_kwargs))
 
     def _make_session_kwargs(self, model: str, system_message: str, mcp_config: dict | None) -> dict:

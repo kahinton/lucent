@@ -3445,7 +3445,18 @@ class LucentDaemon:
         client = None
 
         try:
-            client = CopilotClient(config=SubprocessConfig(log_level="warning"))
+            # Honor COPILOT_CLI_PATH / auto-detect the user's installed CLI
+            # so this fallback path sees the same models the engine does.
+            try:
+                from lucent.llm.copilot_engine import resolve_copilot_cli_path
+
+                _cli_path = resolve_copilot_cli_path()
+            except Exception:
+                _cli_path = None
+            _subprocess_kwargs: dict[str, Any] = {"log_level": "warning"}
+            if _cli_path:
+                _subprocess_kwargs["cli_path"] = _cli_path
+            client = CopilotClient(config=SubprocessConfig(**_subprocess_kwargs))
             await client.start()
 
             session = await client.create_session(
