@@ -290,12 +290,16 @@ class RequestRepository:
                         }
 
                     # Dedup: if any linked memory already has an active request, return it.
+                    # 'failed' counts as active because the user/operator may want
+                    # to edit and retry the failed request rather than silently
+                    # spawning a duplicate. Only 'completed' and 'cancelled'
+                    # (terminal by design) free a goal up for a fresh request.
                     existing = await conn.fetchrow(
                         """SELECT r.* FROM requests r
                            JOIN request_memories rm ON r.id = rm.request_id
                            WHERE r.organization_id = $1
                              AND rm.memory_id = ANY($2)
-                             AND r.status NOT IN ('completed', 'failed', 'cancelled')
+                             AND r.status NOT IN ('completed', 'cancelled')
                            ORDER BY r.created_at DESC LIMIT 1""",
                         UUID(org_id),
                         mem_ids,
@@ -939,15 +943,16 @@ class RequestRepository:
         }
 
     async def list_active_work(self, org_id: str, limit: int = 25, offset: int = 0) -> dict:
-        """Get all non-completed requests with task status summaries.
+        """Get all non-terminal requests with task status summaries.
 
-        Returns requests in pending/in_progress/planned status along with
-        counts of tasks by status, so the cognitive loop can see what's
-        already being worked on and avoid creating duplicate work.
+        Returns requests that are pending/in_progress/planned/needs_rework/review
+        AND requests in 'failed' state (because failed work is still active from
+        the planner's perspective — it needs to be fixed/retried, not duplicated).
+        Only 'completed' and 'cancelled' are excluded as truly terminal.
         """
         base = """FROM requests r LEFT JOIN tasks t ON t.request_id = r.id
                    WHERE r.organization_id = $1
-                     AND r.status NOT IN ('completed', 'failed', 'cancelled')"""
+                     AND r.status NOT IN ('completed', 'cancelled')"""
         async with self.pool.acquire() as conn:
             count_row = await conn.fetchrow(
                 f"SELECT COUNT(DISTINCT r.id) AS total {base}",
@@ -1156,6 +1161,80 @@ class RequestRepository:
                 model,
                 now,
                 UUID(task_id),
+            )
+        return dict(row) if row else None
+
+    # Statuses where the task is in flight or already finalized successfully.
+    # Anything else (pending, planned, failed, cancelled, needs_review, etc.)
+    # is safe to edit because the daemon won't be actively executing it.
+    _NON_EDITABLE_TASK_STATUSES = ('claimed', 'running', 'completed')
+
+    async def update_pending_task(
+        self,
+        task_id: str,
+        org_id: str,
+        *,
+        title: str | None = None,
+        description: str | None = None,
+        model: str | None = None,
+        agent_type: str | None = None,
+        sandbox_template_id: str | None = None,
+        clear_sandbox_template: bool = False,
+    ) -> dict | None:
+        """Edit a task in place. Returns the updated task or None.
+
+        Succeeds for any task that is NOT currently being executed and has
+        not already completed successfully. That means: pending, planned,
+        failed, cancelled, needs_review, etc. are all editable. Tasks in
+        ``claimed``, ``running``, or ``completed`` cannot be modified.
+        Pass ``clear_sandbox_template=True`` to explicitly null out the
+        sandbox template (distinguishes "no change" from "remove").
+        """
+        sets: list[str] = []
+        params: list = []
+
+        if title is not None:
+            params.append(title)
+            sets.append(f"title = ${len(params)}")
+        if description is not None:
+            params.append(description)
+            sets.append(f"description = ${len(params)}")
+        if model is not None:
+            params.append(model)
+            sets.append(f"model = ${len(params)}")
+        if agent_type is not None:
+            params.append(agent_type)
+            sets.append(f"agent_type = ${len(params)}")
+        if clear_sandbox_template:
+            sets.append("sandbox_template_id = NULL")
+        elif sandbox_template_id is not None:
+            params.append(UUID(sandbox_template_id))
+            sets.append(f"sandbox_template_id = ${len(params)}")
+
+        if not sets:
+            return await self.get_task(task_id, org_id=org_id)
+
+        sets.append(f"updated_at = ${len(params) + 1}")
+        params.append(datetime.now(timezone.utc))
+
+        params.append(UUID(task_id))
+        params.append(UUID(org_id))
+
+        non_editable = ', '.join(f"'{s}'" for s in self._NON_EDITABLE_TASK_STATUSES)
+        sql = (
+            f"UPDATE tasks SET {', '.join(sets)} "
+            f"WHERE id = ${len(params) - 1} "
+            f"  AND organization_id = ${len(params)} "
+            f"  AND status NOT IN ({non_editable}) "
+            "RETURNING *"
+        )
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(sql, *params)
+        if row:
+            await self.add_task_event(
+                task_id,
+                "edited",
+                f"Task edited: {', '.join(sorted(s.split(' = ')[0] for s in sets if 'updated_at' not in s))}",
             )
         return dict(row) if row else None
 

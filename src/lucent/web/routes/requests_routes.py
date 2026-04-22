@@ -141,6 +141,52 @@ async def request_detail(request: Request, request_id: str):
         request_id, str(user.organization_id)
     )
 
+    # Edit-affordance support: only fetch the choice lists when the request
+    # actually contains an editable task. Avoids loading them on every view.
+    available_models: list[dict] = []
+    available_agents: list[dict] = []
+    available_sandbox_templates: list[dict] = []
+    has_editable_task = any(
+        t.get("status") not in RequestRepository._NON_EDITABLE_TASK_STATUSES
+        for t in req.get("tasks", [])
+    )
+    if has_editable_task:
+        from lucent.model_registry import list_models
+        from lucent.db.definitions import DefinitionRepository
+
+        available_models = [
+            {"id": m.id, "name": m.name or m.id, "tags": list(m.tags or [])}
+            for m in list_models(include_disabled=False)
+        ]
+        available_models.sort(key=lambda m: m["id"])
+
+        def_repo = DefinitionRepository(pool)
+        agents_page = await def_repo.list_agents(
+            str(user.organization_id),
+            status="active",
+            limit=200,
+            requester_user_id=str(user.id),
+            requester_role=user.role.value,
+        )
+        available_agents = sorted(
+            [{"name": a["name"], "description": a.get("description", "")}
+             for a in agents_page.get("items", [])],
+            key=lambda a: a["name"],
+        )
+
+        try:
+            from lucent.db.sandbox_template import SandboxTemplateRepository
+
+            tpl_repo = SandboxTemplateRepository(pool)
+            tpls = await tpl_repo.list_dispatchable(str(user.organization_id))
+            available_sandbox_templates = sorted(
+                [{"id": str(t["id"]), "name": t.get("name", str(t["id"]))}
+                 for t in tpls],
+                key=lambda t: t["name"],
+            )
+        except Exception:
+            available_sandbox_templates = []
+
     return templates.TemplateResponse(
         request,
         "request_detail.html",
@@ -149,8 +195,88 @@ async def request_detail(request: Request, request_id: str):
             "req": req,
             "recent_events": recent_events[:50],
             "reviews": reviews,
+            "available_models": available_models,
+            "available_agents": available_agents,
+            "available_sandbox_templates": available_sandbox_templates,
         },
     )
+
+
+@router.post("/requests/tasks/{task_id}/edit", response_class=HTMLResponse)
+async def edit_task(request: Request, task_id: str):
+    """Edit a pending task's description, model, agent, or sandbox template."""
+    user = await get_user_context(request)
+    form = await request.form()
+    await _check_csrf(request, form_token=str(form.get("csrf_token", "")))
+    pool = await get_pool()
+    from lucent.db.requests import RequestRepository
+
+    repo = RequestRepository(pool)
+    org_id = str(user.organization_id)
+
+    existing = await repo.get_task(task_id, org_id=org_id)
+    if not existing:
+        raise HTTPException(404, "Task not found")
+    if existing.get("status") in repo._NON_EDITABLE_TASK_STATUSES:
+        raise HTTPException(
+            409,
+            f"Task is in status '{existing.get('status')}' — tasks that are running or already completed cannot be edited.",
+        )
+
+    def _val(name: str) -> str | None:
+        v = form.get(name)
+        if v is None:
+            return None
+        s = str(v).strip()
+        return s if s != "" else None
+
+    title = _val("title")
+    description = _val("description")
+    model = _val("model")
+    agent_type = _val("agent_type")
+    sandbox_template_id = _val("sandbox_template_id")
+    clear_sandbox = form.get("sandbox_template_id") == "__none__"
+
+    # Validate model + agent against the allowed sets
+    if model:
+        from lucent.model_registry import validate_model
+
+        err = validate_model(model)
+        if err:
+            raise HTTPException(422, err)
+
+    if agent_type:
+        from lucent.db.definitions import DefinitionRepository
+
+        def_repo = DefinitionRepository(pool)
+        agents_page = await def_repo.list_agents(
+            org_id,
+            status="active",
+            limit=200,
+            requester_user_id=str(user.id),
+            requester_role=user.role.value,
+        )
+        if not any(a["name"] == agent_type for a in agents_page.get("items", [])):
+            raise HTTPException(422, f"Unknown or unapproved agent_type '{agent_type}'.")
+
+    updated = await repo.update_pending_task(
+        task_id,
+        org_id,
+        title=title,
+        description=description,
+        model=model,
+        agent_type=agent_type,
+        sandbox_template_id=None if clear_sandbox else sandbox_template_id,
+        clear_sandbox_template=clear_sandbox,
+    )
+    if not updated:
+        raise HTTPException(
+            409,
+            "Task could not be updated — it may have been claimed by the daemon.",
+        )
+
+    request_id = str(updated["request_id"])
+    return RedirectResponse(f"/requests/{request_id}#task-{task_id}", status_code=303)
 
 
 @router.post("/requests/tasks/{task_id}/retry", response_class=HTMLResponse)

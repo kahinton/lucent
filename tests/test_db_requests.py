@@ -1119,12 +1119,15 @@ class TestListActiveWork:
         assert str(req["id"]) not in ids
 
     @pytest.mark.asyncio
-    async def test_excludes_failed_request(self, repo, req, test_organization):
+    async def test_includes_failed_request(self, repo, req, test_organization):
+        # Failed requests are still "active" from the planner's perspective —
+        # they need attention (edit/retry) and should block dedup so we don't
+        # silently spawn duplicate work for the same goal.
         org = str(test_organization["id"])
         await repo.update_request_status(str(req["id"]), "failed", org_id=org)
         result = await repo.list_active_work(org)
         ids = [str(r["id"]) for r in result["items"]]
-        assert str(req["id"]) not in ids
+        assert str(req["id"]) in ids
 
     @pytest.mark.asyncio
     async def test_excludes_cancelled_request(self, repo, req, test_organization):
@@ -1291,3 +1294,205 @@ class TestRequestDeduplication:
             memory_ids=[{"id": mem_id, "relation": "goal"}],
         )
         assert str(r1["id"]) == str(r2["id"])
+
+    async def test_failed_request_blocks_dedup(
+        self, repo, test_organization, db_pool
+    ):
+        """A failed request for a goal still blocks new requests for that goal.
+
+        Failed work is unfinished work — the planner should surface the
+        existing failed request (so the operator can edit/retry it) rather
+        than silently spawning a duplicate.
+        """
+        org_id = str(test_organization["id"])
+        async with db_pool.acquire() as conn:
+            mem = await conn.fetchrow(
+                """INSERT INTO memories (content, type, organization_id, username)
+                   VALUES ('failed-goal', 'goal', $1::uuid, 'test-user') RETURNING id""",
+                org_id,
+            )
+        mem_id = str(mem["id"])
+
+        r1 = await repo.create_request(
+            title="Original", org_id=org_id,
+            memory_ids=[{"id": mem_id, "relation": "goal"}],
+        )
+        await repo.update_request_status(str(r1["id"]), "failed", org_id=org_id)
+
+        # Second create_request should return the failed one, not create new
+        r2 = await repo.create_request(
+            title="Different Title", org_id=org_id,
+            memory_ids=[{"id": mem_id, "relation": "goal"}],
+        )
+        assert str(r2["id"]) == str(r1["id"])
+        assert r2["status"] == "failed"
+
+    async def test_cancelled_request_does_not_block_dedup(
+        self, repo, test_organization, db_pool
+    ):
+        """A cancelled request for a goal does NOT block new requests.
+
+        Cancellation is an explicit operator decision to abandon the work,
+        so the goal is free for a fresh attempt.
+        """
+        org_id = str(test_organization["id"])
+        async with db_pool.acquire() as conn:
+            mem = await conn.fetchrow(
+                """INSERT INTO memories (content, type, organization_id, username)
+                   VALUES ('cancelled-goal', 'goal', $1::uuid, 'test-user') RETURNING id""",
+                org_id,
+            )
+        mem_id = str(mem["id"])
+
+        r1 = await repo.create_request(
+            title="Original", org_id=org_id,
+            memory_ids=[{"id": mem_id, "relation": "goal"}],
+        )
+        await repo.update_request_status(str(r1["id"]), "cancelled", org_id=org_id)
+
+        r2 = await repo.create_request(
+            title="Fresh Attempt", org_id=org_id,
+            memory_ids=[{"id": mem_id, "relation": "goal"}],
+        )
+        assert str(r2["id"]) != str(r1["id"])
+
+
+class TestUpdatePendingTask:
+    async def test_edit_all_fields_on_pending_task(
+        self, repo, req, task, test_organization
+    ):
+        org = str(test_organization["id"])
+        updated = await repo.update_pending_task(
+            str(task["id"]),
+            org,
+            title="Renamed task",
+            description="New body",
+            model="claude-opus-4.7",
+            agent_type="research",
+        )
+        assert updated is not None
+        assert updated["title"] == "Renamed task"
+        assert updated["description"] == "New body"
+        assert updated["model"] == "claude-opus-4.7"
+        assert updated["agent_type"] == "research"
+
+    async def test_partial_edit_only_changes_supplied_fields(
+        self, repo, req, task, test_organization
+    ):
+        org = str(test_organization["id"])
+        original_title = task["title"]
+        updated = await repo.update_pending_task(
+            str(task["id"]), org, model="claude-opus-4.7"
+        )
+        assert updated["title"] == original_title
+        assert updated["model"] == "claude-opus-4.7"
+
+    async def test_no_op_returns_current_task(
+        self, repo, req, task, test_organization
+    ):
+        org = str(test_organization["id"])
+        unchanged = await repo.update_pending_task(str(task["id"]), org)
+        assert unchanged is not None
+        assert unchanged["id"] == task["id"]
+
+    async def test_cannot_edit_running_task(
+        self, repo, req, task, test_organization
+    ):
+        org = str(test_organization["id"])
+        await repo.claim_task(str(task["id"]), instance_id="i1", org_id=org)
+        await repo.start_task(str(task["id"]), org_id=org, instance_id="i1")
+        result = await repo.update_pending_task(
+            str(task["id"]), org, title="Should not stick"
+        )
+        assert result is None
+
+    async def test_cannot_edit_claimed_task(
+        self, repo, req, task, test_organization
+    ):
+        org = str(test_organization["id"])
+        await repo.claim_task(str(task["id"]), instance_id="i1", org_id=org)
+        result = await repo.update_pending_task(
+            str(task["id"]), org, title="Should not stick"
+        )
+        assert result is None
+
+    async def test_cannot_edit_completed_task(
+        self, repo, req, task, test_organization
+    ):
+        org = str(test_organization["id"])
+        await repo.claim_task(str(task["id"]), instance_id="i1", org_id=org)
+        await repo.start_task(str(task["id"]), org_id=org, instance_id="i1")
+        await repo.complete_task(str(task["id"]), result="done", org_id=org, instance_id="i1")
+        result = await repo.update_pending_task(
+            str(task["id"]), org, title="Should not stick"
+        )
+        assert result is None
+
+    async def test_can_edit_failed_task(
+        self, repo, req, task, test_organization
+    ):
+        org = str(test_organization["id"])
+        await repo.claim_task(str(task["id"]), instance_id="i1", org_id=org)
+        await repo.start_task(str(task["id"]), org_id=org, instance_id="i1")
+        await repo.fail_task(str(task["id"]), error="boom", org_id=org, instance_id="i1")
+        updated = await repo.update_pending_task(
+            str(task["id"]), org, model="claude-opus-4.7", description="Try again with more detail"
+        )
+        assert updated is not None
+        assert updated["status"] == "failed"
+        assert updated["model"] == "claude-opus-4.7"
+        assert updated["description"] == "Try again with more detail"
+
+    async def test_org_isolation(
+        self, repo, req, task, test_organization, other_org
+    ):
+        # Edit must scope by organization_id
+        result = await repo.update_pending_task(
+            str(task["id"]), str(other_org["id"]), title="Bad"
+        )
+        assert result is None
+        fresh = await repo.get_task(str(task["id"]), org_id=str(test_organization["id"]))
+        assert fresh["title"] == task["title"]
+
+    async def test_clear_sandbox_template(
+        self, repo, req, task, test_organization, db_pool
+    ):
+        org = str(test_organization["id"])
+        # Stuff a fake sandbox_template_id directly so we can clear it
+        async with db_pool.acquire() as conn:
+            tpl_row = await conn.fetchrow(
+                """INSERT INTO sandbox_templates
+                   (organization_id, name, image, scope, status, created_by)
+                   VALUES ($1, 'test-tpl', 'alpine:latest', 'built-in', 'approved', NULL)
+                   ON CONFLICT (organization_id, name) DO UPDATE SET image = EXCLUDED.image
+                   RETURNING id""",
+                test_organization["id"],
+            )
+            tpl_id = tpl_row["id"]
+            await conn.execute(
+                "UPDATE tasks SET sandbox_template_id = $1 WHERE id = $2",
+                tpl_id, task["id"],
+            )
+
+        try:
+            cleared = await repo.update_pending_task(
+                str(task["id"]), org, clear_sandbox_template=True
+            )
+            assert cleared["sandbox_template_id"] is None
+        finally:
+            async with db_pool.acquire() as conn:
+                await conn.execute(
+                    "DELETE FROM sandbox_templates WHERE id = $1", tpl_id
+                )
+
+    async def test_edit_emits_task_event(
+        self, repo, req, task, test_organization, db_pool
+    ):
+        org = str(test_organization["id"])
+        await repo.update_pending_task(str(task["id"]), org, title="X")
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT event_type FROM task_events WHERE task_id = $1 AND event_type = 'edited'",
+                task["id"],
+            )
+        assert row is not None

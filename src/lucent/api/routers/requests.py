@@ -505,6 +505,107 @@ async def update_task_model(
     return result
 
 
+class TaskEditBody(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=512)
+    description: str | None = None
+    model: str | None = None
+    agent_type: str | None = None
+    sandbox_template_id: str | None = None
+    clear_sandbox_template: bool = False
+
+
+@router.patch("/tasks/{task_id}")
+async def edit_pending_task(
+    task_id: UUID,
+    user: AuthenticatedUser,
+    body: TaskEditBody = Body(...),
+    pool=Depends(get_pool),
+):
+    """Edit a pending/planned task in place.
+
+    Tasks that have been claimed or completed cannot be edited — their work
+    is either in flight or done. Validates model against the registry and
+    agent_type against approved definitions before applying changes.
+    """
+    from lucent.db.definitions import DefinitionRepository
+    from lucent.db.requests import RequestRepository
+
+    repo = RequestRepository(pool)
+    org_id = str(user.organization_id)
+
+    # Fetch existing task to confirm it exists and is editable
+    existing = await repo.get_task(str(task_id), org_id=org_id)
+    if not existing:
+        raise HTTPException(404, "Task not found")
+    if existing.get("status") in repo._NON_EDITABLE_TASK_STATUSES:
+        raise HTTPException(
+            409,
+            f"Task is in status '{existing.get('status')}' — tasks that are running or already completed cannot be edited.",
+        )
+
+    if body.model:
+        from lucent.model_registry import validate_model
+
+        error = validate_model(body.model)
+        if error:
+            raise HTTPException(422, error)
+
+    if body.agent_type:
+        def_repo = DefinitionRepository(pool)
+        agents = (
+            await def_repo.list_agents(
+                org_id,
+                status="active",
+                limit=200,
+                requester_user_id=str(user.id),
+                requester_role=user.role.value,
+            )
+        )["items"]
+        if not any(a["name"] == body.agent_type for a in agents):
+            raise HTTPException(
+                422,
+                f"No approved agent definition found for type '{body.agent_type}'.",
+            )
+
+    if body.sandbox_template_id and not body.clear_sandbox_template:
+        # Validate template exists and is approved/accessible
+        try:
+            from lucent.db.sandbox_template import SandboxTemplateRepository
+
+            tpl_repo = SandboxTemplateRepository(pool)
+            tpl = await tpl_repo.get_accessible(
+                body.sandbox_template_id,
+                organization_id=org_id,
+                user_id=str(user.id),
+                user_role=user.role.value,
+            )
+            if not tpl or tpl.get("status") != "approved":
+                raise HTTPException(
+                    422,
+                    f"Sandbox template '{body.sandbox_template_id}' not found or not approved.",
+                )
+        except ImportError:
+            # Sandbox templates module optional in some deployments
+            pass
+
+    result = await repo.update_pending_task(
+        str(task_id),
+        org_id,
+        title=body.title,
+        description=body.description,
+        model=body.model,
+        agent_type=body.agent_type,
+        sandbox_template_id=body.sandbox_template_id if not body.clear_sandbox_template else None,
+        clear_sandbox_template=body.clear_sandbox_template,
+    )
+    if not result:
+        raise HTTPException(
+            409,
+            "Task could not be updated — it may have been claimed by the daemon between the read and write.",
+        )
+    return result
+
+
 @router.post("/tasks/{task_id}/start")
 async def start_task(
     task_id: UUID,
