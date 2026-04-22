@@ -52,19 +52,47 @@ For each completed task, assess:
 - **Quality**: Is the output substantive? A 200-char acknowledgment is not real work.
 - **Errors**: Did any tasks fail? If so, is the failure recoverable via rework?
 
-### 3. Update Linked Memories
+### 3. Update Linked Memories — MANDATORY PRECONDITION
 
-If the review task description includes a **Linked Memories** section, you MUST update those memories with the results of the work:
+If the review task description includes a **Linked Memories** section, you
+MUST call `update_memory` on every memory listed there BEFORE you emit
+`REQUEST_REVIEW_DECISION`. This is not optional, not "if appropriate",
+not "if you have time" — it is a hard precondition for emitting any
+decision. The memory update IS part of the review work; a review that
+skips it is incomplete.
+
+The daemon enforces this at the parser level. After you emit
+`REQUEST_REVIEW_DECISION: APPROVED`, you must include a line:
+
+```
+MEMORIES_UPDATED: <comma-separated memory IDs you updated>
+```
+
+If that line is missing, or doesn't list every linked memory ID, the
+daemon will reject the decision and re-queue the review as NEEDS_REWORK
+regardless of what verdict you wrote. You do not get to skip this step.
 
 **For goal memories (relation: "goal"):**
-- Use `update_memory` on the goal's memory ID
-- Add a `progress_notes` entry describing what was accomplished
-- If a specific milestone was achieved, mark that milestone's status as `"completed"` and set its `completed_at`
-- Only set the overall goal `status` to `"completed"` if ALL milestones are done and the goal is fully satisfied. Goals are often long-term — a single request may only advance one milestone.
-- If the work partially addressed the goal, leave the goal `status` as `"active"` and document what was done in progress_notes
+- Call `update_memory(memory_id=..., metadata={...})` on the goal's memory ID.
+- Append a `progress_notes` entry describing what was accomplished, with
+  today's date.
+- If a specific milestone was achieved, set that milestone's `status` to
+  `"completed"` and `completed_at` to today's date.
+- Set the overall goal `status` to `"completed"` ONLY if every milestone
+  is done. Goals are usually long-term — a single request typically only
+  advances one milestone. Default to leaving the goal `"active"`.
 
-**For context/reference memories:**
-- Update with any relevant new information from the task results
+**For other linked memories:**
+- Update with any relevant new information from the task results.
+- If the task results truly didn't change anything that belongs in the
+  memory, still call `update_memory` with a brief `progress_notes`-style
+  attestation explaining why no substantive change was needed (e.g.
+  "Reviewed; no update required because X"). This proves you considered
+  the memory rather than ignoring it.
+
+**For NEW memories created by tasks (mentioned in task outputs):**
+- Call `link_task_memory(task_id, memory_id, "created")` to attach them
+  back to this request's task tree.
 
 ### 4. Make Your Decision
 
@@ -90,19 +118,32 @@ Include the task IDs that need rework. If a task completed but with wrong output
 
 ## Output Format
 
-Always end your response with this exact machine-readable block:
+Always end your response with this exact machine-readable block.
+**The `MEMORIES_UPDATED` line is mandatory whenever the review task had a
+Linked Memories section** — list every memory ID you called
+`update_memory` on. Use `none` only if no Linked Memories section was
+provided.
+
+For approval:
 
 ```
 REQUEST_REVIEW_DECISION: APPROVED
+FEEDBACK: <one-line summary of why approved>
+MEMORIES_UPDATED: <comma-separated memory UUIDs, or "none">
 ```
 
-or
+For rework:
 
 ```
 REQUEST_REVIEW_DECISION: NEEDS_REWORK
 TASK_IDS_TO_REWORK: <comma-separated task UUIDs>
 FEEDBACK: <specific, actionable guidance for the rework>
+MEMORIES_UPDATED: <comma-separated memory UUIDs, or "none">
 ```
+
+Note: even when sending back for rework, you should still update linked
+goal memories with `progress_notes` describing what was attempted and
+why it didn't pass — that history is valuable for the rework cycle.
 
 ### 5. Record Review Outcome
 

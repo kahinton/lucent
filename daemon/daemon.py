@@ -2603,18 +2603,50 @@ class LucentDaemon:
             "Per-user fan-out execution mode is active for this run.\n"
             "You are operating under a user-scoped key and can only see one user's memories.\n"
             "Focus ONLY on that user's active goals and create tracked requests as needed.\n\n"
-            "Requirements:\n"
+            "=== GOAL PROGRESSION RULES (READ BEFORE CREATING ANY REQUEST) ===\n"
+            "Goals have a `metadata.milestones` array. Each milestone has its own\n"
+            "`status` (active | completed | abandoned). The OVERALL goal status is\n"
+            "active until every milestone is done. You MUST NOT propose work for\n"
+            "a goal as a whole — you propose work for ONE specific milestone, and\n"
+            "you choose the FIRST milestone with status='active'. Skip any\n"
+            "milestone whose status is 'completed' or 'abandoned'. If every\n"
+            "milestone is non-active, the goal is de facto done — do NOT create a\n"
+            "request, instead emit a note in your summary that the goal needs its\n"
+            "overall status updated to 'completed'.\n\n"
+            "Before creating a request for a goal, you MUST also check past work\n"
+            "for that goal:\n"
+            "  search_memories(query='<goal short title>', limit=10)\n"
+            "  AND inspect existing request history via list_active_work() output\n"
+            "If there's a recently completed request whose title matches the\n"
+            "milestone you were about to propose, the milestone state is stale —\n"
+            "do NOT create a duplicate request. Instead update the goal memory's\n"
+            "milestone status to 'completed' yourself (call update_memory) and\n"
+            "move to the next active milestone.\n\n"
+            "When you do create a request:\n"
+            "- Title format: '<Goal short name> M<N>: <milestone description>'\n"
+            "  e.g. 'Federated-self M3: Fork-and-rejoin experiment design'\n"
+            "  This makes future planner cycles able to recognize prior work.\n"
+            "- ALWAYS pass goal_id=<memory ID> for automatic dedup.\n"
+            "- Description should reference the milestone explicitly.\n"
+            "=== END GOAL PROGRESSION RULES ===\n\n"
+            "Procedure:\n"
             "1. Use search_memories(type='goal', limit=50) to find active goals.\n"
-            "2. For each unaddressed active goal, call create_request(...).\n"
-            "3. Include goal_id when creating a request for a goal memory.\n"
-            "4. Set source='cognitive'.\n"
-            "5. **Immediately after each create_request call, decompose the request "
-            "into tasks via create_task. Every request you create MUST end the cycle "
-            "with at least one child task so the user can see the breakdown when "
-            "they review it for approval. A request with zero tasks is incomplete "
-            "work — never leave one in that state.**\n"
-            "6. Return a concise summary including goals scanned, requests created, "
-            "and tasks created.\n"
+            "2. Call list_active_work() to see existing requests.\n"
+            "3. For each goal, identify the first active milestone per the rules\n"
+            "   above. If past work already covered it, update the goal's\n"
+            "   milestone state instead of creating a duplicate request.\n"
+            "4. Create exactly ONE request per goal that has genuinely new work\n"
+            "   to do (skip goals whose next milestone has already been done by\n"
+            "   a prior completed request). Use the title format above and pass\n"
+            "   goal_id.\n"
+            "5. Set source='cognitive'.\n"
+            "6. **Immediately after each create_request call, decompose the\n"
+            "   request into tasks via create_task. Every request you create MUST\n"
+            "   end the cycle with at least one child task. A request with zero\n"
+            "   tasks is incomplete work — never leave one in that state.**\n"
+            "7. Return a concise summary including: goals scanned, milestones\n"
+            "   marked completed during this cycle, requests created, and tasks\n"
+            "   created.\n"
         )
 
     async def _count_user_cognitive_requests_since(
@@ -4832,6 +4864,7 @@ class LucentDaemon:
         Plus optional sections:
         - TASK_IDS_TO_REWORK: <id1>, <id2>, ...
         - FEEDBACK: ...
+        - MEMORIES_UPDATED: <id1>, <id2>, ... | none
         """
         raw = (text or "").strip()
         upper = raw.upper()
@@ -4873,11 +4906,29 @@ class LucentDaemon:
             flags=re.IGNORECASE | re.DOTALL,
         )
         feedback = (mf.group(1).strip() if mf else raw)[:10000]
+
+        memories_updated: list[str] = []
+        mm = re.search(
+            r"MEMORIES_UPDATED\s*:\s*(.+?)(?:\n[A-Z_ ]+\s*:|\Z)",
+            raw,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if mm:
+            blob = mm.group(1).strip()
+            if blob.lower() not in ("none", "n/a", "-", ""):
+                candidates = re.split(r"[\s,]+", blob)
+                memories_updated = [
+                    c.strip().strip("[](){}")
+                    for c in candidates
+                    if re.fullmatch(r"[0-9a-fA-F-]{8,64}", c.strip().strip("[](){}"))
+                ]
+
         return {
             "decision": decision,
             "task_ids": task_ids,
             "feedback": feedback,
             "recognized": recognized,
+            "memories_updated": memories_updated,
         }
 
     async def _find_review_agent_type(
@@ -4994,7 +5045,9 @@ class LucentDaemon:
         memory_section = ""
         if linked_memories:
             mem_lines = []
+            mem_id_list = []
             for mem in linked_memories:
+                mem_id_list.append(str(mem["memory_id"]))
                 mem_lines.append(
                     f"- Memory ID: {mem['memory_id']}, relation: {mem['relation']}, "
                     f"type: {mem.get('memory_type', 'unknown')}\n"
@@ -5002,31 +5055,57 @@ class LucentDaemon:
                     f"  Status: {mem.get('status', 'unknown')}"
                 )
             memory_section = (
-                "\n\nLinked Memories:\n"
+                "\n\nLinked Memories (MANDATORY UPDATE TARGETS):\n"
                 + "\n".join(mem_lines)
-                + "\n\nIMPORTANT — Memory Updates Required:\n"
-                "After reviewing the task outcomes, you MUST update each linked memory:\n"
-                "- For 'goal' memories: Use update_memory to add progress_notes describing "
-                "what was accomplished. If a milestone was completed, mark it as such. "
-                "Only set the goal status to 'completed' if ALL milestones are done and "
-                "the goal is fully satisfied.\n"
-                "- For other memories: Update with any relevant new information from the results.\n"
-                "- Use link_task_memory to connect any new memories created by tasks back to this request.\n"
+                + "\n\n"
+                "=== MANDATORY MEMORY UPDATE STEP — DO NOT SKIP ===\n"
+                "Before you emit REQUEST_REVIEW_DECISION below, you MUST call "
+                "`update_memory` on EVERY memory listed above. This is a hard "
+                "precondition for emitting any decision \u2014 not a suggestion, not a "
+                "best practice, not 'if relevant'. The memory update IS part of the "
+                "review work. A review that skips it is incomplete and will be "
+                "rejected by the daemon.\n\n"
+                "Required calls (one per linked memory):\n"
+                + "\n".join(f"  - update_memory(memory_id=\"{mid}\", ...)" for mid in mem_id_list)
+                + "\n\n"
+                "What to update:\n"
+                "- For 'goal' memories: append a `progress_notes` entry describing "
+                "what was accomplished. If a milestone was completed, set that "
+                "milestone's `status` to \"completed\" and `completed_at` to today. "
+                "Set the overall goal `status` to \"completed\" ONLY if every "
+                "milestone is done.\n"
+                "- For other memory types: update with any relevant new information "
+                "from the task results, or call update_memory with a no-op note "
+                "explaining why no substantive change was needed.\n\n"
+                "After calling update_memory for each linked memory, also call "
+                "`link_task_memory` to attach any NEW memories created by tasks back "
+                "to this request.\n\n"
+                "In the FEEDBACK section of your decision block below, you MUST "
+                "include a line of the form:\n"
+                "  MEMORIES_UPDATED: <comma-separated memory IDs you called "
+                "update_memory on>\n"
+                "If this line is missing or doesn't list every linked memory ID, "
+                "the daemon will treat the review as incomplete and re-queue it.\n"
+                "=== END MANDATORY STEP ===\n"
             )
 
         review_description = (
             "Perform post-completion request review.\n\n"
-            "You are validating whether the request outcomes satisfy the original request goals.\n\n"
+            "You are validating whether the request outcomes satisfy the original "
+            "request goals AND propagating those outcomes into linked memories.\n\n"
             f"Original request title: {request_data.get('title', '')}\n"
             f"Original request description:\n{request_data.get('description', '')}\n\n"
             "Task outcomes:\n"
             f"{chr(10).join(task_summaries)}"
             f"{incomplete_note}"
             f"{memory_section}\n\n"
-            "Return your decision in this exact machine-readable shape:\n"
+            "Return your decision in this exact machine-readable shape "
+            "(emit it ONLY after completing all mandatory memory updates above):\n"
             "REQUEST_REVIEW_DECISION: APPROVED|NEEDS_REWORK\n"
             "TASK_IDS_TO_REWORK: <comma-separated task ids, optional when approved>\n"
-            "FEEDBACK: <actionable rationale and correction guidance>"
+            "FEEDBACK: <actionable rationale and correction guidance>\n"
+            "MEMORIES_UPDATED: <comma-separated memory IDs you called update_memory on; "
+            "use \"none\" only when no Linked Memories section was provided>"
         )
 
         review_task = await RequestAPI.create_task(
@@ -5114,6 +5193,43 @@ class LucentDaemon:
             return
 
         if decision == "APPROVED":
+            # Enforce the mandatory memory-update precondition. If the request
+            # had linked memories but the review didn't attest to updating
+            # them (or attested incompletely), kick it back as NEEDS_REWORK.
+            # This is what makes the prompt's "MANDATORY" language real \u2014 the
+            # agent learns that skipping the memory updates costs a full
+            # re-review cycle.
+            linked_memories = await RequestAPI.get_request_memories(request_id)
+            if linked_memories:
+                expected_ids = {str(m["memory_id"]) for m in linked_memories}
+                attested_ids = {mid.lower() for mid in parsed.get("memories_updated", [])}
+                missing = sorted(
+                    eid for eid in expected_ids if eid.lower() not in attested_ids
+                )
+                if missing:
+                    await RequestAPI.add_event(
+                        str(task["id"]),
+                        "request_review_memory_update_missing",
+                        (
+                            "Review approved without attesting to required memory "
+                            f"updates. Missing MEMORIES_UPDATED entries for: "
+                            f"{', '.join(m[:8] for m in missing)}."
+                        ),
+                        {
+                            "expected_memory_ids": sorted(expected_ids),
+                            "attested_memory_ids": sorted(attested_ids),
+                            "missing_memory_ids": missing,
+                        },
+                    )
+                    await RequestAPI.update_request_status(request_id, "needs_rework")
+                    log(
+                        f"Request {request_id[:8]} review APPROVED but missing "
+                        f"memory updates for {len(missing)} memory/memories; "
+                        f"sent back for rework",
+                        "WARN",
+                    )
+                    return
+
             await RequestAPI.add_event(
                 str(task["id"]),
                 "request_review_approved",
@@ -5121,6 +5237,7 @@ class LucentDaemon:
                 {
                     "recommendation": decision,
                     "feedback": feedback[:1500],
+                    "memories_updated": parsed.get("memories_updated", []),
                 },
             )
             await RequestAPI.update_request_status(request_id, "completed")

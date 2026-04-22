@@ -97,9 +97,24 @@ Returns: JSON with the created request including its ID."""
 
         # Goal already completed — no request created
         if req.get("status") == "skipped":
+            reason = req.get("reason", "")
+            if reason == "stale_goal_progress":
+                return json.dumps({
+                    "status": "skipped",
+                    "reason": reason,
+                    "detail": req.get("detail", ""),
+                    "note": (
+                        "STOP. The system refused this request because a recent "
+                        "completed request exists for this goal but the goal's "
+                        "milestone state hasn't been updated. Call update_memory "
+                        "on the goal first to mark the completed milestone, then "
+                        "decide whether new work is actually needed for the next "
+                        "active milestone."
+                    ),
+                })
             return json.dumps({
                 "status": "skipped",
-                "reason": req.get("reason"),
+                "reason": reason,
                 "note": "This goal memory is already completed. Do NOT create work for it.",
             })
 

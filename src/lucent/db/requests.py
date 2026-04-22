@@ -303,6 +303,52 @@ class RequestRepository:
                     if existing:
                         return dict(existing)
 
+                    # Stale-progress guard: if a goal memory has had a request
+                    # complete recently but the goal's metadata hasn't been
+                    # updated since that completion, the planner is operating
+                    # on stale milestone state and would just re-propose the
+                    # same work. Refuse the create until the goal is updated.
+                    # This is the same class of failure as the review-loop bug:
+                    # an agent ignored its instruction to update linked memory
+                    # state, and the system re-creates the work indefinitely.
+                    if source == "cognitive":
+                        stale = await conn.fetchrow(
+                            """SELECT m.id AS memory_id, m.updated_at AS goal_updated_at,
+                                      r.id AS recent_request_id, r.completed_at,
+                                      r.title AS recent_title
+                               FROM memories m
+                               JOIN request_memories rm ON rm.memory_id = m.id
+                               JOIN requests r ON r.id = rm.request_id
+                               WHERE m.id = ANY($1)
+                                 AND m.type = 'goal'
+                                 AND r.status = 'completed'
+                                 AND r.completed_at > NOW() - INTERVAL '24 hours'
+                                 AND r.completed_at > m.updated_at
+                               ORDER BY r.completed_at DESC
+                               LIMIT 1""",
+                            mem_ids,
+                        )
+                        if stale:
+                            return {
+                                "id": stale["memory_id"],
+                                "title": title,
+                                "status": "skipped",
+                                "reason": "stale_goal_progress",
+                                "detail": (
+                                    f"Goal memory {stale['memory_id']} had a "
+                                    f"request complete at "
+                                    f"{stale['completed_at'].isoformat()} "
+                                    f"({stale['recent_title']!r}) but the goal "
+                                    f"metadata has not been updated since "
+                                    f"({stale['goal_updated_at'].isoformat()}). "
+                                    "Refusing to create another request for the "
+                                    "same goal until the goal's milestone state "
+                                    "is updated to reflect the completed work. "
+                                    "Call update_memory on the goal to mark the "
+                                    "completed milestone, then retry."
+                                ),
+                            }
+
             row = await conn.fetchrow(
                 """INSERT INTO requests
                    (title, description, source, priority, created_by,
