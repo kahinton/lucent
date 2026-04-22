@@ -878,6 +878,13 @@ def _get_required_memory_scope(task_title: str, request_title: str) -> str | Non
     Returns 'user' for per-user tasks, 'org_shared_only' for shared-only tasks,
     or None for tasks that use the daemon's normal key.
     """
+    # Auto-created post-completion review tasks must NEVER inherit memory scope
+    # from their parent request's title. A review of a per-user or org-shared
+    # request still needs the daemon's full memory access so it can read the
+    # task outputs and update linked goal memories regardless of scope.
+    if (task_title or "").strip().lower() == REQUEST_REVIEW_TASK_TITLE.lower():
+        return None
+
     # Check the request title (schedule-generated requests use [Scheduled] prefix)
     clean_title = request_title.replace("[Scheduled] ", "")
 
@@ -4143,7 +4150,16 @@ class LucentDaemon:
             # Special handling: Cognitive Planning schedule runs as per-user fan-out.
             # We intentionally bypass a single unscoped planner session so each user
             # gets planning against their private goals via scoped keys.
-            if _request_title.replace("[Scheduled] ", "") == "Cognitive Planning":
+            #
+            # IMPORTANT: only the original planning task on the schedule's request
+            # should fan out. Auto-created post-completion review tasks live on the
+            # same request and would otherwise also trigger fan-out, completing the
+            # review with garbage output and leaving the request stuck in `review`
+            # — which then spawns another review task next cycle, ad infinitum.
+            if (
+                _request_title.replace("[Scheduled] ", "") == "Cognitive Planning"
+                and not self._is_request_review_task(task)
+            ):
                 try:
                     fanout_result = await self._run_cognitive_planning_fanout(
                         task_id=task_id,
@@ -4797,10 +4813,15 @@ class LucentDaemon:
         return passed
 
     def _is_request_review_task(self, task: dict) -> bool:
-        """Identify daemon-created post-completion review tasks."""
+        """Identify daemon-created post-completion review tasks.
+
+        Matches the canonical review-task title only. The legacy substring
+        check on description (\"REQUEST_REVIEW_DECISION:\") was removed because
+        any unrelated task whose description happened to mention that token
+        (docs, code about the review system, prompts) was being misclassified.
+        """
         title = (task.get("title") or "").strip().lower()
-        desc = task.get("description") or ""
-        return title == REQUEST_REVIEW_TASK_TITLE.lower() or "REQUEST_REVIEW_DECISION:" in desc
+        return title == REQUEST_REVIEW_TASK_TITLE.lower()
 
     def _parse_review_decision(self, text: str) -> dict:
         """Parse review output into a structured decision.
@@ -4891,11 +4912,35 @@ class LucentDaemon:
     async def _create_request_review_task(self, request_id: str, request_data: dict) -> dict | None:
         """Create a review task when a request enters review state."""
         tasks = request_data.get("tasks", []) or []
+        review_tasks = [t for t in tasks if self._is_request_review_task(t)]
+        # Don't pile on if a review task is already in flight.
         if any(
-            self._is_request_review_task(t)
-            and t.get("status") in ("pending", "planned", "claimed", "running")
-            for t in tasks
+            t.get("status") in ("pending", "planned", "claimed", "running")
+            for t in review_tasks
         ):
+            return None
+        # Defense-in-depth against review loops: if the request is still in `review`
+        # status but a previous review task already completed, the processing layer
+        # failed to transition the request out of review (or the review task was
+        # misrouted and produced an unparseable result). Creating another review
+        # task will just produce the same outcome — force the request to completed
+        # so we don't accumulate thousands of useless tasks while waiting for an
+        # operator to notice.
+        completed_reviews = [t for t in review_tasks if t.get("status") == "completed"]
+        if completed_reviews:
+            log(
+                f"Request {request_id[:8]} still in `review` after "
+                f"{len(completed_reviews)} completed review task(s); auto-finalizing "
+                f"as completed to break loop. (Manually re-open if rework needed.)",
+                "WARN",
+            )
+            try:
+                await RequestAPI.update_request_status(request_id, "completed")
+            except Exception as e:
+                log(
+                    f"Failed to auto-finalize stuck request {request_id[:8]}: {e}",
+                    "WARN",
+                )
             return None
 
         org_id = str(request_data.get("organization_id", ""))

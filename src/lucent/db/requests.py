@@ -1803,8 +1803,14 @@ class RequestRepository:
     async def _check_request_completion(self, request_id: str) -> None:
         """If all work tasks are done, move request to review (or failed).
 
-        Excludes request-review tasks from the completion check — they are
-        meta-tasks that validate work, not work tasks themselves.
+        Excludes request-review meta-tasks from the completion check. We
+        identify them by EITHER agent_type='request-review' OR the canonical
+        title 'Post-completion review' — the daemon's review-agent fallback
+        path may create review tasks under a different agent_type (e.g.
+        'code') when the dedicated review agent isn't accessible. Without
+        the title-based exclusion those fallback reviews would count as
+        work tasks and re-trigger another review task on completion,
+        producing an infinite loop.
         """
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -1813,7 +1819,8 @@ class RequestRepository:
                      COUNT(*) FILTER (WHERE status IN ('completed', 'failed', 'cancelled')) as done
                    FROM tasks
                    WHERE request_id = $1
-                     AND agent_type IS DISTINCT FROM 'request-review'""",
+                     AND agent_type IS DISTINCT FROM 'request-review'
+                     AND title IS DISTINCT FROM 'Post-completion review'""",
                 UUID(request_id),
             )
         if row and row["total"] > 0 and row["total"] == row["done"]:
@@ -1822,7 +1829,8 @@ class RequestRepository:
                 failed = await conn.fetchval(
                     """SELECT COUNT(*) FROM tasks
                        WHERE request_id = $1 AND status = 'failed'
-                         AND agent_type IS DISTINCT FROM 'request-review'""",
+                         AND agent_type IS DISTINCT FROM 'request-review'
+                         AND title IS DISTINCT FROM 'Post-completion review'""",
                     UUID(request_id),
                 )
             status = REQUEST_STATUS_FAILED if failed > 0 else (
