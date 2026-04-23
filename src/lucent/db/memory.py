@@ -4,15 +4,33 @@ Handles CRUD operations for memories including search functionality.
 """
 
 import logging
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from math import ceil
+from time import monotonic
 from typing import Any
 from uuid import UUID
 
 import asyncpg
 from asyncpg import Pool
 
+from lucent.metrics import metrics
+from lucent.settings import shadow_forget_enabled
+
 logger = logging.getLogger(__name__)
+
+
+@dataclass(slots=True, frozen=True)
+class MemoryShadowScoreModel:
+    """Typed row model for memory_shadow_scores sidecar entries."""
+
+    memory_id: UUID
+    strategy: str
+    score: float | None
+    shadow_action: str | None
+    signals: dict[str, Any]
+    computed_at: datetime
+    divergence_tag: str | None
 
 
 class VersionConflictError(Exception):
@@ -44,6 +62,7 @@ class MemoryRepository:
         "abandoned": "archived",
         "cancelled": "archived",
     }
+    _ACTIVE_REQUEST_STATUSES: tuple[str, ...] = ("pending", "planned", "in_progress")
 
     # Shared column lists to avoid repetition across queries
     _FULL_COLUMNS = (
@@ -56,6 +75,9 @@ class MemoryRepository:
         "id, username, type, content, tags, importance, related_memory_ids, "
         "metadata, created_at, updated_at, user_id, organization_id, shared, last_accessed_at, "
         "lifecycle_stage"
+    )
+    _SHADOW_SCORE_COLUMNS = (
+        "memory_id, strategy, score, shadow_action, signals, computed_at, divergence_tag"
     )
 
     def __init__(self, pool: Pool):
@@ -544,11 +566,21 @@ class MemoryRepository:
 
                 return self._row_to_dict(updated)
 
-    async def delete(self, memory_id: UUID) -> bool:
+    async def delete(
+        self,
+        memory_id: UUID,
+        *,
+        ldr_canonical_id: UUID | None = None,
+        force_delete_compliance: bool = False,
+    ) -> bool:
         """Soft delete a memory by setting deleted_at timestamp.
 
         Args:
             memory_id: The UUID of the memory to delete.
+            ldr_canonical_id: Optional canonical replacement edge target for
+                Candidate-C observation rows.
+            force_delete_compliance: Whether delete is compliance-required and
+                must remain hard-delete even with LDR.
 
         Returns:
             True if the memory was deleted, False if not found.
@@ -561,9 +593,83 @@ class MemoryRepository:
         """
 
         async with self.pool.acquire() as conn:
+            await self._record_ldr_observation(
+                source_id=memory_id,
+                canonical_id=ldr_canonical_id,
+                force_delete_compliance=force_delete_compliance,
+                conn=conn,
+            )
             result = await conn.fetchrow(query, str(memory_id))
 
         return result is not None
+
+    async def _record_ldr_observation(
+        self,
+        *,
+        source_id: UUID,
+        canonical_id: UUID | None,
+        force_delete_compliance: bool,
+        conn: asyncpg.Connection,
+    ) -> None:
+        """Record a Candidate-C LDR observation row before a delete attempt.
+
+        Strictly observation-only. Any error must not affect delete behavior.
+        """
+        if not shadow_forget_enabled():
+            return
+
+        try:
+            exists = await conn.fetchval(
+                """
+                SELECT EXISTS(
+                    SELECT 1
+                    FROM memories
+                    WHERE id = $1
+                      AND deleted_at IS NULL
+                )
+                """,
+                str(source_id),
+            )
+            if not exists:
+                return
+
+            edges_at_risk = await conn.fetchval(
+                """
+                SELECT COUNT(*)::BIGINT
+                FROM memories
+                WHERE deleted_at IS NULL
+                  AND id != $1
+                  AND $1 = ANY(related_memory_ids)
+                """,
+                str(source_id),
+            )
+            signals = {
+                "would_demote_source_id": str(source_id),
+                "would_link_canonical_id": str(canonical_id) if canonical_id else None,
+                "would_break_edges": int(edges_at_risk or 0),
+                "force_delete_compliance": force_delete_compliance,
+            }
+            await conn.execute(
+                """
+                INSERT INTO memory_shadow_scores (
+                    memory_id, strategy, score, shadow_action, signals, computed_at, divergence_tag
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                """,
+                str(source_id),
+                "ldr-obs-v1",
+                None,
+                "would_demote",
+                signals,
+                datetime.now(UTC),
+                None,
+            )
+        except Exception:
+            logger.warning(
+                "LDR observation insert failed for memory delete: source_id=%s",
+                source_id,
+                exc_info=True,
+            )
 
     async def search(
         self,
@@ -1383,6 +1489,410 @@ class MemoryRepository:
             "computed_at": now,
         }
 
+    async def compute_shadow_forget_scores(
+        self,
+        *,
+        strategy: str = "gcp-v1",
+        batch_size: int = 500,
+    ) -> dict[str, Any]:
+        """Compute Candidate-A shadow scores and write sidecar rows only."""
+        from lucent.memory.decay import (
+            GcpConfig,
+            GraphConnectednessInput,
+            compute_graph_connectedness,
+        )
+
+        if not shadow_forget_enabled():
+            return {
+                "enabled": False,
+                "strategy": strategy,
+                "processed": 0,
+                "inserted": 0,
+                "computed_at": datetime.now(UTC),
+                "comparison_metrics": {},
+                "duration_seconds": 0.0,
+            }
+        if strategy != "gcp-v1":
+            raise ValueError("Unsupported shadow strategy. Supported: gcp-v1")
+
+        started = monotonic()
+        now = datetime.now(UTC)
+        processed = 0
+        inserted = 0
+        offset = 0
+        cfg = GcpConfig()
+
+        while True:
+            async with self.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    f"""
+                    SELECT {self._FULL_COLUMNS}
+                    FROM memories
+                    WHERE deleted_at IS NULL
+                      AND lifecycle_stage != 'forgotten'
+                    ORDER BY created_at ASC
+                    LIMIT $1 OFFSET $2
+                    """,
+                    batch_size,
+                    offset,
+                )
+            if not rows:
+                break
+
+            memory_dicts = [self._row_to_dict(row) for row in rows]
+            memory_ids = [item["id"] for item in memory_dicts]
+            graph_signals = await self._get_graph_connectedness_signals(
+                memory_ids=memory_ids,
+                now=now,
+            )
+
+            async with self.pool.acquire() as conn:
+                for mem in memory_dicts:
+                    signals = graph_signals.get(mem["id"], {})
+                    signals["out_degree"] = len(mem.get("related_memory_ids") or [])
+                    created_at = self._utc(mem["created_at"])
+                    age_days = max(0, (now - created_at).days)
+                    profile = GraphConnectednessInput(
+                        memory_id=mem["id"],
+                        importance=int(mem["importance"]),
+                        age_days=age_days,
+                        in_degree=int(signals.get("in_degree", 0)),
+                        out_degree=int(signals.get("out_degree", 0)),
+                        active_request_links=int(signals.get("active_request_links", 0)),
+                        version_depth=max(1, int(mem.get("version", 1))),
+                        distinct_readers_90d=int(signals.get("distinct_readers_90d", 0)),
+                        tags=mem.get("tags") or [],
+                        metadata=mem.get("metadata") or {},
+                    )
+                    gcp_result = compute_graph_connectedness(profile, config=cfg)
+                    divergence = self._classify_shadow_divergence(
+                        shadow_action=gcp_result.action,
+                        lifecycle_stage=mem.get("lifecycle_stage"),
+                    )
+
+                    await conn.execute(
+                        """
+                        INSERT INTO memory_shadow_scores (
+                            memory_id, strategy, score, shadow_action,
+                            signals, computed_at, divergence_tag
+                        )
+                        VALUES ($1, $2, $3, $4, $5, $6, $7)
+                        """,
+                        str(mem["id"]),
+                        strategy,
+                        gcp_result.score,
+                        gcp_result.action,
+                        gcp_result.signals,
+                        now,
+                        divergence,
+                    )
+                    processed += 1
+                    inserted += 1
+
+            offset += batch_size
+
+        comparison = await self.get_shadow_forget_comparison(
+            strategy=strategy,
+            window_hours=168,
+            limit=100,
+        )
+        duration_seconds = monotonic() - started
+        self._emit_shadow_forget_metrics(
+            strategy=strategy,
+            comparison=comparison,
+            duration_seconds=duration_seconds,
+        )
+
+        return {
+            "enabled": True,
+            "strategy": strategy,
+            "processed": processed,
+            "inserted": inserted,
+            "computed_at": now,
+            "comparison_metrics": comparison.get("metrics", {}),
+            "duration_seconds": duration_seconds,
+        }
+
+    async def get_shadow_forget_comparison(
+        self,
+        *,
+        strategy: str = "gcp-v1",
+        window_hours: int = 168,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        """Return aggregate shadow-vs-vitality comparison statistics."""
+        if strategy != "gcp-v1":
+            raise ValueError("Unsupported shadow strategy. Supported: gcp-v1")
+
+        window_hours = max(1, min(window_hours, 24 * 30))
+        limit = max(1, min(limit, 500))
+        cutoff = datetime.now(UTC) - timedelta(hours=window_hours)
+
+        async with self.pool.acquire() as conn:
+            latest_rows = await conn.fetch(
+                """
+                SELECT DISTINCT ON (ms.memory_id)
+                       ms.memory_id,
+                       ms.score,
+                       ms.shadow_action,
+                       ms.divergence_tag,
+                       ms.signals,
+                       ms.computed_at,
+                       m.lifecycle_stage,
+                       m.vitality_score
+                FROM memory_shadow_scores ms
+                JOIN memories m ON m.id = ms.memory_id
+                WHERE ms.strategy = $1
+                  AND ms.computed_at >= $2
+                  AND m.deleted_at IS NULL
+                ORDER BY ms.memory_id, ms.computed_at DESC
+                """,
+                strategy,
+                cutoff,
+            )
+            ldr_rows = await conn.fetch(
+                """
+                SELECT signals
+                FROM memory_shadow_scores
+                WHERE strategy = 'ldr-obs-v1'
+                  AND computed_at >= $1
+                """,
+                cutoff,
+            )
+
+        latest = [dict(row) for row in latest_rows]
+        total = len(latest)
+        k = max(1, ceil(total * 0.01)) if total else 0
+
+        vitality_top = sorted(
+            [row for row in latest if row.get("vitality_score") is not None],
+            key=lambda row: (float(row["vitality_score"]), str(row["memory_id"])),
+        )[:k]
+        gcp_top = sorted(
+            [row for row in latest if row.get("shadow_action") == "forgetting_candidate"],
+            key=lambda row: (float(row.get("score") or 0.0), str(row["memory_id"])),
+        )[:k]
+
+        vitality_ids = {str(row["memory_id"]) for row in vitality_top}
+        gcp_ids = {str(row["memory_id"]) for row in gcp_top}
+        agreement_n = len(vitality_ids & gcp_ids)
+        top_k_agreement = (agreement_n / k) if k else 1.0
+
+        orphan_reclaims = [
+            row
+            for row in latest
+            if row.get("shadow_action") == "forgetting_candidate"
+            and str(row.get("lifecycle_stage") or "active") == "active"
+        ]
+        orphan_n = len(orphan_reclaims)
+        orphan_reclaim_rate = (
+            orphan_n
+            / max(
+                1,
+                sum(
+                    1
+                    for row in latest
+                    if row.get("shadow_action") == "forgetting_candidate"
+                ),
+            )
+        )
+        orphan_avg_in_degree = (
+            sum(int((row.get("signals") or {}).get("in_degree", 0)) for row in orphan_reclaims)
+            / orphan_n
+            if orphan_n
+            else 0.0
+        )
+
+        load_bearing = [
+            row
+            for row in latest
+            if int((row.get("signals") or {}).get("in_degree", 0)) >= 5
+            or int((row.get("signals") or {}).get("active_request_links", 0)) >= 1
+        ]
+        load_bearing_archived = [
+            row
+            for row in load_bearing
+            if str(row.get("lifecycle_stage") or "") in {"consolidating", "archived"}
+        ]
+        load_bearing_protection_rate = (
+            len(load_bearing_archived) / len(load_bearing) if load_bearing else 0.0
+        )
+
+        ldr_edges_values = [
+            int(((row["signals"] or {}).get("would_break_edges", 0)))
+            for row in ldr_rows
+        ]
+        ldr_edges_sum = int(sum(ldr_edges_values))
+        ldr_edges_mean = (ldr_edges_sum / len(ldr_edges_values)) if ldr_edges_values else 0.0
+        ldr_edges_max = max(ldr_edges_values) if ldr_edges_values else 0
+
+        disagreements = [
+            row
+            for row in latest
+            if row.get("divergence_tag")
+            in {"gcp-protects-vitality-archives", "gcp-forgets-vitality-keeps"}
+        ]
+        top_disagreements = sorted(
+            disagreements,
+            key=lambda row: abs(float(row.get("score") or 0.0)),
+            reverse=True,
+        )[:limit]
+
+        return {
+            "strategy": strategy,
+            "window_hours": window_hours,
+            "sample_size": total,
+            "k": k,
+            "metrics": {
+                "top_k_agreement": top_k_agreement,
+                "orphan_reclaim_rate": orphan_reclaim_rate,
+                "orphan_reclaim_count": orphan_n,
+                "orphan_reclaim_avg_in_degree": orphan_avg_in_degree,
+                "load_bearing_protection_rate": load_bearing_protection_rate,
+                "load_bearing_total": len(load_bearing),
+                "ldr_edges_at_risk_sum": ldr_edges_sum,
+                "ldr_edges_at_risk_mean": ldr_edges_mean,
+                "ldr_edges_at_risk_max": ldr_edges_max,
+            },
+            "divergence_counts": {
+                "agree": sum(1 for row in latest if row.get("divergence_tag") == "agree"),
+                "gcp-protects-vitality-archives": sum(
+                    1
+                    for row in latest
+                    if row.get("divergence_tag") == "gcp-protects-vitality-archives"
+                ),
+                "gcp-forgets-vitality-keeps": sum(
+                    1
+                    for row in latest
+                    if row.get("divergence_tag") == "gcp-forgets-vitality-keeps"
+                ),
+            },
+            "top_disagreements": [
+                {
+                    "memory_id": str(row["memory_id"]),
+                    "score": float(row.get("score") or 0.0),
+                    "shadow_action": row.get("shadow_action"),
+                    "lifecycle_stage": row.get("lifecycle_stage"),
+                    "divergence_tag": row.get("divergence_tag"),
+                    "signals": row.get("signals") or {},
+                    "computed_at": row["computed_at"],
+                }
+                for row in top_disagreements
+            ],
+        }
+
+    async def _get_graph_connectedness_signals(
+        self,
+        *,
+        memory_ids: list[UUID],
+        now: datetime,
+    ) -> dict[UUID, dict[str, int]]:
+        """Collect graph and usage signals for Candidate-A scoring."""
+        if not memory_ids:
+            return {}
+
+        cutoff = now - timedelta(days=90)
+
+        async with self.pool.acquire() as conn:
+            in_degree_rows = await conn.fetch(
+                """
+                SELECT rel_id::uuid AS memory_id, COUNT(*)::BIGINT AS in_degree
+                FROM memories m,
+                     unnest(m.related_memory_ids) AS rel_id
+                WHERE m.deleted_at IS NULL
+                  AND rel_id = ANY($1::uuid[])
+                GROUP BY rel_id
+                """,
+                memory_ids,
+            )
+            request_rows = await conn.fetch(
+                """
+                SELECT rm.memory_id, COUNT(*)::BIGINT AS active_request_links
+                FROM request_memories rm
+                JOIN requests r ON r.id = rm.request_id
+                WHERE rm.memory_id = ANY($1::uuid[])
+                  AND r.status = ANY($2::text[])
+                GROUP BY rm.memory_id
+                """,
+                memory_ids,
+                list(self._ACTIVE_REQUEST_STATUSES),
+            )
+            reader_rows = await conn.fetch(
+                """
+                SELECT memory_id, COUNT(DISTINCT user_id)::BIGINT AS distinct_readers_90d
+                FROM memory_access_log
+                WHERE memory_id = ANY($1::uuid[])
+                  AND user_id IS NOT NULL
+                  AND accessed_at >= $2
+                GROUP BY memory_id
+                """,
+                memory_ids,
+                cutoff,
+            )
+
+        in_degree = {UUID(str(row["memory_id"])): int(row["in_degree"]) for row in in_degree_rows}
+        active_links = {
+            UUID(str(row["memory_id"])): int(row["active_request_links"]) for row in request_rows
+        }
+        readers = {
+            UUID(str(row["memory_id"])): int(row["distinct_readers_90d"]) for row in reader_rows
+        }
+
+        return {
+            memory_id: {
+                "in_degree": in_degree.get(memory_id, 0),
+                "out_degree": 0,
+                "active_request_links": active_links.get(memory_id, 0),
+                "distinct_readers_90d": readers.get(memory_id, 0),
+            }
+            for memory_id in memory_ids
+        }
+
+    def _classify_shadow_divergence(
+        self,
+        *,
+        shadow_action: str,
+        lifecycle_stage: str | None,
+    ) -> str:
+        """Classify agreement/divergence tag versus current vitality lifecycle stage."""
+        stage = str(lifecycle_stage or "active")
+        vitality_archives = stage in {"consolidating", "archived"}
+        shadow_forgets = shadow_action == "forgetting_candidate"
+
+        if not vitality_archives and shadow_forgets:
+            return "gcp-forgets-vitality-keeps"
+        if vitality_archives and shadow_action in {"keep", "protected_hub"}:
+            return "gcp-protects-vitality-archives"
+        return "agree"
+
+    def _emit_shadow_forget_metrics(
+        self,
+        *,
+        strategy: str,
+        comparison: dict[str, Any],
+        duration_seconds: float,
+    ) -> None:
+        """Emit shadow comparison metrics through OTEL."""
+        metric_values = comparison.get("metrics", {})
+        attrs = {"strategy": strategy, "window_hours": str(comparison.get("window_hours", 168))}
+        metrics.shadow_forget_top_k_agreement.record(
+            float(metric_values.get("top_k_agreement", 0.0)),
+            attrs,
+        )
+        metrics.shadow_forget_orphan_reclaim.record(
+            float(metric_values.get("orphan_reclaim_rate", 0.0)),
+            attrs,
+        )
+        metrics.shadow_forget_load_bearing_protection.record(
+            float(metric_values.get("load_bearing_protection_rate", 0.0)),
+            attrs,
+        )
+        metrics.shadow_forget_ldr_edges_at_risk.record(
+            float(metric_values.get("ldr_edges_at_risk_sum", 0.0)),
+            attrs,
+        )
+        metrics.shadow_forget_compute_overhead.record(max(0.0, duration_seconds), attrs)
+
     async def get_lifecycle_stats(
         self,
         organization_id: UUID | None = None,
@@ -1468,6 +1978,115 @@ class MemoryRepository:
             "vitality_histogram": vitality_histogram,
             "total_memories": total_count_row["total"] if total_count_row else 0,
         }
+
+    async def insert_shadow_score(
+        self,
+        *,
+        memory_id: UUID,
+        strategy: str,
+        signals: dict[str, Any],
+        score: float | None = None,
+        shadow_action: str | None = None,
+        computed_at: datetime | None = None,
+        divergence_tag: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Insert a single shadow score sidecar row (feature-flag gated)."""
+        if not shadow_forget_enabled():
+            return None
+
+        effective_computed_at = self._utc(computed_at) if computed_at else datetime.now(UTC)
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f"""
+                INSERT INTO memory_shadow_scores (
+                    memory_id, strategy, score, shadow_action, signals, computed_at, divergence_tag
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                RETURNING {self._SHADOW_SCORE_COLUMNS}
+                """,
+                str(memory_id),
+                strategy,
+                score,
+                shadow_action,
+                signals,
+                effective_computed_at,
+                divergence_tag,
+            )
+
+        if row is None:
+            return None
+        return self._shadow_row_to_dict(row)
+
+    async def upsert_shadow_score(
+        self,
+        *,
+        memory_id: UUID,
+        strategy: str,
+        signals: dict[str, Any],
+        score: float | None = None,
+        shadow_action: str | None = None,
+        computed_at: datetime | None = None,
+        divergence_tag: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Upsert a shadow score sidecar row keyed by (memory_id, strategy, computed_at)."""
+        if not shadow_forget_enabled():
+            return None
+
+        effective_computed_at = self._utc(computed_at) if computed_at else datetime.now(UTC)
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f"""
+                INSERT INTO memory_shadow_scores (
+                    memory_id, strategy, score, shadow_action, signals, computed_at, divergence_tag
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                ON CONFLICT (memory_id, strategy, computed_at)
+                DO UPDATE SET
+                    score = EXCLUDED.score,
+                    shadow_action = EXCLUDED.shadow_action,
+                    signals = EXCLUDED.signals,
+                    divergence_tag = EXCLUDED.divergence_tag
+                RETURNING {self._SHADOW_SCORE_COLUMNS}
+                """,
+                str(memory_id),
+                strategy,
+                score,
+                shadow_action,
+                signals,
+                effective_computed_at,
+                divergence_tag,
+            )
+
+        if row is None:
+            return None
+        return self._shadow_row_to_dict(row)
+
+    async def get_latest_shadow_score(
+        self,
+        *,
+        memory_id: UUID,
+        strategy: str,
+    ) -> dict[str, Any] | None:
+        """Fetch latest sidecar row for a memory+strategy (feature-flag gated)."""
+        if not shadow_forget_enabled():
+            return None
+
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f"""
+                SELECT {self._SHADOW_SCORE_COLUMNS}
+                FROM memory_shadow_scores
+                WHERE memory_id = $1
+                  AND strategy = $2
+                ORDER BY computed_at DESC
+                LIMIT 1
+                """,
+                str(memory_id),
+                strategy,
+            )
+        if row is None:
+            return None
+        return self._shadow_row_to_dict(row)
 
     async def _validate_related_ids(
         self,
@@ -1616,6 +2235,23 @@ class MemoryRepository:
                 row["vitality_computed_at"] if "vitality_computed_at" in row.keys() else None
             ),
         }
+
+    def _shadow_row_to_dict(self, row: asyncpg.Record) -> dict[str, Any]:
+        memory_id = (
+            row["memory_id"]
+            if isinstance(row["memory_id"], UUID)
+            else UUID(row["memory_id"])
+        )
+        model = MemoryShadowScoreModel(
+            memory_id=memory_id,
+            strategy=row["strategy"],
+            score=row["score"],
+            shadow_action=row["shadow_action"],
+            signals=row["signals"] or {},
+            computed_at=row["computed_at"],
+            divergence_tag=row["divergence_tag"],
+        )
+        return asdict(model)
 
     async def _get_access_counts_last_n_days(
         self,

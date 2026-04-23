@@ -336,6 +336,11 @@ PROCEDURAL_CONSOLIDATION_MINUTES = int(
 )
 # Memory vitality scoring: runs every 6 hours by default (360 minutes)
 VITALITY_SCORING_MINUTES = int(os.environ.get("LUCENT_VITALITY_SCORING_MINUTES", "360"))
+# Shadow forgetting Candidate-A scoring: runs every 6 hours, offset +15m from vitality.
+SHADOW_FORGET_SCORING_MINUTES = int(
+    os.environ.get("LUCENT_SHADOW_FORGET_SCORING_MINUTES", str(VITALITY_SCORING_MINUTES))
+)
+SHADOW_FORGET_OFFSET_MINUTES = int(os.environ.get("LUCENT_SHADOW_FORGET_OFFSET_MINUTES", "15"))
 # Daily experience compression: runs once per day (default 1440 minutes = 24 hours)
 COMPRESSION_MINUTES = int(os.environ.get("LUCENT_COMPRESSION_MINUTES", "1440"))
 
@@ -507,6 +512,20 @@ MEMORY_VITALITY_SCORING_PROMPT = (
     "3. Apply lifecycle_stage transitions using configured thresholds.\n"
     "4. Do NOT change search ranking or retrieval behavior.\n"
     "5. Report processed, updated, and stage transition counts."
+)
+
+SHADOW_FORGET_SCORING_PROMPT = (
+    "Run Candidate-A Graph-Centrality Pruning in SHADOW MODE.\n\n"
+    "Required actions:\n"
+    "1. Call compute_shadow_forget_scores with strategy='gcp-v1' and batch_size=500.\n"
+    "2. Confirm all writes are sidecar-only in memory_shadow_scores.\n"
+    "3. Report the five comparison metrics from the run:\n"
+    "   - top-K agreement\n"
+    "   - orphan reclaim\n"
+    "   - load-bearing protection\n"
+    "   - LDR edges-at-risk\n"
+    "   - compute overhead\n"
+    "4. Do NOT mutate vitality_score, lifecycle_stage, search ranking, or memory content."
 )
 
 # Approval flow: when enabled, tasks go to needs-review before completing.
@@ -2463,6 +2482,19 @@ class LucentDaemon:
                         "priority": "low",
                         "prompt": MEMORY_VITALITY_SCORING_PROMPT,
                     },
+                    {
+                        "title": "Shadow Forget Scoring",
+                        "description": (
+                            "Run Candidate-A graph-centrality pruning as shadow-only scoring. "
+                            "Writes sidecar rows and emits comparison metrics only."
+                        ),
+                        "agent_type": "memory",
+                        "schedule_type": "interval",
+                        "interval_seconds": SHADOW_FORGET_SCORING_MINUTES * 60,
+                        "startup_offset_seconds": SHADOW_FORGET_OFFSET_MINUTES * 60,
+                        "priority": "low",
+                        "prompt": SHADOW_FORGET_SCORING_PROMPT,
+                    },
                 ]
 
                 created = 0
@@ -2485,8 +2517,11 @@ class LucentDaemon:
                     now = datetime.now(timezone.utc)
                     interval_seconds = sched.get("interval_seconds")
                     cron_expression = sched.get("cron_expression")
+                    startup_offset_seconds = int(sched.get("startup_offset_seconds", 0) or 0)
                     if sched["schedule_type"] == "interval" and interval_seconds:
-                        next_run_at = now + timedelta(seconds=interval_seconds)
+                        next_run_at = now + timedelta(
+                            seconds=interval_seconds + startup_offset_seconds
+                        )
                     else:
                         next_run_at = now + timedelta(minutes=5)  # first cron run in 5 min
 

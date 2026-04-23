@@ -60,3 +60,13 @@ async def test_seed_system_schedules_includes_procedural_consolidation(monkeypat
     assert vit_row[4] == "interval"  # schedule_type
     assert vit_row[5] == daemon_module.VITALITY_SCORING_MINUTES * 60
     assert vit_row[9] == daemon_module.MEMORY_VITALITY_SCORING_PROMPT
+
+    shadow = [row for row in inserted_rows if row[0] == "Shadow Forget Scoring"]
+    assert len(shadow) == 1
+    shadow_row = shadow[0]
+    assert shadow_row[3] == "memory"
+    assert shadow_row[4] == "interval"
+    assert shadow_row[5] == daemon_module.SHADOW_FORGET_SCORING_MINUTES * 60
+    assert shadow_row[9] == daemon_module.SHADOW_FORGET_SCORING_PROMPT
+    offset_seconds = (shadow_row[7] - vit_row[7]).total_seconds()
+    assert offset_seconds >= (daemon_module.SHADOW_FORGET_OFFSET_MINUTES * 60) - 5

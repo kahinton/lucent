@@ -177,6 +177,119 @@ class DecayAction:
     ARCHIVE_CANDIDATE = "archive-candidate"
 
 
+class ShadowGcpAction:
+    """Shadow-only action labels for Candidate-A graph connectedness scoring."""
+
+    KEEP = "keep"
+    FORGETTING_CANDIDATE = "forgetting_candidate"
+    PROTECTED_HUB = "protected_hub"
+
+
+@dataclass(slots=True)
+class GraphConnectednessInput:
+    """Input profile for one-memory graph connectedness scoring."""
+
+    memory_id: UUID
+    importance: int
+    age_days: int
+    in_degree: int
+    out_degree: int
+    active_request_links: int
+    version_depth: int
+    distinct_readers_90d: int
+    tags: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class ShadowScoreResult:
+    """Output for one-memory shadow graph connectedness scoring."""
+
+    memory_id: UUID
+    score: float
+    action: str
+    protected: bool
+    reasons: list[str]
+    signals: dict[str, float | int | bool]
+
+
+@dataclass(slots=True)
+class GcpConfig:
+    """Configuration for Candidate-A graph connectedness scoring."""
+
+    weight_edges: float = 0.35
+    weight_active_links: float = 0.30
+    weight_version: float = 0.15
+    weight_distinct_readers: float = 0.20
+    forgetting_threshold: float = 0.70
+    protected_hub_threshold: float = 1.30
+    protected_importance_floor: int = 8
+
+
+def compute_graph_connectedness(
+    profile: GraphConnectednessInput,
+    *,
+    config: GcpConfig | None = None,
+) -> ShadowScoreResult:
+    """Compute Candidate-A connectedness score and shadow-only classification."""
+    cfg = config or GcpConfig()
+    hard_protection_reason = _hard_gcp_protection_reason(profile, config=cfg)
+
+    edges = max(0, profile.in_degree) + max(0, profile.out_degree)
+    active_links = max(0, profile.active_request_links)
+    version_depth = max(1, profile.version_depth)
+    distinct_readers = max(0, profile.distinct_readers_90d)
+
+    connectedness = (
+        cfg.weight_edges * _ln1p(edges)
+        + cfg.weight_active_links * _ln1p(2 * active_links)
+        + cfg.weight_version * _ln1p(version_depth)
+        + cfg.weight_distinct_readers * _ln1p(distinct_readers)
+    )
+    action = classify_gcp_action(
+        connectedness,
+        profile=profile,
+        config=cfg,
+    )
+
+    return ShadowScoreResult(
+        memory_id=profile.memory_id,
+        score=connectedness,
+        action=action,
+        protected=hard_protection_reason is not None,
+        reasons=[hard_protection_reason] if hard_protection_reason else [],
+        signals={
+            "in_degree": profile.in_degree,
+            "out_degree": profile.out_degree,
+            "active_request_links": profile.active_request_links,
+            "version_depth": profile.version_depth,
+            "distinct_readers_90d": profile.distinct_readers_90d,
+            "age_days": max(0, profile.age_days),
+            "importance": profile.importance,
+            "connectedness": connectedness,
+            "pinned": "pinned" in (profile.tags or []),
+            "do_not_consolidate": "do_not_consolidate" in (profile.tags or []),
+        },
+    )
+
+
+def classify_gcp_action(
+    score: float,
+    *,
+    profile: GraphConnectednessInput,
+    config: GcpConfig | None = None,
+) -> str:
+    """Map Candidate-A connectedness score to a shadow-only action."""
+    cfg = config or GcpConfig()
+    if _hard_gcp_protection_reason(profile, config=cfg):
+        return ShadowGcpAction.PROTECTED_HUB
+    if score >= cfg.protected_hub_threshold:
+        return ShadowGcpAction.PROTECTED_HUB
+    if score >= cfg.forgetting_threshold:
+        return ShadowGcpAction.KEEP
+    return ShadowGcpAction.FORGETTING_CANDIDATE
+
+
 def compute_memory_vitality(
     profile: MemoryDecayInput,
     *,
@@ -625,3 +738,25 @@ def _env_float(name: str, default: float) -> float:
         return float(raw)
     except ValueError:
         return default
+
+
+def _ln1p(value: int) -> float:
+    # Keep this helper local to avoid importing math.log1p for one callsite.
+    from math import log1p
+
+    return log1p(max(0, value))
+
+
+def _hard_gcp_protection_reason(
+    profile: GraphConnectednessInput,
+    *,
+    config: GcpConfig,
+) -> str | None:
+    tags = set(profile.tags or [])
+    if "pinned" in tags:
+        return "hard-protect-pinned"
+    if "do_not_consolidate" in tags:
+        return "hard-protect-do-not-consolidate"
+    if profile.importance >= config.protected_importance_floor:
+        return "hard-protect-high-importance"
+    return None

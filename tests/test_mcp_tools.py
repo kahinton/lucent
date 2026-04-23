@@ -786,6 +786,100 @@ class TestDeleteMemory:
         )
         assert "error" in get_result
 
+    async def test_soft_delete_flag_off_has_no_ldr_sidecar_write(
+        self, mcp_tools, auth_user, db_pool, clean_test_data, monkeypatch
+    ):
+        """Flag OFF keeps delete behavior and emits no LDR observation rows."""
+        monkeypatch.delenv("LUCENT_SHADOW_FORGET_ENABLED", raising=False)
+        prefix = clean_test_data
+
+        created = await _call(
+            mcp_tools,
+            "create_memory",
+            {
+                "type": "experience",
+                "content": f"{prefix} Memory to delete no ldr row",
+                "username": f"{prefix}user",
+            },
+        )
+        memory_id = created["id"]
+
+        result = await _call(mcp_tools, "delete_memory", {"memory_id": memory_id})
+        assert result["success"] is True
+
+        get_result = await _call(mcp_tools, "get_memory", {"memory_id": memory_id})
+        assert "error" in get_result
+
+        async with db_pool.acquire() as conn:
+            count = await conn.fetchval(
+                """
+                SELECT COUNT(*)
+                FROM memory_shadow_scores
+                WHERE memory_id = $1
+                  AND strategy = 'ldr-obs-v1'
+                """,
+                UUID(memory_id),
+            )
+        assert count == 0
+
+    async def test_soft_delete_flag_on_writes_ldr_row_with_replacement_metadata(
+        self, mcp_tools, auth_user, db_pool, clean_test_data, monkeypatch
+    ):
+        """Flag ON writes LDR observation row with edges-at-risk and canonical metadata."""
+        monkeypatch.setenv("LUCENT_SHADOW_FORGET_ENABLED", "true")
+        prefix = clean_test_data
+        repo = MemoryRepository(db_pool)
+
+        canonical = await repo.create(
+            username=f"{prefix}user",
+            type="technical",
+            content=f"{prefix} canonical target",
+            user_id=auth_user["id"],
+            organization_id=auth_user["organization_id"],
+        )
+        source = await repo.create(
+            username=f"{prefix}user",
+            type="experience",
+            content=f"{prefix} source to delete",
+            metadata={"canonical_memory_id": str(canonical["id"])},
+            user_id=auth_user["id"],
+            organization_id=auth_user["organization_id"],
+        )
+        await repo.create(
+            username=f"{prefix}user",
+            type="experience",
+            content=f"{prefix} inbound edge source",
+            related_memory_ids=[source["id"]],
+            user_id=auth_user["id"],
+            organization_id=auth_user["organization_id"],
+        )
+
+        result = await _call(
+            mcp_tools,
+            "delete_memory",
+            {"memory_id": str(source["id"])},
+        )
+        assert result["success"] is True
+
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT shadow_action, signals
+                FROM memory_shadow_scores
+                WHERE memory_id = $1
+                  AND strategy = 'ldr-obs-v1'
+                ORDER BY computed_at DESC
+                LIMIT 1
+                """,
+                source["id"],
+            )
+        assert row is not None
+        assert row["shadow_action"] == "would_demote"
+        assert row["signals"]["would_demote_source_id"] == str(source["id"])
+        assert row["signals"]["would_link_canonical_id"] == str(canonical["id"])
+        assert row["signals"]["would_break_edges"] == 1
+        assert row["signals"]["force_delete_compliance"] is False
+
     async def test_delete_nonexistent(self, mcp_tools, auth_user):
         """Test deleting a memory that doesn't exist."""
         result = await _call(
@@ -2025,6 +2119,31 @@ class TestComputeVitalityScores:
         result = await _call(mcp_tools, "compute_vitality_scores", {"batch_size": 0})
         assert "error" in result
 
+
+class TestComputeShadowForgetScores:
+    async def test_compute_shadow_forget_scores_noop_when_flag_off(
+        self, mcp_tools, auth_user, monkeypatch
+    ):
+        monkeypatch.delenv("LUCENT_SHADOW_FORGET_ENABLED", raising=False)
+        result = await _call(
+            mcp_tools,
+            "compute_shadow_forget_scores",
+            {"strategy": "gcp-v1", "batch_size": 100},
+        )
+        assert result["enabled"] is False
+        assert result["processed"] == 0
+        assert result["inserted"] == 0
+
+    async def test_compute_shadow_forget_scores_rejects_unknown_strategy(
+        self, mcp_tools, auth_user, monkeypatch
+    ):
+        monkeypatch.setenv("LUCENT_SHADOW_FORGET_ENABLED", "true")
+        result = await _call(
+            mcp_tools,
+            "compute_shadow_forget_scores",
+            {"strategy": "unknown-v1", "batch_size": 100},
+        )
+        assert "error" in result
 
 # ============================================================================
 # Team-mode fixtures and tests for share_memory / unshare_memory

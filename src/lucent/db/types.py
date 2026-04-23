@@ -59,6 +59,18 @@ class MemorySearchResult(TypedDict):
     has_more: bool
 
 
+class MemoryShadowScoreRecord(TypedDict):
+    """Row model for memory_shadow_scores sidecar entries."""
+
+    memory_id: UUID
+    strategy: str
+    score: float | None
+    shadow_action: str | None
+    signals: dict[str, Any]
+    computed_at: datetime
+    divergence_tag: str | None
+
+
 class TagCount(TypedDict):
     """Tag with usage count returned by get_existing_tags()."""
 

@@ -41,6 +41,7 @@ from lucent.db.types import (
     MemoryRecord,
     MemorySearchRecord,
     MemorySearchResult,
+    MemoryShadowScoreRecord,
     MostAccessedRecord,
     OrganizationListResult,
     OrganizationRecord,
@@ -70,6 +71,7 @@ __all__ = [
     "ReviewRepository",
     # TypedDict definitions
     "MemoryRecord",
+    "MemoryShadowScoreRecord",
     "MemorySearchRecord",
     "MemorySearchResult",
     "TagCount",

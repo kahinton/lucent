@@ -8,8 +8,13 @@ from lucent.db.requests import RequestRepository
 from lucent.memory.decay import (
     DecayAction,
     DecayConfig,
+    GcpConfig,
+    GraphConnectednessInput,
     MemoryDecayInput,
+    ShadowGcpAction,
     classify_decay_action,
+    classify_gcp_action,
+    compute_graph_connectedness,
     compute_memory_vitality,
     dry_run_decay_report,
     run_memory_decay_maintenance_cycle,
@@ -169,6 +174,69 @@ def test_dry_run_report_is_reporting_only():
     assert report["counts"]["cleanup_suggestions"] >= 0
     # input untouched (no in-place mutation)
     assert len(scored) == 2
+
+
+def _gcp_profile(
+    *,
+    in_degree: int = 0,
+    out_degree: int = 0,
+    active_request_links: int = 0,
+    version_depth: int = 1,
+    distinct_readers_90d: int = 0,
+    importance: int = 5,
+    tags: list[str] | None = None,
+) -> GraphConnectednessInput:
+    return GraphConnectednessInput(
+        memory_id=uuid4(),
+        importance=importance,
+        age_days=30,
+        in_degree=in_degree,
+        out_degree=out_degree,
+        active_request_links=active_request_links,
+        version_depth=version_depth,
+        distinct_readers_90d=distinct_readers_90d,
+        tags=tags or [],
+    )
+
+
+def test_gcp_connected_hub_scores_as_protected():
+    profile = _gcp_profile(
+        in_degree=12,
+        out_degree=5,
+        active_request_links=3,
+        version_depth=8,
+        distinct_readers_90d=6,
+    )
+    result = compute_graph_connectedness(profile)
+    assert result.score > 1.0
+    assert result.action == ShadowGcpAction.PROTECTED_HUB
+
+
+def test_gcp_low_connectedness_is_forgetting_candidate():
+    profile = _gcp_profile(
+        in_degree=0,
+        out_degree=0,
+        active_request_links=0,
+        version_depth=1,
+        distinct_readers_90d=0,
+        importance=2,
+    )
+    result = compute_graph_connectedness(profile, config=GcpConfig(forgetting_threshold=0.4))
+    assert result.action == ShadowGcpAction.FORGETTING_CANDIDATE
+
+
+def test_gcp_hard_protection_tags_override_thresholds():
+    profile = _gcp_profile(
+        in_degree=0,
+        out_degree=0,
+        active_request_links=0,
+        version_depth=1,
+        distinct_readers_90d=0,
+        importance=1,
+        tags=["pinned"],
+    )
+    action = classify_gcp_action(0.0, profile=profile)
+    assert action == ShadowGcpAction.PROTECTED_HUB
 
 
 async def test_maintenance_cycle_dry_run_no_side_effects(db_pool, test_user, clean_test_data):

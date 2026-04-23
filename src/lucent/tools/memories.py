@@ -138,6 +138,24 @@ def _build_snapshot(memory: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _extract_ldr_canonical_id(memory: dict[str, Any]) -> UUID | None:
+    """Extract optional replacement-edge canonical ID for LDR observation."""
+    metadata = memory.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+
+    for key in ("canonical_memory_id", "canonical_id", "replacement_memory_id"):
+        raw_value = metadata.get(key)
+        if raw_value is None:
+            continue
+        try:
+            return UUID(str(raw_value))
+        except (TypeError, ValueError):
+            logger.debug("Ignoring invalid LDR canonical id metadata key=%s", key)
+            return None
+    return None
+
+
 async def _get_repository() -> MemoryRepository:
     """Get a memory repository, initializing the database if needed."""
     try:
@@ -979,7 +997,11 @@ Returns:
                     " are removed from the system."
                 )
 
-            success = await repo.delete(uuid_id)
+            success = await repo.delete(
+                uuid_id,
+                ldr_canonical_id=_extract_ldr_canonical_id(old_memory),
+                force_delete_compliance=False,
+            )
 
             if not success:
                 return _error_response(f"Memory not found: {memory_id}")
@@ -1828,6 +1850,52 @@ Returns:
         except Exception as e:
             logger.error("compute_vitality_scores failed", exc_info=e)
             return _error_response(f"Failed to compute vitality scores: {str(e)}")
+
+    @mcp.tool()
+    async def compute_shadow_forget_scores(
+        strategy: str = "gcp-v1",
+        batch_size: int = 500,
+    ) -> str:
+        """Compute Candidate-A shadow forgetting scores into sidecar storage only.
+
+        Writes rows only to memory_shadow_scores and never mutates production ranking fields.
+        Becomes a no-op when LUCENT_SHADOW_FORGET_ENABLED is disabled.
+        """
+        try:
+            if batch_size < 1 or batch_size > 5000:
+                return _error_response("batch_size must be between 1 and 5000")
+            repo = await _get_repository()
+            result = await repo.compute_shadow_forget_scores(
+                strategy=strategy,
+                batch_size=batch_size,
+            )
+            return json.dumps(result, indent=2, default=str)
+        except ValueError as e:
+            return _error_response(str(e))
+        except Exception as e:
+            logger.error("compute_shadow_forget_scores failed", exc_info=e)
+            return _error_response(f"Failed to compute shadow forget scores: {str(e)}")
+
+    @mcp.tool()
+    async def get_shadow_forget_comparison(
+        strategy: str = "gcp-v1",
+        window_hours: int = 168,
+        limit: int = 100,
+    ) -> str:
+        """Return divergence and metric summary for shadow forgetting candidates."""
+        try:
+            repo = await _get_repository()
+            result = await repo.get_shadow_forget_comparison(
+                strategy=strategy,
+                window_hours=window_hours,
+                limit=limit,
+            )
+            return json.dumps(result, indent=2, default=str)
+        except ValueError as e:
+            return _error_response(str(e))
+        except Exception as e:
+            logger.error("get_shadow_forget_comparison failed", exc_info=e)
+            return _error_response(f"Failed to retrieve shadow comparison: {str(e)}")
 
 
 def _serialize_memory(memory: dict[str, Any]) -> dict[str, Any]:
