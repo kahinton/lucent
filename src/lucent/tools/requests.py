@@ -98,27 +98,67 @@ Returns: JSON with the created request including its ID."""
             force_pending_approval=(memory_scope == "user"),
         )
 
-        # Goal already completed — no request created
+        # Skip outcome — translate the DB-layer reason into actionable
+        # guidance for the planner. Every branch must emit STOP-level
+        # language so the model doesn't try to "work around" the refusal.
         if req.get("status") == "skipped":
             reason = req.get("reason", "")
-            if reason == "stale_goal_progress":
-                return json.dumps({
-                    "status": "skipped",
-                    "reason": reason,
-                    "detail": req.get("detail", ""),
-                    "note": (
-                        "STOP. The system refused this request because a recent "
-                        "completed request exists for this goal but the goal's "
-                        "milestone state hasn't been updated. Call update_memory "
-                        "on the goal first to mark the completed milestone, then "
-                        "decide whether new work is actually needed for the next "
-                        "active milestone."
-                    ),
-                })
+            notes_by_reason = {
+                "stale_goal_progress": (
+                    "STOP. The system refused this request because a recent "
+                    "completed request exists for this goal but the goal's "
+                    "milestone state hasn't been updated. Call update_memory "
+                    "on the goal first to mark the completed milestone, then "
+                    "decide whether new work is actually needed for the next "
+                    "active milestone."
+                ),
+                "duplicate_of_recent_completion": (
+                    "STOP. A request with the same normalized title was "
+                    "completed or cancelled for this goal in the last 24h. "
+                    "Do NOT propose this same work again. If the milestone "
+                    "is already done, update the goal's milestone state. If "
+                    "it's not done, pick a different milestone or rethink."
+                ),
+                "milestone_not_active": (
+                    "STOP. The milestone you referenced in the title is NOT "
+                    "currently active in the goal's metadata. The planner "
+                    "must propose work only for an active milestone. "
+                    "Re-read the goal's metadata.milestones array and pick "
+                    "an entry whose status is 'active', then re-issue the "
+                    "request with the correct milestone number."
+                ),
+                "milestone_not_referenced": (
+                    "STOP. Requests for goals with milestones MUST include "
+                    "the milestone in the title (e.g. 'M3:', 'Phase 3:', "
+                    "'Milestone 3:'). Re-issue with the active milestone "
+                    "label so future planner cycles can recognize the work."
+                ),
+                "milestone_out_of_range": (
+                    "STOP. The milestone number in your title does not "
+                    "exist on this goal. Re-read the goal's milestones "
+                    "array and pick a valid active milestone."
+                ),
+                "goal_milestones_all_done": (
+                    "STOP. Every milestone of this goal is already "
+                    "completed/abandoned. Do NOT create more work for it. "
+                    "Call update_memory to set metadata.status='completed' "
+                    "on the goal so it stops appearing in planning cycles."
+                ),
+                "goal_completed": (
+                    "This goal is already marked completed/abandoned. "
+                    "Do NOT create work for it."
+                ),
+            }
             return json.dumps({
                 "status": "skipped",
                 "reason": reason,
-                "note": "This goal memory is already completed. Do NOT create work for it.",
+                "detail": req.get("detail", ""),
+                "existing_request_id": req.get("existing_request_id"),
+                "note": notes_by_reason.get(
+                    reason,
+                    "STOP. The system refused this request. Re-evaluate "
+                    "before retrying.",
+                ),
             })
 
         result = {

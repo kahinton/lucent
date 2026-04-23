@@ -62,6 +62,45 @@ def _normalize_title_for_dedup(title: str | None) -> str:
         return ""
     return re.sub(r"[^a-z0-9]+", " ", title.lower()).strip()
 
+
+# Patterns the planner uses to label which milestone a request targets.
+# Order matters: more specific patterns come first so 'Milestone 3' isn't
+# captured as just 'M3' (the integer would still match but the more specific
+# label is more readable in error output).
+_MILESTONE_REF_PATTERNS = (
+    re.compile(r"\bMilestone\s+(\d+)\b", re.IGNORECASE),
+    re.compile(r"\bPhase\s+(\d+)\b", re.IGNORECASE),
+    # Stand-alone M<N> or M<N>: at the start of a token.
+    # Anchored so we don't grab the M out of words like 'memo' or 'M3 file'.
+    re.compile(r"(?<![A-Za-z])M(\d+)(?=[\s:,.\-—–_]|$)"),
+)
+
+
+def _extract_milestone_number(title: str | None) -> int | None:
+    """Extract the milestone index a request title is targeting.
+
+    The cognitive planner is instructed to label requests with the milestone
+    they target — 'Foo M3: ...', 'Foo Milestone 3 ...', 'Foo Phase 3 ...'.
+    We extract that integer so the create-request guard can validate it
+    against the goal's milestone array.
+
+    Returns the 1-based milestone number, or None if the title doesn't
+    reference a specific milestone (in which case we can't validate, and
+    the request is allowed through).
+    """
+    if not title:
+        return None
+    for pat in _MILESTONE_REF_PATTERNS:
+        m = pat.search(title)
+        if m:
+            try:
+                n = int(m.group(1))
+            except (TypeError, ValueError):
+                continue
+            if n >= 1:
+                return n
+    return None
+
 # Approval statuses for the pre-work gate
 APPROVAL_AUTO = "auto_approved"
 APPROVAL_PENDING = "pending_approval"
@@ -320,6 +359,128 @@ class RequestRepository:
                             "status": "skipped",
                             "reason": "goal_completed",
                         }
+
+                    # Milestone-state guard. The cognitive planner has been
+                    # observed picking the wrong milestone (proposing M1 work
+                    # when M1 is already completed and M5 is the active one).
+                    # Title-normalization dedup doesn't catch this because
+                    # each generated description is novel — it's not the same
+                    # work being re-proposed, it's plausible work for the
+                    # wrong phase. The structural fix is to verify the
+                    # milestone the title references is actually active in
+                    # the goal's metadata. If the title doesn't reference a
+                    # milestone, we can't validate and let it through. If the
+                    # goal has no milestones, we let it through. Otherwise:
+                    #   - referenced milestone must exist
+                    #   - and have status='active'
+                    # Also: if every milestone is completed/abandoned but the
+                    # goal status is still 'active', refuse and tell the
+                    # planner to mark the goal complete instead of inventing
+                    # phantom work.
+                    if source == "cognitive":
+                        goal_rows = await conn.fetch(
+                            """SELECT id, content, metadata
+                               FROM memories
+                               WHERE id = ANY($1)
+                                 AND type = 'goal'
+                                 AND deleted_at IS NULL""",
+                            mem_ids,
+                        )
+                        for goal_row in goal_rows:
+                            metadata = goal_row["metadata"]
+                            if isinstance(metadata, str):
+                                try:
+                                    metadata = json.loads(metadata)
+                                except (TypeError, ValueError):
+                                    metadata = None
+                            if not isinstance(metadata, dict):
+                                continue
+                            milestones = metadata.get("milestones") or []
+                            if not isinstance(milestones, list) or not milestones:
+                                continue
+
+                            active_indexes = [
+                                i for i, m in enumerate(milestones, start=1)
+                                if isinstance(m, dict) and m.get("status") == "active"
+                            ]
+                            # Goal has milestones but none are active anymore —
+                            # the planner is making up work. Refuse and tell
+                            # it to mark the goal completed.
+                            if not active_indexes:
+                                return {
+                                    "id": str(goal_row["id"]),
+                                    "title": title,
+                                    "status": "skipped",
+                                    "reason": "goal_milestones_all_done",
+                                    "detail": (
+                                        f"Goal {goal_row['id']} has "
+                                        f"{len(milestones)} milestones and none "
+                                        "are active anymore. Do NOT create new "
+                                        "work for this goal — call update_memory "
+                                        "to set metadata.status='completed'."
+                                    ),
+                                }
+
+                            referenced_n = _extract_milestone_number(title)
+                            if referenced_n is None:
+                                # No milestone label in the title. The planner
+                                # is supposed to use the canonical 'M<N>:'
+                                # format so future cycles can recognize prior
+                                # work; refuse here and force the convention.
+                                return {
+                                    "id": str(goal_row["id"]),
+                                    "title": title,
+                                    "status": "skipped",
+                                    "reason": "milestone_not_referenced",
+                                    "detail": (
+                                        f"Goal {goal_row['id']} has milestones, "
+                                        "but the request title does not "
+                                        "reference a specific milestone (e.g. "
+                                        "'M3', 'Phase 3', 'Milestone 3'). "
+                                        f"Active milestones: {active_indexes}. "
+                                        "Re-issue the request with the next "
+                                        "active milestone in the title."
+                                    ),
+                                }
+
+                            if referenced_n > len(milestones):
+                                return {
+                                    "id": str(goal_row["id"]),
+                                    "title": title,
+                                    "status": "skipped",
+                                    "reason": "milestone_out_of_range",
+                                    "detail": (
+                                        f"Title references M{referenced_n} but "
+                                        f"goal {goal_row['id']} only has "
+                                        f"{len(milestones)} milestones. Active "
+                                        f"milestones: {active_indexes}."
+                                    ),
+                                }
+
+                            milestone = milestones[referenced_n - 1]
+                            current_status = (
+                                milestone.get("status")
+                                if isinstance(milestone, dict)
+                                else None
+                            )
+                            if current_status != "active":
+                                return {
+                                    "id": str(goal_row["id"]),
+                                    "title": title,
+                                    "status": "skipped",
+                                    "reason": "milestone_not_active",
+                                    "detail": (
+                                        f"Title references M{referenced_n} but "
+                                        f"that milestone of goal "
+                                        f"{goal_row['id']} has status "
+                                        f"{current_status!r}, not 'active'. "
+                                        f"Active milestones: {active_indexes}. "
+                                        "Pick the next active milestone or "
+                                        "update the goal's milestone state if "
+                                        "you believe this one was completed by "
+                                        "prior work."
+                                    ),
+                                }
 
                     # Dedup: if any linked memory already has an active request, return it.
                     # 'failed' counts as active because the user/operator may want
