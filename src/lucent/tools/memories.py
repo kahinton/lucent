@@ -1447,7 +1447,7 @@ Returns:
 
         try:
             repo = await _get_repository()
-            user_id, org_id, _, memory_scope, memory_scope_user_id = await _get_current_user_context()
+            user_id, org_id, user_role, memory_scope, memory_scope_user_id = await _get_current_user_context()
             if user_id is None:
                 return _error_response("Authentication required")
 
@@ -1516,7 +1516,7 @@ Returns:
             uuid_id = UUID(memory_id)
             repo = await _get_repository()
 
-            user_id, org_id, _, memory_scope, memory_scope_user_id = await _get_current_user_context()
+            user_id, org_id, user_role, memory_scope, memory_scope_user_id = await _get_current_user_context()
             if user_id is None:
                 return _error_response("Authentication required")
 
@@ -1586,7 +1586,7 @@ Returns:
             uuid_id = UUID(memory_id)
             repo = await _get_repository()
 
-            user_id, org_id, _, memory_scope, memory_scope_user_id = await _get_current_user_context()
+            user_id, org_id, user_role, memory_scope, memory_scope_user_id = await _get_current_user_context()
             if user_id is None:
                 return _error_response("Authentication required")
 

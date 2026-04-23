@@ -1356,6 +1356,211 @@ class TestRequestDeduplication:
         )
         assert str(r2["id"]) != str(r1["id"])
 
+    async def test_recently_completed_with_same_normalized_title_blocks_create(
+        self, repo, test_organization, db_pool
+    ):
+        """A cognitive request whose normalized title matches a recently
+        completed request linked to the same goal must be refused.
+
+        This is the structural fix for the bug where the planner re-proposes
+        the same milestone work after the goal's milestone state wasn't
+        updated.
+        """
+        org_id = str(test_organization["id"])
+        async with db_pool.acquire() as conn:
+            mem = await conn.fetchrow(
+                """INSERT INTO memories (content, type, organization_id, username)
+                   VALUES ('stale-completion-goal', 'goal', $1::uuid, 'test-user')
+                   RETURNING id""",
+                org_id,
+            )
+        mem_id = str(mem["id"])
+
+        r1 = await repo.create_request(
+            title="Native forgetting M2: Propose strategy candidates",
+            org_id=org_id,
+            source="cognitive",
+            memory_ids=[{"id": mem_id, "relation": "goal"}],
+        )
+        await repo.update_request_status(str(r1["id"]), "completed", org_id=org_id)
+
+        # Same normalized title (hyphen + em-dash variation) — must be refused.
+        r2 = await repo.create_request(
+            title="Native-forgetting M2 — propose strategy candidates",
+            org_id=org_id,
+            source="cognitive",
+            memory_ids=[{"id": mem_id, "relation": "goal"}],
+        )
+        assert r2["status"] == "skipped"
+        assert r2["reason"] == "duplicate_of_recent_completion"
+        assert r2["existing_request_id"] == str(r1["id"])
+
+    async def test_recently_completed_with_different_title_allows_create(
+        self, repo, test_organization, db_pool
+    ):
+        """Same goal, recently completed request, but a DIFFERENT title
+        (e.g. moving from milestone 1 to milestone 2) is still allowed."""
+        org_id = str(test_organization["id"])
+        async with db_pool.acquire() as conn:
+            mem = await conn.fetchrow(
+                """INSERT INTO memories (content, type, organization_id, username)
+                   VALUES ('milestone-progression-goal', 'goal', $1::uuid, 'test-user')
+                   RETURNING id""",
+                org_id,
+            )
+        mem_id = str(mem["id"])
+
+        r1 = await repo.create_request(
+            title="M1: Survey current consolidation",
+            org_id=org_id, source="cognitive",
+            memory_ids=[{"id": mem_id, "relation": "goal"}],
+        )
+        await repo.update_request_status(str(r1["id"]), "completed", org_id=org_id)
+
+        r2 = await repo.create_request(
+            title="M2: Propose strategy candidates",
+            org_id=org_id, source="cognitive",
+            memory_ids=[{"id": mem_id, "relation": "goal"}],
+        )
+        assert str(r2["id"]) != str(r1["id"])
+        assert r2.get("status") != "skipped"
+
+    async def test_late_link_blocks_when_active_request_exists(
+        self, repo, test_organization, db_pool
+    ):
+        """When a request is created without memory_ids and then a goal link
+        is added later, the link itself must dedup against existing active
+        goal-linked requests. This is the structural backstop for the
+        REST-API and daemon-HTTP-client paths that don't pass memory_ids
+        at create time."""
+        org_id = str(test_organization["id"])
+        async with db_pool.acquire() as conn:
+            mem = await conn.fetchrow(
+                """INSERT INTO memories (content, type, organization_id, username)
+                   VALUES ('late-link-goal', 'goal', $1::uuid, 'test-user')
+                   RETURNING id""",
+                org_id,
+            )
+        mem_id = str(mem["id"])
+
+        # First request created WITH the goal — uses normal dedup path.
+        r1 = await repo.create_request(
+            title="Original work for the goal",
+            org_id=org_id, source="cognitive",
+            memory_ids=[{"id": mem_id, "relation": "goal"}],
+        )
+
+        # Second request created WITHOUT memory_ids (REST API style).
+        r2 = await repo.create_request(
+            title="Different title that bypassed dedup",
+            org_id=org_id, source="cognitive",
+        )
+
+        # Now try to link r2 to the same goal — must be refused.
+        result = await repo.link_request_memory(
+            str(r2["id"]), mem_id, "goal", org_id=org_id,
+        )
+        assert isinstance(result, dict)
+        assert result.get("duplicate_of") == str(r1["id"])
+        assert result.get("reason") == "active_request_for_goal"
+
+        # Verify no link was actually created
+        async with db_pool.acquire() as conn:
+            link_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM request_memories "
+                "WHERE request_id = $1::uuid AND memory_id = $2::uuid",
+                str(r2["id"]), mem_id,
+            )
+        assert link_count == 0
+
+    async def test_late_link_blocks_when_recent_completion_with_same_title(
+        self, repo, test_organization, db_pool
+    ):
+        """Late-link path also enforces normalized-title match against
+        recently completed requests for the same goal."""
+        org_id = str(test_organization["id"])
+        async with db_pool.acquire() as conn:
+            mem = await conn.fetchrow(
+                """INSERT INTO memories (content, type, organization_id, username)
+                   VALUES ('late-link-stale-goal', 'goal', $1::uuid, 'test-user')
+                   RETURNING id""",
+                org_id,
+            )
+        mem_id = str(mem["id"])
+
+        r1 = await repo.create_request(
+            title="Native forgetting M2: Propose strategy",
+            org_id=org_id, source="cognitive",
+            memory_ids=[{"id": mem_id, "relation": "goal"}],
+        )
+        await repo.update_request_status(str(r1["id"]), "completed", org_id=org_id)
+
+        r2 = await repo.create_request(
+            title="Native-forgetting M2 — propose strategy",
+            org_id=org_id, source="cognitive",
+        )
+        result = await repo.link_request_memory(
+            str(r2["id"]), mem_id, "goal", org_id=org_id,
+        )
+        assert isinstance(result, dict)
+        assert result.get("duplicate_of") == str(r1["id"])
+        assert result.get("reason") == "duplicate_of_recent_completion"
+
+    async def test_late_link_succeeds_when_no_dup(
+        self, repo, test_organization, db_pool
+    ):
+        """Sanity: late-link works fine when there's no duplicate."""
+        org_id = str(test_organization["id"])
+        async with db_pool.acquire() as conn:
+            mem = await conn.fetchrow(
+                """INSERT INTO memories (content, type, organization_id, username)
+                   VALUES ('late-link-clean-goal', 'goal', $1::uuid, 'test-user')
+                   RETURNING id""",
+                org_id,
+            )
+        mem_id = str(mem["id"])
+
+        r = await repo.create_request(
+            title="Standalone request", org_id=org_id, source="user",
+        )
+        result = await repo.link_request_memory(
+            str(r["id"]), mem_id, "goal", org_id=org_id,
+        )
+        assert result is not None
+        # On insert success the link row is returned; no duplicate_of key
+        assert "duplicate_of" not in (result or {})
+
+    async def test_late_link_dedup_can_be_disabled(
+        self, repo, test_organization, db_pool
+    ):
+        """`block_duplicates=False` lets internal callers opt out (e.g.
+        legacy migration code that needs raw inserts)."""
+        org_id = str(test_organization["id"])
+        async with db_pool.acquire() as conn:
+            mem = await conn.fetchrow(
+                """INSERT INTO memories (content, type, organization_id, username)
+                   VALUES ('opt-out-dedup', 'goal', $1::uuid, 'test-user')
+                   RETURNING id""",
+                org_id,
+            )
+        mem_id = str(mem["id"])
+
+        r1 = await repo.create_request(
+            title="First", org_id=org_id, source="cognitive",
+            memory_ids=[{"id": mem_id, "relation": "goal"}],
+        )
+        r2 = await repo.create_request(
+            title="Second", org_id=org_id, source="cognitive",
+        )
+        result = await repo.link_request_memory(
+            str(r2["id"]), mem_id, "goal", org_id=org_id,
+            block_duplicates=False,
+        )
+        # Without the guard, the link is just inserted.
+        assert result is not None
+        assert "duplicate_of" not in (result or {})
+        _ = r1  # used implicitly to set up the dup state
+
 
 class TestUpdatePendingTask:
     async def test_edit_all_fields_on_pending_task(

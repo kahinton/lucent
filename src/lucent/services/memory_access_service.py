@@ -32,7 +32,9 @@ class MemoryAccessService:
         memory_scope: str | None = None,
         is_admin: bool | None = None,
     ) -> dict[str, Any] | None:
-        memory = await self.repo.get_accessible(memory_id, user_id, organization_id, memory_scope)
+        memory = await self.repo.get_accessible(
+            memory_id, user_id, organization_id, memory_scope
+        )
         if not memory:
             return None
         # Admins/owners always have full access (check per-call flag OR constructor flag)

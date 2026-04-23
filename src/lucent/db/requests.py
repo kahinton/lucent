@@ -6,6 +6,7 @@ Full lineage: request → tasks → events → memory links.
 import json
 import logging
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
@@ -29,6 +30,37 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TASK_LEASE_SECONDS = int(os.environ.get("LUCENT_TASK_LEASE_SECONDS", "1800"))
 DEFAULT_INSTANCE_STALE_SECONDS = int(os.environ.get("LUCENT_INSTANCE_STALE_SECONDS", "1800"))
+
+# Advisory lock namespace for serializing memory-link operations on the same
+# memory_id across concurrent transactions. Keyed alongside the memory UUID.
+# Distinct from DECOMPOSITION_LOCK_NAMESPACE in daemon.py.
+MEMORY_LINK_LOCK_NAMESPACE = 0x4C4D454D  # "LMEM" — Lucent MEMory link
+
+# How recently a completed/cancelled request must have happened for a
+# normalized-title match to be considered a duplicate of new work for the
+# same goal. The cognitive planner runs periodically; if a request finished
+# in the last day and another one with the same normalized title comes in,
+# it's almost certainly the planner re-proposing work because the goal's
+# milestone state hasn't been updated.
+RECENT_COMPLETION_WINDOW_HOURS = 24
+
+
+def _normalize_title_for_dedup(title: str | None) -> str:
+    """Normalize a request title for duplicate detection.
+
+    Lowercases, replaces all runs of non-alphanumeric characters with a
+    single space, and trims. This collapses superficial differences like
+    hyphen-vs-space, em-dash, or extra punctuation that the planner often
+    introduces between cycles.
+
+    Examples:
+        'Native forgetting M2: Propose strategy candidates'
+        'Native-forgetting M2 — propose strategy candidates'
+        → both normalize to 'native forgetting m2 propose strategy candidates'
+    """
+    if not title:
+        return ""
+    return re.sub(r"[^a-z0-9]+", " ", title.lower()).strip()
 
 # Approval statuses for the pre-work gate
 APPROVAL_AUTO = "auto_approved"
@@ -307,51 +339,62 @@ class RequestRepository:
                     if existing:
                         return dict(existing)
 
-                    # Stale-progress guard: if a goal memory has had a request
-                    # complete recently but the goal's metadata hasn't been
-                    # updated since that completion, the planner is operating
-                    # on stale milestone state and would just re-propose the
-                    # same work. Refuse the create until the goal is updated.
-                    # This is the same class of failure as the review-loop bug:
-                    # an agent ignored its instruction to update linked memory
-                    # state, and the system re-creates the work indefinitely.
+                    # Stale-progress guard: even if no active request exists,
+                    # refuse to create a new cognitive request whose normalized
+                    # title matches a recently completed (or cancelled)
+                    # request linked to the same goal. This catches the case
+                    # where a request finished but the goal's milestone state
+                    # wasn't updated, so the planner re-proposes the same
+                    # work next cycle.
+                    #
+                    # The previous guard compared `r.completed_at > m.updated_at`
+                    # which was defeated by ANY touch to the goal memory
+                    # (e.g. an unrelated progress note). Normalized-title
+                    # matching is a much stronger signal because it answers
+                    # the actual question: "did we just do this exact work?"
                     if source == "cognitive":
-                        stale = await conn.fetchrow(
-                            """SELECT m.id AS memory_id, m.updated_at AS goal_updated_at,
-                                      r.id AS recent_request_id, r.completed_at,
-                                      r.title AS recent_title
-                               FROM memories m
-                               JOIN request_memories rm ON rm.memory_id = m.id
-                               JOIN requests r ON r.id = rm.request_id
-                               WHERE m.id = ANY($1)
-                                 AND m.type = 'goal'
-                                 AND r.status = 'completed'
-                                 AND r.completed_at > NOW() - INTERVAL '24 hours'
-                                 AND r.completed_at > m.updated_at
-                               ORDER BY r.completed_at DESC
-                               LIMIT 1""",
-                            mem_ids,
-                        )
-                        if stale:
-                            return {
-                                "id": stale["memory_id"],
-                                "title": title,
-                                "status": "skipped",
-                                "reason": "stale_goal_progress",
-                                "detail": (
-                                    f"Goal memory {stale['memory_id']} had a "
-                                    f"request complete at "
-                                    f"{stale['completed_at'].isoformat()} "
-                                    f"({stale['recent_title']!r}) but the goal "
-                                    f"metadata has not been updated since "
-                                    f"({stale['goal_updated_at'].isoformat()}). "
-                                    "Refusing to create another request for the "
-                                    "same goal until the goal's milestone state "
-                                    "is updated to reflect the completed work. "
-                                    "Call update_memory on the goal to mark the "
-                                    "completed milestone, then retry."
-                                ),
-                            }
+                        normalized = _normalize_title_for_dedup(title)
+                        if normalized:
+                            recent = await conn.fetchrow(
+                                """SELECT r.id, r.title, r.status, r.completed_at
+                                   FROM requests r
+                                   JOIN request_memories rm ON rm.request_id = r.id
+                                   WHERE r.organization_id = $1
+                                     AND rm.memory_id = ANY($2)
+                                     AND r.status IN ('completed', 'cancelled')
+                                     AND COALESCE(r.completed_at, r.updated_at)
+                                         > NOW() - make_interval(hours => $3)
+                                     AND regexp_replace(
+                                             lower(r.title),
+                                             '[^a-z0-9]+', ' ', 'g'
+                                         ) = $4
+                                   ORDER BY COALESCE(r.completed_at, r.updated_at) DESC
+                                   LIMIT 1""",
+                                UUID(org_id),
+                                mem_ids,
+                                RECENT_COMPLETION_WINDOW_HOURS,
+                                normalized,
+                            )
+                            if recent:
+                                return {
+                                    "id": str(recent["id"]),
+                                    "title": title,
+                                    "status": "skipped",
+                                    "reason": "duplicate_of_recent_completion",
+                                    "existing_request_id": str(recent["id"]),
+                                    "existing_status": recent["status"],
+                                    "detail": (
+                                        f"A request with the same normalized "
+                                        f"title was already "
+                                        f"{recent['status']} for this goal at "
+                                        f"{recent['completed_at']}. Refusing "
+                                        "to create a duplicate. If the goal's "
+                                        "milestone state hasn't been updated "
+                                        "to reflect the completed work, update "
+                                        "the goal first; otherwise re-think "
+                                        "whether new work is actually needed."
+                                    ),
+                                }
 
             row = await conn.fetchrow(
                 """INSERT INTO requests
@@ -539,27 +582,120 @@ class RequestRepository:
         memory_id: str,
         relation: str = "goal",
         org_id: str | None = None,
+        block_duplicates: bool = True,
     ) -> dict | None:
-        """Link a memory to a request."""
+        """Link a memory to a request.
+
+        Returns one of:
+            - the inserted link row dict on success
+            - ``None`` if the request doesn't exist (or doesn't belong to org)
+            - a dict with ``{"duplicate_of": <existing_request_id>, ...}`` when
+              ``block_duplicates`` is True (default), ``relation == 'goal'``,
+              and another active or recently-completed request is already
+              linked to the same memory. The link is NOT inserted in this case.
+            - ``None`` if the link already existed (insert was a no-op)
+
+        The duplicate check is the structural backstop for the
+        create-request-then-link-later pattern: callers (REST API,
+        daemon's RequestAPI HTTP client, MCP tools called without
+        ``goal_id``) all create requests without dedup running, then add
+        memory links afterward. Without dedup here, those paths can produce
+        duplicate goal-linked requests every cognitive cycle.
+        """
         async with self.pool.acquire() as conn:
-            # Verify the request exists and belongs to the org
-            if org_id:
-                req = await conn.fetchval(
-                    "SELECT id FROM requests WHERE id = $1::uuid AND organization_id = $2::uuid",
-                    request_id,
-                    UUID(org_id),
+            async with conn.transaction():
+                # Serialize concurrent linkers for the same memory so two
+                # parallel callers can't both pass the dedup check before
+                # either commits.
+                if block_duplicates and relation == "goal":
+                    await conn.execute(
+                        "SELECT pg_advisory_xact_lock($1, hashtext($2)::int)",
+                        MEMORY_LINK_LOCK_NAMESPACE,
+                        str(memory_id),
+                    )
+
+                # Verify the request exists and belongs to the org.
+                req_row = await conn.fetchrow(
+                    "SELECT id, title, organization_id FROM requests "
+                    "WHERE id = $1::uuid"
+                    + (" AND organization_id = $2::uuid" if org_id else ""),
+                    *((request_id, UUID(org_id)) if org_id else (request_id,)),
                 )
-                if not req:
+                if not req_row:
                     return None
-            row = await conn.fetchrow(
-                """INSERT INTO request_memories (request_id, memory_id, relation)
-                   VALUES ($1::uuid, $2::uuid, $3)
-                   ON CONFLICT DO NOTHING
-                   RETURNING *""",
-                request_id,
-                memory_id,
-                relation,
-            )
+                req_org_id = req_row["organization_id"]
+
+                if block_duplicates and relation == "goal":
+                    # 1) Any OTHER active goal-linked request for this memory?
+                    active_dup = await conn.fetchrow(
+                        """SELECT r.id, r.title, r.status
+                           FROM requests r
+                           JOIN request_memories rm ON rm.request_id = r.id
+                           WHERE rm.memory_id = $1::uuid
+                             AND r.organization_id = $2
+                             AND r.id != $3::uuid
+                             AND rm.relation = 'goal'
+                             AND r.status NOT IN ('completed', 'cancelled')
+                           ORDER BY r.created_at
+                           LIMIT 1""",
+                        memory_id,
+                        req_org_id,
+                        request_id,
+                    )
+                    if active_dup:
+                        return {
+                            "duplicate_of": str(active_dup["id"]),
+                            "existing_title": active_dup["title"],
+                            "existing_status": active_dup["status"],
+                            "reason": "active_request_for_goal",
+                        }
+
+                    # 2) Any RECENTLY completed/cancelled request for this
+                    # memory whose normalized title matches the linking
+                    # request's title? Mirrors the create_request guard so
+                    # the late-link path is just as protected.
+                    normalized = _normalize_title_for_dedup(req_row["title"])
+                    if normalized:
+                        recent_dup = await conn.fetchrow(
+                            """SELECT r.id, r.title, r.status, r.completed_at
+                               FROM requests r
+                               JOIN request_memories rm ON rm.request_id = r.id
+                               WHERE rm.memory_id = $1::uuid
+                                 AND r.organization_id = $2
+                                 AND r.id != $3::uuid
+                                 AND rm.relation = 'goal'
+                                 AND r.status IN ('completed', 'cancelled')
+                                 AND COALESCE(r.completed_at, r.updated_at)
+                                     > NOW() - make_interval(hours => $4)
+                                 AND regexp_replace(
+                                         lower(r.title),
+                                         '[^a-z0-9]+', ' ', 'g'
+                                     ) = $5
+                               ORDER BY COALESCE(r.completed_at, r.updated_at) DESC
+                               LIMIT 1""",
+                            memory_id,
+                            req_org_id,
+                            request_id,
+                            RECENT_COMPLETION_WINDOW_HOURS,
+                            normalized,
+                        )
+                        if recent_dup:
+                            return {
+                                "duplicate_of": str(recent_dup["id"]),
+                                "existing_title": recent_dup["title"],
+                                "existing_status": recent_dup["status"],
+                                "reason": "duplicate_of_recent_completion",
+                            }
+
+                row = await conn.fetchrow(
+                    """INSERT INTO request_memories (request_id, memory_id, relation)
+                       VALUES ($1::uuid, $2::uuid, $3)
+                       ON CONFLICT DO NOTHING
+                       RETURNING *""",
+                    request_id,
+                    memory_id,
+                    relation,
+                )
         return dict(row) if row else None
 
     async def approve_request(

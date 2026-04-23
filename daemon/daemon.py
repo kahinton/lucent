@@ -858,14 +858,10 @@ async def _mint_scoped_api_key(
         await conn.close()
 
 
-# Schedule titles that require per-user scoped processing
-_PER_USER_SCHEDULE_TITLES = frozenset({
-    "Experience Compression",
-    "Learning Extraction",
-    "Memory Vitality Scoring",
-})
-
-# Schedule titles that require org-shared-only processing
+# Schedule titles that require org-shared-only processing.
+# These are system-wide maintenance tasks with no single owning user; they
+# operate only on shared org memories. All other tasks default to 'user'
+# scope tied to the request's creator.
 _ORG_SHARED_SCHEDULE_TITLES = frozenset({
     "Memory Consolidation",
     "Procedural Consolidation",
@@ -873,25 +869,26 @@ _ORG_SHARED_SCHEDULE_TITLES = frozenset({
 
 
 def _get_required_memory_scope(task_title: str, request_title: str) -> str | None:
-    """Determine if a task requires a scoped memory key.
+    """Return an OVERRIDE memory scope for special system tasks.
 
-    Returns 'user' for per-user tasks, 'org_shared_only' for shared-only tasks,
-    or None for tasks that use the daemon's normal key.
+    Returns:
+        - 'org_shared_only' for org-wide maintenance schedules (consolidation
+          etc.) that have no single owning user and must operate only on
+          shared org memories.
+        - None for everything else, which means the dispatcher will use its
+          default of 'user' scoped to the request's owning user. This is the
+          security floor: every user-initiated task runs under the user's
+          ACL. There is no opt-out — including auto-created post-completion
+          review tasks, which previously bypassed scoping and incorrectly
+          ran with daemon-wide org access.
     """
-    # Auto-created post-completion review tasks must NEVER inherit memory scope
-    # from their parent request's title. A review of a per-user or org-shared
-    # request still needs the daemon's full memory access so it can read the
-    # task outputs and update linked goal memories regardless of scope.
-    if (task_title or "").strip().lower() == REQUEST_REVIEW_TASK_TITLE.lower():
-        return None
-
     # Check the request title (schedule-generated requests use [Scheduled] prefix)
     clean_title = request_title.replace("[Scheduled] ", "")
 
-    if clean_title in _PER_USER_SCHEDULE_TITLES:
-        return "user"
     if clean_title in _ORG_SHARED_SCHEDULE_TITLES:
         return "org_shared_only"
+    # 'user' scope is the dispatcher's default; per-user schedules don't
+    # need to be enumerated here anymore.
     return None
 
 
@@ -4135,7 +4132,22 @@ class LucentDaemon:
                 finally:
                     set_current_user(None)
 
-            # Determine memory scope for this task
+            # Determine memory scope for this task.
+            #
+            # Security model: a sub-agent executing a task MUST only see
+            # what the requesting user can see. We mint a user-scoped key
+            # for the request's creator so all memory ops run within that
+            # user's ACL — including reads of linked goals, writes of new
+            # memories, and updates of existing ones. The agent cannot read
+            # other users' private memories regardless of prompt content.
+            #
+            # The previous behavior — falling back to the daemon's unscoped
+            # key for tasks like post-completion review — broke this model
+            # by giving sub-agents org-wide read access. That's reverted.
+            # Per-user scope is the security boundary; nothing exempts it.
+            #
+            # Org-shared-only is reserved for system-level org maintenance
+            # (memory consolidation etc.) where there's no single owning user.
             _request_title = ""
             if request_id:
                 try:
@@ -4143,11 +4155,23 @@ class LucentDaemon:
                     _request_title = (_req or {}).get("title", "")
                 except Exception:
                     pass
-            _scope_type = _get_required_memory_scope(title, _request_title)
 
-            if _scope_type and MCP_CONFIG.get("memory-server"):
-                # Mint a scoped key for memory isolation
-                _scope_user = requesting_user_id if _scope_type == "user" else None
+            _scope_type: str | None
+            _scope_user: str | None
+            _override_scope = _get_required_memory_scope(title, _request_title)
+            if _override_scope == "org_shared_only":
+                # System maintenance task — operates on shared org memories only.
+                _scope_type = "org_shared_only"
+                _scope_user = None
+            else:
+                # Default and overwhelmingly the common case: scope to the
+                # request's owning user. This holds even for auto-created
+                # post-completion review tasks, which previously bypassed
+                # scoping and ran with daemon org-wide access.
+                _scope_type = "user"
+                _scope_user = requesting_user_id
+
+            if MCP_CONFIG.get("memory-server"):
                 _scoped_key = await _mint_scoped_api_key(
                     memory_scope=_scope_type,
                     memory_scope_user_id=_scope_user,
@@ -4164,11 +4188,17 @@ class LucentDaemon:
                     log(f"Task {task_id[:8]} using {_scope_type} scoped key"
                         f" (user: {_scope_user[:8] if _scope_user else 'shared'})")
                 else:
-                    log(f"Failed to mint scoped key for {task_id[:8]} — "
-                        "falling back to daemon key", "WARN")
-                    task_mcp_config["memory-server"] = MCP_CONFIG["memory-server"]
-            elif MCP_CONFIG.get("memory-server"):
-                task_mcp_config["memory-server"] = MCP_CONFIG["memory-server"]
+                    # Mint failure is a security-sensitive event — refuse to
+                    # dispatch rather than silently fall back to a key with
+                    # broader access than the user is entitled to.
+                    reason = (
+                        f"Failed to mint {_scope_type} scoped key for "
+                        f"requesting user {requesting_user_id[:8]}"
+                    )
+                    log(reason, "ERROR")
+                    await _fail_owned(task_id, reason)
+                    await RequestAPI.add_event(task_id, "dispatch_denied", reason)
+                    continue
 
             # Mark running only after requester-scoped resources resolve successfully
             await _start_owned(task_id)

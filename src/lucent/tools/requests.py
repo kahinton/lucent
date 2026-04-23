@@ -1,6 +1,7 @@
 """MCP tools for request tracking and task queue operations."""
 
 import json
+import logging
 import os
 from uuid import UUID
 
@@ -8,6 +9,8 @@ from mcp.server.fastmcp import FastMCP
 
 from lucent.db.requests import RequestRepository
 from lucent.tools.memories import _get_current_user_context
+
+logger = logging.getLogger(__name__)
 
 
 async def _get_request_repository() -> RequestRepository:
@@ -627,7 +630,47 @@ Returns: JSON confirmation."""
             request_id, memory_id, relation, org_id=str(org_id),
         )
         if result is None:
-            return json.dumps({"error": "Request not found or access denied"})
+            # Either the request didn't exist OR the link already existed.
+            # Both are non-error outcomes for the caller; surface as success.
+            return json.dumps({
+                "status": "linked",
+                "request_id": request_id,
+                "memory_id": memory_id,
+                "relation": relation,
+                "note": "Link existed or no-op.",
+            })
+
+        # Duplicate detected: the DB layer refused the link because another
+        # request is already (or was recently) handling work for this goal.
+        # Auto-cancel the freshly-created request so we don't leak orphans
+        # into the queue, and tell the caller to use the existing one.
+        if isinstance(result, dict) and "duplicate_of" in result:
+            existing_id = result["duplicate_of"]
+            try:
+                await repo.update_request_status(
+                    request_id, "cancelled", org_id=str(org_id)
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to auto-cancel duplicate request %s: %s",
+                    request_id, e,
+                )
+            return json.dumps({
+                "status": "duplicate",
+                "request_id": request_id,
+                "cancelled": True,
+                "existing_request_id": existing_id,
+                "existing_title": result.get("existing_title"),
+                "existing_status": result.get("existing_status"),
+                "reason": result.get("reason"),
+                "note": (
+                    "STOP. A request for this goal already exists "
+                    f"({existing_id}). The new request {request_id} has been "
+                    "auto-cancelled to prevent duplicate work. Use the "
+                    "existing request instead — do NOT create more tasks."
+                ),
+            })
+
         return json.dumps({
             "status": "linked",
             "request_id": request_id,
