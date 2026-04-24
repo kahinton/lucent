@@ -592,8 +592,10 @@
                         </span>
                         {% endif %}
                     </div>
-                    <p class="text-xs text-gray-700 line-clamp-2">{{ mem.content[:150] }}{% if mem.content|length > 150 %}…{% endif %}</p>
-                    <div class="text-[10px] text-gray-400 mt-0.5 font-mono">{{ (mem.memory_id | string)[:8] }}</div>
+                    <a href="/memories/{{ mem.memory_id }}" class="block group">
+                        <p class="text-xs text-gray-700 group-hover:text-primary-600 group-hover:underline line-clamp-2">{{ mem.content[:150] }}{% if mem.content|length > 150 %}…{% endif %}</p>
+                        <div class="text-[10px] text-gray-400 group-hover:text-primary-500 mt-0.5 font-mono">{{ (mem.memory_id | string)[:8] }}</div>
+                    </a>
                 </div>
                 {% endfor %}
             </div>
