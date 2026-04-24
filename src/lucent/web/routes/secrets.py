@@ -123,7 +123,7 @@ async def create_secret_web(request: Request):
 
     if not key or not value:
         return RedirectResponse(
-            f"/secrets?error={quote('Key and value are required.')}",
+            f"/settings/secrets?error={quote('Key and value are required.')}",
             status_code=303,
         )
 
@@ -147,7 +147,7 @@ async def create_secret_web(request: Request):
 
     provider = SecretRegistry.get()
     await provider.set(key, value, scope)
-    return RedirectResponse("/secrets?success=Secret+created", status_code=303)
+    return RedirectResponse("/settings/secrets?success=Secret+created", status_code=303)
 
 
 @router.post("/secrets/{key}/delete")
@@ -178,4 +178,4 @@ async def delete_secret_web(request: Request, key: str):
     deleted = await provider.delete(key, scope)
     if not deleted:
         raise HTTPException(status_code=404, detail="Secret not found")
-    return RedirectResponse("/secrets?success=Secret+deleted", status_code=303)
+    return RedirectResponse("/settings/secrets?success=Secret+deleted", status_code=303)

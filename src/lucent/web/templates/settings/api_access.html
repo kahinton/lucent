@@ -1,0 +1,61 @@
+{% extends "settings_layout.html" %}
+{% set settings_section = "api-access" %}
+{% set settings_title = "API Access" %}
+{% set settings_subtitle = "Endpoints, examples, and client configuration." %}
+
+{% block settings_content %}
+<div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+    <div class="p-6">
+        <p class="text-sm text-gray-600 mb-4">Use these endpoints to integrate Lucent with your tools:</p>
+        <table class="w-full">
+            <tbody class="divide-y divide-gray-100">
+                <tr>
+                    <td class="py-3 text-sm font-medium text-gray-700 w-32">MCP Server</td>
+                    <td class="py-3"><code class="text-sm font-mono bg-gray-100 text-gray-800 px-3 py-1 rounded">{{ base_url }}/mcp</code></td>
+                </tr>
+                <tr>
+                    <td class="py-3 text-sm font-medium text-gray-700">REST API</td>
+                    <td class="py-3"><code class="text-sm font-mono bg-gray-100 text-gray-800 px-3 py-1 rounded">{{ base_url }}/api</code></td>
+                </tr>
+                <tr>
+                    <td class="py-3 text-sm font-medium text-gray-700">API Docs</td>
+                    <td class="py-3"><a href="/api/docs" target="_blank" rel="noopener" class="text-sm text-primary-600 hover:text-primary-700">{{ base_url }}/api/docs →</a></td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+    <div class="px-6 py-4 border-b border-gray-100"><h3 class="text-base font-semibold text-gray-900">Example: REST</h3></div>
+    <div class="p-6">
+        <pre class="text-xs font-mono bg-gray-900 text-gray-100 p-4 rounded-lg overflow-x-auto"><span class="text-gray-500"># Search memories</span>
+curl "{{ base_url }}/api/search?query=python" \
+  -H "Authorization: Bearer hs_your_api_key_here"
+
+<span class="text-gray-500"># Create a memory</span>
+curl -X POST "{{ base_url }}/api/memories" \
+  -H "Authorization: Bearer hs_your_api_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"type": "technical", "content": "How to fix X..."}'</pre>
+    </div>
+</div>
+
+<div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+    <div class="px-6 py-4 border-b border-gray-100"><h3 class="text-base font-semibold text-gray-900">VS Code MCP</h3></div>
+    <div class="p-6">
+        <p class="text-sm text-gray-600 mb-3">Drop this into <code class="text-xs bg-gray-100 px-1 py-0.5 rounded">.vscode/mcp.json</code>:</p>
+        <pre class="text-xs font-mono bg-gray-900 text-gray-100 p-4 rounded-lg overflow-x-auto">{
+  "servers": {
+    "lucent": {
+      "url": "{{ base_url }}/mcp",
+      "type": "http",
+      "headers": {
+        "Authorization": "Bearer hs_your_api_key_here"
+      }
+    }
+  }
+}</pre>
+    </div>
+</div>
+{% endblock %}

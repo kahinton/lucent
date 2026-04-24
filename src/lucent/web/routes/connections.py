@@ -278,7 +278,7 @@ async def oauth_start_web(request: Request):
             actor_role=user.role.value,
             request_body=OAuthStartRequest(
                 provider=provider,
-                redirect_uri=body.get("redirect_uri", f"{request.base_url}connections/oauth/callback"),
+                redirect_uri=body.get("redirect_uri", f"{request.base_url}settings/connections/oauth/callback"),
                 scopes=body.get("scopes"),
             ),
         )
@@ -314,16 +314,16 @@ async def oauth_callback_web(request: Request):
             request_body=OAuthCallbackRequest(
                 code=code,
                 state=state,
-                redirect_uri=f"{request.base_url}connections/oauth/callback",
+                redirect_uri=f"{request.base_url}settings/connections/oauth/callback",
             ),
         )
         # Redirect back to connections page with success
         from fastapi.responses import RedirectResponse
-        return RedirectResponse(url="/connections?connected=true", status_code=303)
+        return RedirectResponse(url="/settings/connections?connected=true", status_code=303)
     except Exception as e:
         logger.error("OAuth callback failed: %s", e)
         from fastapi.responses import RedirectResponse
-        return RedirectResponse(url=f"/connections?error={str(e)[:100]}", status_code=303)
+        return RedirectResponse(url=f"/settings/connections?error={str(e)[:100]}", status_code=303)
 
 
 @router.post("/connections/{credential_id}/revoke")
@@ -338,4 +338,4 @@ async def revoke_connection_web(request: Request, credential_id: str):
     await repo.delete_credential(credential_id, str(user.organization_id))
     
     from fastapi.responses import RedirectResponse
-    return RedirectResponse(url="/connections", status_code=303)
+    return RedirectResponse(url="/settings/connections", status_code=303)

@@ -1,16 +1,17 @@
-{% extends "base.html" %}
-{% block title %}Models - Lucent{% endblock %}
-{% block content %}
-<div class="mb-8">
-    <div class="flex items-center justify-between mb-2">
-        <div>
-            <h1 class="text-2xl font-bold text-gray-900">Models</h1>
-            <p class="text-sm text-gray-500">{{ enabled_count }} of {{ total_count }} models enabled</p>
-        </div>
-        <button onclick="document.getElementById('add-model-modal').classList.remove('hidden')" class="px-4 py-2 text-sm bg-primary-600 text-white rounded-md hover:bg-primary-700 font-medium">+ Add Model</button>
-    </div>
-</div>
+{% extends "settings_layout.html" %}
 
+{% set settings_section = "models" %}
+{% set settings_title = "AI Models" %}
+{% set settings_subtitle = "Configure which models are available for daemon tasks." %}
+
+{% block title %}Models - Lucent{% endblock %}
+
+{% block settings_actions %}
+    <span class="text-xs text-gray-500">{{ enabled_count }} of {{ total_count }} enabled</span>
+    <button onclick="document.getElementById('add-model-modal').classList.remove('hidden')" class="px-4 py-2 text-sm bg-primary-600 text-white rounded-md hover:bg-primary-700 font-medium">+ Add Model</button>
+{% endblock %}
+
+{% block settings_content %}
 {% if request.query_params.get('error') %}
 <div class="mb-4 bg-red-50 border border-red-200 rounded-xl p-4">
     <p class="text-sm font-medium text-red-800">{{ request.query_params.get('error') }}</p>
@@ -99,13 +100,13 @@
                                 data-supports-vision="{{ 'true' if model.supports_vision else 'false' }}"
                                 data-engine="{{ model.engine or '' }}"
                                 class="px-3 py-1 text-xs rounded-md font-medium bg-primary-50 text-primary-700 hover:bg-primary-100">Edit</button>
-                            <form method="POST" action="/models/{{ model.id }}/toggle">
+                            <form method="POST" action="/settings/models/{{ model.id }}/toggle">
                                 <button type="submit" class="px-3 py-1 text-xs rounded-md font-medium
                                     {% if model.is_enabled %}bg-gray-100 text-gray-700 hover:bg-gray-200{% else %}bg-green-50 text-green-700 hover:bg-green-100{% endif %}">
                                     {% if model.is_enabled %}Disable{% else %}Enable{% endif %}
                                 </button>
                             </form>
-                            <form method="POST" action="/models/{{ model.id }}/delete" onsubmit="return confirm('Remove {{ model.name }}?')">
+                            <form method="POST" action="/settings/models/{{ model.id }}/delete" onsubmit="return confirm('Remove {{ model.name }}?')">
                                 <button type="submit" class="px-3 py-1 text-xs rounded-md font-medium bg-red-50 text-red-700 hover:bg-red-100">Remove</button>
                             </form>
                         </div>
@@ -125,7 +126,7 @@
             <h3 class="text-lg font-semibold text-gray-900">Add Model</h3>
             <button onclick="document.getElementById('add-model-modal').classList.add('hidden')" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
         </div>
-        <form method="POST" action="/models/add" class="space-y-4">
+        <form method="POST" action="/settings/models/add" class="space-y-4">
             <div class="grid grid-cols-2 gap-4">
                 <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">Model ID</label>

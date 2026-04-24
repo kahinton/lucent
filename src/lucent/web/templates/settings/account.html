@@ -1,0 +1,84 @@
+{% extends "settings_layout.html" %}
+{% set settings_section = "account" %}
+{% set settings_title = "Profile & Security" %}
+{% set settings_subtitle = "Your personal profile and password." %}
+
+{% block settings_content %}
+<!-- Profile -->
+<div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+    <div class="px-6 py-4 border-b border-gray-100 flex items-center gap-3">
+        <svg class="w-5 h-5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z"/></svg>
+        <h3 class="text-base font-semibold text-gray-900">Your Profile</h3>
+    </div>
+    <div class="p-6">
+        <form action="/settings/profile" method="post" class="space-y-4">
+            <div class="flex items-start gap-6">
+                <div class="flex items-center justify-center w-20 h-20 rounded-full bg-gradient-to-br from-primary-400 to-primary-600 text-white text-2xl font-bold shadow-lg flex-shrink-0">
+                    {{ (user.display_name or user.email or 'U')[0] | upper }}
+                </div>
+                <div class="flex-1 grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                        <label class="block text-xs font-medium text-gray-500 uppercase tracking-wider mb-1">Display Name</label>
+                        <input type="text" name="display_name" value="{{ user.display_name or '' }}" maxlength="120"
+                            class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500">
+                    </div>
+                    <div>
+                        <label class="block text-xs font-medium text-gray-500 uppercase tracking-wider mb-1">Email</label>
+                        <p class="px-3 py-2 text-sm text-gray-700 bg-gray-50 rounded-lg border border-gray-200">{{ user.email or '—' }}</p>
+                        <p class="mt-1 text-xs text-gray-400">Email is set by your identity provider.</p>
+                    </div>
+                    <div>
+                        <label class="block text-xs font-medium text-gray-500 uppercase tracking-wider mb-1">Role</label>
+                        <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium
+                            {% set rv = (user.role.value if user.role.__class__.__name__ == 'Role' else user.role) %}
+                            {% if rv == 'owner' %}bg-purple-100 text-purple-700
+                            {% elif rv == 'admin' %}bg-blue-100 text-blue-700
+                            {% else %}bg-gray-100 text-gray-700{% endif %}">
+                            {{ rv | capitalize }}
+                        </span>
+                    </div>
+                    <div>
+                        <label class="block text-xs font-medium text-gray-500 uppercase tracking-wider mb-1">User ID</label>
+                        <p class="text-xs font-mono text-gray-600 bg-gray-100 px-2 py-1 rounded inline-block select-all">{{ user.id }}</p>
+                    </div>
+                </div>
+            </div>
+            <div class="flex justify-end">
+                <button type="submit" class="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 text-sm font-medium">Save profile</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Change Password -->
+<div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+    <div class="px-6 py-4 border-b border-gray-100 flex items-center gap-3">
+        <svg class="w-5 h-5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z"/></svg>
+        <h3 class="text-base font-semibold text-gray-900">Change Password</h3>
+    </div>
+    <div class="p-6">
+        <form action="/settings/password" method="post" class="space-y-4 max-w-md">
+            <div>
+                <label for="current_password" class="block text-sm font-medium text-gray-700 mb-1">Current password</label>
+                <input type="password" id="current_password" name="current_password" required
+                    class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-500">
+            </div>
+            <div>
+                <label for="new_password" class="block text-sm font-medium text-gray-700 mb-1">New password</label>
+                <input type="password" id="new_password" name="new_password" required minlength="12"
+                    class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-500">
+                <p class="mt-1 text-xs text-gray-500">At least 12 characters with upper, lower, digit, and symbol.</p>
+            </div>
+            <div>
+                <label for="confirm_password" class="block text-sm font-medium text-gray-700 mb-1">Confirm new password</label>
+                <input type="password" id="confirm_password" name="confirm_password" required minlength="12"
+                    class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-500">
+            </div>
+            <div class="flex items-center gap-3">
+                <button type="submit" class="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 text-sm font-medium">Update password</button>
+                <p class="text-xs text-gray-500">Changing your password will sign you out of other sessions.</p>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}

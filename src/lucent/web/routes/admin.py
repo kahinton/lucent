@@ -18,7 +18,8 @@ from lucent.auth_providers import (
     hash_session_token,
     sign_value,
 )
-from lucent.db import UserRepository, get_pool
+from lucent.db import AdminAuditRepository, UserRepository, get_pool
+from lucent.db import admin_audit as audit_actions
 from lucent.llm.model_engine_validation import normalize_engine, validate_engine_override
 from lucent.logging import get_logger
 from lucent.mode import is_team_mode
@@ -111,7 +112,7 @@ async def users_list(
     )
     # Clear the temp password ref cookie after reading
     if ref:
-        response.delete_cookie("lucent_temp_pw_ref", path="/users")
+        response.delete_cookie("lucent_temp_pw_ref", path="/settings/users")
     return response
 
 
@@ -159,7 +160,7 @@ async def create_user(
         if u.get("email") == email:
             # Redirect back with error
             return RedirectResponse(
-                url=f"/users?error=User+with+email+{email}+already+exists",
+                url=f"/settings/users?error=User+with+email+{email}+already+exists",
                 status_code=303,
             )
 
@@ -182,8 +183,20 @@ async def create_user(
     temp_password = secrets.token_urlsafe(12)
     await set_user_password(pool, new_user["id"], temp_password)
 
+    # Audit-log creation. Avoids logging password — only metadata.
+    audit_repo = AdminAuditRepository(pool)
+    await audit_repo.log_for_user(
+        user, request,
+        action=audit_actions.USER_CREATE,
+        entity_type="user",
+        entity_id=new_user["id"],
+        entity_label=display_name or email,
+        new_values={"email": email, "role": role, "display_name": display_name},
+        notes="member created via /users/create; temp password issued",
+    )
+
     # Store temp password server-side with opaque reference token (M6)
-    response = RedirectResponse(url="/users?success=user_created", status_code=303)
+    response = RedirectResponse(url="/settings/users?success=user_created", status_code=303)
     _cleanup_temp_pw_store()
     if len(_temp_pw_store) >= _TEMP_PW_MAX_ENTRIES:
         _temp_pw_store.clear()
@@ -196,7 +209,7 @@ async def create_user(
         samesite="lax",
         secure=SECURE_COOKIES,
         max_age=60,
-        path="/users",
+        path="/settings/users",
     )
     return response
 
@@ -217,7 +230,7 @@ async def reset_user_password_web(request: Request, user_id: UUID):
     # Can't reset own password via this endpoint
     if user_id == user.id:
         return RedirectResponse(
-            url="/users?error=Use+Settings+to+change+your+own+password", status_code=303
+            url="/settings/users?error=Use+Settings+to+change+your+own+password", status_code=303
         )
 
     pool = await get_pool()
@@ -225,24 +238,34 @@ async def reset_user_password_web(request: Request, user_id: UUID):
 
     target = await user_repo.get_by_id(user_id)
     if target is None:
-        return RedirectResponse(url="/users?error=User+not+found", status_code=303)
+        return RedirectResponse(url="/settings/users?error=User+not+found", status_code=303)
 
     if target.get("organization_id") != user.organization_id:
-        return RedirectResponse(url="/users?error=User+not+found", status_code=303)
+        return RedirectResponse(url="/settings/users?error=User+not+found", status_code=303)
 
     from lucent.rbac import can_manage_user
 
     if not can_manage_user(user_role_value, target.get("role", "member")):
         return RedirectResponse(
-            url="/users?error=You+cannot+manage+this+user", status_code=303
+            url="/settings/users?error=You+cannot+manage+this+user", status_code=303
         )
 
     from lucent.auth_providers import admin_reset_password
 
     temp_password = await admin_reset_password(pool, user_id)
 
+    audit_repo = AdminAuditRepository(pool)
+    await audit_repo.log_for_user(
+        user, request,
+        action=audit_actions.USER_PASSWORD_RESET,
+        entity_type="user",
+        entity_id=user_id,
+        entity_label=target.get("display_name") or target.get("email"),
+        notes="admin-initiated password reset",
+    )
+
     # Store temp password server-side with opaque reference token (M6)
-    response = RedirectResponse(url="/users?success=password_reset", status_code=303)
+    response = RedirectResponse(url="/settings/users?success=password_reset", status_code=303)
     _cleanup_temp_pw_store()
     if len(_temp_pw_store) >= _TEMP_PW_MAX_ENTRIES:
         _temp_pw_store.clear()
@@ -255,7 +278,7 @@ async def reset_user_password_web(request: Request, user_id: UUID):
         samesite="lax",
         secure=SECURE_COOKIES,
         max_age=60,
-        path="/users",
+        path="/settings/users",
     )
     return response
 
@@ -275,7 +298,7 @@ async def start_impersonation(request: Request, user_id: UUID):
 
     # Can't impersonate yourself
     if user_id == user.id:
-        return RedirectResponse(url="/users?error=Cannot+impersonate+yourself", status_code=303)
+        return RedirectResponse(url="/settings/users?error=Cannot+impersonate+yourself", status_code=303)
 
     pool = await get_pool()
     user_repo = UserRepository(pool)
@@ -292,10 +315,10 @@ async def start_impersonation(request: Request, user_id: UUID):
     target_role = target.get("role", "member")
     if user_role_value == "admin" and target_role != "member":
         return RedirectResponse(
-            url="/users?error=Admins+can+only+impersonate+members", status_code=303
+            url="/settings/users?error=Admins+can+only+impersonate+members", status_code=303
         )
     if user_role_value == "owner" and target_role == "owner":
-        return RedirectResponse(url="/users?error=Cannot+impersonate+other+owners", status_code=303)
+        return RedirectResponse(url="/settings/users?error=Cannot+impersonate+other+owners", status_code=303)
 
     # Regenerate session to prevent session fixation during impersonation
     try:
@@ -303,6 +326,15 @@ async def start_impersonation(request: Request, user_id: UUID):
     except Exception:
         logger.exception("Error regenerating session for impersonation")
         raise HTTPException(status_code=500, detail="Failed to start impersonation")
+
+    audit_repo = AdminAuditRepository(pool)
+    await audit_repo.log_for_user(
+        user, request,
+        action=audit_actions.IMPERSONATION_START,
+        entity_type="user",
+        entity_id=user_id,
+        entity_label=target.get("display_name") or target.get("email"),
+    )
 
     # Set signed impersonation cookie and new session cookie, then redirect
     # Bind the impersonation cookie to this session to prevent cookie theft
@@ -330,10 +362,163 @@ async def stop_impersonation(request: Request):
     if not is_team_mode():
         raise HTTPException(status_code=404, detail="Impersonation requires team mode")
     await _check_csrf(request)
-    response = RedirectResponse(url="/users", status_code=303)
+    # Best-effort audit. The current user context is the impersonated user; the
+    # impersonator is captured via CurrentUser.impersonator_id when available.
+    try:
+        user = await get_user_context(request)
+        pool = await get_pool()
+        audit_repo = AdminAuditRepository(pool)
+        await audit_repo.log_for_user(
+            user, request,
+            action=audit_actions.IMPERSONATION_STOP,
+            entity_type="user",
+            entity_id=user.id,
+        )
+    except Exception:
+        logger.debug("impersonation stop audit log failed", exc_info=True)
+    response = RedirectResponse(url="/settings/users", status_code=303)
     params = get_cookie_params()
     response.delete_cookie(key="lucent_impersonate", **params)
     return response
+
+
+# =============================================================================
+# Members — role change / deactivate / reactivate (added M5 settings redesign)
+# =============================================================================
+
+
+async def _load_target_user(
+    pool, *, caller, target_user_id: UUID
+) -> tuple[dict | None, str | None]:
+    """Fetch a target user and validate same-org membership.
+
+    Returns (target, error_message). target is None when validation fails.
+    """
+    user_repo = UserRepository(pool)
+    target = await user_repo.get_by_id(target_user_id)
+    if not target or target.get("organization_id") != caller.organization_id:
+        return None, "User not found"
+    return target, None
+
+
+@router.post("/users/{user_id}/role")
+async def change_user_role(request: Request, user_id: UUID, role: str = Form(...)):
+    """Change a user's role. Owners only."""
+    if not is_team_mode():
+        raise HTTPException(status_code=404, detail="Member management requires team mode")
+    await _check_csrf(request)
+    user = await get_user_context(request)
+    caller_role = user.role if isinstance(user.role, str) else user.role.value
+    if caller_role != "owner":
+        raise HTTPException(status_code=403, detail="Only owners can change roles")
+    if user_id == user.id:
+        return RedirectResponse("/settings/users?error=You+cannot+change+your+own+role", status_code=303)
+    if role not in ("member", "admin"):
+        return RedirectResponse("/settings/users?error=Invalid+role", status_code=303)
+
+    pool = await get_pool()
+    target, err = await _load_target_user(pool, caller=user, target_user_id=user_id)
+    if not target:
+        return RedirectResponse(f"/settings/users?error={quote_plus(err or 'User not found')}", status_code=303)
+    if target.get("role") == "owner":
+        return RedirectResponse("/settings/users?error=Cannot+change+the+owner+role+here", status_code=303)
+
+    user_repo = UserRepository(pool)
+    audit_repo = AdminAuditRepository(pool)
+    old_role = target.get("role", "member")
+    if old_role == role:
+        return RedirectResponse("/settings/users?success=Role+unchanged", status_code=303)
+
+    await user_repo.update_role(user_id, role)
+    await audit_repo.log_for_user(
+        user, request,
+        action=audit_actions.USER_ROLE_CHANGE,
+        entity_type="user",
+        entity_id=user_id,
+        entity_label=target.get("display_name") or target.get("email"),
+        changed_fields=["role"],
+        old_values={"role": old_role},
+        new_values={"role": role},
+    )
+    return RedirectResponse("/settings/users?success=Role+updated", status_code=303)
+
+
+@router.post("/users/{user_id}/deactivate")
+async def deactivate_user(request: Request, user_id: UUID):
+    """Disable a user account (admin/owner). Cannot deactivate self or owner."""
+    if not is_team_mode():
+        raise HTTPException(status_code=404, detail="Member management requires team mode")
+    await _check_csrf(request)
+    user = await get_user_context(request)
+    caller_role = user.role if isinstance(user.role, str) else user.role.value
+    if caller_role not in ("admin", "owner"):
+        raise HTTPException(status_code=403, detail="Permission denied")
+    if user_id == user.id:
+        return RedirectResponse("/settings/users?error=You+cannot+deactivate+yourself", status_code=303)
+
+    pool = await get_pool()
+    target, err = await _load_target_user(pool, caller=user, target_user_id=user_id)
+    if not target:
+        return RedirectResponse(f"/settings/users?error={quote_plus(err or 'User not found')}", status_code=303)
+
+    from lucent.rbac import can_manage_user
+    if not can_manage_user(caller_role, target.get("role", "member")):
+        return RedirectResponse("/settings/users?error=You+cannot+deactivate+this+user", status_code=303)
+    if target.get("role") == "owner":
+        return RedirectResponse("/settings/users?error=Cannot+deactivate+the+owner", status_code=303)
+
+    user_repo = UserRepository(pool)
+    await user_repo.update(user_id, is_active=False)
+    # Also kill any active session for them.
+    from lucent.auth_providers import destroy_session
+    try:
+        await destroy_session(pool, user_id)
+    except Exception:
+        logger.debug("failed to destroy sessions for deactivated user", exc_info=True)
+
+    audit_repo = AdminAuditRepository(pool)
+    await audit_repo.log_for_user(
+        user, request,
+        action=audit_actions.USER_DEACTIVATE,
+        entity_type="user",
+        entity_id=user_id,
+        entity_label=target.get("display_name") or target.get("email"),
+    )
+    return RedirectResponse("/settings/users?success=Member+deactivated", status_code=303)
+
+
+@router.post("/users/{user_id}/reactivate")
+async def reactivate_user(request: Request, user_id: UUID):
+    """Re-enable a user account (admin/owner)."""
+    if not is_team_mode():
+        raise HTTPException(status_code=404, detail="Member management requires team mode")
+    await _check_csrf(request)
+    user = await get_user_context(request)
+    caller_role = user.role if isinstance(user.role, str) else user.role.value
+    if caller_role not in ("admin", "owner"):
+        raise HTTPException(status_code=403, detail="Permission denied")
+
+    pool = await get_pool()
+    target, err = await _load_target_user(pool, caller=user, target_user_id=user_id)
+    if not target:
+        return RedirectResponse(f"/settings/users?error={quote_plus(err or 'User not found')}", status_code=303)
+
+    from lucent.rbac import can_manage_user
+    if not can_manage_user(caller_role, target.get("role", "member")):
+        return RedirectResponse("/settings/users?error=You+cannot+reactivate+this+user", status_code=303)
+
+    user_repo = UserRepository(pool)
+    await user_repo.update(user_id, is_active=True)
+
+    audit_repo = AdminAuditRepository(pool)
+    await audit_repo.log_for_user(
+        user, request,
+        action=audit_actions.USER_REACTIVATE,
+        entity_type="user",
+        entity_id=user_id,
+        entity_label=target.get("display_name") or target.get("email"),
+    )
+    return RedirectResponse("/settings/users?success=Member+reactivated", status_code=303)
 
 
 # =============================================================================
@@ -426,7 +611,7 @@ async def toggle_model(request: Request, model_id: str):
         raise HTTPException(status_code=404, detail="Model not found")
 
     await repo.toggle_model(model_id, not model["is_enabled"])
-    return RedirectResponse(url="/models", status_code=303)
+    return RedirectResponse(url="/settings/models", status_code=303)
 
 
 @router.post("/models/{model_id:path}/edit")
@@ -476,12 +661,12 @@ async def add_model(request: Request):
     form = await request.form()
     model_id = form.get("model_id", "").strip()
     if not model_id:
-        return RedirectResponse(url="/models?error=Model+ID+is+required", status_code=303)
+        return RedirectResponse(url="/settings/models?error=Model+ID+is+required", status_code=303)
 
     repo = ModelRepository(pool)
     existing = await repo.get_model(model_id)
     if existing:
-        return RedirectResponse(url="/models?error=Model+ID+already+exists", status_code=303)
+        return RedirectResponse(url="/settings/models?error=Model+ID+already+exists", status_code=303)
     provider = form.get("provider", "openai")
     engine, warnings, error = _validate_engine_form(provider, form.get("engine"))
     if error:
@@ -516,4 +701,4 @@ async def delete_model(request: Request, model_id: str):
 
     repo = ModelRepository(pool)
     await repo.delete_model(model_id)
-    return RedirectResponse(url="/models?success=Model+removed", status_code=303)
+    return RedirectResponse(url="/settings/models?success=Model+removed", status_code=303)

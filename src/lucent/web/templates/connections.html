@@ -1,13 +1,12 @@
-{% extends "base.html" %}
+{% extends "settings_layout.html" %}
+
+{% set settings_section = "connections" %}
+{% set settings_title = "Connections" %}
+{% set settings_subtitle = "Connect Lucent to your tools — via environment tokens, personal access tokens, or OAuth." %}
 
 {% block title %}Connections - Lucent{% endblock %}
 
-{% block content %}
-<div class="mb-8">
-    <h1 class="text-2xl font-bold text-gray-900">Connections</h1>
-    <p class="mt-1 text-sm text-gray-500">Connect Lucent to your tools — via environment tokens, personal access tokens, or OAuth</p>
-</div>
-
+{% block settings_content %}
 {% if request.query_params.get('connected') %}
 <div class="mb-6 px-4 py-3 bg-green-50 border border-green-200 rounded-lg text-sm text-green-700">
     ✓ Successfully connected! Your integration is now active.
@@ -93,7 +92,7 @@
                 {% endif %}
             </div>
             <div class="mt-3">
-                <form method="POST" action="/connections/{{ cred.id }}/revoke">
+                <form method="POST" action="/settings/connections/{{ cred.id }}/revoke">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                     <button type="submit" class="px-3 py-1.5 text-xs font-medium text-red-600 bg-red-50 border border-red-200 rounded-lg hover:bg-red-100 transition-colors">Disconnect</button>
                 </form>
@@ -225,7 +224,7 @@ document.querySelectorAll('[data-oauth-connect]').forEach(btn => {
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({
                     provider: provider,
-                    redirect_uri: window.location.origin + '/connections/oauth/callback',
+                    redirect_uri: window.location.origin + '/settings/connections/oauth/callback',
                 }),
             });
             const data = await resp.json();

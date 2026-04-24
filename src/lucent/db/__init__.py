@@ -16,6 +16,7 @@ Repositories:
 
 # Pool management
 from lucent.db.access import AccessRepository
+from lucent.db.admin_audit import AdminAuditRepository
 from lucent.db.api_key import ApiKeyRepository
 from lucent.db.audit import AuditRepository
 
@@ -66,6 +67,7 @@ __all__ = [
     "ApiKeyRepository",
     "OrganizationRepository",
     "AuditRepository",
+    "AdminAuditRepository",
     "AccessRepository",
     "ModelRepository",
     "ReviewRepository",
