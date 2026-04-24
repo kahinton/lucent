@@ -15,7 +15,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-logger = logging.getLogger("sandbox.mcp_bridge")
+logger = logging.getLogger(__name__)
 
 # Memory-server tools tracked for observability
 _MEMORY_TOOL_NAMES = frozenset({
@@ -256,7 +256,7 @@ class MCPBridgeHandler(BaseHTTPRequestHandler):
                     "error": {"code": -32601, "message": f"Method not found: {method}"},
                 }
             )
-        except Exception as exc:
+        except Exception:
             logger.exception("Bridge request failed")
             self._send_json(
                 {

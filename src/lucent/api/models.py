@@ -85,6 +85,15 @@ class SearchRequest(BaseModel):
     created_before: datetime | None = Field(default=None)
     offset: int = Field(default=0, ge=0)
     limit: int = Field(default=20, ge=1, le=100)
+    include_archived: bool = Field(
+        default=False,
+        description=(
+            "Include memories with lifecycle_stage in ('archived','forgotten'). "
+            "When False (default) and the LUCENT_SEARCH_EXCLUDE_ARCHIVED_ENABLED "
+            "rollout flag is on, those rows are excluded; with the flag off this "
+            "field has no effect (baseline SQL preserved)."
+        ),
+    )
 
 
 class SearchResultMemory(BaseModel):
@@ -106,6 +115,7 @@ class SearchResultMemory(BaseModel):
     shared: bool
     last_accessed_at: datetime | None
     access_count: int = 0
+    lifecycle_stage: str | None = None
 
 
 class SearchResponse(BaseModel):

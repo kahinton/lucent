@@ -32,6 +32,22 @@ def search_vitality_boost_enabled() -> bool:
     return _env_bool("LUCENT_SEARCH_VITALITY_BOOST_ENABLED", default=False)
 
 
+def search_exclude_archived_enabled() -> bool:
+    """Whether search excludes ``archived``/``forgotten`` lifecycle stages by default.
+
+    Phase-2 M9 rollout flag, mirroring ``LUCENT_SEARCH_VITALITY_BOOST_ENABLED``.
+
+    - Off (default): the search SQL is byte-identical to the pre-M9 baseline —
+      ``include_archived`` is accepted on the API surface but has no effect on
+      the emitted query, so production behavior is unchanged until an operator
+      opts in.
+    - On: queries with ``include_archived=False`` (the default) get a
+      ``lifecycle_stage NOT IN ('archived', 'forgotten')`` WHERE-clause
+      addition. ``include_archived=True`` callers continue to see all rows.
+    """
+    return _env_bool("LUCENT_SEARCH_EXCLUDE_ARCHIVED_ENABLED", default=False)
+
+
 def search_vitality_boost_alpha() -> float:
     """Weight for vitality contribution in ranked memory search."""
     return _env_float("LUCENT_SEARCH_VITALITY_BOOST_ALPHA", default=0.15)

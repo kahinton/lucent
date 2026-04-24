@@ -17,6 +17,7 @@ from asyncpg import Pool
 
 from lucent.metrics import metrics
 from lucent.settings import (
+    search_exclude_archived_enabled,
     search_vitality_boost_alpha,
     search_vitality_boost_enabled,
     shadow_forget_enabled,
@@ -442,22 +443,40 @@ class MemoryRepository:
         # Auto-sync lifecycle_stage for goal-type memories when
         # metadata.status maps to a known lifecycle stage.  Uses a SQL
         # CASE so non-goal rows are never touched.
+        #
+        # Reconsolidation-on-update (M9 Phase 2, goal 82b41acd): any update
+        # that touches a memory currently in 'consolidating' or 'archived'
+        # promotes it back to 'active'. 'forgotten' rows are awaiting hard
+        # delete and must NOT be reactivated. The goal-sync target wins when
+        # both apply (CASE branches are evaluated top-to-bottom).
+        # Only apply when the caller actually asked for a real field update —
+        # a no-op call still short-circuits to a plain get().
+        goal_target_stage: str | None = None
         if metadata is not None:
-            target_stage = self._resolve_goal_lifecycle_stage("goal", metadata)
-            if target_stage is not None:
-                updates.append(
-                    f"lifecycle_stage = CASE WHEN type = 'goal' "
-                    f"THEN ${param_idx} ELSE lifecycle_stage END"
-                )
-                params.append(target_stage)
-                param_idx += 1
-                logger.info(
-                    "lifecycle auto-sync: memory %s metadata.status=%s → lifecycle_stage=%s "
-                    "(applied only if type=goal)",
-                    memory_id,
-                    metadata.get("status"),
-                    target_stage,
-                )
+            goal_target_stage = self._resolve_goal_lifecycle_stage("goal", metadata)
+
+        if updates and goal_target_stage is not None:
+            updates.append(
+                f"lifecycle_stage = CASE "
+                f"WHEN type = 'goal' THEN ${param_idx} "
+                f"WHEN lifecycle_stage IN ('consolidating', 'archived') THEN 'active' "
+                f"ELSE lifecycle_stage END"
+            )
+            params.append(goal_target_stage)
+            param_idx += 1
+            logger.info(
+                "lifecycle auto-sync: memory %s metadata.status=%s → lifecycle_stage=%s "
+                "(applied only if type=goal)",
+                memory_id,
+                metadata.get("status") if metadata else None,
+                goal_target_stage,
+            )
+        elif updates:
+            updates.append(
+                "lifecycle_stage = CASE "
+                "WHEN lifecycle_stage IN ('consolidating', 'archived') THEN 'active' "
+                "ELSE lifecycle_stage END"
+            )
 
         if not updates:
             return await self.get(memory_id)
@@ -766,6 +785,7 @@ class MemoryRepository:
         memory_scope: str | None = None,
         accessible_repos: list[str] | None = None,
         vitality_boost: bool | None = None,
+        include_archived: bool = False,
     ) -> dict[str, Any]:
         """Search for memories with fuzzy matching and filters.
 
@@ -787,6 +807,15 @@ class MemoryRepository:
             limit: Maximum results to return.
             requesting_user_id: User ID for access control (if provided, enables access control).
             requesting_org_id: Organization ID for access control.
+            include_archived: When False (default) and the
+                ``LUCENT_SEARCH_EXCLUDE_ARCHIVED_ENABLED`` rollout flag is on,
+                memories with ``lifecycle_stage`` in ``('archived', 'forgotten')``
+                are excluded via a WHERE-clause addition. When True, archived
+                and forgotten memories are returned alongside active ones —
+                ``lifecycle_stage`` is already on each result so callers can
+                surface the distinction. With the env flag off (default),
+                this parameter is accepted but has no effect on the emitted
+                SQL — preserving byte-identical baseline behavior.
 
         Returns:
             Search result with memories, total count, and pagination info.
@@ -867,6 +896,16 @@ class MemoryRepository:
             conditions.append(f"id IN ({placeholders})")
             params.extend(str(uid) for uid in memory_ids)
             param_idx += len(memory_ids)
+
+        # M9 Phase-2: lifecycle exclusion is gated behind a rollout flag so
+        # the default emitted SQL stays byte-identical to the pre-M9 baseline
+        # until an operator opts in. Only when the flag is ON and the caller
+        # did NOT request archived rows do we add the WHERE-clause addition.
+        if search_exclude_archived_enabled() and not include_archived:
+            conditions.append(
+                "(lifecycle_stage IS NULL "
+                "OR lifecycle_stage NOT IN ('archived', 'forgotten'))"
+            )
 
         where_clause = " AND ".join(conditions)
 
@@ -970,6 +1009,7 @@ class MemoryRepository:
         memory_scope: str | None = None,
         accessible_repos: list[str] | None = None,
         vitality_boost: bool | None = None,
+        include_archived: bool = False,
     ) -> dict[str, Any]:
         """Search across all text fields: content, tags, and metadata.
 
@@ -990,6 +1030,9 @@ class MemoryRepository:
             limit: Maximum results to return.
             requesting_user_id: User ID for access control (if provided, enables access control).
             requesting_org_id: Organization ID for access control.
+            include_archived: See ``search``. Default-False with the rollout
+                flag off is a no-op (preserves baseline SQL); flag-on excludes
+                ``archived``/``forgotten`` rows unless explicitly included.
 
         Returns:
             Search result with memories, total count, and pagination info.
@@ -1048,6 +1091,15 @@ class MemoryRepository:
             conditions.append(f"importance <= ${param_idx}")
             params.append(importance_max)
             param_idx += 1
+
+        # M9 Phase-2: see ``search`` — gated lifecycle exclusion preserves the
+        # pre-M9 SQL baseline until ``LUCENT_SEARCH_EXCLUDE_ARCHIVED_ENABLED``
+        # is enabled.
+        if search_exclude_archived_enabled() and not include_archived:
+            conditions.append(
+                "(lifecycle_stage IS NULL "
+                "OR lifecycle_stage NOT IN ('archived', 'forgotten'))"
+            )
 
         where_clause = " AND ".join(conditions)
 

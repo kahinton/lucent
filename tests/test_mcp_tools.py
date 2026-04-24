@@ -608,6 +608,114 @@ class TestSearchMemoriesFull:
 
 
 # ============================================================================
+# include_archived (M9 Phase-2)
+# ============================================================================
+
+
+class TestSearchIncludeArchived:
+    """``include_archived`` flag wiring through the MCP search tools."""
+
+    async def _archive(self, db_pool, memory_id):
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE memories SET lifecycle_stage = 'archived' WHERE id = $1",
+                memory_id,
+            )
+
+    async def test_search_memories_default_excludes_archived(
+        self, mcp_tools, auth_user, clean_test_data, db_pool, monkeypatch
+    ):
+        monkeypatch.setenv("LUCENT_SEARCH_EXCLUDE_ARCHIVED_ENABLED", "true")
+        prefix = clean_test_data
+
+        active = await _call(
+            mcp_tools,
+            "create_memory",
+            {
+                "type": "experience",
+                "content": f"{prefix} mcp-include-archived ACTIVE",
+                "username": f"{prefix}u",
+            },
+        )
+        archived = await _call(
+            mcp_tools,
+            "create_memory",
+            {
+                "type": "experience",
+                "content": f"{prefix} mcp-include-archived ARCHIVED",
+                "username": f"{prefix}u",
+            },
+        )
+        await self._archive(db_pool, archived["id"])
+
+        default = await _call(
+            mcp_tools,
+            "search_memories",
+            {"query": f"{prefix} mcp-include-archived"},
+        )
+        ids = {m["id"] for m in default["memories"]}
+        assert active["id"] in ids
+        assert archived["id"] not in ids
+
+        inclusive = await _call(
+            mcp_tools,
+            "search_memories",
+            {
+                "query": f"{prefix} mcp-include-archived",
+                "include_archived": True,
+            },
+        )
+        ids = {m["id"] for m in inclusive["memories"]}
+        assert archived["id"] in ids
+
+    async def test_search_memories_full_default_excludes_archived(
+        self, mcp_tools, auth_user, clean_test_data, db_pool, monkeypatch
+    ):
+        monkeypatch.setenv("LUCENT_SEARCH_EXCLUDE_ARCHIVED_ENABLED", "true")
+        prefix = clean_test_data
+
+        active = await _call(
+            mcp_tools,
+            "create_memory",
+            {
+                "type": "technical",
+                "content": f"{prefix} mcp-full-archived ACTIVE row",
+                "username": f"{prefix}u",
+            },
+        )
+        archived = await _call(
+            mcp_tools,
+            "create_memory",
+            {
+                "type": "technical",
+                "content": f"{prefix} mcp-full-archived ARCHIVED row",
+                "username": f"{prefix}u",
+            },
+        )
+        await self._archive(db_pool, archived["id"])
+
+        default = await _call(
+            mcp_tools,
+            "search_memories_full",
+            {"query": f"{prefix} mcp-full-archived"},
+        )
+        ids = {m["id"] for m in default["memories"]}
+        assert active["id"] in ids
+        assert archived["id"] not in ids
+
+        inclusive = await _call(
+            mcp_tools,
+            "search_memories_full",
+            {
+                "query": f"{prefix} mcp-full-archived",
+                "include_archived": True,
+            },
+        )
+        ids = {m["id"] for m in inclusive["memories"]}
+        assert archived["id"] in ids
+
+
+# ============================================================================
 # update_memory
 # ============================================================================
 
@@ -740,6 +848,145 @@ class TestUpdateMemory:
 
         assert "error" in result
         assert "not accessible" in result["error"].lower() or "Permission denied" in result["error"]
+        set_current_user(None)
+
+
+# ============================================================================
+# pin_memory / unpin_memory
+# ============================================================================
+
+
+class TestPinUnpinMemory:
+    """Tests for the pin_memory / unpin_memory MCP tools."""
+
+    async def test_pin_adds_pinned_tag_and_bumps_version(
+        self, mcp_tools, auth_user, test_memory
+    ):
+        result = await _call(
+            mcp_tools, "pin_memory", {"memory_id": str(test_memory["id"])}
+        )
+        assert "error" not in result, result
+        assert "pinned" in result["tags"]
+        # other tags preserved
+        assert "test" in result["tags"]
+        assert "fixture" in result["tags"]
+        assert result["version"] == 2
+
+    async def test_pin_is_idempotent(self, mcp_tools, auth_user, test_memory):
+        first = await _call(
+            mcp_tools, "pin_memory", {"memory_id": str(test_memory["id"])}
+        )
+        second = await _call(
+            mcp_tools, "pin_memory", {"memory_id": str(test_memory["id"])}
+        )
+        assert first["tags"].count("pinned") == 1
+        assert second["tags"].count("pinned") == 1
+        # Version bumps both times (matches update_memory semantics).
+        assert second["version"] == first["version"] + 1
+
+    async def test_unpin_removes_pinned_tag(self, mcp_tools, auth_user, test_memory):
+        await _call(mcp_tools, "pin_memory", {"memory_id": str(test_memory["id"])})
+        result = await _call(
+            mcp_tools, "unpin_memory", {"memory_id": str(test_memory["id"])}
+        )
+        assert "error" not in result, result
+        assert "pinned" not in result["tags"]
+        assert "test" in result["tags"]
+
+    async def test_unpin_is_idempotent(self, mcp_tools, auth_user, test_memory):
+        # Memory was never pinned — unpin should still succeed.
+        result = await _call(
+            mcp_tools, "unpin_memory", {"memory_id": str(test_memory["id"])}
+        )
+        assert "error" not in result, result
+        assert "pinned" not in result["tags"]
+
+    async def test_pin_nonexistent_memory(self, mcp_tools, auth_user):
+        result = await _call(
+            mcp_tools, "pin_memory", {"memory_id": str(uuid4())}
+        )
+        assert "error" in result
+        assert "not accessible" in result["error"].lower() or "not found" in result["error"].lower()
+
+    async def test_unpin_nonexistent_memory(self, mcp_tools, auth_user):
+        result = await _call(
+            mcp_tools, "unpin_memory", {"memory_id": str(uuid4())}
+        )
+        assert "error" in result
+
+    async def test_pin_requires_auth(self, mcp_tools, test_memory):
+        set_current_user(None)
+        result = await _call(
+            mcp_tools, "pin_memory", {"memory_id": str(test_memory["id"])}
+        )
+        assert "error" in result
+        assert "auth" in result["error"].lower()
+
+    async def test_unpin_requires_auth(self, mcp_tools, test_memory):
+        set_current_user(None)
+        result = await _call(
+            mcp_tools, "unpin_memory", {"memory_id": str(test_memory["id"])}
+        )
+        assert "error" in result
+        assert "auth" in result["error"].lower()
+
+    async def test_pin_acl_blocks_non_owner(
+        self, mcp_tools, db_pool, test_memory, test_organization, clean_test_data
+    ):
+        """Non-owner in same org cannot pin another user's private memory."""
+        prefix = clean_test_data
+
+        user_repo = UserRepository(db_pool)
+        other_user = await user_repo.create(
+            external_id=f"{prefix}pin_other",
+            provider="local",
+            organization_id=test_organization["id"],
+            email=f"{prefix}pin_other@test.com",
+            display_name=f"{prefix}Pin Other",
+        )
+        set_current_user(
+            {
+                "id": other_user["id"],
+                "organization_id": other_user["organization_id"],
+                "role": "member",
+            }
+        )
+
+        result = await _call(
+            mcp_tools, "pin_memory", {"memory_id": str(test_memory["id"])}
+        )
+        assert "error" in result
+        err = result["error"].lower()
+        assert "not accessible" in err or "permission denied" in err
+        set_current_user(None)
+
+    async def test_unpin_acl_blocks_non_owner(
+        self, mcp_tools, db_pool, test_memory, test_organization, clean_test_data
+    ):
+        prefix = clean_test_data
+
+        user_repo = UserRepository(db_pool)
+        other_user = await user_repo.create(
+            external_id=f"{prefix}unpin_other",
+            provider="local",
+            organization_id=test_organization["id"],
+            email=f"{prefix}unpin_other@test.com",
+            display_name=f"{prefix}Unpin Other",
+        )
+        set_current_user(
+            {
+                "id": other_user["id"],
+                "organization_id": other_user["organization_id"],
+                "role": "member",
+            }
+        )
+
+        result = await _call(
+            mcp_tools, "unpin_memory", {"memory_id": str(test_memory["id"])}
+        )
+        assert "error" in result
+        err = result["error"].lower()
+        assert "not accessible" in err or "permission denied" in err
         set_current_user(None)
 
 

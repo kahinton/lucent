@@ -479,6 +479,7 @@ Returns:
 
             memories = []
             not_found = []
+            accessed_ids: list[UUID] = []
 
             for uuid_id, original_id in zip(uuid_ids, memory_ids):
                 if user_id is not None and org_id is not None:
@@ -499,16 +500,21 @@ Returns:
                     not_found.append(original_id)
                 else:
                     memories.append(_serialize_memory(result))
-                    # Log access
-                    try:
-                        await access_repo.log_access(
-                            memory_id=uuid_id,
-                            access_type="view",
-                            user_id=user_id,
-                            organization_id=org_id,
-                        )
-                    except Exception:
-                        logger.debug("Access log failed for get_memories", exc_info=True)
+                    accessed_ids.append(uuid_id)
+
+            # Log access in a single batch — emits per-memory audit log rows
+            # but issues ONE UPDATE statement to refresh last_accessed_at and
+            # reactivate any qualifying lifecycle stages (M9 Phase 2).
+            if accessed_ids:
+                try:
+                    await access_repo.log_batch_access(
+                        memory_ids=accessed_ids,
+                        access_type="view",
+                        user_id=user_id,
+                        organization_id=org_id,
+                    )
+                except Exception:
+                    logger.debug("Batch access log failed for get_memories", exc_info=True)
 
             return json.dumps(
                 {
@@ -588,6 +594,7 @@ Returns:
         memory_ids: list[str] | None = None,
         offset: int = 0,
         limit: int = 5,
+        include_archived: bool = False,
     ) -> str:
         """Search for memories by content with fuzzy matching and filters.
 
@@ -609,6 +616,12 @@ Returns:
             memory_ids: Optional list of specific memory UUIDs to retrieve.
             offset: Pagination offset (default 0).
             limit: Maximum number of results to return (default 5, max 50).
+            include_archived: When False (default), memories with
+                ``lifecycle_stage`` in ``('archived', 'forgotten')`` are
+                excluded — but only when the
+                ``LUCENT_SEARCH_EXCLUDE_ARCHIVED_ENABLED`` rollout flag is on.
+                When True, archived/forgotten memories are returned alongside
+                active ones (each result already exposes ``lifecycle_stage``).
 
         Returns:
             JSON string with search results including:
@@ -664,6 +677,7 @@ Returns:
                 requesting_user_id=user_id,
                 requesting_org_id=org_id,
                 memory_scope=memory_scope,
+                include_archived=include_archived,
             )
 
             # Log access for returned memories
@@ -711,6 +725,7 @@ Returns:
         importance_max: int | None = None,
         offset: int = 0,
         limit: int = 5,
+        include_archived: bool = False,
     ) -> str:
         """Search across ALL text fields: content, tags, and metadata.
 
@@ -727,6 +742,9 @@ Returns:
             importance_max: Optional maximum importance rating (1-10).
             offset: Pagination offset (default 0).
             limit: Maximum number of results to return (default 5, max 50).
+            include_archived: See ``search_memories``. Default-False is a
+                no-op until the ``LUCENT_SEARCH_EXCLUDE_ARCHIVED_ENABLED``
+                rollout flag is enabled.
 
         Returns:
             JSON string with search results including:
@@ -761,6 +779,7 @@ Returns:
                 requesting_user_id=user_id,
                 requesting_org_id=org_id,
                 memory_scope=memory_scope,
+                include_archived=include_archived,
             )
 
             # Log access for returned memories
@@ -945,6 +964,132 @@ Returns:
         except Exception as e:
             logger.error("update_memory failed: id=%s", memory_id, exc_info=e)
             return _error_response(f"Failed to update memory: {str(e)}")
+
+    async def _toggle_pin(memory_id: str, *, pin: bool) -> str:
+        """Shared implementation for pin_memory / unpin_memory.
+
+        Adds or removes the ``pinned`` tag idempotently with the same ACL rules
+        as ``update_memory``. Bumps the memory version and emits a structured
+        log line ("memory.pinned" / "memory.unpinned") with memory_id and
+        caller user_id.
+        """
+        action = "pin" if pin else "unpin"
+        log_event = "memory.pinned" if pin else "memory.unpinned"
+        try:
+            uuid_id = UUID(memory_id)
+
+            repo = await _get_repository()
+
+            user_id, org_id, user_role, memory_scope, _ = await _get_current_user_context()
+
+            if user_id is None:
+                return _error_response(f"Authentication required to {action} memories")
+
+            old_memory = await repo.get_accessible(
+                uuid_id, user_id, org_id, memory_scope=memory_scope
+            )
+            if old_memory is None:
+                return _error_response(f"Memory not found or not accessible: {memory_id}")
+
+            # Same ACL as update_memory: owner (or daemon role in same org) only.
+            if old_memory.get("user_id") != user_id and user_role != "daemon":
+                return _error_response(
+                    f"Permission denied: only the owner can {action} this memory"
+                )
+
+            current_tags = list(old_memory.get("tags") or [])
+            if pin:
+                if "pinned" in current_tags:
+                    new_tags = current_tags  # idempotent — no change
+                    changed = False
+                else:
+                    new_tags = current_tags + ["pinned"]
+                    changed = True
+            else:
+                if "pinned" not in current_tags:
+                    new_tags = current_tags
+                    changed = False
+                else:
+                    new_tags = [t for t in current_tags if t != "pinned"]
+                    changed = True
+
+            # Always call update so the version bumps even on idempotent calls,
+            # matching update_memory semantics for visibility/auditability.
+            result = await repo.update(
+                memory_id=uuid_id,
+                tags=new_tags,
+            )
+
+            if result is None:
+                return _error_response(f"Memory not found: {memory_id}")
+
+            logger.info(
+                "%s memory_id=%s caller=%s changed=%s",
+                log_event,
+                memory_id,
+                user_id,
+                changed,
+            )
+
+            if changed:
+                audit_repo = await _get_audit_repository()
+                await audit_repo.log(
+                    memory_id=uuid_id,
+                    action_type="update",
+                    user_id=user_id,
+                    organization_id=org_id,
+                    changed_fields=["tags"],
+                    old_values={"tags": current_tags},
+                    new_values={"tags": new_tags},
+                    context=_get_audit_context(),
+                    version=result["version"],
+                    snapshot=_build_snapshot(result),
+                )
+
+            return json.dumps(_serialize_memory(result), indent=2)
+
+        except ValueError as e:
+            return _error_response(f"Invalid input: {str(e)}")
+        except Exception as e:
+            logger.error("%s_memory failed: id=%s", action, memory_id, exc_info=e)
+            return _error_response(f"Failed to {action} memory: {str(e)}")
+
+    @mcp.tool()
+    async def pin_memory(memory_id: str) -> str:
+        """Pin a memory so it is hard-exempt from consolidation and forgetting.
+
+        Adds the ``pinned`` tag to the memory (idempotent — pinning an already
+        pinned memory is a no-op that still bumps the version). Pinned memories
+        are short-circuited out of consolidation/forgetting candidate selection
+        in addition to the existing individual + active-goal exemptions. ACL is
+        the same as ``update_memory``: only the owner (or a daemon-role caller
+        in the same org) may pin a memory.
+
+        Args:
+            memory_id: The UUID of the memory to pin.
+
+        Returns:
+            JSON string with the updated memory, or an error if not found / not
+            accessible / permission denied.
+        """
+        return await _toggle_pin(memory_id, pin=True)
+
+    @mcp.tool()
+    async def unpin_memory(memory_id: str) -> str:
+        """Unpin a memory, re-enabling normal lifecycle transitions.
+
+        Removes the ``pinned`` tag from the memory (idempotent — unpinning a
+        memory that was not pinned is a no-op). ACL matches ``update_memory``:
+        only the owner (or a daemon-role caller in the same org) may unpin.
+
+        Args:
+            memory_id: The UUID of the memory to unpin.
+
+        Returns:
+            JSON string with the updated memory, or an error if not found / not
+            accessible / permission denied.
+        """
+        return await _toggle_pin(memory_id, pin=False)
 
     @mcp.tool()
     async def delete_memory(memory_id: str) -> str:

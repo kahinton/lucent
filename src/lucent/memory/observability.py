@@ -20,17 +20,17 @@ rate is ``0.0`` (the defaults).
 from __future__ import annotations
 
 import json
+import logging
 import random
 from typing import Any, Awaitable, Callable, Iterable, Sequence
 
-from lucent.logging import get_logger
 from lucent.settings import (
     search_vitality_boost_enabled,
     search_vitality_boost_log_sample_rate,
     search_vitality_boost_log_top_n,
 )
 
-logger = get_logger("memory.observability")
+logger = logging.getLogger(__name__)
 
 
 # Type for the legacy-search callable injected by the caller. It must accept

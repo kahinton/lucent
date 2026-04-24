@@ -1,5 +1,8 @@
 """Request-scoped dispatch ACL tests for daemon resource selection."""
 
+import io
+import json
+import logging
 from uuid import UUID
 
 import pytest
@@ -7,6 +10,8 @@ import pytest
 from daemon.daemon import LucentDaemon, load_accessible_agent
 from lucent.db.definitions import DefinitionRepository
 from lucent.db.user import UserRepository
+from lucent.log_context import clear_log_context
+from lucent.logging import JSONFormatter
 
 
 def test_validate_task_result_rejects_empty_consolidation_execution():
@@ -127,6 +132,97 @@ async def test_dispatch_fails_gracefully_when_no_accessible_agent(monkeypatch):
     assert failed
     assert "No accessible approved agent definition" in failed[0]
     assert any(event_type == "agent_not_found" for _, event_type, _ in events)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_log_line_includes_task_request_and_user_context(monkeypatch):
+    import daemon.daemon as daemon_module
+
+    daemon = LucentDaemon()
+    stream = io.StringIO()
+    capture_logger = logging.getLogger("lucent.test.dispatch_context")
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(JSONFormatter())
+
+    prev_handlers = list(capture_logger.handlers)
+    prev_level = capture_logger.level
+    prev_propagate = capture_logger.propagate
+    prev_daemon_logger = daemon_module._logger
+
+    capture_logger.handlers = [handler]
+    capture_logger.setLevel(logging.INFO)
+    capture_logger.propagate = False
+    daemon_module._logger = capture_logger
+
+    task_id = "11111111-1111-1111-1111-111111111111"
+    request_id = "22222222-2222-2222-2222-222222222222"
+    org_id = "33333333-3333-3333-3333-333333333333"
+    user_id = "44444444-4444-4444-4444-444444444444"
+
+    async def _noop_ensure_reviews():
+        return None
+
+    async def _pending():
+        return [
+            {
+                "id": UUID(task_id),
+                "request_id": UUID(request_id),
+                "organization_id": UUID(org_id),
+                "title": "Restricted task",
+                "description": "Should fail cleanly",
+                "agent_type": "code",
+                "requesting_user_id": UUID(user_id),
+            }
+        ]
+
+    async def _claim(claim_task_id, _instance_id):
+        return {"id": claim_task_id}
+
+    async def _update_model(_task_id, _model):
+        return {"ok": True}
+
+    async def _ctx(_request_id):
+        return "", ""
+
+    async def _fail(task_id, error):
+        return {"id": task_id, "error": error}
+
+    async def _event(task_id, event_type, detail=None, metadata=None):
+        return {"id": task_id, "event_type": event_type, "detail": detail, "metadata": metadata}
+
+    async def _start(task_id):
+        return {"id": task_id}
+
+    async def _no_agent(**_kwargs):
+        return None
+
+    monkeypatch.setattr(daemon, "_ensure_request_review_tasks", _noop_ensure_reviews)
+    monkeypatch.setattr("daemon.daemon.RequestAPI.get_pending_tasks", _pending)
+    monkeypatch.setattr("daemon.daemon.RequestAPI.claim_task", _claim)
+    monkeypatch.setattr("daemon.daemon.RequestAPI.update_task_model", _update_model)
+    monkeypatch.setattr("daemon.daemon.RequestAPI.get_request_context", _ctx)
+    monkeypatch.setattr("daemon.daemon.RequestAPI.fail_task", _fail)
+    monkeypatch.setattr("daemon.daemon.RequestAPI.add_event", _event)
+    monkeypatch.setattr("daemon.daemon.RequestAPI.start_task", _start)
+    monkeypatch.setattr("daemon.daemon.load_accessible_agent", _no_agent)
+
+    try:
+        await daemon._dispatch_tracked_tasks(max_tasks=1)
+
+        lines = [json.loads(line) for line in stream.getvalue().splitlines() if line.strip()]
+        dispatch_line = next(
+            (line for line in lines if "Dispatching tracked task" in str(line.get("message", ""))),
+            None,
+        )
+        assert dispatch_line is not None
+        assert dispatch_line["request_id"] == task_id
+        assert dispatch_line["user_id"] == user_id
+    finally:
+        daemon_module._logger = prev_daemon_logger
+        capture_logger.handlers = prev_handlers
+        capture_logger.setLevel(prev_level)
+        capture_logger.propagate = prev_propagate
+        clear_log_context()
 
 
 @pytest.mark.asyncio

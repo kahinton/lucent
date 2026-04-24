@@ -33,7 +33,7 @@ Memory maintenance may run under a **scoped API key** that restricts access:
 
 The system enforces scoping at the database layer — you cannot accidentally access out-of-scope memories. Just work with what your searches return.
 
-**Protected tags**: Skip any memory tagged `pinned` or `do_not_consolidate` during maintenance. These are exempt from consolidation, deduplication, and deletion.
+**Protected tags**: Skip any memory tagged `pinned` or `do_not_consolidate` during maintenance. These are exempt from consolidation, deduplication, and deletion. The `pinned` exemption is also enforced automatically inside the vitality scorer (`_hard_exemption_reason`) — pinned memories short-circuit to the EXEMPT action with reason `hard-exempt-pinned` and never appear in archive/cleanup candidate sets, parallel to the existing `individual` and active-goal exemptions. Toggle the tag via the `pin_memory(memory_id)` / `unpin_memory(memory_id)` MCP tools (idempotent, owner-only ACL, version-bumping).
 
 ## Maintenance Procedure
 

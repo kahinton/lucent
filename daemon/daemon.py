@@ -603,10 +603,9 @@ def _resolve_daemon_database_url() -> str:
         "LUCENT_DEV_DATABASE_URL",
         f"postgresql://lucent:{dev_password}@localhost:{dev_port}/lucent",
     )
-    print(
+    sys.stderr.write(
         "WARNING: Neither DAEMON_DATABASE_URL nor DATABASE_URL is set. "
-        "Using local dev fallback. Set DAEMON_DATABASE_URL in production.",
-        file=sys.stderr,
+        "Using local dev fallback. Set DAEMON_DATABASE_URL in production.\n"
     )
     return fallback
 
@@ -1727,7 +1726,7 @@ def _configure_daemon_logging():
     from lucent.logging import configure_logging, get_logger
 
     configure_logging()
-    return get_logger
+    return get_logger(__name__)
 
 
 # Lazy-initialized logger — set up in main() after arg parsing
@@ -1766,27 +1765,78 @@ def _watchdog_loop():
             os._exit(1)
 
 
-def log(message: str, level: str = "INFO"):
-    """Log via the structured logging module (falls back to print before init)."""
+def log(
+    message: str,
+    level: str = "INFO",
+    *,
+    request_id: str | None = None,
+    user_id: str | None = None,
+):
+    """Log via the structured logging module.
+
+    Optional request_id/user_id values are pushed into log contextvars for this
+    log call so JSONFormatter/HumanFormatter can include them automatically.
+    """
     _touch_activity()
+    restore_context = False
+    prev_request_id: str | None = None
+    prev_user_id: str | None = None
+
+    if request_id is not None or user_id is not None:
+        try:
+            from lucent.log_context import (
+                get_request_id,
+                get_user_id,
+                set_request_id,
+                set_user_id,
+            )
+
+            prev_request_id = get_request_id()
+            prev_user_id = get_user_id()
+            if request_id is not None:
+                set_request_id(request_id)
+            if user_id is not None:
+                set_user_id(user_id)
+            restore_context = True
+        except Exception:
+            restore_context = False
+
     if _logger is None:
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-        print(f"[{timestamp}] [{level}] {message}")
+        sys.stderr.write(f"[{timestamp}] [{level}] {message}\n")
+        if restore_context:
+            try:
+                from lucent.log_context import set_request_id, set_user_id
+
+                set_request_id(prev_request_id)
+                set_user_id(prev_user_id)
+            except Exception:
+                pass
         return
 
-    from lucent.logging import STREAM, THOUGHT
+    try:
+        from lucent.logging import STREAM, THOUGHT
 
-    level_map = {
-        "INFO": _logger.info,
-        "WARN": _logger.warning,
-        "WARNING": _logger.warning,
-        "ERROR": _logger.error,
-        "STREAM": lambda msg: _logger.log(STREAM, msg),
-        "THOUGHT": lambda msg: _logger.log(THOUGHT, msg),
-        "DEBUG": _logger.debug,
-    }
-    log_fn = level_map.get(level.upper(), _logger.info)
-    log_fn(message)
+        level_map = {
+            "INFO": _logger.info,
+            "WARN": _logger.warning,
+            "WARNING": _logger.warning,
+            "ERROR": _logger.error,
+            "STREAM": lambda msg: _logger.log(STREAM, msg),
+            "THOUGHT": lambda msg: _logger.log(THOUGHT, msg),
+            "DEBUG": _logger.debug,
+        }
+        log_fn = level_map.get(level.upper(), _logger.info)
+        log_fn(message)
+    finally:
+        if restore_context:
+            try:
+                from lucent.log_context import set_request_id, set_user_id
+
+                set_request_id(prev_request_id)
+                set_user_id(prev_user_id)
+            except Exception:
+                pass
 
 
 # ============================================================================
@@ -3980,7 +4030,12 @@ class LucentDaemon:
             # Persist the resolved model before dispatch so it's recorded even if the task fails
             await RequestAPI.update_task_model(task_id, selected_model)
 
-            log(f"Dispatching tracked task {task_id[:8]} to {agent_type} model={selected_model}: {title[:80]}...")
+            log(
+                f"Dispatching tracked task {task_id[:8]} to {agent_type} "
+                f"model={selected_model}: {title[:80]}...",
+                request_id=task_id,
+                user_id=str(task.get("requesting_user_id")) if task.get("requesting_user_id") else None,
+            )
             if self._tracer:
                 self._tasks_dispatched_total.add(1, attributes={"agent_type": agent_type})
 
@@ -6055,8 +6110,7 @@ def main():
 
     # Initialize structured logging before anything else
     global _logger
-    get_logger_fn = _configure_daemon_logging()
-    _logger = get_logger_fn("daemon")
+    _logger = _configure_daemon_logging()
 
     parser = argparse.ArgumentParser(description="Lucent Daemon — Cognitive Architecture")
     parser.add_argument("--once", action="store_true", help="Run one cognitive cycle and exit")

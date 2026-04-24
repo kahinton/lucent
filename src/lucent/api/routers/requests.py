@@ -14,7 +14,8 @@ from lucent.rbac import Role
 
 router = APIRouter(prefix="/requests", tags=["requests"])
 
-_deprecation_logger = logging.getLogger("lucent.api.deprecation")
+logger = logging.getLogger(__name__)
+_deprecation_logger = logging.getLogger(f"{__name__}.deprecation")
 
 
 # ── Models ────────────────────────────────────────────────────────────────
@@ -540,7 +541,10 @@ async def edit_pending_task(
     if existing.get("status") in repo._NON_EDITABLE_TASK_STATUSES:
         raise HTTPException(
             409,
-            f"Task is in status '{existing.get('status')}' — tasks that are running or already completed cannot be edited.",
+            (
+                f"Task is in status '{existing.get('status')}' — tasks that are "
+                "running or already completed cannot be edited."
+            ),
         )
 
     if body.model:
@@ -601,7 +605,10 @@ async def edit_pending_task(
     if not result:
         raise HTTPException(
             409,
-            "Task could not be updated — it may have been claimed by the daemon between the read and write.",
+            (
+                "Task could not be updated — it may have been claimed by the "
+                "daemon between the read and write."
+            ),
         )
     return result
 

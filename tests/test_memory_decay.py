@@ -112,6 +112,57 @@ def test_active_goal_memory_hard_exempt_even_if_stale():
     assert "hard-exempt-active-goal" in result.reasons
 
 
+def test_pinned_memory_hard_exempt_even_if_stale():
+    """A memory tagged 'pinned' must short-circuit out of consolidation/forgetting
+    candidate selection, parallel to individual + active-goal exemptions."""
+    profile = _profile(
+        memory_type="experience",
+        importance=1,
+        age_days=2000,
+        updated_days=2000,
+        last_accessed_days=2000,
+        access_count=0,
+    )
+    profile.tags = ["pinned"]
+    result = score_memory_decay(profile)
+    assert result.protected is True
+    assert result.action == DecayAction.EXEMPT
+    assert "hard-exempt-pinned" in result.reasons
+
+
+def test_pinned_memory_excluded_from_consolidation_candidates():
+    """A pinned memory must not appear in archive/cleanup candidate sets even
+    when its raw vitality would otherwise classify it as a candidate."""
+    pinned = _profile(
+        memory_type="experience",
+        importance=1,
+        age_days=2000,
+        updated_days=2000,
+        last_accessed_days=2000,
+        access_count=0,
+    )
+    pinned.tags = ["pinned"]
+    stale_unpinned = _profile(
+        memory_type="experience",
+        importance=1,
+        age_days=2000,
+        updated_days=2000,
+        last_accessed_days=2000,
+        access_count=0,
+    )
+
+    scored = score_memories_batch([pinned, stale_unpinned])
+    report = dry_run_decay_report(scored)
+
+    pinned_id = str(pinned.memory_id)
+    candidate_ids = {
+        c["memory_id"] for c in report["archive_candidates"] + report["cleanup_suggestions"]
+    }
+    assert pinned_id not in candidate_ids
+    exempt_ids = {c["memory_id"] for c in report["exempt"]}
+    assert pinned_id in exempt_ids
+
+
 def test_classify_decay_action_short_circuits_for_exempt_profile():
     profile = _profile(memory_type="individual", age_days=999, last_accessed_days=999, importance=1)
     # Even with a score that would otherwise archive, exemption should win.

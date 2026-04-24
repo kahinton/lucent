@@ -941,3 +941,62 @@ class TestSearchEdgeCases:
             },
         )
         assert resp.status_code == 422
+
+
+# ============================================================================
+# include_archived (M9 Phase-2)
+# ============================================================================
+
+
+class TestSearchIncludeArchivedAPI:
+    """REST surface for the M9 ``include_archived`` parameter."""
+
+    async def test_post_search_default_excludes_archived(
+        self, srch_client, db_pool, srch_user, srch_prefix, monkeypatch
+    ):
+        monkeypatch.setenv("LUCENT_SEARCH_EXCLUDE_ARCHIVED_ENABLED", "true")
+        repo = MemoryRepository(db_pool)
+        active = await repo.create(
+            username=f"{srch_prefix}u",
+            type="experience",
+            content=f"{srch_prefix} api-archived ACTIVE row",
+            user_id=srch_user["id"],
+            organization_id=srch_user["organization_id"],
+        )
+        archived = await repo.create(
+            username=f"{srch_prefix}u",
+            type="experience",
+            content=f"{srch_prefix} api-archived ARCHIVED row",
+            user_id=srch_user["id"],
+            organization_id=srch_user["organization_id"],
+        )
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE memories SET lifecycle_stage = 'archived' WHERE id = $1",
+                archived["id"],
+            )
+
+        resp = await srch_client.post(
+            "/api/search",
+            json={"query": f"{srch_prefix} api-archived"},
+        )
+        assert resp.status_code == 200
+        ids = {UUID(m["id"]) for m in resp.json()["memories"]}
+        assert active["id"] in ids
+        assert archived["id"] not in ids
+
+        resp_inclusive = await srch_client.post(
+            "/api/search",
+            json={
+                "query": f"{srch_prefix} api-archived",
+                "include_archived": True,
+            },
+        )
+        assert resp_inclusive.status_code == 200
+        memories = resp_inclusive.json()["memories"]
+        ids_inclusive = {UUID(m["id"]) for m in memories}
+        assert archived["id"] in ids_inclusive
+        archived_payload = next(m for m in memories if UUID(m["id"]) == archived["id"])
+        # The new ``lifecycle_stage`` field must be on the response so callers
+        # can flag archived rows in UIs.
+        assert archived_payload["lifecycle_stage"] == "archived"

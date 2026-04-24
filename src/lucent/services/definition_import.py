@@ -6,6 +6,7 @@ All imports go through security scanning before being created in proposed status
 """
 
 import hashlib
+import logging
 import re
 from dataclasses import dataclass, field
 from enum import Enum
@@ -13,11 +14,10 @@ from enum import Enum
 import httpx
 import yaml
 
-from lucent.logging import get_logger
 from lucent.security import scan_content_for_injection
 from lucent.url_validation import validate_url
 
-logger = get_logger("import")
+logger = logging.getLogger(__name__)
 
 
 class ImportSourceType(str, Enum):
@@ -72,7 +72,11 @@ class ImportResult:
             "definition_type": self.definition_type.value if self.definition_type else None,
             "name": self.name,
             "description": self.description,
-            "content": self.content[:500] + "..." if self.content and len(self.content) > 500 else self.content,
+            "content": (
+                self.content[:500] + "..."
+                if self.content and len(self.content) > 500
+                else self.content
+            ),
             "content_length": len(self.content) if self.content else 0,
             "skill_names": self.skill_names,
             "source_url": self.source_url,
@@ -147,7 +151,9 @@ def _parse_frontmatter(content: str) -> tuple[dict, str]:
     return fm, body
 
 
-def _detect_definition_type(frontmatter: dict, content: str, source_hint: str | None = None) -> DefinitionType:
+def _detect_definition_type(
+    frontmatter: dict, content: str, source_hint: str | None = None
+) -> DefinitionType:
     """Detect whether content is an agent or skill definition."""
     # Check frontmatter for skill_names (agent indicator)
     if "skill_names" in frontmatter:

@@ -42,6 +42,7 @@ def _memory_to_search_result(memory: dict[str, Any]) -> SearchResultMemory:
         organization_id=memory.get("organization_id"),
         shared=memory.get("shared", False),
         last_accessed_at=memory.get("last_accessed_at"),
+        lifecycle_stage=memory.get("lifecycle_stage"),
     )
 
 
@@ -77,6 +78,7 @@ async def search_memories(
         limit=data.limit,
         requesting_user_id=user.id,
         requesting_org_id=user.organization_id,
+        include_archived=data.include_archived,
     )
 
     # Phase-2 observability: when the vitality boost flag is on, sample a
@@ -98,6 +100,7 @@ async def search_memories(
             "limit": data.limit,
             "requesting_user_id": user.id,
             "requesting_org_id": user.organization_id,
+            "include_archived": data.include_archived,
         },
         boosted_result=result,
         query=data.query,
@@ -147,6 +150,7 @@ async def search_memories_get(
     created_before: datetime | None = Query(default=None),
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=20, ge=1, le=100),
+    include_archived: bool = Query(default=False),
 ) -> SearchResponse:
     """Search memories by content (GET version for convenience)."""
     request = SearchRequest(
@@ -160,6 +164,7 @@ async def search_memories_get(
         created_before=created_before,
         offset=offset,
         limit=limit,
+        include_archived=include_archived,
     )
     return await search_memories(request, user)
 
@@ -198,6 +203,7 @@ async def search_memories_full(
         limit=data.limit,
         requesting_user_id=user.id,
         requesting_org_id=user.organization_id,
+        include_archived=data.include_archived,
     )
 
     await maybe_log_boost_comparison(
@@ -213,6 +219,7 @@ async def search_memories_full(
             "limit": data.limit,
             "requesting_user_id": user.id,
             "requesting_org_id": user.organization_id,
+            "include_archived": data.include_archived,
         },
         boosted_result=result,
         query=data.query,

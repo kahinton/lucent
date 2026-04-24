@@ -453,7 +453,7 @@ These protections prevent the system from losing valuable knowledge:
 
 5. **Grace periods.** 180 days in Archived before forgetting eligibility. 90 days in Forgotten (soft-deleted) before hard delete. Total minimum lifespan from archival to permanent deletion: 270 days.
 
-6. **Human-override tags.** `pinned` tag permanently exempts a memory from all lifecycle transitions. `preserve` tag exempts from forgetting specifically (still subject to consolidation and archival).
+6. **Human-override tags.** `pinned` tag permanently exempts a memory from all lifecycle transitions — enforced as a hard short-circuit in `_hard_exemption_reason` (alongside `individual` type and active-goal exemptions), so pinned memories never appear in consolidation, archive, or forgetting candidate sets regardless of their vitality score. Toggle via the `pin_memory` / `unpin_memory` MCP tools. `preserve` tag exempts from forgetting specifically (still subject to consolidation and archival).
 
 ---
 
@@ -480,6 +480,10 @@ When a memory is accessed (via `get_memory`, `get_accessible`, or returned in se
 | Archived | Direct view (`get_memory`) | Promote to Active immediately. Log reconsolidation event. |
 | Forgotten (soft-deleted) | Direct view | Not reachable via normal search. Manual restore via `restore_memory_version` promotes to Active. |
 
+**Implemented (M9 Phase 2, goal 82b41acd).** Reactivation is wired into `AccessRepository.log_access` and `log_batch_access` — both extend their existing `UPDATE memories SET last_accessed_at = NOW()` with a single CASE expression that promotes `consolidating` and `archived` rows to `active` in the same statement. `forgotten` rows are NOT reactivated (they are queued for hard delete). Batched reads (`get_memories`) issue exactly ONE UPDATE covering all qualifying rows, not N. Vitality is intentionally NOT recomputed inline — the vitality computation schedule will catch up.
+
+The MCP `get_memories` tool was switched from per-id `log_access` calls to a single `log_batch_access` call to satisfy the one-UPDATE constraint.
+
 ### 7.2 Content Strengthening on Update
 
 When a memory is both accessed AND updated in the same interaction (common pattern: agent searches for context, finds a memory, updates it with new information), this is the strongest lifecycle signal. The memory should be treated as actively maintained.
@@ -490,6 +494,8 @@ When a memory is both accessed AND updated in the same interaction (common patte
 - `lifecycle_stage` set to Active (regardless of previous stage)
 - Vitality score floor set to 0.5 for next lifecycle evaluation (prevents immediate re-decay)
 - Audit log records the update with full snapshot
+
+**Implemented (M9 Phase 2).** `MemoryRepository.update` adds a `lifecycle_stage = CASE ... END` expression to its UPDATE whenever the caller actually changes a field — promoting `consolidating` / `archived` rows to `active`. `forgotten` rows are never reactivated. The branch composes with the pre-existing goal-status auto-sync via a single nested CASE so that goal-driven stage transitions (e.g. `status='completed'` → `archived`) take precedence over the reactivation default. No-op `update()` calls (no fields supplied) still short-circuit to `get()` and do NOT trigger reactivation. Vitality floor / inline recomputation are deferred to a later slice — vitality schedule picks the row up.
 
 ### 7.3 Reconsolidation of Consolidated Memories
 
@@ -644,12 +650,28 @@ async def get_memory_stats(
 @mcp_tool
 async def pin_memory(memory_id: UUID) -> dict:
     """Add 'pinned' tag. Memory becomes exempt from all lifecycle transitions.
-    Returns updated memory."""
+    Returns updated memory.
+
+    **Status: implemented (M9 Phase 2).** Idempotent — repeated calls are no-ops
+    on the tag set but still bump the memory version (matching update_memory
+    semantics). ACL is identical to update_memory: only the owner (or a
+    daemon-role caller in the same org) may pin. Emits a structured
+    "memory.pinned" log line with memory_id and caller user_id.
+
+    The `pinned` tag is enforced as a hard exemption inside
+    `_hard_exemption_reason` in `src/lucent/memory/decay.py`, parallel to the
+    existing `hard-exempt-individual` and `hard-exempt-active-goal` cases. A
+    pinned memory short-circuits to the EXEMPT action with reason
+    `hard-exempt-pinned` and never appears in archive/cleanup candidate sets."""
 
 @mcp_tool
 async def unpin_memory(memory_id: UUID) -> dict:
     """Remove 'pinned' tag. Memory re-enters normal lifecycle.
-    Returns updated memory."""
+    Returns updated memory.
+
+    **Status: implemented (M9 Phase 2).** Idempotent — unpinning a non-pinned
+    memory is a no-op on the tag set but still bumps the version. Same ACL as
+    pin_memory. Emits a structured "memory.unpinned" log line."""
 
 @mcp_tool
 async def get_lifecycle_history(

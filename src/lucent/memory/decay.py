@@ -670,6 +670,12 @@ def _build_hard_exempt_result(
 
 
 def _hard_exemption_reason(profile: MemoryDecayInput) -> str | None:
+    # Pinned tag is a manual user-override exemption that short-circuits all
+    # consolidation/forgetting candidate selection, parallel to the
+    # individual + active-goal exemptions.
+    if "pinned" in (profile.tags or []):
+        return "hard-exempt-pinned"
+
     if profile.memory_type == "individual":
         return "hard-exempt-individual"
 

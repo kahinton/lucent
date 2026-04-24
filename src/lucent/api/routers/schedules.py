@@ -1,5 +1,6 @@
 """API router for scheduled tasks."""
 
+import logging
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -9,6 +10,7 @@ from lucent.api.deps import AuthenticatedUser, get_pool
 from lucent.constants import REQUEST_SOURCE_SCHEDULE
 
 router = APIRouter(prefix="/schedules", tags=["schedules"])
+logger = logging.getLogger(__name__)
 
 
 # ── Models ────────────────────────────────────────────────────────────────
@@ -18,7 +20,11 @@ class ScheduleCreate(BaseModel):
     title: str = Field(..., min_length=1, max_length=256)
     description: str = ""
     agent_type: str = "code"
-    model: str | None = Field(default=None, max_length=64, description="LLM model override for tasks created by this schedule")
+    model: str | None = Field(
+        default=None,
+        max_length=64,
+        description="LLM model override for tasks created by this schedule",
+    )
     task_template: dict | None = None
     sandbox_template_id: str | None = None  # Reference a saved sandbox template
     sandbox_config: dict | None = None  # Or inline sandbox config
@@ -36,7 +42,11 @@ class ScheduleUpdate(BaseModel):
     title: str | None = None
     description: str | None = None
     agent_type: str | None = None
-    model: str | None = Field(default=None, max_length=64, description="LLM model override for tasks created by this schedule")
+    model: str | None = Field(
+        default=None,
+        max_length=64,
+        description="LLM model override for tasks created by this schedule",
+    )
     task_template: dict | None = None
     sandbox_template_id: str | None = None
     sandbox_config: dict | None = None
@@ -204,12 +214,8 @@ async def trigger_now(
     pool=Depends(get_pool),
 ):
     """Trigger a schedule. Pass force=true to bypass the time guard (manual run)."""
-    import logging
-
     from lucent.db.requests import RequestRepository
     from lucent.db.schedules import ScheduleRepository
-
-    logger = logging.getLogger("lucent.schedules")
     sched_repo = ScheduleRepository(pool)
     req_repo = RequestRepository(pool)
 

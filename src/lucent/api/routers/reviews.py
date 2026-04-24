@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field
 from lucent.api.deps import AuthenticatedUser, get_pool
 from lucent.rbac import Role
 
-logger = logging.getLogger("lucent.api.reviews")
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/reviews", tags=["reviews"])
 
@@ -181,8 +181,6 @@ async def create_review(
                 )
                 if not updated:
                     raise HTTPException(409, "Request is not in review status")
-
-    review_id = str(review["id"])
 
     # Non-transactional follow-up effects after durable state change
     if body.status == "rejected" and request["status"] == "review":
