@@ -263,7 +263,7 @@
                         </div>
                         <div class="flex-1 min-w-0">
                             <p class="text-sm font-medium text-gray-900 truncate">{{ user.display_name or user.email or "User" }}</p>
-                            <p class="text-xs text-gray-500 capitalize">{{ user.role }}</p>
+                            <p class="text-xs text-gray-500 capitalize">{{ user.role.value if user.role.__class__.__name__ == 'Role' else user.role }}</p>
                         </div>
                         <form method="post" action="/logout" class="inline">
                             <button type="submit" class="p-1.5 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100 transition-colors" title="Sign out">
@@ -302,9 +302,11 @@
             {% endif %}
             
             <main class="py-8 px-8">
-                <div class="max-w-6xl mx-auto">
+                {% block content_wrapper %}
+                <div class="{% block content_max_width %}max-w-6xl{% endblock %} mx-auto">
                     {% block content %}{% endblock %}
                 </div>
+                {% endblock %}
             </main>
         </div>
     </div>

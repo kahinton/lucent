@@ -22,7 +22,6 @@ from lucent.db import AdminAuditRepository, UserRepository, get_pool
 from lucent.db import admin_audit as audit_actions
 from lucent.llm.model_engine_validation import normalize_engine, validate_engine_override
 from lucent.logging import get_logger
-from lucent.mode import is_team_mode
 
 from ._shared import _check_csrf, get_user_context, templates
 
@@ -57,8 +56,6 @@ async def users_list(
     per_page: int = 25,
 ):
     """List organization users (team mode only)."""
-    if not is_team_mode():
-        raise HTTPException(status_code=404, detail="User management requires team mode")
     user = await get_user_context(request)
     pool = await get_pool()
     user_repo = UserRepository(pool)
@@ -124,8 +121,6 @@ async def create_user(
     role: str = Form("member"),
 ):
     """Create a new user in the organization (team mode only)."""
-    if not is_team_mode():
-        raise HTTPException(status_code=404, detail="User management requires team mode")
     user = await get_user_context(request)
     await _check_csrf(request)
 
@@ -217,8 +212,6 @@ async def create_user(
 @router.post("/users/{user_id}/reset-password")
 async def reset_user_password_web(request: Request, user_id: UUID):
     """Reset a user's password (admin action, team mode only)."""
-    if not is_team_mode():
-        raise HTTPException(status_code=404, detail="User management requires team mode")
     await _check_csrf(request)
     user = await get_user_context(request)
 
@@ -286,8 +279,6 @@ async def reset_user_password_web(request: Request, user_id: UUID):
 @router.post("/users/{user_id}/impersonate")
 async def start_impersonation(request: Request, user_id: UUID):
     """Start impersonating a user (team mode only)."""
-    if not is_team_mode():
-        raise HTTPException(status_code=404, detail="Impersonation requires team mode")
     await _check_csrf(request)
     user = await get_user_context(request)
 
@@ -359,8 +350,6 @@ async def start_impersonation(request: Request, user_id: UUID):
 @router.post("/users/stop-impersonation")
 async def stop_impersonation(request: Request):
     """Stop impersonating and return to original user (team mode only)."""
-    if not is_team_mode():
-        raise HTTPException(status_code=404, detail="Impersonation requires team mode")
     await _check_csrf(request)
     # Best-effort audit. The current user context is the impersonated user; the
     # impersonator is captured via CurrentUser.impersonator_id when available.
@@ -404,8 +393,6 @@ async def _load_target_user(
 @router.post("/users/{user_id}/role")
 async def change_user_role(request: Request, user_id: UUID, role: str = Form(...)):
     """Change a user's role. Owners only."""
-    if not is_team_mode():
-        raise HTTPException(status_code=404, detail="Member management requires team mode")
     await _check_csrf(request)
     user = await get_user_context(request)
     caller_role = user.role if isinstance(user.role, str) else user.role.value
@@ -446,8 +433,6 @@ async def change_user_role(request: Request, user_id: UUID, role: str = Form(...
 @router.post("/users/{user_id}/deactivate")
 async def deactivate_user(request: Request, user_id: UUID):
     """Disable a user account (admin/owner). Cannot deactivate self or owner."""
-    if not is_team_mode():
-        raise HTTPException(status_code=404, detail="Member management requires team mode")
     await _check_csrf(request)
     user = await get_user_context(request)
     caller_role = user.role if isinstance(user.role, str) else user.role.value
@@ -490,8 +475,6 @@ async def deactivate_user(request: Request, user_id: UUID):
 @router.post("/users/{user_id}/reactivate")
 async def reactivate_user(request: Request, user_id: UUID):
     """Re-enable a user account (admin/owner)."""
-    if not is_team_mode():
-        raise HTTPException(status_code=404, detail="Member management requires team mode")
     await _check_csrf(request)
     user = await get_user_context(request)
     caller_role = user.role if isinstance(user.role, str) else user.role.value

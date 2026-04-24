@@ -28,17 +28,17 @@
 <div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
     {% if users %}
     {% from "partials/pagination.html" import pagination_controls %}
-    {{ pagination_controls(base_url="/users", page=page, per_page=per_page, total_pages=total_pages, total_count=total_count, entity_name="members") }}
+    {{ pagination_controls(base_url="/settings/users", page=page, per_page=per_page, total_pages=total_pages, total_count=total_count, entity_name="members") }}
     <div class="overflow-x-auto">
         <table class="w-full">
             <thead>
                 <tr class="bg-gray-50 border-b border-gray-200">
-                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Member</th>
-                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Email</th>
-                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Role</th>
-                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
-                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Last Login</th>
-                    {% if can_manage %}<th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>{% endif %}
+                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Member</th>
+                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Email</th>
+                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Role</th>
+                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Last Login</th>
+                    {% if can_manage %}<th class="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>{% endif %}
                 </tr>
             </thead>
             <tbody class="divide-y divide-gray-100">
@@ -53,7 +53,7 @@
                     (caller_role == 'admin' and u_role == 'member')
                 ) %}
                 <tr class="hover:bg-gray-50 transition-colors {% if not u.is_active %}opacity-60{% endif %}">
-                    <td class="px-6 py-4">
+                    <td class="px-4 py-3">
                         <div class="flex items-center gap-3">
                             <div class="flex items-center justify-center w-9 h-9 rounded-full bg-gradient-to-br from-primary-400 to-primary-600 text-white text-sm font-semibold">
                                 {{ (u.display_name or u.external_id or 'U')[0] | upper }}
@@ -64,57 +64,55 @@
                             </div>
                         </div>
                     </td>
-                    <td class="px-6 py-4 text-sm text-gray-500">{{ u.email or '—' }}</td>
-                    <td class="px-6 py-4">
-                        <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium
+                    <td class="px-4 py-3 text-sm text-gray-500">{{ u.email or '—' }}</td>
+                    <td class="px-4 py-3">
+                        {% if may_modify and caller_role == 'owner' %}
+                        <form action="/settings/users/{{ u.id }}/role" method="post" class="inline-flex items-center gap-1">
+                            <select name="role" class="text-xs border border-gray-200 rounded px-1.5 py-1 bg-white"
+                                    onchange="this.form.submit()">
+                                <option value="member" {% if u_role == 'member' %}selected{% endif %}>Member</option>
+                                <option value="admin"  {% if u_role == 'admin'  %}selected{% endif %}>Admin</option>
+                            </select>
+                            <noscript><button type="submit" class="text-xs text-primary-600">Save</button></noscript>
+                        </form>
+                        {% else %}
+                        <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium
                             {% if u_role == 'owner' %}bg-purple-100 text-purple-700
                             {% elif u_role == 'admin' %}bg-blue-100 text-blue-700
                             {% else %}bg-gray-100 text-gray-700{% endif %}">
                             {{ u_role | capitalize }}
                         </span>
+                        {% endif %}
                     </td>
-                    <td class="px-6 py-4">
+                    <td class="px-4 py-3">
                         {% if u.is_active %}
                         <span class="inline-flex items-center gap-1.5 text-sm text-emerald-600"><span class="w-2 h-2 rounded-full bg-emerald-500"></span>Active</span>
                         {% else %}
                         <span class="inline-flex items-center gap-1.5 text-sm text-gray-400"><span class="w-2 h-2 rounded-full bg-gray-300"></span>Inactive</span>
                         {% endif %}
                     </td>
-                    <td class="px-6 py-4 text-sm text-gray-500">{{ u.last_login_at | datetime }}</td>
+                    <td class="px-4 py-3 text-sm text-gray-500 whitespace-nowrap">{{ u.last_login_at | datetime }}</td>
                     {% if can_manage %}
-                    <td class="px-6 py-4 text-right text-sm">
+                    <td class="px-4 py-3 text-right text-sm">
                         {% if may_modify %}
-                        <div class="flex items-center justify-end gap-3">
-                            {# Role change — only owners can promote/demote admins #}
-                            {% if caller_role == 'owner' %}
-                            <form action="/settings/users/{{ u.id }}/role" method="post" class="inline-flex items-center gap-1">
-                                <select name="role" class="text-xs border border-gray-200 rounded px-1.5 py-0.5">
-                                    <option value="member"  {% if u_role == 'member' %}selected{% endif %}>Member</option>
-                                    <option value="admin"   {% if u_role == 'admin'  %}selected{% endif %}>Admin</option>
-                                </select>
-                                <button type="submit" class="text-xs text-primary-600 hover:text-primary-700 font-medium">Save</button>
-                            </form>
-                            <span class="text-gray-200">|</span>
-                            {% endif %}
+                        <div class="flex items-center justify-end gap-2 flex-wrap">
                             <form action="/settings/users/{{ u.id }}/reset-password" method="post" class="inline"
                                   onsubmit="return confirm('Reset password for {{ u.display_name or u.email }}?');">
-                                <button type="submit" class="text-amber-600 hover:text-amber-700 font-medium">Reset password</button>
+                                <button type="submit" class="text-xs text-amber-600 hover:text-amber-700 font-medium">Reset</button>
                             </form>
-                            <span class="text-gray-200">|</span>
                             {% if u.is_active %}
                             <form action="/settings/users/{{ u.id }}/deactivate" method="post" class="inline"
                                   onsubmit="return confirm('Deactivate {{ u.display_name or u.email }}? They will no longer be able to log in.');">
-                                <button type="submit" class="text-rose-600 hover:text-rose-700 font-medium">Deactivate</button>
+                                <button type="submit" class="text-xs text-rose-600 hover:text-rose-700 font-medium">Deactivate</button>
                             </form>
                             {% else %}
                             <form action="/settings/users/{{ u.id }}/reactivate" method="post" class="inline">
-                                <button type="submit" class="text-emerald-600 hover:text-emerald-700 font-medium">Reactivate</button>
+                                <button type="submit" class="text-xs text-emerald-600 hover:text-emerald-700 font-medium">Reactivate</button>
                             </form>
                             {% endif %}
                             {% if can_impersonate and u_role != 'owner' %}
-                            <span class="text-gray-200">|</span>
                             <form action="/settings/users/{{ u.id }}/impersonate" method="post" class="inline">
-                                <button type="submit" class="text-primary-600 hover:text-primary-700 font-medium">Impersonate</button>
+                                <button type="submit" class="text-xs text-primary-600 hover:text-primary-700 font-medium">Impersonate</button>
                             </form>
                             {% endif %}
                         </div>
@@ -130,7 +128,7 @@
             </tbody>
         </table>
     </div>
-    {{ pagination_controls(base_url="/users", page=page, per_page=per_page, total_pages=total_pages, total_count=total_count, show_per_page=false, entity_name="members") }}
+    {{ pagination_controls(base_url="/settings/users", page=page, per_page=per_page, total_pages=total_pages, total_count=total_count, show_per_page=false, entity_name="members") }}
     {% else %}
     <div class="p-12 text-center">
         <p class="text-sm text-gray-500">No members yet.</p>

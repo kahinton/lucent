@@ -188,19 +188,19 @@ class AdminAuditRepository:
 
         Returns ``{"entries": [...], "total_count": N, "page_size": L, "offset": O}``.
         """
-        where = ["organization_id = $1"]
+        where = ["a.organization_id = $1"]
         params: list[Any] = [str(organization_id)]
         idx = 2
         if action:
-            where.append(f"action = ${idx}")
+            where.append(f"a.action = ${idx}")
             params.append(action)
             idx += 1
         if entity_type:
-            where.append(f"entity_type = ${idx}")
+            where.append(f"a.entity_type = ${idx}")
             params.append(entity_type)
             idx += 1
         if actor_user_id:
-            where.append(f"actor_user_id = ${idx}")
+            where.append(f"a.actor_user_id = ${idx}")
             params.append(str(actor_user_id))
             idx += 1
         where_sql = " AND ".join(where)
@@ -220,7 +220,7 @@ class AdminAuditRepository:
             ORDER BY a.created_at DESC
             LIMIT ${idx} OFFSET ${idx + 1}
         """
-        count_q = f"SELECT COUNT(*) AS total FROM admin_audit_log WHERE {where_sql}"
+        count_q = f"SELECT COUNT(*) AS total FROM admin_audit_log a WHERE {where_sql}"
 
         async with self.pool.acquire() as conn:
             total_row = await conn.fetchrow(count_q, *params)

@@ -17,20 +17,26 @@
 
 {% block title %}{{ settings_title or 'Settings' }} — Lucent{% endblock %}
 
+{% block content_wrapper %}
+<div class="max-w-screen-2xl">
+{{ self.content() }}
+</div>
+{% endblock %}
+
 {% block content %}
 {% set role_value = (user.role.value if user.role.__class__.__name__ == 'Role' else user.role) %}
 {% set is_admin = role_value in ('admin', 'owner') %}
 {% set is_owner = role_value == 'owner' %}
 {% set tm = team_mode() %}
 
-<div class="mb-6">
-    <h1 class="text-2xl font-bold text-gray-900">Settings</h1>
-    <p class="mt-1 text-sm text-gray-500">Manage your account, workspace, and {% if is_admin %}administration{% else %}preferences{% endif %}.</p>
+<div class="mb-4">
+    <h1 class="text-xl font-semibold text-gray-900">Settings</h1>
+    <p class="text-xs text-gray-500">Manage your account, workspace, and {% if is_admin %}administration{% else %}preferences{% endif %}.</p>
 </div>
 
-<div class="grid grid-cols-12 gap-8">
+<div class="flex flex-col lg:flex-row gap-6">
     {# ---- Left rail nav ---- #}
-    <aside class="col-span-12 lg:col-span-3">
+    <aside class="w-full lg:w-56 flex-shrink-0">
         <nav class="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden divide-y divide-gray-100">
             {# Account #}
             <div class="px-3 py-2">
@@ -53,10 +59,8 @@
                 {% set _items = [
                     ('connections', '/settings/connections', 'Connections'),
                     ('secrets',     '/settings/secrets',     'Secrets'),
+                    ('groups',      '/settings/groups',      'Groups'),
                 ] %}
-                {% if tm %}
-                    {% set _items = _items + [('groups', '/settings/groups', 'Groups')] %}
-                {% endif %}
                 {% for key, href, label in _items %}
                 <a href="{{ href }}" class="flex items-center justify-between px-3 py-2 rounded-lg text-sm transition-colors {% if settings_section == key %}bg-primary-50 text-primary-700 font-medium{% else %}text-gray-700 hover:bg-gray-50{% endif %}">
                     <span>{{ label }}</span>
@@ -70,7 +74,7 @@
                 <a href="/settings/organization" class="flex items-center justify-between px-3 py-2 rounded-lg text-sm transition-colors {% if settings_section == 'organization' %}bg-primary-50 text-primary-700 font-medium{% else %}text-gray-700 hover:bg-gray-50{% endif %}">
                     <span>Overview</span>
                 </a>
-                {% if is_admin and tm %}
+                {% if is_admin %}
                 <a href="/settings/users" class="flex items-center justify-between px-3 py-2 rounded-lg text-sm transition-colors {% if settings_section == 'members' %}bg-primary-50 text-primary-700 font-medium{% else %}text-gray-700 hover:bg-gray-50{% endif %}">
                     <span>Members</span>
                 </a>
@@ -80,7 +84,7 @@
                     <span>Models</span>
                 </a>
                 {% endif %}
-                {% if is_admin and tm %}
+                {% if is_admin %}
                 <a href="/settings/audit" class="flex items-center justify-between px-3 py-2 rounded-lg text-sm transition-colors {% if settings_section == 'audit' %}bg-primary-50 text-primary-700 font-medium{% else %}text-gray-700 hover:bg-gray-50{% endif %}">
                     <span>Audit Log</span>
                 </a>
@@ -100,7 +104,7 @@
     </aside>
 
     {# ---- Main panel ---- #}
-    <section class="col-span-12 lg:col-span-9 space-y-6">
+    <section class="flex-1 min-w-0 space-y-6">
         <div class="flex items-start justify-between gap-4">
             <div>
                 <h2 class="text-xl font-semibold text-gray-900">{{ settings_title or 'Settings' }}</h2>

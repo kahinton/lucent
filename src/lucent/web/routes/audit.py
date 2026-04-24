@@ -4,7 +4,6 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
 from lucent.db import AdminAuditRepository, AuditRepository, get_pool
-from lucent.mode import is_team_mode
 
 from ._shared import get_user_context, templates
 
@@ -43,9 +42,6 @@ async def audit_logs(
     Defaults to the admin-action audit (user/role/api-key/etc.). Pass
     ``?source=memory`` to view the legacy memory-change log.
     """
-    if not is_team_mode():
-        raise HTTPException(status_code=404, detail="Audit logs require team mode")
-
     user = await get_user_context(request)
     role_val = user.role.value if hasattr(user.role, "value") else str(user.role)
     if role_val not in ("admin", "owner"):
