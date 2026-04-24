@@ -29,6 +29,22 @@ class RequestCreate(BaseModel):
     dependency_policy: str = Field(
         default="strict", pattern=r"^(strict|permissive)$"
     )
+    goal_id: str | None = Field(
+        default=None,
+        description=(
+            "Memory ID of the goal this request advances. When set, the goal "
+            "is validated as 'active' before the request is created."
+        ),
+    )
+    goal_milestone_index: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "1-based index of the milestone within the goal's metadata. "
+            "Required when the goal has a milestones array; the named "
+            "milestone must currently be 'active'."
+        ),
+    )
 
 
 class TaskCreate(BaseModel):
@@ -113,6 +129,8 @@ async def create_request(
         created_by=str(user.id),
         org_id=str(user.organization_id),
         dependency_policy=body.dependency_policy,
+        goal_id=body.goal_id,
+        goal_milestone_index=body.goal_milestone_index,
     )
 
 
@@ -140,6 +158,53 @@ async def list_active_work(user: AuthenticatedUser, pool=Depends(get_pool)):
 
     repo = RequestRepository(pool)
     return await repo.list_active_work(str(user.organization_id))
+
+
+@router.get("/planning-targets")
+async def list_planning_targets(
+    user: AuthenticatedUser,
+    pool=Depends(get_pool),
+    user_id: str | None = None,
+    limit: int = 50,
+):
+    """Goal milestones the cognitive planner MUST progress this cycle.
+
+    Returns a list pre-filtered to:
+      - active goals only
+      - first 'active' milestone whose start_after has passed
+      - no open request already targeting (goal, milestone)
+
+    The planner does not choose between entries — it advances every one
+    by calling create_request with goal_id and goal_milestone_index from
+    the response. Worst case under parallel cycles is a duplicate
+    create_request which is rejected by the validator (status: skipped,
+    reason: in-flight) and the planner moves on.
+
+    When called with a user-scoped API key (memory_scope_user_id set),
+    automatically restricts results to that user's goals so the per-user
+    fan-out gets only its own user's targets.
+    """
+    from lucent.db.requests import RequestRepository
+
+    # If the caller's key is scoped to a user, force-filter to that user.
+    # An explicit ?user_id= override is only honored when it matches the
+    # scoped user id (defense in depth — a scoped key could not actually
+    # broaden its view but we shouldn't pretend otherwise).
+    effective_user_id: str | None = user_id
+    if user.memory_scope == "user" and user.memory_scope_user_id is not None:
+        scoped = str(user.memory_scope_user_id)
+        if effective_user_id and effective_user_id != scoped:
+            effective_user_id = scoped
+        else:
+            effective_user_id = scoped
+
+    repo = RequestRepository(pool)
+    targets = await repo.list_planning_targets(
+        str(user.organization_id),
+        user_id=effective_user_id,
+        limit=limit,
+    )
+    return {"targets": targets, "count": len(targets)}
 
 
 @router.get("/recently-completed")

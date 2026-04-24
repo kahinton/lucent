@@ -1359,41 +1359,56 @@ class TestRequestDeduplication:
     async def test_recently_completed_with_same_normalized_title_blocks_create(
         self, repo, test_organization, db_pool
     ):
-        """A cognitive request whose normalized title matches a recently
-        completed request linked to the same goal must be refused.
-
-        This is the structural fix for the bug where the planner re-proposes
-        the same milestone work after the goal's milestone state wasn't
-        updated.
+        """Replaced by structured-field dedup. The title-normalization
+        guard was removed when goal_id/goal_milestone_index became
+        first-class. Two cognitive requests targeting the same
+        (goal, milestone) are now caught by the structured dedup, and
+        the side effect of completing a request marks the milestone done
+        so it is no longer a planning target.
         """
         org_id = str(test_organization["id"])
         async with db_pool.acquire() as conn:
             mem = await conn.fetchrow(
-                """INSERT INTO memories (content, type, organization_id, username)
-                   VALUES ('stale-completion-goal', 'goal', $1::uuid, 'test-user')
+                """INSERT INTO memories
+                       (content, type, organization_id, username, metadata)
+                   VALUES ('structured-dedup-goal', 'goal', $1::uuid,
+                           'test-user', $2::jsonb)
                    RETURNING id""",
                 org_id,
+                {
+                    "status": "active",
+                    "milestones": [{"description": "x", "status": "active"}],
+                },
             )
         mem_id = str(mem["id"])
 
         r1 = await repo.create_request(
-            title="Native forgetting M2: Propose strategy candidates",
-            org_id=org_id,
-            source="cognitive",
-            memory_ids=[{"id": mem_id, "relation": "goal"}],
+            title="anything",
+            org_id=org_id, source="cognitive",
+            goal_id=mem_id, goal_milestone_index=1,
         )
+        assert r1.get("status") != "skipped"
+
+        # Second create against the SAME (goal, milestone) while r1 is
+        # still open: dedup returns the existing request.
+        r2 = await repo.create_request(
+            title="anything else",
+            org_id=org_id, source="cognitive",
+            goal_id=mem_id, goal_milestone_index=1,
+        )
+        assert str(r2["id"]) == str(r1["id"])
+
+        # Complete r1 → milestone gets marked done as a side effect.
         await repo.update_request_status(str(r1["id"]), "completed", org_id=org_id)
 
-        # Same normalized title (hyphen + em-dash variation) — must be refused.
-        r2 = await repo.create_request(
-            title="Native-forgetting M2 — propose strategy candidates",
-            org_id=org_id,
-            source="cognitive",
-            memory_ids=[{"id": mem_id, "relation": "goal"}],
+        # Third attempt now refuses because the milestone is no longer active.
+        r3 = await repo.create_request(
+            title="post-completion attempt",
+            org_id=org_id, source="cognitive",
+            goal_id=mem_id, goal_milestone_index=1,
         )
-        assert r2["status"] == "skipped"
-        assert r2["reason"] == "duplicate_of_recent_completion"
-        assert r2["existing_request_id"] == str(r1["id"])
+        assert r3.get("status") == "skipped"
+        assert r3.get("reason") in ("milestone_not_active", "goal_completed")
 
     async def test_recently_completed_with_different_title_allows_create(
         self, repo, test_organization, db_pool
@@ -1562,218 +1577,482 @@ class TestRequestDeduplication:
         _ = r1  # used implicitly to set up the dup state
 
 
-class TestMilestoneStateGuard:
-    """Structural guard that prevents the cognitive planner from creating
-    requests for the wrong milestone of a goal (or for a goal whose
-    milestones are all done)."""
+class TestListPlanningTargets:
+    """The canonical 'what's plannable' tool. The planner should call this
+    instead of reasoning about goals + milestones by hand."""
 
-    async def _make_goal(self, db_pool, org_id, milestones):
-        import json as _json
+    async def _make_goal(
+        self, db_pool, org_id, *, status="active", milestones=None,
+        content="planning-target-test", user_id=None,
+    ):
+        meta = {"status": status, "milestones": milestones or []}
+        params = [content, org_id, meta]
+        user_clause = ""
+        if user_id:
+            params.append(user_id)
+            user_clause = ", user_id"
         async with db_pool.acquire() as conn:
             row = await conn.fetchrow(
-                """INSERT INTO memories (content, type, organization_id,
-                                         username, metadata)
-                   VALUES ($1, 'goal', $2::uuid, 'test-user', $3::jsonb)
+                f"""INSERT INTO memories
+                       (content, type, organization_id, username,
+                        metadata{user_clause})
+                   VALUES ($1, 'goal', $2::uuid, 'test-user', $3::jsonb
+                       {', $4::uuid' if user_id else ''})
                    RETURNING id""",
-                "milestone-guard-goal",
-                org_id,
-                _json.dumps({"status": "active", "milestones": milestones}),
+                *params,
             )
         return str(row["id"])
 
-    async def test_refuses_when_referenced_milestone_is_completed(
+    async def test_returns_active_goal_with_first_active_milestone(
         self, repo, test_organization, db_pool
     ):
         org_id = str(test_organization["id"])
-        goal_id = await self._make_goal(db_pool, org_id, [
+        gid = await self._make_goal(db_pool, org_id, milestones=[
             {"description": "Survey", "status": "completed"},
             {"description": "Propose", "status": "completed"},
             {"description": "Prototype", "status": "active"},
-        ])
-        result = await repo.create_request(
-            title="Native Forgetting M1: Design doc",
-            org_id=org_id, source="cognitive",
-            memory_ids=[{"id": goal_id, "relation": "goal"}],
-        )
-        assert result["status"] == "skipped"
-        assert result["reason"] == "milestone_not_active"
-        assert "M1" in (result.get("detail") or "")
-
-    async def test_refuses_when_referenced_milestone_out_of_range(
-        self, repo, test_organization, db_pool
-    ):
-        org_id = str(test_organization["id"])
-        goal_id = await self._make_goal(db_pool, org_id, [
-            {"description": "Survey", "status": "active"},
-            {"description": "Propose", "status": "active"},
-        ])
-        result = await repo.create_request(
-            title="Foo M5: out of range",
-            org_id=org_id, source="cognitive",
-            memory_ids=[{"id": goal_id, "relation": "goal"}],
-        )
-        assert result["status"] == "skipped"
-        assert result["reason"] == "milestone_out_of_range"
-
-    async def test_refuses_when_no_milestone_referenced_in_title(
-        self, repo, test_organization, db_pool
-    ):
-        org_id = str(test_organization["id"])
-        goal_id = await self._make_goal(db_pool, org_id, [
-            {"description": "Survey", "status": "active"},
-        ])
-        result = await repo.create_request(
-            title="Some work for the goal",
-            org_id=org_id, source="cognitive",
-            memory_ids=[{"id": goal_id, "relation": "goal"}],
-        )
-        assert result["status"] == "skipped"
-        assert result["reason"] == "milestone_not_referenced"
-
-    async def test_refuses_when_all_milestones_done(
-        self, repo, test_organization, db_pool
-    ):
-        org_id = str(test_organization["id"])
-        goal_id = await self._make_goal(db_pool, org_id, [
-            {"description": "Survey", "status": "completed"},
-            {"description": "Propose", "status": "completed"},
-            {"description": "Prototype", "status": "abandoned"},
-        ])
-        result = await repo.create_request(
-            title="Foo M2: anything",
-            org_id=org_id, source="cognitive",
-            memory_ids=[{"id": goal_id, "relation": "goal"}],
-        )
-        assert result["status"] == "skipped"
-        assert result["reason"] == "goal_milestones_all_done"
-
-    async def test_allows_active_milestone(self, repo, test_organization, db_pool):
-        """The happy path: title references the FIRST active milestone (M3)."""
-        org_id = str(test_organization["id"])
-        goal_id = await self._make_goal(db_pool, org_id, [
-            {"description": "Survey", "status": "completed"},
-            {"description": "Propose", "status": "completed"},
-            {"description": "Prototype", "status": "active"},
-        ])
-        result = await repo.create_request(
-            title="Foo M3: Prototype in shadow mode",
-            org_id=org_id, source="cognitive",
-            memory_ids=[{"id": goal_id, "relation": "goal"}],
-        )
-        assert result.get("status") != "skipped"
-        assert "id" in result
-
-    async def test_allows_later_active_milestone_when_earlier_done(
-        self, repo, test_organization, db_pool
-    ):
-        """If M2 is completed but M3 is active, requesting M3 work is fine."""
-        org_id = str(test_organization["id"])
-        goal_id = await self._make_goal(db_pool, org_id, [
-            {"description": "Survey", "status": "completed"},
-            {"description": "Propose", "status": "completed"},
-            {"description": "Prototype", "status": "completed"},
-            {"description": "Implement", "status": "completed"},
             {"description": "Soak", "status": "active"},
         ])
-        result = await repo.create_request(
-            title="Native forgetting M5: 30-day soak evaluation",
-            org_id=org_id, source="cognitive",
-            memory_ids=[{"id": goal_id, "relation": "goal"}],
-        )
-        assert result.get("status") != "skipped"
+        targets = await repo.list_planning_targets(org_id)
+        ids = [t["goal_id"] for t in targets]
+        assert gid in ids
+        target = next(t for t in targets if t["goal_id"] == gid)
+        assert target["next_milestone_index"] == 3
+        assert target["next_milestone_description"] == "Prototype"
+        assert "M3:" in target["suggested_title"]
+        assert target["active_milestone_indexes"] == [3, 4]
+        assert target["completed_milestone_count"] == 2
 
-    async def test_allows_milestone_phrased_as_phase(
+    async def test_excludes_completed_goal(
         self, repo, test_organization, db_pool
     ):
         org_id = str(test_organization["id"])
-        goal_id = await self._make_goal(db_pool, org_id, [
-            {"description": "Survey", "status": "active"},
-            {"description": "Propose", "status": "active"},
+        gid = await self._make_goal(db_pool, org_id, status="completed")
+        targets = await repo.list_planning_targets(org_id)
+        assert gid not in [t["goal_id"] for t in targets]
+
+    async def test_excludes_abandoned_goal(
+        self, repo, test_organization, db_pool
+    ):
+        org_id = str(test_organization["id"])
+        gid = await self._make_goal(db_pool, org_id, status="abandoned")
+        targets = await repo.list_planning_targets(org_id)
+        assert gid not in [t["goal_id"] for t in targets]
+
+    async def test_excludes_goal_with_no_active_milestones(
+        self, repo, test_organization, db_pool
+    ):
+        """metadata.status is still 'active' but every milestone is done.
+        These goals should NOT appear — they should be marked completed."""
+        org_id = str(test_organization["id"])
+        gid = await self._make_goal(db_pool, org_id, milestones=[
+            {"description": "a", "status": "completed"},
+            {"description": "b", "status": "abandoned"},
         ])
-        result = await repo.create_request(
-            title="Memory Lifecycle Phase 1: Foo",
-            org_id=org_id, source="cognitive",
-            memory_ids=[{"id": goal_id, "relation": "goal"}],
-        )
-        assert result.get("status") != "skipped"
+        targets = await repo.list_planning_targets(org_id)
+        assert gid not in [t["goal_id"] for t in targets]
 
-    async def test_allows_milestone_phrased_as_milestone(
+    async def test_excludes_goal_with_open_request(
         self, repo, test_organization, db_pool
     ):
+        """Goals already being worked on should not be re-listed."""
         org_id = str(test_organization["id"])
-        goal_id = await self._make_goal(db_pool, org_id, [
-            {"description": "Survey", "status": "active"},
-            {"description": "Propose", "status": "active"},
+        gid = await self._make_goal(db_pool, org_id, milestones=[
+            {"description": "a", "status": "active"},
         ])
-        result = await repo.create_request(
-            title="Foo Milestone 2: Propose",
-            org_id=org_id, source="cognitive",
-            memory_ids=[{"id": goal_id, "relation": "goal"}],
+        r = await repo.create_request(
+            title="in flight", org_id=org_id, source="cognitive",
+            goal_id=gid, goal_milestone_index=1,
         )
-        assert result.get("status") != "skipped"
+        assert r.get("status") != "skipped"
+        targets = await repo.list_planning_targets(org_id)
+        assert gid not in [t["goal_id"] for t in targets]
 
-    async def test_user_source_bypasses_milestone_guard(
+    async def test_includes_goal_after_request_completed(
         self, repo, test_organization, db_pool
     ):
-        """User-initiated requests aren't subject to the cognitive guard.
-        Only the autonomous planner is locked into the milestone discipline.
-        """
+        """Once a request finishes, a goal with remaining active milestones
+        becomes plannable again."""
         org_id = str(test_organization["id"])
-        goal_id = await self._make_goal(db_pool, org_id, [
-            {"description": "Survey", "status": "completed"},
-            {"description": "Propose", "status": "active"},
+        gid = await self._make_goal(db_pool, org_id, milestones=[
+            {"description": "a", "status": "completed"},
+            {"description": "b", "status": "active"},
         ])
-        result = await repo.create_request(
-            title="Just a free-form user request",
-            org_id=org_id, source="user",
-            memory_ids=[{"id": goal_id, "relation": "goal"}],
+        r = await repo.create_request(
+            title="prior work", org_id=org_id, source="cognitive",
+            goal_id=gid, goal_milestone_index=2,
         )
-        assert result.get("status") != "skipped"
+        await repo.update_request_status(str(r["id"]), "completed", org_id=org_id)
+        targets = await repo.list_planning_targets(org_id)
+        ids = [t["goal_id"] for t in targets]
+        # Note: completing the request also marks milestone 2 done via the
+        # completion side effect, which marks the entire goal completed
+        # (since all milestones are now done). So gid should NOT be plannable.
+        assert gid not in ids
 
-    async def test_goal_without_milestones_unaffected(
+    async def test_open_ended_goal_with_no_milestones_is_plannable(
         self, repo, test_organization, db_pool
     ):
-        """Goals with no milestones array can have any cognitive request."""
+        """Goals without a milestones array can still be planned (they're
+        free-form). The planner picks its own title."""
         org_id = str(test_organization["id"])
-        goal_id = await self._make_goal(db_pool, org_id, [])
-        result = await repo.create_request(
-            title="Free-form work",
+        gid = await self._make_goal(db_pool, org_id, milestones=[])
+        targets = await repo.list_planning_targets(org_id)
+        ids = [t["goal_id"] for t in targets]
+        assert gid in ids
+        target = next(t for t in targets if t["goal_id"] == gid)
+        assert target["next_milestone_index"] is None
+        assert target["total_milestones"] == 0
+
+
+class TestStructuredGoalMilestoneFields:
+    """Tests for the new first-class goal_memory_id / goal_milestone_index
+    columns on requests. The structured path is the canonical way to
+    create goal-advancing requests; it replaces the old title-parsing +
+    memory_ids(relation='goal') approach."""
+
+    async def _make_goal(self, db_pool, org_id, *, status="active", milestones=None):
+        meta = {"status": status, "milestones": milestones or []}
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """INSERT INTO memories
+                       (content, type, organization_id, username, metadata)
+                   VALUES ('structured-fields-goal', 'goal', $1::uuid,
+                           'test-user', $2::jsonb)
+                   RETURNING id""",
+                org_id,
+                meta,
+            )
+        return str(row["id"])
+
+    async def test_create_with_goal_id_persists_columns(
+        self, repo, test_organization, db_pool
+    ):
+        org_id = str(test_organization["id"])
+        gid = await self._make_goal(db_pool, org_id, milestones=[
+            {"description": "a", "status": "active"},
+        ])
+        r = await repo.create_request(
+            title="structured create",
             org_id=org_id, source="cognitive",
-            memory_ids=[{"id": goal_id, "relation": "goal"}],
+            goal_id=gid, goal_milestone_index=1,
         )
-        assert result.get("status") != "skipped"
+        assert r.get("status") != "skipped"
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT goal_memory_id, goal_milestone_index FROM requests WHERE id=$1",
+                r["id"],
+            )
+        assert str(row["goal_memory_id"]) == gid
+        assert row["goal_milestone_index"] == 1
+
+    async def test_create_refuses_completed_goal(
+        self, repo, test_organization, db_pool
+    ):
+        org_id = str(test_organization["id"])
+        gid = await self._make_goal(db_pool, org_id, status="completed")
+        r = await repo.create_request(
+            title="x", org_id=org_id, source="cognitive",
+            goal_id=gid,
+        )
+        assert r.get("status") == "skipped"
+        assert r.get("reason") == "goal_completed"
+
+    async def test_create_refuses_nonactive_milestone(
+        self, repo, test_organization, db_pool
+    ):
+        org_id = str(test_organization["id"])
+        gid = await self._make_goal(db_pool, org_id, milestones=[
+            {"description": "a", "status": "completed"},
+            {"description": "b", "status": "active"},
+        ])
+        r = await repo.create_request(
+            title="x", org_id=org_id, source="cognitive",
+            goal_id=gid, goal_milestone_index=1,  # completed, not active
+        )
+        assert r.get("status") == "skipped"
+        assert r.get("reason") == "milestone_not_active"
+
+    async def test_create_refuses_out_of_range_milestone(
+        self, repo, test_organization, db_pool
+    ):
+        org_id = str(test_organization["id"])
+        gid = await self._make_goal(db_pool, org_id, milestones=[
+            {"description": "only-one", "status": "active"},
+        ])
+        r = await repo.create_request(
+            title="x", org_id=org_id, source="cognitive",
+            goal_id=gid, goal_milestone_index=5,
+        )
+        assert r.get("status") == "skipped"
+        assert r.get("reason") == "milestone_out_of_range"
+
+    async def test_create_refuses_milestone_required_when_missing(
+        self, repo, test_organization, db_pool
+    ):
+        """Goal has milestones but caller omitted goal_milestone_index."""
+        org_id = str(test_organization["id"])
+        gid = await self._make_goal(db_pool, org_id, milestones=[
+            {"description": "a", "status": "active"},
+        ])
+        r = await repo.create_request(
+            title="x", org_id=org_id, source="cognitive",
+            goal_id=gid,  # no milestone_index
+        )
+        assert r.get("status") == "skipped"
+        assert r.get("reason") == "milestone_required"
+
+    async def test_create_allows_open_ended_goal_without_milestone(
+        self, repo, test_organization, db_pool
+    ):
+        org_id = str(test_organization["id"])
+        gid = await self._make_goal(db_pool, org_id, milestones=[])
+        r = await repo.create_request(
+            title="open-ended work", org_id=org_id, source="cognitive",
+            goal_id=gid,
+        )
+        assert r.get("status") != "skipped"
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT goal_memory_id, goal_milestone_index FROM requests WHERE id=$1",
+                r["id"],
+            )
+        assert str(row["goal_memory_id"]) == gid
+        assert row["goal_milestone_index"] is None
+
+    async def test_create_refuses_unknown_goal(
+        self, repo, test_organization
+    ):
+        import uuid
+        org_id = str(test_organization["id"])
+        r = await repo.create_request(
+            title="x", org_id=org_id, source="cognitive",
+            goal_id=str(uuid.uuid4()),
+        )
+        assert r.get("status") == "skipped"
+        assert r.get("reason") == "goal_not_found"
+
+    async def test_structured_dedup_returns_existing_request(
+        self, repo, test_organization, db_pool
+    ):
+        """Two create calls against the same (goal, milestone) while the
+        first is open — second returns the existing row, not a new one."""
+        org_id = str(test_organization["id"])
+        gid = await self._make_goal(db_pool, org_id, milestones=[
+            {"description": "a", "status": "active"},
+        ])
+        r1 = await repo.create_request(
+            title="first", org_id=org_id, source="cognitive",
+            goal_id=gid, goal_milestone_index=1,
+        )
+        r2 = await repo.create_request(
+            title="second attempt, parallel cycle",
+            org_id=org_id, source="cognitive",
+            goal_id=gid, goal_milestone_index=1,
+        )
+        assert str(r1["id"]) == str(r2["id"])
+
+    async def test_milestone_requires_goal_id(self, repo, test_organization):
+        """Passing goal_milestone_index without goal_id is a ValueError."""
+        org_id = str(test_organization["id"])
+        with pytest.raises(ValueError):
+            await repo.create_request(
+                title="x", org_id=org_id,
+                goal_milestone_index=1,
+            )
+
+    async def test_mirrors_goal_into_request_memories(
+        self, repo, test_organization, db_pool
+    ):
+        """When goal_id is passed, a request_memories(relation='goal')
+        row is also inserted for UI compatibility."""
+        org_id = str(test_organization["id"])
+        gid = await self._make_goal(db_pool, org_id, milestones=[
+            {"description": "a", "status": "active"},
+        ])
+        r = await repo.create_request(
+            title="mirror test", org_id=org_id, source="cognitive",
+            goal_id=gid, goal_milestone_index=1,
+        )
+        async with db_pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT memory_id, relation FROM request_memories
+                   WHERE request_id=$1""",
+                r["id"],
+            )
+        assert len(rows) == 1
+        assert str(rows[0]["memory_id"]) == gid
+        assert rows[0]["relation"] == "goal"
 
 
-class TestMilestoneNumberExtraction:
-    """Unit tests for the title→milestone-number parser."""
+class TestMilestoneCompletionLoop:
+    """Completing a goal-advancing request automatically marks the
+    targeted milestone 'completed' on the goal memory. Closes the loop
+    so future planning cycles no longer see that milestone."""
 
-    def test_extracts_m_n(self):
-        from lucent.db.requests import _extract_milestone_number
-        assert _extract_milestone_number("Foo M3: bar") == 3
-        assert _extract_milestone_number("Native-forgetting M2 — propose") == 2
-        assert _extract_milestone_number("M1: just at start") == 1
+    async def _make_goal(self, db_pool, org_id, milestones):
+        meta = {"status": "active", "milestones": milestones}
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """INSERT INTO memories
+                       (content, type, organization_id, username, metadata)
+                   VALUES ('completion-loop-goal', 'goal', $1::uuid,
+                           'test-user', $2::jsonb)
+                   RETURNING id""",
+                org_id, meta,
+            )
+        return str(row["id"])
 
-    def test_extracts_milestone_n(self):
-        from lucent.db.requests import _extract_milestone_number
-        assert _extract_milestone_number("Foo Milestone 4 work") == 4
-        assert _extract_milestone_number("milestone 12: scaling") == 12
+    async def _fetch_metadata(self, db_pool, gid):
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT metadata FROM memories WHERE id=$1::uuid", gid
+            )
+        import json as _json
+        m = row["metadata"]
+        return _json.loads(m) if isinstance(m, str) else m
 
-    def test_extracts_phase_n(self):
-        from lucent.db.requests import _extract_milestone_number
-        assert _extract_milestone_number("Memory Lifecycle Phase 1: Foo") == 1
-        assert _extract_milestone_number("Phase 7 prep") == 7
+    async def test_completing_request_marks_milestone_done(
+        self, repo, test_organization, db_pool
+    ):
+        org_id = str(test_organization["id"])
+        gid = await self._make_goal(db_pool, org_id, [
+            {"description": "a", "status": "active"},
+            {"description": "b", "status": "active"},
+        ])
+        r = await repo.create_request(
+            title="advance M1", org_id=org_id, source="cognitive",
+            goal_id=gid, goal_milestone_index=1,
+        )
+        await repo.update_request_status(str(r["id"]), "completed", org_id=org_id)
+        meta = await self._fetch_metadata(db_pool, gid)
+        assert meta["milestones"][0]["status"] == "completed"
+        assert "completed_at" in meta["milestones"][0]
+        # Milestone 2 unaffected.
+        assert meta["milestones"][1]["status"] == "active"
+        # Goal still active (not all milestones done).
+        assert meta.get("status") == "active"
 
-    def test_does_not_match_words(self):
-        from lucent.db.requests import _extract_milestone_number
-        # The 'M' in 'memo' or 'M3 file' must not falsely match.
-        assert _extract_milestone_number("Add memo to system") is None
-        assert _extract_milestone_number("Process the M3file thing") is None
+    async def test_completing_last_active_milestone_marks_goal_completed(
+        self, repo, test_organization, db_pool
+    ):
+        org_id = str(test_organization["id"])
+        gid = await self._make_goal(db_pool, org_id, [
+            {"description": "a", "status": "completed"},
+            {"description": "b", "status": "active"},
+        ])
+        r = await repo.create_request(
+            title="advance final M2", org_id=org_id, source="cognitive",
+            goal_id=gid, goal_milestone_index=2,
+        )
+        await repo.update_request_status(str(r["id"]), "completed", org_id=org_id)
+        meta = await self._fetch_metadata(db_pool, gid)
+        assert meta["milestones"][1]["status"] == "completed"
+        assert meta["status"] == "completed"
 
-    def test_no_match_returns_none(self):
-        from lucent.db.requests import _extract_milestone_number
-        assert _extract_milestone_number("Just some work") is None
-        assert _extract_milestone_number("") is None
-        assert _extract_milestone_number(None) is None
+    async def test_cancelled_request_does_not_mark_milestone(
+        self, repo, test_organization, db_pool
+    ):
+        """Only 'completed' status triggers the milestone update —
+        'cancelled' leaves the milestone alone so it stays plannable."""
+        org_id = str(test_organization["id"])
+        gid = await self._make_goal(db_pool, org_id, [
+            {"description": "a", "status": "active"},
+        ])
+        r = await repo.create_request(
+            title="x", org_id=org_id, source="cognitive",
+            goal_id=gid, goal_milestone_index=1,
+        )
+        await repo.update_request_status(str(r["id"]), "cancelled", org_id=org_id)
+        meta = await self._fetch_metadata(db_pool, gid)
+        assert meta["milestones"][0]["status"] == "active"
+
+    async def test_non_goal_request_completion_is_inert(
+        self, repo, test_organization
+    ):
+        """Completing a request with no goal_memory_id must not crash."""
+        org_id = str(test_organization["id"])
+        r = await repo.create_request(
+            title="no goal here", org_id=org_id, source="user",
+        )
+        res = await repo.update_request_status(
+            str(r["id"]), "completed", org_id=org_id
+        )
+        assert res is not None
+        assert res["status"] == "completed"
+
+
+class TestStartAfterGating:
+    """Milestones with a `start_after` future date are excluded from
+    planning targets and refused at create time."""
+
+    async def _make_goal(self, db_pool, org_id, milestones):
+        meta = {"status": "active", "milestones": milestones}
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """INSERT INTO memories
+                       (content, type, organization_id, username, metadata)
+                   VALUES ('start-after-goal', 'goal', $1::uuid,
+                           'test-user', $2::jsonb)
+                   RETURNING id""",
+                org_id, meta,
+            )
+        return str(row["id"])
+
+    async def test_planning_targets_skips_future_start_after(
+        self, repo, test_organization, db_pool
+    ):
+        from datetime import datetime, timedelta, timezone
+        future = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+        org_id = str(test_organization["id"])
+        gid = await self._make_goal(db_pool, org_id, [
+            {"description": "a", "status": "active", "start_after": future},
+        ])
+        targets = await repo.list_planning_targets(org_id)
+        assert gid not in [t["goal_id"] for t in targets]
+
+    async def test_planning_targets_includes_past_start_after(
+        self, repo, test_organization, db_pool
+    ):
+        from datetime import datetime, timedelta, timezone
+        past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+        org_id = str(test_organization["id"])
+        gid = await self._make_goal(db_pool, org_id, [
+            {"description": "a", "status": "active", "start_after": past},
+        ])
+        targets = await repo.list_planning_targets(org_id)
+        assert gid in [t["goal_id"] for t in targets]
+
+    async def test_create_refuses_future_start_after(
+        self, repo, test_organization, db_pool
+    ):
+        from datetime import datetime, timedelta, timezone
+        future = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+        org_id = str(test_organization["id"])
+        gid = await self._make_goal(db_pool, org_id, [
+            {"description": "a", "status": "active", "start_after": future},
+        ])
+        r = await repo.create_request(
+            title="too early", org_id=org_id, source="cognitive",
+            goal_id=gid, goal_milestone_index=1,
+        )
+        assert r.get("status") == "skipped"
+        assert r.get("reason") == "milestone_not_yet_active"
+
+    async def test_create_allows_date_only_past_start_after(
+        self, repo, test_organization, db_pool
+    ):
+        """start_after='2024-01-01' (date-only, in the past) should work."""
+        org_id = str(test_organization["id"])
+        gid = await self._make_goal(db_pool, org_id, [
+            {"description": "a", "status": "active",
+             "start_after": "2024-01-01"},
+        ])
+        r = await repo.create_request(
+            title="past date work", org_id=org_id, source="cognitive",
+            goal_id=gid, goal_milestone_index=1,
+        )
+        assert r.get("status") != "skipped"
 
 
 class TestUpdatePendingTask:

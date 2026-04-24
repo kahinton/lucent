@@ -16,6 +16,41 @@
             {% if req.description %}
             <p class="text-sm text-gray-500 mt-1">{{ req.description }}</p>
             {% endif %}
+            {% if goal_info %}
+            <div class="mt-3 inline-flex items-start gap-2 bg-purple-50 border border-purple-200 rounded-lg px-3 py-2 text-sm">
+                <svg class="w-4 h-4 text-purple-600 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 21l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.18L12 21z"/>
+                </svg>
+                <div class="min-w-0">
+                    <div class="flex items-center gap-2 flex-wrap">
+                        <span class="text-[11px] font-semibold uppercase tracking-wider text-purple-700">Goal</span>
+                        <a href="/memories/{{ goal_info.id }}" class="font-medium text-purple-900 hover:text-purple-700 truncate">{{ goal_info.title }}</a>
+                    </div>
+                    {% if goal_info.milestone_index %}
+                    <div class="mt-0.5 flex items-center gap-2 flex-wrap text-xs text-purple-800">
+                        <span class="inline-flex items-center px-1.5 py-0.5 rounded bg-purple-100 font-medium">
+                            Milestone {{ goal_info.milestone_index }}{% if goal_info.milestone_total %} of {{ goal_info.milestone_total }}{% endif %}
+                        </span>
+                        {% if goal_info.milestone_status %}
+                        <span class="inline-flex items-center gap-1">
+                            <span class="w-1.5 h-1.5 rounded-full
+                                {% if goal_info.milestone_status == 'completed' %}bg-emerald-500
+                                {% elif goal_info.milestone_status == 'active' %}bg-blue-500
+                                {% elif goal_info.milestone_status == 'abandoned' %}bg-gray-400
+                                {% else %}bg-amber-500{% endif %}"></span>
+                            {{ goal_info.milestone_status }}
+                        </span>
+                        {% endif %}
+                        {% if goal_info.milestone_label %}
+                        <span class="text-purple-700">— {{ goal_info.milestone_label }}</span>
+                        {% endif %}
+                    </div>
+                    {% elif req.goal_memory_id %}
+                    <div class="mt-0.5 text-xs text-purple-700/80">No specific milestone</div>
+                    {% endif %}
+                </div>
+            </div>
+            {% endif %}
         </div>
         <div class="flex items-center gap-2 shrink-0">
             <!-- Status -->

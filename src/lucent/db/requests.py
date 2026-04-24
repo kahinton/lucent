@@ -63,43 +63,230 @@ def _normalize_title_for_dedup(title: str | None) -> str:
     return re.sub(r"[^a-z0-9]+", " ", title.lower()).strip()
 
 
-# Patterns the planner uses to label which milestone a request targets.
-# Order matters: more specific patterns come first so 'Milestone 3' isn't
-# captured as just 'M3' (the integer would still match but the more specific
-# label is more readable in error output).
-_MILESTONE_REF_PATTERNS = (
-    re.compile(r"\bMilestone\s+(\d+)\b", re.IGNORECASE),
-    re.compile(r"\bPhase\s+(\d+)\b", re.IGNORECASE),
-    # Stand-alone M<N> or M<N>: at the start of a token.
-    # Anchored so we don't grab the M out of words like 'memo' or 'M3 file'.
-    re.compile(r"(?<![A-Za-z])M(\d+)(?=[\s:,.\-—–_]|$)"),
-)
+
+def _coerce_metadata(metadata: Any) -> dict | None:
+    """Normalize a memory.metadata value (dict or JSON string) into a dict."""
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except (TypeError, ValueError):
+            return None
+    return metadata if isinstance(metadata, dict) else None
 
 
-def _extract_milestone_number(title: str | None) -> int | None:
-    """Extract the milestone index a request title is targeting.
+def _next_active_milestone_index(metadata: dict | None) -> int | None:
+    """Return the 1-based index of the first 'active' milestone, or None.
 
-    The cognitive planner is instructed to label requests with the milestone
-    they target — 'Foo M3: ...', 'Foo Milestone 3 ...', 'Foo Phase 3 ...'.
-    We extract that integer so the create-request guard can validate it
-    against the goal's milestone array.
-
-    Returns the 1-based milestone number, or None if the title doesn't
-    reference a specific milestone (in which case we can't validate, and
-    the request is allowed through).
+    None can mean: goal has no milestones array, OR every milestone is
+    completed/abandoned. Use ``_milestones_summary`` if you need to
+    distinguish those two cases.
     """
-    if not title:
+    if not metadata:
         return None
-    for pat in _MILESTONE_REF_PATTERNS:
-        m = pat.search(title)
-        if m:
-            try:
-                n = int(m.group(1))
-            except (TypeError, ValueError):
-                continue
-            if n >= 1:
-                return n
+    milestones = metadata.get("milestones") or []
+    if not isinstance(milestones, list):
+        return None
+    for i, m in enumerate(milestones, start=1):
+        if isinstance(m, dict) and m.get("status") == "active":
+            return i
     return None
+
+
+def _milestones_summary(metadata: dict | None) -> dict:
+    """Summarize a goal's milestone state for diagnostics and refusal output."""
+    out = {
+        "total": 0,
+        "active_indexes": [],
+        "completed_count": 0,
+        "abandoned_count": 0,
+    }
+    if not metadata:
+        return out
+    milestones = metadata.get("milestones") or []
+    if not isinstance(milestones, list):
+        return out
+    out["total"] = len(milestones)
+    for i, m in enumerate(milestones, start=1):
+        if not isinstance(m, dict):
+            continue
+        status = m.get("status")
+        if status == "active":
+            out["active_indexes"].append(i)
+        elif status == "completed":
+            out["completed_count"] += 1
+        elif status == "abandoned":
+            out["abandoned_count"] += 1
+    return out
+
+
+def _validate_structured_goal_milestone(
+    goal_id: str,
+    metadata: dict | None,
+    milestone_index: int | None,
+) -> dict | None:
+    """Validate a (goal_id, milestone_index) pair against the goal's metadata.
+
+    Returns ``None`` when the request may proceed, or a refusal dict
+    describing why not. Used by the structured create_request path —
+    callers that pass goal_id/goal_milestone_index get an exact,
+    field-driven validation with no string parsing involved.
+
+    Rules:
+      * goal must not be metadata.status in ('completed', 'abandoned')
+      * if the goal has a milestones array but milestone_index is None,
+        refuse — milestone-having goals must name which milestone
+      * if milestone_index is given, that milestone must exist and
+        have status='active'
+      * if the milestone has 'start_after' (ISO 8601 string), now() must
+        be >= start_after — skip future-dated milestones
+      * if the goal has milestones but none are active, refuse and tell
+        the caller to mark the goal completed
+    """
+    if not isinstance(metadata, dict):
+        # Goal exists but has no metadata — treat as plannable open-ended
+        # if no milestone was requested; refuse if a milestone was named.
+        if milestone_index is not None:
+            return {
+                "id": goal_id,
+                "title": None,
+                "status": "skipped",
+                "reason": "milestone_not_found",
+                "detail": (
+                    f"goal_milestone_index={milestone_index} was specified "
+                    f"but goal {goal_id} has no milestones array."
+                ),
+            }
+        return None
+
+    goal_status = metadata.get("status")
+    if goal_status in ("completed", "abandoned"):
+        return {
+            "id": goal_id,
+            "title": None,
+            "status": "skipped",
+            "reason": "goal_completed",
+            "detail": (
+                f"Goal {goal_id} has metadata.status={goal_status!r} and "
+                "must not spawn new work."
+            ),
+        }
+
+    milestones = metadata.get("milestones") or []
+    if not isinstance(milestones, list):
+        milestones = []
+
+    # Goal has milestones but caller didn't name one — they must, so
+    # validation can pin it to a specific entry. Open-ended goals with
+    # an empty/missing array don't require milestone_index.
+    if milestones and milestone_index is None:
+        summary = _milestones_summary(metadata)
+        return {
+            "id": goal_id,
+            "title": None,
+            "status": "skipped",
+            "reason": "milestone_required",
+            "detail": (
+                f"Goal {goal_id} has {len(milestones)} milestones — "
+                "callers must specify goal_milestone_index. Active "
+                f"milestones: {summary['active_indexes']}."
+            ),
+        }
+
+    # No milestones at all + no index requested = open-ended goal, ok.
+    if not milestones:
+        return None
+
+    if milestone_index is None or milestone_index < 1 or milestone_index > len(milestones):
+        return {
+            "id": goal_id,
+            "title": None,
+            "status": "skipped",
+            "reason": "milestone_out_of_range",
+            "detail": (
+                f"goal_milestone_index={milestone_index} is invalid for "
+                f"goal {goal_id} ({len(milestones)} milestones)."
+            ),
+        }
+
+    milestone = milestones[milestone_index - 1]
+    if not isinstance(milestone, dict):
+        return {
+            "id": goal_id,
+            "title": None,
+            "status": "skipped",
+            "reason": "milestone_not_found",
+            "detail": (
+                f"Milestone at index {milestone_index} of goal {goal_id} "
+                "is malformed."
+            ),
+        }
+
+    mstatus = milestone.get("status")
+    if mstatus != "active":
+        summary = _milestones_summary(metadata)
+        return {
+            "id": goal_id,
+            "title": None,
+            "status": "skipped",
+            "reason": "milestone_not_active",
+            "detail": (
+                f"Milestone {milestone_index} of goal {goal_id} has "
+                f"status={mstatus!r}, not 'active'. Active milestones: "
+                f"{summary['active_indexes']}."
+            ),
+        }
+
+    # Optional date gate: 'start_after' (ISO 8601). If present and in the
+    # future, the milestone is not yet plannable.
+    start_after_raw = milestone.get("start_after")
+    if start_after_raw:
+        start_after_dt = _parse_iso_datetime(start_after_raw)
+        if start_after_dt is not None:
+            if start_after_dt > datetime.now(timezone.utc):
+                return {
+                    "id": goal_id,
+                    "title": None,
+                    "status": "skipped",
+                    "reason": "milestone_not_yet_active",
+                    "detail": (
+                        f"Milestone {milestone_index} of goal {goal_id} "
+                        f"has start_after={start_after_raw} which is in "
+                        "the future. Skip until that date."
+                    ),
+                }
+
+    return None
+
+
+def _parse_iso_datetime(raw: Any) -> datetime | None:
+    """Parse an ISO 8601 datetime/date string into a tz-aware datetime.
+
+    Accepts:
+      * 'YYYY-MM-DD' → midnight UTC
+      * 'YYYY-MM-DDTHH:MM:SS[+TZ]' → as-given (UTC default)
+      * trailing 'Z' (Zulu) is normalized to '+00:00' before parsing
+    Returns None on parse failure or non-string input.
+    """
+    if not isinstance(raw, str):
+        return None
+    s = raw.strip()
+    if not s:
+        return None
+    # Normalize 'Z' suffix.
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        if "T" in s or " " in s:
+            dt = datetime.fromisoformat(s)
+        else:
+            # Date-only.
+            dt = datetime.fromisoformat(s + "T00:00:00")
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
 
 # Approval statuses for the pre-work gate
 APPROVAL_AUTO = "auto_approved"
@@ -320,6 +507,8 @@ class RequestRepository:
         target_repo: str | None = None,
         target_paths: list[str] | None = None,
         force_pending_approval: bool = False,
+        goal_id: str | None = None,
+        goal_milestone_index: int | None = None,
     ) -> dict:
         if source not in VALID_REQUEST_SOURCES:
             valid_sources = ", ".join(sorted(VALID_REQUEST_SOURCES))
@@ -331,6 +520,14 @@ class RequestRepository:
                 "Invalid dependency_policy "
                 f"'{dependency_policy}'. Must be 'strict' or 'permissive'."
             )
+        if goal_milestone_index is not None and goal_id is None:
+            raise ValueError(
+                "goal_milestone_index requires goal_id to be set."
+            )
+        if goal_milestone_index is not None and goal_milestone_index < 1:
+            raise ValueError(
+                "goal_milestone_index must be 1-based and >= 1."
+            )
         approval = (
             APPROVAL_PENDING
             if force_pending_approval or _requires_approval(source)
@@ -338,155 +535,109 @@ class RequestRepository:
         )
         now = datetime.now(timezone.utc) if approval == APPROVAL_AUTO else None
         async with self.pool.acquire() as conn:
+            # === STRUCTURED GOAL/MILESTONE VALIDATION ===
+            # When the caller passes goal_id (the new structured path),
+            # validate the goal and milestone here in one shot. This is the
+            # canonical way to advance a goal — no title parsing, no
+            # late-link, no inference. If the goal isn't active or the
+            # named milestone isn't active (or hasn't reached start_after),
+            # refuse with a clear reason.
+            if goal_id:
+                goal_row = await conn.fetchrow(
+                    """SELECT id, content, metadata
+                       FROM memories
+                       WHERE id = $1::uuid AND type = 'goal'
+                         AND deleted_at IS NULL""",
+                    goal_id,
+                )
+                if goal_row is None:
+                    return {
+                        "id": goal_id,
+                        "title": title,
+                        "status": "skipped",
+                        "reason": "goal_not_found",
+                        "detail": (
+                            f"goal_id {goal_id} does not refer to an active "
+                            "goal memory in this org."
+                        ),
+                    }
+                refusal = _validate_structured_goal_milestone(
+                    str(goal_row["id"]),
+                    _coerce_metadata(goal_row["metadata"]),
+                    goal_milestone_index,
+                )
+                if refusal:
+                    return refusal
+
+                # Dedup against the structured fields. If another open
+                # request already targets this exact (goal, milestone),
+                # return it instead of inserting a duplicate. This is
+                # robust against parallel cycles and across descriptions.
+                dedup_row = await conn.fetchrow(
+                    """SELECT * FROM requests
+                       WHERE organization_id = $1::uuid
+                         AND goal_memory_id = $2::uuid
+                         AND goal_milestone_index IS NOT DISTINCT FROM $3
+                         AND status NOT IN ('completed', 'cancelled')
+                       ORDER BY created_at DESC
+                       LIMIT 1""",
+                    UUID(org_id),
+                    str(goal_row["id"]),
+                    goal_milestone_index,
+                )
+                if dedup_row:
+                    return dict(dedup_row)
+
+            # === LEGACY MEMORY_IDS CONTEXT-LINKING PATH ===
+            # memory_ids is the general-purpose context attachment
+            # mechanism (technical/experience/etc memories that the
+            # request should be aware of). Goals SHOULD be passed via
+            # the goal_id structured field instead, but for back-compat
+            # we still accept relation='goal' here and run the same
+            # checks the structured path runs. Anything that arrives
+            # here that the structured path didn't already handle is
+            # treated as pure context.
             if memory_ids:
                 mem_ids = [UUID(m["id"]) for m in memory_ids]
                 if mem_ids:
-                    # Check if any linked goal memory is already completed.
-                    # Completed goals should not spawn new requests.
-                    completed_goal = await conn.fetchval(
-                        """SELECT m.id FROM memories m
-                           WHERE m.id = ANY($1)
-                             AND m.type = 'goal'
-                             AND m.metadata->>'status' IN ('completed', 'abandoned')
-                           LIMIT 1""",
+                    # Goal-state guard for memory_ids legacy path. Only
+                    # checks the goal-level status (completed/abandoned)
+                    # and the all-milestones-done condition. Per-milestone
+                    # selection is the structured path's job; if the
+                    # caller wants to advance a specific milestone they
+                    # should use goal_id.
+                    goal_rows = await conn.fetch(
+                        """SELECT id, content, metadata
+                           FROM memories
+                           WHERE id = ANY($1)
+                             AND type = 'goal'
+                             AND deleted_at IS NULL""",
                         mem_ids,
                     )
-                    if completed_goal:
-                        # Return a synthetic response indicating the goal is done
-                        return {
-                            "id": completed_goal,
-                            "title": title,
-                            "status": "skipped",
-                            "reason": "goal_completed",
-                        }
+                    for goal_row in goal_rows:
+                        # Skip the goal we already validated via goal_id.
+                        if goal_id and str(goal_row["id"]) == str(goal_id):
+                            continue
+                        meta = _coerce_metadata(goal_row["metadata"])
+                        if meta is None:
+                            continue
+                        gstatus = meta.get("status")
+                        if gstatus in ("completed", "abandoned"):
+                            return {
+                                "id": str(goal_row["id"]),
+                                "title": title,
+                                "status": "skipped",
+                                "reason": "goal_completed",
+                                "detail": (
+                                    f"Goal {goal_row['id']} has "
+                                    f"metadata.status={gstatus!r} and must "
+                                    "not spawn new work."
+                                ),
+                            }
 
-                    # Milestone-state guard. The cognitive planner has been
-                    # observed picking the wrong milestone (proposing M1 work
-                    # when M1 is already completed and M5 is the active one).
-                    # Title-normalization dedup doesn't catch this because
-                    # each generated description is novel — it's not the same
-                    # work being re-proposed, it's plausible work for the
-                    # wrong phase. The structural fix is to verify the
-                    # milestone the title references is actually active in
-                    # the goal's metadata. If the title doesn't reference a
-                    # milestone, we can't validate and let it through. If the
-                    # goal has no milestones, we let it through. Otherwise:
-                    #   - referenced milestone must exist
-                    #   - and have status='active'
-                    # Also: if every milestone is completed/abandoned but the
-                    # goal status is still 'active', refuse and tell the
-                    # planner to mark the goal complete instead of inventing
-                    # phantom work.
-                    if source == "cognitive":
-                        goal_rows = await conn.fetch(
-                            """SELECT id, content, metadata
-                               FROM memories
-                               WHERE id = ANY($1)
-                                 AND type = 'goal'
-                                 AND deleted_at IS NULL""",
-                            mem_ids,
-                        )
-                        for goal_row in goal_rows:
-                            metadata = goal_row["metadata"]
-                            if isinstance(metadata, str):
-                                try:
-                                    metadata = json.loads(metadata)
-                                except (TypeError, ValueError):
-                                    metadata = None
-                            if not isinstance(metadata, dict):
-                                continue
-                            milestones = metadata.get("milestones") or []
-                            if not isinstance(milestones, list) or not milestones:
-                                continue
-
-                            active_indexes = [
-                                i for i, m in enumerate(milestones, start=1)
-                                if isinstance(m, dict) and m.get("status") == "active"
-                            ]
-                            # Goal has milestones but none are active anymore —
-                            # the planner is making up work. Refuse and tell
-                            # it to mark the goal completed.
-                            if not active_indexes:
-                                return {
-                                    "id": str(goal_row["id"]),
-                                    "title": title,
-                                    "status": "skipped",
-                                    "reason": "goal_milestones_all_done",
-                                    "detail": (
-                                        f"Goal {goal_row['id']} has "
-                                        f"{len(milestones)} milestones and none "
-                                        "are active anymore. Do NOT create new "
-                                        "work for this goal — call update_memory "
-                                        "to set metadata.status='completed'."
-                                    ),
-                                }
-
-                            referenced_n = _extract_milestone_number(title)
-                            if referenced_n is None:
-                                # No milestone label in the title. The planner
-                                # is supposed to use the canonical 'M<N>:'
-                                # format so future cycles can recognize prior
-                                # work; refuse here and force the convention.
-                                return {
-                                    "id": str(goal_row["id"]),
-                                    "title": title,
-                                    "status": "skipped",
-                                    "reason": "milestone_not_referenced",
-                                    "detail": (
-                                        f"Goal {goal_row['id']} has milestones, "
-                                        "but the request title does not "
-                                        "reference a specific milestone (e.g. "
-                                        "'M3', 'Phase 3', 'Milestone 3'). "
-                                        f"Active milestones: {active_indexes}. "
-                                        "Re-issue the request with the next "
-                                        "active milestone in the title."
-                                    ),
-                                }
-
-                            if referenced_n > len(milestones):
-                                return {
-                                    "id": str(goal_row["id"]),
-                                    "title": title,
-                                    "status": "skipped",
-                                    "reason": "milestone_out_of_range",
-                                    "detail": (
-                                        f"Title references M{referenced_n} but "
-                                        f"goal {goal_row['id']} only has "
-                                        f"{len(milestones)} milestones. Active "
-                                        f"milestones: {active_indexes}."
-                                    ),
-                                }
-
-                            milestone = milestones[referenced_n - 1]
-                            current_status = (
-                                milestone.get("status")
-                                if isinstance(milestone, dict)
-                                else None
-                            )
-                            if current_status != "active":
-                                return {
-                                    "id": str(goal_row["id"]),
-                                    "title": title,
-                                    "status": "skipped",
-                                    "reason": "milestone_not_active",
-                                    "detail": (
-                                        f"Title references M{referenced_n} but "
-                                        f"that milestone of goal "
-                                        f"{goal_row['id']} has status "
-                                        f"{current_status!r}, not 'active'. "
-                                        f"Active milestones: {active_indexes}. "
-                                        "Pick the next active milestone or "
-                                        "update the goal's milestone state if "
-                                        "you believe this one was completed by "
-                                        "prior work."
-                                    ),
-                                }
-
-                    # Dedup: if any linked memory already has an active request, return it.
-                    # 'failed' counts as active because the user/operator may want
-                    # to edit and retry the failed request rather than silently
-                    # spawning a duplicate. Only 'completed' and 'cancelled'
-                    # (terminal by design) free a goal up for a fresh request.
+                    # Dedup against any other open request linked to the
+                    # same memory(ies). 'failed' counts as active because
+                    # the user/operator may want to retry.
                     existing = await conn.fetchrow(
                         """SELECT r.* FROM requests r
                            JOIN request_memories rm ON r.id = rm.request_id
@@ -500,70 +651,15 @@ class RequestRepository:
                     if existing:
                         return dict(existing)
 
-                    # Stale-progress guard: even if no active request exists,
-                    # refuse to create a new cognitive request whose normalized
-                    # title matches a recently completed (or cancelled)
-                    # request linked to the same goal. This catches the case
-                    # where a request finished but the goal's milestone state
-                    # wasn't updated, so the planner re-proposes the same
-                    # work next cycle.
-                    #
-                    # The previous guard compared `r.completed_at > m.updated_at`
-                    # which was defeated by ANY touch to the goal memory
-                    # (e.g. an unrelated progress note). Normalized-title
-                    # matching is a much stronger signal because it answers
-                    # the actual question: "did we just do this exact work?"
-                    if source == "cognitive":
-                        normalized = _normalize_title_for_dedup(title)
-                        if normalized:
-                            recent = await conn.fetchrow(
-                                """SELECT r.id, r.title, r.status, r.completed_at
-                                   FROM requests r
-                                   JOIN request_memories rm ON rm.request_id = r.id
-                                   WHERE r.organization_id = $1
-                                     AND rm.memory_id = ANY($2)
-                                     AND r.status IN ('completed', 'cancelled')
-                                     AND COALESCE(r.completed_at, r.updated_at)
-                                         > NOW() - make_interval(hours => $3)
-                                     AND regexp_replace(
-                                             lower(r.title),
-                                             '[^a-z0-9]+', ' ', 'g'
-                                         ) = $4
-                                   ORDER BY COALESCE(r.completed_at, r.updated_at) DESC
-                                   LIMIT 1""",
-                                UUID(org_id),
-                                mem_ids,
-                                RECENT_COMPLETION_WINDOW_HOURS,
-                                normalized,
-                            )
-                            if recent:
-                                return {
-                                    "id": str(recent["id"]),
-                                    "title": title,
-                                    "status": "skipped",
-                                    "reason": "duplicate_of_recent_completion",
-                                    "existing_request_id": str(recent["id"]),
-                                    "existing_status": recent["status"],
-                                    "detail": (
-                                        f"A request with the same normalized "
-                                        f"title was already "
-                                        f"{recent['status']} for this goal at "
-                                        f"{recent['completed_at']}. Refusing "
-                                        "to create a duplicate. If the goal's "
-                                        "milestone state hasn't been updated "
-                                        "to reflect the completed work, update "
-                                        "the goal first; otherwise re-think "
-                                        "whether new work is actually needed."
-                                    ),
-                                }
-
             row = await conn.fetchrow(
                 """INSERT INTO requests
                    (title, description, source, priority, created_by,
                     organization_id, dependency_policy,
                     approval_status, approved_at,
-                    target_repo, target_paths)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                    target_repo, target_paths,
+                    goal_memory_id, goal_milestone_index)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+                           $12, $13)
                    RETURNING *""",
                 title,
                 description,
@@ -576,6 +672,8 @@ class RequestRepository:
                 now,
                 target_repo,
                 target_paths,
+                UUID(goal_id) if goal_id else None,
+                goal_milestone_index,
             )
 
             # Link memories to the new request
@@ -591,6 +689,24 @@ class RequestRepository:
                         )
                     except Exception:
                         pass  # Best-effort — don't fail request creation on link errors
+
+            # If the request advances a goal via the structured field, also
+            # mirror that into request_memories(relation='goal') so the
+            # existing UI panel and link-following queries continue to
+            # surface the goal alongside the structured fields. Idempotent
+            # via ON CONFLICT.
+            if goal_id and row:
+                try:
+                    await conn.execute(
+                        """INSERT INTO request_memories
+                                (request_id, memory_id, relation)
+                           VALUES ($1, $2::uuid, 'goal')
+                           ON CONFLICT DO NOTHING""",
+                        row["id"],
+                        goal_id,
+                    )
+                except Exception:
+                    pass
 
         return dict(row)
 
@@ -735,7 +851,99 @@ class RequestRepository:
                     e,
                 )
 
+        # Milestone-completion side effect: when a request that advances a
+        # specific goal milestone reaches 'completed', mark that milestone
+        # 'completed' on the goal memory in the same transaction-ish window.
+        # This closes the loop so the planner's next cycle no longer sees
+        # the milestone as plannable. Failures are non-fatal — the
+        # primary status transition has already committed.
+        if (
+            row
+            and status == REQUEST_STATUS_COMPLETED
+            and row.get("goal_memory_id")
+            and row.get("goal_milestone_index")
+        ):
+            try:
+                await self._mark_milestone_completed(
+                    str(row["goal_memory_id"]),
+                    int(row["goal_milestone_index"]),
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to mark milestone %s of goal %s completed for "
+                    "request %s: %s",
+                    row.get("goal_milestone_index"),
+                    row.get("goal_memory_id"),
+                    request_id,
+                    e,
+                )
+
         return dict(row) if row else None
+
+    async def _mark_milestone_completed(
+        self, goal_memory_id: str, milestone_index: int
+    ) -> None:
+        """Set metadata.milestones[i-1].status = 'completed' on a goal.
+
+        Uses jsonb_set so unrelated milestone fields are preserved. If the
+        milestone is already non-active (someone marked it abandoned, etc.)
+        we leave it alone — only flip 'active' → 'completed'.
+
+        Also bumps the goal's metadata.status to 'completed' if EVERY
+        milestone is now completed/abandoned, since otherwise the next
+        planning cycle would still consider the goal active.
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    """SELECT metadata FROM memories
+                       WHERE id = $1::uuid AND type = 'goal'
+                         AND deleted_at IS NULL
+                       FOR UPDATE""",
+                    goal_memory_id,
+                )
+                if not row:
+                    return
+                metadata = _coerce_metadata(row["metadata"]) or {}
+                milestones = metadata.get("milestones")
+                if not isinstance(milestones, list):
+                    return
+                if milestone_index < 1 or milestone_index > len(milestones):
+                    return
+                m = milestones[milestone_index - 1]
+                if not isinstance(m, dict):
+                    return
+
+                if m.get("status") != "active":
+                    # Don't overwrite abandoned/completed/etc.
+                    return
+
+                m["status"] = "completed"
+                # Stamp completion date so analytics / UI can show when
+                # the milestone wrapped up.
+                m["completed_at"] = (
+                    datetime.now(timezone.utc).isoformat()
+                )
+                metadata["milestones"] = milestones
+
+                # If every milestone is now non-active, the goal as a whole
+                # is done — flip metadata.status so the planner stops
+                # considering it.
+                if all(
+                    isinstance(x, dict) and x.get("status") in ("completed", "abandoned")
+                    for x in milestones
+                ):
+                    metadata["status"] = "completed"
+
+                await conn.execute(
+                    """UPDATE memories
+                       SET metadata = $2::jsonb,
+                           updated_at = NOW(),
+                           version = version + 1
+                       WHERE id = $1::uuid""",
+                    goal_memory_id,
+                    metadata,
+                )
 
     async def link_request_memory(
         self,
@@ -777,7 +985,7 @@ class RequestRepository:
 
                 # Verify the request exists and belongs to the org.
                 req_row = await conn.fetchrow(
-                    "SELECT id, title, organization_id FROM requests "
+                    "SELECT id, title, source, organization_id FROM requests "
                     "WHERE id = $1::uuid"
                     + (" AND organization_id = $2::uuid" if org_id else ""),
                     *((request_id, UUID(org_id)) if org_id else (request_id,)),
@@ -785,8 +993,22 @@ class RequestRepository:
                 if not req_row:
                     return None
                 req_org_id = req_row["organization_id"]
+                req_source = req_row["source"]
 
                 if block_duplicates and relation == "goal":
+                    # NOTE: late-link goal-state validation has been removed.
+                    # Goals are now expected to be passed via the structured
+                    # goal_memory_id / goal_milestone_index fields at
+                    # create_request time, where validation is atomic. The
+                    # link_request_memory path remains supported for
+                    # back-compat (and for non-goal context attachments)
+                    # but no longer second-guesses the goal's lifecycle.
+                    #
+                    # The dedup checks below DO still run because two
+                    # different requests linking the same goal at roughly
+                    # the same time is still a duplicate-work signal worth
+                    # catching, regardless of the goal's metadata state.
+
                     # 1) Any OTHER active goal-linked request for this memory?
                     active_dup = await conn.fetchrow(
                         """SELECT r.id, r.title, r.status
@@ -1238,6 +1460,160 @@ class RequestRepository:
             "limit": limit,
             "has_more": offset + len(rows) < total_count,
         }
+
+    async def list_planning_targets(
+        self,
+        org_id: str,
+        *,
+        user_id: str | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        """Return goal milestones that the planner MUST progress this cycle.
+
+        This is the canonical "what's plannable" view. The cognitive
+        planner does not choose between targets — it advances every entry
+        this method returns. Filtering rules (all enforced in SQL):
+
+          - Goal exists, not soft-deleted, organization scoped
+          - Goal metadata.status is 'active' (or missing — treated as active)
+          - The goal's first 'active' milestone (if it has milestones) has
+            no ``start_after`` set OR ``start_after`` is in the past
+          - The (goal_id, milestone_index) pair has no open request
+            already targeting it via the structured fields. We use the
+            structured fields (NOT request_memories) because that's the
+            exact in-flight key.
+
+        Open-ended goals (no milestones array) are returned with
+        ``next_milestone_index=None`` and the goal-level dedup applies.
+
+        Returns a list of dicts:
+            {
+              "goal_id": str,
+              "goal_title": str (truncated),
+              "next_milestone_index": int | None,
+              "next_milestone_description": str | None,
+              "next_milestone_start_after": str | None,
+              "suggested_title": str,
+              "total_milestones": int,
+              "active_milestone_indexes": list[int],
+              "completed_milestone_count": int,
+            }
+
+        ``user_id`` filters to a single user's goals (used by per-user
+        cognitive fan-out). Otherwise returns goals for the whole org.
+        """
+        async with self.pool.acquire() as conn:
+            params: list = [UUID(org_id)]
+            user_clause = ""
+            if user_id:
+                params.append(UUID(user_id))
+                user_clause = f" AND m.user_id = ${len(params)}::uuid"
+
+            params.append(limit)
+            limit_param = f"${len(params)}"
+
+            rows = await conn.fetch(
+                f"""SELECT m.id, m.content, m.metadata, m.user_id
+                    FROM memories m
+                    WHERE m.organization_id = $1::uuid
+                      AND m.type = 'goal'
+                      AND m.deleted_at IS NULL
+                      AND COALESCE(m.metadata->>'status', 'active') = 'active'
+                      {user_clause}
+                    ORDER BY m.updated_at DESC
+                    LIMIT {limit_param}""",
+                *params,
+            )
+
+            now_utc = datetime.now(timezone.utc)
+            targets: list[dict] = []
+            for row in rows:
+                metadata = _coerce_metadata(row["metadata"])
+                summary = _milestones_summary(metadata)
+                short_title = (row["content"] or "")[:60].splitlines()[0].strip()
+
+                # Find the first active milestone whose start_after gate
+                # (if any) has passed. start_after in the future skips
+                # the milestone for this cycle.
+                next_idx: int | None = None
+                next_desc: str | None = None
+                next_start_after: str | None = None
+                if metadata:
+                    milestones = metadata.get("milestones") or []
+                    if isinstance(milestones, list):
+                        for i, ms in enumerate(milestones, start=1):
+                            if not isinstance(ms, dict):
+                                continue
+                            if ms.get("status") != "active":
+                                continue
+                            sa_raw = ms.get("start_after")
+                            if sa_raw:
+                                sa_dt = _parse_iso_datetime(sa_raw)
+                                if sa_dt is not None and sa_dt > now_utc:
+                                    # Future-dated — skip this milestone
+                                    # this cycle. Continue scanning in case
+                                    # a later milestone is unblocked, but
+                                    # that's unusual; first active is the
+                                    # canonical pick.
+                                    continue
+                            next_idx = i
+                            next_desc = (ms.get("description") or "").strip() or None
+                            next_start_after = sa_raw if isinstance(sa_raw, str) else None
+                            break
+
+                # Goals with milestones but no plannable one this cycle
+                # (all completed, all abandoned, or all future-dated) are
+                # NOT returned. They'll appear next cycle if any milestone
+                # becomes plannable.
+                if summary["total"] > 0 and next_idx is None:
+                    continue
+
+                # Dedup against the structured (goal_memory_id,
+                # goal_milestone_index) fields. If an open request already
+                # targets this exact pair, skip — the planner shouldn't
+                # double-up. Also skip if any open request targets the
+                # same goal with a NULL milestone index (which represents
+                # "advancing the whole goal" — blocks per-milestone work
+                # until it completes; also covers legacy rows backfilled
+                # by migration 068 that only have goal_memory_id set).
+                in_flight = await conn.fetchval(
+                    """SELECT 1 FROM requests
+                       WHERE organization_id = $1::uuid
+                         AND goal_memory_id = $2::uuid
+                         AND (
+                             goal_milestone_index IS NOT DISTINCT FROM $3
+                             OR goal_milestone_index IS NULL
+                         )
+                         AND status NOT IN ('completed', 'cancelled')
+                       LIMIT 1""",
+                    UUID(org_id),
+                    str(row["id"]),
+                    next_idx,
+                )
+                if in_flight:
+                    continue
+
+                # Suggested title is informational only — the planner is
+                # free to write its own. The structured fields are what
+                # actually identify the work.
+                if next_idx is not None and next_desc:
+                    suggested_title = f"{short_title or 'Goal'} M{next_idx}: {next_desc[:80]}".strip()
+                else:
+                    suggested_title = short_title or "Goal"
+
+                targets.append({
+                    "goal_id": str(row["id"]),
+                    "goal_title": short_title,
+                    "next_milestone_index": next_idx,
+                    "next_milestone_description": next_desc,
+                    "next_milestone_start_after": next_start_after,
+                    "suggested_title": suggested_title,
+                    "total_milestones": summary["total"],
+                    "active_milestone_indexes": summary["active_indexes"],
+                    "completed_milestone_count": summary["completed_count"],
+                })
+
+        return targets
 
     async def list_active_work(self, org_id: str, limit: int = 25, offset: int = 0) -> dict:
         """Get all non-terminal requests with task status summaries.

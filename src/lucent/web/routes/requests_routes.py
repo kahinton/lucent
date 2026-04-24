@@ -124,6 +124,52 @@ async def request_detail(request: Request, request_id: str):
     if not req:
         raise HTTPException(404, "Request not found")
 
+    # Resolve linked goal + milestone for the request banner. Best-effort:
+    # if the goal memory was deleted or isn't accessible, just skip.
+    goal_info: dict | None = None
+    goal_memory_id = req.get("goal_memory_id")
+    if goal_memory_id:
+        try:
+            from uuid import UUID as _UUID
+
+            from lucent.db.memory import MemoryRepository
+
+            mem_repo = MemoryRepository(pool)
+            goal_mem = await mem_repo.get(_UUID(str(goal_memory_id)))
+            if goal_mem and goal_mem.get("type") == "goal":
+                meta = goal_mem.get("metadata") or {}
+                milestones = meta.get("milestones") or []
+                idx = req.get("goal_milestone_index")
+                milestone_label: str | None = None
+                milestone_status: str | None = None
+                if (
+                    isinstance(milestones, list)
+                    and isinstance(idx, int)
+                    and 1 <= idx <= len(milestones)
+                ):
+                    m = milestones[idx - 1] or {}
+                    if isinstance(m, dict):
+                        milestone_label = (
+                            m.get("description") or m.get("title") or m.get("name")
+                        )
+                        milestone_status = m.get("status")
+                goal_info = {
+                    "id": str(goal_memory_id),
+                    "title": (
+                        meta.get("title")
+                        or (goal_mem.get("content") or "").split("\n", 1)[0][:80]
+                        or "Goal"
+                    ),
+                    "milestone_index": idx,
+                    "milestone_total": (
+                        len(milestones) if isinstance(milestones, list) else None
+                    ),
+                    "milestone_label": milestone_label,
+                    "milestone_status": milestone_status,
+                }
+        except Exception:
+            goal_info = None
+
     # Get recent events for the activity feed
     recent_events = []
     for task in req.get("tasks", []):
@@ -198,6 +244,7 @@ async def request_detail(request: Request, request_id: str):
             "available_models": available_models,
             "available_agents": available_agents,
             "available_sandbox_templates": available_sandbox_templates,
+            "goal_info": goal_info,
         },
     )
 

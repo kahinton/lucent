@@ -1164,6 +1164,39 @@ class RequestAPI:
         return None
 
     @staticmethod
+    async def list_planning_targets(
+        api_key: str | None = None,
+    ) -> list[dict] | None:
+        """Fetch goal milestones the planner MUST progress this cycle.
+
+        When ``api_key`` is provided (typically a user-scoped key minted
+        for per-user fan-out), the request is authenticated with that key
+        and the server-side handler scopes the result to that user's
+        goals automatically.
+        """
+        try:
+            headers = (
+                {"Authorization": f"Bearer {api_key}"}
+                if api_key else API_HEADERS
+            )
+            async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
+                resp = await client.get(
+                    f"{API_BASE}/requests/planning-targets",
+                    headers=headers,
+                )
+                if resp.status_code == 200:
+                    payload = resp.json()
+                    return payload.get("targets") or []
+                log(
+                    f"planning-targets returned HTTP {resp.status_code}: "
+                    f"{resp.text[:200]}",
+                    "WARN",
+                )
+        except Exception as e:
+            log(f"API list_planning_targets failed: {e}", "WARN")
+        return None
+
+    @staticmethod
     async def list_recently_completed() -> list[dict]:
         """Fetch requests completed in the last 2 hours for dedup."""
         try:
@@ -2683,57 +2716,90 @@ class LucentDaemon:
         finally:
             await conn.close()
 
-    def _build_user_scoped_cognitive_prompt(self) -> str:
-        """Build a prompt for per-user scoped cognitive planning sessions."""
+    def _build_user_scoped_cognitive_prompt(
+        self, targets: list[dict] | None = None
+    ) -> str:
+        """Build a prompt for per-user scoped cognitive planning sessions.
+
+        ``targets`` is the pre-fetched list from
+        ``GET /requests/planning-targets``. Every entry in ``targets`` is a
+        milestone the planner MUST progress this cycle — there is no
+        choosing between them. The list is already filtered for active
+        goals, active milestones with passed start_after dates, and
+        no-in-flight-work. The planner just iterates and creates requests.
+        """
+        if not targets:
+            return (
+                f"{self._build_cognitive_schedule_prompt()}\n\n"
+                "Per-user fan-out execution mode is active for this run.\n"
+                "You are operating under a user-scoped key and can only see "
+                "one user's memories.\n\n"
+                "There is NO PLANNABLE WORK for this user this cycle. The "
+                "planning-targets endpoint returned an empty list, which "
+                "means: every active goal either has all its milestones "
+                "completed, has open in-flight requests already, or has "
+                "milestones whose start_after dates are still in the "
+                "future.\n\n"
+                "Return a concise summary saying 'no work this cycle' and "
+                "stop. Do NOT search for goals manually. Do NOT invent "
+                "work to fill the cycle.\n"
+            )
+
+        # Render the targets as a numbered list the planner consumes
+        # verbatim. Each entry includes the structured fields the planner
+        # must pass to create_request.
+        target_lines: list[str] = []
+        for i, t in enumerate(targets, start=1):
+            milestone_part = ""
+            if t.get("next_milestone_index") is not None:
+                milestone_part = (
+                    f" — milestone {t['next_milestone_index']}: "
+                    f"{t.get('next_milestone_description') or '(no description)'}"
+                )
+            start_after = t.get("next_milestone_start_after")
+            sa_note = f" (start_after={start_after})" if start_after else ""
+            target_lines.append(
+                f"{i}. goal_id={t['goal_id']}"
+                f", goal_milestone_index={t.get('next_milestone_index')}"
+                f"\n   goal: {t.get('goal_title') or '(untitled)'}"
+                f"{milestone_part}{sa_note}"
+                f"\n   suggested_title: {t.get('suggested_title')}"
+            )
+        targets_block = "\n".join(target_lines)
+
         return (
             f"{self._build_cognitive_schedule_prompt()}\n\n"
             "Per-user fan-out execution mode is active for this run.\n"
-            "You are operating under a user-scoped key and can only see one user's memories.\n"
-            "Focus ONLY on that user's active goals and create tracked requests as needed.\n\n"
-            "=== GOAL PROGRESSION RULES (READ BEFORE CREATING ANY REQUEST) ===\n"
-            "Goals have a `metadata.milestones` array. Each milestone has its own\n"
-            "`status` (active | completed | abandoned). The OVERALL goal status is\n"
-            "active until every milestone is done. You MUST NOT propose work for\n"
-            "a goal as a whole — you propose work for ONE specific milestone, and\n"
-            "you choose the FIRST milestone with status='active'. Skip any\n"
-            "milestone whose status is 'completed' or 'abandoned'. If every\n"
-            "milestone is non-active, the goal is de facto done — do NOT create a\n"
-            "request, instead emit a note in your summary that the goal needs its\n"
-            "overall status updated to 'completed'.\n\n"
-            "Before creating a request for a goal, you MUST also check past work\n"
-            "for that goal:\n"
-            "  search_memories(query='<goal short title>', limit=10)\n"
-            "  AND inspect existing request history via list_active_work() output\n"
-            "If there's a recently completed request whose title matches the\n"
-            "milestone you were about to propose, the milestone state is stale —\n"
-            "do NOT create a duplicate request. Instead update the goal memory's\n"
-            "milestone status to 'completed' yourself (call update_memory) and\n"
-            "move to the next active milestone.\n\n"
-            "When you do create a request:\n"
-            "- Title format: '<Goal short name> M<N>: <milestone description>'\n"
-            "  e.g. 'Federated-self M3: Fork-and-rejoin experiment design'\n"
-            "  This makes future planner cycles able to recognize prior work.\n"
-            "- ALWAYS pass goal_id=<memory ID> for automatic dedup.\n"
-            "- Description should reference the milestone explicitly.\n"
-            "=== END GOAL PROGRESSION RULES ===\n\n"
-            "Procedure:\n"
-            "1. Use search_memories(type='goal', limit=50) to find active goals.\n"
-            "2. Call list_active_work() to see existing requests.\n"
-            "3. For each goal, identify the first active milestone per the rules\n"
-            "   above. If past work already covered it, update the goal's\n"
-            "   milestone state instead of creating a duplicate request.\n"
-            "4. Create exactly ONE request per goal that has genuinely new work\n"
-            "   to do (skip goals whose next milestone has already been done by\n"
-            "   a prior completed request). Use the title format above and pass\n"
-            "   goal_id.\n"
-            "5. Set source='cognitive'.\n"
-            "6. **Immediately after each create_request call, decompose the\n"
-            "   request into tasks via create_task. Every request you create MUST\n"
-            "   end the cycle with at least one child task. A request with zero\n"
-            "   tasks is incomplete work — never leave one in that state.**\n"
-            "7. Return a concise summary including: goals scanned, milestones\n"
-            "   marked completed during this cycle, requests created, and tasks\n"
-            "   created.\n"
+            "You are operating under a user-scoped key and can only see "
+            "one user's memories.\n\n"
+            "=== ACTIVE MILESTONES TO PROGRESS THIS CYCLE ===\n"
+            "The following goal milestones are active, unblocked, and have "
+            "no open work yet. You MUST create one tracked request for "
+            "each of them. Do NOT pick between them. Do NOT search for "
+            "additional goals. The system has already filtered out "
+            "everything that is not plannable.\n\n"
+            f"{targets_block}\n\n"
+            "=== END MILESTONES ===\n\n"
+            "For each entry above:\n"
+            "1. Call create_request with:\n"
+            "     title=<the suggested_title from the entry>\n"
+            "     description=<your summary of what to do for the milestone>\n"
+            "     source='cognitive'\n"
+            "     goal_id=<the entry's goal_id>\n"
+            "     goal_milestone_index=<the entry's goal_milestone_index>\n"
+            "   The system validates these fields against the goal's "
+            "metadata. If you pass a different goal or milestone the call "
+            "will be refused.\n"
+            "2. Immediately decompose the new request into tasks via "
+            "create_task. Every request you create MUST end with at "
+            "least one child task.\n"
+            "3. If create_request returns status='skipped' with reason "
+            "in {'in-flight', 'milestone_not_active'}, that means a "
+            "parallel cycle has already started this work. Skip it and "
+            "move on — no error.\n\n"
+            "Return a concise summary listing every (goal_id, milestone) "
+            "you processed and whether each ended in a created request, "
+            "a skipped duplicate, or a created task count.\n"
         )
 
     async def _count_user_cognitive_requests_since(
@@ -2785,7 +2851,6 @@ class LucentDaemon:
             return "Cognitive fan-out: no users with active goals."
 
         summaries: list[str] = []
-        prompt = self._build_user_scoped_cognitive_prompt()
 
         for user_row in users:
             user_id = str(user_row.get("user_id", "")).strip()
@@ -2797,6 +2862,7 @@ class LucentDaemon:
             start_ts = time.perf_counter()
             errors: list[str] = []
             requests_created = 0
+            targets_count = 0
 
             try:
                 scoped_key = await _mint_scoped_api_key(
@@ -2807,6 +2873,32 @@ class LucentDaemon:
                 )
                 if not scoped_key:
                     raise RuntimeError("scoped key minting failed")
+
+                # Fetch the planning targets server-side BEFORE invoking
+                # the planner. The endpoint scopes results to this user
+                # automatically because the key is user-scoped. If there
+                # are no targets, we skip the LLM call entirely — saves
+                # tokens and time.
+                targets = await RequestAPI.list_planning_targets(api_key=scoped_key)
+                if targets is None:
+                    targets = []
+                targets_count = len(targets)
+
+                if not targets:
+                    log(
+                        f"cognitive fan-out: user {user_id[:8]} has no "
+                        "plannable targets — skipping LLM call",
+                        "INFO",
+                    )
+                    summaries.append(
+                        f"user={user_id[:8]} goals={goals_scanned} "
+                        f"targets=0 requests=0 (no work)"
+                    )
+                    continue
+
+                prompt = self._build_user_scoped_cognitive_prompt(
+                    targets=targets
+                )
 
                 scoped_mcp = dict(mcp_config_base)
                 scoped_mcp["memory-server"] = {
@@ -2840,6 +2932,7 @@ class LucentDaemon:
                         {
                             "user_id": user_id,
                             "goals_scanned": goals_scanned,
+                            "targets_count": targets_count,
                             "requests_created": requests_created,
                             "errors": errors,
                             "duration_ms": duration_ms,
@@ -2847,10 +2940,12 @@ class LucentDaemon:
                         sort_keys=True,
                     )
                 )
-                summaries.append(
-                    f"user={user_id[:8]} goals={goals_scanned} "
-                    f"requests={requests_created} errors={len(errors)}"
-                )
+                if targets_count > 0 or errors:
+                    summaries.append(
+                        f"user={user_id[:8]} goals={goals_scanned} "
+                        f"targets={targets_count} "
+                        f"requests={requests_created} errors={len(errors)}"
+                    )
 
         return "Cognitive fan-out complete: " + "; ".join(summaries)
 

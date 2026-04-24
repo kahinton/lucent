@@ -44,10 +44,23 @@ that will be broken into tasks.
 Use this when you identify new work to do (during cognitive cycles, from user messages, etc.).
 The request will appear in the Requests UI and can be broken into tasks.
 
-IMPORTANT: When creating a request for a goal memory, ALWAYS pass the goal's memory ID
-as goal_id. This enables automatic deduplication — if a request for that goal already
-has an active request (not completed/failed/cancelled), the existing request is returned
-instead of creating a duplicate.
+GOAL-DRIVEN REQUESTS — strongly preferred path:
+When the request advances a specific goal milestone, pass goal_id and
+goal_milestone_index together. The system will:
+  - validate the goal is active and the named milestone is currently 'active'
+  - reject duplicates that target the same (goal, milestone) pair
+  - automatically mark the milestone 'completed' on the goal memory when
+    the request finishes
+This is the canonical way to advance plannable work returned by
+list_planning_targets.
+
+CONTEXT MEMORIES (memory_ids):
+memory_ids attaches arbitrary supporting memories (technical/experience/etc.)
+to the request as context. Use this for "validate that this technical memory
+is still correct" or "summarize all April experiences" — situations where
+the request needs context but isn't advancing a goal milestone. Goals can
+also be passed via memory_ids for back-compat, but new code should use
+goal_id/goal_milestone_index.
 
     Args:
     title: Short descriptive title (e.g. "Improve search performance")
@@ -56,14 +69,17 @@ instead of creating a duplicate.
     priority: 'low', 'medium', 'high', or 'urgent'
     dependency_policy: 'strict' (default) blocks later tasks when a predecessor fails;
         'permissive' allows continuation past failed/cancelled predecessors.
-    goal_id: Memory ID of the goal this request serves. Enables deduplication —
-        only one active request per memory at a time.
-    target_repo: Optional repository this request targets (owner/repo format, e.g. 'octocat/hello-world').
-        When set, working agents automatically receive relevant technical memories as context.
-    target_paths: Optional list of specific directories or files this request targets
-        (e.g. ['src/lucent/db/', 'src/lucent/api/routers/']). Narrows which technical memories are injected.
+    goal_id: Memory ID of the goal this request advances (structured field).
+    goal_milestone_index: 1-based index into the goal's metadata.milestones array.
+        Required when the goal has milestones. The named milestone must be
+        currently 'active' or the request is refused.
+    memory_ids: Optional list of {"id": "<memory-uuid>", "relation": "context"}
+        for additional context memories (NOT for goals — use goal_id).
+    target_repo: Optional repository this request targets (owner/repo format).
+    target_paths: Optional list of specific directories or files this request targets.
 
-Returns: JSON with the created request including its ID."""
+Returns: JSON with the created request including its ID. If the system refused,
+returns status='skipped' with reason and a note explaining what to do."""
     )
     async def create_request(
         title: str,
@@ -72,16 +88,14 @@ Returns: JSON with the created request including its ID."""
         priority: str = "medium",
         dependency_policy: str = "strict",
         goal_id: str = "",
+        goal_milestone_index: int | None = None,
+        memory_ids: list[dict] | None = None,
         target_repo: str = "",
         target_paths: list[str] | None = None,
     ) -> str:
         user_id, org_id, _, memory_scope, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
-
-        memory_ids = None
-        if goal_id:
-            memory_ids = [{"id": goal_id, "relation": "goal"}]
 
         repo = await _get_request_repository()
         req = await repo.create_request(
@@ -96,6 +110,8 @@ Returns: JSON with the created request including its ID."""
             target_repo=target_repo or None,
             target_paths=target_paths,
             force_pending_approval=(memory_scope == "user"),
+            goal_id=goal_id or None,
+            goal_milestone_index=goal_milestone_index,
         )
 
         # Skip outcome — translate the DB-layer reason into actionable
@@ -104,49 +120,38 @@ Returns: JSON with the created request including its ID."""
         if req.get("status") == "skipped":
             reason = req.get("reason", "")
             notes_by_reason = {
-                "stale_goal_progress": (
-                    "STOP. The system refused this request because a recent "
-                    "completed request exists for this goal but the goal's "
-                    "milestone state hasn't been updated. Call update_memory "
-                    "on the goal first to mark the completed milestone, then "
-                    "decide whether new work is actually needed for the next "
-                    "active milestone."
-                ),
-                "duplicate_of_recent_completion": (
-                    "STOP. A request with the same normalized title was "
-                    "completed or cancelled for this goal in the last 24h. "
-                    "Do NOT propose this same work again. If the milestone "
-                    "is already done, update the goal's milestone state. If "
-                    "it's not done, pick a different milestone or rethink."
-                ),
                 "milestone_not_active": (
-                    "STOP. The milestone you referenced in the title is NOT "
-                    "currently active in the goal's metadata. The planner "
-                    "must propose work only for an active milestone. "
-                    "Re-read the goal's metadata.milestones array and pick "
-                    "an entry whose status is 'active', then re-issue the "
-                    "request with the correct milestone number."
+                    "STOP. The milestone you named is NOT currently active "
+                    "on this goal. Either the milestone has already been "
+                    "completed (in which case the work is already done) or "
+                    "you picked the wrong index. Re-fetch the planning "
+                    "targets via the planning-targets endpoint."
                 ),
-                "milestone_not_referenced": (
-                    "STOP. Requests for goals with milestones MUST include "
-                    "the milestone in the title (e.g. 'M3:', 'Phase 3:', "
-                    "'Milestone 3:'). Re-issue with the active milestone "
-                    "label so future planner cycles can recognize the work."
+                "milestone_not_yet_active": (
+                    "STOP. The milestone has a start_after date that is "
+                    "still in the future. Skip this milestone — it is not "
+                    "plannable yet."
+                ),
+                "milestone_required": (
+                    "STOP. This goal has milestones; you must specify "
+                    "goal_milestone_index. Pick the active one from "
+                    "list_planning_targets."
                 ),
                 "milestone_out_of_range": (
-                    "STOP. The milestone number in your title does not "
-                    "exist on this goal. Re-read the goal's milestones "
-                    "array and pick a valid active milestone."
+                    "STOP. goal_milestone_index is out of range for this "
+                    "goal's milestones array. Re-read planning-targets."
                 ),
-                "goal_milestones_all_done": (
-                    "STOP. Every milestone of this goal is already "
-                    "completed/abandoned. Do NOT create more work for it. "
-                    "Call update_memory to set metadata.status='completed' "
-                    "on the goal so it stops appearing in planning cycles."
+                "milestone_not_found": (
+                    "STOP. No milestone exists at that index. Re-read "
+                    "planning-targets."
                 ),
                 "goal_completed": (
-                    "This goal is already marked completed/abandoned. "
-                    "Do NOT create work for it."
+                    "STOP. This goal is already completed/abandoned. Do "
+                    "NOT create work for it."
+                ),
+                "goal_not_found": (
+                    "STOP. goal_id does not refer to an active goal "
+                    "memory in this org."
                 ),
             }
             return json.dumps({
@@ -711,6 +716,40 @@ Returns: JSON confirmation."""
                 ),
             })
 
+        # Goal-state refusal: the linked goal is completed/abandoned, has no
+        # active milestones, or the request title doesn't match an active
+        # milestone. Auto-cancel the request — it never should have been
+        # created in the first place. This is the late-link symmetric guard
+        # for the create_request goal-state checks.
+        if isinstance(result, dict) and result.get("refused"):
+            try:
+                await repo.update_request_status(
+                    request_id, "cancelled", org_id=str(org_id)
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to auto-cancel request %s after goal-state "
+                    "refusal: %s",
+                    request_id, e,
+                )
+            return json.dumps({
+                "status": "refused",
+                "request_id": request_id,
+                "cancelled": True,
+                "memory_id": memory_id,
+                "goal_id": result.get("goal_id"),
+                "reason": result.get("reason"),
+                "detail": result.get("detail", ""),
+                "note": (
+                    "STOP. The link was refused and the request has been "
+                    "auto-cancelled. The linked goal is in a state that "
+                    "should not produce new work (completed, abandoned, "
+                    "all milestones done, or wrong-milestone label). Use "
+                    "list_planning_targets() to discover goals that "
+                    "actually have work to do."
+                ),
+            })
+
         return json.dumps({
             "status": "linked",
             "request_id": request_id,
@@ -805,6 +844,50 @@ new requests. This prevents duplicate work items."""
             return str(obj)
 
         return json.dumps(work, default=serialize)
+
+    @mcp.tool(
+        description="""List goals that have actual plannable work right now.
+
+This is the canonical "what should the planner work on" view. It applies all
+the rules the planner used to have to reason about by hand:
+
+  - Goal must be active (metadata.status='active' or missing)
+  - Goal must have at least one milestone with status='active', OR no
+    milestones array at all (open-ended goals)
+  - Goal must NOT already have an open request linked to it (no duplicates)
+
+For each plannable goal, the FIRST active milestone is computed for you and
+returned in 'next_milestone_index' / 'next_milestone_description'. The
+'suggested_title' field is pre-formatted in the canonical 'M<N>:' convention
+the planner is required to use — copy it verbatim into create_request().
+
+Use this INSTEAD of search_memories(type='goal') + manual milestone reasoning.
+Goals not in this list are not plannable; do not invent work for them.
+
+Args:
+    user_id: Optional UUID to scope to one user's goals (used by per-user
+        cognitive fan-out). Omit to get the whole org's plannable goals.
+    limit: Maximum goals to return (default 50).
+
+Returns: JSON list of {goal_id, goal_title, next_milestone_index,
+    next_milestone_description, suggested_title, total_milestones,
+    active_milestone_indexes, completed_milestone_count}."""
+    )
+    async def list_planning_targets(
+        user_id: str = "",
+        limit: int = 50,
+    ) -> str:
+        _, org_id, _, _, _ = await _get_current_user_context()
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+
+        repo = await _get_request_repository()
+        targets = await repo.list_planning_targets(
+            str(org_id),
+            user_id=user_id or None,
+            limit=limit,
+        )
+        return json.dumps(targets)
 
     @mcp.tool(
         description="""List available LLM models for task assignment.
