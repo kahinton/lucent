@@ -14,6 +14,7 @@ from lucent.api.models import (
 from lucent.db import AccessRepository, MemoryRepository, get_pool
 from lucent.integrations.github_repo_access_service import GitHubRepoAccessService
 from lucent.logging import get_logger
+from lucent.memory.observability import maybe_log_boost_comparison
 from lucent.services.memory_access_service import MemoryAccessService
 
 logger = get_logger("api.search")
@@ -76,6 +77,31 @@ async def search_memories(
         limit=data.limit,
         requesting_user_id=user.id,
         requesting_org_id=user.organization_id,
+    )
+
+    # Phase-2 observability: when the vitality boost flag is on, sample a
+    # fraction of queries and emit a structured legacy-vs-boosted comparison.
+    # No-op when the flag is off (default) or sample rate is 0.0 (default).
+    await maybe_log_boost_comparison(
+        legacy_search=memory_access.search,
+        legacy_search_kwargs={
+            "user_id": user.id,
+            "query": data.query,
+            "username": data.username,
+            "type": data.type,
+            "tags": data.tags,
+            "importance_min": data.importance_min,
+            "importance_max": data.importance_max,
+            "created_after": data.created_after,
+            "created_before": data.created_before,
+            "offset": data.offset,
+            "limit": data.limit,
+            "requesting_user_id": user.id,
+            "requesting_org_id": user.organization_id,
+        },
+        boosted_result=result,
+        query=data.query,
+        search_kind="search",
     )
 
     # Log access for returned memories
@@ -172,6 +198,25 @@ async def search_memories_full(
         limit=data.limit,
         requesting_user_id=user.id,
         requesting_org_id=user.organization_id,
+    )
+
+    await maybe_log_boost_comparison(
+        legacy_search=memory_access.search_full,
+        legacy_search_kwargs={
+            "user_id": user.id,
+            "query": data.query,
+            "username": data.username,
+            "type": data.type,
+            "importance_min": data.importance_min,
+            "importance_max": data.importance_max,
+            "offset": data.offset,
+            "limit": data.limit,
+            "requesting_user_id": user.id,
+            "requesting_org_id": user.organization_id,
+        },
+        boosted_result=result,
+        query=data.query,
+        search_kind="search_full",
     )
 
     # Log access for returned memories

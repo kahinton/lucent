@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from typing import Any
 
+from lucent.log_context import get_request_id, get_user_id
+
 # Custom log levels for daemon visibility
 THOUGHT = 15  # Between DEBUG(10) and INFO(20) — full output dumps
 STREAM = 12  # Between DEBUG(10) and THOUGHT(15) — real-time event tracking
@@ -77,6 +79,15 @@ class JSONFormatter(logging.Formatter):
         if cid:
             log_data["correlation_id"] = cid
 
+        # Add request-scoped context from contextvars if present
+        request_id = get_request_id()
+        if request_id:
+            log_data["request_id"] = request_id
+
+        user_id = get_user_id()
+        if user_id:
+            log_data["user_id"] = user_id
+
         # Add location info
         if record.pathname:
             log_data["location"] = {
@@ -120,7 +131,8 @@ class JSONFormatter(logging.Formatter):
                 "taskName",
                 "correlation_id",
             ):
-                log_data[key] = value
+                if key not in log_data:
+                    log_data[key] = value
 
         return json.dumps(log_data, default=str)
 
@@ -156,8 +168,17 @@ class HumanFormatter(logging.Formatter):
 
         message = record.getMessage()
         cid = getattr(record, "correlation_id", None)
-        cid_str = f" [{cid}]" if cid else ""
-        base = f"{timestamp} {level_str} [{record.name}]{cid_str} {message}"
+        request_id = get_request_id()
+        user_id = get_user_id()
+        context_parts = []
+        if cid:
+            context_parts.append(cid)
+        if request_id:
+            context_parts.append(f"request_id={request_id}")
+        if user_id:
+            context_parts.append(f"user_id={user_id}")
+        context_str = "".join(f" [{part}]" for part in context_parts)
+        base = f"{timestamp} {level_str} [{record.name}]{context_str} {message}"
 
         # Add exception info if present
         if record.exc_info:

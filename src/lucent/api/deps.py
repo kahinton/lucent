@@ -11,6 +11,7 @@ from lucent.auth import (
     set_current_user,
 )
 from lucent.db import ApiKeyRepository, UserRepository, get_pool
+from lucent.log_context import set_user_id
 from lucent.rbac import Permission, Role, has_permission
 
 
@@ -189,6 +190,7 @@ async def get_current_user(
                         status_code=status.HTTP_403_FORBIDDEN,
                         detail="API key scope does not allow this endpoint",
                     )
+            set_user_id(str(user.id))
             return user
 
         # Invalid API key

@@ -4,6 +4,7 @@ Handles CRUD operations for memories including search functionality.
 """
 
 import logging
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from math import ceil
@@ -15,7 +16,11 @@ import asyncpg
 from asyncpg import Pool
 
 from lucent.metrics import metrics
-from lucent.settings import shadow_forget_enabled
+from lucent.settings import (
+    search_vitality_boost_alpha,
+    search_vitality_boost_enabled,
+    shadow_forget_enabled,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +79,7 @@ class MemoryRepository:
     _SEARCH_COLUMNS = (
         "id, username, type, content, tags, importance, related_memory_ids, "
         "metadata, created_at, updated_at, user_id, organization_id, shared, last_accessed_at, "
-        "lifecycle_stage"
+        "lifecycle_stage, vitality_score"
     )
     _SHADOW_SCORE_COLUMNS = (
         "memory_id, strategy, score, shadow_action, signals, computed_at, divergence_tag"
@@ -82,6 +87,77 @@ class MemoryRepository:
 
     def __init__(self, pool: Pool):
         self.pool = pool
+
+    @staticmethod
+    def _normalize_vitality_score(vitality_score: float | None) -> float:
+        """Normalize vitality into a bounded [0.0, 1.0] interval."""
+        if vitality_score is None:
+            return 0.5
+        return max(0.0, min(1.0, float(vitality_score)))
+
+    @classmethod
+    def _vitality_boosted_rank(
+        cls,
+        *,
+        similarity_score: float,
+        vitality_score: float | None,
+        alpha: float,
+    ) -> float:
+        """Apply phase-2 vitality boost to a base similarity score."""
+        centered_vitality = cls._normalize_vitality_score(vitality_score) - 0.5
+        return similarity_score + (alpha * centered_vitality)
+
+    @staticmethod
+    def _row_field(row: Mapping[str, Any] | Any, key: str, default: Any = None) -> Any:
+        """Read a field from dict-like rows (dict/asyncpg.Record)."""
+        if isinstance(row, Mapping):
+            return row.get(key, default)
+        if hasattr(row, "keys") and key in row.keys():
+            return row[key]
+        return default
+
+    @staticmethod
+    def _canonical_created_at(created_at: Any) -> datetime:
+        """Normalize created_at for deterministic canonical sorting."""
+        if isinstance(created_at, datetime):
+            dt = created_at
+        elif isinstance(created_at, str):
+            try:
+                dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+            except ValueError:
+                return datetime.max.replace(tzinfo=UTC)
+        else:
+            return datetime.max.replace(tzinfo=UTC)
+
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=UTC)
+        return dt.astimezone(UTC)
+
+    @classmethod
+    def select_canonical(
+        cls, rows: list[Mapping[str, Any] | Any]
+    ) -> Mapping[str, Any] | Any | None:
+        """Pick canonical consolidation target by vitality, then completeness, then age.
+
+        Ordering:
+        1. Highest vitality_score first (NULL treated as 0.5)
+        2. Highest importance first
+        3. Oldest created_at first
+        4. Lowest stringified id for deterministic final tie-break
+        """
+        if not rows:
+            return None
+
+        ranked = sorted(
+            rows,
+            key=lambda row: (
+                -cls._normalize_vitality_score(cls._row_field(row, "vitality_score")),
+                -int(cls._row_field(row, "importance", 0) or 0),
+                cls._canonical_created_at(cls._row_field(row, "created_at")),
+                str(cls._row_field(row, "id", "")),
+            ),
+        )
+        return ranked[0]
 
     async def create(
         self,
@@ -689,6 +765,7 @@ class MemoryRepository:
         requesting_org_id: UUID | None = None,
         memory_scope: str | None = None,
         accessible_repos: list[str] | None = None,
+        vitality_boost: bool | None = None,
     ) -> dict[str, Any]:
         """Search for memories with fuzzy matching and filters.
 
@@ -793,6 +870,11 @@ class MemoryRepository:
 
         where_clause = " AND ".join(conditions)
 
+        boost_enabled = (
+            search_vitality_boost_enabled() if vitality_boost is None else vitality_boost
+        )
+        boost_alpha = search_vitality_boost_alpha()
+
         # Build the query with optional fuzzy matching
         if query:
             # Use pg_trgm similarity for fuzzy search
@@ -800,16 +882,34 @@ class MemoryRepository:
             params.append(query)
             param_idx += 1
 
-            search_query = f"""
-                SELECT {self._SEARCH_COLUMNS},
-                       similarity(content, ${similarity_param}) as sim_score
-                FROM memories
-                WHERE {where_clause}
-                  AND (content % ${similarity_param}
-                       OR content ILIKE '%' || ${similarity_param} || '%')
-                ORDER BY sim_score DESC, importance DESC, created_at DESC
-                LIMIT ${param_idx} OFFSET ${param_idx + 1}
-            """
+            if boost_enabled:
+                boost_alpha_param = param_idx
+                params.append(boost_alpha)
+                param_idx += 1
+                search_query = f"""
+                    SELECT {self._SEARCH_COLUMNS},
+                           similarity(content, ${similarity_param}) as sim_score,
+                           similarity(content, ${similarity_param})
+                             + (${boost_alpha_param}
+                                * (COALESCE(vitality_score, 0.5) - 0.5)) AS final_rank
+                    FROM memories
+                    WHERE {where_clause}
+                      AND (content % ${similarity_param}
+                           OR content ILIKE '%' || ${similarity_param} || '%')
+                    ORDER BY final_rank DESC, importance DESC, created_at DESC
+                    LIMIT ${param_idx} OFFSET ${param_idx + 1}
+                """
+            else:
+                search_query = f"""
+                    SELECT {self._SEARCH_COLUMNS},
+                           similarity(content, ${similarity_param}) as sim_score
+                    FROM memories
+                    WHERE {where_clause}
+                      AND (content % ${similarity_param}
+                           OR content ILIKE '%' || ${similarity_param} || '%')
+                    ORDER BY sim_score DESC, importance DESC, created_at DESC
+                    LIMIT ${param_idx} OFFSET ${param_idx + 1}
+                """
 
             count_query = f"""
                 SELECT COUNT(*) as total
@@ -869,6 +969,7 @@ class MemoryRepository:
         requesting_org_id: UUID | None = None,
         memory_scope: str | None = None,
         accessible_repos: list[str] | None = None,
+        vitality_boost: bool | None = None,
     ) -> dict[str, Any]:
         """Search across all text fields: content, tags, and metadata.
 
@@ -950,31 +1051,66 @@ class MemoryRepository:
 
         where_clause = " AND ".join(conditions)
 
+        boost_enabled = (
+            search_vitality_boost_enabled() if vitality_boost is None else vitality_boost
+        )
+        boost_alpha = search_vitality_boost_alpha()
+
         # Build a combined text field for searching: content + tags + metadata
         query_param = param_idx
         params.append(query)
         param_idx += 1
 
         # Search across content, array_to_string(tags), and metadata::text
-        search_query = f"""
-            SELECT {self._SEARCH_COLUMNS},
-                   GREATEST(
-                       similarity(content, ${query_param}),
-                       similarity(array_to_string(tags, ' '), ${query_param}),
-                       similarity(metadata::text, ${query_param})
-                   ) as sim_score
-            FROM memories
-            WHERE {where_clause}
-              AND (
-                  content % ${query_param} OR content ILIKE '%' || ${query_param} || '%'
-                  OR array_to_string(tags, ' ') % ${query_param}
-                  OR array_to_string(tags, ' ') ILIKE '%' || ${query_param} || '%'
-                  OR metadata::text % ${query_param}
-                  OR metadata::text ILIKE '%' || ${query_param} || '%'
-              )
-            ORDER BY sim_score DESC, importance DESC, created_at DESC
-            LIMIT ${param_idx} OFFSET ${param_idx + 1}
-        """
+        if boost_enabled:
+            boost_alpha_param = param_idx
+            params.append(boost_alpha)
+            param_idx += 1
+            search_query = f"""
+                SELECT {self._SEARCH_COLUMNS},
+                       GREATEST(
+                           similarity(content, ${query_param}),
+                           similarity(array_to_string(tags, ' '), ${query_param}),
+                           similarity(metadata::text, ${query_param})
+                       ) as sim_score,
+                       GREATEST(
+                           similarity(content, ${query_param}),
+                           similarity(array_to_string(tags, ' '), ${query_param}),
+                           similarity(metadata::text, ${query_param})
+                       ) + (${boost_alpha_param}
+                            * (COALESCE(vitality_score, 0.5) - 0.5)) AS final_rank
+                FROM memories
+                WHERE {where_clause}
+                  AND (
+                      content % ${query_param} OR content ILIKE '%' || ${query_param} || '%'
+                      OR array_to_string(tags, ' ') % ${query_param}
+                      OR array_to_string(tags, ' ') ILIKE '%' || ${query_param} || '%'
+                      OR metadata::text % ${query_param}
+                      OR metadata::text ILIKE '%' || ${query_param} || '%'
+                  )
+                ORDER BY final_rank DESC, importance DESC, created_at DESC
+                LIMIT ${param_idx} OFFSET ${param_idx + 1}
+            """
+        else:
+            search_query = f"""
+                SELECT {self._SEARCH_COLUMNS},
+                       GREATEST(
+                           similarity(content, ${query_param}),
+                           similarity(array_to_string(tags, ' '), ${query_param}),
+                           similarity(metadata::text, ${query_param})
+                       ) as sim_score
+                FROM memories
+                WHERE {where_clause}
+                  AND (
+                      content % ${query_param} OR content ILIKE '%' || ${query_param} || '%'
+                      OR array_to_string(tags, ' ') % ${query_param}
+                      OR array_to_string(tags, ' ') ILIKE '%' || ${query_param} || '%'
+                      OR metadata::text % ${query_param}
+                      OR metadata::text ILIKE '%' || ${query_param} || '%'
+                  )
+                ORDER BY sim_score DESC, importance DESC, created_at DESC
+                LIMIT ${param_idx} OFFSET ${param_idx + 1}
+            """
 
         count_query = f"""
             SELECT COUNT(*) as total
@@ -2177,6 +2313,7 @@ class MemoryRepository:
             "lifecycle_stage": (
                 row["lifecycle_stage"] if "lifecycle_stage" in row.keys() else "active"
             ),
+            "vitality_score": row["vitality_score"] if "vitality_score" in row.keys() else None,
         }
 
     def _row_to_dict(self, row: asyncpg.Record) -> dict[str, Any]:

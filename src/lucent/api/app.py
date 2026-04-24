@@ -10,12 +10,14 @@ The API and web interface run alongside the MCP server.
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
+from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from lucent.api.routers import admin_lifecycle as admin_lifecycle_router
 from lucent.api.routers import admin_models as admin_models_router
 from lucent.api.routers import daemon_messages as daemon_messages_router
 from lucent.api.routers import daemon_tasks as daemon_tasks_router
@@ -25,6 +27,7 @@ from lucent.api.system_schedules import (
     stop_server_system_schedule_runner,
 )
 from lucent.db import close_db, init_db
+from lucent.log_context import clear_log_context, set_request_id
 from lucent.logging import get_correlation_id, get_logger, set_correlation_id
 from lucent.mode import is_team_mode
 from lucent.rate_limit import get_rate_limiter
@@ -153,8 +156,8 @@ def _check_security_defaults() -> None:
             issues.append(var)
 
     # Check for missing critical secrets that default to random values
-    _REQUIRED_SECRETS = ["LUCENT_SIGNING_SECRET"]
-    missing: list[str] = [v for v in _REQUIRED_SECRETS if not os.environ.get(v)]
+    required_secrets = ["LUCENT_SIGNING_SECRET"]
+    missing: list[str] = [v for v in required_secrets if not os.environ.get(v)]
 
     if issues:
         msg = (
@@ -381,14 +384,8 @@ def create_app() -> FastAPI:
         return await call_next(request)
 
     @app.middleware("http")
-    async def correlation_id_middleware(request: Request, call_next):
-        """Generate or propagate a correlation ID for every request.
-
-        When OTEL is active, extracts trace_id from the OTEL span context and
-        uses it as the correlation ID for log-trace correlation. Falls back to
-        the X-Request-ID header or generates a 12-char hex ID when OTEL is
-        inactive.
-        """
+    async def request_context_middleware(request: Request, call_next):
+        """Bind request-scoped logging context for each HTTP request."""
         from lucent.telemetry import (
             bridge_correlation_id,
             is_enabled,
@@ -396,35 +393,38 @@ def create_app() -> FastAPI:
             unbind_correlation_id,
         )
 
-        cid = None
+        incoming_request_id = request.headers.get("X-Request-ID")
+        request_id = incoming_request_id.strip() if incoming_request_id else ""
+        if not request_id:
+            request_id = str(uuid4())
+        set_request_id(request_id)
+
+        # Correlation ID remains OTEL trace-linked when possible; otherwise
+        # use request_id for consistent request-level correlation.
+        set_correlation_id(request_id)
+        cid = request_id
         otel_token = None
 
         # When OTEL is active, extract trace_id as correlation ID
         if is_enabled():
             sync_trace_to_correlation_id()
             cid = get_correlation_id()
-
-        # Fall back to X-Request-ID header or generate a new one
-        if not cid:
-            header_cid = request.headers.get("X-Request-ID")
-            if header_cid:
-                set_correlation_id(header_cid)
-                cid = header_cid
-            else:
-                cid = set_correlation_id()
+            if not cid:
+                cid = set_correlation_id(request_id)
 
         # Bridge correlation ID into OTEL baggage and span attributes
         if is_enabled():
             otel_token = bridge_correlation_id()
-
-        response = await call_next(request)
-        response.headers["X-Request-ID"] = cid
-
-        # Clean up OTEL baggage context
-        if otel_token is not None:
-            unbind_correlation_id(otel_token)
-
-        return response
+        try:
+            response = await call_next(request)
+            response.headers["X-Request-ID"] = request_id
+            return response
+        finally:
+            # Clean up OTEL baggage + request-scoped contextvars.
+            if otel_token is not None:
+                unbind_correlation_id(otel_token)
+            clear_log_context()
+            set_correlation_id(None)
 
     @app.middleware("http")
     async def api_rate_limit_middleware(request: Request, call_next):
@@ -459,7 +459,8 @@ def create_app() -> FastAPI:
 
         if not rate_result.allowed:
             logger.warning(
-                "API rate limit exceeded: key=%s, path=%s, retry_after=%s",
+                "API rate limit exceeded: method=%s, key=%s, path=%s, retry_after=%s",
+                request.method,
                 rate_key[:20] + "...",
                 path,
                 rate_result.headers.get("Retry-After"),
@@ -495,6 +496,11 @@ def create_app() -> FastAPI:
         admin_models_router.router,
         prefix="/api/admin/models",
         tags=["Admin Models"],
+    )
+    app.include_router(
+        admin_lifecycle_router.router,
+        prefix="/api/admin/lifecycle",
+        tags=["Admin Lifecycle"],
     )
 
     # Include team-only API routers
@@ -629,7 +635,12 @@ def create_app() -> FastAPI:
     @app.exception_handler(Exception)
     async def global_exception_handler(request: Request, exc: Exception):
         """Handle unhandled exceptions — log detail, return generic error."""
-        logger.error(f"Unhandled exception on {request.method} {request.url.path}", exc_info=exc)
+        logger.error(
+            "Unhandled exception on %s %s",
+            request.method,
+            request.url.path,
+            exc_info=exc,
+        )
         if _is_web_request(request):
             from lucent.web.routes._shared import templates
 
