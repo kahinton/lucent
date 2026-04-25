@@ -1,5 +1,6 @@
 """User management and impersonation routes (admin)."""
 
+import logging
 import secrets
 import time
 from math import ceil
@@ -21,11 +22,10 @@ from lucent.auth_providers import (
 from lucent.db import AdminAuditRepository, UserRepository, get_pool
 from lucent.db import admin_audit as audit_actions
 from lucent.llm.model_engine_validation import normalize_engine, validate_engine_override
-from lucent.logging import get_logger
 
 from ._shared import _check_csrf, get_user_context, templates
 
-logger = get_logger("web.routes.admin")
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import re
 import time
 from typing import Any
@@ -27,9 +28,8 @@ from starlette.requests import Request
 
 from lucent.integrations.base import IntegrationError
 from lucent.integrations.models import EventType, IntegrationEvent
-from lucent.logging import get_logger
 
-logger = get_logger("integrations.slack")
+logger = logging.getLogger(__name__)
 
 # Slack rejects requests older than 5 minutes
 _TIMESTAMP_MAX_AGE_SECONDS = 300

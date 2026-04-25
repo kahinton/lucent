@@ -17,6 +17,7 @@ Discord verification: Ed25519 signature verification per Discord docs.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Any, Awaitable, Callable
 
@@ -24,9 +25,8 @@ from starlette.requests import Request
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from lucent.integrations.base import IntegrationAdapter
-from lucent.logging import get_logger
 
-logger = get_logger("integrations.webhooks")
+logger = logging.getLogger(__name__)
 
 # Matches /webhooks/slack or /webhooks/discord (with optional trailing slash)
 _WEBHOOK_ROUTE = re.compile(r"^/webhooks/(?P<platform>slack|discord)/?$")

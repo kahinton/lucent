@@ -4,6 +4,7 @@ Provides CRUD endpoints and approval workflow for managing definitions.
 Agents can be granted access to specific skills and MCP servers.
 """
 
+import logging
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException
@@ -14,7 +15,6 @@ from lucent.api.deps import AdminUser, AuthenticatedUser
 from lucent.db import DefinitionRepository, get_pool
 from lucent.db.audit import AuditRepository
 from lucent.db.definitions import BuiltInProtectionError
-from lucent.logging import get_logger
 from lucent.security import scan_content_for_injection
 from lucent.services.mcp_discovery import (
     MCPDiscoveryError,
@@ -23,7 +23,7 @@ from lucent.services.mcp_discovery import (
 )
 from lucent.url_validation import SSRFError, validate_url
 
-logger = get_logger("security")
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/definitions", tags=["definitions"])
 
@@ -532,7 +532,6 @@ async def commit_import(body: ImportRequest, user: AuthenticatedUser):
     from lucent.services.definition_import import (
         DefinitionType,
         ImportSourceType,
-        SecuritySeverity,
         import_definition,
     )
 
