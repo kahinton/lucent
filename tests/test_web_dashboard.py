@@ -34,6 +34,26 @@ async def web_prefix(db_pool):
     prefix = f"test_webdash_{test_id}_"
     yield prefix
     async with db_pool.acquire() as conn:
+        # Clean up requests/tasks before memories. Goal-linked requests use
+        # goal_memory_id + goal_milestone_index, so deleting goal memories first
+        # can violate the request check constraint while FK actions run.
+        await conn.execute(
+            "DELETE FROM tasks WHERE request_id IN "
+            "(SELECT id FROM requests WHERE organization_id IN "
+            "(SELECT id FROM organizations WHERE name LIKE $1))",
+            f"{prefix}%",
+        )
+        await conn.execute(
+            "DELETE FROM request_memories WHERE request_id IN "
+            "(SELECT id FROM requests WHERE organization_id IN "
+            "(SELECT id FROM organizations WHERE name LIKE $1))",
+            f"{prefix}%",
+        )
+        await conn.execute(
+            "DELETE FROM requests WHERE organization_id IN "
+            "(SELECT id FROM organizations WHERE name LIKE $1)",
+            f"{prefix}%",
+        )
         await conn.execute(
             "DELETE FROM memory_audit_log WHERE memory_id IN "
             "(SELECT id FROM memories WHERE username LIKE $1)",
@@ -48,18 +68,6 @@ async def web_prefix(db_pool):
         await conn.execute(
             "DELETE FROM api_keys WHERE user_id IN "
             "(SELECT id FROM users WHERE external_id LIKE $1)",
-            f"{prefix}%",
-        )
-        # Clean up requests/tasks created during tests (before users/orgs)
-        await conn.execute(
-            "DELETE FROM tasks WHERE request_id IN "
-            "(SELECT id FROM requests WHERE organization_id IN "
-            "(SELECT id FROM organizations WHERE name LIKE $1))",
-            f"{prefix}%",
-        )
-        await conn.execute(
-            "DELETE FROM requests WHERE organization_id IN "
-            "(SELECT id FROM organizations WHERE name LIKE $1)",
             f"{prefix}%",
         )
         await conn.execute("DELETE FROM users WHERE external_id LIKE $1", f"{prefix}%")
@@ -115,6 +123,80 @@ class TestDashboard:
         resp = await client.get("/")
         assert resp.status_code == 200
         assert "text/html" in resp.headers["content-type"]
+        assert "Goals we're pursuing together" in resp.text
+        assert "Admin attention queue" not in resp.text
+        assert "Processing events" not in resp.text
+        assert "Daemon Status" not in resp.text
+
+    @pytest.mark.asyncio
+    async def test_dashboard_shows_active_goal_progress(
+        self, client, db_pool, web_user, web_prefix
+    ):
+        user, org, _token = web_user
+        repo = MemoryRepository(db_pool)
+        goal = await repo.create(
+            username=f"{web_prefix}User",
+            type="goal",
+            content="Dashboard collaborative goal",
+            metadata={
+                "status": "active",
+                "milestones": [
+                    {"description": "Define dashboard goal view", "status": "completed"},
+                    {"description": "Validate data accuracy", "status": "active"},
+                    {"description": "Ship useful overview", "status": "active"},
+                ],
+            },
+            tags=["dashboard", "goal"],
+            importance=7,
+            user_id=user["id"],
+            organization_id=org["id"],
+        )
+
+        from lucent.db.requests import RequestRepository
+
+        req_repo = RequestRepository(db_pool)
+        await req_repo.create_request(
+            title="Move dashboard goal forward",
+            org_id=str(org["id"]),
+            source="user",
+            goal_id=str(goal["id"]),
+            goal_milestone_index=2,
+        )
+
+        resp = await client.get("/")
+        assert resp.status_code == 200
+        assert "Dashboard collaborative goal" in resp.text
+        assert "1 of 3 milestones complete" in resp.text
+        assert "Next: Validate data accuracy" in resp.text
+        assert "Current: Move dashboard goal forward" in resp.text
+
+    @pytest.mark.asyncio
+    async def test_dashboard_current_work_excludes_old_failed_requests(
+        self, client, db_pool, web_user
+    ):
+        _user, org, _token = web_user
+        from lucent.db.requests import RequestRepository
+
+        req_repo = RequestRepository(db_pool)
+        await req_repo.create_request(
+            title="Open current dashboard work",
+            org_id=str(org["id"]),
+            source="user",
+        )
+        failed_req = await req_repo.create_request(
+            title="Old failed dashboard work",
+            org_id=str(org["id"]),
+            source="user",
+        )
+        await req_repo.update_request_status(
+            str(failed_req["id"]), "failed", org_id=str(org["id"])
+        )
+
+        resp = await client.get("/")
+        assert resp.status_code == 200
+        assert "Current Work" in resp.text
+        assert "Open current dashboard work" in resp.text
+        assert "Old failed dashboard work" not in resp.text
 
     @pytest.mark.asyncio
     async def test_dashboard_contains_user_info(self, client, web_prefix):
@@ -151,6 +233,8 @@ class TestDashboard:
     @pytest.mark.asyncio
     async def test_dashboard_shows_daemon_status_panel(self, client, db_pool, web_user, web_prefix):
         user, org, _token = web_user
+        user_repo = UserRepository(db_pool)
+        await user_repo.update_role(user["id"], "owner")
         repo = MemoryRepository(db_pool)
 
         heartbeat_payload = {
@@ -185,7 +269,9 @@ class TestDashboard:
         assert "Processing review queue" in resp.text
 
     @pytest.mark.asyncio
-    async def test_dashboard_sidebar_shows_approval_badge(self, client, db_pool, web_user, web_prefix, monkeypatch):
+    async def test_dashboard_sidebar_shows_approval_badge(
+        self, client, db_pool, web_user, web_prefix, monkeypatch
+    ):
         user, org, _token = web_user
 
         # Create a request that needs approval (cognitive source + auto-approve off)
@@ -203,6 +289,43 @@ class TestDashboard:
         assert 'href="/daemon/review"' in resp.text
         assert "Needs Approval" in resp.text
         assert re.search(r'bg-amber-100[^>]*>\s*\d+\s*</span>', resp.text, re.S)
+
+    @pytest.mark.asyncio
+    async def test_dashboard_owner_sees_admin_operations(
+        self, client, db_pool, web_user, monkeypatch
+    ):
+        user, org, _token = web_user
+
+        user_repo = UserRepository(db_pool)
+        await user_repo.update_role(user["id"], "owner")
+
+        # Create a request that needs owner/admin attention.
+        monkeypatch.setenv("LUCENT_AUTO_APPROVE", "false")
+        from lucent.db.requests import RequestRepository
+
+        req_repo = RequestRepository(db_pool)
+        await req_repo.create_request(
+            title="Owner dashboard approval",
+            org_id=str(org["id"]),
+            source="cognitive",
+        )
+        cancelled_req = await req_repo.create_request(
+            title="Cancelled dashboard approval",
+            org_id=str(org["id"]),
+            source="cognitive",
+        )
+        await req_repo.update_request_status(
+            str(cancelled_req["id"]), "cancelled", org_id=str(org["id"])
+        )
+
+        resp = await client.get("/")
+        assert resp.status_code == 200
+        assert "Admin attention queue" in resp.text
+        assert "Org operations" in resp.text
+        assert "Definition proposals" in resp.text
+        assert "Owner dashboard approval" in resp.text
+        assert "Cancelled dashboard approval" not in resp.text
+        assert re.search(r"Work approvals</p>\s*<p[^>]*>\s*1\s*</p>", resp.text)
 
     @pytest.mark.asyncio
     async def test_dashboard_filters_repo_tagged_memories_when_acl_denied(
