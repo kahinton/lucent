@@ -20,10 +20,30 @@ from pydantic import BaseModel, Field
 
 
 class IntegrationType(str, Enum):
-    """Supported integration platforms."""
+    """Supported integration platforms.
+
+    Values must match the ``integrations.type`` CHECK constraint
+    (migrations 028 + 069).
+    """
 
     SLACK = "slack"
     DISCORD = "discord"
+    GITHUB_APP = "github_app"
+    JIRA = "jira"
+    LINEAR = "linear"
+    CUSTOM = "custom"
+
+
+class IntegrationHealthStatus(str, Enum):
+    """Most recently observed health of a workspace integration.
+
+    Mirrors the ``health_status`` CHECK constraint added in migration 069.
+    """
+
+    UNKNOWN = "unknown"
+    HEALTHY = "healthy"
+    DEGRADED = "degraded"
+    FAILED = "failed"
 
 
 class IntegrationStatus(str, Enum):
@@ -109,6 +129,13 @@ class IntegrationCreate(BaseModel):
     external_workspace_id: str | None = Field(
         default=None, description="Platform workspace/guild ID"
     )
+    install_id: str | None = Field(
+        default=None,
+        description=(
+            "Provider-issued installation identifier (e.g. GitHub App "
+            "installation_id). Optional for bot-style integrations."
+        ),
+    )
     config: dict[str, Any] = Field(
         ..., description="Platform credentials (will be encrypted at rest)"
     )
@@ -137,6 +164,7 @@ class IntegrationResponse(BaseModel):
     type: IntegrationType
     status: IntegrationStatus
     external_workspace_id: str | None
+    install_id: str | None = None
     allowed_channels: list[str]
     config_version: int
     created_by: UUID
@@ -145,6 +173,9 @@ class IntegrationResponse(BaseModel):
     updated_at: datetime
     disabled_at: datetime | None
     revoked_at: datetime | None
+    health_status: IntegrationHealthStatus = IntegrationHealthStatus.UNKNOWN
+    health_detail: str | None = None
+    health_checked_at: datetime | None = None
 
 
 class IntegrationListResponse(BaseModel):

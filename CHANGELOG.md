@@ -8,6 +8,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+#### Two-Tier Connections Model
+- **Settings → Connections** page split into two clearly labeled sections: **Workspace connections** (org-owned app/bot installs, admin-managed) and **Your connected accounts** (personal OAuth/PAT/env-token credentials, self-service).
+- Six new feature flags for connection behavior, all with safe defaults that preserve the existing single-user/PAT workflow:
+  - `LUCENT_CONNECTIONS_PAT_ENABLED` (default `true`)
+  - `LUCENT_CONNECTIONS_ENV_TOKEN_CLAIM_ENABLED` (default `true`)
+  - `LUCENT_CONNECTIONS_OAUTH_ENABLED` (default `true`)
+  - `LUCENT_WORKSPACE_INTEGRATIONS_ENABLED` (default `true`)
+  - `LUCENT_GITHUB_APP_ENABLED` (default `false`)
+  - `LUCENT_REQUIRE_USER_GITHUB_CONNECTION_FOR_REPO_ACL` (default `false`)
+- Centralized feature-flag layer (`src/lucent/integrations/connection_flags.py`) — sole reader of the `LUCENT_CONNECTIONS_*` / `LUCENT_GITHUB_APP_*` envs.
+- CSRF protection added to all `/settings/connections/*` JSON mutation endpoints (PAT save, env-token claim, OAuth start, revoke).
+- Workspace-integration mutations now require explicit `MANAGE_INTEGRATIONS` permission inside each handler (defense-in-depth on top of `AdminUser`).
+- GitHub App groundwork: `integrations.type` widened to include `github_app` (plus `jira`, `linear`, `custom`); new `install_id`, `health_status`, `health_detail`, `health_checked_at` columns; partial unique index on `(org, type, install_id)` for active rows. **Migration 069**.
+- New `RepoAccessDecision(allowed, reason, hint)` from `GitHubRepoAccessService.check_access_with_reason()`. Strict mode (`LUCENT_REQUIRE_USER_GITHUB_CONNECTION_FOR_REPO_ACL=true`) returns `user_github_credential_required` with a "Connect your GitHub…" hint; compat mode keeps the existing single-user back-compat allowance.
+- New `app_installation_can_see_repo()` API for app-level repo visibility, gated by `LUCENT_GITHUB_APP_ENABLED`. **Returns `None` ("unknown")** until App JWT signing / installation-token minting lands. **Never** substitutes for user ACL.
+- Documentation: new [docs/connections.md](docs/connections.md) covering the model, every flag, three setup profiles (simple local, team, enterprise), role visibility, and the GitHub repo ACL rule.
+
+### Behavior changes (user-visible)
+- The Connections page now shows two sections instead of one mixed list. Members see Workspace connections as read-only ("View only" badge) with no mutation controls.
+- Defaults are unchanged for existing single-user installs: PAT, env-token claim, OAuth, and workspace integrations are all on; GitHub App and strict repo ACL are off.
+
+### Deferred (follow-up)
+- GitHub App webhook execution: the schema and flag are in place, but App JWT signing, installation-token minting, and the `/integrations/webhook/github` HMAC-verified receiver are not yet implemented. `app_installation_can_see_repo()` returns `None` until these land. Do not enable `LUCENT_GITHUB_APP_ENABLED=true` in production with the expectation of working webhook-driven behavior yet.
+
+### Added
+
 #### Request Approval Gate
 - Pre-work approval flow for daemon-created requests (`LUCENT_AUTO_APPROVE` env var)
 - When `LUCENT_AUTO_APPROVE=false`, daemon/cognitive/schedule requests require human approval before any tasks are dispatched

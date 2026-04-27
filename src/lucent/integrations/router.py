@@ -50,6 +50,7 @@ from lucent.integrations.repositories import (
     UserLinkRepo,
 )
 from lucent.integrations.service import IntegrationService
+from lucent.rbac import Permission
 from lucent.secrets import SecretRegistry, SecretScope
 from lucent.secrets.utils import is_secret_reference, secret_key_from_reference
 
@@ -93,6 +94,7 @@ def _integration_to_response(row: dict[str, Any]) -> IntegrationResponse:
         type=row["type"],
         status=row["status"],
         external_workspace_id=row.get("external_workspace_id"),
+        install_id=row.get("install_id"),
         allowed_channels=channels,
         config_version=row.get("config_version", 1),
         created_by=row["created_by"],
@@ -101,6 +103,9 @@ def _integration_to_response(row: dict[str, Any]) -> IntegrationResponse:
         updated_at=row["updated_at"],
         disabled_at=row.get("disabled_at"),
         revoked_at=row.get("revoked_at"),
+        health_status=row.get("health_status") or "unknown",
+        health_detail=row.get("health_detail"),
+        health_checked_at=row.get("health_checked_at"),
     )
 
 
@@ -269,7 +274,14 @@ async def create_integration(
     body: IntegrationCreate,
     user: AdminUser,
 ) -> IntegrationResponse:
-    """Create a new platform integration for the organization."""
+    """Create a new platform integration for the organization.
+
+    Workspace-integration mutations require ``MANAGE_INTEGRATIONS``
+    (admin or owner). ``AdminUser`` already enforces ADMIN-or-higher;
+    the explicit permission check below is defense-in-depth so the gate
+    survives any future change to the ``AdminUser`` alias.
+    """
+    user.require_permission(Permission.MANAGE_INTEGRATIONS)
     if not user.organization_id:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "User has no organization")
 
@@ -297,6 +309,7 @@ async def create_integration(
         encrypted_config=encrypted_config,
         created_by=str(user.id),
         external_workspace_id=body.external_workspace_id,
+        install_id=body.install_id,
         allowed_channels=body.allowed_channels,
     )
 
@@ -366,7 +379,11 @@ async def update_integration(
     body: IntegrationUpdate,
     user: AdminUser,
 ) -> IntegrationResponse:
-    """Update an integration's config, channels, or status."""
+    """Update an integration's config, channels, or status.
+
+    Requires ``MANAGE_INTEGRATIONS`` (admin/owner).
+    """
+    user.require_permission(Permission.MANAGE_INTEGRATIONS)
     if not user.organization_id:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "User has no organization")
 
@@ -469,7 +486,11 @@ async def delete_integration(
     integration_id: UUID,
     user: AdminUser,
 ) -> dict[str, str]:
-    """Soft-delete an integration."""
+    """Soft-delete an integration.
+
+    Requires ``MANAGE_INTEGRATIONS`` (admin/owner).
+    """
+    user.require_permission(Permission.MANAGE_INTEGRATIONS)
     if not user.organization_id:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "User has no organization")
 

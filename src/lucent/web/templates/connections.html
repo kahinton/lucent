@@ -2,11 +2,17 @@
 
 {% set settings_section = "connections" %}
 {% set settings_title = "Connections" %}
-{% set settings_subtitle = "Connect Lucent to your tools — via environment tokens, personal access tokens, or OAuth." %}
+{% set settings_subtitle = "Workspace integrations and your personal connected accounts." %}
 
 {% block title %}Connections - Lucent{% endblock %}
 
 {% block settings_content %}
+{# Read model from build_connections_view_model:
+     feature_flags, admin_permissions, provider_capabilities,
+     workspace_connections, your_connected_accounts, env_detected
+   Legacy keys (env_connections, oauth_configured) are still passed for
+   compatibility but the layout below is driven by the explicit read model. #}
+
 {% if request.query_params.get('connected') %}
 <div class="mb-6 px-4 py-3 bg-green-50 border border-green-200 rounded-lg text-sm text-green-700">
     ✓ Successfully connected! Your integration is now active.
@@ -18,189 +24,242 @@
 </div>
 {% endif %}
 
-<div class="space-y-5">
-    {% for provider in providers %}
-    {% set cred = connected.get(provider.id) %}
-    {% set env = env_connections.get(provider.id) %}
-    <div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-        <div class="p-5">
-            <!-- Provider header -->
-            <div class="flex items-center gap-3 mb-4">
-                {% if provider.id == 'github' %}
-                <div class="w-10 h-10 bg-gray-900 rounded-lg flex items-center justify-center shrink-0">
-                    <svg class="w-6 h-6 text-white" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
+{# =====================================================================
+   Section 1 — Workspace connections
+   Org-owned app/bot installs. Hidden entirely when the workspace
+   integrations feature flag is off. Mutation controls only render for
+   users with MANAGE_INTEGRATIONS (admin/owner).
+   ===================================================================== #}
+{% if feature_flags.workspace_integrations_enabled %}
+<section data-section="workspace-connections" class="mb-10">
+    <div class="flex items-baseline justify-between mb-3">
+        <div>
+            <h2 class="text-lg font-semibold text-gray-900">Workspace connections</h2>
+            <p class="text-xs text-gray-500 mt-0.5">App and bot installs for the whole organization. Health and configuration are managed by admins.</p>
+        </div>
+        {% if not admin_permissions.manage_integrations %}
+        <span class="px-2 py-0.5 text-[10px] font-medium text-gray-500 bg-gray-100 border border-gray-200 rounded-full" title="You can view installed apps but only admins or owners can connect, disconnect, or configure them.">View only</span>
+        {% endif %}
+    </div>
+
+    {% if workspace_connections %}
+    <div class="space-y-3" data-testid="workspace-connections-list">
+        {% for wc in workspace_connections %}
+        <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-4">
+            <div class="flex items-center gap-3">
+                <div class="w-10 h-10 bg-gray-100 rounded-lg flex items-center justify-center shrink-0">
+                    <span class="text-xs font-semibold text-gray-600 uppercase">{{ wc.type[:3] }}</span>
                 </div>
-                {% elif provider.id == 'slack' %}
-                <div class="w-10 h-10 bg-purple-600 rounded-lg flex items-center justify-center shrink-0">
-                    <svg class="w-5 h-5 text-white" fill="currentColor" viewBox="0 0 24 24"><path d="M5.042 15.165a2.528 2.528 0 0 1-2.52 2.523A2.528 2.528 0 0 1 0 15.165a2.527 2.527 0 0 1 2.522-2.52h2.52v2.52zM6.313 15.165a2.527 2.527 0 0 1 2.521-2.52 2.527 2.527 0 0 1 2.521 2.52v6.313A2.528 2.528 0 0 1 8.834 24a2.528 2.528 0 0 1-2.521-2.522v-6.313zM8.834 5.042a2.528 2.528 0 0 1-2.521-2.52A2.528 2.528 0 0 1 8.834 0a2.528 2.528 0 0 1 2.521 2.522v2.52H8.834zM8.834 6.313a2.528 2.528 0 0 1 2.521 2.521 2.528 2.528 0 0 1-2.521 2.521H2.522A2.528 2.528 0 0 1 0 8.834a2.528 2.528 0 0 1 2.522-2.521h6.312zM18.956 8.834a2.528 2.528 0 0 1 2.522-2.521A2.528 2.528 0 0 1 24 8.834a2.528 2.528 0 0 1-2.522 2.521h-2.522V8.834zM17.688 8.834a2.528 2.528 0 0 1-2.523 2.521 2.527 2.527 0 0 1-2.52-2.521V2.522A2.527 2.527 0 0 1 15.165 0a2.528 2.528 0 0 1 2.523 2.522v6.312zM15.165 18.956a2.528 2.528 0 0 1 2.523 2.522A2.528 2.528 0 0 1 15.165 24a2.527 2.527 0 0 1-2.52-2.522v-2.522h2.52zM15.165 17.688a2.527 2.527 0 0 1-2.52-2.523 2.526 2.526 0 0 1 2.52-2.52h6.313A2.527 2.527 0 0 1 24 15.165a2.528 2.528 0 0 1-2.522 2.523h-6.313z"/></svg>
-                </div>
-                {% elif provider.id == 'jira' %}
-                <div class="w-10 h-10 bg-blue-600 rounded-lg flex items-center justify-center shrink-0">
-                    <svg class="w-5 h-5 text-white" fill="currentColor" viewBox="0 0 24 24"><path d="M11.571 11.513H0a5.218 5.218 0 0 0 5.232 5.215h2.13v2.057A5.215 5.215 0 0 0 12.575 24V12.518a1.005 1.005 0 0 0-1.005-1.005zm5.723-5.756H5.736a5.215 5.215 0 0 0 5.215 5.214h2.129v2.058a5.218 5.218 0 0 0 5.215 5.214V6.758a1.001 1.001 0 0 0-1.001-1.001zM23.013 0H11.455a5.215 5.215 0 0 0 5.215 5.215h2.129v2.057A5.215 5.215 0 0 0 24.013 12.5V1.005A1.005 1.005 0 0 0 23.013 0z"/></svg>
-                </div>
-                {% endif %}
                 <div class="flex-1 min-w-0">
-                    <h3 class="text-base font-semibold text-gray-900">{{ provider.name }}</h3>
-                    <p class="text-xs text-gray-500">{{ provider.description }}</p>
+                    <h3 class="text-sm font-semibold text-gray-900">{{ wc.display_name }}</h3>
+                    <p class="text-[11px] text-gray-500">{{ wc.type }} · installed by {{ wc.installed_by or "—" }}</p>
                 </div>
-                {% if cred %}
-                <span class="flex items-center gap-1.5 px-2.5 py-1 bg-green-50 border border-green-200 rounded-full text-xs font-medium text-green-700">
-                    <span class="w-2 h-2 bg-green-500 rounded-full"></span>
-                    Connected
-                </span>
-                {% elif env %}
-                <span class="flex items-center gap-1.5 px-2.5 py-1 bg-blue-50 border border-blue-200 rounded-full text-xs font-medium text-blue-700">
-                    <span class="w-2 h-2 bg-blue-400 rounded-full"></span>
-                    Token detected
-                </span>
+                {% set hs = wc.health.status %}
+                {% if hs == "ok" %}
+                <span class="px-2 py-0.5 text-[10px] font-medium text-green-700 bg-green-50 border border-green-200 rounded-full">healthy</span>
+                {% elif hs == "degraded" %}
+                <span class="px-2 py-0.5 text-[10px] font-medium text-amber-700 bg-amber-50 border border-amber-200 rounded-full">degraded</span>
+                {% elif hs == "failing" %}
+                <span class="px-2 py-0.5 text-[10px] font-medium text-red-700 bg-red-50 border border-red-200 rounded-full">failing</span>
                 {% else %}
-                <span class="flex items-center gap-1.5 px-2.5 py-1 bg-gray-50 border border-gray-200 rounded-full text-xs text-gray-500">
-                    <span class="w-2 h-2 bg-gray-300 rounded-full"></span>
-                    Not connected
-                </span>
+                <span class="px-2 py-0.5 text-[10px] font-medium text-gray-600 bg-gray-50 border border-gray-200 rounded-full">{{ hs }}</span>
                 {% endif %}
+                <span class="px-2 py-0.5 text-[10px] font-medium text-gray-600 bg-gray-50 border border-gray-200 rounded-full">{{ wc.status }}</span>
             </div>
 
-            <!-- Connection details / methods -->
-            {% if env and not cred %}
-            <!-- Env var detected but not claimed -->
-            <div class="px-4 py-3 bg-blue-50 border border-blue-100 rounded-lg">
-                <div class="flex items-center gap-2 text-xs">
-                    <svg class="w-3.5 h-3.5 text-blue-500" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" /></svg>
-                    <span class="font-medium text-blue-700">Token detected in environment</span>
-                    <span class="text-blue-500 ml-auto font-mono text-[10px]">{{ env.env_var }} = {{ env.masked_token }}</span>
-                </div>
-                <p class="text-[10px] text-blue-500 mt-1">Verify this token against {{ provider.name }} to confirm your identity and create a connection.</p>
-            </div>
-            <div class="mt-3">
-                <button data-env-claim="{{ provider.id }}" class="w-full px-3 py-2 text-xs font-medium text-white bg-primary-600 rounded-lg hover:bg-primary-700 transition-colors">
-                    Verify & Connect
-                </button>
-            </div>
-            {% elif cred %}
-            <!-- Stored credential -->
-            <div class="px-4 py-3 bg-green-50 border border-green-100 rounded-lg">
-                <div class="flex items-center justify-between text-xs">
-                    <div class="flex items-center gap-2">
-                        <span class="font-medium text-green-700">{{ cred.display_name }}</span>
-                        <span class="px-1.5 py-0.5 bg-green-100 text-green-600 rounded text-[10px]">{{ cred.credential_kind }}</span>
-                    </div>
-                    <span class="text-green-600">{{ cred.scopes|join(', ') if cred.scopes else 'default scopes' }}</span>
-                </div>
-                {% if cred.access_token_expires_at %}
-                <p class="text-[10px] text-gray-500 mt-1">Token expires: {{ cred.access_token_expires_at.strftime('%Y-%m-%d %H:%M') }}</p>
+            {% if admin_permissions.manage_integrations %}
+            <div class="mt-3 flex gap-2" data-testid="workspace-actions">
+                {% if wc.actions.can_disable %}
+                <button data-workspace-disable="{{ wc.id }}" class="px-3 py-1.5 text-xs font-medium text-gray-700 bg-gray-50 border border-gray-200 rounded-lg hover:bg-gray-100 transition-colors">Disable</button>
                 {% endif %}
-            </div>
-            <div class="mt-3">
-                <form method="POST" action="/settings/connections/{{ cred.id }}/revoke">
-                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                    <button type="submit" class="px-3 py-1.5 text-xs font-medium text-red-600 bg-red-50 border border-red-200 rounded-lg hover:bg-red-100 transition-colors">Disconnect</button>
-                </form>
-            </div>
-            {% else %}
-            <!-- Not connected — show connection methods -->
-            <div class="space-y-3">
-                <!-- PAT input -->
-                <div class="border border-gray-200 rounded-lg p-3">
-                    <div class="flex items-center gap-2 mb-2">
-                        <svg class="w-3.5 h-3.5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 5.25a3 3 0 013 3m3 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121.75 8.25z" /></svg>
-                        <span class="text-xs font-medium text-gray-700">Personal Access Token</span>
-                        <a href="{{ provider.pat_url }}" target="_blank" rel="noopener" class="text-[10px] text-primary-600 hover:text-primary-700 ml-auto">Create a token →</a>
-                    </div>
-                    <div class="flex gap-2">
-                        <input type="password" data-pat-input="{{ provider.id }}" placeholder="{% if provider.pat_prefix %}{{ provider.pat_prefix }}...{% else %}Paste your token{% endif %}" class="flex-1 px-3 py-1.5 text-xs border border-gray-200 rounded-lg bg-gray-50 focus:bg-white focus:border-primary-300 focus:ring-2 focus:ring-primary-100 focus:outline-none font-mono">
-                        <button data-pat-save="{{ provider.id }}" class="px-3 py-1.5 text-xs font-medium text-white bg-primary-600 rounded-lg hover:bg-primary-700 transition-colors disabled:opacity-40">Save</button>
-                    </div>
-                    {% if not encryption_available %}
-                    <p class="text-[10px] text-amber-600 mt-1.5">⚠ Credential encryption not available. Ensure Vault/OpenBao is running and transit is configured.</p>
-                    {% endif %}
-                </div>
-
-                <!-- OAuth (if configured) -->
-                {% if oauth_configured.get(provider.id) %}
-                <div class="border border-gray-200 rounded-lg p-3">
-                    <div class="flex items-center justify-between">
-                        <div class="flex items-center gap-2">
-                            <svg class="w-3.5 h-3.5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M13.19 8.688a4.5 4.5 0 011.242 7.244l-4.5 4.5a4.5 4.5 0 01-6.364-6.364l1.757-1.757m13.35-.622l1.757-1.757a4.5 4.5 0 00-6.364-6.364l-4.5 4.5a4.5 4.5 0 001.242 7.244" /></svg>
-                            <span class="text-xs font-medium text-gray-700">OAuth</span>
-                        </div>
-                        <button data-oauth-connect="{{ provider.id }}" class="px-3 py-1.5 text-xs font-medium text-primary-700 bg-primary-50 border border-primary-200 rounded-lg hover:bg-primary-100 transition-colors">Connect with {{ provider.name }}</button>
-                    </div>
-                </div>
+                {% if wc.actions.can_revoke %}
+                <button data-workspace-revoke="{{ wc.id }}" class="px-3 py-1.5 text-xs font-medium text-red-600 bg-red-50 border border-red-200 rounded-lg hover:bg-red-100 transition-colors">Revoke</button>
                 {% endif %}
             </div>
             {% endif %}
         </div>
+        {% endfor %}
     </div>
-    {% endfor %}
-</div>
+    {% else %}
+    <div class="bg-white rounded-xl border border-dashed border-gray-200 p-6 text-center">
+        <p class="text-sm text-gray-700">No workspace integrations installed.</p>
+        {% if admin_permissions.manage_integrations %}
+        <p class="text-xs text-gray-500 mt-1">Connect a GitHub App, Slack bot, or other workspace integration to enable org-wide functionality.</p>
+        {% else %}
+        <p class="text-xs text-gray-500 mt-1">Ask an admin or owner to install a workspace integration.</p>
+        {% endif %}
+    </div>
+    {% endif %}
+</section>
+{% endif %}
+
+{# =====================================================================
+   Section 2 — Your connected accounts
+   The current user's personal credentials (OAuth, PAT, env-token).
+   Always visible — self-service.
+   ===================================================================== #}
+<section data-section="your-connected-accounts">
+    <div class="mb-3">
+        <h2 class="text-lg font-semibold text-gray-900">Your connected accounts</h2>
+        <p class="text-xs text-gray-500 mt-0.5">Personal credentials Lucent uses on your behalf. Only you can see and manage these.</p>
+    </div>
+
+    {% if not encryption_available %}
+    <div class="mb-4 px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg text-[11px] text-amber-700">
+        ⚠ Credential encryption backend not available. Tokens may not be safely stored — ensure Vault/OpenBao transit is configured.
+    </div>
+    {% endif %}
+
+    <div class="space-y-5">
+        {% for provider in provider_capabilities %}
+        {# Build the per-provider account from your_connected_accounts. #}
+        {% set ns = namespace(account=None) %}
+        {% for acct in your_connected_accounts %}
+            {% if acct.provider == provider.id and ns.account is none %}
+                {% set ns.account = acct %}
+            {% endif %}
+        {% endfor %}
+        {% set account = ns.account %}
+        {% set env = env_detected.get(provider.id) %}
+        <div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden" data-provider="{{ provider.id }}">
+            <div class="p-5">
+                <div class="flex items-center gap-3 mb-4">
+                    <div class="w-10 h-10 bg-gray-100 rounded-lg flex items-center justify-center shrink-0">
+                        <span class="text-xs font-semibold text-gray-700 uppercase">{{ provider.id[:2] }}</span>
+                    </div>
+                    <div class="flex-1 min-w-0">
+                        <h3 class="text-base font-semibold text-gray-900">{{ provider.name }}</h3>
+                        <p class="text-xs text-gray-500">{{ provider.description }}</p>
+                    </div>
+                    {% if account %}
+                    <span class="flex items-center gap-1.5 px-2.5 py-1 bg-green-50 border border-green-200 rounded-full text-xs font-medium text-green-700">
+                        <span class="w-2 h-2 bg-green-500 rounded-full"></span>
+                        Connected
+                    </span>
+                    {% elif env %}
+                    <span class="flex items-center gap-1.5 px-2.5 py-1 bg-blue-50 border border-blue-200 rounded-full text-xs font-medium text-blue-700">
+                        <span class="w-2 h-2 bg-blue-400 rounded-full"></span>
+                        Token detected
+                    </span>
+                    {% else %}
+                    <span class="flex items-center gap-1.5 px-2.5 py-1 bg-gray-50 border border-gray-200 rounded-full text-xs text-gray-500">
+                        <span class="w-2 h-2 bg-gray-300 rounded-full"></span>
+                        Not connected
+                    </span>
+                    {% endif %}
+                </div>
+
+                {% if account %}
+                {# ----- Stored credential ----- #}
+                <div class="px-4 py-3 bg-green-50 border border-green-100 rounded-lg" data-testid="account-summary">
+                    <div class="flex items-center justify-between text-xs">
+                        <div class="flex items-center gap-2">
+                            <span class="font-medium text-green-700">{{ account.display_name }}</span>
+                            <span class="px-1.5 py-0.5 bg-green-100 text-green-600 rounded text-[10px]">{{ account.credential_kind }}</span>
+                            <span class="px-1.5 py-0.5 bg-green-100 text-green-600 rounded text-[10px]">{{ account.source }}</span>
+                        </div>
+                        <span class="text-green-600">{{ account.scopes|join(', ') if account.scopes else 'default scopes' }}</span>
+                    </div>
+                </div>
+                <div class="mt-3">
+                    <form method="POST" action="/settings/connections/{{ account.id }}/revoke">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                        <button type="submit" class="px-3 py-1.5 text-xs font-medium text-red-600 bg-red-50 border border-red-200 rounded-lg hover:bg-red-100 transition-colors">Disconnect</button>
+                    </form>
+                </div>
+                {% else %}
+                <div class="space-y-3">
+                    {# ----- Env token claim (only if flag on) ----- #}
+                    {% if env and feature_flags.env_token_claim_enabled %}
+                    <div class="border border-blue-200 rounded-lg p-3 bg-blue-50/40" data-testid="env-claim-{{ provider.id }}">
+                        <div class="flex items-center gap-2 text-xs">
+                            <span class="font-medium text-blue-700">Token detected in environment</span>
+                            <span class="text-blue-500 ml-auto font-mono text-[10px]">{{ env.env_var }} = {{ env.masked_token }}</span>
+                        </div>
+                        <p class="text-[10px] text-blue-500 mt-1">Verify and adopt this token as your personal credential.</p>
+                        <button data-env-claim="{{ provider.id }}" class="mt-2 w-full px-3 py-2 text-xs font-medium text-white bg-primary-600 rounded-lg hover:bg-primary-700 transition-colors">Verify &amp; Connect</button>
+                    </div>
+                    {% endif %}
+
+                    {# ----- PAT (only if flag on AND provider supports PAT) ----- #}
+                    {% if feature_flags.pat_enabled and provider.supports_pat %}
+                    <div class="border border-gray-200 rounded-lg p-3" data-testid="pat-form-{{ provider.id }}">
+                        <div class="flex items-center gap-2 mb-2">
+                            <span class="text-xs font-medium text-gray-700">Personal Access Token</span>
+                            <a href="{{ provider.pat_url }}" target="_blank" rel="noopener" class="text-[10px] text-primary-600 hover:text-primary-700 ml-auto">Create a token →</a>
+                        </div>
+                        <div class="flex gap-2">
+                            <input type="password" data-pat-input="{{ provider.id }}" placeholder="{% if provider.pat_prefix %}{{ provider.pat_prefix }}...{% else %}Paste your token{% endif %}" class="flex-1 px-3 py-1.5 text-xs border border-gray-200 rounded-lg bg-gray-50 focus:bg-white focus:border-primary-300 focus:ring-2 focus:ring-primary-100 focus:outline-none font-mono">
+                            <button data-pat-save="{{ provider.id }}" class="px-3 py-1.5 text-xs font-medium text-white bg-primary-600 rounded-lg hover:bg-primary-700 transition-colors disabled:opacity-40">Save</button>
+                        </div>
+                    </div>
+                    {% endif %}
+
+                    {# ----- OAuth (only when oauth_enabled AND provider has client config) ----- #}
+                    {% if feature_flags.oauth_enabled and provider.supports_oauth %}
+                    <div class="border border-gray-200 rounded-lg p-3" data-testid="oauth-button-{{ provider.id }}">
+                        <div class="flex items-center justify-between">
+                            <span class="text-xs font-medium text-gray-700">OAuth</span>
+                            <button data-oauth-connect="{{ provider.id }}" class="px-3 py-1.5 text-xs font-medium text-primary-700 bg-primary-50 border border-primary-200 rounded-lg hover:bg-primary-100 transition-colors">Connect with {{ provider.name }}</button>
+                        </div>
+                    </div>
+                    {% endif %}
+
+                    {% if not (feature_flags.pat_enabled and provider.supports_pat)
+                          and not (feature_flags.oauth_enabled and provider.supports_oauth)
+                          and not (env and feature_flags.env_token_claim_enabled) %}
+                    <p class="text-[11px] text-gray-500 italic">No connection methods enabled for {{ provider.name }} in this deployment.</p>
+                    {% endif %}
+                </div>
+                {% endif %}
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+</section>
 
 <script nonce="{{ request.state.csp_nonce }}">
-// Env token claim handlers
+const CSRF_TOKEN = {{ csrf_token | tojson }};
+
+function jsonHeaders() {
+    return {'Content-Type': 'application/json', 'X-CSRF-Token': CSRF_TOKEN};
+}
+
 document.querySelectorAll('[data-env-claim]').forEach(btn => {
     btn.addEventListener('click', async () => {
         const provider = btn.dataset.envClaim;
-        btn.textContent = 'Verifying...';
-        btn.disabled = true;
-        
+        btn.textContent = 'Verifying...'; btn.disabled = true;
         try {
-            const resp = await fetch('/connections/env/claim', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
+            const resp = await fetch('/settings/connections/env/claim', {
+                method: 'POST', headers: jsonHeaders(),
                 body: JSON.stringify({ provider }),
             });
             const data = await resp.json();
-            
-            if (data.status === 'claimed') {
-                window.location.reload();
-            } else {
-                alert(data.error || 'Verification failed');
-                btn.textContent = 'Verify & Connect';
-                btn.disabled = false;
-            }
-        } catch (e) {
-            alert('Verification failed: ' + e.message);
-            btn.textContent = 'Verify & Connect';
-            btn.disabled = false;
-        }
+            if (data.status === 'claimed') { window.location.reload(); }
+            else { alert(data.error || 'Verification failed'); btn.textContent = 'Verify & Connect'; btn.disabled = false; }
+        } catch (e) { alert('Verification failed: ' + e.message); btn.textContent = 'Verify & Connect'; btn.disabled = false; }
     });
 });
 
-// PAT save handlers
 document.querySelectorAll('[data-pat-save]').forEach(btn => {
     btn.addEventListener('click', async () => {
         const provider = btn.dataset.patSave;
         const input = document.querySelector('[data-pat-input="' + provider + '"]');
         const token = input.value.trim();
         if (!token) return;
-        
-        btn.textContent = 'Saving...';
-        btn.disabled = true;
-        
+        btn.textContent = 'Saving...'; btn.disabled = true;
         try {
-            const resp = await fetch('/connections/pat', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
+            const resp = await fetch('/settings/connections/pat', {
+                method: 'POST', headers: jsonHeaders(),
                 body: JSON.stringify({ provider, token }),
             });
             const data = await resp.json();
-            
-            if (data.status === 'saved') {
-                window.location.reload();
-            } else {
-                alert(data.error || 'Failed to save token');
-                btn.textContent = 'Save';
-                btn.disabled = false;
-            }
-        } catch (e) {
-            alert('Save failed: ' + e.message);
-            btn.textContent = 'Save';
-            btn.disabled = false;
-        }
+            if (data.status === 'saved') { window.location.reload(); }
+            else { alert(data.error || 'Failed to save token'); btn.textContent = 'Save'; btn.disabled = false; }
+        } catch (e) { alert('Save failed: ' + e.message); btn.textContent = 'Save'; btn.disabled = false; }
     });
 });
 
-// Allow Enter key in PAT inputs
 document.querySelectorAll('[data-pat-input]').forEach(input => {
     input.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') {
@@ -211,36 +270,22 @@ document.querySelectorAll('[data-pat-input]').forEach(input => {
     });
 });
 
-// OAuth connect handlers
 document.querySelectorAll('[data-oauth-connect]').forEach(btn => {
     btn.addEventListener('click', async () => {
         const provider = btn.dataset.oauthConnect;
-        btn.textContent = 'Connecting...';
-        btn.disabled = true;
-        
+        btn.textContent = 'Connecting...'; btn.disabled = true;
         try {
-            const resp = await fetch('/connections/oauth/start', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
+            const resp = await fetch('/settings/connections/oauth/start', {
+                method: 'POST', headers: jsonHeaders(),
                 body: JSON.stringify({
                     provider: provider,
                     redirect_uri: window.location.origin + '/settings/connections/oauth/callback',
                 }),
             });
             const data = await resp.json();
-            
-            if (data.authorization_url) {
-                window.location.href = data.authorization_url;
-            } else {
-                alert(data.error || 'Failed to start OAuth flow');
-                btn.textContent = 'Connect with ' + provider.charAt(0).toUpperCase() + provider.slice(1);
-                btn.disabled = false;
-            }
-        } catch (e) {
-            alert('Connection failed: ' + e.message);
-            btn.textContent = 'Connect with ' + provider.charAt(0).toUpperCase() + provider.slice(1);
-            btn.disabled = false;
-        }
+            if (data.authorization_url) { window.location.href = data.authorization_url; }
+            else { alert(data.error || 'Failed to start OAuth flow'); btn.textContent = 'Connect with ' + provider; btn.disabled = false; }
+        } catch (e) { alert('Connection failed: ' + e.message); btn.textContent = 'Connect with ' + provider; btn.disabled = false; }
     });
 });
 </script>
