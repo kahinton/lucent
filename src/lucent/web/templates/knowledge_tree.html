@@ -91,6 +91,11 @@ function vBg(v) {
     return '#fef2f2';
 }
 function trunc(s, n) { return !s ? '' : s.length > n ? s.slice(0, n-1) + '…' : s; }
+function escapeHtml(s) {
+    const d = document.createElement('div');
+    d.textContent = s == null ? '' : String(s);
+    return d.innerHTML;
+}
 
 // ── Build the logical tree (no positions yet) ───────────────
 const allNodes = [];
@@ -262,12 +267,21 @@ function render() {
         const fill = isRepo ? '#111827' : '#374151';
         html += `<text x="${labelX}" y="${pos.y + h/2 + 1}" font-size="${fontSize}" font-weight="${fontWeight}" fill="${fill}" dominant-baseline="middle">${trunc(n.label, isRepo ? 18 : 20)}</text>`;
 
-        // Right side: child count badge for collapsed parents, importance for leaves
-        const badgeX = pos.x + w - 12;
+        // Right side: child count badge for collapsed parents, importance for leaves.
+        // Parent nodes can also have their own memory; expose that via an explicit
+        // info affordance so the rest of the row can stay a fast expand/collapse target.
+        const badgeX = pos.x + w - (n.memory ? 30 : 12);
         if (hasChildren && isCollapsed) {
             html += `<text x="${badgeX}" y="${pos.y + h/2 + 1}" font-size="9" fill="#6b7280" dominant-baseline="middle" text-anchor="end">${n.childCount}</text>`;
         } else {
             html += `<text x="${badgeX}" y="${pos.y + h/2 + 1}" font-size="9" fill="#9ca3af" dominant-baseline="middle" text-anchor="end">${n.importance}</text>`;
+        }
+
+        if (n.memory) {
+            const infoX = pos.x + w - 12;
+            const infoY = pos.y + h / 2;
+            html += `<circle cx="${infoX}" cy="${infoY}" r="6" fill="#ffffff" stroke="${c}" stroke-width="1" class="memory-open"><title>View memory at this scope</title></circle>`;
+            html += `<text x="${infoX}" y="${infoY + 1}" font-size="8" fill="#4b5563" font-weight="700" text-anchor="middle" dominant-baseline="middle" class="memory-open">i</text>`;
         }
 
         html += '</g>';
@@ -285,6 +299,39 @@ const dTitle = document.getElementById('detail-title');
 const dBody = document.getElementById('detail-body');
 const dLink = document.getElementById('detail-link');
 
+function toggleNode(idx) {
+    if (collapsed.has(idx)) {
+        collapsed.delete(idx);
+    } else {
+        collapsed.add(idx);
+    }
+    panel.classList.add('hidden');
+    render();
+}
+
+function showNodeDetail(n) {
+    dTitle.textContent = n.fullLabel || n.label;
+    if (n.memory) {
+        const m = n.memory;
+        const v = m.vitality_score != null ? m.vitality_score.toFixed(2) : 'n/a';
+        const tags = (m.tags||[]).slice(0,8).map(t => '<span class="inline-block px-1.5 py-0.5 bg-gray-100 text-gray-600 rounded text-[10px]">'+escapeHtml(t)+'</span>').join(' ');
+        dBody.innerHTML = `
+            <div class="flex items-center gap-3 mb-3 text-xs text-gray-500">
+                <span>importance: <strong class="text-gray-700">${m.importance}</strong></span>
+                <span>vitality: <strong class="text-gray-700">${v}</strong></span>
+                <span>stage: <strong class="text-gray-700">${escapeHtml(m.lifecycle_stage||'active')}</strong></span>
+            </div>
+            <div class="mb-3 flex flex-wrap gap-1">${tags}</div>
+            <div class="text-xs text-gray-600 leading-relaxed whitespace-pre-line">${escapeHtml(m.preview||'')}</div>`;
+        dLink.href = '/memories/' + m.id;
+        dLink.style.display = '';
+    } else {
+        dBody.innerHTML = '<p class="text-gray-400 text-xs italic">No memory at this scope yet.</p>';
+        dLink.style.display = 'none';
+    }
+    panel.classList.remove('hidden');
+}
+
 svg.addEventListener('click', function(e) {
     const g = e.target.closest('.tree-node');
     if (!g) { panel.classList.add('hidden'); return; }
@@ -292,62 +339,29 @@ svg.addEventListener('click', function(e) {
     const n = allNodes[idx];
     if (!n) return;
 
-    // If clicking on a parent node (repo or dir with children), toggle collapse
-    if (n.childIdxs.length > 0) {
-        if (collapsed.has(idx)) {
-            collapsed.delete(idx);
-        } else {
-            collapsed.add(idx);
-        }
-        render();
+    // Parent nodes can have their own memory. The info badge opens details;
+    // the rest of a parent row remains an immediate expand/collapse target.
+    if (e.target.closest('.memory-open')) {
+        showNodeDetail(n);
         return;
     }
 
-    // Leaf node — show detail panel
-    if (n.memory) {
-        const m = n.memory;
-        dTitle.textContent = n.fullLabel || n.label;
-        const v = m.vitality_score != null ? m.vitality_score.toFixed(2) : 'n/a';
-        const tags = (m.tags||[]).slice(0,8).map(t => '<span class="inline-block px-1.5 py-0.5 bg-gray-100 text-gray-600 rounded text-[10px]">'+t+'</span>').join(' ');
-        dBody.innerHTML = `
-            <div class="flex items-center gap-3 mb-3 text-xs text-gray-500">
-                <span>importance: <strong class="text-gray-700">${m.importance}</strong></span>
-                <span>vitality: <strong class="text-gray-700">${v}</strong></span>
-                <span>stage: <strong class="text-gray-700">${m.lifecycle_stage||'active'}</strong></span>
-            </div>
-            <div class="mb-3 flex flex-wrap gap-1">${tags}</div>
-            <div class="text-xs text-gray-600 leading-relaxed whitespace-pre-line">${(m.preview||'').replace(/</g,'&lt;')}</div>`;
-        dLink.href = '/memories/' + m.id;
-        dLink.style.display = '';
-    } else {
-        dTitle.textContent = n.fullLabel || n.label;
-        dBody.innerHTML = '<p class="text-gray-400 text-xs italic">No memory at this scope yet.</p>';
-        dLink.style.display = 'none';
+    if (n.childIdxs.length > 0) {
+        toggleNode(idx);
+        return;
     }
-    panel.classList.remove('hidden');
+
+    showNodeDetail(n);
 });
 
-// Also allow detail panel on parent nodes via double-click
+// Double-click anywhere on a parent node still expands/collapses for keyboard/mouse users
+// who were used to clicking the whole row to navigate the tree.
 svg.addEventListener('dblclick', function(e) {
     const g = e.target.closest('.tree-node');
     if (!g) return;
-    const n = allNodes[parseInt(g.dataset.idx)];
-    if (!n || !n.memory) return;
-    const m = n.memory;
-    dTitle.textContent = n.fullLabel || n.label;
-    const v = m.vitality_score != null ? m.vitality_score.toFixed(2) : 'n/a';
-    const tags = (m.tags||[]).slice(0,8).map(t => '<span class="inline-block px-1.5 py-0.5 bg-gray-100 text-gray-600 rounded text-[10px]">'+t+'</span>').join(' ');
-    dBody.innerHTML = `
-        <div class="flex items-center gap-3 mb-3 text-xs text-gray-500">
-            <span>importance: <strong class="text-gray-700">${m.importance}</strong></span>
-            <span>vitality: <strong class="text-gray-700">${v}</strong></span>
-            <span>stage: <strong class="text-gray-700">${m.lifecycle_stage||'active'}</strong></span>
-        </div>
-        <div class="mb-3 flex flex-wrap gap-1">${tags}</div>
-        <div class="text-xs text-gray-600 leading-relaxed whitespace-pre-line">${(m.preview||'').replace(/</g,'&lt;')}</div>`;
-    dLink.href = '/memories/' + m.id;
-    dLink.style.display = '';
-    panel.classList.remove('hidden');
+    const idx = parseInt(g.dataset.idx);
+    const n = allNodes[idx];
+    if (n && n.childIdxs.length > 0) toggleNode(idx);
 });
 
 document.getElementById('detail-close').addEventListener('click', function() {

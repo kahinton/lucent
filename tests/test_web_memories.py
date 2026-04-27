@@ -247,6 +247,66 @@ class TestMemoriesList:
 
 
 # ============================================================================
+# GET /knowledge — knowledge tree
+# ============================================================================
+
+
+class TestKnowledgeTree:
+    async def test_repo_root_memory_is_available_from_repo_node(
+        self, client, db_pool, web_user, web_prefix, monkeypatch
+    ):
+        user, org, _token = web_user
+        repo = MemoryRepository(db_pool)
+        root_memory = await repo.create(
+            username=f"{web_prefix}User",
+            type="technical",
+            content=f"{web_prefix}Repo-level architecture memory",
+            tags=["knowledge-tree", "repo-root"],
+            importance=8,
+            metadata={"repo": "org/root-visible"},
+            user_id=user["id"],
+            organization_id=org["id"],
+            shared=True,
+        )
+        await repo.create(
+            username=f"{web_prefix}User",
+            type="technical",
+            content=f"{web_prefix}File-level child memory",
+            tags=["knowledge-tree", "file"],
+            importance=5,
+            metadata={
+                "repo": "org/root-visible",
+                "directory": "src/",
+                "filename": "src/app.py",
+            },
+            user_id=user["id"],
+            organization_id=org["id"],
+            shared=True,
+        )
+
+        async def _repo_exists(self, repo_full_name):  # pragma: no cover - signature shim
+            return True
+
+        monkeypatch.setattr(
+            "lucent.integrations.github_repo_access_service.GitHubRepoAccessService.check_repo_exists",
+            _repo_exists,
+        )
+
+        resp = await client.get("/knowledge")
+
+        assert resp.status_code == 200
+        assert "org/root-visible" in resp.text
+        assert str(root_memory["id"]) in resp.text
+        assert f"{web_prefix}Repo-level architecture memory" in resp.text
+        # Parent nodes keep immediate row-click expand/collapse, while the
+        # explicit info badge exposes the root memory details.
+        assert "showNodeDetail(n);" in resp.text
+        assert "memory-open" in resp.text
+        assert "if (n.childIdxs.length > 0)" in resp.text
+        assert "toggleNode(idx);" in resp.text
+
+
+# ============================================================================
 # GET /memories/new — new memory form
 # ============================================================================
 
