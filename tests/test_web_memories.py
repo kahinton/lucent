@@ -352,6 +352,28 @@ class TestMemoryDetail:
         assert resp.status_code == 200
         assert "Access Count" in resp.text
 
+    async def test_detail_shows_version_content_changes(self, client, web_memory):
+        await client.post(
+            f"/memories/{web_memory['id']}/edit",
+            data=_csrf_data(
+                client,
+                {
+                    "content": "Updated version history content",
+                    "tags": "updated,history",
+                    "importance": "7",
+                },
+            ),
+        )
+
+        resp = await client.get(f"/memories/{web_memory['id']}")
+        assert resp.status_code == 200
+        assert "Content changed — view before/after" in resp.text
+        assert "Before edit" in resp.text
+        assert "After edit" in resp.text
+        assert "Test memory content for web tests" in resp.text
+        assert "Updated version history content" in resp.text
+        assert "View tag, importance, and metadata changes" in resp.text
+
     async def test_detail_not_found(self, client):
         resp = await client.get(f"/memories/{uuid4()}")
         assert resp.status_code == 404
