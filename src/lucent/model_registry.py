@@ -264,6 +264,36 @@ _db_model_by_id: dict[str, ModelInfo] = {}
 _db_enabled_ids: set[str] = set()
 
 
+def _sync_runtime_model_registry(models: list[ModelInfo]) -> None:
+    """Sync DB-loaded models into the runtime LLM routing registry.
+
+    The DB model registry is the source of truth for admin-managed custom
+    models. Keep LangChain/Copilot routing state aligned whenever this cache is
+    loaded or refreshed so chat, API, and daemon processes can resolve
+    Ollama/custom models without a restart.
+    """
+    try:
+        from lucent.llm.langchain_engine import clear_runtime_model_registry, register_model
+
+        clear_runtime_model_registry()
+        for model in models:
+            if (
+                model.provider == "ollama"
+                or model.engine is not None
+                or model.provider not in {"anthropic", "openai", "google"}
+            ):
+                register_model(
+                    model.id,
+                    model.provider,
+                    model.api_model_id or model.id,
+                    engine=model.engine,
+                )
+    except Exception:
+        # Routing falls back to static maps/provider inference. Do not make
+        # model listing unavailable just because optional runtime imports fail.
+        return
+
+
 async def load_models_from_db(pool) -> list[ModelInfo]:
     """Load models from the database, replacing the hardcoded registry.
 
@@ -305,6 +335,7 @@ async def load_models_from_db(pool) -> list[ModelInfo]:
         _db_model_by_id = by_id
         _db_enabled_ids = enabled_ids
         _MODEL_BY_ID = by_id
+        _sync_runtime_model_registry(loaded)
         return loaded
     except Exception:
         return MODELS
@@ -400,11 +431,11 @@ def get_recommended_model(task_type: str) -> str:
 
     Never recommends a disabled model; falls back through alternatives.
     """
-    _DEFAULT_FALLBACK = "claude-sonnet-4.6"
+    default_fallback = "claude-sonnet-4.6"
 
     recommendations = {
         "code": "claude-sonnet-4.6",
-        "research": "gemini-3-pro",
+        "research": "gemini-3.1-pro",
         "memory": "claude-haiku-4.5",
         "reflection": "claude-opus-4.7",
         "documentation": "claude-sonnet-4.6",
@@ -413,12 +444,12 @@ def get_recommended_model(task_type: str) -> str:
         "fast": "claude-haiku-4.5",
         "agentic": "gpt-5.3-codex",
     }
-    candidate = recommendations.get(task_type, _DEFAULT_FALLBACK)
+    candidate = recommendations.get(task_type, default_fallback)
     if is_model_enabled(candidate):
         return candidate
     # Recommended model is disabled — fall back to default
-    if candidate != _DEFAULT_FALLBACK and is_model_enabled(_DEFAULT_FALLBACK):
-        return _DEFAULT_FALLBACK
+    if candidate != default_fallback and is_model_enabled(default_fallback):
+        return default_fallback
     # Default also disabled — pick the first enabled model
     for m in (_db_models if _db_models is not None else MODELS):
         if _db_models is not None:
@@ -428,7 +459,7 @@ def get_recommended_model(task_type: str) -> str:
             return m.id
     # Nothing enabled — return the default anyway (caller will get a clear
     # validation error downstream)
-    return _DEFAULT_FALLBACK
+    return default_fallback
 
 
 def get_api_model_id(model_id: str) -> str:
@@ -459,4 +490,8 @@ def get_provider(model_id: str) -> str | None:
         return "openai"
     elif model_id.startswith("gemini"):
         return "google"
+    elif model_id.startswith("grok"):
+        return "xai"
+    elif model_id in {"goldeneye", "raptor-mini"}:
+        return "copilot"
     return None

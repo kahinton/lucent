@@ -151,3 +151,35 @@ async def test_copilot_unsupported_provider_warns_not_errors(models_client, mdl_
     assert data["engine"] == "copilot"
     assert "warnings" in data
     assert "may not be supported by Copilot SDK" in data["warnings"][0]
+
+
+@pytest.mark.asyncio
+async def test_discover_models_endpoint_syncs_configured_providers(
+    models_client, monkeypatch
+):
+    async def fake_sync(self, *, providers=None, org_id=None, disable_missing=False):
+        return {
+            "providers": [
+                {
+                    "provider": "openai",
+                    "configured": True,
+                    "discovered": 1,
+                    "upserted": 1,
+                    "disabled_missing": 0,
+                }
+            ],
+            "provider_count": 1,
+            "discovered_count": 1,
+            "upserted_count": 1,
+            "errors": [],
+            "synced_at": "2026-04-27T00:00:00+00:00",
+        }
+
+    monkeypatch.setattr("lucent.model_discovery.ModelDiscoveryService.sync", fake_sync)
+    resp = await models_client.post(
+        "/api/admin/models/discover",
+        json={"providers": ["openai"]},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["upserted_count"] == 1

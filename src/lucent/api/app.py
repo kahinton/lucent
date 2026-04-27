@@ -127,6 +127,28 @@ async def _sync_built_in_definitions():
         logger.warning(f"Failed to sync built-in definitions: {e}")
 
 
+async def _sync_configured_model_providers(pool) -> None:
+    """Refresh model registry rows from configured providers on startup."""
+    enabled = os.environ.get("LUCENT_MODEL_DISCOVERY_ON_STARTUP", "true").lower()
+    if enabled in {"0", "false", "no", "off"}:
+        return
+    try:
+        from lucent.model_discovery import ModelDiscoveryService
+
+        service = ModelDiscoveryService(pool)
+        result = await service.sync()
+        if result.get("provider_count"):
+            logger.info(
+                "Model discovery synced %s models from %s configured provider(s)",
+                result.get("upserted_count", 0),
+                result.get("provider_count", 0),
+            )
+        if result.get("errors"):
+            logger.warning("Model discovery had provider errors: %s", result.get("errors"))
+    except Exception as e:
+        logger.warning("Model discovery startup sync failed: %s", e)
+
+
 # Known insecure default values that must not be used in production.
 _INSECURE_DEFAULTS = {
     "LUCENT_SECRET_KEY": "lucent-dev-secret-key-change-in-production",
@@ -213,6 +235,7 @@ async def lifespan(app: FastAPI):
 
         _pool = await _get_pool()
         if _pool:
+            await _sync_configured_model_providers(_pool)
             from lucent.model_registry import load_models_from_db
 
             await load_models_from_db(_pool)

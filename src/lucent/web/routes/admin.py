@@ -515,7 +515,7 @@ MODEL_TAGS = [
     "coding", "frontier", "reasoning", "agentic", "fast", "research", "tools",
     "reflection", "general", "writing", "lightweight", "preview", "default",
 ]
-MODEL_PROVIDERS = ["anthropic", "google", "ollama", "openai"]
+MODEL_PROVIDERS = ["anthropic", "copilot", "google", "ollama", "openai", "xai"]
 
 
 async def _require_admin(request: Request):
@@ -548,7 +548,37 @@ def _models_redirect(success: str | None = None, error: str | None = None, warni
     if warning:
         params.append(f"warning={quote_plus(warning)}")
     suffix = f"?{'&'.join(params)}" if params else ""
-    return RedirectResponse(url=f"/models{suffix}", status_code=303)
+    return RedirectResponse(url=f"/settings/models{suffix}", status_code=303)
+
+
+def _visible_model_providers(models: list[dict], active_providers: set[str]) -> list[str]:
+    """Return provider sections that should be shown on the models page.
+
+    Provider-discovered rows are visible only when the provider is configured in
+    this deployment. Manual/custom rows remain visible so admins can manage what
+    they explicitly added through the UI.
+    """
+    visible: set[str] = set()
+    for model in models:
+        provider = model.get("provider")
+        if not provider:
+            continue
+        if (
+            provider in active_providers
+            or model.get("is_custom")
+            or model.get("discovery_source") == "manual"
+        ):
+            visible.add(provider)
+    return sorted(visible)
+
+
+async def _refresh_runtime_registry(pool) -> None:
+    try:
+        from lucent.model_registry import load_models_from_db
+
+        await load_models_from_db(pool)
+    except Exception:
+        logger.debug("Failed to refresh model registry cache", exc_info=True)
 
 
 @router.get("/models", response_class=HTMLResponse)
@@ -559,9 +589,12 @@ async def models_list(request: Request):
     from lucent.db.models import ModelRepository
 
     repo = ModelRepository(pool)
-    models = (await repo.list_models())["items"]
+    all_models = (await repo.list_models(limit=500))["items"]
+    from lucent.model_discovery import ModelDiscoveryService
 
-    providers = sorted({m["provider"] for m in models})
+    active_providers = set(ModelDiscoveryService(pool).configured_providers())
+    providers = _visible_model_providers(all_models, active_providers)
+    models = [m for m in all_models if m["provider"] in providers]
     enabled_count = sum(1 for m in models if m["is_enabled"])
 
     return templates.TemplateResponse(
@@ -580,6 +613,45 @@ async def models_list(request: Request):
     )
 
 
+@router.post("/models/discover")
+async def discover_models_web(request: Request):
+    """Discover available models from configured providers and sync the DB."""
+    await _check_csrf(request)
+    user = await _require_admin(request)
+    pool = await get_pool()
+    from lucent.model_discovery import ModelDiscoveryService
+
+    form = await request.form()
+    raw_providers = form.get("providers", "")
+    providers = _parse_tags(raw_providers) if raw_providers else None
+    disable_missing = "disable_missing" in form
+
+    service = ModelDiscoveryService(pool)
+    result = await service.sync(
+        providers=providers,
+        org_id=str(user.organization_id),
+        disable_missing=disable_missing,
+    )
+    await _refresh_runtime_registry(pool)
+
+    provider_count = result.get("provider_count", 0)
+    discovered = result.get("discovered_count", 0)
+    upserted = result.get("upserted_count", 0)
+    errors = result.get("errors") or []
+    if errors and not discovered:
+        return _models_redirect(error=f"Model discovery failed for {len(errors)} provider(s)")
+    if errors:
+        return _models_redirect(
+            success=f"Synced {upserted} models from {provider_count} provider(s)",
+            warning=f"{len(errors)} provider(s) failed; check logs for details",
+        )
+    if provider_count == 0:
+        return _models_redirect(
+            warning="No model providers are configured. Set provider API keys or OLLAMA_HOST."
+        )
+    return _models_redirect(success=f"Synced {upserted} models from {provider_count} provider(s)")
+
+
 @router.post("/models/{model_id:path}/toggle")
 async def toggle_model(request: Request, model_id: str):
     """Enable or disable a model."""
@@ -594,6 +666,7 @@ async def toggle_model(request: Request, model_id: str):
         raise HTTPException(status_code=404, detail="Model not found")
 
     await repo.toggle_model(model_id, not model["is_enabled"])
+    await _refresh_runtime_registry(pool)
     return RedirectResponse(url="/settings/models", status_code=303)
 
 
@@ -628,6 +701,7 @@ async def edit_model(request: Request, model_id: str):
         supports_vision="supports_vision" in form,
         engine=engine,
     )
+    await _refresh_runtime_registry(pool)
     if warnings:
         return _models_redirect(success="Model updated", warning=warnings[0])
     return _models_redirect(success="Model updated")
@@ -668,7 +742,10 @@ async def add_model(request: Request):
         supports_vision="supports_vision" in form,
         org_id=str(user.organization_id),
         engine=engine,
+        discovery_source="manual",
+        is_custom=True,
     )
+    await _refresh_runtime_registry(pool)
     if warnings:
         return _models_redirect(success="Model added", warning=warnings[0])
     return _models_redirect(success="Model added")
@@ -684,4 +761,5 @@ async def delete_model(request: Request, model_id: str):
 
     repo = ModelRepository(pool)
     await repo.delete_model(model_id)
+    await _refresh_runtime_registry(pool)
     return RedirectResponse(url="/settings/models?success=Model+removed", status_code=303)

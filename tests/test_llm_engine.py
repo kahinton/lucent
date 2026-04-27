@@ -152,7 +152,12 @@ class TestEngineRoutingByModel:
     def test_explicit_langchain_override_wins(self):
         from lucent.llm.langchain_engine import register_model
 
-        register_model("anthropic-via-langchain", "anthropic", "claude-sonnet-4-6-20260115", "langchain")
+        register_model(
+            "anthropic-via-langchain",
+            "anthropic",
+            "claude-sonnet-4-6-20260115",
+            "langchain",
+        )
         engine = get_engine_for_model("anthropic-via-langchain")
         assert engine.name == "langchain"
 
@@ -184,6 +189,28 @@ class TestEngineRoutingByModel:
         register_model("openai-via-copilot", "openai", "gpt-5.2", "copilot")
         engine = get_engine_for_model("openai-via-copilot")
         assert engine.name == "copilot"
+
+    def test_static_engine_override_for_copilot_hosted_model(self, monkeypatch):
+        from lucent import model_registry
+        from lucent.model_registry import ModelInfo
+
+        monkeypatch.setattr(model_registry, "_db_models", None)
+        monkeypatch.setitem(
+            model_registry._MODEL_BY_ID,
+            "copilot-static-test",
+            ModelInfo(
+                id="copilot-static-test",
+                provider="copilot",
+                name="Copilot Static Test",
+                category="general",
+                api_model_id="copilot-static-test",
+                engine="copilot",
+            ),
+        )
+        with patch.dict(os.environ, {"LUCENT_LLM_ENGINE": "langchain"}):
+            reset_engine()
+            engine = get_engine_for_model("copilot-static-test")
+            assert engine.name == "copilot"
 
     def test_register_model_override_replaces_auto_detection(self):
         from lucent.llm.langchain_engine import register_model
@@ -243,6 +270,14 @@ class TestModelEngineValidation:
 
 
 class TestModelRegistry:
+    def setup_method(self):
+        from lucent import model_registry
+
+        model_registry._db_models = None
+        model_registry._db_model_by_id = {}
+        model_registry._db_enabled_ids = set()
+        model_registry._MODEL_BY_ID = {m.id: m for m in model_registry.MODELS}
+
     def test_api_model_id(self):
         from lucent.model_registry import get_api_model_id
 
@@ -322,6 +357,47 @@ class TestModelRegistry:
         loaded = await model_registry.load_models_from_db(object())
         match = next(m for m in loaded if m.id == "resync-model")
         assert match.engine == "langchain"
+
+    @pytest.mark.asyncio
+    async def test_db_load_registers_ollama_model_for_runtime_routing(self, monkeypatch):
+        from lucent import model_registry
+        from lucent.llm.langchain_engine import _resolve_model, _runtime_model_registry
+
+        class _Repo:
+            def __init__(self, _pool):
+                pass
+
+            async def list_models(self):
+                return {
+                    "items": [
+                        {
+                            "id": "local-llama",
+                            "provider": "ollama",
+                            "name": "Local Llama",
+                            "category": "general",
+                            "api_model_id": "llama3.2:latest",
+                            "engine": None,
+                            "is_enabled": True,
+                        }
+                    ]
+                }
+
+        _runtime_model_registry.clear()
+        monkeypatch.setattr("lucent.db.models.ModelRepository", _Repo)
+        try:
+            await model_registry.load_models_from_db(object())
+            provider, provider_model_id = _resolve_model("local-llama")
+            assert provider == "ollama"
+            assert provider_model_id == "llama3.2:latest"
+            assert get_engine_for_model("local-llama").name == "langchain"
+        finally:
+            _runtime_model_registry.clear()
+            monkeypatch.setattr(model_registry, "_db_models", None)
+            monkeypatch.setattr(
+                model_registry,
+                "_MODEL_BY_ID",
+                {m.id: m for m in model_registry.MODELS},
+            )
 
 
 class TestValidateModel:

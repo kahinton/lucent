@@ -195,11 +195,15 @@ async def chat_stream(
     """Stream a chat response. Model defaults to CHAT_MODEL but can be overridden per-request."""
     user, pool = await _get_session_user(request)
 
-    from lucent.llm import get_engine
-
-    engine = get_engine()
+    from lucent.llm import get_engine_for_model
+    from lucent.model_registry import validate_model
 
     selected_model = body.model or CHAT_MODEL
+    validation_error = validate_model(selected_model)
+    if validation_error:
+        raise HTTPException(status_code=400, detail=validation_error)
+
+    engine = get_engine_for_model(selected_model)
 
     system_prompt = await _build_system_prompt(user, pool, body.page_context)
 
@@ -341,11 +345,16 @@ async def chat_stream_v2(
 
     user, pool = await _get_session_user(request)
 
-    from lucent.llm import get_engine
+    from lucent.llm import get_engine_for_model
     from lucent.llm.engine import SessionEvent, SessionEventType
+    from lucent.model_registry import validate_model
 
-    engine = get_engine()
     selected_model = body.model or CHAT_MODEL
+    validation_error = validate_model(selected_model)
+    if validation_error:
+        raise HTTPException(status_code=400, detail=validation_error)
+
+    engine = get_engine_for_model(selected_model)
 
     # Build system prompt — optionally load agent definition
     system_prompt_parts = []

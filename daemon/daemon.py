@@ -2440,7 +2440,7 @@ class LucentDaemon:
             try:
                 from lucent.llm.langchain_engine import register_model
                 async with httpx.AsyncClient(timeout=15) as _c:
-                    _resp = await _c.get(f"{API_BASE}/api/admin/models", headers=API_HEADERS)
+                    _resp = await _c.get(f"{API_BASE}/admin/models", headers=API_HEADERS)
                 resp = _resp.json() if _resp.status_code == 200 else None
                 if resp and resp.get("items"):
                     registered = 0

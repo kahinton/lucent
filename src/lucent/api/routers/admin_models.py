@@ -54,11 +54,31 @@ class ModelPatchRequest(BaseModel):
         return normalize_engine(value)
 
 
+class DiscoverModelsRequest(BaseModel):
+    providers: list[str] | None = None
+    disable_missing: bool = False
+
+
 def _to_response(model: dict[str, Any], warnings: list[str] | None = None) -> dict[str, Any]:
     payload = dict(model)
     if warnings:
         payload["warnings"] = warnings
     return payload
+
+
+def _require_admin_user(user: AuthenticatedUser) -> None:
+    role = user.role.value if hasattr(user.role, "value") else str(user.role)
+    if role not in ("admin", "owner"):
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+
+async def _refresh_runtime_registry(pool) -> None:
+    try:
+        from lucent.model_registry import load_models_from_db
+
+        await load_models_from_db(pool)
+    except Exception:
+        return
 
 
 @router.get("")
@@ -73,6 +93,7 @@ async def list_models(user: AuthenticatedUser, limit: int = 100, offset: int = 0
 @router.post("", status_code=status.HTTP_201_CREATED)
 async def create_model(body: ModelUpsertRequest, user: AuthenticatedUser):
     user.require_scope("write")
+    _require_admin_user(user)
     pool = await get_pool()
     repo = ModelRepository(pool)
     existing = await repo.get_model(body.model_id)
@@ -96,13 +117,35 @@ async def create_model(body: ModelUpsertRequest, user: AuthenticatedUser):
         is_enabled=body.is_enabled,
         org_id=str(user.organization_id) if user.organization_id else None,
         engine=body.engine,
+        discovery_source="manual",
+        is_custom=True,
     )
+    await _refresh_runtime_registry(pool)
     return _to_response(model, warnings=warnings)
+
+
+@router.post("/discover")
+async def discover_models(body: DiscoverModelsRequest, user: AuthenticatedUser):
+    """Discover models from configured providers and sync them to the registry."""
+    user.require_scope("write")
+    _require_admin_user(user)
+    pool = await get_pool()
+    from lucent.model_discovery import ModelDiscoveryService
+
+    service = ModelDiscoveryService(pool)
+    result = await service.sync(
+        providers=body.providers,
+        org_id=str(user.organization_id) if user.organization_id else None,
+        disable_missing=body.disable_missing,
+    )
+    await _refresh_runtime_registry(pool)
+    return result
 
 
 @router.put("/{model_id:path}")
 async def update_model(model_id: str, body: ModelPatchRequest, user: AuthenticatedUser):
     user.require_scope("write")
+    _require_admin_user(user)
     pool = await get_pool()
     repo = ModelRepository(pool)
     existing = await repo.get_model(model_id)
@@ -118,4 +161,5 @@ async def update_model(model_id: str, body: ModelPatchRequest, user: Authenticat
     updated = await repo.update_model(model_id, **updates)
     if not updated:
         raise HTTPException(status_code=404, detail="Model not found")
+    await _refresh_runtime_registry(pool)
     return _to_response(updated, warnings=warnings)
