@@ -83,15 +83,20 @@ This creates a visible trail from initial work item through planning, execution,
 - Update state only when there is a meaningful delta (new decision, status transition, completed action, changed blocker, or new follow-through commitment).
 - If cycle outcome is idle/no-op, prefer a lightweight log/event over duplicative state rewrites.
 
-**Model Assignment (MANDATORY for every `create_task` call)**:
-Every task MUST have an explicit `model` field. Never leave `model=null`.
+**Model Assignment:**
+Before assigning models, call `list_available_models()` to see which models are
+currently enabled and what the default model is. Only assign models from that
+list. Do NOT hardcode model names; the available models change by deployment
+and user configuration.
 
-**Before assigning models, call `list_available_models()` to see which models are currently enabled.** Only assign models from that list. Choose based on task complexity:
-- **Lightweight tasks** (memory ops, simple lookups): pick the fastest/cheapest available model
-- **Standard tasks** (research, documentation, code): pick a capable mid-tier model
-- **Complex tasks** (deep reasoning, reflection, multi-step agentic work): pick the most capable available model
-
-Do NOT hardcode model names. The available models change based on user configuration.
+Default behavior: use the returned `default_model` whenever there is no clear
+reason to pick a specialized model. It is valid to omit the `model` field on
+`create_task`; the daemon will apply the same default-aware selector at
+dispatch time. Set an explicit `model` only when the task has a concrete need:
+- **Lightweight tasks** (memory ops, simple lookups): use a fast/cheap enabled model if one exists.
+- **Specialized complex tasks** (security, architecture, root-cause analysis, large synthesis): use an enabled reasoning model if one exists.
+- **Sustained autonomous coding/refactors**: use an enabled agentic/coding model if one exists.
+- **Standard research, documentation, code, planning, and review:** use the default model.
 
 **For lightweight state management, use memory tools directly:**
 - **Update state**: search for and update `daemon-state` memory (type: "procedural")

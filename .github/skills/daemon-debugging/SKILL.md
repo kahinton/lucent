@@ -68,7 +68,7 @@ This skill is for **diagnosing and fixing failures** — crashes, stuck tasks, d
 2. Read the tail of the log: `tail -100 daemon/daemon.log`
 3. Look for the watchdog kill pattern — if the last log line is older than 900s with no activity, the watchdog thread calls `os._exit(1)`. Search for `WATCHDOG` in logs.
 4. Check for Python exceptions — `_run_session_inner()` wraps sessions in `SESSION_TOTAL_TIMEOUT` (720s). A `TimeoutError` here returns `None` and logs `ERROR`.
-5. Check environment variables: `DATABASE_URL`, `MODEL` (default `claude-opus-4.7`), `DAEMON_INTERVAL_MINUTES` (default 15).
+5. Check environment variables: `DATABASE_URL`, `LUCENT_DAEMON_MODEL` (optional override; empty uses the enabled model registry default), `DAEMON_INTERVAL_MINUTES` (default 15).
 
 **Common causes**:
 - Missing `DATABASE_URL` → server can't start

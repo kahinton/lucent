@@ -74,16 +74,19 @@ Lucent uses a strict state machine for requests and tasks.
 
 ## 4. Model Selection Guidelines
 
-When creating tasks (`create_task`), choose the model based on complexity:
+When creating tasks (`create_task`), prefer the enabled default model unless
+the work clearly needs a specialized capability:
 
-| Task Type | Recommended Model | Rationale |
-|-----------|-------------------|-----------|
-| **Complex Logic / Architecture** | `claude-opus-4.7` | Highest reasoning capability, best for subtle bugs and design. |
-| **Code Generation / Refactoring** | `gpt-5.3-codex` | Excellent code fluency and standard library knowledge. |
-| **Documentation / summarization** | `gemini-3.1-pro` | Strong context window and natural language generation. |
-| **Routine / Simple Tasks** | `claude-sonnet-4.6` | Cost-effective for well-defined, lower-risk tasks. |
+| Task Type | Recommended Category | Rationale |
+|-----------|----------------------|-----------|
+| **Complex Logic / Architecture** | enabled `reasoning` model | Use only when default/general models are not enough for subtle bugs and design. |
+| **Large Code Generation / Refactoring** | enabled `agentic` model | Use for sustained edit-test loops or broad multi-file changes. |
+| **Documentation / Summarization** | default model | Use specialized long-context models only for unusually large source sets. |
+| **Routine / Simple Tasks** | default model or enabled `fast` model | Keep cost low for well-defined, lower-risk tasks. |
 
-**Note**: Do not use "preview" or "legacy" models for critical daemon workflows unless explicitly requested.
+**Note**: Do not hardcode model IDs. Call `list_available_models()` and choose
+from enabled models. Do not use "preview" or "legacy" models for critical daemon
+workflows unless explicitly requested.
 
 ## Anti-Patterns
 

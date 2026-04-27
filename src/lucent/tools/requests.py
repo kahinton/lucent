@@ -893,23 +893,33 @@ Returns: JSON list of {goal_id, goal_title, next_milestone_index,
         description="""List available LLM models for task assignment.
 
 Use this to choose a model when creating tasks. Returns all available models
-with their categories, capabilities, and provider info.
+with their categories, capabilities, provider info, and generic selection
+guidance. Default models should be used whenever there is no clear reason to
+pick a specialized model.
 
 Args:
     category: Optional filter — one of: general, fast, reasoning, agentic, visual
     agent_type: Optional agent type to also return the recommended model for
         (code, research, memory, reflection, documentation, planning, review, fast, agentic)
 
-Returns: JSON with list of models and, if agent_type provided, the recommended model."""
+Returns: JSON with list of models, the default model, and if agent_type is
+provided, the recommended model plus a selection reason."""
     )
     async def list_available_models(
         category: str | None = None,
         agent_type: str | None = None,
     ) -> str:
-        from lucent.model_registry import get_recommended_model, list_models
+        from lucent.model_registry import get_default_model_id, list_models, select_model_for_task
 
         models = list_models(category=category)
+        default_model = get_default_model_id(models if models else None)
         result: dict = {
+            "default_model": default_model,
+            "guidance": (
+                "Use the default_model unless the task has a clear need for a "
+                "specialized category such as fast, reasoning, agentic, or visual. "
+                "Only choose from enabled models in this list."
+            ),
             "models": [
                 {
                     "id": m.id,
@@ -926,7 +936,16 @@ Returns: JSON with list of models and, if agent_type provided, the recommended m
             ]
         }
         if agent_type:
-            result["recommended"] = get_recommended_model(agent_type)
+            selection = select_model_for_task(agent_type=agent_type, models=models or None)
+            result["recommended"] = selection.model_id
+            result["recommendation"] = {
+                "model": selection.model_id,
+                "reason": selection.reason,
+                "source": selection.source,
+                "default_model": selection.default_model_id,
+                "requested_category": selection.requested_category,
+                "alternatives": selection.alternatives,
+            }
         return json.dumps(result)
 
     @mcp.tool(

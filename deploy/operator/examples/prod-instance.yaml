@@ -25,7 +25,7 @@ spec:
       provider: ollama
       engine: langchain
   daemon:
-    defaultModel: claude-opus-4.7
+    defaultModel: ""
     maxConcurrentSessions: 5
     intervalMinutes: 10
   observability:

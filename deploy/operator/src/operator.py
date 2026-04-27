@@ -89,7 +89,7 @@ def _build_helm_values(name: str, namespace: str, spec: dict[str, Any]) -> dict[
         },
         "daemon": {
             "enabled": True,
-            "model": daemon.get("defaultModel", "claude-opus-4.7"),
+            "model": daemon.get("defaultModel", ""),
             "maxConcurrentSessions": daemon.get("maxConcurrentSessions", 3),
             "env": {
                 "LUCENT_DAEMON_INTERVAL": str(daemon.get("intervalMinutes", 15)),

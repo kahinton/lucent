@@ -291,7 +291,7 @@ class AuthFailureDetectedError(Exception):
 
 MAX_CONCURRENT_SESSIONS = int(os.environ.get("LUCENT_MAX_SESSIONS", "3"))
 DAEMON_INTERVAL_MINUTES = int(os.environ.get("LUCENT_DAEMON_INTERVAL", "15"))
-MODEL = os.environ.get("LUCENT_DAEMON_MODEL", "claude-opus-4.7")
+MODEL = os.environ.get("LUCENT_DAEMON_MODEL", "").strip()
 STALE_HEARTBEAT_MINUTES = int(os.environ.get("LUCENT_STALE_HEARTBEAT_MINUTES", "30"))
 
 # PG advisory-lock namespace for the request-decomposition backfill.
@@ -543,7 +543,8 @@ REQUIRE_APPROVAL = os.environ.get("LUCENT_REQUIRE_APPROVAL", "false").lower() in
 
 # Multi-model review: comma-separated list of models to use for reviewing task output.
 # When set, completed tasks are re-evaluated by each model before final completion.
-# The cognitive model is set by LUCENT_DAEMON_MODEL (default claude-opus-4.7);
+# The cognitive model can be pinned by LUCENT_DAEMON_MODEL. When unset, the
+# daemon uses the model registry's enabled default instead of a hardcoded model.
 # these are for sub-agent review.
 REVIEW_MODELS = [
     m.strip() for m in os.environ.get("LUCENT_REVIEW_MODELS", "").split(",") if m.strip()
@@ -552,7 +553,7 @@ REVIEW_MODELS = [
 # Request-level post-completion review configuration.
 REQUEST_REVIEW_AGENT_TYPE = os.environ.get("LUCENT_REQUEST_REVIEW_AGENT_TYPE", "request-review")
 REQUEST_REVIEW_FALLBACK_AGENT_TYPE = os.environ.get("LUCENT_REQUEST_REVIEW_FALLBACK_AGENT_TYPE", "code")
-REQUEST_REVIEW_MODEL = os.environ.get("LUCENT_REQUEST_REVIEW_MODEL", MODEL)
+REQUEST_REVIEW_MODEL = os.environ.get("LUCENT_REQUEST_REVIEW_MODEL", "").strip()
 REQUEST_REVIEW_TASK_TITLE = "Post-completion review"
 
 # Git operations: daemon can commit (but never push without ALLOW_GIT_PUSH)
@@ -569,6 +570,41 @@ LOG_FILE = DAEMON_DIR / "daemon.log"
 # MCP configuration — passed to all sessions
 MCP_URL = os.environ.get("LUCENT_MCP_URL", "http://localhost:8766/mcp")
 MCP_API_KEY = os.environ.get("LUCENT_MCP_API_KEY", "")
+
+
+def _resolve_default_model(preferred_model: str | None = None) -> str:
+    """Resolve the current enabled default model from the model registry."""
+    try:
+        from lucent.model_registry import get_default_model_id
+
+        return get_default_model_id(preferred_model=(preferred_model or MODEL or None))
+    except Exception:
+        return preferred_model or MODEL
+
+
+def _select_model_for_task(
+    *,
+    agent_type: str | None = None,
+    title: str | None = None,
+    description: str | None = None,
+    explicit_model: str | None = None,
+) -> tuple[str, str]:
+    """Select a model for task execution without hardcoding model names."""
+    if explicit_model:
+        return explicit_model, "explicit model on task"
+    try:
+        from lucent.model_registry import select_model_for_task
+
+        selection = select_model_for_task(
+            agent_type=agent_type,
+            title=title,
+            description=description,
+            preferred_default=MODEL or None,
+        )
+        return selection.model_id, selection.reason
+    except Exception as exc:
+        fallback = _resolve_default_model()
+        return fallback, f"model selector unavailable ({exc}); using default"
 
 # Database URL for direct key provisioning.
 # Prefers DAEMON_DATABASE_URL (restricted lucent_daemon role) over DATABASE_URL
@@ -2403,7 +2439,13 @@ class LucentDaemon:
             from lucent.db.pool import init_db as _init_db
             # The daemon uses DAEMON_DATABASE_URL (or falls back to DATABASE_URL).
             # Pass explicitly so init_db uses the same connection the daemon does.
-            await _init_db(database_url=DATABASE_URL)
+            _pool = await _init_db(database_url=DATABASE_URL)
+            try:
+                from lucent.model_registry import load_models_from_db
+
+                await load_models_from_db(_pool)
+            except Exception as model_exc:
+                log(f"Failed to load model registry from DB: {model_exc}", "WARN")
             log("Lucent DB pool initialized")
         except Exception as e:
             log(f"Failed to initialize Lucent DB pool: {e}", "WARN")
@@ -2415,7 +2457,7 @@ class LucentDaemon:
             hostname=platform.node(),
             pid=os.getpid(),
             roles=sorted(self.roles),
-            metadata={"model": MODEL, "max_sessions": MAX_CONCURRENT_SESSIONS},
+            metadata={"model": _resolve_default_model(), "max_sessions": MAX_CONCURRENT_SESSIONS},
         )
 
         # Start the watchdog thread — detects event loop freezes
@@ -2432,7 +2474,7 @@ class LucentDaemon:
             f"Daemon ready. Instance: {self.instance_id}, "
             f"Roles: {','.join(sorted(self.roles))}, "
             f"Engine: {engine_name} (multi-engine routing enabled), "
-            f"Model: {MODEL}, Max sessions: {MAX_CONCURRENT_SESSIONS}"
+            f"Model: {_resolve_default_model()}, Max sessions: {MAX_CONCURRENT_SESSIONS}"
         )
 
         # Populate LLM engine model registry from DB (for Ollama/custom providers)
@@ -3033,14 +3075,18 @@ class LucentDaemon:
             f"{target_block}\n\n"
             f"DESCRIPTION:\n{description}\n\n"
             "Procedure:\n"
-            "1. Call list_available_models() once to see what models are available.\n"
+            "1. Call list_available_models() once to see enabled models and the "
+            "default_model. Use default_model unless a task has a clear need for a "
+            "specialized fast, reasoning, agentic, or visual model.\n"
             "2. Decide on a task breakdown — typically 1 to 5 tasks. Each task should "
             "have a clear, actionable title and a short description of what it does.\n"
             "3. For each task, call create_task(request_id=..., title=..., "
-            "description=..., agent_type=..., model=..., sequence_order=...). Use "
+            "description=..., agent_type=..., sequence_order=..., model=<optional>). Use "
             "agent_type values like 'research', 'code', or 'documentation' depending "
-            "on the work. Set sequence_order so dependent tasks come after their "
-            "prerequisites (0 for the first batch, 1 for the next, etc.).\n"
+            "on the work. Omit model for standard/default tasks; set model only when "
+            "the available model list gives a concrete reason to specialize. Set "
+            "sequence_order so dependent tasks come after their prerequisites (0 for "
+            "the first batch, 1 for the next, etc.).\n"
             "4. DO NOT create the request — it already exists. DO NOT call any "
             "approval, status update, or rejection tools. Your output is a short "
             "summary of how many tasks you created and why this breakdown.\n"
@@ -3423,9 +3469,8 @@ class LucentDaemon:
             log(f"Skipping '{name}' — at session limit ({MAX_CONCURRENT_SESSIONS})", "WARN")
             return None
 
-        log(f"Starting session: {name}{f' (model: {model})' if model else ''}")
-
-        selected_model = model or MODEL
+        selected_model = _resolve_default_model(model)
+        log(f"Starting session: {name} (model: {selected_model})")
         start_time = time.time()
         status = "success"
 
@@ -3456,7 +3501,7 @@ class LucentDaemon:
                             name,
                             system_message,
                             prompt,
-                            model=model,
+                            model=selected_model,
                             mcp_config_override=mcp_config_override,
                         ),
                         timeout=SESSION_TOTAL_TIMEOUT,
@@ -3536,7 +3581,7 @@ class LucentDaemon:
         Falls back to direct CopilotClient if the engine module isn't available
         (e.g. when running the daemon standalone outside the package).
         """
-        selected_model = model or MODEL
+        selected_model = _resolve_default_model(model)
 
         if _LLM_ENGINE_AVAILABLE:
             # Keep memory-server always available; all other MCP servers are requester-scoped.
@@ -4113,9 +4158,14 @@ class LucentDaemon:
             task_id = str(task["id"])
             agent_type = task.get("agent_type", "code")
             task_model = task.get("model")  # per-task model override
-            selected_model = task_model or MODEL
             title = task.get("title", "")
             description = task.get("description", title)
+            selected_model, model_reason = _select_model_for_task(
+                agent_type=agent_type,
+                title=title,
+                description=description,
+                explicit_model=task_model,
+            )
 
             # Claim it atomically
             claimed = await RequestAPI.claim_task(task_id, self.instance_id)
@@ -4131,6 +4181,8 @@ class LucentDaemon:
                 request_id=task_id,
                 user_id=str(task.get("requesting_user_id")) if task.get("requesting_user_id") else None,
             )
+            if not task_model:
+                log(f"Task {task_id[:8]} model selection: {model_reason}", "DEBUG")
             if self._tracer:
                 self._tasks_dispatched_total.add(1, attributes={"agent_type": agent_type})
 
@@ -5328,6 +5380,13 @@ class LucentDaemon:
             "use \"none\" only when no Linked Memories section was provided>"
         )
 
+        review_model, review_model_reason = _select_model_for_task(
+            agent_type=agent_type,
+            title=REQUEST_REVIEW_TASK_TITLE,
+            description=review_description,
+            explicit_model=REQUEST_REVIEW_MODEL or None,
+        )
+
         review_task = await RequestAPI.create_task(
             request_id=request_id,
             title=REQUEST_REVIEW_TASK_TITLE,
@@ -5335,12 +5394,12 @@ class LucentDaemon:
             description=review_description,
             priority=request_data.get("priority", "medium"),
             sequence_order=10_000_000,
-            model=REQUEST_REVIEW_MODEL,
+            model=review_model,
         )
         if review_task:
             log(
                 f"Request {request_id[:8]} moved to review; created review task {str(review_task.get('id', ''))[:8]} "
-                f"agent={agent_type} mode={mode}",
+                f"agent={agent_type} mode={mode} model={review_model} ({review_model_reason})",
             )
         else:
             log(
@@ -5567,6 +5626,11 @@ class LucentDaemon:
         # Create a request/task record via the HTTP API so it appears on Activity
         task_id = None
         try:
+            memory_model, _memory_model_reason = _select_model_for_task(
+                agent_type="memory",
+                title="Consolidate memories",
+                description=MEMORY_CONSOLIDATION_PROMPT,
+            )
             request_record = await RequestAPI.create_request(
                 title="Memory consolidation",
                 description="Autonomic memory maintenance — consolidating fragments into long-term knowledge.",
@@ -5584,7 +5648,7 @@ class LucentDaemon:
                         "Run mandatory metadata normalization for metadata.repo, "
                         "metadata.directory, metadata.filename, then verify compliance."
                     ),
-                    model=MODEL,
+                    model=memory_model,
                 )
                 if task_record:
                     task_id = str(task_record["id"])
@@ -5601,6 +5665,7 @@ class LucentDaemon:
             "autonomic-maintenance",
             system_message,
             MEMORY_CONSOLIDATION_PROMPT,
+            model=memory_model if task_id else None,
         )
 
         # Update the request/task records with the outcome

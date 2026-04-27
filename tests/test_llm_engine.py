@@ -302,6 +302,74 @@ class TestModelRegistry:
         assert get_provider("gpt-6") == "openai"
         assert get_provider("gemini-4") == "google"
 
+    def test_default_model_prefers_enabled_general_model(self, monkeypatch):
+        from lucent import model_registry
+        from lucent.model_registry import ModelInfo, get_default_model_id
+
+        models = [
+            ModelInfo(id="expensive-reasoner", provider="x", name="Reasoner", category="reasoning"),
+            ModelInfo(id="balanced-default", provider="x", name="Balanced", category="general"),
+        ]
+        monkeypatch.setattr(model_registry, "_db_models", models)
+        monkeypatch.setattr(model_registry, "_db_enabled_ids", {m.id for m in models})
+        monkeypatch.setattr(model_registry, "_MODEL_BY_ID", {m.id: m for m in models})
+
+        assert get_default_model_id() == "balanced-default"
+
+    def test_task_selection_uses_default_without_clear_specialized_need(self, monkeypatch):
+        from lucent import model_registry
+        from lucent.model_registry import ModelInfo, select_model_for_task
+
+        models = [
+            ModelInfo(id="balanced-default", provider="x", name="Balanced", category="general"),
+            ModelInfo(id="expensive-reasoner", provider="x", name="Reasoner", category="reasoning"),
+        ]
+        monkeypatch.setattr(model_registry, "_db_models", models)
+        monkeypatch.setattr(model_registry, "_db_enabled_ids", {m.id for m in models})
+        monkeypatch.setattr(model_registry, "_MODEL_BY_ID", {m.id: m for m in models})
+
+        selection = select_model_for_task(agent_type="planning", title="Break down request")
+
+        assert selection.model_id == "balanced-default"
+        assert selection.source == "default"
+
+    def test_task_selection_specializes_for_clear_reasoning_signal(self, monkeypatch):
+        from lucent import model_registry
+        from lucent.model_registry import ModelInfo, select_model_for_task
+
+        models = [
+            ModelInfo(id="balanced-default", provider="x", name="Balanced", category="general"),
+            ModelInfo(id="deep-reasoner", provider="x", name="Deep", category="reasoning"),
+        ]
+        monkeypatch.setattr(model_registry, "_db_models", models)
+        monkeypatch.setattr(model_registry, "_db_enabled_ids", {m.id for m in models})
+        monkeypatch.setattr(model_registry, "_MODEL_BY_ID", {m.id: m for m in models})
+
+        selection = select_model_for_task(
+            agent_type="research",
+            title="Investigate root cause of a complex architecture issue",
+        )
+
+        assert selection.model_id == "deep-reasoner"
+        assert selection.source == "specialized"
+
+    def test_task_selection_uses_fast_for_memory_when_available(self, monkeypatch):
+        from lucent import model_registry
+        from lucent.model_registry import ModelInfo, select_model_for_task
+
+        models = [
+            ModelInfo(id="balanced-default", provider="x", name="Balanced", category="general"),
+            ModelInfo(id="cheap-fast", provider="x", name="Cheap", category="fast"),
+        ]
+        monkeypatch.setattr(model_registry, "_db_models", models)
+        monkeypatch.setattr(model_registry, "_db_enabled_ids", {m.id for m in models})
+        monkeypatch.setattr(model_registry, "_MODEL_BY_ID", {m.id: m for m in models})
+
+        selection = select_model_for_task(agent_type="memory", title="Tag memories")
+
+        assert selection.model_id == "cheap-fast"
+        assert selection.source == "specialized"
+
     @pytest.mark.asyncio
     async def test_db_load_keeps_null_engine_for_existing_models(self, monkeypatch):
         from lucent import model_registry
@@ -310,7 +378,7 @@ class TestModelRegistry:
             def __init__(self, _pool):
                 pass
 
-            async def list_models(self):
+            async def list_models(self, **_kwargs):
                 return {
                     "items": [
                         {
@@ -338,7 +406,7 @@ class TestModelRegistry:
             def __init__(self, _pool):
                 pass
 
-            async def list_models(self):
+            async def list_models(self, **_kwargs):
                 return {
                     "items": [
                         {
@@ -367,7 +435,7 @@ class TestModelRegistry:
             def __init__(self, _pool):
                 pass
 
-            async def list_models(self):
+            async def list_models(self, **_kwargs):
                 return {
                     "items": [
                         {

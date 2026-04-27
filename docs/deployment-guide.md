@@ -235,7 +235,7 @@ docker run --rm -v lucent_data:/data -v $(pwd):/backup alpine \
 |----------|---------|-------------|
 | `LUCENT_MAX_SESSIONS` | `3` | Max concurrent sub-agent sessions |
 | `LUCENT_DAEMON_INTERVAL` | `15` | Minutes between cognitive cycles |
-| `LUCENT_DAEMON_MODEL` | `claude-opus-4.7` | Default model for daemon sessions |
+| `LUCENT_DAEMON_MODEL` | *(model registry default)* | Optional override for daemon sessions |
 | `LUCENT_DAEMON_ROLES` | `all` | Loops to enable: `cognitive`, `dispatcher`, `scheduler`, `autonomic` (comma-separated) |
 | `LUCENT_MCP_URL` | `http://localhost:8766/mcp` | MCP endpoint URL |
 | `LUCENT_MCP_API_KEY` | — | API key for daemon MCP access |

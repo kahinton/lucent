@@ -164,7 +164,7 @@ The first model in the list determines the `LUCENT_LLM_ENGINE` setting applied t
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `daemon.defaultModel` | string | `claude-opus-4.7` | Model ID used for daemon cognitive cycles. Must match an `id` in `models`. |
+| `daemon.defaultModel` | string | `""` | Optional model override for daemon cognitive cycles. Empty uses the enabled model registry default. |
 | `daemon.maxConcurrentSessions` | integer | `3` | Maximum number of parallel sub-agent sessions. Range: 1–100. |
 | `daemon.intervalMinutes` | integer | `15` | Minutes between daemon cognitive cycles. Minimum: 1. |
 
@@ -275,7 +275,7 @@ spec:
       provider: anthropic
       engine: copilot
   daemon:
-    defaultModel: claude-opus-4.7
+    defaultModel: ""
     maxConcurrentSessions: 5
   observability:
     enabled: true

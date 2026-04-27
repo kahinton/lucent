@@ -526,6 +526,8 @@ class TestListAvailableModels:
     async def test_returns_models(self, mcp, auth_user):
         result = await _call(mcp, "list_available_models")
         assert "models" in result
+        assert "default_model" in result
+        assert "guidance" in result
         assert isinstance(result["models"], list)
         assert len(result["models"]) > 0
 
@@ -550,8 +552,11 @@ class TestListAvailableModels:
     async def test_recommended_included_when_agent_type_given(self, mcp, auth_user):
         result = await _call(mcp, "list_available_models", {"agent_type": "code"})
         assert "recommended" in result
+        assert "recommendation" in result
         assert isinstance(result["recommended"], str)
         assert len(result["recommended"]) > 0
+        assert result["recommendation"]["model"] == result["recommended"]
+        assert "reason" in result["recommendation"]
 
     @pytest.mark.asyncio
     async def test_no_recommended_without_agent_type(self, mcp, auth_user):

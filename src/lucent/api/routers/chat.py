@@ -22,12 +22,20 @@ logger = get_logger("chat")
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
-CHAT_MODEL = os.environ.get("LUCENT_CHAT_MODEL", "claude-opus-4.7")
+CHAT_MODEL = os.environ.get("LUCENT_CHAT_MODEL", "").strip()
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 # MCP server URL — localhost inside the container, configurable for external
 MCP_URL = os.environ.get("LUCENT_CHAT_MCP_URL", "http://localhost:8766/mcp")
 # Session timeout for chat (shorter than daemon — chat should be snappy)
 CHAT_SESSION_TIMEOUT = int(os.environ.get("LUCENT_CHAT_TIMEOUT", "300"))
+
+
+def _resolve_chat_model(override: str | None = None) -> str:
+    from lucent.model_registry import get_default_model_id
+
+    if override:
+        return override
+    return get_default_model_id(preferred_model=(CHAT_MODEL or None))
 
 
 class ChatMessage(BaseModel):
@@ -198,7 +206,7 @@ async def chat_stream(
     from lucent.llm import get_engine_for_model
     from lucent.model_registry import validate_model
 
-    selected_model = body.model or CHAT_MODEL
+    selected_model = _resolve_chat_model(body.model)
     validation_error = validate_model(selected_model)
     if validation_error:
         raise HTTPException(status_code=400, detail=validation_error)
@@ -277,7 +285,7 @@ async def chat_models(request: Request):
 
     models = registry_list_models()
     return {
-        "default": CHAT_MODEL,
+        "default": _resolve_chat_model(),
         "models": [
             {
                 "id": m.id,
@@ -301,7 +309,7 @@ async def chat_status(request: Request):
 
     return {
         "available": True,
-        "model": CHAT_MODEL,
+        "model": _resolve_chat_model(),
         "engine": get_engine_name(),
     }
 
@@ -349,7 +357,7 @@ async def chat_stream_v2(
     from lucent.llm.engine import SessionEvent, SessionEventType
     from lucent.model_registry import validate_model
 
-    selected_model = body.model or CHAT_MODEL
+    selected_model = _resolve_chat_model(body.model)
     validation_error = validate_model(selected_model)
     if validation_error:
         raise HTTPException(status_code=400, detail=validation_error)
