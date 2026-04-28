@@ -89,6 +89,24 @@ class TestCreateMemory:
         assert result["importance"] == 7
         assert result["version"] == 1
 
+    async def test_create_procedural_rejected_as_deprecated(
+        self, mcp_tools, auth_user, clean_test_data
+    ):
+        """Procedural memories are legacy and cannot be newly created via MCP."""
+        prefix = clean_test_data
+        result = await _call(
+            mcp_tools,
+            "create_memory",
+            {
+                "type": "procedural",
+                "content": f"{prefix} Deprecated procedural memory",
+                "username": f"{prefix}user",
+            },
+        )
+
+        assert "error" in result
+        assert "deprecated" in result["error"].lower()
+
     async def test_create_memory_invalid_type(self, mcp_tools, auth_user):
         """Test that an invalid memory type returns an error."""
         result = await _call(
@@ -580,17 +598,18 @@ class TestSearchMemoriesFull:
         assert "error" in result
         assert "required" in result["error"].lower()
 
-    async def test_full_search_with_type_filter(self, mcp_tools, auth_user, clean_test_data):
+    async def test_full_search_with_type_filter(
+        self, mcp_tools, auth_user, clean_test_data, db_pool
+    ):
         """Test full search with type filter."""
         prefix = clean_test_data
-        await _call(
-            mcp_tools,
-            "create_memory",
-            {
-                "type": "procedural",
-                "content": f"{prefix} Procedural full search",
-                "username": f"{prefix}user",
-            },
+        repo = MemoryRepository(db_pool)
+        await repo.create(
+            username=f"{prefix}user",
+            type="procedural",
+            content=f"{prefix} Procedural full search",
+            user_id=auth_user["id"],
+            organization_id=auth_user["organization_id"],
         )
 
         result = await _call(

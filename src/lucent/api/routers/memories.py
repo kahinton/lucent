@@ -30,6 +30,15 @@ logger = get_logger("api.memories")
 
 router = APIRouter()
 
+DEPRECATED_CREATE_TYPES = {"procedural"}
+DEPRECATED_CREATE_TYPE_MESSAGES = {
+    "procedural": (
+        "Procedural memories are deprecated and can no longer be created. "
+        "Use skills for reusable procedures/workflows, or technical/experience "
+        "memories for durable knowledge and outcomes."
+    ),
+}
+
 
 def _memory_to_response(memory: dict[str, Any]) -> MemoryResponse:
     """Convert a memory dict to a response model."""
@@ -77,6 +86,12 @@ async def create_memory(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid memory type. Must be one of: {', '.join(valid_types)}",
+        )
+
+    if data.type in DEPRECATED_CREATE_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=DEPRECATED_CREATE_TYPE_MESSAGES[data.type],
         )
 
     # Individual memories cannot be created via API - they are auto-created when users are added

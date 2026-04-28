@@ -19,6 +19,16 @@ from lucent.services.memory_access_service import MemoryAccessService
 
 from ._shared import _build_metadata_from_form, _check_csrf, get_user_context, templates
 
+CREATABLE_MEMORY_TYPES = ["experience", "technical", "goal"]
+FILTERABLE_MEMORY_TYPES = ["experience", "technical", "procedural", "goal", "individual"]
+DEPRECATED_CREATE_TYPE_MESSAGES = {
+    "procedural": (
+        "Procedural memories are deprecated and can no longer be created. "
+        "Use skills for reusable procedures/workflows, or technical/experience "
+        "memories for durable knowledge and outcomes."
+    ),
+}
+
 
 def _build_memory_access(pool, user) -> MemoryAccessService:
     """Build a MemoryAccessService with admin detection from the current user."""
@@ -27,6 +37,54 @@ def _build_memory_access(pool, user) -> MemoryAccessService:
         GitHubRepoAccessService(pool),
         is_admin=user.role in (Role.ADMIN, Role.OWNER),
     )
+
+
+def _repo_root_memory_priority(memory: dict) -> float:
+    """Rank candidate repo-root memories for Knowledge Tree display.
+
+    Multiple technical memories can temporarily look repo-scoped when older
+    records lack directory/filename metadata. The root node should prefer a
+    durable codebase overview over daemon telemetry, maintenance run reports,
+    one-off audits, or research notes until consolidation can repair the data.
+    """
+    tags = {str(t).lower() for t in (memory.get("tags") or [])}
+    metadata = memory.get("metadata") if isinstance(memory.get("metadata"), dict) else {}
+    category = str(metadata.get("category") or "").lower()
+    preview = str(memory.get("preview") or memory.get("content") or "").lower()
+
+    score = float(memory.get("importance") or 0)
+    vitality = memory.get("vitality_score")
+    if vitality is not None:
+        try:
+            score += float(vitality) * 10
+        except (TypeError, ValueError):
+            pass
+
+    if "maintenance" in tags or any("heartbeat" in tag or "state" in tag for tag in tags):
+        score -= 100
+    if preview.lstrip().startswith("{"):
+        score -= 40
+    if tags & {"environment", "codebase"}:
+        score += 45
+    if "architecture" in tags or category == "architecture":
+        score += 25
+    if "project environment assessment" in preview:
+        score += 30
+    if "source layout" in preview or "build/test" in preview:
+        score += 15
+    if tags & {"needs-review", "research", "experiment-design", "tool-gap"}:
+        score -= 15
+    return score
+
+
+def _prefer_repo_root_memory(current: dict | None, candidate: dict) -> dict:
+    """Return the better repo-root display memory."""
+    if current is None:
+        return candidate
+    if _repo_root_memory_priority(candidate) > _repo_root_memory_priority(current):
+        return candidate
+    return current
+
 
 router = APIRouter()
 
@@ -119,7 +177,7 @@ async def memories_list(
             "type_filter": type,
             "tag_filter": tag,
             "tags": tags,
-            "memory_types": ["experience", "technical", "procedural", "goal", "individual"],
+            "memory_types": FILTERABLE_MEMORY_TYPES,
         },
     )
 
@@ -151,7 +209,7 @@ async def memory_new_form(request: Request):
         "memory_new.html",
         {
             "user": user,
-            "memory_types": ["experience", "technical", "procedural", "goal", "individual"],
+            "memory_types": CREATABLE_MEMORY_TYPES,
             "existing_tags": tags,
             "org_users": org_users,
         },
@@ -226,6 +284,12 @@ async def memory_new_submit(
                 " They are automatically created when users are"
                 " added to the system."
             ),
+        )
+
+    if type in DEPRECATED_CREATE_TYPE_MESSAGES:
+        raise HTTPException(
+            status_code=400,
+            detail=DEPRECATED_CREATE_TYPE_MESSAGES[type],
         )
 
     # Build type-specific metadata
@@ -382,7 +446,7 @@ async def memory_edit_form(request: Request, memory_id: UUID):
         {
             "user": user,
             "memory": memory,
-            "memory_types": ["experience", "technical", "procedural", "goal", "individual"],
+            "memory_types": FILTERABLE_MEMORY_TYPES,
             "org_users": org_users,
         },
     )
@@ -814,7 +878,7 @@ async def knowledge_tree(request: Request):
 
         if not directory and not filename:
             # Repo-level memory
-            node["memory"] = r
+            node["memory"] = _prefer_repo_root_memory(node.get("memory"), r)
         elif directory and not filename:
             # Directory-level memory
             if directory not in node["dirs"]:

@@ -47,7 +47,11 @@ async def test_get_accessible_filters_single_memory_by_repo_access() -> None:
 
     result = await service.get_accessible(memory_id, user_id, org_id)
 
-    assert result is None
+    assert result == {
+        "_access_denied": True,
+        "id": memory_id,
+        "metadata": {"repo": "org/repo"},
+    }
     github_access.check_access.assert_awaited_once_with(user_id, "org/repo")
 
 
@@ -132,6 +136,42 @@ async def test_search_admin_skips_repo_filter() -> None:
     assert kwargs.get("accessible_repos") is None
     assert result["total_count"] == 2
     assert [m["id"] for m in result["memories"]] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_search_org_shared_scope_skips_daemon_repo_acl_filter() -> None:
+    """Org-shared maintenance keys already restrict the corpus to shared org
+    memories, so they must not additionally filter by the daemon service
+    account's GitHub repo cache. Technical consolidation needs all shared
+    repo-tagged memories to build useful repo/module summaries."""
+
+    user_id = uuid4()
+    repo = AsyncMock()
+    repo.search = AsyncMock(
+        return_value={
+            "memories": [
+                {"id": 1, "metadata": {"repo": "org/allowed"}},
+                {"id": 2, "metadata": {"repo": "org/blocked-for-daemon"}},
+            ],
+            "total_count": 2,
+            "offset": 0,
+            "limit": 5,
+            "has_more": False,
+        }
+    )
+    github_access = AsyncMock()
+    service = MemoryAccessService(repo, github_access)
+
+    result = await service.search(
+        user_id=user_id,
+        query="architecture",
+        memory_scope="org_shared_only",
+    )
+
+    kwargs = repo.search.await_args.kwargs
+    assert kwargs.get("accessible_repos") is None
+    assert kwargs["memory_scope"] == "org_shared_only"
+    assert result["total_count"] == 2
 
 
 @pytest.mark.asyncio

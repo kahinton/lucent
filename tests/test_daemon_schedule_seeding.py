@@ -70,3 +70,45 @@ async def test_seed_system_schedules_includes_procedural_consolidation(monkeypat
     assert shadow_row[9] == daemon_module.SHADOW_FORGET_SCORING_PROMPT
     offset_seconds = (shadow_row[7] - vit_row[7]).total_seconds()
     assert offset_seconds >= (daemon_module.SHADOW_FORGET_OFFSET_MINUTES * 60) - 5
+
+
+@pytest.mark.asyncio
+async def test_seed_system_schedules_refreshes_existing_prompts(monkeypatch):
+    updates: list[tuple] = []
+
+    class FakeConn:
+        async def fetchrow(self, query, *args):
+            if "FROM users" in query:
+                return {
+                    "id": UUID("11111111-1111-1111-1111-111111111111"),
+                    "organization_id": UUID("22222222-2222-2222-2222-222222222222"),
+                }
+            if "FROM schedules" in query:
+                title = args[0]
+                return {"id": UUID(int=len(str(title)))}
+            return None
+
+        async def execute(self, query, *args):
+            if "UPDATE schedules SET" in query:
+                updates.append(args)
+            return "OK"
+
+        async def close(self):
+            return None
+
+    async def _connect(_database_url):
+        return FakeConn()
+
+    monkeypatch.setitem(sys.modules, "asyncpg", types.SimpleNamespace(connect=_connect))
+
+    daemon = LucentDaemon()
+    await daemon._seed_system_schedules()
+
+    memory_updates = [row for row in updates if row[2].startswith("Autonomic memory maintenance")]
+    assert len(memory_updates) == 1
+    memory_update = memory_updates[0]
+    assert memory_update[3] == "memory"
+    assert memory_update[4] == "interval"
+    assert memory_update[5] == daemon_module.AUTONOMIC_MINUTES * 60
+    assert memory_update[8] == daemon_module.MEMORY_CONSOLIDATION_PROMPT
+    assert "Desired Content Contract" in memory_update[8]

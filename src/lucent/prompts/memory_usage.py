@@ -120,8 +120,8 @@ This is better than pretending or guessing.
 | "Fixed auth bug - root cause was token expiration not being checked" |
 | `technical` | Code patterns, solutions, architecture details \
 | "API rate limiting implementation using Redis sliding window" |
-| `procedural` | Step-by-step processes that work \
-| "Deployment process for production: 1) Run tests, 2) Build container..." |
+| `procedural` | Legacy/read-only procedure storage; do not create new procedural memories \
+| "Use skills for reusable workflows instead." |
 | `goal` | Objectives being tracked over time \
 | "Launch MVP by end of Q1 - currently blocked on auth integration" |
 | `individual` | Information about people \

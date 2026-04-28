@@ -89,17 +89,22 @@ link_task_memory(task_id, memory_id, "created")
 
 ### 5. Summary
 
-Follow the **memory-capture** skill to create a maintenance log:
+Report the maintenance result in your task response. If a `task_id` is available,
+also call `log_task_event(task_id, "progress", "...")` with a concise summary.
 
-```
-create_memory(
-  type="technical",
-  content="## Memory Maintenance: <area>\n\n**Scope**: <what was audited>\n**Actions**: consolidated N, updated N, fixed N tags, deleted N\n**IDs affected**: <list>\n**Remaining issues**: <follow-up needed>",
-  tags=["daemon", "memory", "maintenance"],
-  importance=5,
-  shared=true
-)
-```
+**Do not create a memory just to log the maintenance pass.** Maintenance logs,
+run reports, placeholder audit summaries, and daemon heartbeats are not durable
+technical knowledge. Creating them pollutes repo-level technical memories and
+makes the knowledge tree worse. Only call `create_memory` when the task explicitly
+allows creation and you discovered a genuine missing canonical memory that cannot
+be represented by updating an existing one. Never create procedural memories;
+procedural memories are legacy and reusable workflows belong in skills.
+
+Your final response should include:
+- scope surveyed
+- memories updated/deleted/left unchanged
+- verification performed
+- remaining human-review issues
 
 ## Decision Framework
 

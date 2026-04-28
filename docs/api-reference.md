@@ -89,7 +89,7 @@ POST /api/memories
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `type` | string | yes | `experience`, `technical`, `procedural`, or `goal` |
+| `type` | string | yes | `experience`, `technical`, or `goal`. `procedural` is legacy/read-only and cannot be newly created. |
 | `content` | string | yes | Main content of the memory |
 | `username` | string | no | Defaults to authenticated user's display name |
 | `tags` | string[] | no | Categorization tags |
@@ -97,7 +97,7 @@ POST /api/memories
 | `related_memory_ids` | UUID[] | no | Links to related memories |
 | `metadata` | object | no | Type-specific metadata (validated per type) |
 
-> **Note:** `individual` type memories cannot be created via API — they are auto-created with user accounts.
+> **Note:** `individual` type memories cannot be created via API — they are auto-created with user accounts. `procedural` memories are legacy records that predate skills; use skills for reusable procedures/workflows.
 
 **Response:** `201` with the full memory object.
 

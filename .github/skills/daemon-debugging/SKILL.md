@@ -40,9 +40,10 @@ This skill is for **diagnosing and fixing failures** — crashes, stuck tasks, d
 
 | Tool | Purpose | Key Parameters |
 |------|---------|---------------|
-| `memory-server-search_memories` | Check heartbeat and daemon-state | `tags=["daemon-heartbeat"]`, `tags=["daemon-state"]` |
+| SQL / dashboard | Check daemon instance heartbeat | `daemon_instances.last_seen_at`, `status`, `metadata` |
+| `memory-server-search_memories` | Check daemon-state | `tags=["daemon-state"]` |
 | `memory-server-search_memories` | Find pending daemon messages | `tags=["daemon-message"]` |
-| `memory-server-get_memory` | Get full heartbeat/state detail | `memory_id` |
+| `memory-server-get_memory` | Get full daemon-state detail | `memory_id` |
 
 ## Quick Diagnostic Checklist
 
@@ -51,7 +52,7 @@ This skill is for **diagnosing and fixing failures** — crashes, stuck tasks, d
 2. Is the server healthy?            → curl localhost:8766/api/health
 3. Is the database reachable?        → docker exec lucent-db pg_isready -U lucent
 4. Are there stale tasks?            → Activity page or GET /api/requests/queue/pending
-5. Is the heartbeat current?         → memory-server-search_memories(tags=["daemon-heartbeat"])
+5. Is the heartbeat current?         → query daemon_instances.last_seen_at or check Dashboard
 6. What did the last cycle decide?   → memory-server-search_memories(tags=["daemon-state"])
 7. Are there pending requests?       → Activity page or GET /api/requests?status=pending
 8. What errors are in the log?       → grep -i "error\|exception\|timeout" daemon/daemon.log | tail -20
@@ -61,7 +62,7 @@ This skill is for **diagnosing and fixing failures** — crashes, stuck tasks, d
 
 ### 1. Daemon Not Running or Crashing
 
-**Symptoms**: No new log entries, heartbeat memory stale, process not found.
+**Symptoms**: No new log entries, daemon_instances heartbeat stale, process not found.
 
 **Steps**:
 1. Check if the process is alive: `ps aux | grep daemon.py`
@@ -82,7 +83,7 @@ This skill is for **diagnosing and fixing failures** — crashes, stuck tasks, d
 **Steps**:
 1. Check the Activity page for tasks stuck in `running` status
 2. The daemon's `_release_stale_claims()` releases tasks where `started_at` > 30 minutes ago
-3. If the release mechanism isn't firing, check that the cognitive cycle is running (heartbeat memory should be recent)
+3. If the release mechanism isn't firing, check that the cognitive cycle is running (`daemon_instances.last_seen_at` should be recent)
 4. Manual fix: `POST /api/requests/queue/release-stale?stale_minutes=30`
    ```bash
    curl -s -X POST "http://localhost:8766/api/requests/queue/release-stale?stale_minutes=30"
@@ -92,7 +93,7 @@ This skill is for **diagnosing and fixing failures** — crashes, stuck tasks, d
 **Root causes**:
 - Session hung waiting for LLM response (no watchdog kill because other sessions are active)
 - `_validate_task_result()` failed but the error handler didn't release the claim
-- Multiple daemon instances racing on the same task (check `instance_id` in heartbeat memories)
+- Multiple daemon instances racing on the same task (check `daemon_instances.instance_id` rows)
 
 ### 3. Task Dispatch Failures
 
@@ -173,7 +174,7 @@ find pending tasks → get memory details → atomic claim (tag swap) → run_se
 ## Decision: Which Phase is Failing?
 
 - IF daemon process is not found → **restart daemon**, check startup errors
-- ELIF heartbeat memory is stale (>2× interval) → **watchdog killed or hung**, check logs for WATCHDOG or TimeoutError
+- ELIF `daemon_instances.last_seen_at` is stale (>2× interval) → **watchdog killed or hung**, check logs for WATCHDOG or TimeoutError
 - ELIF heartbeat is current BUT tasks stuck in `pending` → **dispatch issue**, check agent_type validity and semaphore
 - ELIF heartbeat is current BUT tasks stuck in `running` → **execution hung**, run release-stale endpoint
 - ELIF cycles run but no tasks are being created → **cognitive cycle producing no work**, check daemon-state memory
@@ -197,18 +198,18 @@ find pending tasks → get memory details → atomic claim (tag swap) → run_se
 
 ```
 1. User reports "daemon seems stuck"
-2. Run: memory-server-search_memories(tags=["daemon-heartbeat"])
-   → Heartbeat timestamp is 45 minutes old (interval is 15 min → STALE)
+2. Query `daemon_instances` or check Dashboard
+   → `last_seen_at` is 45 minutes old (interval is 15 min → STALE)
 3. Run: ps aux | grep daemon.py → process NOT found
 4. Run: tail -50 daemon/daemon.log → last line: "WATCHDOG: no activity for 900s, exiting"
 5. Check what was running before exit: look 15 min back in log
    → Find: "Running session for task abc123 (agent: code)"
    → Session started but never finished
 6. Root cause: LLM API was timing out silently
-7. Fix: Restart daemon, verify heartbeat appears within 15 min
+7. Fix: Restart daemon, verify `daemon_instances.last_seen_at` updates within 15 min
    curl -s http://localhost:8766/api/health → confirm server healthy
    python -m daemon.daemon &
-   Wait 15 min, then: memory-server-search_memories(tags=["daemon-heartbeat"])
+   Wait for one interval, then query `daemon_instances` or check Dashboard
 ```
 
 ## Example: Anti-Pattern (What NOT to Do)

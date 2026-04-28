@@ -47,7 +47,11 @@ class MemoryAccessService:
         if filtered is None:
             # Memory exists but repo access denied — attach a flag
             # so callers can distinguish 404 vs 403
-            return {"_access_denied": True, "id": memory.get("id"), "metadata": memory.get("metadata", {})}
+            return {
+                "_access_denied": True,
+                "id": memory.get("id"),
+                "metadata": memory.get("metadata", {}),
+            }
         return filtered
 
     async def filter_memory(
@@ -85,16 +89,21 @@ class MemoryAccessService:
         return filtered
 
     async def _resolve_accessible_repos(
-        self, user_id: UUID | None
+        self, user_id: UUID | None, memory_scope: str | None = None
     ) -> list[str] | None:
         """Return the lowercased list of repos the user can access, or
-        ``None`` to mean "no repo filter" (admins/owners and the caller
-        explicitly asked to bypass).
+        ``None`` to mean "no repo filter".
+
+        Admins/owners bypass repo ACL. Org-shared maintenance scopes also
+        bypass repo ACL because the scoped key already restricts visibility to
+        shared organization memories; applying the daemon service account's
+        GitHub repo cache would hide the shared technical corpus that
+        consolidation is supposed to maintain.
 
         Anonymous callers (``user_id is None``) get an empty list, meaning
         only memories without a ``metadata.repo`` are visible.
         """
-        if self._is_admin:
+        if self._is_admin or memory_scope == "org_shared_only":
             return None
         if user_id is None:
             return []
@@ -116,14 +125,18 @@ class MemoryAccessService:
         return [row["repo_full_name"].lower() for row in rows]
 
     async def search(self, *, user_id: UUID | None, **kwargs: Any) -> dict[str, Any]:
-        accessible_repos = await self._resolve_accessible_repos(user_id)
+        accessible_repos = await self._resolve_accessible_repos(
+            user_id, kwargs.get("memory_scope")
+        )
         result = await self.repo.search(accessible_repos=accessible_repos, **kwargs)
         # The SQL filter already enforces repo ACL, so total_count is accurate
         # and the page does not need a second post-filter pass.
         return result
 
     async def search_full(self, *, user_id: UUID | None, **kwargs: Any) -> dict[str, Any]:
-        accessible_repos = await self._resolve_accessible_repos(user_id)
+        accessible_repos = await self._resolve_accessible_repos(
+            user_id, kwargs.get("memory_scope")
+        )
         result = await self.repo.search_full(accessible_repos=accessible_repos, **kwargs)
         return result
 
@@ -132,17 +145,25 @@ class MemoryAccessService:
     ) -> list[dict[str, Any]]:
         """Tag counts that respect both basic ACL and GitHub repo ACL —
         consistent with what ``search`` exposes."""
-        accessible_repos = await self._resolve_accessible_repos(user_id)
+        accessible_repos = await self._resolve_accessible_repos(
+            user_id, kwargs.get("memory_scope")
+        )
+        repo_kwargs = dict(kwargs)
+        repo_kwargs.pop("memory_scope", None)
         return await self.repo.get_existing_tags(
-            accessible_repos=accessible_repos, **kwargs
+            accessible_repos=accessible_repos, **repo_kwargs
         )
 
     async def get_tag_suggestions(
         self, *, user_id: UUID | None, **kwargs: Any
     ) -> list[dict[str, Any]]:
-        accessible_repos = await self._resolve_accessible_repos(user_id)
+        accessible_repos = await self._resolve_accessible_repos(
+            user_id, kwargs.get("memory_scope")
+        )
+        repo_kwargs = dict(kwargs)
+        repo_kwargs.pop("memory_scope", None)
         return await self.repo.get_tag_suggestions(
-            accessible_repos=accessible_repos, **kwargs
+            accessible_repos=accessible_repos, **repo_kwargs
         )
 
     @staticmethod

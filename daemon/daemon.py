@@ -358,6 +358,18 @@ MEMORY_CONSOLIDATION_PROMPT = (
     "  Contains: what this directory does, key files, patterns specific to this area\n"
     "- **File-level**: One memory per file that has enough knowledge to warrant it (metadata.repo=<owner/repo>, metadata.directory=<parent/dir/>, metadata.filename=<parent/dir/file.ext>)\n"
     "  Contains: what this file does, key functions, gotchas, patterns\n\n"
+    "## Desired Content Contract\n\n"
+    "The hierarchy is a navigational knowledge base for future agents. It is NOT an audit log.\n"
+    "Repo-level memories should read like a compact contributor briefing with these sections when known:\n"
+    "- Architecture map: major subsystems and how requests/data flow between them\n"
+    "- Working conventions: how to run/build/test locally, including background workers, services, "
+    "and containerized dependencies when the repo uses them\n"
+    "- Important docs/runbooks: docs worth reading before changing the repo\n"
+    "- Do / don't: operational constraints, security boundaries, and common footguns\n"
+    "- Current decisions/invariants: durable design choices and why they exist\n"
+    "Directory-level memories should explain the directory's responsibility, boundaries, key files, "
+    "local patterns, and gotchas. File-level memories should explain responsibilities, important "
+    "symbols, invariants, and edit hazards.\n\n"
     "## Determining the repo name\n\n"
     "The repo name MUST be in owner/repo format (e.g. 'octocat/hello-world'). "
     "To find the correct repo name, look at existing technical memories that already have metadata.repo set. "
@@ -365,18 +377,22 @@ MEMORY_CONSOLIDATION_PROMPT = (
     "If no existing memories have metadata.repo set, search for clues in memory content or tags.\n\n"
     "## Process (Mandatory Phases)\n\n"
     "1. Search for all technical memories (use search_memories with type='technical', limit=50).\n"
-    "   Also search with search_memories_full for broader coverage.\n\n"
-    "2. For each memory, determine its correct scope:\n"
+    "   Also search with search_memories_full for broader coverage. Before planning writes, exclude "
+    "protected or non-knowledge records from the consolidation set: anything tagged 'pinned', "
+    "'do_not_consolidate', maintenance, or records that are plain task reports, heartbeat/state "
+    "records, telemetry, or other runtime bookkeeping rather than durable codebase knowledge.\n\n"
+    "2. For each in-scope memory, determine its correct scope:\n"
     "   - If it's about a specific file -> file-level\n"
     "   - If it's about a directory/module -> directory-level\n"
     "   - If it's about the repo generally -> repo-level\n\n"
     "3. **Merge duplicates**: If two memories belong to the same scope, merge them into one.\n"
-    "   Keep the highest-vitality memory as canonical (treat missing vitality_score as 0.5), "
-    "tie-break by higher importance, then older created_at.\n"
+    "   Keep the best scope-fit memory as canonical: prefer durable overview/convention content "
+    "over audit reports, one-off research outputs, maintenance logs, or transient task summaries. "
+    "Then tie-break by higher vitality_score (missing=0.5), higher importance, then older created_at.\n"
     "   Update the canonical memory with combined content, delete lower-vitality fragments.\n"
     "   The surviving memory should be comprehensive but concise.\n\n"
     "4. **MANDATORY METADATA NORMALIZATION PASS (separate from merge pass)**:\n"
-    "   Update EVERY technical memory so it has these exact metadata fields:\n"
+    "   Update EVERY in-scope technical codebase memory so it has these exact metadata fields:\n"
     "   - metadata.repo (repository name in owner/repo format. Get this from existing memories — do NOT hardcode or guess)\n"
     "   - metadata.directory (path within repo; directory path ending with '/', or null)\n"
     "   - metadata.filename (specific file path within repo, or null. Must be null for directory-level memories)\n"
@@ -386,13 +402,14 @@ MEMORY_CONSOLIDATION_PROMPT = (
     "   - file-level -> repo set, directory='parent/dir/', filename='full/path/to/file.ext'\n"
     "   Also set metadata.category to a short category like 'architecture', 'api', 'database', 'testing'.\n\n"
     "5. **MANDATORY VERIFICATION PASS (after all updates/deletes)**:\n"
-    "   Re-read technical memories and verify each one includes metadata.repo, metadata.directory, and metadata.filename\n"
+    "   Re-read in-scope technical codebase memories and verify each one includes metadata.repo, metadata.directory, and metadata.filename\n"
     "   with values consistent with its scope mapping above. If any memory is non-compliant, fix it in this run before finishing.\n\n"
     "6. **Non-technical memories** (experience, procedural, etc.): Leave these alone.\n\n"
     "7. Create a summary of what you changed, including verification counts and any corrected memory IDs.\n\n"
     "## Important Rules\n"
     "- NEVER create new memories. Only update existing ones or delete duplicates.\n"
     "- The ONLY valid operations are: update_memory and delete_memory.\n"
+    "- NEVER create a memory maintenance log, run report, or audit-result memory. Put the run summary only in the task response.\n"
     "- If you identify merge/update/delete operations, you MUST execute them in this run.\n"
     "- Do not stop after planning. Planning without writes is an incomplete run.\n"
     "- If two memories cover the same scope, update the better one and delete the other.\n"
@@ -400,6 +417,7 @@ MEMORY_CONSOLIDATION_PROMPT = (
     "- Each scope should have AT MOST one technical memory.\n"
     "- Do NOT treat metadata normalization as optional; it is a required pass every run.\n"
     "- NEVER touch memories tagged 'pinned' or 'do_not_consolidate'.\n"
+    "- NEVER normalize heartbeat/state records, maintenance logs, run reports, or telemetry records into repo metadata. These are not codebase knowledge.\n"
     "- Final output MUST include: 'Planned operations: <N>' and 'Executed write operations: <M>'.\n"
     "- Content should be practical: what does a developer need to know to work here?\n\n"
     "## Content Quality: Focus on WHY, not WHAT\n\n"
@@ -432,24 +450,26 @@ LEARNING_EXTRACTION_PROMPT = (
     "that this lesson is ABOUT (the technical or procedural memory "
     "for that module/system/workflow).\n"
     "3. Update that existing memory with the new knowledge. "
-    "If no related memory exists, create ONE well-scoped memory "
-    "that includes the lesson as part of its content.\n"
+    "If no related memory exists, create ONE well-scoped technical or experience memory "
+    "that includes the lesson as part of its content. Never create procedural memories; "
+    "reusable procedures belong in skills.\n"
     "4. Tag processed source memories with 'lesson-extracted'.\n"
     "5. Delete source experience memories that are now redundant "
     "(their knowledge has been absorbed).\n"
     "\n\nSTRICT RULES:\n"
     "- NEVER create standalone 'Lesson:' or 'Learning Extraction Run' memories.\n"
+    "- NEVER create procedural memories; skills are the canonical home for reusable workflows.\n"
     "- NEVER create a new memory if an existing one covers the same scope - update it.\n"
     "- The total memory count must go DOWN or stay the same, never up.\n"
     "- Prefer update_memory and delete_memory. Only use create_memory for genuine gaps.\n"
-    "- Skip anything tagged 'daemon-heartbeat'."
+    "- Skip runtime heartbeat or telemetry records if any legacy records are still present."
 )
 
 EXPERIENCE_COMPRESSION_PROMPT = (
     "Compress experience memories into daily digests.\n\n"
     "## Process\n\n"
     "1. Search for experience memories that are NOT tagged 'daily-digest' "
-    "and NOT tagged 'daemon-heartbeat' (use search_memories with type='experience', limit=50).\n\n"
+    "and not runtime heartbeat/telemetry records (use search_memories with type='experience', limit=50).\n\n"
     "2. Group the results by date (use the created_at or updated_at field). "
     "Skip memories from today - only compress older ones.\n\n"
     "3. For each date that has 2+ experience memories:\n"
@@ -475,7 +495,8 @@ PROCEDURAL_CONSOLIDATION_PROMPT = (
     "Run a memory consolidation pass focused on PROCEDURAL memories.\n\n"
     "## Goal: One Canonical Procedure Per Topic\n\n"
     "Procedural memories should converge toward one current, complete procedure per topic.\n"
-    "Do not let overlapping step lists accumulate.\n\n"
+    "Do not let overlapping step lists accumulate. Procedural memories are legacy; "
+    "do not create new ones. Reusable workflows belong in skills.\n\n"
     "## Process (Mandatory Phases)\n\n"
     "1. Search for procedural memories (search_memories with type='procedural', limit=50) and "
     "expand coverage with search_memories_full.\n\n"
@@ -501,9 +522,9 @@ PROCEDURAL_CONSOLIDATION_PROMPT = (
     "   - Archived daemon-task entries should not appear as active procedures.\n"
     "   - Summarize updates/deletes/archives performed.\n\n"
     "## Important Rules\n"
-    "- Prefer update_memory and delete_memory; only create_memory for a genuine gap.\n"
-    "- Total memory count should go DOWN or stay the same unless a true missing canonical procedure "
-    "must be created.\n"
+    "- Use only update_memory and delete_memory. Never create procedural memories.\n"
+    "- NEVER create a memory maintenance log, run report, or audit-result memory. Put the run summary only in the task response.\n"
+    "- Total memory count should go DOWN or stay the same; do not fill missing procedure gaps with new procedural memories.\n"
     "- Preserve the highest-vitality procedure as canonical (missing vitality_score = 0.5).\n"
     "- NEVER touch memories tagged 'pinned' or 'do_not_consolidate'.\n"
     "- Keep procedural memories actionable: ordered steps, prerequisites, pitfalls, and success criteria."
@@ -2289,7 +2310,7 @@ Before starting work, search for relevant memories:
 - Look for previous approaches to similar tasks (search by keywords from your task description)
 - Check for validated patterns (tagged 'validated') and
   rejection lessons (tagged 'rejection-lesson')
-- Reference procedural memories for proven workflows
+- Reference skills for proven workflows; procedural memories are legacy read-only context
 - Build on existing knowledge rather than starting from scratch
 
 After completing work, save what you learned:
@@ -2353,9 +2374,6 @@ class LucentDaemon:
         self._listen_lock = asyncio.Lock()
         self._task_ready = asyncio.Event()
         self._request_ready = asyncio.Event()
-
-        # Heartbeat memory ID (cached after first create/lookup)
-        self._heartbeat_memory_id: str | None = None
 
         # MCP memory-tool usage tracking per session (for observability)
         self._session_mcp_trackers: dict[str, list[dict]] = {}
@@ -2519,7 +2537,9 @@ class LucentDaemon:
 
         System schedules replace the old autonomic and cognitive loops.
         They can be modified (interval, enabled) but not deleted.
-        Idempotent — skips creation if the schedule already exists.
+        Idempotent — creates missing schedules and refreshes existing built-in
+        schedule definitions from the on-disk source constants while preserving
+        runtime state such as enabled/next_run_at.
         Uses direct DB connection (same pattern as key provisioning).
         """
         import asyncpg
@@ -2637,10 +2657,32 @@ class LucentDaemon:
                         org_id,
                     )
                     if existing:
-                        # System schedule already exists — do NOT overwrite the prompt.
-                        # The database is the source of truth for schedule prompts.
-                        # Prompts are editable via the Schedules UI/API.
-                        # The Python constants are only used for initial seeding.
+                        # Built-in system schedule definitions are source-controlled.
+                        # Refresh definition fields on startup so prompt fixes take
+                        # effect, but preserve operational state (enabled, status,
+                        # next_run_at, run history).
+                        await conn.execute(
+                            """UPDATE schedules SET
+                                   description = $3,
+                                   agent_type = $4,
+                                   schedule_type = $5,
+                                   interval_seconds = $6,
+                                   cron_expression = $7,
+                                   priority = $8,
+                                   prompt = $9,
+                                   updated_at = NOW()
+                               WHERE id = $1::uuid AND organization_id = $2::uuid
+                                 AND is_system = true""",
+                            str(existing["id"]),
+                            org_id,
+                            sched["description"],
+                            sched["agent_type"],
+                            sched["schedule_type"],
+                            sched.get("interval_seconds"),
+                            sched.get("cron_expression"),
+                            sched["priority"],
+                            sched["prompt"],
+                        )
                         updated += 1
                         continue
 
@@ -2678,7 +2720,7 @@ class LucentDaemon:
                 if created:
                     log(f"Seeded {created} system schedule(s)")
                 if updated:
-                    log(f"Verified {updated} existing system schedule(s)")
+                    log(f"Refreshed {updated} existing system schedule definition(s)")
                 if not created and not updated:
                     log("System schedules verified (all exist)")
 
@@ -4023,42 +4065,11 @@ class LucentDaemon:
             metadata={
                 "cycle_count": self.cycle_count,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
-                "roles": sorted(self.roles),
-            },
-        )
-
-    async def _update_legacy_heartbeat_memory(self):
-        """Backward-compatible heartbeat memory updates."""
-        heartbeat_content = json.dumps(
-            {
-                "instance_id": self.instance_id,
-                "hostname": platform.node(),
-                "pid": os.getpid(),
-                "cycle_count": self.cycle_count,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "model": MODEL,
                 "roles": sorted(self.roles),
                 "max_sessions": MAX_CONCURRENT_SESSIONS,
-            }
+            },
         )
-
-        if self._heartbeat_memory_id:
-            await MemoryAPI.update(self._heartbeat_memory_id, content=heartbeat_content)
-        else:
-            # Search for existing heartbeat from this instance
-            results = await MemoryAPI.search(self.instance_id, tags=["daemon-heartbeat"], limit=1)
-            if results:
-                self._heartbeat_memory_id = results[0].get("id")
-                await MemoryAPI.update(self._heartbeat_memory_id, content=heartbeat_content)
-            else:
-                result = await MemoryAPI.create(
-                    type="technical",
-                    content=heartbeat_content,
-                    tags=["daemon-heartbeat", "daemon"],
-                    importance=3,
-                )
-                if result:
-                    self._heartbeat_memory_id = result.get("id")
 
     async def _check_due_schedules(self):
         """Fire any scheduled tasks that are due, creating requests for them."""
@@ -5731,17 +5742,19 @@ class LucentDaemon:
                 "that this lesson is ABOUT (the technical or procedural memory "
                 "for that module/system/workflow).\n"
                 "3. Update that existing memory with the new knowledge. "
-                "If no related memory exists, create ONE well-scoped memory "
-                "that includes the lesson as part of its content.\n"
+                "If no related memory exists, create ONE well-scoped technical or "
+                "experience memory that includes the lesson as part of its content. "
+                "Never create procedural memories; reusable procedures belong in skills.\n"
                 "4. Tag processed source memories with 'lesson-extracted'.\n"
                 "5. Delete source experience memories that are now redundant "
                 "(their knowledge has been absorbed).\n"
                 "\n\nSTRICT RULES:\n"
                 "- NEVER create standalone 'Lesson:' or 'Learning Extraction Run' memories.\n"
+                "- NEVER create procedural memories; skills are the canonical home for reusable workflows.\n"
                 "- NEVER create a new memory if an existing one covers the same scope — update it.\n"
                 "- The total memory count must go DOWN or stay the same, never up.\n"
                 "- Prefer update_memory and delete_memory. Only use create_memory for genuine gaps.\n"
-                "- Skip anything tagged 'daemon-heartbeat'."
+                "- Skip runtime heartbeat or telemetry records if any legacy records are still present."
             ),
         )
 
@@ -5780,7 +5793,7 @@ class LucentDaemon:
                 "Compress experience memories into daily digests.\n\n"
                 "## Process\n\n"
                 "1. Search for experience memories that are NOT tagged 'daily-digest' "
-                "and NOT tagged 'daemon-heartbeat' (use search_memories with type='experience', limit=50).\n\n"
+                "and not runtime heartbeat/telemetry records (use search_memories with type='experience', limit=50).\n\n"
                 "2. Group the results by date (use the created_at or updated_at field). "
                 f"Skip memories from today ({today}) — only compress older ones.\n\n"
                 "3. For each date that has 2+ experience memories:\n"
@@ -5876,8 +5889,6 @@ class LucentDaemon:
 
                 # Refresh instance liveness and lease heartbeats.
                 await self._update_heartbeat()
-                # Keep existing memory heartbeat for backward compatibility/observability.
-                await self._update_legacy_heartbeat_memory()
 
                 # Release stale tasks from dead instances
                 stale = await RequestAPI.release_stale(STALE_HEARTBEAT_MINUTES)

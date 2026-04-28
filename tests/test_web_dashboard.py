@@ -1,8 +1,6 @@
 """Integration tests for dashboard web routes in web/routes.py."""
 
-import json
 import re
-from datetime import datetime, timezone
 from uuid import uuid4
 
 import httpx
@@ -51,6 +49,11 @@ async def web_prefix(db_pool):
         )
         await conn.execute(
             "DELETE FROM requests WHERE organization_id IN "
+            "(SELECT id FROM organizations WHERE name LIKE $1)",
+            f"{prefix}%",
+        )
+        await conn.execute(
+            "DELETE FROM daemon_instances WHERE organization_id IN "
             "(SELECT id FROM organizations WHERE name LIKE $1)",
             f"{prefix}%",
         )
@@ -235,22 +238,22 @@ class TestDashboard:
         user, org, _token = web_user
         user_repo = UserRepository(db_pool)
         await user_repo.update_role(user["id"], "owner")
-        repo = MemoryRepository(db_pool)
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO daemon_instances
+                   (instance_id, organization_id, hostname, pid, roles, status,
+                    started_at, last_seen_at, metadata, created_at, updated_at)
+                   VALUES ($1, $2::uuid, $3, $4, $5::text[], 'active',
+                           NOW(), NOW(), $6::jsonb, NOW(), NOW())""",
+                "daemon-test-instance",
+                org["id"],
+                "test-host",
+                12345,
+                ["dispatcher", "scheduler"],
+                '{"cycle_count": 42}',
+            )
 
-        heartbeat_payload = {
-            "instance_id": "daemon-test-instance",
-            "cycle_count": 42,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-        await repo.create(
-            username=f"{web_prefix}User",
-            type="technical",
-            content=json.dumps(heartbeat_payload),
-            tags=["daemon-heartbeat", "daemon"],
-            importance=3,
-            user_id=user["id"],
-            organization_id=org["id"],
-        )
+        repo = MemoryRepository(db_pool)
         await repo.create(
             username=f"{web_prefix}User",
             type="procedural",

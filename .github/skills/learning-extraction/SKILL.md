@@ -35,7 +35,7 @@ search_memories(tags=["feedback-processed"], limit=10)
 
 Filter to memories that do NOT have the `lesson-extracted` tag.
 
-Cap at 10 per run. Skip anything tagged `daemon-heartbeat`.
+Cap at 10 per run. Skip runtime heartbeat or telemetry records if legacy records are still present.
 
 ## Step 2: Classify Each Experience
 
@@ -59,7 +59,7 @@ A memory qualifies for `lesson-extracted` **only if all are true**:
 
 If any criterion fails:
 - Do **not** add `lesson-extracted`.
-- You may still integrate useful facts into technical/procedural memories.
+- You may still integrate useful facts into existing technical/procedural memories. Do not create new procedural memories; reusable workflows belong in skills.
 - For pure summaries/digests/documentation, treat as reference material, not lessons.
 
 ### Negative Examples (Not Lessons)
@@ -78,12 +78,12 @@ search_memories(query="<the topic/module/system this lesson is about>", limit=10
 
 Look for:
 - Technical memories about the relevant file, module, or system
-- Procedural memories about the relevant workflow or process
+- Existing procedural memories about the relevant workflow or process (legacy/read-only target for updates only)
 - Any memory whose scope covers this lesson's domain
 
 **If a matching memory exists**: Update it with the new knowledge using `update_memory`. Append the insight to the existing content — don't rewrite the whole thing, just add what's new.
 
-**If no matching memory exists**: This reveals a genuine knowledge gap. Create ONE technical or procedural memory scoped to the right level (file, module, or system). Include the lesson as part of its content, not as a standalone "Lesson:" entry.
+**If no matching memory exists**: This reveals a genuine knowledge gap. Create ONE technical or experience memory scoped to the right level (file, module, system, or work session). Include the lesson as part of its content, not as a standalone "Lesson:" entry. If the gap is a reusable workflow, update/create a skill through the built-in skill workflow instead of creating a procedural memory.
 
 **For correction-tagged memories**: When integrating a correction, note the correction source in the updated memory. User corrections (tagged `correction`): note "Corrected by user feedback" with date. Self-corrections (tagged `self-correction`): note "Self-corrected" with date. This creates traceable lineage from correction event to knowledge update.
 
@@ -134,6 +134,7 @@ Skipped: J routine experiences
 ## Anti-Patterns
 
 - **Creating standalone "Lesson:" memories** — lessons should be integrated into the memory they're about, not floating independently
+- **Creating new procedural memories** — procedural memories are legacy; reusable procedures belong in skills
 - **Creating "Learning Extraction Run" summary memories** — the output goes to text, not to memory
 - **Extracting from a single occurrence** — wait for 2+ confirming instances before treating something as a pattern
 - **Writing lessons too vaguely to be actionable** — "be careful with X" is not a lesson

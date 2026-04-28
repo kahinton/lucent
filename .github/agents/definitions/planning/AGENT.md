@@ -123,17 +123,12 @@ the repo declares.
 
 ### 5. Record the Plan
 
-Follow the **memory-capture** skill:
-
-```
-create_memory(
-  type="procedural",
-  content="## Plan: <goal>\n\n**Objective**: <what we're achieving>\n**Request ID**: <id>\n**Tasks**: <ordered list with agent types>\n**Dependencies**: <which tasks block which>\n**Success criteria**: <how we know the goal is met>",
-  tags=["daemon", "planning", "<initiative>"],
-  importance=7,
-  shared=true
-)
-```
+Record the plan in the request/task tree and task events. Do **not** create a
+procedural memory for plans — procedural memories are legacy storage and skills
+are the canonical home for reusable workflows. If planning reveals a durable
+technical decision, update the relevant technical memory; if it reveals a
+reusable planning procedure, propose or update a skill through the built-in
+skill workflow.
 
 ## Decision Framework
 

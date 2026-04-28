@@ -286,7 +286,7 @@ Every memory update is versioned. Use `get_memory_versions` to browse history an
 
 ```
 Arguments:
-- type (required): experience | technical | procedural | goal
+- type (required): experience | technical | goal (`procedural` is legacy/read-only; use skills for reusable workflows)
 - content (required): Main content of the memory
 - username: Owner username (defaults to authenticated user)
 - tags: List of categorization tags

@@ -171,10 +171,10 @@ class TestCreateMemory:
         assert resp.status_code == 201
         assert resp.json()["type"] == "technical"
 
-    async def test_create_procedural(self, mem_client, mem_prefix):
+    async def test_create_procedural_rejected_as_deprecated(self, mem_client, mem_prefix):
         resp = await _create_memory(mem_client, mem_prefix, type="procedural")
-        assert resp.status_code == 201
-        assert resp.json()["type"] == "procedural"
+        assert resp.status_code == 400
+        assert "deprecated" in resp.json()["detail"].lower()
 
     async def test_create_goal(self, mem_client, mem_prefix):
         resp = await _create_memory(mem_client, mem_prefix, type="goal")

@@ -32,6 +32,15 @@ from lucent.services.memory_access_service import MemoryAccessService
 
 logger = get_logger("tools.memories")
 
+DEPRECATED_CREATE_TYPES = {MemoryType.PROCEDURAL}
+DEPRECATED_CREATE_TYPE_MESSAGES = {
+    MemoryType.PROCEDURAL: (
+        "Procedural memories are deprecated and can no longer be created. "
+        "Use skills for reusable procedures/workflows, or technical/experience "
+        "memories for durable knowledge and outcomes."
+    ),
+}
+
 
 def _error_response(message: str) -> str:
     """Create a consistent JSON error response for MCP tools.
@@ -257,6 +266,9 @@ Returns:
             # Validate input
             memory_type = MemoryType(type)
 
+            if memory_type in DEPRECATED_CREATE_TYPES:
+                return _error_response(DEPRECATED_CREATE_TYPE_MESSAGES[memory_type])
+
             # Individual memories cannot be created via MCP
             # - they are auto-created when users are added
             if memory_type == MemoryType.INDIVIDUAL:
@@ -314,7 +326,9 @@ Returns:
             )
 
             # Type-based default sharing:
-            # - technical/procedural: shared by default (org knowledge)
+            # - technical: shared by default (org knowledge)
+            # - procedural: legacy/read-only for new public creates; retained here
+            #   for compatibility with existing records/internal maintenance
             # - experience: private by default (personal work log)
             # - goal: shared with Lucent (working contract), respects explicit shared param
             # - individual: always private (handled separately, can't be created via MCP)
@@ -1212,6 +1226,7 @@ Returns:
                 limit=min(limit, 100),
                 requesting_user_id=user_id,
                 requesting_org_id=org_id,
+                memory_scope=memory_scope,
             )
 
             return json.dumps(
@@ -1260,6 +1275,7 @@ Returns:
                 limit=min(limit, 25),
                 requesting_user_id=user_id,
                 requesting_org_id=org_id,
+                memory_scope=memory_scope,
             )
 
             return json.dumps(

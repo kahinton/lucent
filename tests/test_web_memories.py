@@ -14,6 +14,8 @@ Tests the HTML-serving memory endpoints:
 Uses real DB sessions + CSRF tokens through the full ASGI stack.
 """
 
+import json
+import re
 from uuid import uuid4
 
 import httpx
@@ -260,10 +262,25 @@ class TestKnowledgeTree:
         root_memory = await repo.create(
             username=f"{web_prefix}User",
             type="technical",
-            content=f"{web_prefix}Repo-level architecture memory",
-            tags=["knowledge-tree", "repo-root"],
+            content=(
+                f"{web_prefix}Project environment assessment\n\n"
+                "## Source Layout\nsrc/lucent contains the app.\n"
+                "## Build/test\nRun pytest and ruff before shipping."
+            ),
+            tags=["knowledge-tree", "repo-root", "environment", "codebase"],
             importance=8,
-            metadata={"repo": "org/root-visible"},
+            metadata={"repo": "org/root-visible", "category": "architecture"},
+            user_id=user["id"],
+            organization_id=org["id"],
+            shared=True,
+        )
+        audit_memory = await repo.create(
+            username=f"{web_prefix}User",
+            type="technical",
+            content=f"{web_prefix}One-off audit result, needs review",
+            tags=["knowledge-tree", "needs-review", "research"],
+            importance=9,
+            metadata={"repo": "org/root-visible", "category": "research"},
             user_id=user["id"],
             organization_id=org["id"],
             shared=True,
@@ -297,7 +314,11 @@ class TestKnowledgeTree:
         assert resp.status_code == 200
         assert "org/root-visible" in resp.text
         assert str(root_memory["id"]) in resp.text
-        assert f"{web_prefix}Repo-level architecture memory" in resp.text
+        assert str(audit_memory["id"]) not in resp.text
+        match = re.search(r"const treeData = (.*?);\n", resp.text, re.S)
+        assert match is not None
+        tree = json.loads(match.group(1))
+        assert tree["org/root-visible"]["memory"]["id"] == str(root_memory["id"])
         # Parent nodes keep immediate row-click expand/collapse, while the
         # explicit info badge exposes the root memory details.
         assert "showNodeDetail(n);" in resp.text
@@ -362,6 +383,21 @@ class TestMemoryNewSubmit:
             follow_redirects=False,
         )
         assert resp.status_code == 400
+
+    async def test_create_procedural_returns_400(self, client):
+        resp = await client.post(
+            "/memories/new",
+            data=_csrf_data(
+                client,
+                {
+                    "type": "procedural",
+                    "content": "Should not work",
+                },
+            ),
+            follow_redirects=False,
+        )
+        assert resp.status_code == 400
+        assert "deprecated" in resp.text.lower()
 
     async def test_create_missing_csrf_fails(self, client):
         resp = await client.post(

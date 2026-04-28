@@ -432,16 +432,18 @@ async def dashboard(request: Request):
         except Exception:
             proposed_sandbox_templates = []
 
-    daemon_heartbeat = await memory_access.search(
-        user_id=user.id,
-        tags=["daemon-heartbeat"],
-        limit=1,
-        requesting_user_id=user.id,
-        requesting_org_id=user.organization_id,
-    )
-    heartbeat_memory = (
-        daemon_heartbeat.get("memories", [])[0] if daemon_heartbeat.get("memories") else None
-    )
+    heartbeat_row = None
+    if user.organization_id:
+        async with pool.acquire() as conn:
+            heartbeat_row = await conn.fetchrow(
+                """SELECT instance_id, hostname, pid, roles, status,
+                          last_seen_at, metadata
+                   FROM daemon_instances
+                   WHERE organization_id = $1::uuid
+                   ORDER BY last_seen_at DESC
+                   LIMIT 1""",
+                user.organization_id,
+            )
 
     daemon_state = await memory_access.search(
         user_id=user.id,
@@ -454,19 +456,20 @@ async def dashboard(request: Request):
 
     heartbeat_data = {}
     heartbeat_timestamp = None
-    if heartbeat_memory:
-        try:
-            heartbeat_data = json.loads(heartbeat_memory.get("content") or "{}")
-        except (TypeError, ValueError):
-            heartbeat_data = {}
-        raw_ts = heartbeat_data.get("timestamp")
-        if isinstance(raw_ts, str):
-            try:
-                heartbeat_timestamp = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
-                if heartbeat_timestamp.tzinfo is None:
-                    heartbeat_timestamp = heartbeat_timestamp.replace(tzinfo=timezone.utc)
-            except ValueError:
-                heartbeat_timestamp = None
+    if heartbeat_row:
+        heartbeat_data = _metadata_dict(heartbeat_row["metadata"])
+        heartbeat_data.update(
+            {
+                "instance_id": heartbeat_row["instance_id"],
+                "hostname": heartbeat_row["hostname"],
+                "pid": heartbeat_row["pid"],
+                "roles": heartbeat_row["roles"],
+                "status": heartbeat_row["status"],
+            }
+        )
+        heartbeat_timestamp = heartbeat_row["last_seen_at"]
+        if heartbeat_timestamp and heartbeat_timestamp.tzinfo is None:
+            heartbeat_timestamp = heartbeat_timestamp.replace(tzinfo=timezone.utc)
 
     status_level = "offline"
     status_label = "Offline"
