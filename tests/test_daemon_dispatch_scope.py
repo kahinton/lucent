@@ -11,6 +11,7 @@ from daemon.daemon import (
     MEMORY_CONSOLIDATION_PROMPT,
     REQUEST_REVIEW_TASK_TITLE,
     _get_required_memory_scope,
+    _task_requires_mcp_tool_usage,
 )
 
 
@@ -71,3 +72,34 @@ class TestMemoryConsolidationPrompt:
         assert "background workers, services" in MEMORY_CONSOLIDATION_PROMPT
         assert "NEVER create a memory maintenance log" in MEMORY_CONSOLIDATION_PROMPT
         assert "heartbeat/state records" in MEMORY_CONSOLIDATION_PROMPT
+
+
+class TestRequiredToolUsage:
+    def test_memory_agent_requires_mcp_tool_usage_for_mutating_work(self):
+        assert _task_requires_mcp_tool_usage("memory", "Soft-delete retired memories") is True
+
+    def test_memory_agent_does_not_require_mcp_tool_usage_for_lightweight_work(self):
+        assert _task_requires_mcp_tool_usage("memory", "Tag memories") is False
+
+    def test_request_review_does_not_require_mcp_tool_usage(self):
+        assert (
+            _task_requires_mcp_tool_usage(
+                "request-review",
+                "Post-completion review",
+                "Verify memories were updated with get_memory if needed.",
+            )
+            is False
+        )
+
+    def test_explicit_tool_instruction_requires_mcp_tool_usage(self):
+        assert (
+            _task_requires_mcp_tool_usage(
+                "research",
+                "Verify state",
+                "You must call an MCP tool before answering.",
+            )
+            is True
+        )
+
+    def test_plain_research_task_does_not_require_mcp_tool_usage(self):
+        assert _task_requires_mcp_tool_usage("research", "Summarize sibling results") is False

@@ -344,6 +344,7 @@ class LangChainEngine(LLMEngine):
                 return MCPToolBridge(
                     mcp_url=server_conf["url"],
                     headers=server_conf.get("headers"),
+                    allowed_tools=server_conf.get("tools"),
                 )
         return None
 

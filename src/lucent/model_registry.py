@@ -411,6 +411,7 @@ def get_default_model_id(
     models: list[ModelInfo] | None = None,
     *,
     preferred_model: str | None = None,
+    require_tools: bool = False,
 ) -> str:
     """Return the default enabled model for general work.
 
@@ -420,10 +421,13 @@ def get_default_model_id(
     model choice opt-in and cost-conscious.
     """
     available = _available_models(models)
+    if require_tools:
+        available = [m for m in available if m.supports_tools]
     if not available:
         # No enabled DB models. Return a known general-purpose static model so
         # downstream validation can emit the clearer "disabled/no models" error.
-        return _first_model_id(MODELS, category="general") or MODELS[0].id
+        fallback_models = [m for m in MODELS if not require_tools or m.supports_tools]
+        return _first_model_id(fallback_models, category="general") or fallback_models[0].id
 
     available_by_id = {m.id: m for m in available}
     for candidate in (
@@ -450,9 +454,6 @@ def _infer_task_category(
     agent = (agent_type or "").strip().lower()
     text = f"{title or ''} {description or ''}".lower()
 
-    if agent in {"fast", "memory"}:
-        return "fast", "lightweight/memory work benefits from a faster cheaper model"
-
     agentic_signals = (
         "multi-file",
         "repo-wide",
@@ -476,6 +477,30 @@ def _infer_task_category(
         "cross-reference",
         "investigate",
     )
+    high_risk_memory_signals = (
+        "create_memory",
+        "update_memory",
+        "delete_memory",
+        "soft-delete",
+        "delete",
+        "consolidat",
+        "deduplicat",
+        "merge",
+        "migrat",
+        "retire",
+        "retirement",
+        "transfer",
+        "verify",
+        "vitality",
+        "forget",
+        "curate",
+    )
+
+    if agent == "memory" and any(signal in text for signal in high_risk_memory_signals):
+        return "reasoning", "memory task mutates or verifies durable state"
+
+    if agent in {"fast", "memory"}:
+        return "fast", "lightweight/memory work benefits from a faster cheaper model"
 
     if agent == "code" and any(signal in text for signal in agentic_signals):
         return "agentic", "code task has sustained multi-step execution signals"
@@ -499,6 +524,7 @@ def select_model_for_task(
     preferred_default: str | None = None,
     models: list[ModelInfo] | None = None,
     require_vision: bool = False,
+    require_tools: bool = False,
 ) -> ModelSelection:
     """Choose an enabled model for a task using generic capabilities.
 
@@ -507,14 +533,21 @@ def select_model_for_task(
     IDs into planners while still allowing cheap fast models and high-capability
     models where they are justified.
     """
-    available = _available_models(models)
+    all_available = _available_models(models)
+    available = all_available
+    if require_tools:
+        available = [m for m in available if m.supports_tools]
     if require_vision:
         vision_models = [m for m in available if m.supports_vision]
         if vision_models:
             available = vision_models
 
     if explicit_model and any(m.id == explicit_model for m in available):
-        default_id = get_default_model_id(available, preferred_model=preferred_default)
+        default_id = get_default_model_id(
+            available,
+            preferred_model=preferred_default,
+            require_tools=require_tools,
+        )
         return ModelSelection(
             model_id=explicit_model,
             reason="explicit model was provided and is enabled",
@@ -523,7 +556,30 @@ def select_model_for_task(
             alternatives=[m.id for m in available if m.id != explicit_model][:5],
         )
 
-    default_id = get_default_model_id(available, preferred_model=preferred_default)
+    default_id = get_default_model_id(
+        available if available else None,
+        preferred_model=preferred_default,
+        require_tools=require_tools,
+    )
+    if explicit_model and any(m.id == explicit_model for m in all_available):
+        missing = []
+        explicit_info = next(m for m in all_available if m.id == explicit_model)
+        if require_tools and not explicit_info.supports_tools:
+            missing.append("tool/function calling")
+        if require_vision and not explicit_info.supports_vision:
+            missing.append("vision")
+        if missing:
+            return ModelSelection(
+                model_id=default_id,
+                reason=(
+                    f"Explicit model '{explicit_model}' lacks required "
+                    f"capability: {', '.join(missing)}. Using default capable model."
+                ),
+                source="fallback",
+                default_model_id=default_id,
+                alternatives=[m.id for m in available if m.id != default_id][:5],
+            )
+
     category, category_reason = _infer_task_category(
         agent_type=agent_type,
         title=title,
@@ -573,7 +629,7 @@ def select_model_for_task(
     )
 
 
-def validate_model(model_id: str) -> str | None:
+def validate_model(model_id: str, *, require_tools: bool = False) -> str | None:
     """Validate a model selection. Returns an error message, or None if valid.
 
     Checks that the model ID exists in the registry (DB-loaded or hardcoded)
@@ -589,6 +645,11 @@ def validate_model(model_id: str) -> str | None:
         if model_id in _db_model_by_id:
             if model_id not in _db_enabled_ids:
                 return f"Model '{model_id}' is disabled by admin. Choose an enabled model."
+            if require_tools and not _db_model_by_id[model_id].supports_tools:
+                return (
+                    f"Model '{model_id}' does not support tool/function calling. "
+                    "Daemon tasks require a tool-capable model."
+                )
             return None  # Known and enabled
         # Model not found in DB registry
         if strict:
@@ -604,6 +665,11 @@ def validate_model(model_id: str) -> str | None:
     if model_id in _MODEL_BY_ID:
         if not _MODEL_BY_ID[model_id].enabled:
             return f"Model '{model_id}' is disabled. Choose an enabled model."
+        if require_tools and not _MODEL_BY_ID[model_id].supports_tools:
+            return (
+                f"Model '{model_id}' does not support tool/function calling. "
+                "Daemon tasks require a tool-capable model."
+            )
         return None  # Known and enabled
 
     if strict:

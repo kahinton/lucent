@@ -244,7 +244,7 @@ if the agent type is not approved or the sandbox template is invalid."""
         if model:
             from lucent.model_registry import validate_model
 
-            error = validate_model(model)
+            error = validate_model(model, require_tools=True)
             if error:
                 return json.dumps({"error": error})
 
@@ -918,7 +918,9 @@ provided, the recommended model plus a selection reason."""
             "guidance": (
                 "Use the default_model unless the task has a clear need for a "
                 "specialized category such as fast, reasoning, agentic, or visual. "
-                "Only choose from enabled models in this list."
+                "Daemon-dispatched tasks require tool-capable models, because "
+                "agents receive MCP tools for memory/request operations. Only "
+                "choose from enabled models in this list."
             ),
             "models": [
                 {
@@ -936,7 +938,11 @@ provided, the recommended model plus a selection reason."""
             ]
         }
         if agent_type:
-            selection = select_model_for_task(agent_type=agent_type, models=models or None)
+            selection = select_model_for_task(
+                agent_type=agent_type,
+                models=models or None,
+                require_tools=True,
+            )
             result["recommended"] = selection.model_id
             result["recommendation"] = {
                 "model": selection.model_id,

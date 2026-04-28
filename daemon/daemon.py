@@ -34,6 +34,8 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 if TYPE_CHECKING:
+    import asyncpg
+
     from lucent.sandbox.models import SandboxConfig
 
 # ---------------------------------------------------------------------------
@@ -576,11 +578,51 @@ def _select_model_for_task(
             title=title,
             description=description,
             preferred_default=MODEL or None,
+            require_tools=True,
         )
         return selection.model_id, selection.reason
     except Exception as exc:
         fallback = _resolve_default_model()
         return fallback, f"model selector unavailable ({exc}); using default"
+
+
+def _task_requires_mcp_tool_usage(
+    agent_type: str | None,
+    title: str | None = None,
+    description: str | None = None,
+) -> bool:
+    """Return True when a successful task must have used at least one MCP tool."""
+    agent = (agent_type or "").strip().lower()
+    text = f"{title or ''} {description or ''}".lower()
+    if agent == "request-review":
+        return False
+    mutating_memory_signals = (
+        "create_memory",
+        "update_memory",
+        "delete_memory",
+        "soft-delete",
+        "delete retired",
+        "consolidat",
+        "deduplicat",
+        "merge duplicate",
+        "retire",
+        "retirement",
+        "transfer durable",
+        "curate",
+    )
+    if agent == "memory":
+        return any(signal in text for signal in mutating_memory_signals)
+
+    tool_required_signals = (
+        "create_memory",
+        "update_memory",
+        "delete_memory",
+        "create_task",
+        "create_request",
+        "must call an mcp tool",
+        "must use memory tools",
+    )
+    return any(signal in text for signal in tool_required_signals)
 
 # Database URL for direct key provisioning.
 # Prefers DAEMON_DATABASE_URL (restricted lucent_daemon role) over DATABASE_URL
@@ -866,7 +908,7 @@ async def _mint_scoped_api_key(
         scope_suffix = memory_scope_user_id[:8] if memory_scope_user_id else "shared"
         key_name = f"scoped-{memory_scope}-{scope_suffix}-{secrets.token_hex(4)}"
 
-        row = await conn.fetchrow(
+        await conn.fetchrow(
             "INSERT INTO api_keys "
             "(user_id, organization_id, name, key_prefix, key_hash, scopes, "
             " expires_at, memory_scope, memory_scope_user_id) "
@@ -4613,6 +4655,22 @@ class LucentDaemon:
                 except Exception as e:
                     log(f"Sandbox cleanup failed for {sandbox_id[:12]}: {e}", "WARN")
 
+            if _task_requires_mcp_tool_usage(agent_type, title, description) and not mcp_tracker:
+                reason = (
+                    f"{agent_type} task completed without any MCP tool calls. "
+                    "Tool-dependent tasks must perform real tool operations, not "
+                    "narrate intended changes."
+                )
+                log(f"Tracked task {task_id[:8]} failed: {reason}", "WARN")
+                await RequestAPI.add_event(
+                    task_id,
+                    "missing_required_tool_usage",
+                    reason,
+                    {"agent_type": agent_type, "model": selected_model},
+                )
+                await _fail_owned(task_id, reason)
+                continue
+
             # Validate
             success, reason = self._validate_task_result(result, task=task, tool_counts=tool_counts)
 
@@ -4743,7 +4801,6 @@ class LucentDaemon:
                     BackendCredentialEncryptor,
                     EncryptionError,
                 )
-                from uuid import UUID
 
                 pool = await get_pool()
 
@@ -4943,8 +5000,8 @@ class LucentDaemon:
             # Format the context
             parts = [
                 f"--- TECHNICAL CONTEXT ({target_repo}) ---",
-                f"The following technical memories describe the codebase conventions and patterns for this repository.",
-                f"Follow these conventions in your work. These represent the established standards.\n",
+                "The following technical memories describe the codebase conventions and patterns for this repository.",
+                "Follow these conventions in your work. These represent the established standards.\n",
             ]
 
             for mem in relevant:
@@ -5464,7 +5521,7 @@ class LucentDaemon:
             await RequestAPI.add_event(
                 str(task["id"]),
                 "request_review_approved",
-                f"Internal review: APPROVED. Auto-completing request.",
+                "Internal review: APPROVED. Auto-completing request.",
                 {
                     "recommendation": decision,
                     "feedback": feedback[:1500],
@@ -5479,7 +5536,7 @@ class LucentDaemon:
         await RequestAPI.add_event(
             str(task["id"]),
             "request_review_needs_rework",
-            f"Internal review: NEEDS_REWORK. Sending back for revision.",
+            "Internal review: NEEDS_REWORK. Sending back for revision.",
             {
                 "recommendation": decision,
                 "feedback": feedback[:1500],

@@ -454,7 +454,7 @@ async def create_task(
     if body.model:
         from lucent.model_registry import validate_model
 
-        error = validate_model(body.model)
+        error = validate_model(body.model, require_tools=True)
         if error:
             raise HTTPException(422, error)
 
@@ -615,7 +615,7 @@ async def edit_pending_task(
     if body.model:
         from lucent.model_registry import validate_model
 
-        error = validate_model(body.model)
+        error = validate_model(body.model, require_tools=True)
         if error:
             raise HTTPException(422, error)
 

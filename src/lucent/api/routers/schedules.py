@@ -303,7 +303,7 @@ async def trigger_now(
         if task_model:
             from lucent.model_registry import validate_model
 
-            model_error = validate_model(task_model)
+            model_error = validate_model(task_model, require_tools=True)
             if model_error:
                 logger.warning(
                     "Schedule %s has invalid model '%s': %s — clearing override",

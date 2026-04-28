@@ -370,6 +370,102 @@ class TestModelRegistry:
         assert selection.model_id == "cheap-fast"
         assert selection.source == "specialized"
 
+    def test_task_selection_filters_non_tool_models_when_required(self, monkeypatch):
+        from lucent import model_registry
+        from lucent.model_registry import ModelInfo, select_model_for_task
+
+        models = [
+            ModelInfo(
+                id="cheap-fast-no-tools",
+                provider="ollama",
+                name="Cheap",
+                category="fast",
+                supports_tools=False,
+            ),
+            ModelInfo(id="tool-default", provider="x", name="Tool", category="general"),
+        ]
+        monkeypatch.setattr(model_registry, "_db_models", models)
+        monkeypatch.setattr(model_registry, "_db_enabled_ids", {m.id for m in models})
+        monkeypatch.setattr(model_registry, "_MODEL_BY_ID", {m.id: m for m in models})
+
+        selection = select_model_for_task(
+            agent_type="memory",
+            title="Tag memories",
+            require_tools=True,
+        )
+
+        assert selection.model_id == "tool-default"
+
+    def test_task_selection_does_not_honor_explicit_non_tool_model_for_tool_task(self, monkeypatch):
+        from lucent import model_registry
+        from lucent.model_registry import ModelInfo, select_model_for_task
+
+        models = [
+            ModelInfo(
+                id="local-text-only",
+                provider="ollama",
+                name="Text Only",
+                category="fast",
+                supports_tools=False,
+            ),
+            ModelInfo(id="tool-default", provider="x", name="Tool", category="general"),
+        ]
+        monkeypatch.setattr(model_registry, "_db_models", models)
+        monkeypatch.setattr(model_registry, "_db_enabled_ids", {m.id for m in models})
+        monkeypatch.setattr(model_registry, "_MODEL_BY_ID", {m.id: m for m in models})
+
+        selection = select_model_for_task(
+            agent_type="memory",
+            title="Tag memories",
+            explicit_model="local-text-only",
+            require_tools=True,
+        )
+
+        assert selection.model_id == "tool-default"
+        assert "lacks required capability" in selection.reason
+
+    def test_high_risk_memory_task_prefers_reasoning_over_fast(self, monkeypatch):
+        from lucent import model_registry
+        from lucent.model_registry import ModelInfo, select_model_for_task
+
+        models = [
+            ModelInfo(id="balanced-default", provider="x", name="Balanced", category="general"),
+            ModelInfo(id="cheap-fast", provider="x", name="Cheap", category="fast"),
+            ModelInfo(id="deep-reasoner", provider="x", name="Deep", category="reasoning"),
+        ]
+        monkeypatch.setattr(model_registry, "_db_models", models)
+        monkeypatch.setattr(model_registry, "_db_enabled_ids", {m.id for m in models})
+        monkeypatch.setattr(model_registry, "_MODEL_BY_ID", {m.id: m for m in models})
+
+        selection = select_model_for_task(
+            agent_type="memory",
+            title="Soft-delete retired memories and verify zero active records",
+            require_tools=True,
+        )
+
+        assert selection.model_id == "deep-reasoner"
+        assert selection.requested_category == "reasoning"
+
+    def test_validate_model_can_require_tools(self, monkeypatch):
+        from lucent import model_registry
+        from lucent.model_registry import ModelInfo, validate_model
+
+        m = ModelInfo(
+            id="text-only",
+            provider="ollama",
+            name="Text Only",
+            category="general",
+            supports_tools=False,
+        )
+        monkeypatch.setattr(model_registry, "_db_models", [m])
+        monkeypatch.setattr(model_registry, "_db_model_by_id", {m.id: m})
+        monkeypatch.setattr(model_registry, "_db_enabled_ids", {m.id})
+
+        assert validate_model("text-only") is None
+        error = validate_model("text-only", require_tools=True)
+        assert error is not None
+        assert "does not support tool" in error
+
     @pytest.mark.asyncio
     async def test_db_load_keeps_null_engine_for_existing_models(self, monkeypatch):
         from lucent import model_registry

@@ -115,6 +115,13 @@ def _is_generation_model(model_id: str) -> bool:
     return not any(part in lowered for part in excluded)
 
 
+def _env_flag(name: str, *, default: bool = True) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
 class ModelDiscoveryService:
     """Discovers models from configured providers and syncs them to the DB."""
 
@@ -252,6 +259,77 @@ class ModelDiscoveryService:
             resp = await client.post(url, json=json or {})
             resp.raise_for_status()
             return resp.json()
+
+    async def _probe_ollama_tool_support(
+        self,
+        api_base: str,
+        model_id: str,
+    ) -> dict[str, Any]:
+        """Probe whether Ollama returns structured ``message.tool_calls``.
+
+        Some local models advertise a ``tools`` capability because their template
+        accepts tool schemas, but they still emit JSON as plain assistant text.
+        LangChain cannot execute those as tools. The daemon needs actual
+        structured tool calls, so discovery verifies the end-to-end API shape.
+        """
+        payload = {
+            "model": model_id,
+            "stream": False,
+            "think": False,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": (
+                        "Call the lucent_probe_tool for Paris. Return only the tool call."
+                    ),
+                }
+            ],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "lucent_probe_tool",
+                        "description": "Probe function-calling support.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                            "required": ["city"],
+                        },
+                    },
+                }
+            ],
+            "options": {"temperature": 0, "num_predict": 256},
+        }
+        try:
+            async with httpx.AsyncClient(timeout=max(self.timeout, 45.0)) as client:
+                resp = await client.post(f"{api_base}/chat", json=payload)
+                resp.raise_for_status()
+                data = resp.json()
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error": str(exc),
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+            }
+
+        message = data.get("message") if isinstance(data, dict) else {}
+        tool_calls = message.get("tool_calls") if isinstance(message, dict) else None
+        ok = False
+        if isinstance(tool_calls, list):
+            ok = any(
+                isinstance(call, dict)
+                and isinstance(call.get("function"), dict)
+                and call["function"].get("name") == "lucent_probe_tool"
+                for call in tool_calls
+            )
+        return {
+            "ok": ok,
+            "tool_call_count": len(tool_calls) if isinstance(tool_calls, list) else 0,
+            "content_excerpt": str((message or {}).get("content") or "")[:200]
+            if isinstance(message, dict)
+            else "",
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+        }
 
     async def _discover_openai(self) -> list[DiscoveredModel]:
         api_key = os.environ.get("OPENAI_API_KEY", "")
@@ -420,9 +498,21 @@ class ModelDiscoveryService:
             )
             capabilities = show.get("capabilities") or []
             supports_vision = "vision" in capabilities or "llava" in model_id.lower()
+            supports_tools = "tools" in capabilities
+            tool_probe: dict[str, Any] | None = None
+            if supports_tools and _env_flag("LUCENT_OLLAMA_TOOL_PROBE", default=True):
+                tool_probe = await self._probe_ollama_tool_support(api_base, model_id)
+                supports_tools = bool(tool_probe.get("ok"))
             tags = _infer_tags(model_id, category, local=True)
             if details.get("parameter_size"):
                 tags.append(str(details["parameter_size"]).lower())
+            if supports_tools:
+                tags.append("tools")
+            notes = "Discovered from local Ollama server."
+            if "tools" in capabilities and not supports_tools:
+                notes += " Tool capability was advertised but structured tool-call probe failed."
+            elif not supports_tools:
+                notes += " Ollama reports no structured tool-call support."
             models.append(
                 DiscoveredModel(
                     id=model_id,
@@ -431,12 +521,16 @@ class ModelDiscoveryService:
                     category=category,
                     api_model_id=model_id,
                     context_window=context_window,
-                    supports_tools=True,
+                    supports_tools=supports_tools,
                     supports_vision=supports_vision,
-                    notes="Discovered from local Ollama server.",
+                    notes=notes,
                     tags=sorted(set(tags)),
                     engine="langchain",
-                    discovery_metadata={"tags_row": dict(row), "show": show},
+                    discovery_metadata={
+                        "tags_row": dict(row),
+                        "show": show,
+                        "tool_probe": tool_probe,
+                    },
                 )
             )
         return models

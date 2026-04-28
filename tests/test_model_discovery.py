@@ -66,6 +66,97 @@ async def test_google_discovery_filters_generate_content(db_pool, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_ollama_discovery_marks_models_without_tool_capability_false(db_pool, monkeypatch):
+    monkeypatch.setenv("OLLAMA_HOST", "http://localhost:11434")
+    service = ModelDiscoveryService(db_pool)
+
+    async def fake_get_json(url, **_kwargs):
+        assert url.endswith("/tags")
+        return {
+            "models": [
+                {
+                    "model": "gemma3:4b",
+                    "details": {"parameter_size": "4B"},
+                }
+            ]
+        }
+
+    async def fake_post_json(url, *, json=None, **_kwargs):
+        assert url.endswith("/show")
+        assert json == {"model": "gemma3:4b"}
+        return {"capabilities": ["completion", "vision"], "model_info": {}}
+
+    monkeypatch.setattr(service, "_get_json", fake_get_json)
+    monkeypatch.setattr(service, "_post_json", fake_post_json)
+
+    models = await service._discover_ollama()
+
+    assert models[0].id == "gemma3:4b"
+    assert models[0].supports_tools is False
+    assert "no structured tool-call support" in models[0].notes
+
+
+@pytest.mark.asyncio
+async def test_ollama_discovery_uses_structured_tool_probe(db_pool, monkeypatch):
+    monkeypatch.setenv("OLLAMA_HOST", "http://localhost:11434")
+    service = ModelDiscoveryService(db_pool)
+
+    async def fake_get_json(url, **_kwargs):
+        assert url.endswith("/tags")
+        return {"models": [{"model": "qwen3:4b", "details": {}}]}
+
+    async def fake_post_json(url, *, json=None, **_kwargs):
+        assert url.endswith("/show")
+        assert json == {"model": "qwen3:4b"}
+        return {"capabilities": ["completion", "tools"], "model_info": {}}
+
+    async def fake_probe(api_base, model_id):
+        assert api_base == "http://localhost:11434/api"
+        assert model_id == "qwen3:4b"
+        return {"ok": True, "tool_call_count": 1}
+
+    monkeypatch.setattr(service, "_get_json", fake_get_json)
+    monkeypatch.setattr(service, "_post_json", fake_post_json)
+    monkeypatch.setattr(service, "_probe_ollama_tool_support", fake_probe)
+
+    models = await service._discover_ollama()
+
+    assert models[0].supports_tools is True
+    assert "tools" in models[0].tags
+    assert models[0].discovery_metadata["tool_probe"] == {"ok": True, "tool_call_count": 1}
+
+
+@pytest.mark.asyncio
+async def test_ollama_discovery_distrusts_advertised_tools_when_probe_fails(
+    db_pool,
+    monkeypatch,
+):
+    monkeypatch.setenv("OLLAMA_HOST", "http://localhost:11434")
+    service = ModelDiscoveryService(db_pool)
+
+    async def fake_get_json(url, **_kwargs):
+        assert url.endswith("/tags")
+        return {"models": [{"model": "qwen2.5-coder:3b", "details": {}}]}
+
+    async def fake_post_json(url, *, json=None, **_kwargs):
+        assert url.endswith("/show")
+        assert json == {"model": "qwen2.5-coder:3b"}
+        return {"capabilities": ["completion", "tools"], "model_info": {}}
+
+    async def fake_probe(_api_base, _model_id):
+        return {"ok": False, "tool_call_count": 0, "content_excerpt": "```json"}
+
+    monkeypatch.setattr(service, "_get_json", fake_get_json)
+    monkeypatch.setattr(service, "_post_json", fake_post_json)
+    monkeypatch.setattr(service, "_probe_ollama_tool_support", fake_probe)
+
+    models = await service._discover_ollama()
+
+    assert models[0].supports_tools is False
+    assert "advertised but structured tool-call probe failed" in models[0].notes
+
+
+@pytest.mark.asyncio
 async def test_sync_inserts_provider_model(db_pool, discovery_prefix):
     from lucent.db.models import ModelRepository
 
