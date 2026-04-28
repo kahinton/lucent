@@ -110,7 +110,6 @@ Every memory should answer three questions:
 |------|---------|
 | `experience` | Things that happened — outcomes, debugging sessions, lessons |
 | `technical` | Code patterns, architecture, solutions, system behavior |
-| `procedural` | **Legacy/read-only. Do not create new procedural memories; reusable procedures belong in skills.** |
 | `goal` | Objectives tracked over time — status updates appended |
 | `individual` | Info about people — preferences, roles, working style |
 
@@ -133,7 +132,6 @@ When creating or updating technical memories, distill the underlying convention 
 | Type | Default `shared` | Rationale |
 |------|------------------|----------|
 | `technical` | `true` (shared) | Org knowledge about code and systems |
-| `procedural` | deprecated | Legacy procedure storage; use skills instead |
 | `experience` | `false` (private) | Personal work log |
 | `goal` | respect caller | Working contract between user and Lucent |
 | `individual` | `false` (always private) | Contact info, preferences — never shared |

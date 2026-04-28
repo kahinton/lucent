@@ -80,7 +80,7 @@ class ProceduralStep(BaseModel):
 
 
 class ProceduralMetadata(BaseModel):
-    """Metadata specific to procedural memories."""
+    """Metadata retained for retired workflow records."""
 
     steps: list[ProceduralStep] = Field(
         default_factory=list, description="Ordered steps to complete the procedure"

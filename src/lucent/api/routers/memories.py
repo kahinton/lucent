@@ -29,15 +29,7 @@ logger = get_logger("api.memories")
 
 
 router = APIRouter()
-
-DEPRECATED_CREATE_TYPES = {"procedural"}
-DEPRECATED_CREATE_TYPE_MESSAGES = {
-    "procedural": (
-        "Procedural memories are deprecated and can no longer be created. "
-        "Use skills for reusable procedures/workflows, or technical/experience "
-        "memories for durable knowledge and outcomes."
-    ),
-}
+CREATABLE_MEMORY_TYPES = ["experience", "technical", "goal"]
 
 
 def _memory_to_response(memory: dict[str, Any]) -> MemoryResponse:
@@ -81,20 +73,6 @@ async def create_memory(
     audit_repo = AuditRepository(pool)
 
     # Validate memory type
-    valid_types = ["experience", "technical", "procedural", "goal", "individual"]
-    if data.type not in valid_types:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid memory type. Must be one of: {', '.join(valid_types)}",
-        )
-
-    if data.type in DEPRECATED_CREATE_TYPES:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=DEPRECATED_CREATE_TYPE_MESSAGES[data.type],
-        )
-
-    # Individual memories cannot be created via API - they are auto-created when users are added
     if data.type == "individual":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -103,6 +81,12 @@ async def create_memory(
                 " They are automatically created when users are"
                 " added to the system."
             ),
+        )
+
+    if data.type not in CREATABLE_MEMORY_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid memory type. Must be one of: {', '.join(CREATABLE_MEMORY_TYPES)}",
         )
 
     # Validate and normalize metadata for the memory type

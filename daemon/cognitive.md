@@ -99,10 +99,10 @@ dispatch time. Set an explicit `model` only when the task has a concrete need:
 - **Standard research, documentation, code, planning, and review:** use the default model.
 
 **For lightweight state management, use memory tools directly:**
-- **Update state**: search for and update `daemon-state` memory (type: "procedural")
+- **Update state**: search for and update `daemon-state` memory
 - **Send messages**: create memory with tags `daemon-message` and urgency level (type: "experience")
 - **Save insights**: create memory with tags `daemon` and `self-improvement` (type: "experience")
-- **Legacy daemon tasks**: type "procedural", tags `daemon-task` + `pending` + agent type (prefer tracked requests instead)
+- **Tracked work**: use requests/tasks; do not create ad-hoc task memories
 
 **Memory quality bar:**
 - Every created memory must capture genuine insight, decision, or non-obvious outcome.

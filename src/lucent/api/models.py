@@ -17,7 +17,7 @@ class MemoryCreate(BaseModel):
     username: str | None = Field(
         default=None, description="Username for this memory (defaults to authenticated user)"
     )
-    type: str = Field(..., description="Type: experience, technical, procedural, goal, individual")
+    type: str = Field(..., description="Type: experience, technical, goal, individual")
     content: str = Field(..., description="Main content/description of the memory")
     tags: list[str] | None = Field(default=None, description="Tags for categorization")
     importance: int = Field(default=5, ge=1, le=10, description="Importance rating 1-10")
@@ -406,7 +406,7 @@ class ExportResponse(BaseModel):
 class ImportMemory(BaseModel):
     """A single memory in an import request."""
 
-    type: str = Field(..., description="Type: experience, technical, procedural, goal, individual")
+    type: str = Field(..., description="Type: experience, technical, goal, individual")
     content: str = Field(..., min_length=1, description="Main content of the memory")
     username: str | None = Field(
         default=None, description="Original username (defaults to authenticated user)"

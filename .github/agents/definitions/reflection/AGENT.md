@@ -59,8 +59,8 @@ If the task involves processing completed work into lessons, follow the **learni
 ### 3. Propose Changes
 
 Follow the **self-improvement** skill's Steps 3-4 (Determine What to Change + Make the Change):
-- Match the problem type to the right target (agent definition, skill, technical memory, legacy procedural memory, goal)
-- Prefer skills for reusable workflows. Procedural memories are legacy and must not be newly created.
+- Match the problem type to the right target (agent definition, skill, technical memory, goal)
+- Prefer skills for reusable workflows.
 - Read the target file before modifying
 - Make the smallest effective change
 - Write specific, actionable directives — not vague principles

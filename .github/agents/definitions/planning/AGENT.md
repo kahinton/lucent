@@ -123,12 +123,11 @@ the repo declares.
 
 ### 5. Record the Plan
 
-Record the plan in the request/task tree and task events. Do **not** create a
-procedural memory for plans — procedural memories are legacy storage and skills
-are the canonical home for reusable workflows. If planning reveals a durable
-technical decision, update the relevant technical memory; if it reveals a
-reusable planning procedure, propose or update a skill through the built-in
-skill workflow.
+Record the plan in the request/task tree and task events. Do **not** create
+memory entries just to log plans. If planning reveals a durable technical
+decision, update the relevant technical memory; if it reveals a reusable
+planning workflow, propose or update a skill through the built-in skill
+workflow.
 
 ## Decision Framework
 

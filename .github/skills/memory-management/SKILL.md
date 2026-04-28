@@ -29,7 +29,7 @@ If a relevant memory exists, `update_memory` instead of creating a duplicate.
 Memory maintenance may run under a **scoped API key** that restricts access:
 
 - **User scope**: Only this user's memories are visible. Consolidation should only merge and organize within this user's memories.
-- **Org-shared-only scope**: Only shared memories are visible. Consolidation should only merge shared technical or procedural knowledge.
+- **Org-shared-only scope**: Only shared memories are visible. Consolidation should only merge shared technical knowledge.
 
 The system enforces scoping at the database layer — you cannot accidentally access out-of-scope memories. Just work with what your searches return.
 

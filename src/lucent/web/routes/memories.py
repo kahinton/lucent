@@ -20,14 +20,7 @@ from lucent.services.memory_access_service import MemoryAccessService
 from ._shared import _build_metadata_from_form, _check_csrf, get_user_context, templates
 
 CREATABLE_MEMORY_TYPES = ["experience", "technical", "goal"]
-FILTERABLE_MEMORY_TYPES = ["experience", "technical", "procedural", "goal", "individual"]
-DEPRECATED_CREATE_TYPE_MESSAGES = {
-    "procedural": (
-        "Procedural memories are deprecated and can no longer be created. "
-        "Use skills for reusable procedures/workflows, or technical/experience "
-        "memories for durable knowledge and outcomes."
-    ),
-}
+FILTERABLE_MEMORY_TYPES = ["experience", "technical", "goal", "individual"]
 
 
 def _build_memory_access(pool, user) -> MemoryAccessService:
@@ -236,7 +229,7 @@ async def memory_new_submit(
     meta_filename: str = Form(""),
     meta_code_snippet: str = Form(""),
     meta_references: str = Form(""),
-    # Procedural metadata
+    # Legacy structured metadata fields retained for existing forms/data
     meta_estimated_time: str = Form(""),
     meta_success_criteria: str = Form(""),
     meta_prerequisites: str = Form(""),
@@ -286,10 +279,10 @@ async def memory_new_submit(
             ),
         )
 
-    if type in DEPRECATED_CREATE_TYPE_MESSAGES:
+    if type not in CREATABLE_MEMORY_TYPES:
         raise HTTPException(
             status_code=400,
-            detail=DEPRECATED_CREATE_TYPE_MESSAGES[type],
+            detail=f"Invalid memory type. Must be one of: {', '.join(CREATABLE_MEMORY_TYPES)}",
         )
 
     # Build type-specific metadata
@@ -472,7 +465,7 @@ async def memory_edit_submit(
     meta_filename: str = Form(""),
     meta_code_snippet: str = Form(""),
     meta_references: str = Form(""),
-    # Procedural metadata
+    # Legacy structured metadata fields retained for existing forms/data
     meta_estimated_time: str = Form(""),
     meta_success_criteria: str = Form(""),
     meta_prerequisites: str = Form(""),

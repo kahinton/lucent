@@ -89,23 +89,23 @@ class TestCreateMemory:
         assert result["importance"] == 7
         assert result["version"] == 1
 
-    async def test_create_procedural_rejected_as_deprecated(
+    async def test_create_retired_type_rejected(
         self, mcp_tools, auth_user, clean_test_data
     ):
-        """Procedural memories are legacy and cannot be newly created via MCP."""
+        """Retired memory types cannot be newly created via MCP."""
         prefix = clean_test_data
         result = await _call(
             mcp_tools,
             "create_memory",
             {
                 "type": "procedural",
-                "content": f"{prefix} Deprecated procedural memory",
+                "content": f"{prefix} Retired type memory",
                 "username": f"{prefix}user",
             },
         )
 
         assert "error" in result
-        assert "deprecated" in result["error"].lower()
+        assert "invalid memory type" in result["error"].lower()
 
     async def test_create_memory_invalid_type(self, mcp_tools, auth_user):
         """Test that an invalid memory type returns an error."""

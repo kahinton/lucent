@@ -2,7 +2,6 @@
 
 import sys
 import types
-from datetime import datetime, timezone
 from uuid import UUID
 
 import pytest
@@ -12,7 +11,7 @@ from daemon.daemon import LucentDaemon
 
 
 @pytest.mark.asyncio
-async def test_seed_system_schedules_includes_procedural_consolidation(monkeypatch):
+async def test_seed_system_schedules_excludes_retired_procedure_cleanup(monkeypatch):
     inserted_rows: list[tuple] = []
 
     class FakeConn:
@@ -42,16 +41,8 @@ async def test_seed_system_schedules_includes_procedural_consolidation(monkeypat
     daemon = LucentDaemon()
     await daemon._seed_system_schedules()
 
-    procedural = [row for row in inserted_rows if row[0] == "Procedural Consolidation"]
-    assert len(procedural) == 1
-
-    proc_row = procedural[0]
-    assert proc_row[3] == "memory"  # agent_type
-    assert proc_row[4] == "interval"  # schedule_type
-    assert proc_row[5] == daemon_module.PROCEDURAL_CONSOLIDATION_MINUTES * 60
-    assert proc_row[9] == daemon_module.PROCEDURAL_CONSOLIDATION_PROMPT
-    assert isinstance(proc_row[7], datetime)
-    assert proc_row[7].tzinfo == timezone.utc
+    retired_cleanup = [row for row in inserted_rows if row[0] == "Procedural Consolidation"]
+    assert retired_cleanup == []
 
     vitality = [row for row in inserted_rows if row[0] == "Memory Vitality Scoring"]
     assert len(vitality) == 1

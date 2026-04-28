@@ -27,7 +27,7 @@
 
 Lucent's memory system currently has no mechanism for managing memories over time. Every memory created persists at full fidelity indefinitely. The only removal path is manual soft-delete. There is no consolidation, no automatic archival, and no forgetting.
 
-**Today's numbers are small.** But the system is designed for continuous autonomous operation — a daemon running cognitive cycles every 15 minutes, creating experience memories, technical notes, and procedural knowledge around the clock. At projected rates:
+**Today's numbers are small.** But the system is designed for continuous autonomous operation — a daemon running cognitive cycles every 15 minutes, creating experience memories and technical notes around the clock. At projected rates:
 
 | Timeframe | Estimated memories | Problem |
 |-----------|-------------------|---------|
@@ -86,7 +86,7 @@ Memories gradually become hippocampus-independent as neocortical connections str
 
 Each retrieval creates a new hippocampal trace. Older memories have more traces and are therefore more robust. Episodic memories always require some hippocampal involvement; semantic memories can become fully independent.
 
-**Lucent mapping:** Access frequency directly strengthens a memory's vitality score (§4.1). Each access is a "trace" that increases robustness. Experience memories (episodic) decay fastest; procedural and technical memories (semantic) have type bonuses that extend their lifespan.
+**Lucent mapping:** Access frequency directly strengthens a memory's vitality score (§4.1). Each access is a "trace" that increases robustness. Experience memories (episodic) decay fastest; technical memories (semantic) have type bonuses that extend their lifespan.
 
 ### 2.4 Memory Reconsolidation (Nader, Schafe & LeDoux 2000)
 
@@ -115,8 +115,8 @@ Biological forgetting is not passive decay — it includes active mechanisms:
 |--------|---------------|-------------------|
 | **MemGPT/Letta** (Packer et al. 2023) | OS-style virtual memory paging — LLM manages what's in/out of context | Tiered storage concept; lifecycle stages as "memory pages" |
 | **Generative Agents** (Park et al. 2023) | Reflection: periodic synthesis of observations into higher-level abstractions; retrieval scored by `recency × importance × relevance` | Consolidation mechanism (§5); vitality score formula (§4.1) |
-| **Voyager** (Wang et al. 2023) | Skill library: stores capabilities as executable code, not raw observations | Validates Lucent's existing type distinction (procedural vs. experience) |
-| **CoALA** (Sumers, Yao et al. 2023) | Modular memory: working, episodic, semantic, procedural as distinct stores | Validates type-aware lifecycle rules (§4.2) |
+| **Voyager** (Wang et al. 2023) | Skill library: stores capabilities as executable code, not raw observations | Validates Lucent's skills-as-capability-library design |
+| **CoALA** (Sumers, Yao et al. 2023) | Modular memory: working, episodic, semantic, capability-oriented stores | Validates type-aware lifecycle rules (§4.2) |
 
 **Key gap across all systems:** No existing AI memory system has robust active forgetting. All grow monotonically. Lucent's forgetting mechanism (§6) addresses an unsolved problem in the field.
 
@@ -162,7 +162,7 @@ No memory should jump from active to deleted. Transitions move through stages �
 
 ### P8: Type-aware lifecycle rules
 
-Not all memory types decay equally. Individual memories (contact info) should never auto-decay. Goal memories with status "active" should never be archived. Procedural memories (how-to guides) have longer useful lives than experience memories (session logs). The lifecycle system must encode type-specific rules.
+Not all memory types decay equally. Individual memories (contact info) should never auto-decay. Goal memories with status "active" should never be archived. Technical memories generally have longer useful lives than experience memories (session logs). The lifecycle system must encode type-specific rules.
 
 ---
 
@@ -259,7 +259,6 @@ importance_score = importance / 10.0
 | Memory Type | Type Bonus | Rationale |
 |-------------|-----------|-----------|
 | `individual` | 0.3 | Contact info rarely accessed but always valuable |
-| `procedural` | 0.2 | How-to knowledge has long shelf life |
 | `technical` | 0.15 | Technical knowledge ages but remains reference-worthy |
 | `goal` | 0.1 (active), 0.0 (completed/abandoned) | Active goals must stay active; completed ones can consolidate |
 | `experience` | 0.0 | Session logs and insights age fastest |
@@ -320,7 +319,7 @@ LIMIT 100;
 
 Clustering criteria:
 1. **Tag overlap** — Memories sharing ≥ 2 non-generic tags (excluding `daemon`, `validated`, etc.) are likely related.
-2. **Type match** — Only merge memories of the same type (don't merge an experience with a procedural).
+2. **Type match** — Only merge memories of the same type (don't merge an experience with a technical note).
 3. **Temporal proximity** — Memories created within the same time window (default: 30 days) about the same topic are consolidation candidates.
 4. **Metadata similarity** — For technical memories: same `repo` or `filename`. For experience memories: overlapping `related_entities`.
 5. **Explicit links** — Memories in each other's `related_memory_ids` arrays.
@@ -372,7 +371,6 @@ Step 6: LOG
 |-------------|----------------------|---------------------|
 | `experience` | Merge session logs about the same project/feature into a single narrative. Preserve: key decisions, root causes, outcomes. Drop: step-by-step debugging trails, intermediate states. | 10 |
 | `technical` | Merge per-file or per-module notes into comprehensive module documentation. Preserve: architecture decisions, API contracts, gotchas. Drop: version-specific quirks for old versions. | 8 |
-| `procedural` | Merge overlapping how-to memories into a single canonical procedure. Preserve: all steps, prerequisites, pitfalls. Reconcile conflicting steps (newer wins). | 5 |
 | `goal` | Completed/abandoned goals: merge progress notes into a summary experience memory. Active goals: never consolidate. | 3 |
 | `individual` | Never consolidated. Updated in place. | N/A |
 

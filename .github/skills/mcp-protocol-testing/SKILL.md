@@ -74,7 +74,7 @@ Test each tool with invalid inputs to verify error handling returns JSON `{"erro
 **Type validation** (`create_memory`):
 - Invalid type string (e.g., `"invalid"`) → `MemoryType(type)` raises error
 - `"individual"` type → explicitly blocked, returns error
-- Valid types: `"experience"`, `"technical"`, `"procedural"`, `"goal"`
+- Creatable types: `"experience"`, `"technical"`, `"goal"`
 
 **Limit capping**:
 - `search_memories(limit=100)` → silently capped to 50 via `min(limit, 50)`

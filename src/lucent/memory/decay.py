@@ -41,7 +41,6 @@ class DecayConfig:
     type_bonus: dict[str, float] = field(
         default_factory=lambda: {
             "individual": 0.30,
-            "procedural": 0.20,
             "technical": 0.15,
             "goal_active": 0.10,
             "goal_inactive": 0.00,
@@ -91,10 +90,6 @@ class DecayConfig:
         cfg.type_bonus["individual"] = _env_float(
             "LUCENT_MEMORY_DECAY_TYPE_BONUS_INDIVIDUAL",
             cfg.type_bonus["individual"],
-        )
-        cfg.type_bonus["procedural"] = _env_float(
-            "LUCENT_MEMORY_DECAY_TYPE_BONUS_PROCEDURAL",
-            cfg.type_bonus["procedural"],
         )
         cfg.type_bonus["technical"] = _env_float(
             "LUCENT_MEMORY_DECAY_TYPE_BONUS_TECHNICAL",
@@ -436,7 +431,8 @@ def dry_run_decay_report(
     cleanup_suggestions = [
         r
         for r in sorted_scored
-        if r.action != DecayAction.EXEMPT and cfg.archive_threshold <= r.score < cfg.suggest_threshold
+        if r.action != DecayAction.EXEMPT
+        and cfg.archive_threshold <= r.score < cfg.suggest_threshold
     ]
 
     return {
@@ -571,7 +567,9 @@ async def _get_recent_access_counts(
 
     counts: dict[UUID, int] = {memory_id: 0 for memory_id in memory_ids}
     for row in rows:
-        memory_id = row["memory_id"] if isinstance(row["memory_id"], UUID) else UUID(row["memory_id"])
+        memory_id = (
+            row["memory_id"] if isinstance(row["memory_id"], UUID) else UUID(row["memory_id"])
+        )
         counts[memory_id] = row["access_count"]
     return counts
 

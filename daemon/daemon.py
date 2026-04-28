@@ -330,10 +330,6 @@ AUTONOMIC_MINUTES = int(
 LEARNING_MINUTES = int(
     os.environ.get("LUCENT_LEARNING_MINUTES", str(LEARNING_INTERVAL * DAEMON_INTERVAL_MINUTES))
 )
-# Procedural consolidation: runs every 5 hours by default (300 minutes)
-PROCEDURAL_CONSOLIDATION_MINUTES = int(
-    os.environ.get("LUCENT_PROCEDURAL_CONSOLIDATION_MINUTES", "300")
-)
 # Memory vitality scoring: runs every 6 hours by default (360 minutes)
 VITALITY_SCORING_MINUTES = int(os.environ.get("LUCENT_VITALITY_SCORING_MINUTES", "360"))
 # Shadow forgetting Candidate-A scoring: runs every 6 hours, offset +15m from vitality.
@@ -404,7 +400,7 @@ MEMORY_CONSOLIDATION_PROMPT = (
     "5. **MANDATORY VERIFICATION PASS (after all updates/deletes)**:\n"
     "   Re-read in-scope technical codebase memories and verify each one includes metadata.repo, metadata.directory, and metadata.filename\n"
     "   with values consistent with its scope mapping above. If any memory is non-compliant, fix it in this run before finishing.\n\n"
-    "6. **Non-technical memories** (experience, procedural, etc.): Leave these alone.\n\n"
+    "6. **Non-technical memories** (experience, goal, individual, etc.): Leave these alone.\n\n"
     "7. Create a summary of what you changed, including verification counts and any corrected memory IDs.\n\n"
     "## Important Rules\n"
     "- NEVER create new memories. Only update existing ones or delete duplicates.\n"
@@ -446,19 +442,17 @@ LEARNING_EXTRACTION_PROMPT = (
     "or 'rejection-lesson' or 'feedback-rejected' "
     "or 'validated' that do "
     "NOT have the 'lesson-extracted' tag. Cap at 10.\n"
-    "2. For each non-routine experience, find the existing memory "
-    "that this lesson is ABOUT (the technical or procedural memory "
-    "for that module/system/workflow).\n"
+    "2. For each non-routine experience, find the existing memory or skill "
+    "that this lesson is ABOUT (the technical memory for that module/system, "
+    "or the skill for that workflow).\n"
     "3. Update that existing memory with the new knowledge. "
     "If no related memory exists, create ONE well-scoped technical or experience memory "
-    "that includes the lesson as part of its content. Never create procedural memories; "
-    "reusable procedures belong in skills.\n"
+    "that includes the lesson as part of its content. Reusable workflows belong in skills.\n"
     "4. Tag processed source memories with 'lesson-extracted'.\n"
     "5. Delete source experience memories that are now redundant "
     "(their knowledge has been absorbed).\n"
     "\n\nSTRICT RULES:\n"
     "- NEVER create standalone 'Lesson:' or 'Learning Extraction Run' memories.\n"
-    "- NEVER create procedural memories; skills are the canonical home for reusable workflows.\n"
     "- NEVER create a new memory if an existing one covers the same scope - update it.\n"
     "- The total memory count must go DOWN or stay the same, never up.\n"
     "- Prefer update_memory and delete_memory. Only use create_memory for genuine gaps.\n"
@@ -489,45 +483,6 @@ EXPERIENCE_COMPRESSION_PROMPT = (
     "- Total memory count must go DOWN.\n"
     "- Keep digests concise - aim for 200-500 words per day, not a transcript.\n"
     "- NEVER touch memories tagged 'pinned' or 'do_not_consolidate'."
-)
-
-PROCEDURAL_CONSOLIDATION_PROMPT = (
-    "Run a memory consolidation pass focused on PROCEDURAL memories.\n\n"
-    "## Goal: One Canonical Procedure Per Topic\n\n"
-    "Procedural memories should converge toward one current, complete procedure per topic.\n"
-    "Do not let overlapping step lists accumulate. Procedural memories are legacy; "
-    "do not create new ones. Reusable workflows belong in skills.\n\n"
-    "## Process (Mandatory Phases)\n\n"
-    "1. Search for procedural memories (search_memories with type='procedural', limit=50) and "
-    "expand coverage with search_memories_full.\n\n"
-    "2. Cluster by topic/workflow.\n"
-    "   Topic matching signals include: similar titles, shared tags, same system/module names, "
-    "and overlapping step text.\n\n"
-    "3. **Merge duplicates/overlap**:\n"
-    "   - For each cluster, keep ONE canonical memory: highest vitality_score (missing=0.5), "
-    "then higher importance, then older created_at.\n"
-    "   - Fold useful missing steps/notes from lower-vitality fragments into the canonical memory.\n"
-    "   - Delete merged duplicates after canonical memory is updated.\n\n"
-    "4. **Update outdated procedures**:\n"
-    "   - If newer procedural/experience/technical memories invalidate older steps, update the "
-    "canonical procedural memory so it reflects current practice.\n"
-    "   - Prefer explicit, ordered steps and preserve practical caveats.\n\n"
-    "5. **Archive stale daemon-task procedural entries**:\n"
-    "   - Find procedural memories tagged 'daemon-task' where status indicates completed/cancelled "
-    "(including tags like 'completed', 'cancelled', 'done', or equivalent metadata).\n"
-    "   - Archive by updating tags/metadata to clearly mark them archived and non-actionable.\n"
-    "   - If a stale daemon-task memory is fully redundant with a canonical procedure, delete it.\n\n"
-    "6. Verify outcomes:\n"
-    "   - Each topic should have at most one active canonical procedure.\n"
-    "   - Archived daemon-task entries should not appear as active procedures.\n"
-    "   - Summarize updates/deletes/archives performed.\n\n"
-    "## Important Rules\n"
-    "- Use only update_memory and delete_memory. Never create procedural memories.\n"
-    "- NEVER create a memory maintenance log, run report, or audit-result memory. Put the run summary only in the task response.\n"
-    "- Total memory count should go DOWN or stay the same; do not fill missing procedure gaps with new procedural memories.\n"
-    "- Preserve the highest-vitality procedure as canonical (missing vitality_score = 0.5).\n"
-    "- NEVER touch memories tagged 'pinned' or 'do_not_consolidate'.\n"
-    "- Keep procedural memories actionable: ordered steps, prerequisites, pitfalls, and success criteria."
 )
 
 MEMORY_VITALITY_SCORING_PROMPT = (
@@ -944,7 +899,6 @@ async def _mint_scoped_api_key(
 # scope tied to the request's creator.
 _ORG_SHARED_SCHEDULE_TITLES = frozenset({
     "Memory Consolidation",
-    "Procedural Consolidation",
 })
 
 
@@ -2310,7 +2264,7 @@ Before starting work, search for relevant memories:
 - Look for previous approaches to similar tasks (search by keywords from your task description)
 - Check for validated patterns (tagged 'validated') and
   rejection lessons (tagged 'rejection-lesson')
-- Reference skills for proven workflows; procedural memories are legacy read-only context
+- Reference skills for proven workflows
 - Build on existing knowledge rather than starting from scratch
 
 After completing work, save what you learned:
@@ -2606,19 +2560,6 @@ class LucentDaemon:
                         "cron_expression": "0 4 * * *",
                         "priority": "low",
                         "prompt": EXPERIENCE_COMPRESSION_PROMPT,
-                    },
-                    {
-                        "title": "Procedural Consolidation",
-                        "description": (
-                            "Consolidate procedural memories — merge overlapping procedures, "
-                            "archive stale daemon-task procedure entries, and keep one current "
-                            "canonical procedure per topic."
-                        ),
-                        "agent_type": "memory",
-                        "schedule_type": "interval",
-                        "interval_seconds": PROCEDURAL_CONSOLIDATION_MINUTES * 60,
-                        "priority": "low",
-                        "prompt": PROCEDURAL_CONSOLIDATION_PROMPT,
                     },
                     {
                         "title": "Memory Vitality Scoring",
@@ -5738,19 +5679,18 @@ class LucentDaemon:
                 "or 'rejection-lesson' or 'feedback-rejected' "
                 "or 'validated' that do "
                 "NOT have the 'lesson-extracted' tag. Cap at 10.\n"
-                "2. For each non-routine experience, find the existing memory "
-                "that this lesson is ABOUT (the technical or procedural memory "
-                "for that module/system/workflow).\n"
+                "2. For each non-routine experience, find the existing memory or skill "
+                "that this lesson is ABOUT (the technical memory for that module/system, "
+                "or the skill for that workflow).\n"
                 "3. Update that existing memory with the new knowledge. "
                 "If no related memory exists, create ONE well-scoped technical or "
                 "experience memory that includes the lesson as part of its content. "
-                "Never create procedural memories; reusable procedures belong in skills.\n"
+                "Reusable workflows belong in skills.\n"
                 "4. Tag processed source memories with 'lesson-extracted'.\n"
                 "5. Delete source experience memories that are now redundant "
                 "(their knowledge has been absorbed).\n"
                 "\n\nSTRICT RULES:\n"
                 "- NEVER create standalone 'Lesson:' or 'Learning Extraction Run' memories.\n"
-                "- NEVER create procedural memories; skills are the canonical home for reusable workflows.\n"
                 "- NEVER create a new memory if an existing one covers the same scope — update it.\n"
                 "- The total memory count must go DOWN or stay the same, never up.\n"
                 "- Prefer update_memory and delete_memory. Only use create_memory for genuine gaps.\n"

@@ -384,7 +384,7 @@ class TestMemoryNewSubmit:
         )
         assert resp.status_code == 400
 
-    async def test_create_procedural_returns_400(self, client):
+    async def test_create_retired_type_returns_400(self, client):
         resp = await client.post(
             "/memories/new",
             data=_csrf_data(
@@ -397,7 +397,7 @@ class TestMemoryNewSubmit:
             follow_redirects=False,
         )
         assert resp.status_code == 400
-        assert "deprecated" in resp.text.lower()
+        assert "invalid memory type" in resp.text.lower()
 
     async def test_create_missing_csrf_fails(self, client):
         resp = await client.post(

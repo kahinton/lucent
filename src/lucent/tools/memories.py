@@ -31,15 +31,7 @@ from lucent.security import scan_content_for_injection
 from lucent.services.memory_access_service import MemoryAccessService
 
 logger = get_logger("tools.memories")
-
-DEPRECATED_CREATE_TYPES = {MemoryType.PROCEDURAL}
-DEPRECATED_CREATE_TYPE_MESSAGES = {
-    MemoryType.PROCEDURAL: (
-        "Procedural memories are deprecated and can no longer be created. "
-        "Use skills for reusable procedures/workflows, or technical/experience "
-        "memories for durable knowledge and outcomes."
-    ),
-}
+CREATABLE_MEMORY_TYPES = {MemoryType.EXPERIENCE, MemoryType.TECHNICAL, MemoryType.GOAL}
 
 
 def _error_response(message: str) -> str:
@@ -225,7 +217,7 @@ def register_tools(mcp: FastMCP) -> None:
     create_memory_description = """Create a new memory in the knowledge base.
 
 Args:
-    type: Type of memory - one of: experience, technical, procedural, goal.
+    type: Type of memory - one of: experience, technical, goal.
     content: The main content/description of the memory.
     username: Optional username (defaults to authenticated user).
     tags: Optional list of tags for categorization.
@@ -234,9 +226,6 @@ Args:
     metadata: Optional type-specific metadata. Structure depends on memory type:
         - experience: {context, outcome, lessons_learned[], related_entities[]}
         - technical: {category, language, code_snippet, references[], version_info, repo, directory, filename}
-        - procedural: {steps[{order, description, notes}],
-          prerequisites[], estimated_time, success_criteria,
-          common_pitfalls[]}
         - goal: {status, deadline,
           milestones[{description, status, completed_at}],
           blockers[], progress_notes[{date, note}], priority}
@@ -266,9 +255,6 @@ Returns:
             # Validate input
             memory_type = MemoryType(type)
 
-            if memory_type in DEPRECATED_CREATE_TYPES:
-                return _error_response(DEPRECATED_CREATE_TYPE_MESSAGES[memory_type])
-
             # Individual memories cannot be created via MCP
             # - they are auto-created when users are added
             if memory_type == MemoryType.INDIVIDUAL:
@@ -276,6 +262,11 @@ Returns:
                     "Individual memories cannot be created directly."
                     " They are automatically created when users"
                     " are added to the system."
+                )
+
+            if memory_type not in CREATABLE_MEMORY_TYPES:
+                return _error_response(
+                    "Invalid memory type. Must be one of: experience, technical, goal"
                 )
 
             # Validate and normalize metadata for the memory type
@@ -327,15 +318,13 @@ Returns:
 
             # Type-based default sharing:
             # - technical: shared by default (org knowledge)
-            # - procedural: legacy/read-only for new public creates; retained here
-            #   for compatibility with existing records/internal maintenance
             # - experience: private by default (personal work log)
             # - goal: shared with Lucent (working contract), respects explicit shared param
             # - individual: always private (handled separately, can't be created via MCP)
             #
             # Daemon-created memories in scoped sessions inherit the scope's
             # sharing context (scoped key already restricts to correct user).
-            if memory_type in (MemoryType.TECHNICAL, MemoryType.PROCEDURAL):
+            if memory_type == MemoryType.TECHNICAL:
                 # Shared by default unless caller explicitly sets shared=False
                 effective_shared = shared if shared is not None else True
             elif memory_type == MemoryType.EXPERIENCE:
@@ -619,7 +608,7 @@ Returns:
             query: Optional fuzzy search query to match against memory CONTENT only.
             username: Optional filter to only return memories for a specific user.
             type: Optional filter by memory type
-                (experience, technical, procedural, goal, individual).
+                (experience, technical, goal, individual).
             tags: Optional list of tags to filter by
                 (memories must have all specified tags).
             importance_min: Optional minimum importance rating (1-10).
@@ -751,7 +740,7 @@ Returns:
             query: Search query to match against content, tags, and metadata (required).
             username: Optional filter to only return memories for a specific user.
             type: Optional filter by memory type
-                (experience, technical, procedural, goal, individual).
+                (experience, technical, goal, individual).
             importance_min: Optional minimum importance rating (1-10).
             importance_max: Optional maximum importance rating (1-10).
             offset: Pagination offset (default 0).
@@ -1208,7 +1197,7 @@ Returns:
         Args:
             username: Optional filter to only show tags used by a specific user.
             type: Optional filter by memory type
-                (experience, technical, procedural, goal, individual).
+                (experience, technical, goal, individual).
             limit: Maximum number of tags to return (default 50, max 100).
 
         Returns:
@@ -1835,7 +1824,7 @@ Returns:
         you own or that are shared within your organization.
 
         Args:
-            type: Filter by memory type (experience, technical, procedural, goal, individual).
+            type: Filter by memory type (experience, technical, goal, individual).
             tags: Filter by tags (returns memories matching any provided tag).
             importance_min: Minimum importance (1-10).
             importance_max: Maximum importance (1-10).
