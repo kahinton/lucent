@@ -448,6 +448,34 @@ class TestMemoryDetail:
         assert resp.status_code == 200
         assert "Access Count" in resp.text
 
+    async def test_detail_has_clear_owner_actions_with_csrf(self, client, web_memory):
+        resp = await client.get(f"/memories/{web_memory['id']}")
+        assert resp.status_code == 200
+        assert f'href="/memories/{web_memory["id"]}/edit"' in resp.text
+        assert f'action="/memories/{web_memory["id"]}/delete"' in resp.text
+        assert CSRF_FIELD_NAME in resp.text
+        assert client._csrf_token in resp.text  # type: ignore[attr-defined]
+
+    async def test_detail_does_not_show_legacy_feedback_for_daemon_tag(
+        self, client, db_pool, web_user, web_prefix
+    ):
+        user, org, _token = web_user
+        memory = await MemoryRepository(db_pool).create(
+            username=f"{web_prefix}User",
+            type="experience",
+            content="Daemon-tagged memory should not show accept/reject controls",
+            tags=["daemon", "needs-review"],
+            importance=5,
+            user_id=user["id"],
+            organization_id=org["id"],
+        )
+
+        resp = await client.get(f"/memories/{memory['id']}")
+        assert resp.status_code == 200
+        assert "Feedback" not in resp.text
+        assert "Accept" not in resp.text
+        assert "Reject" not in resp.text
+
     async def test_detail_shows_version_content_changes(self, client, web_memory):
         await client.post(
             f"/memories/{web_memory['id']}/edit",

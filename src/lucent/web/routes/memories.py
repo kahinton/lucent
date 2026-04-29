@@ -1,10 +1,12 @@
 """Memory CRUD, search, share, and detail routes."""
 
+import asyncio
 from uuid import UUID
 
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
+from lucent.auth_providers import CSRF_COOKIE_NAME
 from lucent.db import (
     AccessRepository,
     AuditRepository,
@@ -98,7 +100,6 @@ async def memories_list(
     """List and search memories."""
     user = await get_user_context(request)
     pool = await get_pool()
-    repo = MemoryRepository(pool)
     memory_access = _build_memory_access(pool, user)
     access_repo = AccessRepository(pool)
 
@@ -181,7 +182,6 @@ async def memory_new_form(request: Request):
     """New memory form."""
     user = await get_user_context(request)
     pool = await get_pool()
-    repo = MemoryRepository(pool)
     user_repo = UserRepository(pool)
     memory_access = _build_memory_access(pool, user)
 
@@ -349,7 +349,6 @@ async def memory_detail(request: Request, memory_id: UUID):
     user = await get_user_context(request)
     pool = await get_pool()
 
-    repo = MemoryRepository(pool)
     memory_access = _build_memory_access(pool, user)
     audit_repo = AuditRepository(pool)
     access_repo = AccessRepository(pool)
@@ -360,15 +359,8 @@ async def memory_detail(request: Request, memory_id: UUID):
         organization_id=user.organization_id,
         memory_scope=getattr(user, "memory_scope", None),
     )
-    if memory is None:
+    if memory is None or memory.get("_access_denied"):
         raise HTTPException(status_code=404, detail="Memory not found")
-    if memory.get("_access_denied"):
-        repo_name = (memory.get("metadata") or {}).get("repo", "unknown")
-        raise HTTPException(
-            status_code=403,
-            detail=f"Access denied — you don't have access to the repository '{repo_name}'. "
-                   f"Connect your GitHub account on the Connections page to verify access.",
-        )
 
     # Log access
     await access_repo.log_access(
@@ -378,14 +370,12 @@ async def memory_detail(request: Request, memory_id: UUID):
         organization_id=user.organization_id,
     )
 
-    # Get audit history
-    audit = await audit_repo.get_by_memory_id(memory_id, limit=10)
+    # Keep the detail page readable. Dedicated audit/version APIs can expose
+    # deeper history when needed; the page should show a compact recent trail.
+    audit = await audit_repo.get_by_memory_id(memory_id, limit=6)
 
     # Get version history
-    versions = await audit_repo.get_versions(memory_id, limit=20)
-
-    # Get access history
-    access = await access_repo.get_access_history(memory_id, limit=10)
+    versions = await audit_repo.get_versions(memory_id, limit=8)
 
     # Access count (includes this view)
     counts = await access_repo.get_access_counts([memory_id])
@@ -401,8 +391,8 @@ async def memory_detail(request: Request, memory_id: UUID):
             "memory": memory,
             "audit_entries": audit["entries"],
             "version_entries": versions["versions"],
-            "access_entries": access["entries"],
             "is_owner": is_owner,
+            "csrf_token": request.cookies.get(CSRF_COOKIE_NAME, ""),
         },
     )
 
@@ -412,7 +402,6 @@ async def memory_edit_form(request: Request, memory_id: UUID):
     """Edit memory form."""
     user = await get_user_context(request)
     pool = await get_pool()
-    repo = MemoryRepository(pool)
     memory_access = _build_memory_access(pool, user)
     user_repo = UserRepository(pool)
 
@@ -422,7 +411,7 @@ async def memory_edit_form(request: Request, memory_id: UUID):
         organization_id=user.organization_id,
         memory_scope=getattr(user, "memory_scope", None),
     )
-    if memory is None:
+    if memory is None or memory.get("_access_denied"):
         raise HTTPException(status_code=404, detail="Memory not found")
 
     if memory.get("user_id") != user.id:
@@ -505,7 +494,7 @@ async def memory_edit_submit(
         organization_id=user.organization_id,
         memory_scope=getattr(user, "memory_scope", None),
     )
-    if existing is None:
+    if existing is None or existing.get("_access_denied"):
         raise HTTPException(status_code=404, detail="Memory not found")
 
     if existing.get("user_id") != user.id:
@@ -614,7 +603,7 @@ async def memory_share(request: Request, memory_id: UUID):
         organization_id=user.organization_id,
         memory_scope=getattr(user, "memory_scope", None),
     )
-    if memory is None:
+    if memory is None or memory.get("_access_denied"):
         raise HTTPException(status_code=404, detail="Memory not found")
 
     if memory.get("user_id") != user.id:
@@ -664,7 +653,7 @@ async def memory_delete(request: Request, memory_id: UUID):
         organization_id=user.organization_id,
         memory_scope=getattr(user, "memory_scope", None),
     )
-    if memory is None:
+    if memory is None or memory.get("_access_denied"):
         raise HTTPException(status_code=404, detail="Memory not found")
 
     # Individual memories cannot be deleted via web interface
@@ -723,7 +712,7 @@ async def memory_restore(request: Request, memory_id: UUID, version: int):
         organization_id=user.organization_id,
         memory_scope=getattr(user, "memory_scope", None),
     )
-    if memory is None:
+    if memory is None or memory.get("_access_denied"):
         raise HTTPException(status_code=404, detail="Memory not found")
 
     if memory.get("user_id") != user.id:
@@ -795,7 +784,6 @@ async def knowledge_tree(request: Request):
     """Knowledge tree — technical memories organized by repo/directory/file hierarchy."""
     user = await get_user_context(request)
     pool = await get_pool()
-    repo = MemoryRepository(pool)
 
     # Query technical memories with repo metadata, grouped into tree structure
     query = """
@@ -818,10 +806,6 @@ async def knowledge_tree(request: Request):
 
     # Validate repo existence — batch check unique repos in parallel
     # Uses cached results (15min positive, 5min negative TTL) so repeat loads are instant
-    import asyncio
-    from lucent.integrations.github_repo_access_service import GitHubRepoAccessService
-    from lucent.rbac import Role
-
     github_access = GitHubRepoAccessService(pool)
     is_admin = user.role in (Role.ADMIN, Role.OWNER)
 
