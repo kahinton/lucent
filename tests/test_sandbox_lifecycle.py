@@ -15,6 +15,7 @@ import asyncio
 import io
 import tarfile
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
 
 import pytest
 
@@ -395,6 +396,48 @@ class TestDockerSandboxLifecycle:
 
         assert info.id not in manager._cleanup_tasks
 
+    @pytest.mark.asyncio
+    async def test_task_bridge_key_is_redacted_from_persisted_config(self):
+        backend = _make_backend_mock()
+        manager = _make_manager(backend)
+
+        await manager.create(SandboxConfig(task_id=str(uuid4()), timeout_seconds=0))
+
+        repo = await manager._repo()
+        persisted_config = repo.create.call_args.kwargs["config"]
+        assert persisted_config["env_vars"]["LUCENT_SANDBOX_MCP_API_KEY"] == "***"
+
+    @pytest.mark.asyncio
+    async def test_task_bridge_key_is_memory_scoped_to_requesting_user(
+        self, db_pool, test_organization, test_user
+    ):
+        backend = _make_backend_mock()
+        manager = SandboxManager(backend=backend)
+        manager._pool = AsyncMock(return_value=db_pool)
+        task_id = str(uuid4())
+        config = SandboxConfig(
+            task_id=task_id,
+            organization_id=str(test_organization["id"]),
+            requesting_user_id=str(test_user["id"]),
+            timeout_seconds=1,
+        )
+
+        key_id, _plain = await manager._create_task_scoped_api_key(config)
+        try:
+            async with db_pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """SELECT scopes, memory_scope, memory_scope_user_id, organization_id
+                       FROM api_keys WHERE id = $1""",
+                    key_id,
+                )
+            assert row["memory_scope"] == "user"
+            assert str(row["memory_scope_user_id"]) == str(test_user["id"])
+            assert str(row["organization_id"]) == str(test_organization["id"])
+            assert "sandbox-memory" in row["scopes"]
+        finally:
+            async with db_pool.acquire() as conn:
+                await conn.execute("DELETE FROM api_keys WHERE id = $1", key_id)
+
 
 # ===========================================================================
 # 2. MCP bridge
@@ -486,7 +529,10 @@ class TestMCPBridge:
             return {}
 
         bridge._proxy = fake_proxy
-        bridge.handle_tool_call("log_task_event", {"event_type": "progress", "detail": "doing work"})
+        bridge.handle_tool_call(
+            "log_task_event",
+            {"event_type": "progress", "detail": "doing work"},
+        )
 
         assert "task-abc123" in captured["path"]
         assert captured["payload"]["event_type"] == "progress"
@@ -497,7 +543,10 @@ class TestMCPBridge:
         bridge._proxy = lambda m, p, pl: {}
 
         # Same task_id as bridge scope — should succeed
-        bridge.handle_tool_call("log_task_event", {"task_id": "task-abc123", "event_type": "info"})
+        bridge.handle_tool_call(
+            "log_task_event",
+            {"task_id": "task-abc123", "event_type": "info"},
+        )
 
     def test_log_task_event_wrong_task_id_raises(self):
         """log_task_event rejects task_id that doesn't match bridge scope."""
@@ -505,7 +554,10 @@ class TestMCPBridge:
         bridge._proxy = lambda m, p, pl: {}
 
         with pytest.raises(ValueError, match="task_id does not match bridge scope"):
-            bridge.handle_tool_call("log_task_event", {"task_id": "task-OTHER", "event_type": "info"})
+            bridge.handle_tool_call(
+                "log_task_event",
+                {"task_id": "task-OTHER", "event_type": "info"},
+            )
 
     def test_update_memory_requires_memory_id(self):
         """update_memory raises ValueError when memory_id is missing."""
@@ -563,7 +615,10 @@ class TestMCPBridge:
 
         bridge = self._bridge()
 
-        with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("connection refused")):
+        with patch(
+            "urllib.request.urlopen",
+            side_effect=urllib.error.URLError("connection refused"),
+        ):
             with pytest.raises(RuntimeError, match="Connection error"):
                 bridge._proxy("GET", "/health", {})
 
@@ -811,7 +866,7 @@ class TestOutputModes:
     async def test_pr_mode_pushes_branch_and_logs_event(self):
         """pr mode pushes branch and logs sandbox_output_pr event."""
         handler, manager, request_api, _ = self._handler()
-        # exec calls: git diff (from _extract_diff), git rev-parse, chmod askpass, git remote set-url, git push
+        # exec calls: git diff, git rev-parse, chmod askpass, remote set-url, push
         exec_responses = [
             _make_exec_ok(stdout="+added line\n"),  # git diff
             _make_exec_ok(stdout="main\n"),          # git rev-parse
@@ -1188,7 +1243,8 @@ class TestSandboxSecurity:
         _, kwargs = client.containers.run.call_args
         volumes = kwargs.get("volumes", {})
         assert volume_name in volumes, (
-            f"Workspace volume {volume_name!r} must be mounted after rebuild; got volumes={volumes!r}"
+            f"Workspace volume {volume_name!r} must be mounted after rebuild; "
+            f"got volumes={volumes!r}"
         )
         assert volumes[volume_name]["bind"] == "/workspace"
 

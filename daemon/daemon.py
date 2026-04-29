@@ -117,6 +117,27 @@ _MEMORY_CAPTURE_TOOLS = frozenset({
     "update_memory",
 })
 
+_TASK_MEMORY_SERVER_TOOLS = sorted(
+    {
+        "create_memory",
+        "get_current_user_context",
+        "get_existing_tags",
+        "get_memory",
+        "get_memories",
+        "get_tag_suggestions",
+        "search_memories",
+        "search_memories_full",
+        "update_memory",
+        "create_review",
+        "get_memory_versions",
+        "get_request_details",
+        "link_request_memory",
+        "link_task_memory",
+        "list_available_models",
+        "log_task_event",
+    }
+)
+
 
 def _summarize_memory_tool_params(tool_name: str, arguments: dict) -> str:
     """Build a concise, loggable summary of memory tool parameters.
@@ -4419,7 +4440,7 @@ class LucentDaemon:
                         "type": "http",
                         "url": MCP_URL,
                         "headers": {"Authorization": f"Bearer {_scoped_key}"},
-                        "tools": ["*"],
+                        "tools": _TASK_MEMORY_SERVER_TOOLS,
                     }
                     log(f"Task {task_id[:8]} using {_scope_type} scoped key"
                         f" (user: {_scope_user[:8] if _scope_user else 'shared'})")
@@ -4497,6 +4518,7 @@ class LucentDaemon:
                     ) = await self._create_task_sandbox(
                         task_id,
                         sandbox_config,
+                        request_id=request_id,
                         requesting_user_id=requesting_user_id,
                         org_id=org_id,
                     )
@@ -4769,6 +4791,7 @@ class LucentDaemon:
         task_id: str,
         sandbox_config: dict,
         *,
+        request_id: str | None = None,
         requesting_user_id: str,
         org_id: str,
     ) -> tuple[str | None, "SandboxConfig | None", dict | None]:
@@ -4880,7 +4903,7 @@ class LucentDaemon:
 
         config = SandboxConfig(
             name=sandbox_config.get("name", f"task-{task_id[:12]}"),
-            image=sandbox_config.get("image", "python:3.12-slim"),
+            image=sandbox_config.get("image", "lucent-sandbox:base"),
             repo_url=sandbox_config.get("repo_url"),
             branch=sandbox_config.get("branch"),
             git_credentials=git_credentials,
@@ -4895,6 +4918,9 @@ class LucentDaemon:
             output_mode=sandbox_config.get("output_mode"),
             commit_approved=bool(sandbox_config.get("commit_approved", False)),
             task_id=task_id,
+            request_id=request_id or sandbox_config.get("request_id"),
+            organization_id=org_id,
+            requesting_user_id=requesting_user_id,
         )
         manager = get_sandbox_manager()
         info = await manager.create(config)

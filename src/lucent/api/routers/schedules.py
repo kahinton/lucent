@@ -8,9 +8,46 @@ from pydantic import BaseModel, Field
 
 from lucent.api.deps import AuthenticatedUser, get_pool
 from lucent.constants import REQUEST_SOURCE_SCHEDULE
+from lucent.rbac import Role
 
 router = APIRouter(prefix="/schedules", tags=["schedules"])
 logger = logging.getLogger(__name__)
+
+
+def _is_daemon_user(user: AuthenticatedUser) -> bool:
+    return user.role == Role.DAEMON or user.external_id == "daemon-service"
+
+
+def _can_manage_schedule(sched: dict, user: AuthenticatedUser) -> bool:
+    if user.role >= Role.ADMIN or _is_daemon_user(user):
+        return True
+    created_by = sched.get("created_by")
+    if not created_by:
+        return True
+    return bool(created_by and str(created_by) == str(user.id))
+
+
+def _require_schedule_access(sched: dict, user: AuthenticatedUser) -> None:
+    if not _can_manage_schedule(sched, user):
+        raise HTTPException(404, "Schedule not found")
+
+
+async def _schedule_owner_context(
+    pool,
+    sched: dict,
+    fallback_user: AuthenticatedUser,
+) -> tuple[str, str]:
+    """Return (owner_user_id, owner_role) for work created by a schedule."""
+    owner_id = str(sched.get("created_by") or fallback_user.id)
+    try:
+        from lucent.db import UserRepository
+
+        owner = await UserRepository(pool).get_by_id(owner_id)
+        if owner and owner.get("role"):
+            return owner_id, str(owner["role"])
+    except Exception:
+        logger.debug("Failed to resolve schedule owner %s", owner_id, exc_info=True)
+    return owner_id, "member"
 
 
 # ── Models ────────────────────────────────────────────────────────────────
@@ -146,6 +183,10 @@ async def update_schedule(
     fields = {k: v for k, v in body.model_dump(exclude_unset=True).items()}
     if "timezone" in fields:
         fields["timezone_str"] = fields.pop("timezone")
+    sched = await repo.get_schedule(schedule_id, str(user.organization_id))
+    if not sched:
+        raise HTTPException(404, "Schedule not found")
+    _require_schedule_access(sched, user)
     try:
         result = await repo.update_schedule(
             schedule_id, str(user.organization_id),
@@ -168,6 +209,10 @@ async def toggle_schedule(
     from lucent.db.schedules import ScheduleRepository
 
     repo = ScheduleRepository(pool)
+    sched = await repo.get_schedule(schedule_id, str(user.organization_id))
+    if not sched:
+        raise HTTPException(404, "Schedule not found")
+    _require_schedule_access(sched, user)
     try:
         result = await repo.toggle_schedule(
             schedule_id, str(user.organization_id), body.enabled,
@@ -185,6 +230,10 @@ async def delete_schedule(schedule_id: str, user: AuthenticatedUser, pool=Depend
     from lucent.db.schedules import ScheduleRepository
 
     repo = ScheduleRepository(pool)
+    sched = await repo.get_schedule(schedule_id, str(user.organization_id))
+    if not sched:
+        raise HTTPException(404, "Schedule not found")
+    _require_schedule_access(sched, user)
     try:
         ok = await repo.delete_schedule(schedule_id, str(user.organization_id))
     except ValueError as e:
@@ -203,6 +252,7 @@ async def list_runs(schedule_id: str, user: AuthenticatedUser, pool=Depends(get_
     sched = await repo.get_schedule(schedule_id, str(user.organization_id))
     if not sched:
         raise HTTPException(404, "Schedule not found")
+    _require_schedule_access(sched, user)
     return await repo.list_runs(schedule_id)
 
 
@@ -222,6 +272,7 @@ async def trigger_now(
     sched = await sched_repo.get_schedule(schedule_id, str(user.organization_id))
     if not sched:
         raise HTTPException(404, "Schedule not found")
+    _require_schedule_access(sched, user)
 
     if sched.get("status") != "active":
         raise HTTPException(409, f"Schedule is {sched.get('status')}, cannot trigger")
@@ -236,6 +287,8 @@ async def trigger_now(
     # Idempotency: if the schedule was already advanced by another cycle, skip.
     if run is None:
         return {"schedule": sched, "already_fired": True}
+
+    owner_user_id, owner_role = await _schedule_owner_context(pool, sched, user)
 
     # Create a request from the schedule
     template = sched.get("task_template") or {}
@@ -266,6 +319,10 @@ async def trigger_now(
                 "Schedule %s skipped — active request %s exists",
                 schedule_id, str(active_request)[:8],
             )
+            await sched_repo.complete_run(
+                str(run["id"]),
+                result=f"Skipped: active request {str(active_request)} already exists",
+            )
             return {"schedule": sched, "skipped": True, "active_request": str(active_request)}
 
         req = await req_repo.create_request(
@@ -274,7 +331,7 @@ async def trigger_now(
             description=sched.get("description", ""),
             source=REQUEST_SOURCE_SCHEDULE,
             priority=sched.get("priority", "medium"),
-            created_by=str(user.id),
+            created_by=owner_user_id,
         )
 
         # Validate agent_type against approved definitions (workflow-audit/phase-4)
@@ -286,8 +343,8 @@ async def trigger_now(
             await def_repo.list_agents(
                 str(user.organization_id),
                 status="active",
-                requester_user_id=str(user.id),
-                requester_role=user.role.value,
+                requester_user_id=owner_user_id,
+                requester_role=owner_role,
             )
         )["items"]
         active_names = {a["name"] for a in agents}
@@ -297,6 +354,11 @@ async def trigger_now(
                 schedule_id, agent_type,
             )
             agent_type = "code"
+        if agent_type and agent_type not in active_names:
+            raise RuntimeError(
+                f"Schedule references agent_type '{sched.get('agent_type')}', but neither it "
+                "nor fallback agent 'code' is approved/accessible for the schedule owner."
+            )
 
         # Validate model against registry (workflow-audit/phase-4)
         task_model = sched.get("model")
@@ -325,6 +387,7 @@ async def trigger_now(
             else None,
             sandbox_config=sched.get("sandbox_config"),
             org_id=str(user.organization_id),
+            requesting_user_id=owner_user_id,
         )
 
         # Link the run to the request so completion hooks can find it

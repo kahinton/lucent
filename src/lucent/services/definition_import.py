@@ -10,6 +10,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from enum import Enum
+from urllib.parse import urljoin
 
 import httpx
 import yaml
@@ -242,8 +243,26 @@ async def fetch_from_url(url: str) -> tuple[str | None, str | None]:
         return None, f"URL validation failed: {e}"
 
     try:
-        async with httpx.AsyncClient(timeout=15, follow_redirects=True, max_redirects=3) as client:
-            resp = await client.get(url, headers={"Accept": "text/plain, text/markdown, */*"})
+        current_url = url
+        async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
+            for _redirect_count in range(4):
+                resp = await client.get(
+                    current_url,
+                    headers={"Accept": "text/plain, text/markdown, */*"},
+                )
+                if resp.status_code not in (301, 302, 303, 307, 308):
+                    break
+                location = resp.headers.get("location")
+                if not location:
+                    return None, f"HTTP {resp.status_code}: redirect without Location"
+                current_url = urljoin(str(resp.url), location)
+                try:
+                    validate_url(current_url)
+                except Exception as e:
+                    return None, f"Redirect URL validation failed: {e}"
+            else:
+                return None, "Too many redirects"
+
             if resp.status_code != 200:
                 return None, f"HTTP {resp.status_code}: {resp.reason_phrase}"
 

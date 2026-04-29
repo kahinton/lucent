@@ -18,6 +18,93 @@ logger = logging.getLogger(__name__)
 _deprecation_logger = logging.getLogger(f"{__name__}.deprecation")
 
 
+def _is_daemon_user(user: AuthenticatedUser) -> bool:
+    return user.role == Role.DAEMON or user.external_id == "daemon-service"
+
+
+def _is_privileged_request_actor(user: AuthenticatedUser) -> bool:
+    return user.role >= Role.ADMIN or _is_daemon_user(user)
+
+
+def _can_mutate_request(req: dict, user: AuthenticatedUser) -> bool:
+    if _is_privileged_request_actor(user):
+        return True
+    created_by = req.get("created_by")
+    if not created_by:
+        return True
+    return bool(created_by and str(created_by) == str(user.id))
+
+
+def _require_request_mutation(req: dict, user: AuthenticatedUser) -> None:
+    if not _can_mutate_request(req, user):
+        raise HTTPException(404, "Request not found")
+
+
+def _is_matching_sandbox_task_actor(task_id: str, user: AuthenticatedUser) -> bool:
+    return bool(
+        user.auth_method == "api_key"
+        and getattr(user, "sandbox_task_id", None)
+        and str(user.sandbox_task_id) == str(task_id)
+    )
+
+
+async def _get_task_and_request(repo, task_id: str, org_id: str) -> tuple[dict, dict]:
+    task = await repo.get_task(task_id, org_id=org_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    req = await repo.get_request(str(task["request_id"]), org_id)
+    if not req:
+        raise HTTPException(404, "Task not found")
+    return task, req
+
+
+async def _require_task_mutation(repo, task_id: str, org_id: str, user: AuthenticatedUser) -> dict:
+    task, req = await _get_task_and_request(repo, task_id, org_id)
+    if _is_matching_sandbox_task_actor(task_id, user):
+        return task
+    _require_request_mutation(req, user)
+    return task
+
+
+def _effective_memory_user_id(user: AuthenticatedUser) -> UUID:
+    return user.effective_memory_user_id
+
+
+def _memory_admin_override(user: AuthenticatedUser) -> bool:
+    return user.role >= Role.ADMIN and not user.is_memory_scoped
+
+
+def _build_memory_access(pool, user: AuthenticatedUser):
+    from lucent.db import MemoryRepository
+    from lucent.integrations.github_repo_access_service import GitHubRepoAccessService
+    from lucent.services.memory_access_service import MemoryAccessService
+
+    return MemoryAccessService(
+        MemoryRepository(pool),
+        GitHubRepoAccessService(pool),
+        is_admin=_memory_admin_override(user),
+    )
+
+
+async def _require_accessible_memory(pool, memory_id: str, user: AuthenticatedUser) -> dict:
+    try:
+        memory_uuid = UUID(str(memory_id))
+    except ValueError as exc:
+        raise HTTPException(422, "Invalid memory_id") from exc
+
+    memory_access = _build_memory_access(pool, user)
+    memory = await memory_access.get_accessible(
+        memory_uuid,
+        _effective_memory_user_id(user),
+        user.organization_id,
+        memory_scope=user.memory_scope,
+        is_admin=_memory_admin_override(user),
+    )
+    if not memory or memory.get("_access_denied"):
+        raise HTTPException(404, "Memory not found")
+    return memory
+
+
 # ── Models ────────────────────────────────────────────────────────────────
 
 
@@ -269,10 +356,20 @@ async def request_memories(request_id: UUID, user: AuthenticatedUser, pool=Depen
                FROM request_memories rm
                JOIN memories m ON rm.memory_id = m.id
                WHERE rm.request_id = $1
+                      AND m.organization_id = $2
+                      AND m.deleted_at IS NULL
                ORDER BY rm.created_at""",
             request_id,
+                user.organization_id,
         )
-    return {"items": [dict(r) for r in rows]}
+    memory_access = _build_memory_access(pool, user)
+    items = await memory_access.filter_memory_links(
+        [dict(r) for r in rows],
+        user_id=_effective_memory_user_id(user),
+        organization_id=user.organization_id,
+        memory_scope=user.memory_scope,
+    )
+    return {"items": items}
 
 
 @router.get("/{request_id}")
@@ -283,7 +380,13 @@ async def get_request(request_id: UUID, user: AuthenticatedUser, pool=Depends(ge
     result = await repo.get_request_with_tasks(str(request_id), str(user.organization_id))
     if not result:
         raise HTTPException(404, "Request not found")
-    return result
+    memory_access = _build_memory_access(pool, user)
+    return await memory_access.filter_request_detail_memory_links(
+        result,
+        user_id=_effective_memory_user_id(user),
+        organization_id=user.organization_id,
+        memory_scope=user.memory_scope,
+    )
 
 
 @router.patch("/{request_id}/status")
@@ -296,6 +399,10 @@ async def update_request_status(
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
+    req = await repo.get_request(str(request_id), str(user.organization_id))
+    if not req:
+        raise HTTPException(404, "Request not found")
+    _require_request_mutation(req, user)
     result = await repo.update_request_status(
         str(request_id), body.status, org_id=str(user.organization_id)
     )
@@ -449,6 +556,7 @@ async def create_task(
     req = await repo.get_request(str(request_id), org_id)
     if not req:
         raise HTTPException(404, "Request not found")
+    _require_request_mutation(req, user)
 
     # Validate model against registry (matches MCP create_task behavior)
     if body.model:
@@ -545,6 +653,7 @@ async def claim_task(
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
+    await _require_task_mutation(repo, str(task_id), str(user.organization_id), user)
     result = await repo.claim_task(str(task_id), body.instance_id, org_id=str(user.organization_id))
     if not result:
         raise HTTPException(409, "Task already claimed or not pending")
@@ -565,6 +674,8 @@ async def update_task_model(
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
+    task, req = await _get_task_and_request(repo, str(task_id), str(user.organization_id))
+    _require_request_mutation(req, user)
     result = await repo.update_task_model(str(task_id), body.model)
     if not result:
         raise HTTPException(404, "Task not found")
@@ -600,9 +711,7 @@ async def edit_pending_task(
     org_id = str(user.organization_id)
 
     # Fetch existing task to confirm it exists and is editable
-    existing = await repo.get_task(str(task_id), org_id=org_id)
-    if not existing:
-        raise HTTPException(404, "Task not found")
+    existing = await _require_task_mutation(repo, str(task_id), org_id, user)
     if existing.get("status") in repo._NON_EDITABLE_TASK_STATUSES:
         raise HTTPException(
             409,
@@ -688,6 +797,7 @@ async def start_task(
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
+    await _require_task_mutation(repo, str(task_id), str(user.organization_id), user)
     result = await repo.start_task(
         str(task_id),
         org_id=str(user.organization_id),
@@ -720,9 +830,7 @@ async def complete_task(
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
-    task_row = await repo.get_task(str(task_id), org_id=str(user.organization_id))
-    if not task_row:
-        raise HTTPException(404, "Task not found")
+    task_row = await _require_task_mutation(repo, str(task_id), str(user.organization_id), user)
 
     output_contract = task_row.get("output_contract")
     if isinstance(output_contract, str):
@@ -776,6 +884,7 @@ async def fail_task(
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
+    await _require_task_mutation(repo, str(task_id), str(user.organization_id), user)
     task = await repo.fail_task(
         str(task_id),
         body.error,
@@ -800,6 +909,7 @@ async def release_task(
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
+    await _require_task_mutation(repo, str(task_id), str(user.organization_id), user)
     task = await repo.release_task(
         str(task_id),
         org_id=str(user.organization_id),
@@ -815,6 +925,7 @@ async def retry_task(task_id: UUID, user: AuthenticatedUser, pool=Depends(get_po
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
+    await _require_task_mutation(repo, str(task_id), str(user.organization_id), user)
     task = await repo.retry_task(str(task_id), org_id=str(user.organization_id))
     if not task:
         raise HTTPException(409, "Task not in failed state")
@@ -831,6 +942,7 @@ async def retry_task_with_feedback(
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
+    await _require_task_mutation(repo, str(task_id), str(user.organization_id), user)
     task = await repo.retry_task_with_feedback(
         str(task_id), body.feedback, org_id=str(user.organization_id)
     )
@@ -857,6 +969,7 @@ async def add_task_event(
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
+    await _require_task_mutation(repo, str(task_id), str(user.organization_id), user)
     task = await repo.get_task(str(task_id), str(user.organization_id))
     if not task:
         raise HTTPException(404, "Task not found")
@@ -878,10 +991,14 @@ async def link_memory(
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
-    task = await repo.get_task(str(task_id), str(user.organization_id))
-    if not task:
-        raise HTTPException(404, "Task not found")
-    await repo.link_memory(str(task_id), body.memory_id, body.relation)
+    await _require_task_mutation(repo, str(task_id), str(user.organization_id), user)
+    await _require_accessible_memory(pool, body.memory_id, user)
+    await repo.link_memory(
+        str(task_id),
+        body.memory_id,
+        body.relation,
+        org_id=str(user.organization_id),
+    )
     return {"status": "linked"}
 
 
@@ -890,7 +1007,17 @@ async def task_memories(task_id: UUID, user: AuthenticatedUser, pool=Depends(get
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
-    return await repo.list_task_memories(str(task_id), org_id=str(user.organization_id))
+    result = await repo.list_task_memories(str(task_id), org_id=str(user.organization_id))
+    memory_access = _build_memory_access(pool, user)
+    result["items"] = await memory_access.filter_memory_links(
+        result.get("items") or [],
+        user_id=_effective_memory_user_id(user),
+        organization_id=user.organization_id,
+        memory_scope=user.memory_scope,
+    )
+    result["total_count"] = len(result["items"])
+    result["has_more"] = False
+    return result
 
 
 # ── Queue management ──────────────────────────────────────────────────────

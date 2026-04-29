@@ -14,8 +14,8 @@ Covers:
 import re
 from uuid import uuid4
 
-import pytest
 import httpx
+import pytest
 import pytest_asyncio
 from httpx import ASGITransport
 
@@ -30,6 +30,7 @@ from lucent.constants import (
     REQUEST_STATUS_REVIEW,
 )
 from lucent.db import OrganizationRepository, UserRepository
+from lucent.db.memory import MemoryRepository
 from lucent.db.requests import RequestRepository
 
 # ---------------------------------------------------------------------------
@@ -103,6 +104,23 @@ async def rl_prefix(db_pool):
         )
         await conn.execute(
             "DELETE FROM requests WHERE organization_id IN ("
+            "SELECT id FROM organizations WHERE name LIKE $1)",
+            f"{prefix}%",
+        )
+        await conn.execute(
+            "DELETE FROM memory_access_log WHERE memory_id IN ("
+            "SELECT id FROM memories WHERE organization_id IN ("
+            "SELECT id FROM organizations WHERE name LIKE $1))",
+            f"{prefix}%",
+        )
+        await conn.execute(
+            "DELETE FROM memory_audit_log WHERE memory_id IN ("
+            "SELECT id FROM memories WHERE organization_id IN ("
+            "SELECT id FROM organizations WHERE name LIKE $1))",
+            f"{prefix}%",
+        )
+        await conn.execute(
+            "DELETE FROM memories WHERE organization_id IN ("
             "SELECT id FROM organizations WHERE name LIKE $1)",
             f"{prefix}%",
         )
@@ -290,6 +308,77 @@ class TestReviewStatusTransitions:
 
         result = await repo.update_request_status(str(req["id"]), "needs_rework")
         assert result["reviewed_at"] is not None
+
+
+class TestRequestTaskSecurity:
+    """Regression tests for request/task authorization and linked-memory ACLs."""
+
+    async def test_same_org_user_cannot_create_task_on_another_users_request(
+        self, db_pool, repo, org_id, rl_user, rl_prefix
+    ):
+        user_repo = UserRepository(db_pool)
+        other = await user_repo.create(
+            external_id=f"{rl_prefix}other_user",
+            provider="local",
+            organization_id=rl_user["organization_id"],
+            email=f"{rl_prefix}other@test.com",
+            display_name=f"{rl_prefix}Other",
+        )
+        req = await _make_request(
+            repo,
+            org_id,
+            title="Owned request",
+            created_by=str(rl_user["id"]),
+        )
+
+        client, app = await _make_client(other)
+        async with client:
+            resp = await client.post(
+                f"/api/requests/{req['id']}/tasks",
+                json={"title": "Injected task", "agent_type": None},
+            )
+        app.dependency_overrides.clear()
+
+        assert resp.status_code == 404
+
+    async def test_private_linked_memory_is_filtered_from_request_details(
+        self, db_pool, repo, org_id, rl_user, rl_prefix, api_client
+    ):
+        user_repo = UserRepository(db_pool)
+        other = await user_repo.create(
+            external_id=f"{rl_prefix}memory_owner",
+            provider="local",
+            organization_id=rl_user["organization_id"],
+            email=f"{rl_prefix}memory-owner@test.com",
+            display_name=f"{rl_prefix}Memory Owner",
+        )
+        req = await _make_request(
+            repo,
+            org_id,
+            title="Request with inaccessible memory",
+            created_by=str(rl_user["id"]),
+        )
+        task = await _make_task(repo, str(req["id"]), org_id)
+        memory = await MemoryRepository(db_pool).create(
+            username=f"{rl_prefix}memory-owner",
+            type="experience",
+            content="private linked memory should not be visible",
+            tags=["private"],
+            importance=5,
+            user_id=other["id"],
+            organization_id=rl_user["organization_id"],
+            shared=False,
+        )
+        await repo.link_memory(str(task["id"]), str(memory["id"]), "read", org_id=org_id)
+
+        detail = await api_client.get(f"/api/requests/{req['id']}")
+        assert detail.status_code == 200
+        task_rows = detail.json()["tasks"]
+        assert task_rows[0]["memories"] == []
+
+        mems = await api_client.get(f"/api/requests/tasks/{task['id']}/memories")
+        assert mems.status_code == 200
+        assert mems.json()["items"] == []
 
 
 class TestInvalidTransitions:

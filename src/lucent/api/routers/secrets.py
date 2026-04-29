@@ -14,9 +14,10 @@ from pydantic import BaseModel, Field
 
 from lucent.access_control import AccessControlService
 from lucent.api.deps import AdminUser, AuthenticatedUser
-from lucent.db import get_pool
+from lucent.db import GroupRepository, get_pool
 from lucent.db.audit import AuditRepository
 from lucent.integrations.encryption import BackendCredentialEncryptor, EncryptionError
+from lucent.rbac import Role
 from lucent.secrets import SecretRegistry, SecretScope
 from lucent.secrets.utils import SECRET_REF_PREFIX
 
@@ -132,6 +133,29 @@ async def _check_secret_access(
         raise HTTPException(status_code=403, detail="Access denied")
 
 
+async def _check_group_secret_scope(
+    user: AuthenticatedUser,
+    owner_group_id: str | None,
+    *,
+    require_modify: bool,
+) -> None:
+    if not owner_group_id:
+        return
+    pool = await get_pool()
+    repo = GroupRepository(pool)
+    group = await repo.get_group(owner_group_id, str(user.organization_id))
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+    if user.role >= Role.ADMIN:
+        return
+    if require_modify:
+        allowed = await repo.is_group_admin(str(user.id), owner_group_id)
+    else:
+        allowed = await repo.is_member(str(user.id), owner_group_id)
+    if not allowed:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+
 def _is_sensitive_env_key(key: str) -> bool:
     token = key.lower()
     sensitive_tokens = (
@@ -163,6 +187,7 @@ def _scope_from_row(row: dict) -> SecretScope:
 @router.post("", status_code=201, response_model=SecretKeyResponse)
 async def create_secret(body: SecretCreate, user: AuthenticatedUser):
     """Store a secret. Returns key name only — never the value."""
+    await _check_group_secret_scope(user, body.owner_group_id, require_modify=True)
     provider = SecretRegistry.get()
     scope = _user_scope(user, body.owner_group_id)
     await provider.set(body.key, body.value, scope)
@@ -177,6 +202,7 @@ async def create_secret(body: SecretCreate, user: AuthenticatedUser):
 @router.get("", response_model=SecretListResponse)
 async def list_secrets(user: AuthenticatedUser, owner_group_id: str | None = None):
     """List secret key names (no values) for the current user or group."""
+    await _check_group_secret_scope(user, owner_group_id, require_modify=False)
     provider = SecretRegistry.get()
     scope = _user_scope(user, owner_group_id)
     keys = await provider.list_keys(scope)
@@ -262,7 +288,9 @@ async def migrate_plaintext_configs(user: AdminUser):
                 migrated_mcp += 1
             if changed:
                 await conn.execute(
-                    "UPDATE mcp_server_configs SET env_vars = $2::jsonb, updated_at = NOW() WHERE id = $1",
+                    """UPDATE mcp_server_configs
+                       SET env_vars = $2::jsonb, updated_at = NOW()
+                       WHERE id = $1""",
                     row["id"],
                     __import__("json").dumps(updated),
                 )
@@ -296,7 +324,9 @@ async def migrate_plaintext_configs(user: AdminUser):
                 migrated_sandbox += 1
             if changed:
                 await conn.execute(
-                    "UPDATE sandbox_templates SET env_vars = $2::jsonb, updated_at = NOW() WHERE id = $1",
+                    """UPDATE sandbox_templates
+                       SET env_vars = $2::jsonb, updated_at = NOW()
+                       WHERE id = $1""",
                     row["id"],
                     __import__("json").dumps(updated),
                 )
@@ -338,7 +368,9 @@ async def migrate_plaintext_configs(user: AdminUser):
                     migrated_integrations += 1
                 if changed:
                     await conn.execute(
-                        "UPDATE integrations SET encrypted_config = $2, updated_at = NOW() WHERE id = $1",
+                        """UPDATE integrations
+                           SET encrypted_config = $2, updated_at = NOW()
+                           WHERE id = $1""",
                         row["id"],
                         encryptor.encrypt(updated_cfg),
                     )

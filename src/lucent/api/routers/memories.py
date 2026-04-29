@@ -17,7 +17,7 @@ from lucent.api.models import (
     TagSuggestion,
     TagSuggestionsResponse,
 )
-from lucent.db import AccessRepository, AuditRepository, MemoryRepository, get_pool
+from lucent.db import AccessRepository, AuditRepository, MemoryRepository, UserRepository, get_pool
 from lucent.integrations.github_repo_access_service import GitHubRepoAccessService
 from lucent.logging import get_logger
 from lucent.models.validation import normalize_tags, validate_metadata
@@ -30,6 +30,27 @@ logger = get_logger("api.memories")
 
 router = APIRouter()
 CREATABLE_MEMORY_TYPES = ["experience", "technical", "goal"]
+
+
+def _effective_memory_user_id(user: AuthenticatedUser) -> UUID:
+    return user.effective_memory_user_id
+
+
+def _memory_admin_override(user: AuthenticatedUser) -> bool:
+    return user.role in (Role.ADMIN, Role.OWNER) and not user.is_memory_scoped
+
+
+async def _effective_memory_username(user: AuthenticatedUser, pool) -> str:
+    effective_user_id = _effective_memory_user_id(user)
+    if effective_user_id != user.id:
+        scoped_user = await UserRepository(pool).get_by_id(effective_user_id)
+        if scoped_user:
+            return (
+                scoped_user.get("display_name")
+                or scoped_user.get("email")
+                or str(effective_user_id)
+            )
+    return user.display_name or user.email or str(user.id)
 
 
 def _memory_to_response(memory: dict[str, Any]) -> MemoryResponse:
@@ -100,10 +121,11 @@ async def create_memory(
 
     # Always derive username from authenticated user — never trust client-supplied
     # username to prevent display-name spoofing (anti-spoofing: V1/V2)
-    username = user.display_name or user.email or str(user.id)
+    effective_user_id = _effective_memory_user_id(user)
+    username = await _effective_memory_username(user, pool)
 
     # Detect daemon caller for auto-sharing and auto-tagging
-    is_daemon = user.external_id == "daemon-service"
+    is_daemon = user.external_id == "daemon-service" and not user.is_memory_scoped
 
     # Daemon-created memories must always be shared so org members can see
     # them in the review queue and search results (workflow-audit/phase-4)
@@ -133,16 +155,21 @@ async def create_memory(
         importance=data.importance,
         related_memory_ids=data.related_memory_ids,
         metadata=validated_metadata,
-        user_id=user.id,
+        user_id=effective_user_id,
         organization_id=user.organization_id,
         shared=effective_shared,
     )
 
-    logger.info("Memory created: id=%s, type=%s, user=%s", result["id"], data.type, user.id)
+    logger.info(
+        "Memory created: id=%s, type=%s, user=%s",
+        result["id"],
+        data.type,
+        effective_user_id,
+    )
     await audit_repo.log(
         memory_id=result["id"],
         action_type="create",
-        user_id=user.id,
+        user_id=effective_user_id,
         organization_id=user.organization_id,
         new_values={
             "username": username,
@@ -175,16 +202,17 @@ async def list_tags(
     memory_access = MemoryAccessService(
         repo,
         GitHubRepoAccessService(pool),
-        is_admin=user.role in (Role.ADMIN, Role.OWNER),
+        is_admin=_memory_admin_override(user),
     )
 
     result = await memory_access.get_existing_tags(
-        user_id=user.id,
+        user_id=_effective_memory_user_id(user),
         username=username,
         type=type,
         limit=min(limit, 100),
-        requesting_user_id=user.id,
+        requesting_user_id=_effective_memory_user_id(user),
         requesting_org_id=user.organization_id,
+        memory_scope=user.memory_scope,
     )
 
     return TagListResponse(
@@ -209,16 +237,17 @@ async def suggest_tags(
     memory_access = MemoryAccessService(
         repo,
         GitHubRepoAccessService(pool),
-        is_admin=user.role in (Role.ADMIN, Role.OWNER),
+        is_admin=_memory_admin_override(user),
     )
 
     result = await memory_access.get_tag_suggestions(
-        user_id=user.id,
+        user_id=_effective_memory_user_id(user),
         query=query,
         username=username,
         limit=min(limit, 25),
-        requesting_user_id=user.id,
+        requesting_user_id=_effective_memory_user_id(user),
         requesting_org_id=user.organization_id,
+        memory_scope=user.memory_scope,
     )
 
     return TagSuggestionsResponse(
@@ -243,27 +272,32 @@ async def get_memory(
     """Get a memory by ID."""
     pool = await get_pool()
     repo = MemoryRepository(pool)
-    memory_access = MemoryAccessService(repo, GitHubRepoAccessService(pool))
+    memory_access = MemoryAccessService(
+        repo,
+        GitHubRepoAccessService(pool),
+        is_admin=_memory_admin_override(user),
+    )
     access_repo = AccessRepository(pool)
 
     # Use access-controlled get
     result = await memory_access.get_accessible(
         memory_id=memory_id,
-        user_id=user.id,
+        user_id=_effective_memory_user_id(user),
         organization_id=user.organization_id,
         memory_scope=user.memory_scope,
+        is_admin=_memory_admin_override(user),
     )
 
     if result is None:
         # Check if admin can see it
-        if user.has_permission(Permission.MEMORY_READ_ALL):
+        if user.has_permission(Permission.MEMORY_READ_ALL) and not user.is_memory_scoped:
             result = await repo.get(memory_id)
             if result and result.get("organization_id") == user.organization_id:
-                result = await memory_access.filter_memory(result, user.id)
+                result = await memory_access.filter_memory(result, _effective_memory_user_id(user))
             else:
                 result = None
 
-    if result is None:
+    if result is None or result.get("_access_denied"):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Memory not found or not accessible",
@@ -273,7 +307,7 @@ async def get_memory(
     await access_repo.log_access(
         memory_id=memory_id,
         access_type="view",
-        user_id=user.id,
+        user_id=_effective_memory_user_id(user),
         organization_id=user.organization_id,
     )
 
@@ -298,24 +332,30 @@ async def update_memory(
 
     pool = await get_pool()
     repo = MemoryRepository(pool)
-    memory_access = MemoryAccessService(repo, GitHubRepoAccessService(pool))
+    memory_access = MemoryAccessService(
+        repo,
+        GitHubRepoAccessService(pool),
+        is_admin=_memory_admin_override(user),
+    )
     audit_repo = AuditRepository(pool)
 
     # Get the memory first to check ownership - use get_accessible to prevent leaking existence
     existing = await memory_access.get_accessible(
         memory_id=memory_id,
-        user_id=user.id,
+        user_id=_effective_memory_user_id(user),
         organization_id=user.organization_id,
         memory_scope=user.memory_scope,
+        is_admin=_memory_admin_override(user),
     )
-    if existing is None:
+    if existing is None or existing.get("_access_denied"):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Memory not found",
         )
 
     # Check ownership (only owner can update)
-    if existing.get("user_id") != user.id:
+    effective_user_id = _effective_memory_user_id(user)
+    if existing.get("user_id") != effective_user_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You can only update your own memories",
@@ -376,7 +416,7 @@ async def update_memory(
         await audit_repo.log(
             memory_id=memory_id,
             action_type="update",
-            user_id=user.id,
+            user_id=effective_user_id,
             organization_id=user.organization_id,
             changed_fields=changed_fields,
             old_values=old_values,
@@ -399,17 +439,22 @@ async def delete_memory(
     """Delete a memory (soft delete)."""
     pool = await get_pool()
     repo = MemoryRepository(pool)
-    memory_access = MemoryAccessService(repo, GitHubRepoAccessService(pool))
+    memory_access = MemoryAccessService(
+        repo,
+        GitHubRepoAccessService(pool),
+        is_admin=_memory_admin_override(user),
+    )
     audit_repo = AuditRepository(pool)
 
     # Get memory first - use get_accessible to prevent leaking existence of other org's memories
     existing = await memory_access.get_accessible(
         memory_id=memory_id,
-        user_id=user.id,
+        user_id=_effective_memory_user_id(user),
         organization_id=user.organization_id,
         memory_scope=user.memory_scope,
+        is_admin=_memory_admin_override(user),
     )
-    if existing is None:
+    if existing is None or existing.get("_access_denied"):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Memory not found",
@@ -427,8 +472,9 @@ async def delete_memory(
         )
 
     # Check permissions
-    is_owner = existing.get("user_id") == user.id
-    can_delete_any = user.has_permission(Permission.MEMORY_DELETE_ANY)
+    effective_user_id = _effective_memory_user_id(user)
+    is_owner = existing.get("user_id") == effective_user_id
+    can_delete_any = user.has_permission(Permission.MEMORY_DELETE_ANY) and not user.is_memory_scoped
     same_org = existing.get("organization_id") == user.organization_id
 
     if not is_owner and not (can_delete_any and same_org):
@@ -449,7 +495,7 @@ async def delete_memory(
     await audit_repo.log(
         memory_id=memory_id,
         action_type="delete",
-        user_id=user.id,
+        user_id=effective_user_id,
         organization_id=user.organization_id,
         old_values={
             "content": existing["content"],
@@ -480,7 +526,7 @@ async def share_memory(
 
     result = await repo.set_shared(
         memory_id=memory_id,
-        user_id=user.id,
+        user_id=_effective_memory_user_id(user),
         shared=True,
     )
 
@@ -520,7 +566,7 @@ async def unshare_memory(
 
     result = await repo.set_shared(
         memory_id=memory_id,
-        user_id=user.id,
+        user_id=_effective_memory_user_id(user),
         shared=False,
     )
 

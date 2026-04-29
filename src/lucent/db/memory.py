@@ -1357,6 +1357,7 @@ class MemoryRepository:
         created_before: datetime | None = None,
         requesting_user_id: UUID | None = None,
         requesting_org_id: UUID | None = None,
+        memory_scope: str | None = None,
     ) -> list[dict[str, Any]]:
         """Export memories with full content and metadata.
 
@@ -1382,13 +1383,24 @@ class MemoryRepository:
         param_idx = 1
 
         if requesting_user_id is not None and requesting_org_id is not None:
-            conditions.append(
-                f"(user_id = ${param_idx} OR "
-                f"(organization_id = ${param_idx + 1} AND shared = true))"
-            )
-            params.append(str(requesting_user_id))
-            params.append(str(requesting_org_id))
-            param_idx += 2
+            if memory_scope == "user":
+                conditions.append(f"user_id = ${param_idx}")
+                params.append(str(requesting_user_id))
+                param_idx += 1
+            elif memory_scope == "org_shared_only":
+                conditions.append(
+                    f"(organization_id = ${param_idx} AND shared = true)"
+                )
+                params.append(str(requesting_org_id))
+                param_idx += 1
+            else:
+                conditions.append(
+                    f"(user_id = ${param_idx} OR "
+                    f"(organization_id = ${param_idx + 1} AND shared = true))"
+                )
+                params.append(str(requesting_user_id))
+                params.append(str(requesting_org_id))
+                param_idx += 2
 
         if type is not None:
             conditions.append(f"type = ${param_idx}")

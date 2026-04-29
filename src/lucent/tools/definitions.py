@@ -8,12 +8,30 @@ from mcp.server.fastmcp import FastMCP
 from lucent.db import get_pool
 from lucent.db.definitions import BuiltInProtectionError, DefinitionRepository
 from lucent.tools.memories import _get_current_user_context
+from lucent.url_validation import SSRFError, validate_url
 
 
 async def _get_definition_repository() -> DefinitionRepository:
     """Get a DefinitionRepository instance."""
     pool = await get_pool()
     return DefinitionRepository(pool)
+
+
+async def _can_modify_definition(
+    user_id: str,
+    org_id: str,
+    resource_type: str,
+    resource_id: str,
+) -> bool:
+    from lucent.access_control import AccessControlService
+
+    pool = await get_pool()
+    return await AccessControlService(pool).can_modify(
+        user_id,
+        resource_type,
+        resource_id,
+        org_id,
+    )
 
 
 def _serialize(obj):
@@ -218,7 +236,7 @@ Returns: JSON with the created agent including its ID and status."""
         description: str = "",
         content: str = "",
     ) -> str:
-        user_id, org_id, _, _, _ = await _get_current_user_context()
+        user_id, org_id, user_role, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         if not user_id:
@@ -358,6 +376,11 @@ Returns: JSON with the updated agent, or an error if not found."""
         if not user_id:
             return json.dumps({"error": "No user context"})
 
+        if not await _can_modify_definition(
+            str(user_id), str(org_id), "agent", agent_id,
+        ):
+            return json.dumps({"error": "Agent not found"})
+
         kwargs = {}
         if name is not None:
             kwargs["name"] = name
@@ -445,6 +468,11 @@ Returns: JSON with status 'deleted', or an error if not found."""
             return json.dumps(
                 {"error": "Forbidden: admin or owner role required", "code": 403}
             )
+
+        if not await _can_modify_definition(
+            str(user_id), str(org_id), "agent", agent_id,
+        ):
+            return json.dumps({"error": "Agent not found"})
 
         repo = await _get_definition_repository()
         success = await repo.delete_agent(agent_id, str(org_id))
@@ -623,6 +651,11 @@ Returns: JSON with status 'deleted', or an error if not found."""
                 {"error": "Forbidden: admin or owner role required", "code": 403}
             )
 
+        if not await _can_modify_definition(
+            str(user_id), str(org_id), "skill", skill_id,
+        ):
+            return json.dumps({"error": "Skill not found"})
+
         repo = await _get_definition_repository()
         success = await repo.delete_skill(skill_id, str(org_id))
         if not success:
@@ -688,13 +721,21 @@ Returns: JSON with the created server including its ID and status."""
         args: str | None = None,
         env_vars: str | None = None,
     ) -> str:
-        user_id, org_id, _, _, _ = await _get_current_user_context()
+        user_id, org_id, user_role, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         if not user_id:
             return json.dumps({"error": "No user context"})
         if not name or len(name) > 64:
             return json.dumps({"error": "name is required and must be <= 64 characters"})
+
+        if server_type == "stdio" and user_role not in ("admin", "owner"):
+            return json.dumps({"error": "Stdio MCP servers require admin or owner role"})
+        if server_type == "http" and url:
+            try:
+                validate_url(url, purpose="MCP server")
+            except SSRFError as exc:
+                return json.dumps({"error": str(exc)})
 
         parsed_args = None
         parsed_env_vars = None
@@ -751,6 +792,32 @@ Returns: JSON with the updated server, or an error if not found."""
         if not user_id:
             return json.dumps({"error": "No user context"})
 
+        repo = await _get_definition_repository()
+        existing = await repo.get_mcp_server(
+            server_id,
+            str(org_id),
+            requester_user_id=str(user_id),
+            requester_role=user_role,
+        )
+        if not existing:
+            return json.dumps({"error": "MCP server not found"})
+        if not await _can_modify_definition(
+            str(user_id), str(org_id), "mcp_server", server_id,
+        ):
+            return json.dumps({"error": "MCP server not found"})
+
+        effective_type = server_type or existing.get("server_type")
+        if (
+            (effective_type == "stdio" or command is not None)
+            and user_role not in ("admin", "owner")
+        ):
+            return json.dumps({"error": "Stdio MCP servers require admin or owner role"})
+        if url is not None and effective_type == "http":
+            try:
+                validate_url(url, purpose="MCP server")
+            except SSRFError as exc:
+                return json.dumps({"error": str(exc)})
+
         kwargs = {}
         if name is not None:
             kwargs["name"] = name
@@ -763,7 +830,6 @@ Returns: JSON with the updated server, or an error if not found."""
         if command is not None:
             kwargs["command"] = command
 
-        repo = await _get_definition_repository()
         try:
             result = await repo.update_mcp_server(
                 server_id, str(org_id), requester_role=user_role, **kwargs,

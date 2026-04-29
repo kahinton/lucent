@@ -15,6 +15,7 @@ from lucent.api.deps import AdminUser, AuthenticatedUser
 from lucent.db import DefinitionRepository, get_pool
 from lucent.db.audit import AuditRepository
 from lucent.db.definitions import BuiltInProtectionError
+from lucent.rbac import Role
 from lucent.security import scan_content_for_injection
 from lucent.services.mcp_discovery import (
     MCPDiscoveryError,
@@ -26,6 +27,23 @@ from lucent.url_validation import SSRFError, validate_url
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/definitions", tags=["definitions"])
+
+
+def _validate_user_definition_create(status_value: str, scope_value: str) -> None:
+    if status_value != "proposed" or scope_value != "instance":
+        raise HTTPException(
+            403,
+            "Definitions created through the API must start as proposed instance definitions",
+        )
+
+
+def _require_admin_for_stdio(
+    user: AuthenticatedUser,
+    server_type: str | None,
+    command: str | None = None,
+) -> None:
+    if (server_type == "stdio" or command is not None) and user.role < Role.ADMIN:
+        raise HTTPException(403, "Stdio MCP servers require admin or owner role")
 
 
 # ── Request Models ────────────────────────────────────────────────────────
@@ -75,9 +93,22 @@ class GrantAccess(BaseModel):
 
 class ImportRequest(BaseModel):
     """Request body for importing a definition from an external source."""
-    source_type: str = Field(..., pattern=r"^(url|github|raw)$", description="Import source: 'url', 'github', or 'raw'")
-    source: str = Field(..., min_length=1, max_length=100000, description="URL, GitHub path (owner/repo/path), or raw markdown content")
-    definition_type: str | None = Field(None, pattern=r"^(agent|skill)$", description="Hint: 'agent' or 'skill'. Auto-detected if not provided.")
+    source_type: str = Field(
+        ...,
+        pattern=r"^(url|github|raw)$",
+        description="Import source: 'url', 'github', or 'raw'",
+    )
+    source: str = Field(
+        ...,
+        min_length=1,
+        max_length=100000,
+        description="URL, GitHub path (owner/repo/path), or raw markdown content",
+    )
+    definition_type: str | None = Field(
+        None,
+        pattern=r"^(agent|skill)$",
+        description="Hint: 'agent' or 'skill'. Auto-detected if not provided.",
+    )
 
 
 # ── Agent Endpoints ──────────────────────────────────────────────────────
@@ -104,6 +135,7 @@ async def list_agents(
 
 @router.post("/agents", status_code=201)
 async def create_agent(body: CreateAgent, user: AuthenticatedUser):
+    _validate_user_definition_create(body.status, body.scope)
     pool = await get_pool()
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     result = await repo.create_agent(
@@ -289,6 +321,7 @@ async def list_skills(
 
 @router.post("/skills", status_code=201)
 async def create_skill(body: CreateSkill, user: AuthenticatedUser):
+    _validate_user_definition_create(body.status, body.scope)
     pool = await get_pool()
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     result = await repo.create_skill(
@@ -377,6 +410,7 @@ async def list_mcp_servers(
 
 @router.post("/mcp-servers", status_code=201)
 async def create_mcp_server(body: CreateMCPServer, user: AuthenticatedUser):
+    _require_admin_for_stdio(user, body.server_type, body.command)
     # Validate URL against SSRF before persisting.
     if body.server_type == "http" and body.url:
         try:
@@ -425,6 +459,16 @@ async def update_mcp_server(server_id: str, body: UpdateMCPServer, user: Authent
     if not await acl.can_modify(str(user.id), "mcp_server", server_id, str(user.organization_id)):
         raise HTTPException(404, "MCP server not found")
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    existing = await repo.get_mcp_server(
+        server_id,
+        str(user.organization_id),
+        requester_user_id=str(user.id),
+        requester_role=user.role.value,
+    )
+    if not existing:
+        raise HTTPException(404, "MCP server not found")
+    effective_type = body.server_type or existing.get("server_type")
+    _require_admin_for_stdio(user, effective_type, body.command)
     updates = body.model_dump(exclude_none=True)
     try:
         result = await repo.update_mcp_server(
@@ -465,6 +509,12 @@ async def discover_mcp_server_tools(
     )
     if not server:
         raise HTTPException(404, "MCP server not found")
+
+    if refresh:
+        if server.get("status") != "active":
+            raise HTTPException(409, "MCP tool discovery requires an active approved server")
+        if server.get("server_type") == "stdio" and user.role < Role.ADMIN:
+            raise HTTPException(403, "Stdio MCP tool discovery requires admin or owner role")
 
     try:
         if refresh:

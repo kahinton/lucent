@@ -33,6 +33,8 @@ class CurrentUser:
         external_id: str | None = None,  # External provider ID (e.g. "daemon-service")
         memory_scope_user_id: UUID | None = None,  # Restricts memory ops to this user
         memory_scope: str | None = None,  # 'user' or 'org_shared_only'
+        api_key_name: str | None = None,
+        sandbox_task_id: str | None = None,
     ):
         self.id = id
         self.organization_id = organization_id
@@ -47,6 +49,8 @@ class CurrentUser:
         self.external_id = external_id
         self.memory_scope_user_id = memory_scope_user_id
         self.memory_scope = memory_scope
+        self.api_key_name = api_key_name
+        self.sandbox_task_id = sandbox_task_id
 
     @property
     def effective_memory_user_id(self) -> UUID:
@@ -146,6 +150,13 @@ async def _authenticate_with_api_key(api_key: str) -> CurrentUser | None:
     raw_scope_uid = key_info.get("memory_scope_user_id")
     scope_user_id = UUID(str(raw_scope_uid)) if raw_scope_uid else None
 
+    key_name = key_info.get("name")
+    sandbox_task_id = None
+    if isinstance(key_name, str):
+        match = re.match(r"^sandbox-task-([0-9a-fA-F-]{36})-[0-9a-fA-F]+$", key_name)
+        if match:
+            sandbox_task_id = match.group(1)
+
     return CurrentUser(
         id=user["id"],
         organization_id=user.get("organization_id"),
@@ -158,6 +169,8 @@ async def _authenticate_with_api_key(api_key: str) -> CurrentUser | None:
         external_id=user.get("external_id"),
         memory_scope_user_id=scope_user_id,
         memory_scope=key_info.get("memory_scope"),
+        api_key_name=key_name,
+        sandbox_task_id=sandbox_task_id,
     )
 
 
@@ -179,16 +192,33 @@ async def get_current_user(
             # Sandbox bridge scoped keys are restricted to specific API endpoints.
             has_sandbox_scope = any(scope.startswith("sandbox-") for scope in user.api_key_scopes)
             if user.auth_method == "api_key" and has_sandbox_scope:
-                allowed_path_patterns = (
-                    r"^/api/memories(?:$|/[^/]+$|/tags/(?:list|suggest)$)",
-                    r"^/api/search(?:$|/full$)",
-                    r"^/api/requests/tasks/[^/]+/(?:events|memories)$",
+                allowed_method_path_patterns = (
+                    ("POST", r"^/api/memories$"),
+                    ("PATCH", r"^/api/memories/[^/]+$"),
+                    ("POST", r"^/api/search(?:$|/full$)"),
+                    ("POST", r"^/api/requests/tasks/[^/]+/(?:events|memories)$"),
                 )
                 path = request.url.path
-                if not any(re.match(pattern, path) for pattern in allowed_path_patterns):
+                method = request.method.upper()
+                if not any(
+                    method == allowed_method and re.match(pattern, path)
+                    for allowed_method, pattern in allowed_method_path_patterns
+                ):
                     raise HTTPException(
                         status_code=status.HTTP_403_FORBIDDEN,
                         detail="API key scope does not allow this endpoint",
+                    )
+                task_match = re.match(
+                    r"^/api/requests/tasks/([^/]+)/(?:events|memories)$", path
+                )
+                if (
+                    task_match
+                    and user.sandbox_task_id
+                    and task_match.group(1) != user.sandbox_task_id
+                ):
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Sandbox API key is scoped to a different task",
                     )
             set_user_id(str(user.id))
             return user

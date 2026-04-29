@@ -10,8 +10,8 @@ from __future__ import annotations
 import os
 from unittest.mock import patch
 
+import httpx
 import pytest
-
 
 # ---------------------------------------------------------------------------
 # Unit tests for url_validation.validate_url
@@ -71,6 +71,40 @@ class TestValidateUrl:
             ]
             result = self._validate("https://public.example.com/mcp")
             assert result == "https://public.example.com/mcp"
+
+    @pytest.mark.asyncio
+    async def test_definition_import_revalidates_redirect_target(self):
+        from lucent.services import definition_import
+        from lucent.url_validation import SSRFError
+
+        class FakeClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def get(self, url, headers=None):
+                return httpx.Response(
+                    302,
+                    headers={"location": "http://127.0.0.1/private"},
+                    request=httpx.Request("GET", url),
+                )
+
+        def fake_validate(url, **kwargs):
+            if "127.0.0.1" in str(url):
+                raise SSRFError("blocked redirect")
+            return url
+
+        with (
+            patch.object(definition_import, "validate_url", side_effect=fake_validate),
+            patch.object(definition_import.httpx, "AsyncClient", return_value=FakeClient()),
+        ):
+            content, error = await definition_import.fetch_from_url("https://public.example/file.md")
+
+        assert content is None
+        assert error is not None
+        assert "Redirect URL validation failed" in error
 
     # ── Missing hostname ─────────────────────────────────────────
 
@@ -184,7 +218,10 @@ class TestValidateUrl:
             assert result == "http://internal-mcp.corp.local:8080/mcp"
 
     def test_allowlist_supports_multiple_hosts(self):
-        with patch.dict(os.environ, {"LUCENT_MCP_URL_ALLOWLIST": "host1.local, host2.local, 10.0.1.5"}):
+        with patch.dict(
+            os.environ,
+            {"LUCENT_MCP_URL_ALLOWLIST": "host1.local, host2.local, 10.0.1.5"},
+        ):
             result = self._validate("http://host2.local:9000/mcp")
             assert result == "http://host2.local:9000/mcp"
 

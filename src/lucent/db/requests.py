@@ -993,7 +993,17 @@ class RequestRepository:
                 if not req_row:
                     return None
                 req_org_id = req_row["organization_id"]
-                req_source = req_row["source"]
+
+                memory_exists = await conn.fetchval(
+                    """SELECT 1 FROM memories
+                       WHERE id = $1::uuid
+                         AND organization_id = $2
+                         AND deleted_at IS NULL""",
+                    memory_id,
+                    req_org_id,
+                )
+                if not memory_exists:
+                    return None
 
                 if block_duplicates and relation == "goal":
                     # NOTE: late-link goal-state validation has been removed.
@@ -1247,8 +1257,11 @@ class RequestRepository:
                        FROM task_memories tm
                        JOIN memories m ON tm.memory_id = m.id
                        WHERE tm.task_id = ANY($1)
+                           AND m.organization_id = $2
+                           AND m.deleted_at IS NULL
                        ORDER BY tm.created_at""",
                     task_ids,
+                    UUID(org_id),
                 )
 
             # Group by task_id
@@ -1293,8 +1306,11 @@ class RequestRepository:
                    FROM request_memories rm
                    JOIN memories m ON rm.memory_id = m.id
                    WHERE rm.request_id = $1
+                              AND m.organization_id = $2
+                              AND m.deleted_at IS NULL
                    ORDER BY rm.created_at""",
                 UUID(request_id),
+                     UUID(org_id),
             )
         req["memories"] = [dict(r) for r in mem_rows]
 
@@ -2516,6 +2532,14 @@ class RequestRepository:
                 )
                 if not task_exists:
                     raise ValueError("Task not found")
+                memory_exists = await conn.fetchval(
+                    """SELECT 1 FROM memories
+                       WHERE id = $1 AND organization_id = $2 AND deleted_at IS NULL""",
+                    UUID(memory_id),
+                    UUID(org_id),
+                )
+                if not memory_exists:
+                    raise ValueError("Memory not found")
             await conn.execute(
                 """INSERT INTO task_memories (task_id, memory_id, relation)
                    VALUES ($1, $2, $3) ON CONFLICT DO NOTHING""",
@@ -2541,9 +2565,13 @@ class RequestRepository:
         async with self.pool.acquire() as conn:
             if org_id:
                 count_row = await conn.fetchrow(
-                    """SELECT COUNT(*) AS total FROM task_memories tm
+                    """SELECT COUNT(*) AS total
+                       FROM task_memories tm
                        JOIN tasks t ON tm.task_id = t.id
-                       WHERE tm.task_id = $1 AND t.organization_id = $2""",
+                       JOIN memories m ON tm.memory_id = m.id
+                       WHERE tm.task_id = $1 AND t.organization_id = $2
+                         AND m.organization_id = $2
+                         AND m.deleted_at IS NULL""",
                     UUID(task_id),
                     UUID(org_id),
                 )
@@ -2554,6 +2582,8 @@ class RequestRepository:
                        JOIN memories m ON tm.memory_id = m.id
                        JOIN tasks t ON tm.task_id = t.id
                        WHERE tm.task_id = $1 AND t.organization_id = $2
+                                  AND m.organization_id = $2
+                                  AND m.deleted_at IS NULL
                        ORDER BY tm.created_at LIMIT $3 OFFSET $4""",
                     UUID(task_id),
                     UUID(org_id),
@@ -2562,7 +2592,11 @@ class RequestRepository:
                 )
             else:
                 count_row = await conn.fetchrow(
-                    "SELECT COUNT(*) AS total FROM task_memories WHERE task_id = $1",
+                    """SELECT COUNT(*) AS total
+                       FROM task_memories tm
+                       JOIN memories m ON tm.memory_id = m.id
+                       WHERE tm.task_id = $1
+                         AND m.deleted_at IS NULL""",
                     UUID(task_id),
                 )
                 total_count = count_row["total"] if count_row else 0
@@ -2571,6 +2605,7 @@ class RequestRepository:
                        FROM task_memories tm
                        JOIN memories m ON tm.memory_id = m.id
                        WHERE tm.task_id = $1
+                                  AND m.deleted_at IS NULL
                        ORDER BY tm.created_at LIMIT $2 OFFSET $3""",
                     UUID(task_id),
                     limit,

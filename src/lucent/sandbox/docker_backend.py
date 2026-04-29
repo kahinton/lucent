@@ -332,6 +332,7 @@ class DockerBackend(SandboxBackend):
                 task_id=config.task_id,
                 request_id=config.request_id,
                 organization_id=config.organization_id,
+                requesting_user_id=config.requesting_user_id,
             )
             new_container = await asyncio.to_thread(
                 self._create_container, sandbox_id, name, new_config,
@@ -542,7 +543,7 @@ class DockerBackend(SandboxBackend):
         # with full network access.
         check = await self.exec(sandbox_id, "command -v iptables", timeout=5)
         if check.exit_code != 0:
-            install = await self.exec(
+            await self.exec(
                 sandbox_id,
                 "( (command -v apt-get >/dev/null 2>&1 && apt-get update -qq && "
                 "apt-get install -y -qq iptables >/dev/null 2>&1) || "

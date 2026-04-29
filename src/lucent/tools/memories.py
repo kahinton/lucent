@@ -420,7 +420,7 @@ Returns:
                     "Authentication required: unable to determine user context for access control"
                 )
 
-            if result is None:
+            if result is None or result.get("_access_denied"):
                 return _error_response(f"Memory not found or not accessible: {memory_id}")
 
             # Log the access
@@ -1941,112 +1941,6 @@ Returns:
         except Exception as e:
             logger.error("import_memories failed", exc_info=e)
             return _error_response(f"Failed to import memories: {str(e)}")
-
-    @mcp.tool()
-    async def get_memory_stats(
-        organization_id: str | None = None,
-    ) -> str:
-        """Return memory lifecycle statistics for observability.
-
-        Surfaces lifecycle stage distribution, vitality histogram, and total count.
-        This is a read-only shadow mode tool (no memory mutations).
-
-        Args:
-            organization_id: Optional organization UUID override. Defaults to caller org.
-
-        Returns:
-            JSON string with lifecycle stage counts, vitality buckets, and total memory count.
-        """
-        try:
-            user_id, org_id, user_role, memory_scope, memory_scope_user_id = await _get_current_user_context()
-            effective_org_id = organization_id or (str(org_id) if org_id else None)
-
-            repo = await _get_repository()
-            stats = await repo.get_lifecycle_stats(
-                UUID(effective_org_id) if effective_org_id else None
-            )
-            return json.dumps(stats, indent=2, default=str)
-        except ValueError as e:
-            return _error_response(f"Invalid organization_id format: {str(e)}")
-        except Exception as e:
-            logger.error("get_memory_stats failed", exc_info=e)
-            return _error_response(f"Failed to retrieve memory stats: {str(e)}")
-
-    @mcp.tool()
-    async def compute_vitality_scores(
-        batch_size: int = 500,
-    ) -> str:
-        """Compute and persist vitality scores for shadow-mode lifecycle observation.
-
-        This mutates only lifecycle observability fields:
-        - vitality_score
-        - vitality_computed_at
-        - lifecycle_stage
-
-        It does NOT change search ranking behavior.
-
-        Args:
-            batch_size: Number of memories to process per batch (default 500).
-
-        Returns:
-            JSON string with processed counts and computation timestamp.
-        """
-        try:
-            if batch_size < 1 or batch_size > 5000:
-                return _error_response("batch_size must be between 1 and 5000")
-            repo = await _get_repository()
-            result = await repo.compute_vitality_scores(batch_size=batch_size)
-            return json.dumps(result, indent=2, default=str)
-        except Exception as e:
-            logger.error("compute_vitality_scores failed", exc_info=e)
-            return _error_response(f"Failed to compute vitality scores: {str(e)}")
-
-    @mcp.tool()
-    async def compute_shadow_forget_scores(
-        strategy: str = "gcp-v1",
-        batch_size: int = 500,
-    ) -> str:
-        """Compute Candidate-A shadow forgetting scores into sidecar storage only.
-
-        Writes rows only to memory_shadow_scores and never mutates production ranking fields.
-        Becomes a no-op when LUCENT_SHADOW_FORGET_ENABLED is disabled.
-        """
-        try:
-            if batch_size < 1 or batch_size > 5000:
-                return _error_response("batch_size must be between 1 and 5000")
-            repo = await _get_repository()
-            result = await repo.compute_shadow_forget_scores(
-                strategy=strategy,
-                batch_size=batch_size,
-            )
-            return json.dumps(result, indent=2, default=str)
-        except ValueError as e:
-            return _error_response(str(e))
-        except Exception as e:
-            logger.error("compute_shadow_forget_scores failed", exc_info=e)
-            return _error_response(f"Failed to compute shadow forget scores: {str(e)}")
-
-    @mcp.tool()
-    async def get_shadow_forget_comparison(
-        strategy: str = "gcp-v1",
-        window_hours: int = 168,
-        limit: int = 100,
-    ) -> str:
-        """Return divergence and metric summary for shadow forgetting candidates."""
-        try:
-            repo = await _get_repository()
-            result = await repo.get_shadow_forget_comparison(
-                strategy=strategy,
-                window_hours=window_hours,
-                limit=limit,
-            )
-            return json.dumps(result, indent=2, default=str)
-        except ValueError as e:
-            return _error_response(str(e))
-        except Exception as e:
-            logger.error("get_shadow_forget_comparison failed", exc_info=e)
-            return _error_response(f"Failed to retrieve shadow comparison: {str(e)}")
-
 
 def _serialize_memory(memory: dict[str, Any]) -> dict[str, Any]:
     """Serialize a memory dict for JSON output."""

@@ -88,6 +88,90 @@ class MemoryAccessService:
                 filtered.append(memory)
         return filtered
 
+    async def filter_memory_links(
+        self,
+        links: list[dict[str, Any]],
+        *,
+        user_id: UUID | None,
+        organization_id: UUID | None,
+        memory_scope: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return only linked memories the caller can read.
+
+        Request/task detail loaders historically joined directly against the
+        memories table.  This helper re-hydrates each linked memory through the
+        same access-control path as ordinary memory reads, then copies the safe
+        display fields back onto the link row.
+        """
+        if user_id is None or organization_id is None:
+            return []
+
+        filtered: list[dict[str, Any]] = []
+        for link in links:
+            memory_id = link.get("memory_id")
+            try:
+                memory_uuid = UUID(str(memory_id))
+            except (TypeError, ValueError):
+                continue
+
+            memory = await self.get_accessible(
+                memory_uuid,
+                user_id,
+                organization_id,
+                memory_scope=memory_scope,
+            )
+            if not memory or memory.get("_access_denied"):
+                continue
+
+            safe_link = dict(link)
+            safe_link["content"] = memory.get("content")
+            safe_link["memory_type"] = memory.get("type")
+            safe_link["tags"] = memory.get("tags") or []
+            safe_link["metadata"] = memory.get("metadata") or {}
+            filtered.append(safe_link)
+        return filtered
+
+    async def filter_request_detail_memory_links(
+        self,
+        request_detail: dict[str, Any],
+        *,
+        user_id: UUID | None,
+        organization_id: UUID | None,
+        memory_scope: str | None = None,
+    ) -> dict[str, Any]:
+        """Filter request-level and task-level memory links in a detail payload."""
+        if not request_detail:
+            return request_detail
+
+        request_detail["memories"] = await self.filter_memory_links(
+            request_detail.get("memories") or [],
+            user_id=user_id,
+            organization_id=organization_id,
+            memory_scope=memory_scope,
+        )
+
+        for task in request_detail.get("tasks") or []:
+            task["memories"] = await self.filter_memory_links(
+                task.get("memories") or [],
+                user_id=user_id,
+                organization_id=organization_id,
+                memory_scope=memory_scope,
+            )
+
+        def _filter_tree(tasks: list[dict[str, Any]]) -> None:
+            for task in tasks:
+                task_id = str(task.get("id"))
+                source = next(
+                    (t for t in request_detail.get("tasks") or [] if str(t.get("id")) == task_id),
+                    None,
+                )
+                if source is not None:
+                    task["memories"] = source.get("memories") or []
+                _filter_tree(task.get("sub_tasks") or [])
+
+        _filter_tree(request_detail.get("task_tree") or [])
+        return request_detail
+
     async def _resolve_accessible_repos(
         self, user_id: UUID | None, memory_scope: str | None = None
     ) -> list[str] | None:

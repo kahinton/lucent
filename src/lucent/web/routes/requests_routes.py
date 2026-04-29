@@ -124,6 +124,22 @@ async def request_detail(request: Request, request_id: str):
     if not req:
         raise HTTPException(404, "Request not found")
 
+    from lucent.db.memory import MemoryRepository
+    from lucent.integrations.github_repo_access_service import GitHubRepoAccessService
+    from lucent.services.memory_access_service import MemoryAccessService
+
+    role_value = user.role if isinstance(user.role, str) else user.role.value
+    memory_access = MemoryAccessService(
+        MemoryRepository(pool),
+        GitHubRepoAccessService(pool),
+        is_admin=role_value in ("admin", "owner"),
+    )
+    req = await memory_access.filter_request_detail_memory_links(
+        req,
+        user_id=user.id,
+        organization_id=user.organization_id,
+    )
+
     # Resolve linked goal + milestone for the request banner. Best-effort:
     # if the goal memory was deleted or isn't accessible, just skip.
     goal_info: dict | None = None
@@ -132,10 +148,12 @@ async def request_detail(request: Request, request_id: str):
         try:
             from uuid import UUID as _UUID
 
-            from lucent.db.memory import MemoryRepository
-
-            mem_repo = MemoryRepository(pool)
-            goal_mem = await mem_repo.get(_UUID(str(goal_memory_id)))
+            goal_mem = await memory_access.get_accessible(
+                _UUID(str(goal_memory_id)),
+                user.id,
+                user.organization_id,
+                is_admin=role_value in ("admin", "owner"),
+            )
             if goal_mem and goal_mem.get("type") == "goal":
                 meta = goal_mem.get("metadata") or {}
                 milestones = meta.get("milestones") or []
@@ -197,8 +215,8 @@ async def request_detail(request: Request, request_id: str):
         for t in req.get("tasks", [])
     )
     if has_editable_task:
-        from lucent.model_registry import list_models
         from lucent.db.definitions import DefinitionRepository
+        from lucent.model_registry import list_models
 
         available_models = [
             {"id": m.id, "name": m.name or m.id, "tags": list(m.tags or [])}
@@ -212,7 +230,7 @@ async def request_detail(request: Request, request_id: str):
             status="active",
             limit=200,
             requester_user_id=str(user.id),
-            requester_role=user.role.value,
+            requester_role=role_value,
         )
         available_agents = sorted(
             [{"name": a["name"], "description": a.get("description", "")}

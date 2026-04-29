@@ -22,6 +22,14 @@ async def _get_schedule_repository() -> ScheduleRepository:
 def register_schedule_tools(mcp: FastMCP) -> None:
     """Register schedule management tools with the MCP server."""
 
+    def _can_manage_schedule(schedule: dict, user_id: str | None, user_role: str | None) -> bool:
+        if user_role in ("admin", "owner", "daemon"):
+            return True
+        created_by = schedule.get("created_by")
+        if not created_by:
+            return True
+        return bool(user_id and created_by and str(created_by) == str(user_id))
+
     @mcp.tool(
         description="""Create a scheduled task — either one-time or repeating.
 
@@ -159,6 +167,11 @@ Returns: JSON with the updated schedule."""
             return json.dumps({"error": "No organization context"})
 
         repo = await _get_schedule_repository()
+        schedule = await repo.get_schedule(schedule_id, str(org_id))
+        if not schedule:
+            return json.dumps({"error": "Schedule not found"})
+        if not _can_manage_schedule(schedule, str(user_id) if user_id else None, user_role):
+            return json.dumps({"error": "Schedule not found"})
         try:
             result = await repo.toggle_schedule(
                 schedule_id, str(org_id), enabled, requester_role=user_role,

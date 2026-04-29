@@ -34,6 +34,44 @@ async def _get_pool():
     return await init_db(database_url)
 
 
+async def _memory_access_service(*, is_admin: bool = False):
+    from lucent.db import MemoryRepository
+    from lucent.integrations.github_repo_access_service import GitHubRepoAccessService
+    from lucent.services.memory_access_service import MemoryAccessService
+
+    pool = await _get_pool()
+    return MemoryAccessService(
+        MemoryRepository(pool),
+        GitHubRepoAccessService(pool),
+        is_admin=is_admin,
+    )
+
+
+async def _get_accessible_memory(
+    memory_id: str,
+    *,
+    user_id: UUID,
+    org_id: UUID,
+    memory_scope: str | None,
+    is_admin: bool = False,
+) -> dict | None:
+    try:
+        memory_uuid = UUID(str(memory_id))
+    except ValueError:
+        return None
+    access = await _memory_access_service(is_admin=is_admin)
+    memory = await access.get_accessible(
+        memory_uuid,
+        user_id,
+        org_id,
+        memory_scope=memory_scope,
+        is_admin=is_admin,
+    )
+    if not memory or memory.get("_access_denied"):
+        return None
+    return memory
+
+
 def register_request_tools(mcp: FastMCP) -> None:
     """Register request tracking tools with the MCP server."""
 
@@ -631,13 +669,27 @@ Returns: JSON confirmation."""
         relation: str = "created",
     ) -> str:
         # Anti-spoofing V6: require authentication
-        user_id, org_id, _, _, _ = await _get_current_user_context()
+        user_id, org_id, user_role, memory_scope, _ = await _get_current_user_context()
         if not user_id:
             return json.dumps({"error": "Authentication required"})
         if not org_id:
             return json.dumps({"error": "No organization context"})
 
         repo = await _get_request_repository()
+        task = await repo.get_task(task_id, org_id=str(org_id))
+        if not task:
+            return json.dumps({"error": "Task not found"})
+
+        memory = await _get_accessible_memory(
+            memory_id,
+            user_id=user_id,
+            org_id=org_id,
+            memory_scope=memory_scope,
+            is_admin=user_role in ("admin", "owner") and memory_scope is None,
+        )
+        if not memory:
+            return json.dumps({"error": "Memory not found or not accessible"})
+
         try:
             await repo.link_memory(task_id, memory_id, relation, org_id=str(org_id))
         except ValueError as exc:
@@ -664,11 +716,21 @@ Returns: JSON confirmation."""
         memory_id: str,
         relation: str = "goal",
     ) -> str:
-        user_id, org_id, _, _, _ = await _get_current_user_context()
+        user_id, org_id, user_role, memory_scope, _ = await _get_current_user_context()
         if not user_id:
             return json.dumps({"error": "Authentication required"})
         if not org_id:
             return json.dumps({"error": "No organization context"})
+
+        memory = await _get_accessible_memory(
+            memory_id,
+            user_id=user_id,
+            org_id=org_id,
+            memory_scope=memory_scope,
+            is_admin=user_role in ("admin", "owner") and memory_scope is None,
+        )
+        if not memory:
+            return json.dumps({"error": "Memory not found or not accessible"})
 
         repo = await _get_request_repository()
         result = await repo.link_request_memory(
@@ -767,14 +829,26 @@ Args:
 Returns: JSON with request details, task breakdown, events timeline, memory links, and reviews."""
     )
     async def get_request_details(request_id: str) -> str:
-        _, org_id, _, _, _ = await _get_current_user_context()
+        user_id, org_id, user_role, memory_scope, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
+        if not user_id:
+            return json.dumps({"error": "No user context"})
 
         repo = await _get_request_repository()
         req = await repo.get_request_with_tasks(request_id, str(org_id))
         if not req:
             return json.dumps({"error": "Request not found"})
+
+        memory_access = await _memory_access_service(
+            is_admin=user_role in ("admin", "owner") and memory_scope is None
+        )
+        req = await memory_access.filter_request_detail_memory_links(
+            req,
+            user_id=user_id,
+            organization_id=org_id,
+            memory_scope=memory_scope,
+        )
 
         # Include review history
         from lucent.db.reviews import ReviewRepository
