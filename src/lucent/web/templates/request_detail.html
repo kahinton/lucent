@@ -84,6 +84,64 @@
     </div>
 </div>
 
+{% if req.approval_status == 'pending_approval' and req.status not in ('cancelled', 'rejection_processing') %}
+<div class="mb-6 rounded-xl border border-amber-200 bg-amber-50 p-4 shadow-sm">
+    <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+        <div class="flex items-start gap-3">
+            <div class="mt-0.5 rounded-lg bg-amber-100 p-2 text-amber-700">
+                <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6l4 2m6-2a10 10 0 11-20 0 10 10 0 0120 0z" />
+                </svg>
+            </div>
+            <div>
+                <h2 class="text-sm font-semibold text-amber-950">This request is waiting for approval</h2>
+                <p class="mt-1 max-w-2xl text-sm text-amber-800">
+                    Review the request and task plan here. Approving releases it for daemon execution; rejecting sends feedback into the planning loop.
+                </p>
+            </div>
+        </div>
+        {% if can_review_request %}
+        <div class="flex flex-col gap-2 sm:min-w-[24rem]">
+            <form method="post" action="/requests/{{ req.id }}/approval" class="flex flex-col gap-2 sm:flex-row">
+                <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
+                <input type="hidden" name="action" value="approve">
+                <input type="text" name="comment" maxlength="10000" placeholder="Optional approval note" class="min-w-0 flex-1 rounded-lg border border-emerald-200 bg-white px-3 py-2 text-sm text-gray-700 placeholder:text-gray-400 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500">
+                <button type="submit" class="inline-flex items-center justify-center gap-1.5 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-emerald-700 transition-colors">
+                    <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    Approve
+                </button>
+            </form>
+            <details class="rounded-lg border border-amber-200 bg-white/70">
+                <summary class="cursor-pointer list-none px-3 py-2 text-sm font-medium text-amber-800 hover:bg-amber-100/60 rounded-lg">
+                    Reject with feedback
+                </summary>
+                <form method="post" action="/requests/{{ req.id }}/approval" class="space-y-2 border-t border-amber-100 p-3">
+                    <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
+                    <input type="hidden" name="action" value="reject">
+                    <label class="block text-xs font-medium text-amber-900" for="reject-comment">Rejection reason</label>
+                    <textarea id="reject-comment" name="comment" rows="3" maxlength="10000" required placeholder="What should change before this work runs?" class="w-full rounded-lg border border-red-200 bg-white px-3 py-2 text-sm text-gray-700 placeholder:text-gray-400 focus:border-red-500 focus:outline-none focus:ring-1 focus:ring-red-500"></textarea>
+                    <div class="flex justify-end">
+                        <button type="submit" onclick="return confirm('Reject this request and return it to the planning loop?')" class="inline-flex items-center justify-center gap-1.5 rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-red-700 transition-colors">
+                            <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M9.75 9.75l4.5 4.5m0-4.5l-4.5 4.5M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                            </svg>
+                            Reject request
+                        </button>
+                    </div>
+                </form>
+            </details>
+        </div>
+        {% else %}
+        <div class="rounded-lg border border-amber-200 bg-white/70 px-3 py-2 text-sm text-amber-800">
+            Admin or owner approval is required.
+        </div>
+        {% endif %}
+    </div>
+</div>
+{% endif %}
+
 <!-- Stats Bar -->
 {% if req.stats %}
 <div class="grid grid-cols-5 gap-3 mb-6">

@@ -2,16 +2,69 @@
 
 from math import ceil
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
+from lucent.auth_providers import CSRF_COOKIE_NAME
 from lucent.db import get_pool
+from lucent.rbac import Role
 
 from ._shared import _check_csrf, get_user_context, templates
 
 router = APIRouter()
 
 ALLOWED_PER_PAGE = {10, 25, 50, 100}
+
+
+def _can_review_request(user) -> bool:
+    """Return whether the current web user can approve/reject request gates."""
+    role = user.role if isinstance(user.role, Role) else Role.from_string(str(user.role))
+    return (
+        role >= Role.ADMIN
+        or role == Role.DAEMON
+        or user.external_id == "daemon-service"
+    )
+
+
+async def _notify_request_ready(pool, *, request_id: str, action: str) -> None:
+    """Best-effort wake notification for daemon request/review state changes."""
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "SELECT pg_notify('request_ready', $1)",
+                f'{{"type": "approval", "action": "{action}", "request_id": "{request_id}"}}',
+            )
+    except Exception:
+        pass
+
+
+async def _record_rejection_lesson(pool, *, user, req: dict, request_id: str, comment: str) -> None:
+    """Capture rejection feedback as a learning memory for future planning."""
+    from lucent.db import MemoryRepository
+
+    memo_repo = MemoryRepository(pool)
+    await memo_repo.create(
+        username=user.display_name or user.email or "reviewer",
+        type="experience",
+        content=(
+            f"Request rejected before work began: '{req.get('title', '')}'\n"
+            f"Reason: {comment}\n"
+            f"Description: {req.get('description', 'N/A')}"
+        ),
+        tags=[
+            "rejection-lesson",
+            "approval-rejected",
+            "feedback-rejected",
+            "learning-extraction",
+        ],
+        metadata={
+            "request_id": request_id,
+            "reviewer": user.display_name or user.email,
+            "source": req.get("source", "unknown"),
+        },
+        user_id=user.id,
+        organization_id=user.organization_id,
+    )
 
 
 # =============================================================================
@@ -263,8 +316,65 @@ async def request_detail(request: Request, request_id: str):
             "available_agents": available_agents,
             "available_sandbox_templates": available_sandbox_templates,
             "goal_info": goal_info,
+            "can_review_request": _can_review_request(user),
+            "csrf_token": request.cookies.get(CSRF_COOKIE_NAME, ""),
         },
     )
+
+
+@router.post("/requests/{request_id}/approval", response_class=HTMLResponse)
+async def request_approval_action(
+    request: Request,
+    request_id: str,
+    action: str = Form(...),
+    comment: str = Form(""),
+):
+    """Approve or reject a request that is waiting at the pre-work approval gate."""
+    await _check_csrf(request)
+    user = await get_user_context(request)
+    if not _can_review_request(user):
+        raise HTTPException(status_code=403, detail="Admin or owner role required")
+    if action not in ("approve", "reject"):
+        raise HTTPException(status_code=400, detail=f"Unknown action: {action}")
+    if len(comment) > 10000:
+        raise HTTPException(status_code=422, detail="Comments must be at most 10000 characters")
+    if action == "reject" and not comment.strip():
+        raise HTTPException(status_code=400, detail="Comments are required when rejecting")
+
+    pool = await get_pool()
+    from lucent.db.requests import RequestRepository
+
+    repo = RequestRepository(pool)
+    org_id = str(user.organization_id)
+    req = await repo.get_request(request_id, org_id)
+    if not req:
+        raise HTTPException(status_code=404, detail="Request not found")
+    if req.get("approval_status") != "pending_approval":
+        raise HTTPException(status_code=409, detail="Request is not awaiting approval")
+
+    if action == "approve":
+        result = await repo.approve_request(
+            request_id,
+            org_id,
+            str(user.id),
+            comment.strip() or None,
+        )
+    else:
+        result = await repo.reject_request(request_id, org_id, str(user.id), comment.strip())
+    if not result:
+        raise HTTPException(status_code=409, detail="Request already processed")
+
+    await _notify_request_ready(pool, request_id=request_id, action=action)
+    if action == "reject":
+        await _record_rejection_lesson(
+            pool,
+            user=user,
+            req=req,
+            request_id=request_id,
+            comment=comment.strip(),
+        )
+
+    return RedirectResponse(f"/requests/{request_id}", status_code=303)
 
 
 @router.post("/requests/tasks/{task_id}/edit", response_class=HTMLResponse)

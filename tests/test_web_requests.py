@@ -165,6 +165,11 @@ def _csrf_data(client: httpx.AsyncClient, extra: dict | None = None) -> dict:
     return data
 
 
+async def _promote_web_user(db_pool, user: dict, role: str = "admin") -> None:
+    async with db_pool.acquire() as conn:
+        await conn.execute("UPDATE users SET role = $2 WHERE id = $1", user["id"], role)
+
+
 # ============================================================================
 # GET /activity — list
 # ============================================================================
@@ -263,6 +268,137 @@ class TestRequestDetail:
             resp = await c.get(f"/activity/{sample_request['id']}", follow_redirects=False)
             assert resp.status_code == 303
             assert "/login" in resp.headers.get("location", "")
+
+    async def test_detail_shows_inline_approval_actions_for_admin(
+        self, client, db_pool, web_user
+    ):
+        user, org, _token = web_user
+        await _promote_web_user(db_pool, user)
+        repo = RequestRepository(db_pool)
+        req = await repo.create_request(
+            title="Approval Needed From Detail",
+            org_id=str(org["id"]),
+            description="Approve me from the detail page",
+            source="user",
+            created_by=str(user["id"]),
+            force_pending_approval=True,
+        )
+
+        resp = await client.get(f"/requests/{req['id']}")
+        assert resp.status_code == 200
+        assert "This request is waiting for approval" in resp.text
+        assert f'action="/requests/{req["id"]}/approval"' in resp.text
+        assert 'value="approve"' in resp.text
+        assert 'value="reject"' in resp.text
+        assert CSRF_FIELD_NAME in resp.text
+
+    async def test_detail_shows_admin_required_for_non_admin(
+        self, client, db_pool, web_user
+    ):
+        user, org, _token = web_user
+        repo = RequestRepository(db_pool)
+        req = await repo.create_request(
+            title="Approval Needs Admin",
+            org_id=str(org["id"]),
+            source="user",
+            created_by=str(user["id"]),
+            force_pending_approval=True,
+        )
+
+        resp = await client.get(f"/requests/{req['id']}")
+        assert resp.status_code == 200
+        assert "Admin or owner approval is required" in resp.text
+        assert f'action="/requests/{req["id"]}/approval"' not in resp.text
+
+
+class TestRequestApprovalAction:
+    async def test_approve_pending_request_from_detail(self, client, db_pool, web_user):
+        user, org, _token = web_user
+        await _promote_web_user(db_pool, user)
+        repo = RequestRepository(db_pool)
+        req = await repo.create_request(
+            title="Approve From Detail",
+            org_id=str(org["id"]),
+            source="user",
+            created_by=str(user["id"]),
+            force_pending_approval=True,
+        )
+
+        resp = await client.post(
+            f"/requests/{req['id']}/approval",
+            data=_csrf_data(client, {"action": "approve", "comment": "Looks good"}),
+            follow_redirects=False,
+        )
+
+        assert resp.status_code == 303
+        assert f"/requests/{req['id']}" in resp.headers.get("location", "")
+        updated = await repo.get_request(str(req["id"]), str(org["id"]))
+        assert updated["approval_status"] == "approved"
+        assert updated["approval_comment"] == "Looks good"
+
+    async def test_reject_pending_request_from_detail(self, client, db_pool, web_user):
+        user, org, _token = web_user
+        await _promote_web_user(db_pool, user)
+        repo = RequestRepository(db_pool)
+        req = await repo.create_request(
+            title="Reject From Detail",
+            org_id=str(org["id"]),
+            description="Needs better scoping",
+            source="user",
+            created_by=str(user["id"]),
+            force_pending_approval=True,
+        )
+
+        resp = await client.post(
+            f"/requests/{req['id']}/approval",
+            data=_csrf_data(client, {"action": "reject", "comment": "Too broad"}),
+            follow_redirects=False,
+        )
+
+        assert resp.status_code == 303
+        updated = await repo.get_request(str(req["id"]), str(org["id"]))
+        assert updated["approval_status"] == "rejected"
+        assert updated["status"] == "rejection_processing"
+        assert updated["approval_comment"] == "Too broad"
+
+    async def test_reject_requires_comment(self, client, db_pool, web_user):
+        user, org, _token = web_user
+        await _promote_web_user(db_pool, user)
+        repo = RequestRepository(db_pool)
+        req = await repo.create_request(
+            title="Reject Requires Comment",
+            org_id=str(org["id"]),
+            source="user",
+            created_by=str(user["id"]),
+            force_pending_approval=True,
+        )
+
+        resp = await client.post(
+            f"/requests/{req['id']}/approval",
+            data=_csrf_data(client, {"action": "reject", "comment": ""}),
+            follow_redirects=False,
+        )
+
+        assert resp.status_code == 400
+
+    async def test_member_cannot_approve_request(self, client, db_pool, web_user):
+        user, org, _token = web_user
+        repo = RequestRepository(db_pool)
+        req = await repo.create_request(
+            title="Member Cannot Approve",
+            org_id=str(org["id"]),
+            source="user",
+            created_by=str(user["id"]),
+            force_pending_approval=True,
+        )
+
+        resp = await client.post(
+            f"/requests/{req['id']}/approval",
+            data=_csrf_data(client, {"action": "approve"}),
+            follow_redirects=False,
+        )
+
+        assert resp.status_code == 403
 
 
 # ============================================================================
