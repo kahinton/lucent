@@ -170,7 +170,7 @@ Test `get_memories` with mixed valid/invalid IDs:
 docker compose up -d postgres
 
 # Set test database URL
-export TEST_DATABASE_URL="postgresql://lucent:lucent_dev_password@localhost:5433/lucent_test"
+export TEST_DATABASE_URL="postgresql://lucent:change-me-insecure-dev-password@localhost:5433/lucent_test"
 
 # Run MCP tool tests
 pytest tests/test_mcp_tools.py -v

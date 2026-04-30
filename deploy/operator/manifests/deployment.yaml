@@ -22,7 +22,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: operator
-          image: ghcr.io/lucent/operator:0.2.0
+          image: ghcr.io/lucent/operator:0.4.0
           imagePullPolicy: IfNotPresent
           command: ["kopf"]
           args:

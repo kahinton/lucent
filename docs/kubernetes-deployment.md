@@ -101,7 +101,7 @@ All parameters are set via `--set` flags or `values.yaml` overrides. The chart s
 |---|---|---|---|
 | `server.replicaCount` | int | `1` | Number of lucent-server pods |
 | `server.image.repository` | string | `lucent` | Container image repository |
-| `server.image.tag` | string | `0.2.0` | Container image tag |
+| `server.image.tag` | string | `0.4.0` | Container image tag |
 | `server.image.pullPolicy` | string | `IfNotPresent` | Image pull policy |
 | `server.service.type` | string | `ClusterIP` | Kubernetes service type |
 | `server.service.port` | int | `8766` | Service port |
@@ -351,7 +351,7 @@ GPU nodes are required for performant inference.
 ```bash
 REGISTRY=registry.internal.example.com
 
-for IMAGE in lucent:0.2.0 postgres:16-alpine openbao/openbao:2.1.0 ollama/ollama:latest; do
+for IMAGE in lucent:0.4.0 postgres:16-alpine openbao/openbao:2.1.0 ollama/ollama:latest; do
   docker pull $IMAGE
   docker tag $IMAGE $REGISTRY/$IMAGE
   docker push $REGISTRY/$IMAGE
@@ -608,7 +608,7 @@ To run migrations manually (e.g., before a zero-downtime canary):
 
 ```bash
 kubectl -n lucent run lucent-migrate --rm -i --restart=Never \
-  --image=lucent:0.3.0 \
+  --image=lucent:0.4.0 \
   --env="DATABASE_URL=$(kubectl -n lucent get secret lucent-db-credentials -o jsonpath='{.data.DATABASE_URL}' | base64 -d)" \
   -- python -m lucent.migrate
 ```

@@ -165,6 +165,10 @@ async def test_maybe_log_emits_structured_payload(monkeypatch, caplog) -> None:
         "memories": [{"id": "c"}, {"id": "a"}, {"id": "d"}, {"id": "b"}]
     }
 
+    # Some app tests configure the top-level lucent logger with propagate=False.
+    # Re-enable propagation here so caplog reliably sees this module's record
+    # even when the full suite runs before this test.
+    monkeypatch.setattr(logging.getLogger("lucent"), "propagate", True)
     caplog.set_level(logging.INFO, logger="lucent.memory.observability")
 
     out = await observability.maybe_log_boost_comparison(

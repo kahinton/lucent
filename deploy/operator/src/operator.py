@@ -64,7 +64,7 @@ def _build_helm_values(name: str, namespace: str, spec: dict[str, Any]) -> dict[
             "replicaCount": spec.get("replicas", 1),
             "image": {
                 "repository": image.get("repository", "lucent"),
-                "tag": image.get("tag", "0.2.0"),
+                "tag": image.get("tag", "0.4.0"),
                 "pullPolicy": image.get("pullPolicy", "IfNotPresent"),
             },
         },
@@ -210,7 +210,10 @@ def _upsert_cronjob(namespace: str, name: str, schedule: str, spec: dict[str, An
             client.V1Volume(
                 name="backup",
                 persistent_volume_claim=client.V1PersistentVolumeClaimVolumeSource(
-                    claim_name=storage.get("pvcName", spec.get("database", {}).get("pvcName", "lucent-db-data"))
+                    claim_name=storage.get(
+                        "pvcName",
+                        spec.get("database", {}).get("pvcName", "lucent-db-data"),
+                    )
                 ),
             )
         ],
@@ -250,7 +253,13 @@ def _upsert_cronjob(namespace: str, name: str, schedule: str, spec: dict[str, An
             raise
 
 
-def _run_job(namespace: str, name: str, image: str, command: list[str], env: list[client.V1EnvVar] | None = None) -> None:
+def _run_job(
+    namespace: str,
+    name: str,
+    image: str,
+    command: list[str],
+    env: list[client.V1EnvVar] | None = None,
+) -> None:
     batch = client.BatchV1Api()
     body = client.V1Job(
         metadata=client.V1ObjectMeta(
@@ -344,10 +353,14 @@ def _patch_status(namespace: str, name: str, patch: dict[str, Any]) -> None:
 def _reconcile(name: str, namespace: str, spec: dict[str, Any], generation: int) -> dict[str, Any]:
     helm_values = _build_helm_values(name=name, namespace=namespace, spec=spec)
     values_name = f"{name}-helm-values"
-    _upsert_config_map(namespace=namespace, name=values_name, data={"values.yaml": json.dumps(helm_values, indent=2)})
+    _upsert_config_map(
+        namespace=namespace,
+        name=values_name,
+        data={"values.yaml": json.dumps(helm_values, indent=2)},
+    )
 
     image_repo = spec.get("image", {}).get("repository", "lucent")
-    image_tag = spec.get("image", {}).get("tag", "0.2.0")
+    image_tag = spec.get("image", {}).get("tag", "0.4.0")
     image = f"{image_repo}:{image_tag}"
 
     _run_job(
@@ -422,35 +435,70 @@ def _reconcile(name: str, namespace: str, spec: dict[str, Any], generation: int)
 
 @kopf.on.create(GROUP, VERSION, PLURAL)
 def on_create(
-    spec: dict[str, Any], name: str, namespace: str, meta: dict[str, Any], body: dict[str, Any], **_: Any
+    spec: dict[str, Any],
+    name: str,
+    namespace: str,
+    meta: dict[str, Any],
+    body: dict[str, Any],
+    **_: Any,
 ) -> dict[str, Any]:
     generation = int(meta.get("generation", 1))
     status = _reconcile(name=name, namespace=namespace, spec=spec, generation=generation)
     _patch_status(namespace=namespace, name=name, patch=status)
     if status.get("phase") != "Ready":
-        kopf.event(body, type="Warning", reason="ReconcileProgressing", message="Instance is still progressing")
+        kopf.event(
+            body,
+            type="Warning",
+            reason="ReconcileProgressing",
+            message="Instance is still progressing",
+        )
     else:
-        kopf.event(body, type="Normal", reason="Reconciled", message="Instance reconciled successfully")
+        kopf.event(
+            body,
+            type="Normal",
+            reason="Reconciled",
+            message="Instance reconciled successfully",
+        )
     return status
 
 
 @kopf.on.update(GROUP, VERSION, PLURAL)
 def on_update(
-    spec: dict[str, Any], name: str, namespace: str, meta: dict[str, Any], body: dict[str, Any], **_: Any
+    spec: dict[str, Any],
+    name: str,
+    namespace: str,
+    meta: dict[str, Any],
+    body: dict[str, Any],
+    **_: Any,
 ) -> dict[str, Any]:
     generation = int(meta.get("generation", 1))
     status = _reconcile(name=name, namespace=namespace, spec=spec, generation=generation)
     _patch_status(namespace=namespace, name=name, patch=status)
     if status.get("phase") != "Ready":
-        kopf.event(body, type="Warning", reason="HealthDegraded", message="Instance requires attention")
+        kopf.event(
+            body,
+            type="Warning",
+            reason="HealthDegraded",
+            message="Instance requires attention",
+        )
     else:
-        kopf.event(body, type="Normal", reason="Reconciled", message="Instance reconciled successfully")
+        kopf.event(
+            body,
+            type="Normal",
+            reason="Reconciled",
+            message="Instance reconciled successfully",
+        )
     return status
 
 
 @kopf.timer(GROUP, VERSION, PLURAL, interval=60.0, sharp=True)
 def health_timer(
-    spec: dict[str, Any], name: str, namespace: str, body: dict[str, Any], logger: logging.Logger, **_: Any
+    spec: dict[str, Any],
+    name: str,
+    namespace: str,
+    body: dict[str, Any],
+    logger: logging.Logger,
+    **_: Any,
 ) -> None:
     server_health, ready_replicas = _read_server_health(namespace=namespace, name=name)
     vault_health = _check_openbao(namespace=namespace, name=name)
@@ -472,7 +520,12 @@ def health_timer(
 
     if server_health != "Healthy":
         logger.warning("LucentInstance %s/%s unhealthy: server=%s", namespace, name, server_health)
-        kopf.event(body, type="Warning", reason="HealthCheckFailed", message=f"Server state: {server_health}")
+        kopf.event(
+            body,
+            type="Warning",
+            reason="HealthCheckFailed",
+            message=f"Server state: {server_health}",
+        )
 
 
 @kopf.on.delete(GROUP, VERSION, PLURAL)

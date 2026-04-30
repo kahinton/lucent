@@ -13,6 +13,7 @@ Tests auth context enforcement, JSON serialization, and error handling.
 """
 
 import json
+from unittest.mock import patch
 
 import pytest
 import pytest_asyncio
@@ -999,11 +1000,12 @@ class TestListMcpServerDefinitions:
 class TestCreateMcpServerDefinition:
     @pytest.mark.asyncio
     async def test_create_succeeds(self, mcp, auth_user):
-        result = await _call(
-            mcp,
-            "create_mcp_server_definition",
-            {"name": "new-mcp-server", "description": "New server", "url": "http://new.example.com"},
-        )
+        with patch("lucent.tools.definitions.validate_url", return_value="http://new.example.com"):
+            result = await _call(
+                mcp,
+                "create_mcp_server_definition",
+                {"name": "new-mcp-server", "description": "New server", "url": "http://new.example.com"},
+            )
         assert result["name"] == "new-mcp-server"
         assert result["status"] == "proposed"
 
@@ -1053,11 +1055,12 @@ class TestUpdateMcpServerDefinition:
             created_by=str(auth_user["id"]),
             owner_user_id=str(auth_user["id"]),
         )
-        result = await _call(
-            mcp,
-            "update_mcp_server_definition",
-            {"server_id": str(server["id"]), "description": "Updated", "url": "http://updated.example.com"},
-        )
+        with patch("lucent.tools.definitions.validate_url", return_value="http://updated.example.com"):
+            result = await _call(
+                mcp,
+                "update_mcp_server_definition",
+                {"server_id": str(server["id"]), "description": "Updated", "url": "http://updated.example.com"},
+            )
         assert result["description"] == "Updated"
         assert result["url"] == "http://updated.example.com"
 

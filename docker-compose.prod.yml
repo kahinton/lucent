@@ -28,9 +28,10 @@ services:
       POSTGRES_USER: lucent
       # REQUIRED: No default — must be explicitly set
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      DAEMON_DB_PASSWORD: ${DAEMON_DB_PASSWORD:?DAEMON_DB_PASSWORD is required}
     volumes:
       - lucent_data:/var/lib/postgresql/data
-      - ./docker/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./docker/postgres-init.sh:/docker-entrypoint-initdb.d/10-lucent-init.sh:ro
     # No ports exposed to host — internal network only
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U lucent -d lucent"]

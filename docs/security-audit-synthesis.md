@@ -1,6 +1,7 @@
 # Security Audit Synthesis Report
 
 **Date:** 2026-03-27
+**Last updated:** 2026-04-30 for v0.4.0 release readiness
 **Auditors:** Claude Opus 4.6 (Task 1), GPT-5.3 Codex (Task 2), Gemini 3.1 Pro (Task 3)
 **Scope:** Full Lucent codebase — auth, RBAC, middleware, secrets, Docker, sandbox, dependencies
 
@@ -20,7 +21,7 @@
 | M1 | Medium | Rate Limit Bypass via Rotating Auth Headers | GPT | src/lucent/api/app.py | **Fixed** — rate key uses `f"api:{key_prefix}:{client_ip}"` |
 | M2 | Medium | Temp Password Cookie Missing Secure Flag | GPT | src/lucent/web/routes/admin.py | **Fixed** — uses `SECURE_COOKIES` global (default `true`) |
 | M3 | Medium | Daemon API Key Uses Broad Read/Write Scopes | GPT | daemon/daemon.py | **Open** — extracted to `DAEMON_KEY_SCOPES` constant with TODO |
-| M4 | Medium | Known CVEs in Dependency Graph | GPT | pyproject.toml | **Open** — needs pip-audit + dependency updates |
+| M4 | Medium | Known CVEs in Dependency Graph | GPT | pyproject.toml | **Mitigated** — dependency constraints refreshed in v0.4.0; rerun `pip-audit` before tagging |
 | M5 | Medium | Auth System Findings (4 issues) | Claude | src/lucent/auth.py | **Unactionable** — Claude report truncated; needs re-review |
 | L1 | Low | CORS Policy Broader Than Necessary | GPT | src/lucent/api/app.py | **Open** — allow_methods/headers could be restricted |
 | L2 | Low | Login Limiter Uses Direct Socket IP | GPT | src/lucent/web/routes/auth.py | **Open** — should use shared get_client_ip() helper |
@@ -52,21 +53,24 @@
 
 **C1 (Exposed Token):** `.gitignore` line 14 contains `.env`. Token is a local development artifact, not committed to version control.
 
-**C2 (Docker Socket):** `docker-compose.prod.yml` lines 73-104 deploy `tecnativa/docker-socket-proxy` with restrictive ACLs (AUTH=0, SECRETS=0, EXEC=0, etc.). The lucent service connects via `DOCKER_HOST: tcp://docker-socket-proxy:2375` instead of direct socket mount.
+**C2 (Docker Socket):** `docker-compose.prod.yml` deploys `tecnativa/docker-socket-proxy` with restrictive ACLs (AUTH=0, SECRETS=0, EXEC=0, etc.). The lucent service connects via `DOCKER_HOST: tcp://docker-socket-proxy:2375` instead of direct socket mount.
 
 **C3 (Hardcoded Credentials):** `docker-compose.prod.yml` uses `${VAR:?error}` syntax throughout:
-- Line 30: `POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}`
-- Line 119: `DATABASE_URL` with required password
-- Line 127: `LUCENT_SECRET_KEY: ${LUCENT_SECRET_KEY:?LUCENT_SECRET_KEY is required}`
-- Line 130: `VAULT_TOKEN: ${VAULT_TOKEN:?VAULT_TOKEN is required}`
+- `POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}`
+- `DAEMON_DB_PASSWORD: ${DAEMON_DB_PASSWORD:?DAEMON_DB_PASSWORD is required}`
+- `DATABASE_URL` and `DAEMON_DATABASE_URL` with required passwords
+- `LUCENT_SECRET_KEY: ${LUCENT_SECRET_KEY:?LUCENT_SECRET_KEY is required}`
+- `VAULT_TOKEN: ${VAULT_TOKEN:?VAULT_TOKEN is required}`
+
+The PostgreSQL first-run init path now reads `DAEMON_DB_PASSWORD` via `docker/postgres-init.sh`; it no longer ships a hardcoded daemon role password in SQL.
 
 The dev compose file has a prominent 12-line header: "LOCAL DEVELOPMENT ONLY — NOT FOR PRODUCTION USE".
 
 ### High Findings — All Mitigated
 
-**H1 (OpenBao Dev Mode):** `docker-compose.prod.yml` line 53 uses `server -config=/openbao/config/config.hcl`. Production config at `docker/openbao-prod-config.hcl` configures file storage backend and proper listener settings.
+**H1 (OpenBao Dev Mode):** `docker-compose.prod.yml` uses `server -config=/openbao/config/config.hcl`. Production config at `docker/openbao-prod-config.hcl` configures file storage backend and proper listener settings.
 
-**H2 (Interactive TTY):** Dev compose lines 124-125 explicitly document that stdin_open/tty are disabled by default.
+**H2 (Interactive TTY):** Dev compose explicitly documents that stdin_open/tty are disabled by default.
 
 **H3 (OpenBao Network Exposure):** Prod compose uses internal Docker network (`networks: internal`) with no port mappings for OpenBao.
 
@@ -80,6 +84,8 @@ The dev compose file has a prominent 12-line header: "LOCAL DEVELOPMENT ONLY —
 
 **M3 (Daemon Key Scopes):** Extracted to `DAEMON_KEY_SCOPES` constant in `daemon/daemon.py` with TODO for future narrowing. Requires MCP tool-level scope enforcement to safely restrict.
 
+**M4 (Dependency CVEs):** Mitigated for the v0.4.0 release by refreshing security-sensitive dependency constraints in `pyproject.toml`, including `python-multipart`, `cryptography`, `requests`, `pyasn1`, and LangChain-related packages. Re-run `pip-audit` as a release gate before tagging.
+
 ---
 
 ## Remaining Issues for Future Work
@@ -88,14 +94,12 @@ The dev compose file has a prominent 12-line header: "LOCAL DEVELOPMENT ONLY —
 
 1. **M3 — Daemon Key Scopes**: `DAEMON_KEY_SCOPES = ["read", "write"]` grants full API access. Narrowing requires implementing scope checks in MCP tool handlers. Track as future security hardening.
 
-2. **M4 — Dependency CVEs**: `pip-audit` reported 5 vulnerabilities in 4 packages (requests, pyasn1, and tooling packages). Run `pip-audit --fix` and update constraints.
-
-3. **M5 — Claude Auth Findings**: Claude Opus report was truncated at "4 findings includi…". Re-run a focused auth audit to capture the complete findings.
+2. **M5 — Claude Auth Findings**: Claude Opus report was truncated at "4 findings includi…". Re-run a focused auth audit to capture the complete findings.
 
 ### Low Priority
 
-4. **L1 — CORS Configuration**: Restrict `allow_methods` and `allow_headers` from `["*"]` to only what the frontend requires.
+3. **L1 — CORS Configuration**: Restrict `allow_methods` and `allow_headers` from `["*"]` to only what the frontend requires.
 
-5. **L2 — Login Rate Limiter IP**: Switch `request.client.host` to shared `get_client_ip()` helper for proxy-aware IP extraction.
+4. **L2 — Login Rate Limiter IP**: Switch `request.client.host` to shared `get_client_ip()` helper for proxy-aware IP extraction.
 
-6. **L3 — Error Information Disclosure**: Sanitize exception messages in `mcp_bridge.py` JSON-RPC error responses to prevent leaking internal details.
+5. **L3 — Error Information Disclosure**: Sanitize exception messages in `mcp_bridge.py` JSON-RPC error responses to prevent leaking internal details.

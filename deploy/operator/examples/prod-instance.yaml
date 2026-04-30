@@ -7,7 +7,7 @@ spec:
   replicas: 3
   image:
     repository: ghcr.io/lucent/lucent
-    tag: "0.2.0"
+    tag: "0.4.0"
     pullPolicy: IfNotPresent
   database:
     embedded: false
@@ -34,7 +34,7 @@ spec:
     otelEndpoint: http://otel-collector:4317
   canary:
     enabled: true
-    imageTag: "0.2.1-rc1"
+    imageTag: "0.4.1-rc1"
     replicas: 1
     weight: 10
     promotionPolicy: manual

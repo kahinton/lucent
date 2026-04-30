@@ -33,6 +33,7 @@
 
 ## Integrations
 
+- **[Connections](connections.md)** — Workspace integrations, personal connected accounts, and enterprise credential profiles
 - **[Integrations API Reference](integrations-api-reference.md)** — Integration REST API
 - **[Slack Admin Setup](slack-admin-setup.md)** — Slack app configuration
 - **[Slack User Linking](slack-user-linking.md)** — Slack user pairing flow

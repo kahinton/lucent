@@ -4,7 +4,7 @@ Lucent is an enterprise AI agent that can learn how your organization works, tak
 
 It is closer to a supervised digital teammate than a one-off chat tool: you can assign it work, give it access to approved systems, let it operate across model providers, review what it did, and preserve what it learned for the next task.
 
-> **Project Status:** Active development (v0.2.0). Core features are stable. APIs may change before 1.0.
+> **Project Status:** Active development (v0.4.0). Core features are stable. APIs may change before 1.0.
 
 ## Why Lucent exists
 

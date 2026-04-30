@@ -20,7 +20,6 @@ from lucent.auth import set_current_user
 from lucent.db import MemoryRepository, OrganizationRepository, UserRepository
 from lucent.db.requests import APPROVAL_AUTO, APPROVAL_PENDING, RequestRepository
 
-
 # ============================================================================
 # Fixtures
 # ============================================================================
@@ -563,7 +562,7 @@ class TestErrorIsolation:
         self, db_pool, org, user_a, user_b, mem_repo, prefix
     ):
         """When minting a scoped key fails for user A, user B still gets processed."""
-        from daemon.daemon import LucentDaemon, _mint_scoped_api_key
+        from daemon.daemon import LucentDaemon
 
         await _create_active_goal(mem_repo, user_a, org, prefix, "Goal A")
         await _create_active_goal(mem_repo, user_b, org, prefix, "Goal B")
@@ -581,7 +580,12 @@ class TestErrorIsolation:
         # Mock both mint and run_session to isolate the fan-out logic
         with (
             patch("daemon.daemon._mint_scoped_api_key", side_effect=_mock_mint),
-            patch.object(daemon, "run_session", new_callable=AsyncMock, return_value="planned goals"),
+            patch.object(
+                daemon,
+                "run_session",
+                new_callable=AsyncMock,
+                return_value="planned goals",
+            ),
         ):
             result = await daemon._run_cognitive_planning_fanout(
                 task_id=str(uuid4()),
@@ -614,6 +618,11 @@ class TestErrorIsolation:
                 "daemon.daemon._mint_scoped_api_key",
                 new_callable=AsyncMock,
                 return_value="hs_fake_key",
+            ),
+            patch(
+                "daemon.daemon.RequestAPI.list_planning_targets",
+                new_callable=AsyncMock,
+                return_value=[{"goal_id": str(uuid4()), "title": "Goal A"}],
             ),
             patch.object(daemon, "run_session", side_effect=_boom),
         ):
@@ -651,6 +660,11 @@ class TestErrorIsolation:
                 "daemon.daemon._mint_scoped_api_key",
                 new_callable=AsyncMock,
                 return_value="hs_fake_key",
+            ),
+            patch(
+                "daemon.daemon.RequestAPI.list_planning_targets",
+                new_callable=AsyncMock,
+                return_value=[{"goal_id": str(uuid4()), "title": "Goal"}],
             ),
             patch.object(daemon, "run_session", side_effect=_mock_session),
         ):

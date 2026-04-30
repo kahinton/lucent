@@ -134,7 +134,8 @@ class TestValidateUrl:
 
     # ── Loopback ─────────────────────────────────────────────────
 
-    def test_rejects_localhost_127_0_0_1(self):
+    def test_rejects_localhost_127_0_0_1(self, monkeypatch):
+        monkeypatch.delenv("LUCENT_MCP_URL_ALLOWLIST", raising=False)
         with patch("socket.getaddrinfo") as mock_dns:
             mock_dns.return_value = [(2, 1, 6, "", ("127.0.0.1", 8080))]
             with pytest.raises(self._ssrf_error(), match="blocked"):

@@ -160,9 +160,9 @@ For the full two-tier model, recommended setup profiles (simple / team / enterpr
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `POSTGRES_PASSWORD` | `lucent_dev_password` | PostgreSQL password |
+| `POSTGRES_PASSWORD` | `change-me-insecure-dev-password` | PostgreSQL password for local Docker Compose only |
 | `LUCENT_DB_PORT` | `5433` | Host port for the PostgreSQL container |
-| `DAEMON_DB_PASSWORD` | `lucent_daemon_dev_password` | Password for the restricted `lucent_daemon` database role |
+| `DAEMON_DB_PASSWORD` | `change-me-insecure-daemon-password` | Password for the restricted `lucent_daemon` database role in local Docker Compose |
 
 ### Observability Stack
 

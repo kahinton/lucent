@@ -9,7 +9,8 @@ import pytest_asyncio
 
 # Set test database URL before importing any db modules
 TEST_DATABASE_URL = os.environ.get(
-    "TEST_DATABASE_URL", "postgresql://lucent:lucent_dev_password@localhost:5433/lucent"
+    "TEST_DATABASE_URL",
+    "postgresql://lucent:change-me-insecure-dev-password@localhost:5433/lucent",
 )
 os.environ["DATABASE_URL"] = TEST_DATABASE_URL
 # Disable effective rate limiting during tests
@@ -54,7 +55,8 @@ async def db_pool():
     pool_module._pool = None
 
     database_url = os.environ.get(
-        "DATABASE_URL", "postgresql://lucent:lucent_dev_password@localhost:5433/lucent"
+        "DATABASE_URL",
+        "postgresql://lucent:change-me-insecure-dev-password@localhost:5433/lucent",
     )
     pool = await init_db(database_url)
     yield pool
@@ -78,7 +80,7 @@ def cleanup_orphaned_test_data():
 
         database_url = os.environ.get(
             "DATABASE_URL",
-            "postgresql://lucent:lucent_dev_password@localhost:5433/lucent",
+            "postgresql://lucent:change-me-insecure-dev-password@localhost:5433/lucent",
         )
         conn = await asyncpg.connect(database_url)
         try:

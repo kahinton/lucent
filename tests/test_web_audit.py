@@ -1,16 +1,15 @@
-"""Integration tests for GET /audit web route in web/routes.py.
+"""Integration tests for GET /settings/audit web route in web/routes.py.
 
 Tests:
-- Page loads for authenticated user (team mode)
+- Page loads for authenticated admin user
 - Pagination params (page, action_type filter)
 - Unauthenticated redirect to /login
 - Content rendering (audit entries, empty state, template elements)
-- Non-team-mode returns 404
+- Legacy root path returns 404
 
 Uses real DB sessions + CSRF tokens through the full ASGI stack.
 """
 
-from unittest.mock import patch
 from uuid import uuid4
 
 import httpx
@@ -25,15 +24,12 @@ from lucent.auth_providers import (
     create_session,
     set_user_password,
 )
-from lucent.db import AuditRepository, MemoryRepository, OrganizationRepository, UserRepository
-
-
-@pytest.fixture
-def team_mode():
-    """Patch is_team_mode to return True for the duration of the test."""
-    with patch("lucent.web.routes.audit.is_team_mode", return_value=True):
-        yield
-
+from lucent.db import (
+    AuditRepository,
+    MemoryRepository,
+    OrganizationRepository,
+    UserRepository,
+)
 
 TEST_PASSWORD = "TestPass1"
 
@@ -83,6 +79,8 @@ async def web_user(db_pool, web_prefix):
         email=f"{web_prefix}user@test.com",
         display_name=f"{web_prefix}User",
     )
+    await user_repo.update_role(user["id"], "admin")
+    user = await user_repo.get_by_id(user["id"])
     await set_user_password(db_pool, user["id"], TEST_PASSWORD)
     token = await create_session(db_pool, user["id"])
     return user, org, token
@@ -159,19 +157,19 @@ async def audit_entries(db_pool, web_user, web_prefix):
 
 class TestAuditPageLoad:
     @pytest.mark.asyncio
-    async def test_audit_returns_200(self, client, team_mode):
-        resp = await client.get("/audit")
+    async def test_audit_returns_200(self, client):
+        resp = await client.get("/settings/audit")
         assert resp.status_code == 200
         assert "text/html" in resp.headers["content-type"]
 
     @pytest.mark.asyncio
-    async def test_audit_contains_page_header(self, client, team_mode):
-        resp = await client.get("/audit")
+    async def test_audit_contains_page_header(self, client):
+        resp = await client.get("/settings/audit")
         assert "Audit Log" in resp.text
 
     @pytest.mark.asyncio
-    async def test_audit_not_team_mode_returns_404(self, client):
-        """Without team mode, GET /audit returns 404."""
+    async def test_legacy_audit_path_returns_404(self, client):
+        """The legacy root /audit path is no longer mounted."""
         resp = await client.get("/audit")
         assert resp.status_code == 404
 
@@ -183,11 +181,11 @@ class TestAuditPageLoad:
 
 class TestAuditUnauthenticated:
     @pytest.mark.asyncio
-    async def test_unauthenticated_redirects_to_login(self, db_pool, team_mode):
+    async def test_unauthenticated_redirects_to_login(self, db_pool):
         app = create_app()
         transport = ASGITransport(app=app, raise_app_exceptions=False)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
-            resp = await c.get("/audit", follow_redirects=False)
+            resp = await c.get("/settings/audit", follow_redirects=False)
             assert resp.status_code == 303
             assert "/login" in resp.headers.get("location", "")
 
@@ -199,26 +197,30 @@ class TestAuditUnauthenticated:
 
 class TestAuditPagination:
     @pytest.mark.asyncio
-    async def test_page_param_accepted(self, client, team_mode):
-        resp = await client.get("/audit", params={"page": "2"})
+    async def test_page_param_accepted(self, client):
+        resp = await client.get("/settings/audit", params={"page": "2"})
         assert resp.status_code == 200
 
     @pytest.mark.asyncio
-    async def test_action_type_filter(self, client, audit_entries, team_mode):
-        resp = await client.get("/audit", params={"action_type": "create"})
+    async def test_action_type_filter(self, client, audit_entries):
+        resp = await client.get(
+            "/settings/audit", params={"source": "memory", "action_type": "create"}
+        )
         assert resp.status_code == 200
         # The filter dropdown should show 'create' selected
         assert "Create" in resp.text or "create" in resp.text
 
     @pytest.mark.asyncio
-    async def test_action_type_filter_update(self, client, audit_entries, team_mode):
-        resp = await client.get("/audit", params={"action_type": "update"})
+    async def test_action_type_filter_update(self, client, audit_entries):
+        resp = await client.get(
+            "/settings/audit", params={"source": "memory", "action_type": "update"}
+        )
         assert resp.status_code == 200
 
     @pytest.mark.asyncio
-    async def test_page_and_action_type_combined(self, client, team_mode):
+    async def test_page_and_action_type_combined(self, client):
         resp = await client.get(
-            "/audit",
+            "/settings/audit",
             params={"page": "1", "action_type": "delete"},
         )
         assert resp.status_code == 200
@@ -231,39 +233,39 @@ class TestAuditPagination:
 
 class TestAuditContentRendering:
     @pytest.mark.asyncio
-    async def test_empty_state_shown_when_no_entries(self, client, team_mode):
+    async def test_empty_state_shown_when_no_entries(self, client):
         """With no audit entries, page shows empty state message."""
-        resp = await client.get("/audit")
+        resp = await client.get("/settings/audit")
         assert resp.status_code == 200
         assert "No audit entries" in resp.text or "audit log is empty" in resp.text
 
     @pytest.mark.asyncio
-    async def test_entries_rendered(self, client, audit_entries, team_mode):
+    async def test_entries_rendered(self, client, audit_entries):
         """With audit entries present, they appear on the page."""
-        resp = await client.get("/audit")
+        resp = await client.get("/settings/audit", params={"source": "memory"})
         assert resp.status_code == 200
         # Should contain the memory ID (truncated) as a link
         memory_id_str = str(audit_entries["id"])
         assert memory_id_str[:8] in resp.text or memory_id_str[:12] in resp.text
 
     @pytest.mark.asyncio
-    async def test_action_types_dropdown_rendered(self, client, team_mode):
+    async def test_action_types_dropdown_rendered(self, client):
         """Filter dropdown contains expected action type options."""
-        resp = await client.get("/audit")
+        resp = await client.get("/settings/audit")
         assert resp.status_code == 200
         assert "All Actions" in resp.text
 
     @pytest.mark.asyncio
-    async def test_entry_count_shown(self, client, audit_entries, team_mode):
+    async def test_entry_count_shown(self, client, audit_entries):
         """Total entry count appears in the page."""
-        resp = await client.get("/audit")
+        resp = await client.get("/settings/audit", params={"source": "memory"})
         assert resp.status_code == 200
         assert "entries" in resp.text
 
     @pytest.mark.asyncio
-    async def test_create_entry_rendered_with_icon(self, client, audit_entries, team_mode):
+    async def test_create_entry_rendered_with_icon(self, client, audit_entries):
         """Create action entry shows on the page."""
-        resp = await client.get("/audit")
+        resp = await client.get("/settings/audit", params={"source": "memory"})
         assert resp.status_code == 200
         # The template renders action_type capitalized
         assert "Create" in resp.text or "create" in resp.text
@@ -273,16 +275,15 @@ class TestAuditContentRendering:
         self,
         client,
         audit_entries,
-        team_mode,
     ):
         """Update entries show changed fields."""
-        resp = await client.get("/audit")
+        resp = await client.get("/settings/audit", params={"source": "memory"})
         assert resp.status_code == 200
         assert "content" in resp.text.lower()
 
     @pytest.mark.asyncio
-    async def test_memory_link_present(self, client, audit_entries, team_mode):
+    async def test_memory_link_present(self, client, audit_entries):
         """Each entry links to the memory detail page."""
-        resp = await client.get("/audit")
+        resp = await client.get("/settings/audit", params={"source": "memory"})
         assert resp.status_code == 200
         assert f"/memories/{audit_entries['id']}" in resp.text

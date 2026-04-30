@@ -19,9 +19,10 @@ services:
       POSTGRES_DB: lucent
       POSTGRES_USER: lucent
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-insecure-dev-password}
+      DAEMON_DB_PASSWORD: ${DAEMON_DB_PASSWORD:-change-me-insecure-daemon-password}
     volumes:
       - lucent_data:/var/lib/postgresql/data
-      - ./docker/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./docker/postgres-init.sh:/docker-entrypoint-initdb.d/10-lucent-init.sh:ro
     ports:
       - "${LUCENT_DB_PORT:-5433}:5432"
     healthcheck:

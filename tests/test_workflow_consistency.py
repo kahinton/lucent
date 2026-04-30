@@ -250,9 +250,11 @@ class TestStatusTransitionGuards:
         assert failed_claimed is not None
         assert failed_claimed["status"] == "failed"
 
-        running_task = await _create_task(wf_repo, org, str(req["id"]), title="running")
+        running_req = await wf_repo.create_request(title="R running", org_id=org)
+        running_task = await _create_task(wf_repo, org, str(running_req["id"]), title="running")
         await wf_repo.claim_task(str(running_task["id"]), "d1")
-        await wf_repo.start_task(str(running_task["id"]))
+        started = await wf_repo.start_task(str(running_task["id"]))
+        assert started is not None
         failed_running = await wf_repo.fail_task(str(running_task["id"]), "err")
         assert failed_running is not None
         assert failed_running["status"] == "failed"

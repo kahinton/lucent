@@ -1,3 +1,3 @@
-"""Lucent - MCP server providing memory functionality for LLMs."""
+"""Lucent - enterprise AI agent platform for durable memory and governed work."""
 
-__version__ = "0.2.0"
+__version__ = "0.4.0"
