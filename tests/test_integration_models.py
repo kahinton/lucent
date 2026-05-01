@@ -39,7 +39,17 @@ class TestEnumValues:
     # These sets are copied verbatim from the CHECK(...) clauses in
     # 028_add_integration_tables.sql.  If either side drifts the test fails.
 
-    DB_INTEGRATION_TYPE = {"slack", "discord"}
+    # Migration 028 added ('slack', 'discord'); migration 069 widens to
+    # also accept ('github_app', 'jira', 'linear', 'custom') for the
+    # workspace-integrations groundwork.
+    DB_INTEGRATION_TYPE = {
+        "slack",
+        "discord",
+        "github_app",
+        "jira",
+        "linear",
+        "custom",
+    }
     DB_INTEGRATION_STATUS = {"active", "disabled", "revoked", "deleted"}
     DB_USER_LINK_STATUS = {
         "pending", "active", "revoked", "superseded", "orphaned", "disabled",

@@ -103,8 +103,8 @@ For agents, the `skill_names` list in frontmatter controls which skills are gran
 The sync only runs at startup. After editing the file, restart the server:
 
 ```bash
-# Docker environment
-docker compose restart hindsight
+# Docker environment — use the compose service name for your deployment
+docker compose restart lucent
 
 # Local development
 # Stop and restart the server process

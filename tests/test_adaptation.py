@@ -12,10 +12,13 @@ Validates:
 from __future__ import annotations
 
 import json
+import logging
 import textwrap
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+import httpx
 
 from daemon.adaptation import (
     DOMAIN_ARCHETYPES,
@@ -102,6 +105,16 @@ def _wrap_assessment(data: dict) -> str:
         {json.dumps(data, indent=2)}
         </assessment_result>
     """)
+
+
+@pytest.fixture(autouse=True)
+def _redirect_generated_definition_dirs(tmp_path, monkeypatch):
+    """Avoid writing generated adaptation artifacts into the real repo."""
+    agents_dir = tmp_path / "agents"
+    skills_dir = tmp_path / "skills"
+    monkeypatch.setattr("daemon.adaptation.AGENTS_DIR", agents_dir)
+    monkeypatch.setattr("daemon.adaptation.SKILLS_DIR", skills_dir)
+    return {"agents_dir": agents_dir, "skills_dir": skills_dir}
 
 
 @pytest.fixture
@@ -438,7 +451,11 @@ class TestAgentGeneration:
     """Tests for generating agent definitions via the API."""
 
     @pytest.mark.asyncio
-    async def test_proposes_agent_definitions(self, sample_assessment: AssessmentResult):
+    async def test_proposes_agent_definitions(
+        self,
+        sample_assessment: AssessmentResult,
+        _redirect_generated_definition_dirs,
+    ):
         client, created_agents, _ = _mock_httpx_client()
         with patch("daemon.adaptation.httpx.AsyncClient", return_value=client):
             pipeline = AdaptationPipeline(sample_assessment)
@@ -453,6 +470,11 @@ class TestAgentGeneration:
             assert "name" in body
             assert "content" in body
             assert "description" in body
+            assert body["scope"] == "instance"
+            assert body["status"] == "proposed"
+            artifact_path = _redirect_generated_definition_dirs["agents_dir"] / f"{body['name']}.md"
+            assert artifact_path.exists()
+            assert artifact_path.read_text(encoding="utf-8").strip()
 
     @pytest.mark.asyncio
     async def test_skips_existing_agents(self, sample_assessment: AssessmentResult):
@@ -488,6 +510,82 @@ class TestAgentGeneration:
         names = await pipeline.generate_agents()
         assert names == []
 
+    @pytest.mark.asyncio
+    async def test_cleans_up_agent_artifact_when_db_persist_fails(
+        self,
+        sample_assessment: AssessmentResult,
+        _redirect_generated_definition_dirs,
+    ):
+        async def mock_get(url, **kwargs):
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = []
+            return resp
+
+        async def mock_post(url, **kwargs):
+            resp = MagicMock()
+            resp.status_code = 500
+            return resp
+
+        client = AsyncMock()
+        client.get = mock_get
+        client.post = mock_post
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("daemon.adaptation.httpx.AsyncClient", return_value=client):
+            pipeline = AdaptationPipeline(sample_assessment)
+            names = await pipeline.generate_agents(
+                api_base="http://test/api",
+                api_headers={"Authorization": "Bearer test"},
+            )
+
+        assert names == []
+        for rec in sample_assessment.recommended_agents:
+            artifact_path = _redirect_generated_definition_dirs["agents_dir"] / f"{rec.name}.md"
+            assert not artifact_path.exists()
+
+    @pytest.mark.asyncio
+    async def test_duplicate_prevention_on_second_run(self, sample_assessment: AssessmentResult):
+        existing_agents: set[str] = set()
+        created_agents: list[dict] = []
+
+        async def mock_get(url, **kwargs):
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = [{"name": n} for n in sorted(existing_agents)]
+            return resp
+
+        async def mock_post(url, **kwargs):
+            resp = MagicMock()
+            body = kwargs.get("json", {})
+            created_agents.append(body)
+            existing_agents.add(body["name"])
+            resp.status_code = 201
+            resp.json.return_value = {"id": "test-id", **body}
+            return resp
+
+        client = AsyncMock()
+        client.get = mock_get
+        client.post = mock_post
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("daemon.adaptation.httpx.AsyncClient", return_value=client):
+            pipeline = AdaptationPipeline(sample_assessment)
+            first = await pipeline.generate_agents(
+                api_base="http://test/api",
+                api_headers={"Authorization": "Bearer test"},
+            )
+            second = await pipeline.generate_agents(
+                api_base="http://test/api",
+                api_headers={"Authorization": "Bearer test"},
+            )
+
+        assert len(first) == 2
+        assert second == []
+        assert len(created_agents) == 2
+
 
 # ============================================================================
 # Skill Generation
@@ -498,7 +596,11 @@ class TestSkillGeneration:
     """Tests for generating skill definitions via the API."""
 
     @pytest.mark.asyncio
-    async def test_proposes_skill_definitions(self, sample_assessment: AssessmentResult):
+    async def test_proposes_skill_definitions(
+        self,
+        sample_assessment: AssessmentResult,
+        _redirect_generated_definition_dirs,
+    ):
         client, _, created_skills = _mock_httpx_client()
         with patch("daemon.adaptation.httpx.AsyncClient", return_value=client):
             pipeline = AdaptationPipeline(sample_assessment)
@@ -512,6 +614,13 @@ class TestSkillGeneration:
         for body in created_skills:
             assert "name" in body
             assert "content" in body
+            assert body["scope"] == "instance"
+            assert body["status"] == "proposed"
+            artifact_path = (
+                _redirect_generated_definition_dirs["skills_dir"] / body["name"] / "SKILL.md"
+            )
+            assert artifact_path.exists()
+            assert artifact_path.read_text(encoding="utf-8").strip()
 
     @pytest.mark.asyncio
     async def test_skips_existing_skills(self, sample_assessment: AssessmentResult):
@@ -540,6 +649,175 @@ class TestSkillGeneration:
 
         assert names == []
         assert created_skills == []
+
+    @pytest.mark.asyncio
+    async def test_cleans_up_skill_artifact_when_db_persist_fails(
+        self,
+        sample_assessment: AssessmentResult,
+        _redirect_generated_definition_dirs,
+    ):
+        async def mock_get(url, **kwargs):
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = []
+            return resp
+
+        async def mock_post(url, **kwargs):
+            resp = MagicMock()
+            resp.status_code = 500
+            return resp
+
+        client = AsyncMock()
+        client.get = mock_get
+        client.post = mock_post
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("daemon.adaptation.httpx.AsyncClient", return_value=client):
+            pipeline = AdaptationPipeline(sample_assessment)
+            names = await pipeline.generate_skills(
+                api_base="http://test/api",
+                api_headers={"Authorization": "Bearer test"},
+            )
+
+        assert names == []
+        for rec in sample_assessment.recommended_skills:
+            artifact_path = (
+                _redirect_generated_definition_dirs["skills_dir"] / rec.name / "SKILL.md"
+            )
+            assert not artifact_path.exists()
+
+    @pytest.mark.asyncio
+    async def test_duplicate_prevention_on_second_run(self, sample_assessment: AssessmentResult):
+        existing_skills: set[str] = set()
+        created_skills: list[dict] = []
+
+        async def mock_get(url, **kwargs):
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = [{"name": n} for n in sorted(existing_skills)]
+            return resp
+
+        async def mock_post(url, **kwargs):
+            resp = MagicMock()
+            body = kwargs.get("json", {})
+            created_skills.append(body)
+            existing_skills.add(body["name"])
+            resp.status_code = 201
+            resp.json.return_value = {"id": "test-id", **body}
+            return resp
+
+        client = AsyncMock()
+        client.get = mock_get
+        client.post = mock_post
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("daemon.adaptation.httpx.AsyncClient", return_value=client):
+            pipeline = AdaptationPipeline(sample_assessment)
+            first = await pipeline.generate_skills(
+                api_base="http://test/api",
+                api_headers={"Authorization": "Bearer test"},
+            )
+            second = await pipeline.generate_skills(
+                api_base="http://test/api",
+                api_headers={"Authorization": "Bearer test"},
+            )
+
+        assert len(first) == 2
+        assert second == []
+        assert len(created_skills) == 2
+
+
+# ============================================================================
+# Proposals Visibility
+# ============================================================================
+
+
+class TestProposalsVisibility:
+    """Generated definitions should appear in the proposals listing."""
+
+    @pytest.mark.asyncio
+    async def test_generated_definitions_appear_in_proposals(
+        self,
+        sample_assessment: AssessmentResult,
+        _redirect_generated_definition_dirs,
+    ):
+        db_agents: list[dict] = []
+        db_skills: list[dict] = []
+
+        async def mock_get(url, **kwargs):
+            resp = MagicMock()
+            if "/definitions/agents" in url:
+                resp.status_code = 200
+                resp.json.return_value = [{"name": row["name"]} for row in db_agents]
+            elif "/definitions/skills" in url:
+                resp.status_code = 200
+                resp.json.return_value = [{"name": row["name"]} for row in db_skills]
+            elif "/definitions/proposals" in url:
+                resp.status_code = 200
+                resp.json.return_value = {
+                    "agents": [dict(row) for row in db_agents],
+                    "skills": [dict(row) for row in db_skills],
+                    "mcp_servers": [],
+                    "total": len(db_agents) + len(db_skills),
+                }
+            else:
+                resp.status_code = 404
+                resp.json.return_value = {}
+            return resp
+
+        async def mock_post(url, **kwargs):
+            resp = MagicMock()
+            body = kwargs.get("json", {})
+            row = {
+                "id": f"test-{body.get('name', 'id')}",
+                "name": body["name"],
+                "description": body.get("description", ""),
+                "content": body["content"],
+                "scope": body.get("scope", "instance"),
+                "status": body.get("status", "proposed"),
+            }
+            if "/definitions/agents" in url:
+                db_agents.append(row)
+                resp.status_code = 201
+                resp.json.return_value = row
+            elif "/definitions/skills" in url:
+                db_skills.append(row)
+                resp.status_code = 201
+                resp.json.return_value = row
+            else:
+                resp.status_code = 404
+                resp.json.return_value = {}
+            return resp
+
+        client = AsyncMock()
+        client.get = mock_get
+        client.post = mock_post
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("daemon.adaptation.httpx.AsyncClient", return_value=client):
+            pipeline = AdaptationPipeline(sample_assessment)
+            result = await pipeline.run(
+                memory_api=None,
+                api_base="http://test/api",
+                api_headers={"Authorization": "Bearer test"},
+            )
+
+            proposals_resp = await client.get("http://test/api/definitions/proposals")
+
+        assert proposals_resp.status_code == 200
+        proposals = proposals_resp.json()
+        proposed_agent_names = {item["name"] for item in proposals["agents"]}
+        proposed_skill_names = {item["name"] for item in proposals["skills"]}
+
+        assert set(result["agents_proposed"]).issubset(proposed_agent_names)
+        assert set(result["skills_proposed"]).issubset(proposed_skill_names)
+        assert all(item["scope"] == "instance" for item in proposals["agents"])
+        assert all(item["status"] == "proposed" for item in proposals["agents"])
+        assert all(item["scope"] == "instance" for item in proposals["skills"])
+        assert all(item["status"] == "proposed" for item in proposals["skills"])
 
 
 # ============================================================================
@@ -1191,3 +1469,745 @@ class TestPipelineWithArchetypes:
         assert "domain_signals" in metadata
         assert metadata["domain_signals"]["primary"] == "software"
         assert "scores" in metadata["domain_signals"]
+
+
+# ============================================================================
+# DB Persistence Contract — end-to-end verification
+# ============================================================================
+
+
+class TestDBPersistenceContract:
+    """Verify the full contract between the adaptation pipeline and the definitions DB.
+
+    These tests strengthen coverage of the 4 key persistence guarantees:
+    1. Happy path: files AND DB rows created with correct scope/status/content
+    2. Duplicate prevention: no duplicate definitions on repeated runs
+    3. Proposals visibility: generated definitions appear in proposals endpoint
+    4. Atomicity: file-write and DB-write fail or succeed together
+
+    Existing tests in TestAgentGeneration/TestSkillGeneration/TestProposalsVisibility
+    cover individual aspects; this class focuses on gaps: content consistency,
+    reverse atomicity (file failure → no DB), and end-to-end pipeline.run() flow.
+    """
+
+    @pytest.mark.asyncio
+    async def test_agent_file_and_db_content_are_identical(
+        self,
+        sample_assessment: AssessmentResult,
+        _redirect_generated_definition_dirs,
+    ):
+        """The rendered template content written to disk must exactly match the POST body."""
+        client, created_agents, _ = _mock_httpx_client()
+        with patch("daemon.adaptation.httpx.AsyncClient", return_value=client):
+            pipeline = AdaptationPipeline(sample_assessment)
+            names = await pipeline.generate_agents(
+                api_base="http://test/api",
+                api_headers={"Authorization": "Bearer test"},
+            )
+
+        assert len(names) >= 2
+        for body in created_agents:
+            artifact_path = _redirect_generated_definition_dirs["agents_dir"] / f"{body['name']}.md"
+            file_content = artifact_path.read_text(encoding="utf-8")
+            assert file_content == body["content"], (
+                f"Content mismatch for agent '{body['name']}': "
+                f"file has {len(file_content)} chars, DB payload has {len(body['content'])} chars"
+            )
+
+    @pytest.mark.asyncio
+    async def test_skill_file_and_db_content_are_identical(
+        self,
+        sample_assessment: AssessmentResult,
+        _redirect_generated_definition_dirs,
+    ):
+        """The rendered template content written to disk must exactly match the POST body."""
+        client, _, created_skills = _mock_httpx_client()
+        with patch("daemon.adaptation.httpx.AsyncClient", return_value=client):
+            pipeline = AdaptationPipeline(sample_assessment)
+            names = await pipeline.generate_skills(
+                api_base="http://test/api",
+                api_headers={"Authorization": "Bearer test"},
+            )
+
+        assert len(names) >= 2
+        for body in created_skills:
+            artifact_path = (
+                _redirect_generated_definition_dirs["skills_dir"] / body["name"] / "SKILL.md"
+            )
+            file_content = artifact_path.read_text(encoding="utf-8")
+            assert file_content == body["content"], (
+                f"Content mismatch for skill '{body['name']}'"
+            )
+
+    @pytest.mark.asyncio
+    async def test_agent_description_from_recommendation_purpose(
+        self,
+        sample_assessment: AssessmentResult,
+    ):
+        """POST body 'description' should be set from the recommendation's 'purpose'."""
+        client, created_agents, _ = _mock_httpx_client()
+        with patch("daemon.adaptation.httpx.AsyncClient", return_value=client):
+            pipeline = AdaptationPipeline(sample_assessment)
+            await pipeline.generate_agents(
+                api_base="http://test/api",
+                api_headers={"Authorization": "Bearer test"},
+            )
+
+        # Build a map of recommendation name → purpose
+        purpose_by_name = {r.name: r.purpose for r in sample_assessment.recommended_agents}
+        for body in created_agents:
+            expected_desc = purpose_by_name.get(body["name"])
+            if expected_desc is not None:
+                assert body["description"] == expected_desc, (
+                    f"Agent '{body['name']}' description should be '{expected_desc}', "
+                    f"got '{body['description']}'"
+                )
+
+    @pytest.mark.asyncio
+    async def test_skill_description_from_recommendation_purpose(
+        self,
+        sample_assessment: AssessmentResult,
+    ):
+        """POST body 'description' should be set from the recommendation's 'purpose'."""
+        client, _, created_skills = _mock_httpx_client()
+        with patch("daemon.adaptation.httpx.AsyncClient", return_value=client):
+            pipeline = AdaptationPipeline(sample_assessment)
+            await pipeline.generate_skills(
+                api_base="http://test/api",
+                api_headers={"Authorization": "Bearer test"},
+            )
+
+        purpose_by_name = {r.name: r.purpose for r in sample_assessment.recommended_skills}
+        for body in created_skills:
+            expected_desc = purpose_by_name.get(body["name"])
+            if expected_desc is not None:
+                assert body["description"] == expected_desc
+
+    @pytest.mark.asyncio
+    async def test_file_write_failure_prevents_db_post_for_agents(
+        self,
+        sample_assessment: AssessmentResult,
+    ):
+        """If _write_generated_definition raises, no DB POST should be attempted."""
+        post_calls: list[str] = []
+
+        async def mock_get(url, **kwargs):
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = []
+            return resp
+
+        async def mock_post(url, **kwargs):
+            body = kwargs.get("json", {})
+            post_calls.append(body.get("name", "unknown"))
+            resp = MagicMock()
+            resp.status_code = 201
+            resp.json.return_value = {"id": "test-id", **body}
+            return resp
+
+        client = AsyncMock()
+        client.get = mock_get
+        client.post = mock_post
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=False)
+
+        def failing_write(path, content):
+            raise OSError("Disk full")
+
+        with (
+            patch("daemon.adaptation.httpx.AsyncClient", return_value=client),
+            patch("daemon.adaptation._write_generated_definition", failing_write),
+        ):
+            pipeline = AdaptationPipeline(sample_assessment)
+            names = await pipeline.generate_agents(
+                api_base="http://test/api",
+                api_headers={"Authorization": "Bearer test"},
+            )
+
+        # No agents should be created and no POST calls should have been made
+        assert names == []
+        assert post_calls == [], (
+            f"DB POST was attempted for {post_calls} despite file write failure"
+        )
+
+    @pytest.mark.asyncio
+    async def test_file_write_failure_prevents_db_post_for_skills(
+        self,
+        sample_assessment: AssessmentResult,
+    ):
+        """If _write_generated_definition raises for skills, no DB POST should be attempted."""
+        post_calls: list[str] = []
+
+        async def mock_get(url, **kwargs):
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = []
+            return resp
+
+        async def mock_post(url, **kwargs):
+            body = kwargs.get("json", {})
+            post_calls.append(body.get("name", "unknown"))
+            resp = MagicMock()
+            resp.status_code = 201
+            resp.json.return_value = {"id": "test-id", **body}
+            return resp
+
+        client = AsyncMock()
+        client.get = mock_get
+        client.post = mock_post
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=False)
+
+        def failing_write(path, content):
+            raise OSError("Disk full")
+
+        with (
+            patch("daemon.adaptation.httpx.AsyncClient", return_value=client),
+            patch("daemon.adaptation._write_generated_definition", failing_write),
+        ):
+            pipeline = AdaptationPipeline(sample_assessment)
+            names = await pipeline.generate_skills(
+                api_base="http://test/api",
+                api_headers={"Authorization": "Bearer test"},
+            )
+
+        assert names == []
+        assert post_calls == [], (
+            f"DB POST was attempted for {post_calls} despite file write failure"
+        )
+
+    @pytest.mark.asyncio
+    async def test_pipeline_run_creates_files_and_db_rows(
+        self,
+        sample_assessment: AssessmentResult,
+        _redirect_generated_definition_dirs,
+    ):
+        """pipeline.run() should create both file artifacts and DB rows for all definitions."""
+        db_agents: list[dict] = []
+        db_skills: list[dict] = []
+
+        async def mock_get(url, **kwargs):
+            resp = MagicMock()
+            if "/definitions/agents" in url:
+                resp.status_code = 200
+                resp.json.return_value = [{"name": row["name"]} for row in db_agents]
+            elif "/definitions/skills" in url:
+                resp.status_code = 200
+                resp.json.return_value = [{"name": row["name"]} for row in db_skills]
+            else:
+                resp.status_code = 404
+                resp.json.return_value = {}
+            return resp
+
+        async def mock_post(url, **kwargs):
+            resp = MagicMock()
+            body = kwargs.get("json", {})
+            row = {"id": f"test-{body['name']}", **body}
+            if "/definitions/agents" in url:
+                db_agents.append(row)
+                resp.status_code = 201
+                resp.json.return_value = row
+            elif "/definitions/skills" in url:
+                db_skills.append(row)
+                resp.status_code = 201
+                resp.json.return_value = row
+            else:
+                resp.status_code = 404
+            return resp
+
+        client = AsyncMock()
+        client.get = mock_get
+        client.post = mock_post
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("daemon.adaptation.httpx.AsyncClient", return_value=client):
+            pipeline = AdaptationPipeline(sample_assessment)
+            result = await pipeline.run(
+                memory_api=None,
+                api_base="http://test/api",
+                api_headers={"Authorization": "Bearer test"},
+            )
+
+        # Verify DB rows were created
+        assert len(result["agents_proposed"]) >= 2
+        assert len(result["skills_proposed"]) >= 2
+        assert len(db_agents) == len(result["agents_proposed"])
+        assert len(db_skills) == len(result["skills_proposed"])
+
+        # Verify every proposed agent has a file AND correct DB metadata
+        for row in db_agents:
+            assert row["scope"] == "instance"
+            assert row["status"] == "proposed"
+            artifact = _redirect_generated_definition_dirs["agents_dir"] / f"{row['name']}.md"
+            assert artifact.exists(), f"No file artifact for agent '{row['name']}'"
+
+        # Verify every proposed skill has a file AND correct DB metadata
+        for row in db_skills:
+            assert row["scope"] == "instance"
+            assert row["status"] == "proposed"
+            artifact = (
+                _redirect_generated_definition_dirs["skills_dir"] / row["name"] / "SKILL.md"
+            )
+            assert artifact.exists(), f"No file artifact for skill '{row['name']}'"
+
+    @pytest.mark.asyncio
+    async def test_duplicate_recommendations_deduped_within_single_run(
+        self,
+        _redirect_generated_definition_dirs,
+    ):
+        """If recommendations contain duplicate names, only one POST is made per name."""
+        assessment = AssessmentResult.from_json({
+            "recommended_agents": [
+                {"name": "sec-agent", "purpose": "First", "domain_template": "software"},
+                {"name": "sec-agent", "purpose": "Duplicate", "domain_template": "software"},
+            ],
+            "recommended_skills": [
+                {"name": "sec-skill", "purpose": "First", "domain_template": "software"},
+                {"name": "sec-skill", "purpose": "Duplicate", "domain_template": "software"},
+            ],
+        })
+
+        agent_posts: list[dict] = []
+        skill_posts: list[dict] = []
+        created_agent_names: set[str] = set()
+        created_skill_names: set[str] = set()
+
+        async def mock_get(url, **kwargs):
+            resp = MagicMock()
+            resp.status_code = 200
+            if "/definitions/agents" in url:
+                resp.json.return_value = [{"name": n} for n in created_agent_names]
+            elif "/definitions/skills" in url:
+                resp.json.return_value = [{"name": n} for n in created_skill_names]
+            else:
+                resp.json.return_value = []
+            return resp
+
+        async def mock_post(url, **kwargs):
+            resp = MagicMock()
+            body = kwargs.get("json", {})
+            if "/definitions/agents" in url:
+                agent_posts.append(body)
+                created_agent_names.add(body["name"])
+            elif "/definitions/skills" in url:
+                skill_posts.append(body)
+                created_skill_names.add(body["name"])
+            resp.status_code = 201
+            resp.json.return_value = {"id": "test-id", **body}
+            return resp
+
+        client = AsyncMock()
+        client.get = mock_get
+        client.post = mock_post
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("daemon.adaptation.httpx.AsyncClient", return_value=client):
+            pipeline = AdaptationPipeline(assessment)
+            agents = await pipeline.generate_agents(
+                api_base="http://test/api",
+                api_headers={"Authorization": "Bearer test"},
+            )
+            skills = await pipeline.generate_skills(
+                api_base="http://test/api",
+                api_headers={"Authorization": "Bearer test"},
+            )
+
+        # Only one POST per unique name, despite duplicate recommendations
+        assert len(agents) == 1
+        assert len(agent_posts) == 1
+        assert agent_posts[0]["name"] == "sec-agent"
+
+        assert len(skills) == 1
+        assert len(skill_posts) == 1
+        assert skill_posts[0]["name"] == "sec-skill"
+
+    @pytest.mark.asyncio
+    async def test_run_adaptation_convenience_persists_to_db(
+        self,
+        sample_raw_output: str,
+        _redirect_generated_definition_dirs,
+    ):
+        """The run_adaptation() convenience function should trigger full DB persistence."""
+        db_agents: list[dict] = []
+        db_skills: list[dict] = []
+
+        async def mock_get(url, **kwargs):
+            resp = MagicMock()
+            if "/definitions/agents" in url:
+                resp.status_code = 200
+                resp.json.return_value = [{"name": r["name"]} for r in db_agents]
+            elif "/definitions/skills" in url:
+                resp.status_code = 200
+                resp.json.return_value = [{"name": r["name"]} for r in db_skills]
+            else:
+                resp.status_code = 404
+                resp.json.return_value = {}
+            return resp
+
+        async def mock_post(url, **kwargs):
+            resp = MagicMock()
+            body = kwargs.get("json", {})
+            row = {"id": f"id-{body['name']}", **body}
+            if "/definitions/agents" in url:
+                db_agents.append(row)
+            elif "/definitions/skills" in url:
+                db_skills.append(row)
+            resp.status_code = 201
+            resp.json.return_value = row
+            return resp
+
+        client = AsyncMock()
+        client.get = mock_get
+        client.post = mock_post
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("daemon.adaptation.httpx.AsyncClient", return_value=client):
+            result = await run_adaptation(
+                sample_raw_output,
+                api_base="http://test/api",
+                api_headers={"Authorization": "Bearer test"},
+            )
+
+        assert result is not None
+        assert result["requires_approval"] is True
+        # DB rows were created
+        assert len(db_agents) >= 2
+        assert len(db_skills) >= 2
+        # All have correct scope and status
+        for row in db_agents + db_skills:
+            assert row["scope"] == "instance"
+            assert row["status"] == "proposed"
+
+    @pytest.mark.asyncio
+    async def test_partial_db_failure_only_cleans_failed_agents(
+        self,
+        sample_assessment: AssessmentResult,
+        _redirect_generated_definition_dirs,
+    ):
+        """If DB fails for one agent but succeeds for another, only the failed one is cleaned up."""
+        call_count = 0
+
+        async def mock_get(url, **kwargs):
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = []
+            return resp
+
+        async def mock_post(url, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            resp = MagicMock()
+            body = kwargs.get("json", {})
+            if call_count == 1:
+                # First agent succeeds
+                resp.status_code = 201
+                resp.json.return_value = {"id": "ok", **body}
+            else:
+                # Second agent fails
+                resp.status_code = 500
+            return resp
+
+        client = AsyncMock()
+        client.get = mock_get
+        client.post = mock_post
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("daemon.adaptation.httpx.AsyncClient", return_value=client):
+            pipeline = AdaptationPipeline(sample_assessment)
+            names = await pipeline.generate_agents(
+                api_base="http://test/api",
+                api_headers={"Authorization": "Bearer test"},
+            )
+
+        # Only the first agent should be in the result
+        assert len(names) == 1
+        agents_dir = _redirect_generated_definition_dirs["agents_dir"]
+        # The successful agent's file should still exist
+        assert (agents_dir / f"{names[0]}.md").exists()
+        # The failed agent's file should have been cleaned up
+        failed_name = [
+            r.name for r in sample_assessment.recommended_agents if r.name != names[0]
+        ][0]
+        assert not (agents_dir / f"{failed_name}.md").exists()
+
+
+# ============================================================================
+# Atomicity — logging verification and exception paths
+# ============================================================================
+
+
+class TestAtomicityLogging:
+    """Verify that DB persistence failures are logged, not silently swallowed.
+
+    The existing TestAgentGeneration/TestSkillGeneration tests verify artifact
+    cleanup on DB failure (status 500). This class covers the gaps:
+    - Warning is actually logged when DB returns non-201
+    - Debug is logged when httpx raises an exception
+    - Artifacts are cleaned up on exception path (not just non-201)
+    - Inconsistent-state warning logged when cleanup itself fails
+    """
+
+    @pytest.mark.asyncio
+    async def test_agent_db_failure_logs_warning(
+        self,
+        sample_assessment: AssessmentResult,
+        _redirect_generated_definition_dirs,
+        caplog,
+    ):
+        """Non-201 from DB POST logs a warning with the agent name and status code."""
+        async def mock_get(url, **kwargs):
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = []
+            return resp
+
+        async def mock_post(url, **kwargs):
+            resp = MagicMock()
+            resp.status_code = 500
+            return resp
+
+        client = AsyncMock()
+        client.get = mock_get
+        client.post = mock_post
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("daemon.adaptation.httpx.AsyncClient", return_value=client):
+            pipeline = AdaptationPipeline(sample_assessment)
+            with caplog.at_level(logging.WARNING, logger="daemon.adaptation"):
+                names = await pipeline.generate_agents(
+                    api_base="http://test/api",
+                    api_headers={"Authorization": "Bearer test"},
+                )
+
+        assert names == []
+        warnings = [r for r in caplog.records if "Failed to persist generated agent" in r.message]
+        assert len(warnings) >= 1
+        # Check that agent name and status code appear in at least one warning
+        assert any("security" in r.message or "deployment" in r.message for r in warnings)
+
+    @pytest.mark.asyncio
+    async def test_skill_db_failure_logs_warning(
+        self,
+        sample_assessment: AssessmentResult,
+        _redirect_generated_definition_dirs,
+        caplog,
+    ):
+        """Non-201 from DB POST logs a warning with the skill name and status code."""
+        async def mock_get(url, **kwargs):
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = []
+            return resp
+
+        async def mock_post(url, **kwargs):
+            resp = MagicMock()
+            resp.status_code = 500
+            return resp
+
+        client = AsyncMock()
+        client.get = mock_get
+        client.post = mock_post
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("daemon.adaptation.httpx.AsyncClient", return_value=client):
+            pipeline = AdaptationPipeline(sample_assessment)
+            with caplog.at_level(logging.WARNING, logger="daemon.adaptation"):
+                names = await pipeline.generate_skills(
+                    api_base="http://test/api",
+                    api_headers={"Authorization": "Bearer test"},
+                )
+
+        assert names == []
+        warnings = [r for r in caplog.records if "Failed to persist generated skill" in r.message]
+        assert len(warnings) >= 1
+
+    @pytest.mark.asyncio
+    async def test_agent_db_exception_cleans_up_and_logs(
+        self,
+        sample_assessment: AssessmentResult,
+        _redirect_generated_definition_dirs,
+        caplog,
+    ):
+        """If httpx raises an exception during POST, the artifact is cleaned up."""
+        call_count = 0
+
+        async def mock_get(url, **kwargs):
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = []
+            return resp
+
+        async def mock_post(url, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            raise httpx.ConnectError("Connection refused")
+
+        client = AsyncMock()
+        client.get = mock_get
+        client.post = mock_post
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("daemon.adaptation.httpx.AsyncClient", return_value=client):
+            pipeline = AdaptationPipeline(sample_assessment)
+            with caplog.at_level(logging.DEBUG, logger="daemon.adaptation"):
+                names = await pipeline.generate_agents(
+                    api_base="http://test/api",
+                    api_headers={"Authorization": "Bearer test"},
+                )
+
+        # No agents should be created
+        assert names == []
+        # All recommendation POSTs should have been attempted
+        assert call_count == len(sample_assessment.recommended_agents)
+        # Artifacts should have been cleaned up
+        for rec in sample_assessment.recommended_agents:
+            artifact = _redirect_generated_definition_dirs["agents_dir"] / f"{rec.name}.md"
+            assert not artifact.exists(), f"Artifact for {rec.name} should be cleaned up"
+        # Debug log should mention the failure
+        debug_msgs = [
+            r for r in caplog.records
+            if "Failed to create agent definition" in r.message
+        ]
+        assert len(debug_msgs) >= 1
+
+    @pytest.mark.asyncio
+    async def test_skill_db_exception_cleans_up_and_logs(
+        self,
+        sample_assessment: AssessmentResult,
+        _redirect_generated_definition_dirs,
+        caplog,
+    ):
+        """If httpx raises an exception during skill POST, artifact + dir are cleaned up."""
+        async def mock_get(url, **kwargs):
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = []
+            return resp
+
+        async def mock_post(url, **kwargs):
+            raise httpx.ConnectError("Connection refused")
+
+        client = AsyncMock()
+        client.get = mock_get
+        client.post = mock_post
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("daemon.adaptation.httpx.AsyncClient", return_value=client):
+            pipeline = AdaptationPipeline(sample_assessment)
+            with caplog.at_level(logging.DEBUG, logger="daemon.adaptation"):
+                names = await pipeline.generate_skills(
+                    api_base="http://test/api",
+                    api_headers={"Authorization": "Bearer test"},
+                )
+
+        assert names == []
+        for rec in sample_assessment.recommended_skills:
+            artifact = (
+                _redirect_generated_definition_dirs["skills_dir"] / rec.name / "SKILL.md"
+            )
+            assert not artifact.exists(), f"Artifact for {rec.name} should be cleaned up"
+        debug_msgs = [
+            r for r in caplog.records
+            if "Failed to create skill definition" in r.message
+        ]
+        assert len(debug_msgs) >= 1
+
+    @pytest.mark.asyncio
+    async def test_agent_cleanup_failure_logs_inconsistent_state(
+        self,
+        sample_assessment: AssessmentResult,
+        _redirect_generated_definition_dirs,
+        caplog,
+    ):
+        """When DB fails AND cleanup fails, a warning about inconsistent state is logged."""
+        async def mock_get(url, **kwargs):
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = []
+            return resp
+
+        async def mock_post(url, **kwargs):
+            resp = MagicMock()
+            resp.status_code = 500
+            return resp
+
+        client = AsyncMock()
+        client.get = mock_get
+        client.post = mock_post
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=False)
+
+        def exploding_cleanup(path):
+            raise OSError("Permission denied")
+
+        with (
+            patch("daemon.adaptation.httpx.AsyncClient", return_value=client),
+            patch("daemon.adaptation._cleanup_generated_definition", exploding_cleanup),
+        ):
+            pipeline = AdaptationPipeline(sample_assessment)
+            with caplog.at_level(logging.WARNING, logger="daemon.adaptation"):
+                names = await pipeline.generate_agents(
+                    api_base="http://test/api",
+                    api_headers={"Authorization": "Bearer test"},
+                )
+
+        assert names == []
+        inconsistent_warnings = [
+            r for r in caplog.records
+            if "Inconsistent adaptation state" in r.message
+        ]
+        assert len(inconsistent_warnings) >= 1
+
+    @pytest.mark.asyncio
+    async def test_skill_cleanup_failure_logs_inconsistent_state(
+        self,
+        sample_assessment: AssessmentResult,
+        _redirect_generated_definition_dirs,
+        caplog,
+    ):
+        """When skill DB fails AND cleanup fails, inconsistent state warning is logged."""
+        async def mock_get(url, **kwargs):
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = []
+            return resp
+
+        async def mock_post(url, **kwargs):
+            resp = MagicMock()
+            resp.status_code = 500
+            return resp
+
+        client = AsyncMock()
+        client.get = mock_get
+        client.post = mock_post
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=False)
+
+        def exploding_cleanup(path):
+            raise OSError("Permission denied")
+
+        with (
+            patch("daemon.adaptation.httpx.AsyncClient", return_value=client),
+            patch("daemon.adaptation._cleanup_generated_definition", exploding_cleanup),
+        ):
+            pipeline = AdaptationPipeline(sample_assessment)
+            with caplog.at_level(logging.WARNING, logger="daemon.adaptation"):
+                names = await pipeline.generate_skills(
+                    api_base="http://test/api",
+                    api_headers={"Authorization": "Bearer test"},
+                )
+
+        assert names == []
+        inconsistent_warnings = [
+            r for r in caplog.records
+            if "Inconsistent adaptation state" in r.message
+        ]
+        assert len(inconsistent_warnings) >= 1

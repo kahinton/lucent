@@ -205,7 +205,6 @@ class TestImpersonationSessionRegeneration:
         new_token = "new_session_token_abc123"
 
         with (
-            patch("lucent.web.routes.admin.is_team_mode", return_value=True),
             patch("lucent.web.routes.admin._check_csrf", new_callable=AsyncMock),
             patch(
                 "lucent.web.routes.admin.get_user_context",
@@ -220,6 +219,10 @@ class TestImpersonationSessionRegeneration:
             patch(
                 "lucent.web.routes.admin.UserRepository",
                 return_value=mock_repo,
+            ),
+            patch(
+                "lucent.web.routes.admin.AdminAuditRepository",
+                return_value=MagicMock(log_for_user=AsyncMock()),
             ),
             patch(
                 "lucent.web.routes.admin.create_session",

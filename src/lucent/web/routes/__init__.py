@@ -11,6 +11,7 @@ from . import (
     audit,
     auth,
     chat,
+    connections,
     daemon,
     dashboard,
     definitions,
@@ -21,7 +22,6 @@ from . import (
     schedules,
     secrets,
     settings,
-    usage_analytics,
 )
 
 # Re-export symbols that tests and other modules import directly
@@ -36,13 +36,16 @@ router.include_router(chat.router)
 router.include_router(dashboard.router)
 router.include_router(definitions.router)
 router.include_router(daemon.router)
-router.include_router(usage_analytics.router)
 router.include_router(memories.router)
-router.include_router(audit.router)
-router.include_router(admin.router)
-router.include_router(groups.router)
 router.include_router(sandboxes.router)
 router.include_router(settings.router)
 router.include_router(requests_routes.router)
 router.include_router(schedules.router)
-router.include_router(secrets.router)
+
+# Settings sub-area: members (admin.py), audit, groups, secrets,
+# connections, models — all live under /settings/* for a unified IA.
+router.include_router(audit.router, prefix="/settings")
+router.include_router(admin.router, prefix="/settings")
+router.include_router(groups.router, prefix="/settings")
+router.include_router(secrets.router, prefix="/settings")
+router.include_router(connections.router, prefix="/settings")

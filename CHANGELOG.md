@@ -6,7 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-04-30
+
 ### Added
+
+#### Two-Tier Connections Model
+- **Settings → Connections** page split into two clearly labeled sections: **Workspace connections** (org-owned app/bot installs, admin-managed) and **Your connected accounts** (personal OAuth/PAT/env-token credentials, self-service).
+- Six new feature flags for connection behavior, all with safe defaults that preserve the existing single-user/PAT workflow:
+  - `LUCENT_CONNECTIONS_PAT_ENABLED` (default `true`)
+  - `LUCENT_CONNECTIONS_ENV_TOKEN_CLAIM_ENABLED` (default `true`)
+  - `LUCENT_CONNECTIONS_OAUTH_ENABLED` (default `true`)
+  - `LUCENT_WORKSPACE_INTEGRATIONS_ENABLED` (default `true`)
+  - `LUCENT_GITHUB_APP_ENABLED` (default `false`)
+  - `LUCENT_REQUIRE_USER_GITHUB_CONNECTION_FOR_REPO_ACL` (default `false`)
+- Centralized feature-flag layer (`src/lucent/integrations/connection_flags.py`) — sole reader of the `LUCENT_CONNECTIONS_*` / `LUCENT_GITHUB_APP_*` envs.
+- CSRF protection added to all `/settings/connections/*` JSON mutation endpoints (PAT save, env-token claim, OAuth start, revoke).
+- Workspace-integration mutations now require explicit `MANAGE_INTEGRATIONS` permission inside each handler (defense-in-depth on top of `AdminUser`).
+- GitHub App groundwork: `integrations.type` widened to include `github_app` (plus `jira`, `linear`, `custom`); new `install_id`, `health_status`, `health_detail`, `health_checked_at` columns; partial unique index on `(org, type, install_id)` for active rows. **Migration 069**.
+- New `RepoAccessDecision(allowed, reason, hint)` from `GitHubRepoAccessService.check_access_with_reason()`. Strict mode (`LUCENT_REQUIRE_USER_GITHUB_CONNECTION_FOR_REPO_ACL=true`) returns `user_github_credential_required` with a "Connect your GitHub…" hint; compat mode keeps the existing single-user back-compat allowance.
+- New `app_installation_can_see_repo()` API for app-level repo visibility, gated by `LUCENT_GITHUB_APP_ENABLED`. **Returns `None` ("unknown")** until App JWT signing / installation-token minting lands. **Never** substitutes for user ACL.
+- Documentation: new [docs/connections.md](docs/connections.md) covering the model, every flag, three setup profiles (simple local, team, enterprise), role visibility, and the GitHub repo ACL rule.
 
 #### Request Approval Gate
 - Pre-work approval flow for daemon-created requests (`LUCENT_AUTO_APPROVE` env var)
@@ -48,6 +67,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `LUCENT_SIGNING_SECRET` now included in dev compose defaults for stable cookie signing across restarts
 
 ### Changed
+- Root README repositioned Lucent as an enterprise AI agent / supervised digital teammate instead of a memory-server-first project
+- Package metadata updated for the v0.4.0 release and new enterprise AI agent platform positioning
+- Helm chart, Kubernetes examples, operator defaults, and release docs now use v0.4.0 image/version defaults
+- The Connections page now shows two sections instead of one mixed list. Members see Workspace connections as read-only ("View only" badge) with no mutation controls
+- Defaults are unchanged for existing single-user installs: PAT, env-token claim, OAuth, and workspace integrations are all on; GitHub App and strict repo ACL are off
 - `_check_request_completion` now respects `LUCENT_REQUIRE_APPROVAL` — completed requests go straight to `completed` status by default instead of `review`
 - `list_pending_tasks` query now filters out tasks from unapproved requests
 - Learning extraction skill updated to search for `approval-rejected` tagged memories
@@ -55,8 +79,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `LUCENT_REQUIRE_APPROVAL` documented in `docs/configuration.md`
 - `GITHUB_TOKEN` guidance expanded in `.env.example` and `docs/getting-started.md` (Copilot scope/daemon requirements)
 - Documentation refresh across `docs/configuration.md` and `docs/deployment-guide.md` for launch-readiness
+- Python dependency constraints refreshed for current security and compatibility releases, including `python-multipart`, `cryptography`, LangChain packages, `langsmith`, and pytest
 
 ### Fixed
+- Docker PostgreSQL initialization now sets the `lucent_daemon` role password from `DAEMON_DB_PASSWORD` instead of a hardcoded development password
 - `.env.example` session TTL comment corrected to default `24` hours (`LUCENT_SESSION_TTL_HOURS`)
 - `.env.example` daemon MCP API key placeholder updated from `mcp_...` to `hs_...`
 - `docs/deployment-guide.md` corrected `LUCENT_SECURE_COOKIES` default to `true` (with local HTTP override guidance)
@@ -65,9 +91,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Removed
 - Dead `LUCENT_DAEMON_RESEARCH_MODEL` entry removed from `.env.example`
+- Local-only `check_session.py` debug helper removed from the release tree
+- Stale `.bak` route/template files removed from tracked source
 
 ### Security
+- Connection mutation endpoints now require CSRF validation, and workspace-integration mutations require explicit `MANAGE_INTEGRATIONS` checks inside each handler
+- Production Compose continues to require explicit credentials and now passes `DAEMON_DB_PASSWORD` into the PostgreSQL init path for first-run daemon role setup
 - Protected built-in agent/skill/MCP definitions from daemon-driven modification paths
+
+### Deferred
+- GitHub App webhook execution: the schema and flag are in place, but App JWT signing, installation-token minting, and the `/integrations/webhook/github` HMAC-verified receiver are not yet implemented. `app_installation_can_see_repo()` returns `None` until these land. Do not enable `LUCENT_GITHUB_APP_ENABLED=true` in production with the expectation of working webhook-driven behavior yet.
 
 ## [0.3.0] - 2026-03-27
 
@@ -342,7 +375,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Daemon process for autonomous cognitive cycles
 - 687+ tests covering core functionality
 
-[Unreleased]: https://github.com/kahinton/lucent/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/kahinton/lucent/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/kahinton/lucent/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/kahinton/lucent/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/kahinton/lucent/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/kahinton/lucent/releases/tag/v0.1.0

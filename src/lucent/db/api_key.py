@@ -30,6 +30,8 @@ class ApiKeyRepository:
         name: str,
         scopes: list[str] | None = None,
         expires_at: datetime | None = None,
+        memory_scope_user_id: UUID | None = None,
+        memory_scope: str | None = None,
     ) -> tuple[dict[str, Any], str]:
         """Create a new API key.
 
@@ -62,10 +64,12 @@ class ApiKeyRepository:
 
         query = """
             INSERT INTO api_keys (user_id, organization_id, name,
-                key_prefix, key_hash, scopes, expires_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+                key_prefix, key_hash, scopes, expires_at,
+                memory_scope_user_id, memory_scope)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             RETURNING id, user_id, organization_id, name, key_prefix, scopes,
-                      last_used_at, use_count, expires_at, is_active, created_at, updated_at
+                      last_used_at, use_count, expires_at, is_active, created_at, updated_at,
+                      memory_scope_user_id, memory_scope
         """
 
         async with self.pool.acquire() as conn:
@@ -78,6 +82,8 @@ class ApiKeyRepository:
                 key_hash,
                 scopes or ["read", "write"],
                 expires_at,
+                str(memory_scope_user_id) if memory_scope_user_id else None,
+                memory_scope,
             )
 
         result = self._row_to_dict(row), plain_key
@@ -96,7 +102,8 @@ class ApiKeyRepository:
         """
         query = """
             SELECT id, user_id, organization_id, name, key_prefix, scopes,
-                   last_used_at, use_count, expires_at, is_active, created_at, updated_at
+                   last_used_at, use_count, expires_at, is_active, created_at, updated_at,
+                   memory_scope_user_id, memory_scope
             FROM api_keys
             WHERE user_id = $1 AND name = $2 AND revoked_at IS NULL
         """
@@ -128,6 +135,7 @@ class ApiKeyRepository:
             SELECT ak.id, ak.user_id, ak.organization_id, ak.name, ak.key_prefix,
                    ak.key_hash, ak.scopes, ak.last_used_at, ak.use_count,
                    ak.expires_at, ak.is_active, ak.created_at, ak.updated_at,
+                   ak.memory_scope_user_id, ak.memory_scope,
                    u.email as user_email, u.display_name as user_display_name, u.role as user_role
             FROM api_keys ak
             JOIN users u ON ak.user_id = u.id
@@ -174,6 +182,8 @@ class ApiKeyRepository:
         result["user_email"] = matched_row["user_email"]
         result["user_display_name"] = matched_row["user_display_name"]
         result["user_role"] = matched_row["user_role"]
+        result["memory_scope_user_id"] = matched_row["memory_scope_user_id"]
+        result["memory_scope"] = matched_row["memory_scope"]
         return result
 
     async def list_by_user(self, user_id: UUID, limit: int = 25, offset: int = 0) -> dict:
@@ -193,7 +203,8 @@ class ApiKeyRepository:
         """
         query = """
             SELECT id, user_id, organization_id, name, key_prefix, scopes,
-                   last_used_at, use_count, expires_at, is_active, created_at, updated_at
+                   last_used_at, use_count, expires_at, is_active, created_at, updated_at,
+                   memory_scope_user_id, memory_scope
             FROM api_keys
             WHERE user_id = $1 AND revoked_at IS NULL
             ORDER BY created_at DESC
@@ -225,7 +236,8 @@ class ApiKeyRepository:
         """
         query = """
             SELECT id, user_id, organization_id, name, key_prefix, scopes,
-                   last_used_at, use_count, expires_at, is_active, created_at, updated_at
+                   last_used_at, use_count, expires_at, is_active, created_at, updated_at,
+                   memory_scope_user_id, memory_scope
             FROM api_keys
             WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL
         """
@@ -278,7 +290,8 @@ class ApiKeyRepository:
             SET name = $1, updated_at = NOW()
             WHERE id = $2 AND user_id = $3 AND revoked_at IS NULL
             RETURNING id, user_id, organization_id, name, key_prefix, scopes,
-                      last_used_at, use_count, expires_at, is_active, created_at, updated_at
+                      last_used_at, use_count, expires_at, is_active, created_at, updated_at,
+                      memory_scope_user_id, memory_scope
         """
 
         async with self.pool.acquire() as conn:
@@ -313,5 +326,16 @@ class ApiKeyRepository:
             )
         else:
             result["organization_id"] = None
+
+        if "memory_scope_user_id" in row.keys() and row["memory_scope_user_id"]:
+            result["memory_scope_user_id"] = (
+                row["memory_scope_user_id"]
+                if isinstance(row["memory_scope_user_id"], UUID)
+                else UUID(row["memory_scope_user_id"])
+            )
+        else:
+            result["memory_scope_user_id"] = None
+
+        result["memory_scope"] = row.get("memory_scope")
 
         return result

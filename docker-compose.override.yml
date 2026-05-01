@@ -1,0 +1,13 @@
+# Local development overrides — not for production.
+# Exposes OpenBao on localhost:8200 so the daemon running on the host (outside
+# docker-compose) can decrypt stored credentials (e.g. GitHub tokens for
+# private repo clones into sandboxes).
+#
+# The token is still required for auth. For production, do NOT expose this port;
+# instead run the daemon inside the docker network where it can reach
+# `http://openbao:8200` directly.
+
+services:
+  openbao:
+    ports:
+      - "127.0.0.1:8200:8200"

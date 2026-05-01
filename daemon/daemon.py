@@ -29,12 +29,42 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
 if TYPE_CHECKING:
+    import asyncpg
+
     from lucent.sandbox.models import SandboxConfig
+
+# ---------------------------------------------------------------------------
+# Dev ergonomics — auto-load VAULT_ADDR/VAULT_TOKEN when running on the host
+# ---------------------------------------------------------------------------
+# The daemon needs OpenBao access to decrypt stored credentials (e.g. GitHub
+# tokens for private-repo sandbox clones). When run inside docker-compose the
+# env vars are set automatically; when run on the host we resolve them from
+# the compose setup:
+#   - VAULT_ADDR defaults to http://127.0.0.1:8200 (exposed by
+#     docker-compose.override.yml)
+#   - VAULT_TOKEN is read from ./.openbao/shared/vault-token, written by the
+#     openbao-init container after init+unseal.
+# This runs at import time so all downstream imports of encryption.py see the
+# resolved values.
+def _auto_load_vault_env() -> None:
+    if os.environ.get("VAULT_ADDR") and (
+        os.environ.get("VAULT_TOKEN") or os.environ.get("VAULT_TOKEN_FILE")
+    ):
+        return
+    repo_root = Path(__file__).resolve().parent.parent
+    shared_token = repo_root / ".openbao" / "shared" / "vault-token"
+    if not shared_token.exists():
+        return
+    os.environ.setdefault("VAULT_ADDR", "http://127.0.0.1:8200")
+    os.environ.setdefault("VAULT_TOKEN_FILE", str(shared_token))
+
+
+_auto_load_vault_env()
 
 # ---------------------------------------------------------------------------
 # Redaction helper — strip known secret patterns from logged tool output
@@ -86,6 +116,27 @@ _MEMORY_CAPTURE_TOOLS = frozenset({
     "create_memory",
     "update_memory",
 })
+
+_TASK_MEMORY_SERVER_TOOLS = sorted(
+    {
+        "create_memory",
+        "get_current_user_context",
+        "get_existing_tags",
+        "get_memory",
+        "get_memories",
+        "get_tag_suggestions",
+        "search_memories",
+        "search_memories_full",
+        "update_memory",
+        "create_review",
+        "get_memory_versions",
+        "get_request_details",
+        "link_request_memory",
+        "link_task_memory",
+        "list_available_models",
+        "log_task_event",
+    }
+)
 
 
 def _summarize_memory_tool_params(tool_name: str, arguments: dict) -> str:
@@ -185,6 +236,7 @@ from lucent.secrets.utils import resolve_env_vars as resolve_secret_env_vars
 # Import LLM engine abstraction — the daemon no longer calls CopilotClient directly
 try:
     from lucent.llm import (
+        ModelNotAvailableError,
         SessionEvent,
         SessionEventType,
         get_engine,
@@ -196,9 +248,24 @@ try:
 except ImportError:
     _LLM_ENGINE_AVAILABLE = False
 
+    class ModelNotAvailableError(Exception):  # type: ignore[no-redef]
+        """Stub for when lucent.llm is not available."""
+
+        def __init__(self, model: str = "", original_error: Exception | None = None):
+            self.model = model
+            self.original_error = original_error
+            super().__init__(f"Model '{model}' is not available in the runtime")
+
 # Legacy import for backward compat (daemon may be run outside the package)
 try:
-    from copilot import CopilotClient, PermissionHandler
+    from copilot import CopilotClient, SubprocessConfig
+
+    # PermissionHandler and SystemMessageReplaceConfig moved to copilot.session in SDK >=0.2.1
+    try:
+        from copilot.session import PermissionHandler, SystemMessageReplaceConfig
+    except ImportError:
+        from copilot import PermissionHandler
+        from copilot.types import SystemMessageReplaceConfig
 
     _COPILOT_SDK_AVAILABLE = True
 except ImportError:
@@ -216,9 +283,9 @@ except (ImportError, Exception):
 
 # Structured output contract validation/extraction helpers.
 try:
-    from output_validation import process_task_output
+    from output_validation import process_task_output, validate_consolidation_execution
 except ImportError:
-    from daemon.output_validation import process_task_output
+    from daemon.output_validation import process_task_output, validate_consolidation_execution
 
 # OpenTelemetry instrumentation (optional — graceful when not available)
 try:
@@ -247,8 +314,12 @@ class AuthFailureDetectedError(Exception):
 
 MAX_CONCURRENT_SESSIONS = int(os.environ.get("LUCENT_MAX_SESSIONS", "3"))
 DAEMON_INTERVAL_MINUTES = int(os.environ.get("LUCENT_DAEMON_INTERVAL", "15"))
-MODEL = os.environ.get("LUCENT_DAEMON_MODEL", "claude-opus-4.6")
+MODEL = os.environ.get("LUCENT_DAEMON_MODEL", "").strip()
 STALE_HEARTBEAT_MINUTES = int(os.environ.get("LUCENT_STALE_HEARTBEAT_MINUTES", "30"))
+
+# PG advisory-lock namespace for the request-decomposition backfill.
+# Two-int form: (namespace, hashtext(request_id)::int). Arbitrary unique int.
+DECOMPOSITION_LOCK_NAMESPACE = 0x4C434D50  # "LCMP" — Lucent CoMPose
 # Overall timeout for an entire run_session call (client start + create + response)
 SESSION_TOTAL_TIMEOUT = int(os.environ.get("LUCENT_SESSION_TIMEOUT", "3600"))
 # Idle timeout: kill session if no LLM activity for this long (seconds)
@@ -282,10 +353,13 @@ AUTONOMIC_MINUTES = int(
 LEARNING_MINUTES = int(
     os.environ.get("LUCENT_LEARNING_MINUTES", str(LEARNING_INTERVAL * DAEMON_INTERVAL_MINUTES))
 )
-# Procedural consolidation: runs every 5 hours by default (300 minutes)
-PROCEDURAL_CONSOLIDATION_MINUTES = int(
-    os.environ.get("LUCENT_PROCEDURAL_CONSOLIDATION_MINUTES", "300")
+# Memory vitality scoring: runs every 6 hours by default (360 minutes)
+VITALITY_SCORING_MINUTES = int(os.environ.get("LUCENT_VITALITY_SCORING_MINUTES", "360"))
+# Shadow forgetting Candidate-A scoring: runs every 6 hours, offset +15m from vitality.
+SHADOW_FORGET_SCORING_MINUTES = int(
+    os.environ.get("LUCENT_SHADOW_FORGET_SCORING_MINUTES", str(VITALITY_SCORING_MINUTES))
 )
+SHADOW_FORGET_OFFSET_MINUTES = int(os.environ.get("LUCENT_SHADOW_FORGET_OFFSET_MINUTES", "15"))
 # Daily experience compression: runs once per day (default 1440 minutes = 24 hours)
 COMPRESSION_MINUTES = int(os.environ.get("LUCENT_COMPRESSION_MINUTES", "1440"))
 
@@ -297,45 +371,90 @@ MEMORY_CONSOLIDATION_PROMPT = (
     "Run a memory consolidation pass focused on TECHNICAL memories.\n\n"
     "## Goal: One Technical Memory Per Scope\n\n"
     "Technical memories must follow a strict hierarchy:\n"
-    "- **Repo-level**: One memory per repo (metadata.repo='hindsight', metadata.directory=null, metadata.filename=null)\n"
+    "- **Repo-level**: One memory per repo (metadata.repo=<owner/repo>, metadata.directory=null, metadata.filename=null)\n"
     "  Contains: general architecture, conventions, build/test commands, key patterns\n"
-    "- **Directory-level**: One memory per significant directory (metadata.repo='hindsight', metadata.directory='src/lucent/api/', metadata.filename=null)\n"
+    "- **Directory-level**: One memory per significant directory (metadata.repo=<owner/repo>, metadata.directory=<path/>, metadata.filename=null)\n"
     "  Contains: what this directory does, key files, patterns specific to this area\n"
-    "- **File-level**: One memory per file that has enough knowledge to warrant it (metadata.repo='hindsight', metadata.directory='src/lucent/db/', metadata.filename='src/lucent/db/memory.py')\n"
+    "- **File-level**: One memory per file that has enough knowledge to warrant it (metadata.repo=<owner/repo>, metadata.directory=<parent/dir/>, metadata.filename=<parent/dir/file.ext>)\n"
     "  Contains: what this file does, key functions, gotchas, patterns\n\n"
+    "## Desired Content Contract\n\n"
+    "The hierarchy is a navigational knowledge base for future agents. It is NOT an audit log.\n"
+    "Repo-level memories should read like a compact contributor briefing with these sections when known:\n"
+    "- Architecture map: major subsystems and how requests/data flow between them\n"
+    "- Working conventions: how to run/build/test locally, including background workers, services, "
+    "and containerized dependencies when the repo uses them\n"
+    "- Important docs/runbooks: docs worth reading before changing the repo\n"
+    "- Do / don't: operational constraints, security boundaries, and common footguns\n"
+    "- Current decisions/invariants: durable design choices and why they exist\n"
+    "Directory-level memories should explain the directory's responsibility, boundaries, key files, "
+    "local patterns, and gotchas. File-level memories should explain responsibilities, important "
+    "symbols, invariants, and edit hazards.\n\n"
+    "## Determining the repo name\n\n"
+    "The repo name MUST be in owner/repo format (e.g. 'octocat/hello-world'). "
+    "To find the correct repo name, look at existing technical memories that already have metadata.repo set. "
+    "Use whatever value they already have — do NOT invent a new name or use the filesystem directory name. "
+    "If no existing memories have metadata.repo set, search for clues in memory content or tags.\n\n"
     "## Process (Mandatory Phases)\n\n"
     "1. Search for all technical memories (use search_memories with type='technical', limit=50).\n"
-    "   Also search with search_memories_full for broader coverage.\n\n"
-    "2. For each memory, determine its correct scope:\n"
+    "   Also search with search_memories_full for broader coverage. Before planning writes, exclude "
+    "protected or non-knowledge records from the consolidation set: anything tagged 'pinned', "
+    "'do_not_consolidate', maintenance, or records that are plain task reports, heartbeat/state "
+    "records, telemetry, or other runtime bookkeeping rather than durable codebase knowledge.\n\n"
+    "2. For each in-scope memory, determine its correct scope:\n"
     "   - If it's about a specific file -> file-level\n"
     "   - If it's about a directory/module -> directory-level\n"
     "   - If it's about the repo generally -> repo-level\n\n"
     "3. **Merge duplicates**: If two memories belong to the same scope, merge them into one.\n"
-    "   Update the better one with combined content, delete the other.\n"
+    "   Keep the best scope-fit memory as canonical: prefer durable overview/convention content "
+    "over audit reports, one-off research outputs, maintenance logs, or transient task summaries. "
+    "Then tie-break by higher vitality_score (missing=0.5), higher importance, then older created_at.\n"
+    "   Update the canonical memory with combined content, delete lower-vitality fragments.\n"
     "   The surviving memory should be comprehensive but concise.\n\n"
     "4. **MANDATORY METADATA NORMALIZATION PASS (separate from merge pass)**:\n"
-    "   Update EVERY technical memory so it has these exact metadata fields:\n"
-    "   - metadata.repo (repository name, e.g. 'hindsight')\n"
+    "   Update EVERY in-scope technical codebase memory so it has these exact metadata fields:\n"
+    "   - metadata.repo (repository name in owner/repo format. Get this from existing memories — do NOT hardcode or guess)\n"
     "   - metadata.directory (path within repo; directory path ending with '/', or null)\n"
-    "   - metadata.filename (specific file path within repo, or null)\n"
+    "   - metadata.filename (specific file path within repo, or null. Must be null for directory-level memories)\n"
     "   Scope mapping is strict and non-optional:\n"
     "   - repo-level -> repo set, directory=null, filename=null\n"
     "   - directory-level -> repo set, directory='path/within/repo/', filename=null\n"
     "   - file-level -> repo set, directory='parent/dir/', filename='full/path/to/file.ext'\n"
     "   Also set metadata.category to a short category like 'architecture', 'api', 'database', 'testing'.\n\n"
     "5. **MANDATORY VERIFICATION PASS (after all updates/deletes)**:\n"
-    "   Re-read technical memories and verify each one includes metadata.repo, metadata.directory, and metadata.filename\n"
+    "   Re-read in-scope technical codebase memories and verify each one includes metadata.repo, metadata.directory, and metadata.filename\n"
     "   with values consistent with its scope mapping above. If any memory is non-compliant, fix it in this run before finishing.\n\n"
-    "6. **Non-technical memories** (experience, procedural, etc.): Leave these alone.\n\n"
+    "6. **Non-technical memories** (experience, goal, individual, etc.): Leave these alone.\n\n"
     "7. Create a summary of what you changed, including verification counts and any corrected memory IDs.\n\n"
     "## Important Rules\n"
     "- NEVER create new memories. Only update existing ones or delete duplicates.\n"
     "- The ONLY valid operations are: update_memory and delete_memory.\n"
+    "- NEVER create a memory maintenance log, run report, or audit-result memory. Put the run summary only in the task response.\n"
+    "- If you identify merge/update/delete operations, you MUST execute them in this run.\n"
+    "- Do not stop after planning. Planning without writes is an incomplete run.\n"
     "- If two memories cover the same scope, update the better one and delete the other.\n"
     "- The total memory count must go DOWN or stay the same, never up.\n"
     "- Each scope should have AT MOST one technical memory.\n"
     "- Do NOT treat metadata normalization as optional; it is a required pass every run.\n"
-    "- Content should be practical: what does a developer need to know to work here?"
+    "- NEVER touch memories tagged 'pinned' or 'do_not_consolidate'.\n"
+    "- NEVER normalize heartbeat/state records, maintenance logs, run reports, or telemetry records into repo metadata. These are not codebase knowledge.\n"
+    "- Final output MUST include: 'Planned operations: <N>' and 'Executed write operations: <M>'.\n"
+    "- Content should be practical: what does a developer need to know to work here?\n\n"
+    "## Content Quality: Focus on WHY, not WHAT\n\n"
+    "Technical memories are used as working context for agents executing tasks. "
+    "They should describe conventions, patterns, design decisions, and constraints — "
+    "NOT be a changelog of what was done.\n\n"
+    "GOOD (why/how — useful for future work):\n"
+    "- 'Uses repository pattern with asyncpg connection pools'\n"
+    "- 'ACL enforcement: user_id = caller OR (org_id AND shared = true)'\n"
+    "- 'All API endpoints require AuthenticatedUser dependency for API key auth'\n"
+    "- 'Migrations are sequential numbered SQL files, applied on startup'\n\n"
+    "BAD (what — reads like a commit log, not useful as context):\n"
+    "- 'Added memory_scope_user_id column in migration 057'\n"
+    "- 'Fixed bug where get_accessible() failed under scoped keys'\n"
+    "- 'Implemented multi-engine LLM abstraction in March 2026'\n\n"
+    "When consolidating, strip out changelog-style entries and distill the "
+    "underlying conventions and patterns. A developer reading this memory should "
+    "understand HOW to work in this area, not WHAT was historically done."
 )
 
 LEARNING_EXTRACTION_PROMPT = (
@@ -346,12 +465,12 @@ LEARNING_EXTRACTION_PROMPT = (
     "or 'rejection-lesson' or 'feedback-rejected' "
     "or 'validated' that do "
     "NOT have the 'lesson-extracted' tag. Cap at 10.\n"
-    "2. For each non-routine experience, find the existing memory "
-    "that this lesson is ABOUT (the technical or procedural memory "
-    "for that module/system/workflow).\n"
+    "2. For each non-routine experience, find the existing memory or skill "
+    "that this lesson is ABOUT (the technical memory for that module/system, "
+    "or the skill for that workflow).\n"
     "3. Update that existing memory with the new knowledge. "
-    "If no related memory exists, create ONE well-scoped memory "
-    "that includes the lesson as part of its content.\n"
+    "If no related memory exists, create ONE well-scoped technical or experience memory "
+    "that includes the lesson as part of its content. Reusable workflows belong in skills.\n"
     "4. Tag processed source memories with 'lesson-extracted'.\n"
     "5. Delete source experience memories that are now redundant "
     "(their knowledge has been absorbed).\n"
@@ -360,14 +479,14 @@ LEARNING_EXTRACTION_PROMPT = (
     "- NEVER create a new memory if an existing one covers the same scope - update it.\n"
     "- The total memory count must go DOWN or stay the same, never up.\n"
     "- Prefer update_memory and delete_memory. Only use create_memory for genuine gaps.\n"
-    "- Skip anything tagged 'daemon-heartbeat'."
+    "- Skip runtime heartbeat or telemetry records if any legacy records are still present."
 )
 
 EXPERIENCE_COMPRESSION_PROMPT = (
     "Compress experience memories into daily digests.\n\n"
     "## Process\n\n"
     "1. Search for experience memories that are NOT tagged 'daily-digest' "
-    "and NOT tagged 'daemon-heartbeat' (use search_memories with type='experience', limit=50).\n\n"
+    "and not runtime heartbeat/telemetry records (use search_memories with type='experience', limit=50).\n\n"
     "2. Group the results by date (use the created_at or updated_at field). "
     "Skip memories from today - only compress older ones.\n\n"
     "3. For each date that has 2+ experience memories:\n"
@@ -381,45 +500,36 @@ EXPERIENCE_COMPRESSION_PROMPT = (
     "## Rules\n"
     "- Each day gets AT MOST one digest memory.\n"
     "- If a daily digest already exists for a date, update it instead of creating a new one.\n"
+    "- If multiple digest candidates exist for one date, keep the highest-vitality digest as canonical "
+    "(missing vitality_score = 0.5) and absorb lower-vitality fragments into it.\n"
     "- The narrative should be practical: what happened and why it matters, not raw logs.\n"
     "- Total memory count must go DOWN.\n"
-    "- Keep digests concise - aim for 200-500 words per day, not a transcript."
+    "- Keep digests concise - aim for 200-500 words per day, not a transcript.\n"
+    "- NEVER touch memories tagged 'pinned' or 'do_not_consolidate'."
 )
 
-PROCEDURAL_CONSOLIDATION_PROMPT = (
-    "Run a memory consolidation pass focused on PROCEDURAL memories.\n\n"
-    "## Goal: One Canonical Procedure Per Topic\n\n"
-    "Procedural memories should converge toward one current, complete procedure per topic.\n"
-    "Do not let overlapping step lists accumulate.\n\n"
-    "## Process (Mandatory Phases)\n\n"
-    "1. Search for procedural memories (search_memories with type='procedural', limit=50) and "
-    "expand coverage with search_memories_full.\n\n"
-    "2. Cluster by topic/workflow.\n"
-    "   Topic matching signals include: similar titles, shared tags, same system/module names, "
-    "and overlapping step text.\n\n"
-    "3. **Merge duplicates/overlap**:\n"
-    "   - For each cluster, keep ONE canonical memory: the most recent and most complete version.\n"
-    "   - Fold useful missing steps/notes from older duplicates into the canonical memory.\n"
-    "   - Delete merged duplicates after canonical memory is updated.\n\n"
-    "4. **Update outdated procedures**:\n"
-    "   - If newer procedural/experience/technical memories invalidate older steps, update the "
-    "canonical procedural memory so it reflects current practice.\n"
-    "   - Prefer explicit, ordered steps and preserve practical caveats.\n\n"
-    "5. **Archive stale daemon-task procedural entries**:\n"
-    "   - Find procedural memories tagged 'daemon-task' where status indicates completed/cancelled "
-    "(including tags like 'completed', 'cancelled', 'done', or equivalent metadata).\n"
-    "   - Archive by updating tags/metadata to clearly mark them archived and non-actionable.\n"
-    "   - If a stale daemon-task memory is fully redundant with a canonical procedure, delete it.\n\n"
-    "6. Verify outcomes:\n"
-    "   - Each topic should have at most one active canonical procedure.\n"
-    "   - Archived daemon-task entries should not appear as active procedures.\n"
-    "   - Summarize updates/deletes/archives performed.\n\n"
-    "## Important Rules\n"
-    "- Prefer update_memory and delete_memory; only create_memory for a genuine gap.\n"
-    "- Total memory count should go DOWN or stay the same unless a true missing canonical procedure "
-    "must be created.\n"
-    "- Preserve the newest, most complete procedure as canonical.\n"
-    "- Keep procedural memories actionable: ordered steps, prerequisites, pitfalls, and success criteria."
+MEMORY_VITALITY_SCORING_PROMPT = (
+    "Run memory lifecycle vitality scoring in SHADOW MODE.\n\n"
+    "Required actions:\n"
+    "1. Compute vitality scores for all non-deleted memories not in forgotten stage.\n"
+    "2. Persist vitality_score and vitality_computed_at.\n"
+    "3. Apply lifecycle_stage transitions using configured thresholds.\n"
+    "4. Do NOT change search ranking or retrieval behavior.\n"
+    "5. Report processed, updated, and stage transition counts."
+)
+
+SHADOW_FORGET_SCORING_PROMPT = (
+    "Run Candidate-A Graph-Centrality Pruning in SHADOW MODE.\n\n"
+    "Required actions:\n"
+    "1. Call compute_shadow_forget_scores with strategy='gcp-v1' and batch_size=500.\n"
+    "2. Confirm all writes are sidecar-only in memory_shadow_scores.\n"
+    "3. Report the five comparison metrics from the run:\n"
+    "   - top-K agreement\n"
+    "   - orphan reclaim\n"
+    "   - load-bearing protection\n"
+    "   - LDR edges-at-risk\n"
+    "   - compute overhead\n"
+    "4. Do NOT mutate vitality_score, lifecycle_stage, search ranking, or memory content."
 )
 
 # Approval flow: when enabled, tasks go to needs-review before completing.
@@ -432,7 +542,9 @@ REQUIRE_APPROVAL = os.environ.get("LUCENT_REQUIRE_APPROVAL", "false").lower() in
 
 # Multi-model review: comma-separated list of models to use for reviewing task output.
 # When set, completed tasks are re-evaluated by each model before final completion.
-# The cognitive model is always claude-opus-4.6; these are for sub-agent review.
+# The cognitive model can be pinned by LUCENT_DAEMON_MODEL. When unset, the
+# daemon uses the model registry's enabled default instead of a hardcoded model.
+# these are for sub-agent review.
 REVIEW_MODELS = [
     m.strip() for m in os.environ.get("LUCENT_REVIEW_MODELS", "").split(",") if m.strip()
 ]
@@ -440,7 +552,7 @@ REVIEW_MODELS = [
 # Request-level post-completion review configuration.
 REQUEST_REVIEW_AGENT_TYPE = os.environ.get("LUCENT_REQUEST_REVIEW_AGENT_TYPE", "request-review")
 REQUEST_REVIEW_FALLBACK_AGENT_TYPE = os.environ.get("LUCENT_REQUEST_REVIEW_FALLBACK_AGENT_TYPE", "code")
-REQUEST_REVIEW_MODEL = os.environ.get("LUCENT_REQUEST_REVIEW_MODEL", MODEL)
+REQUEST_REVIEW_MODEL = os.environ.get("LUCENT_REQUEST_REVIEW_MODEL", "").strip()
 REQUEST_REVIEW_TASK_TITLE = "Post-completion review"
 
 # Git operations: daemon can commit (but never push without ALLOW_GIT_PUSH)
@@ -457,6 +569,81 @@ LOG_FILE = DAEMON_DIR / "daemon.log"
 # MCP configuration — passed to all sessions
 MCP_URL = os.environ.get("LUCENT_MCP_URL", "http://localhost:8766/mcp")
 MCP_API_KEY = os.environ.get("LUCENT_MCP_API_KEY", "")
+
+
+def _resolve_default_model(preferred_model: str | None = None) -> str:
+    """Resolve the current enabled default model from the model registry."""
+    try:
+        from lucent.model_registry import get_default_model_id
+
+        return get_default_model_id(preferred_model=(preferred_model or MODEL or None))
+    except Exception:
+        return preferred_model or MODEL
+
+
+def _select_model_for_task(
+    *,
+    agent_type: str | None = None,
+    title: str | None = None,
+    description: str | None = None,
+    explicit_model: str | None = None,
+) -> tuple[str, str]:
+    """Select a model for task execution without hardcoding model names."""
+    if explicit_model:
+        return explicit_model, "explicit model on task"
+    try:
+        from lucent.model_registry import select_model_for_task
+
+        selection = select_model_for_task(
+            agent_type=agent_type,
+            title=title,
+            description=description,
+            preferred_default=MODEL or None,
+            require_tools=True,
+        )
+        return selection.model_id, selection.reason
+    except Exception as exc:
+        fallback = _resolve_default_model()
+        return fallback, f"model selector unavailable ({exc}); using default"
+
+
+def _task_requires_mcp_tool_usage(
+    agent_type: str | None,
+    title: str | None = None,
+    description: str | None = None,
+) -> bool:
+    """Return True when a successful task must have used at least one MCP tool."""
+    agent = (agent_type or "").strip().lower()
+    text = f"{title or ''} {description or ''}".lower()
+    if agent == "request-review":
+        return False
+    mutating_memory_signals = (
+        "create_memory",
+        "update_memory",
+        "delete_memory",
+        "soft-delete",
+        "delete retired",
+        "consolidat",
+        "deduplicat",
+        "merge duplicate",
+        "retire",
+        "retirement",
+        "transfer durable",
+        "curate",
+    )
+    if agent == "memory":
+        return any(signal in text for signal in mutating_memory_signals)
+
+    tool_required_signals = (
+        "create_memory",
+        "update_memory",
+        "delete_memory",
+        "create_task",
+        "create_request",
+        "must call an mcp tool",
+        "must use memory tools",
+    )
+    return any(signal in text for signal in tool_required_signals)
 
 # Database URL for direct key provisioning.
 # Prefers DAEMON_DATABASE_URL (restricted lucent_daemon role) over DATABASE_URL
@@ -491,10 +678,9 @@ def _resolve_daemon_database_url() -> str:
         "LUCENT_DEV_DATABASE_URL",
         f"postgresql://lucent:{dev_password}@localhost:{dev_port}/lucent",
     )
-    print(
+    sys.stderr.write(
         "WARNING: Neither DAEMON_DATABASE_URL nor DATABASE_URL is set. "
-        "Using local dev fallback. Set DAEMON_DATABASE_URL in production.",
-        file=sys.stderr,
+        "Using local dev fallback. Set DAEMON_DATABASE_URL in production.\n"
     )
     return fallback
 
@@ -691,6 +877,116 @@ async def _revoke_current_key() -> None:
     finally:
         _current_key_db_id = None
         _current_key_expires_at = None
+
+
+async def _mint_scoped_api_key(
+    *,
+    memory_scope: str,  # 'user' or 'org_shared_only'
+    memory_scope_user_id: str | None = None,
+    org_id: str,
+    ttl_minutes: int = 60,
+) -> str | None:
+    """Mint a temporary scoped API key for per-user memory operations.
+
+    The scoped key restricts all memory operations to a specific user's
+    memories (memory_scope='user') or to shared-only org memories
+    (memory_scope='org_shared_only'). This is the security boundary for
+    multi-user memory isolation — sub-agents holding a scoped key cannot
+    access data outside their scope regardless of prompt manipulation.
+
+    Returns the plain-text hs_ key, or None on failure.
+    """
+    import secrets
+
+    import asyncpg
+    import bcrypt
+
+    try:
+        conn = await asyncpg.connect(DATABASE_URL)
+    except Exception as e:
+        log(f"DB connect failed minting scoped key: {e}", "WARN")
+        return None
+
+    try:
+        # Look up the daemon service user
+        user = await conn.fetchrow(
+            "SELECT id, organization_id FROM users "
+            "WHERE external_id = 'daemon-service' AND is_active = true"
+        )
+        if not user:
+            log("Cannot mint scoped key — no daemon-service user", "WARN")
+            return None
+
+        daemon_user_id = str(user["id"])
+
+        # Generate key
+        raw_key = secrets.token_urlsafe(32)
+        plain_key = f"hs_{raw_key}"
+        key_prefix = plain_key[:11]
+        key_hash = bcrypt.hashpw(plain_key.encode(), bcrypt.gensalt()).decode()
+
+        # Create scoped key with short TTL
+        scope_suffix = memory_scope_user_id[:8] if memory_scope_user_id else "shared"
+        key_name = f"scoped-{memory_scope}-{scope_suffix}-{secrets.token_hex(4)}"
+
+        await conn.fetchrow(
+            "INSERT INTO api_keys "
+            "(user_id, organization_id, name, key_prefix, key_hash, scopes, "
+            " expires_at, memory_scope, memory_scope_user_id) "
+            "VALUES ($1, $2, $3, $4, $5, $6, NOW() + INTERVAL '1 minute' * $7, $8, $9) "
+            "RETURNING id, expires_at",
+            daemon_user_id,
+            org_id,
+            key_name,
+            key_prefix,
+            key_hash,
+            ["read", "write"],
+            ttl_minutes,
+            memory_scope,
+            memory_scope_user_id,
+        )
+        log(f"Minted {memory_scope} scoped key (prefix: {key_prefix}, "
+            f"scope_user: {scope_suffix}, ttl: {ttl_minutes}m)")
+        return plain_key
+
+    except Exception as e:
+        log(f"Scoped key provisioning failed: {e}", "ERROR")
+        return None
+    finally:
+        await conn.close()
+
+
+# Schedule titles that require org-shared-only processing.
+# These are system-wide maintenance tasks with no single owning user; they
+# operate only on shared org memories. All other tasks default to 'user'
+# scope tied to the request's creator.
+_ORG_SHARED_SCHEDULE_TITLES = frozenset({
+    "Memory Consolidation",
+})
+
+
+def _get_required_memory_scope(task_title: str, request_title: str) -> str | None:
+    """Return an OVERRIDE memory scope for special system tasks.
+
+    Returns:
+        - 'org_shared_only' for org-wide maintenance schedules (consolidation
+          etc.) that have no single owning user and must operate only on
+          shared org memories.
+        - None for everything else, which means the dispatcher will use its
+          default of 'user' scoped to the request's owning user. This is the
+          security floor: every user-initiated task runs under the user's
+          ACL. There is no opt-out — including auto-created post-completion
+          review tasks, which previously bypassed scoping and incorrectly
+          ran with daemon-wide org access.
+    """
+    # Check the request title (schedule-generated requests use [Scheduled] prefix)
+    clean_title = request_title.replace("[Scheduled] ", "")
+
+    if clean_title in _ORG_SHARED_SCHEDULE_TITLES:
+        return "org_shared_only"
+    # 'user' scope is the dispatcher's default; per-user schedules don't
+    # need to be enumerated here anymore.
+    return None
 
 
 async def _verify_api_key(api_key: str) -> bool:
@@ -939,6 +1235,39 @@ class RequestAPI:
                     return resp.json()
         except Exception as e:
             log(f"API list_active_work failed: {e}", "WARN")
+        return None
+
+    @staticmethod
+    async def list_planning_targets(
+        api_key: str | None = None,
+    ) -> list[dict] | None:
+        """Fetch goal milestones the planner MUST progress this cycle.
+
+        When ``api_key`` is provided (typically a user-scoped key minted
+        for per-user fan-out), the request is authenticated with that key
+        and the server-side handler scopes the result to that user's
+        goals automatically.
+        """
+        try:
+            headers = (
+                {"Authorization": f"Bearer {api_key}"}
+                if api_key else API_HEADERS
+            )
+            async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
+                resp = await client.get(
+                    f"{API_BASE}/requests/planning-targets",
+                    headers=headers,
+                )
+                if resp.status_code == 200:
+                    payload = resp.json()
+                    return payload.get("targets") or []
+                log(
+                    f"planning-targets returned HTTP {resp.status_code}: "
+                    f"{resp.text[:200]}",
+                    "WARN",
+                )
+        except Exception as e:
+            log(f"API list_planning_targets failed: {e}", "WARN")
         return None
 
     @staticmethod
@@ -1487,6 +1816,14 @@ def _configure_daemon_logging():
     os.environ.setdefault("LUCENT_LOG_FILE", str(LOG_FILE))
     os.environ.setdefault("LUCENT_LOG_FILE_MAX_BYTES", "10485760")  # 10 MB
     os.environ.setdefault("LUCENT_LOG_FILE_BACKUP_COUNT", "5")
+    # The daemon is typically launched with stderr redirected to LOG_FILE
+    # (e.g. `nohup python -m daemon.daemon >> daemon/daemon.log 2>&1`).
+    # Without this, every log line would be written twice to the file:
+    # once by the rotating file handler, and again when the stderr handler
+    # flushes to the redirected fd. Any real Python crash/traceback that
+    # bypasses the logger still reaches the file through the stderr
+    # redirection.
+    os.environ.setdefault("LUCENT_LOG_STDERR", "false")
 
     # Add src to path so lucent package is importable
     src_dir = str(DAEMON_DIR.parent / "src")
@@ -1496,7 +1833,7 @@ def _configure_daemon_logging():
     from lucent.logging import configure_logging, get_logger
 
     configure_logging()
-    return get_logger
+    return get_logger(__name__)
 
 
 # Lazy-initialized logger — set up in main() after arg parsing
@@ -1535,27 +1872,78 @@ def _watchdog_loop():
             os._exit(1)
 
 
-def log(message: str, level: str = "INFO"):
-    """Log via the structured logging module (falls back to print before init)."""
+def log(
+    message: str,
+    level: str = "INFO",
+    *,
+    request_id: str | None = None,
+    user_id: str | None = None,
+):
+    """Log via the structured logging module.
+
+    Optional request_id/user_id values are pushed into log contextvars for this
+    log call so JSONFormatter/HumanFormatter can include them automatically.
+    """
     _touch_activity()
+    restore_context = False
+    prev_request_id: str | None = None
+    prev_user_id: str | None = None
+
+    if request_id is not None or user_id is not None:
+        try:
+            from lucent.log_context import (
+                get_request_id,
+                get_user_id,
+                set_request_id,
+                set_user_id,
+            )
+
+            prev_request_id = get_request_id()
+            prev_user_id = get_user_id()
+            if request_id is not None:
+                set_request_id(request_id)
+            if user_id is not None:
+                set_user_id(user_id)
+            restore_context = True
+        except Exception:
+            restore_context = False
+
     if _logger is None:
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-        print(f"[{timestamp}] [{level}] {message}")
+        sys.stderr.write(f"[{timestamp}] [{level}] {message}\n")
+        if restore_context:
+            try:
+                from lucent.log_context import set_request_id, set_user_id
+
+                set_request_id(prev_request_id)
+                set_user_id(prev_user_id)
+            except Exception:
+                pass
         return
 
-    from lucent.logging import STREAM, THOUGHT
+    try:
+        from lucent.logging import STREAM, THOUGHT
 
-    level_map = {
-        "INFO": _logger.info,
-        "WARN": _logger.warning,
-        "WARNING": _logger.warning,
-        "ERROR": _logger.error,
-        "STREAM": lambda msg: _logger.log(STREAM, msg),
-        "THOUGHT": lambda msg: _logger.log(THOUGHT, msg),
-        "DEBUG": _logger.debug,
-    }
-    log_fn = level_map.get(level.upper(), _logger.info)
-    log_fn(message)
+        level_map = {
+            "INFO": _logger.info,
+            "WARN": _logger.warning,
+            "WARNING": _logger.warning,
+            "ERROR": _logger.error,
+            "STREAM": lambda msg: _logger.log(STREAM, msg),
+            "THOUGHT": lambda msg: _logger.log(THOUGHT, msg),
+            "DEBUG": _logger.debug,
+        }
+        log_fn = level_map.get(level.upper(), _logger.info)
+        log_fn(message)
+    finally:
+        if restore_context:
+            try:
+                from lucent.log_context import set_request_id, set_user_id
+
+                set_request_id(prev_request_id)
+                set_user_id(prev_user_id)
+            except Exception:
+                pass
 
 
 # ============================================================================
@@ -1632,7 +2020,7 @@ async def build_cognitive_prompt() -> str:
                 "3. Update each linked goal memory based on the feedback:\n"
                 "   - If the goal itself is obsolete/already done → set metadata.status to 'abandoned' with the reason\n"
                 "   - If just the approach was wrong → add the rejection feedback to the goal's content\n"
-                "4. Transition the request to 'cancelled' using `update_request_status`\n"
+                "4. Transition the request to 'cancelled' using `mark_rejection_processed(request_id, note=...)`\n"
                 "5. Tag the feedback-rejected memory as 'feedback-processed'\n\n"
                 "Do NOT skip this. Do NOT create new requests for these goals until processing is complete.\n"
             )
@@ -1814,7 +2202,7 @@ async def get_secret_provider():
     try:
         from lucent.db import get_pool
         pool = await get_pool()
-        return initialize_secret_provider(pool)
+        return await initialize_secret_provider(pool)
     except Exception:
         # DB pool not available in daemon process — return None
         # MCP server secret resolution will be skipped
@@ -1905,7 +2293,7 @@ async def build_subagent_prompt(
                             break  # Only need one request for all skills
             except Exception:
                 log(f"Failed to load skills for agent '{agent_type}'", "DEBUG")
-        log(f"Using approved DB definition for '{agent_type}' agent (id: {db_agent['id'][:8]})")
+        log(f"Using approved DB definition for '{agent_type}' agent (id: {str(db_agent['id'])[:8]})")
     else:
         raise AgentNotFoundError(
             f"No approved agent definition found for '{agent_type}'. "
@@ -1939,7 +2327,7 @@ Before starting work, search for relevant memories:
 - Look for previous approaches to similar tasks (search by keywords from your task description)
 - Check for validated patterns (tagged 'validated') and
   rejection lessons (tagged 'rejection-lesson')
-- Reference procedural memories for proven workflows
+- Reference skills for proven workflows
 - Build on existing knowledge rather than starting from scratch
 
 After completing work, save what you learned:
@@ -2003,9 +2391,6 @@ class LucentDaemon:
         self._listen_lock = asyncio.Lock()
         self._task_ready = asyncio.Event()
         self._request_ready = asyncio.Event()
-
-        # Heartbeat memory ID (cached after first create/lookup)
-        self._heartbeat_memory_id: str | None = None
 
         # MCP memory-tool usage tracking per session (for observability)
         self._session_mcp_trackers: dict[str, list[dict]] = {}
@@ -2081,6 +2466,25 @@ class LucentDaemon:
         if _TELEMETRY_AVAILABLE:
             init_telemetry(service_name="lucent-daemon")
 
+        # Initialize the lucent DB pool so that subsystems using `get_pool()`
+        # (sandbox manager, repo access service, memory access service, etc.)
+        # can operate. The daemon also has its own direct asyncpg connections
+        # for polling, but shared services use the pool.
+        try:
+            from lucent.db.pool import init_db as _init_db
+            # The daemon uses DAEMON_DATABASE_URL (or falls back to DATABASE_URL).
+            # Pass explicitly so init_db uses the same connection the daemon does.
+            _pool = await _init_db(database_url=DATABASE_URL)
+            try:
+                from lucent.model_registry import load_models_from_db
+
+                await load_models_from_db(_pool)
+            except Exception as model_exc:
+                log(f"Failed to load model registry from DB: {model_exc}", "WARN")
+            log("Lucent DB pool initialized")
+        except Exception as e:
+            log(f"Failed to initialize Lucent DB pool: {e}", "WARN")
+
         # Ensure we have a valid API key before anything else
         await ensure_valid_api_key(self.instance_id)
         await RequestAPI.register_instance(
@@ -2088,7 +2492,7 @@ class LucentDaemon:
             hostname=platform.node(),
             pid=os.getpid(),
             roles=sorted(self.roles),
-            metadata={"model": MODEL, "max_sessions": MAX_CONCURRENT_SESSIONS},
+            metadata={"model": _resolve_default_model(), "max_sessions": MAX_CONCURRENT_SESSIONS},
         )
 
         # Start the watchdog thread — detects event loop freezes
@@ -2105,7 +2509,7 @@ class LucentDaemon:
             f"Daemon ready. Instance: {self.instance_id}, "
             f"Roles: {','.join(sorted(self.roles))}, "
             f"Engine: {engine_name} (multi-engine routing enabled), "
-            f"Model: {MODEL}, Max sessions: {MAX_CONCURRENT_SESSIONS}"
+            f"Model: {_resolve_default_model()}, Max sessions: {MAX_CONCURRENT_SESSIONS}"
         )
 
         # Populate LLM engine model registry from DB (for Ollama/custom providers)
@@ -2113,7 +2517,7 @@ class LucentDaemon:
             try:
                 from lucent.llm.langchain_engine import register_model
                 async with httpx.AsyncClient(timeout=15) as _c:
-                    _resp = await _c.get(f"{API_BASE}/api/admin/models", headers=API_HEADERS)
+                    _resp = await _c.get(f"{API_BASE}/admin/models", headers=API_HEADERS)
                 resp = _resp.json() if _resp.status_code == 200 else None
                 if resp and resp.get("items"):
                     registered = 0
@@ -2150,7 +2554,9 @@ class LucentDaemon:
 
         System schedules replace the old autonomic and cognitive loops.
         They can be modified (interval, enabled) but not deleted.
-        Idempotent — skips creation if the schedule already exists.
+        Idempotent — creates missing schedules and refreshes existing built-in
+        schedule definitions from the on-disk source constants while preserving
+        runtime state such as enabled/next_run_at.
         Uses direct DB connection (same pattern as key provisioning).
         """
         import asyncpg
@@ -2219,17 +2625,29 @@ class LucentDaemon:
                         "prompt": EXPERIENCE_COMPRESSION_PROMPT,
                     },
                     {
-                        "title": "Procedural Consolidation",
+                        "title": "Memory Vitality Scoring",
                         "description": (
-                            "Consolidate procedural memories — merge overlapping procedures, "
-                            "archive stale daemon-task procedure entries, and keep one current "
-                            "canonical procedure per topic."
+                            "Compute and persist memory vitality scores and lifecycle stages "
+                            "for shadow-mode observability. No search behavior changes."
                         ),
                         "agent_type": "memory",
                         "schedule_type": "interval",
-                        "interval_seconds": PROCEDURAL_CONSOLIDATION_MINUTES * 60,
+                        "interval_seconds": VITALITY_SCORING_MINUTES * 60,
                         "priority": "low",
-                        "prompt": PROCEDURAL_CONSOLIDATION_PROMPT,
+                        "prompt": MEMORY_VITALITY_SCORING_PROMPT,
+                    },
+                    {
+                        "title": "Shadow Forget Scoring",
+                        "description": (
+                            "Run Candidate-A graph-centrality pruning as shadow-only scoring. "
+                            "Writes sidecar rows and emits comparison metrics only."
+                        ),
+                        "agent_type": "memory",
+                        "schedule_type": "interval",
+                        "interval_seconds": SHADOW_FORGET_SCORING_MINUTES * 60,
+                        "startup_offset_seconds": SHADOW_FORGET_OFFSET_MINUTES * 60,
+                        "priority": "low",
+                        "prompt": SHADOW_FORGET_SCORING_PROMPT,
                     },
                 ]
 
@@ -2243,17 +2661,31 @@ class LucentDaemon:
                         org_id,
                     )
                     if existing:
-                        # Update prompt + description on existing system schedules so
-                        # maintenance behavior changes take effect without manual DB edits.
+                        # Built-in system schedule definitions are source-controlled.
+                        # Refresh definition fields on startup so prompt fixes take
+                        # effect, but preserve operational state (enabled, status,
+                        # next_run_at, run history).
                         await conn.execute(
-                            """UPDATE schedules
-                               SET prompt = $1,
-                                   description = $2,
-                                   updated_at = now()
-                               WHERE id = $3""",
-                            sched["prompt"],
+                            """UPDATE schedules SET
+                                   description = $3,
+                                   agent_type = $4,
+                                   schedule_type = $5,
+                                   interval_seconds = $6,
+                                   cron_expression = $7,
+                                   priority = $8,
+                                   prompt = $9,
+                                   updated_at = NOW()
+                               WHERE id = $1::uuid AND organization_id = $2::uuid
+                                 AND is_system = true""",
+                            str(existing["id"]),
+                            org_id,
                             sched["description"],
-                            existing["id"],
+                            sched["agent_type"],
+                            sched["schedule_type"],
+                            sched.get("interval_seconds"),
+                            sched.get("cron_expression"),
+                            sched["priority"],
+                            sched["prompt"],
                         )
                         updated += 1
                         continue
@@ -2261,8 +2693,11 @@ class LucentDaemon:
                     now = datetime.now(timezone.utc)
                     interval_seconds = sched.get("interval_seconds")
                     cron_expression = sched.get("cron_expression")
+                    startup_offset_seconds = int(sched.get("startup_offset_seconds", 0) or 0)
                     if sched["schedule_type"] == "interval" and interval_seconds:
-                        next_run_at = now + timedelta(seconds=interval_seconds)
+                        next_run_at = now + timedelta(
+                            seconds=interval_seconds + startup_offset_seconds
+                        )
                     else:
                         next_run_at = now + timedelta(minutes=5)  # first cron run in 5 min
 
@@ -2289,7 +2724,7 @@ class LucentDaemon:
                 if created:
                     log(f"Seeded {created} system schedule(s)")
                 if updated:
-                    log(f"Refreshed prompts for {updated} system schedule(s)")
+                    log(f"Refreshed {updated} existing system schedule definition(s)")
                 if not created and not updated:
                     log("System schedules verified (all exist)")
 
@@ -2311,6 +2746,709 @@ class LucentDaemon:
             "assigning models to tasks. Perceive, reason, decide. Use request/task "
             "tools to create work items. Output a brief summary of your decisions."
         )
+
+    async def _list_active_goal_users(self, org_id: str) -> list[dict[str, Any]]:
+        """Return users that need a cognitive planning iteration this cycle.
+
+        A user qualifies if they have at least one truly-active goal memory OR
+        at least one request awaiting feedback-loop processing (status
+        'rejection_processing'). Users with rejected requests but no active
+        goals must still be iterated so the planner can consume the rejection
+        feedback and close the loop — otherwise rejected requests remain in
+        rejection_processing forever.
+        """
+        import asyncpg
+
+        try:
+            conn = await asyncpg.connect(DATABASE_URL)
+        except Exception as e:
+            log(f"Cognitive fan-out DB connect failed: {e}", "WARN")
+            return []
+
+        try:
+            rows = await conn.fetch(
+                """
+                SELECT user_id::text AS user_id,
+                       SUM(goals_scanned)::int AS goals_scanned,
+                       SUM(rejections_pending)::int AS rejections_pending
+                FROM (
+                    SELECT user_id,
+                           COUNT(*)::int AS goals_scanned,
+                           0 AS rejections_pending
+                    FROM memories
+                    WHERE organization_id = $1::uuid
+                      AND type = 'goal'
+                      AND lifecycle_stage = 'active'
+                      AND COALESCE(metadata->>'status', '') = 'active'
+                      AND user_id IS NOT NULL
+                    GROUP BY user_id
+                    UNION ALL
+                    SELECT created_by AS user_id,
+                           0 AS goals_scanned,
+                           COUNT(*)::int AS rejections_pending
+                    FROM requests
+                    WHERE organization_id = $1::uuid
+                      AND status = 'rejection_processing'
+                      AND created_by IS NOT NULL
+                    GROUP BY created_by
+                ) AS combined
+                GROUP BY user_id
+                ORDER BY user_id
+                """,
+                org_id,
+            )
+            return [dict(r) for r in rows]
+        except Exception as e:
+            log(f"Cognitive fan-out query failed: {e}", "WARN")
+            return []
+        finally:
+            await conn.close()
+
+    def _build_user_scoped_cognitive_prompt(
+        self, targets: list[dict] | None = None
+    ) -> str:
+        """Build a prompt for per-user scoped cognitive planning sessions.
+
+        ``targets`` is the pre-fetched list from
+        ``GET /requests/planning-targets``. Every entry in ``targets`` is a
+        milestone the planner MUST progress this cycle — there is no
+        choosing between them. The list is already filtered for active
+        goals, active milestones with passed start_after dates, and
+        no-in-flight-work. The planner just iterates and creates requests.
+        """
+        if not targets:
+            return (
+                f"{self._build_cognitive_schedule_prompt()}\n\n"
+                "Per-user fan-out execution mode is active for this run.\n"
+                "You are operating under a user-scoped key and can only see "
+                "one user's memories.\n\n"
+                "There is NO PLANNABLE WORK for this user this cycle. The "
+                "planning-targets endpoint returned an empty list, which "
+                "means: every active goal either has all its milestones "
+                "completed, has open in-flight requests already, or has "
+                "milestones whose start_after dates are still in the "
+                "future.\n\n"
+                "Return a concise summary saying 'no work this cycle' and "
+                "stop. Do NOT search for goals manually. Do NOT invent "
+                "work to fill the cycle.\n"
+            )
+
+        # Render the targets as a numbered list the planner consumes
+        # verbatim. Each entry includes the structured fields the planner
+        # must pass to create_request.
+        target_lines: list[str] = []
+        for i, t in enumerate(targets, start=1):
+            milestone_part = ""
+            if t.get("next_milestone_index") is not None:
+                milestone_part = (
+                    f" — milestone {t['next_milestone_index']}: "
+                    f"{t.get('next_milestone_description') or '(no description)'}"
+                )
+            start_after = t.get("next_milestone_start_after")
+            sa_note = f" (start_after={start_after})" if start_after else ""
+            target_lines.append(
+                f"{i}. goal_id={t['goal_id']}"
+                f", goal_milestone_index={t.get('next_milestone_index')}"
+                f"\n   goal: {t.get('goal_title') or '(untitled)'}"
+                f"{milestone_part}{sa_note}"
+                f"\n   suggested_title: {t.get('suggested_title')}"
+            )
+        targets_block = "\n".join(target_lines)
+
+        return (
+            f"{self._build_cognitive_schedule_prompt()}\n\n"
+            "Per-user fan-out execution mode is active for this run.\n"
+            "You are operating under a user-scoped key and can only see "
+            "one user's memories.\n\n"
+            "=== ACTIVE MILESTONES TO PROGRESS THIS CYCLE ===\n"
+            "The following goal milestones are active, unblocked, and have "
+            "no open work yet. You MUST create one tracked request for "
+            "each of them. Do NOT pick between them. Do NOT search for "
+            "additional goals. The system has already filtered out "
+            "everything that is not plannable.\n\n"
+            f"{targets_block}\n\n"
+            "=== END MILESTONES ===\n\n"
+            "For each entry above:\n"
+            "1. Call create_request with:\n"
+            "     title=<the suggested_title from the entry>\n"
+            "     description=<your summary of what to do for the milestone>\n"
+            "     source='cognitive'\n"
+            "     goal_id=<the entry's goal_id>\n"
+            "     goal_milestone_index=<the entry's goal_milestone_index>\n"
+            "   The system validates these fields against the goal's "
+            "metadata. If you pass a different goal or milestone the call "
+            "will be refused.\n"
+            "2. Immediately decompose the new request into tasks via "
+            "create_task. Every request you create MUST end with at "
+            "least one child task.\n"
+            "3. If create_request returns status='skipped' with reason "
+            "in {'in-flight', 'milestone_not_active'}, that means a "
+            "parallel cycle has already started this work. Skip it and "
+            "move on — no error.\n\n"
+            "Return a concise summary listing every (goal_id, milestone) "
+            "you processed and whether each ended in a created request, "
+            "a skipped duplicate, or a created task count.\n"
+        )
+
+    async def _count_user_cognitive_requests_since(
+        self,
+        *,
+        org_id: str,
+        user_id: str,
+        since: datetime,
+    ) -> int:
+        """Count cognitive requests created for a user since a timestamp."""
+        import asyncpg
+
+        try:
+            conn = await asyncpg.connect(DATABASE_URL)
+        except Exception:
+            return 0
+
+        try:
+            count = await conn.fetchval(
+                """
+                SELECT COUNT(*)
+                FROM requests
+                WHERE organization_id = $1::uuid
+                  AND created_by = $2::uuid
+                  AND source = 'cognitive'
+                  AND created_at >= $3
+                """,
+                org_id,
+                user_id,
+                since,
+            )
+            return int(count or 0)
+        except Exception:
+            return 0
+        finally:
+            await conn.close()
+
+    async def _run_cognitive_planning_fanout(
+        self,
+        *,
+        task_id: str,
+        org_id: str,
+        system_message: str,
+        mcp_config_base: dict[str, Any],
+    ) -> str:
+        """Run per-user cognitive planning fan-out with scoped keys."""
+        users = await self._list_active_goal_users(org_id)
+        if not users:
+            return "Cognitive fan-out: no users with active goals."
+
+        summaries: list[str] = []
+
+        for user_row in users:
+            user_id = str(user_row.get("user_id", "")).strip()
+            goals_scanned = int(user_row.get("goals_scanned") or 0)
+            if not user_id:
+                continue
+
+            started = datetime.now(timezone.utc)
+            start_ts = time.perf_counter()
+            errors: list[str] = []
+            requests_created = 0
+            targets_count = 0
+
+            try:
+                scoped_key = await _mint_scoped_api_key(
+                    memory_scope="user",
+                    memory_scope_user_id=user_id,
+                    org_id=org_id,
+                    ttl_minutes=60,
+                )
+                if not scoped_key:
+                    raise RuntimeError("scoped key minting failed")
+
+                # Fetch the planning targets server-side BEFORE invoking
+                # the planner. The endpoint scopes results to this user
+                # automatically because the key is user-scoped. If there
+                # are no targets, we skip the LLM call entirely — saves
+                # tokens and time.
+                targets = await RequestAPI.list_planning_targets(api_key=scoped_key)
+                if targets is None:
+                    targets = []
+                targets_count = len(targets)
+
+                if not targets:
+                    log(
+                        f"cognitive fan-out: user {user_id[:8]} has no "
+                        "plannable targets — skipping LLM call",
+                        "INFO",
+                    )
+                    summaries.append(
+                        f"user={user_id[:8]} goals={goals_scanned} "
+                        f"targets=0 requests=0 (no work)"
+                    )
+                    continue
+
+                prompt = self._build_user_scoped_cognitive_prompt(
+                    targets=targets
+                )
+
+                scoped_mcp = dict(mcp_config_base)
+                scoped_mcp["memory-server"] = {
+                    "type": "http",
+                    "url": MCP_URL,
+                    "headers": {"Authorization": f"Bearer {scoped_key}"},
+                    "tools": ["*"],
+                }
+
+                session_result = await self.run_session(
+                    f"cognitive-plan-{task_id[:8]}-{user_id[:8]}",
+                    system_message,
+                    prompt,
+                    mcp_config_override=scoped_mcp,
+                )
+                if not session_result:
+                    errors.append("planner session produced no output")
+                requests_created = await self._count_user_cognitive_requests_since(
+                    org_id=org_id,
+                    user_id=user_id,
+                    since=started,
+                )
+            except Exception as e:
+                errors.append(str(e))
+                log(f"Cognitive planning fan-out failed for user {user_id[:8]}: {e}", "WARN")
+            finally:
+                duration_ms = int((time.perf_counter() - start_ts) * 1000)
+                log(
+                    "cognitive_planning_user_iteration "
+                    + json.dumps(
+                        {
+                            "user_id": user_id,
+                            "goals_scanned": goals_scanned,
+                            "targets_count": targets_count,
+                            "requests_created": requests_created,
+                            "errors": errors,
+                            "duration_ms": duration_ms,
+                        },
+                        sort_keys=True,
+                    )
+                )
+                if targets_count > 0 or errors:
+                    summaries.append(
+                        f"user={user_id[:8]} goals={goals_scanned} "
+                        f"targets={targets_count} "
+                        f"requests={requests_created} errors={len(errors)}"
+                    )
+
+        return "Cognitive fan-out complete: " + "; ".join(summaries)
+
+    async def _list_undecomposed_pending_approval_requests(
+        self,
+        *,
+        org_id: str,
+        min_age_seconds: int,
+    ) -> list[dict[str, Any]]:
+        """Return non-terminal requests with zero tasks older than min_age_seconds.
+
+        Used by the decomposition backfill so that any request reaching the
+        queue has a visible task breakdown — whether it's awaiting human
+        approval (`pending_approval`), auto-approved on creation
+        (`auto_approved`, e.g. user-source requests), or manually approved
+        (`approved`). All three states share the same failure mode: a
+        request with zero tasks is incomplete work.
+        """
+        import asyncpg
+
+        try:
+            conn = await asyncpg.connect(DATABASE_URL)
+        except Exception as e:
+            log(f"Decomp backfill DB connect failed: {e}", "WARN")
+            return []
+
+        try:
+            rows = await conn.fetch(
+                """
+                SELECT r.id::text AS request_id,
+                       r.title,
+                       r.description,
+                       r.created_by::text AS created_by,
+                       r.target_repo,
+                       r.target_paths,
+                       r.priority,
+                       r.source,
+                       r.approval_status
+                FROM requests r
+                WHERE r.organization_id = $1::uuid
+                  AND r.approval_status IN (
+                      'pending_approval', 'auto_approved', 'approved'
+                  )
+                  AND r.status IN ('pending', 'in_progress')
+                  AND r.created_at < NOW() - ($2::int * INTERVAL '1 second')
+                  AND r.created_by IS NOT NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM tasks t WHERE t.request_id = r.id
+                  )
+                ORDER BY r.created_at ASC
+                LIMIT 5
+                """,
+                org_id,
+                min_age_seconds,
+            )
+            return [dict(r) for r in rows]
+        except Exception as e:
+            log(f"Decomp backfill query failed: {e}", "WARN")
+            return []
+        finally:
+            await conn.close()
+
+    def _build_decomposition_prompt(self, request: dict[str, Any]) -> str:
+        """Build a focused prompt that instructs the agent to decompose one request."""
+        title = request.get("title", "")
+        description = request.get("description", "") or ""
+        request_id = request.get("request_id", "")
+        target_repo = request.get("target_repo") or ""
+        target_paths = request.get("target_paths") or []
+        priority = request.get("priority") or "medium"
+
+        target_block = ""
+        if target_repo:
+            target_block += f"\n- target_repo: {target_repo}"
+        if target_paths:
+            target_block += f"\n- target_paths: {target_paths}"
+
+        return (
+            "You are running a focused decomposition session. Your ONLY job is to "
+            "break the following request into a sensible list of tasks so the user "
+            "can see the breakdown before they decide whether to approve it.\n\n"
+            f"REQUEST ID: {request_id}\n"
+            f"TITLE: {title}\n"
+            f"PRIORITY: {priority}\n"
+            f"{target_block}\n\n"
+            f"DESCRIPTION:\n{description}\n\n"
+            "Procedure:\n"
+            "1. Call list_available_models() once to see enabled models and the "
+            "default_model. Use default_model unless a task has a clear need for a "
+            "specialized fast, reasoning, agentic, or visual model.\n"
+            "2. Decide on a task breakdown — typically 1 to 5 tasks. Each task should "
+            "have a clear, actionable title and a short description of what it does.\n"
+            "3. For each task, call create_task(request_id=..., title=..., "
+            "description=..., agent_type=..., sequence_order=..., model=<optional>). Use "
+            "agent_type values like 'research', 'code', or 'documentation' depending "
+            "on the work. Omit model for standard/default tasks; set model only when "
+            "the available model list gives a concrete reason to specialize. Set "
+            "sequence_order so dependent tasks come after their prerequisites (0 for "
+            "the first batch, 1 for the next, etc.).\n"
+            "4. DO NOT create the request — it already exists. DO NOT call any "
+            "approval, status update, or rejection tools. Your output is a short "
+            "summary of how many tasks you created and why this breakdown.\n"
+            "5. If the request description is too vague to break down meaningfully, "
+            "create a single 'research' task to investigate further and stop there.\n\n"
+            "Stay focused. Do not search memories, do not create new requests, do "
+            "not start sub-agents. Just call create_task one or more times for the "
+            "above request, then return your summary."
+        )
+
+    async def _backfill_pending_decomposition(
+        self,
+        *,
+        org_id: str,
+        min_age_seconds: int = 300,
+    ) -> int:
+        """Decompose any non-terminal request older than min_age_seconds with no tasks.
+
+        Returns the number of requests for which decomposition was attempted.
+        Each attempt runs as a small focused session under a key scoped to the
+        request's owner so the resulting tasks inherit ownership cleanly.
+
+        Concurrency: safe across multiple daemon instances. Each candidate is
+        guarded by a PG session-level advisory lock keyed off the request's
+        UUID. If another daemon holds the lock, this one skips the request
+        and moves on. The in-memory set is just a per-instance fast-path so
+        we don't round-trip to the DB for requests we already know we are
+        actively decomposing locally.
+
+        Backoff: a request that fails to gain any tasks (planner refused,
+        MCP error, scoped-key failure, session crash) is suppressed locally
+        for an exponentially growing window so a single bad request can't
+        burn through sessions every scheduler tick. Backoff state is
+        per-instance — a daemon restart resets it, which is the desired
+        recovery path for transient failures.
+
+        Why min_age_seconds defaults to 300: a normal cognitive cycle takes
+        30–90 seconds, but slow planner sessions can run longer. Waiting 5
+        minutes before backfilling avoids racing a planner that's about to
+        call create_task on a request it just created.
+        """
+        import asyncpg
+
+        if self.draining:
+            return 0
+        if len(self.active_sessions) >= MAX_CONCURRENT_SESSIONS:
+            return 0
+        if not MCP_CONFIG.get("memory-server"):
+            return 0
+
+        # Per-instance fast-path guard. The DB advisory lock is the source
+        # of truth for cross-instance correctness; this just avoids a wasted
+        # DB round-trip when our own scheduler tick re-races itself.
+        if not hasattr(self, "_decomposing_request_ids"):
+            self._decomposing_request_ids = set()
+        # Per-instance backoff: request_id -> (next_retry_monotonic, attempts).
+        if not hasattr(self, "_decomposition_backoff"):
+            self._decomposition_backoff = {}
+
+        candidates = await self._list_undecomposed_pending_approval_requests(
+            org_id=org_id, min_age_seconds=min_age_seconds
+        )
+        now_mono = time.monotonic()
+        filtered: list[dict[str, Any]] = []
+        for req in candidates:
+            rid = req.get("request_id")
+            if not rid:
+                continue
+            if rid in self._decomposing_request_ids:
+                continue
+            backoff_until, _attempts = self._decomposition_backoff.get(rid, (0.0, 0))
+            if backoff_until > now_mono:
+                continue
+            filtered.append(req)
+        candidates = filtered
+        if not candidates:
+            return 0
+
+        # Build the system message once — same context as a normal sub-agent.
+        try:
+            system_message = await build_subagent_prompt(
+                "planning",
+                "Break a pending_approval request into a visible task list.",
+            )
+        except Exception:
+            # Fall back to a minimal system message if the planning agent
+            # definition isn't available — the per-request prompt is fully
+            # self-contained anyway.
+            system_message = (
+                "You are a focused planning sub-agent. Follow the user prompt exactly."
+            )
+
+        attempted = 0
+        for req in candidates:
+            request_id = req.get("request_id", "")
+            owner_user_id = req.get("created_by", "")
+            if not request_id or not owner_user_id:
+                continue
+
+            # Acquire the cross-daemon advisory lock on a dedicated connection.
+            # The lock is bound to the connection's session, so we MUST keep the
+            # connection open for the duration of the decomposition session and
+            # release/close in finally. pg_try_advisory_lock returns immediately
+            # — if another daemon has it, we skip without waiting.
+            lock_conn: asyncpg.Connection | None = None
+            try:
+                try:
+                    lock_conn = await asyncpg.connect(DATABASE_URL)
+                except Exception as e:
+                    log(f"Decomp lock connect failed for {request_id[:8]}: {e}", "WARN")
+                    continue
+
+                acquired = await lock_conn.fetchval(
+                    "SELECT pg_try_advisory_lock($1, hashtext($2)::int)",
+                    DECOMPOSITION_LOCK_NAMESPACE,
+                    request_id,
+                )
+                if not acquired:
+                    log(
+                        f"Decomp backfill: request {request_id[:8]} already "
+                        "being decomposed by another daemon — skipping",
+                    )
+                    await lock_conn.close()
+                    lock_conn = None
+                    continue
+
+                # Re-check candidacy under the lock to avoid the TOCTOU window
+                # where another daemon finished decomposing this very request
+                # between our list query and our lock acquisition.
+                still_undecomposed = await lock_conn.fetchval(
+                    """
+                    SELECT 1
+                    FROM requests r
+                    WHERE r.id = $1::uuid
+                      AND r.approval_status IN (
+                          'pending_approval', 'auto_approved', 'approved'
+                      )
+                      AND r.status IN ('pending', 'in_progress')
+                      AND NOT EXISTS (
+                          SELECT 1 FROM tasks t WHERE t.request_id = r.id
+                      )
+                    """,
+                    request_id,
+                )
+                if not still_undecomposed:
+                    await lock_conn.execute(
+                        "SELECT pg_advisory_unlock($1, hashtext($2)::int)",
+                        DECOMPOSITION_LOCK_NAMESPACE,
+                        request_id,
+                    )
+                    await lock_conn.close()
+                    lock_conn = None
+                    # Clear any stale backoff — the request is now decomposed
+                    # or no longer eligible.
+                    self._decomposition_backoff.pop(request_id, None)
+                    continue
+
+                self._decomposing_request_ids.add(request_id)
+                start_ts = time.perf_counter()
+                tasks_created = 0
+                terminal_after_session = False
+                errors: list[str] = []
+                try:
+                    scoped_key = await _mint_scoped_api_key(
+                        memory_scope="user",
+                        memory_scope_user_id=owner_user_id,
+                        org_id=org_id,
+                        ttl_minutes=30,
+                    )
+                    if not scoped_key:
+                        raise RuntimeError("scoped key minting failed")
+
+                    scoped_mcp = dict(MCP_CONFIG)
+                    scoped_mcp["memory-server"] = {
+                        "type": "http",
+                        "url": MCP_URL,
+                        "headers": {"Authorization": f"Bearer {scoped_key}"},
+                        "tools": ["*"],
+                    }
+
+                    prompt = self._build_decomposition_prompt(req)
+
+                    session_result = await self.run_session(
+                        f"decompose-{request_id[:8]}-{owner_user_id[:8]}",
+                        system_message,
+                        prompt,
+                        mcp_config_override=scoped_mcp,
+                    )
+                    if not session_result:
+                        errors.append("session produced no output")
+
+                    tasks_created = await self._count_tasks_for_request(request_id)
+
+                    # Defensive post-session check: if the user cancelled or
+                    # the request otherwise reached terminal state during the
+                    # session, the planner may have created orphan tasks.
+                    # The dispatch+claim queries now refuse to run tasks
+                    # under terminal parents, so the orphans won't execute,
+                    # but log loudly so we notice the pattern.
+                    terminal_status = await self._get_request_terminal_status(
+                        lock_conn, request_id
+                    )
+                    if terminal_status:
+                        terminal_after_session = True
+                        errors.append(
+                            f"request reached terminal status "
+                            f"'{terminal_status}' during decomposition; "
+                            f"any tasks created will not be dispatched"
+                        )
+                except Exception as e:
+                    errors.append(str(e))
+                    log(
+                        f"Decomp backfill failed for request {request_id[:8]}: {e}",
+                        "WARN",
+                    )
+                finally:
+                    self._decomposing_request_ids.discard(request_id)
+                    attempted += 1
+                    duration_ms = int((time.perf_counter() - start_ts) * 1000)
+                    log(
+                        "request_decomposed_for_review "
+                        + json.dumps(
+                            {
+                                "request_id": request_id,
+                                "owner_user_id": owner_user_id,
+                                "tasks_created": tasks_created,
+                                "terminal_during_session": terminal_after_session,
+                                "errors": errors,
+                                "duration_ms": duration_ms,
+                            },
+                            sort_keys=True,
+                        )
+                    )
+                    # Update backoff: success clears it, failure escalates.
+                    if tasks_created > 0 and not terminal_after_session:
+                        self._decomposition_backoff.pop(request_id, None)
+                    else:
+                        prev_until, prev_attempts = self._decomposition_backoff.get(
+                            request_id, (0.0, 0)
+                        )
+                        attempts = prev_attempts + 1
+                        # 5min, 15min, 1h, then 1h thereafter (capped). After
+                        # the 4th failed attempt we essentially give up until
+                        # the daemon restarts.
+                        if attempts >= 4:
+                            wait_seconds = 24 * 3600
+                            log(
+                                f"Decomp backfill: request {request_id[:8]} "
+                                f"failed {attempts} times — suppressing for 24h "
+                                "(restart the daemon to reset)",
+                                "WARN",
+                            )
+                        elif attempts >= 3:
+                            wait_seconds = 3600
+                        elif attempts >= 2:
+                            wait_seconds = 15 * 60
+                        else:
+                            wait_seconds = 5 * 60
+                        self._decomposition_backoff[request_id] = (
+                            time.monotonic() + wait_seconds,
+                            attempts,
+                        )
+            finally:
+                if lock_conn is not None:
+                    try:
+                        await lock_conn.execute(
+                            "SELECT pg_advisory_unlock($1, hashtext($2)::int)",
+                            DECOMPOSITION_LOCK_NAMESPACE,
+                            request_id,
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        await lock_conn.close()
+                    except Exception:
+                        pass
+
+        return attempted
+
+    async def _get_request_terminal_status(
+        self, conn: "asyncpg.Connection", request_id: str
+    ) -> str | None:
+        """Return the request's status if it has reached a terminal state, else None."""
+        try:
+            row = await conn.fetchrow(
+                """
+                SELECT status FROM requests
+                WHERE id = $1::uuid
+                  AND status IN ('cancelled', 'completed', 'failed')
+                """,
+                request_id,
+            )
+        except Exception:
+            return None
+        if not row:
+            return None
+        return str(row["status"])
+
+    async def _count_tasks_for_request(self, request_id: str) -> int:
+        """Count tasks attached to a request — used to verify decomposition outcome."""
+        import asyncpg
+
+        try:
+            conn = await asyncpg.connect(DATABASE_URL)
+        except Exception:
+            return 0
+        try:
+            count = await conn.fetchval(
+                "SELECT COUNT(*) FROM tasks WHERE request_id = $1::uuid",
+                request_id,
+            )
+            return int(count or 0)
+        except Exception:
+            return 0
+        finally:
+            await conn.close()
 
     def _handle_shutdown(self):
         """Handle shutdown signal."""
@@ -2377,9 +3515,8 @@ class LucentDaemon:
             log(f"Skipping '{name}' — at session limit ({MAX_CONCURRENT_SESSIONS})", "WARN")
             return None
 
-        log(f"Starting session: {name}{f' (model: {model})' if model else ''}")
-
-        selected_model = model or MODEL
+        selected_model = _resolve_default_model(model)
+        log(f"Starting session: {name} (model: {selected_model})")
         start_time = time.time()
         status = "success"
 
@@ -2410,7 +3547,7 @@ class LucentDaemon:
                             name,
                             system_message,
                             prompt,
-                            model=model,
+                            model=selected_model,
                             mcp_config_override=mcp_config_override,
                         ),
                         timeout=SESSION_TOTAL_TIMEOUT,
@@ -2459,6 +3596,9 @@ class LucentDaemon:
                     if span:
                         span.set_attribute("daemon.session.error", "timeout")
                     return None
+                except ModelNotAvailableError:
+                    status = "error"
+                    raise  # Let the caller handle model-not-available specifically
                 except Exception as e:
                     status = "error"
                     log(f"Session '{name}' failed: {e}", "ERROR")
@@ -2469,8 +3609,8 @@ class LucentDaemon:
             duration = time.time() - start_time
             if self._tracer:
                 self._sessions_active.add(-1)
-                self._sessions_total.add(1, {"status": status, "model": selected_model})
-                self._session_duration.record(duration, {"session_name": name, "status": status})
+                self._sessions_total.add(1, attributes={"status": status, "model": selected_model})
+                self._session_duration.record(duration, attributes={"session_name": name, "status": status})
             if span_ctx:
                 span_ctx.__exit__(None, None, None)
 
@@ -2487,7 +3627,7 @@ class LucentDaemon:
         Falls back to direct CopilotClient if the engine module isn't available
         (e.g. when running the daemon standalone outside the package).
         """
-        selected_model = model or MODEL
+        selected_model = _resolve_default_model(model)
 
         if _LLM_ENGINE_AVAILABLE:
             # Keep memory-server always available; all other MCP servers are requester-scoped.
@@ -2618,9 +3758,18 @@ class LucentDaemon:
         client = None
 
         try:
-            from copilot.types import SubprocessConfig, SystemMessageReplaceConfig
+            # Honor COPILOT_CLI_PATH / auto-detect the user's installed CLI
+            # so this fallback path sees the same models the engine does.
+            try:
+                from lucent.llm.copilot_engine import resolve_copilot_cli_path
 
-            client = CopilotClient(config=SubprocessConfig(log_level="warning"))
+                _cli_path = resolve_copilot_cli_path()
+            except Exception:
+                _cli_path = None
+            _subprocess_kwargs: dict[str, Any] = {"log_level": "warning"}
+            if _cli_path:
+                _subprocess_kwargs["cli_path"] = _cli_path
+            client = CopilotClient(config=SubprocessConfig(**_subprocess_kwargs))
             await client.start()
 
             session = await client.create_session(
@@ -2858,7 +4007,9 @@ class LucentDaemon:
 
     # --- Distributed Coordination ---
 
-    def _validate_task_result(self, result: str) -> tuple[bool, str]:
+    def _validate_task_result(
+        self, result: str, *, task: dict | None = None, tool_counts: dict[str, int] | None = None
+    ) -> tuple[bool, str]:
         """Validate whether a sub-agent result indicates actual work was done.
 
         Returns (success, reason) — success is True only if the result looks
@@ -2866,6 +4017,16 @@ class LucentDaemon:
         """
         if not result:
             return False, "no output"
+
+        if task:
+            consolidation_ok, consolidation_reason = validate_consolidation_execution(
+                result_text=result,
+                task_title=str(task.get("title", "")),
+                task_description=str(task.get("description", "")),
+                tool_counts=tool_counts,
+            )
+            if not consolidation_ok:
+                return False, consolidation_reason
 
         stripped = result.strip()
 
@@ -2908,45 +4069,16 @@ class LucentDaemon:
             metadata={
                 "cycle_count": self.cycle_count,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
-                "roles": sorted(self.roles),
-            },
-        )
-
-    async def _update_legacy_heartbeat_memory(self):
-        """Backward-compatible heartbeat memory updates."""
-        heartbeat_content = json.dumps(
-            {
-                "instance_id": self.instance_id,
-                "hostname": platform.node(),
-                "pid": os.getpid(),
-                "cycle_count": self.cycle_count,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "model": MODEL,
                 "roles": sorted(self.roles),
                 "max_sessions": MAX_CONCURRENT_SESSIONS,
-            }
+            },
         )
-
-        if self._heartbeat_memory_id:
-            await MemoryAPI.update(self._heartbeat_memory_id, content=heartbeat_content)
-        else:
-            # Search for existing heartbeat from this instance
-            results = await MemoryAPI.search(self.instance_id, tags=["daemon-heartbeat"], limit=1)
-            if results:
-                self._heartbeat_memory_id = results[0].get("id")
-                await MemoryAPI.update(self._heartbeat_memory_id, content=heartbeat_content)
-            else:
-                result = await MemoryAPI.create(
-                    type="technical",
-                    content=heartbeat_content,
-                    tags=["daemon-heartbeat", "daemon"],
-                    importance=3,
-                )
-                if result:
-                    self._heartbeat_memory_id = result.get("id")
 
     async def _check_due_schedules(self):
         """Fire any scheduled tasks that are due, creating requests for them."""
+        from lucent.api.system_schedules import STALE_TASK_REAPER_TITLE
+
         try:
             async with httpx.AsyncClient(timeout=15) as client:
                 resp = await client.get(f"{API_BASE}/schedules/due", headers=API_HEADERS)
@@ -2965,6 +4097,9 @@ class LucentDaemon:
                 for sched in due:
                     sched_id = str(sched["id"])
                     title = sched.get("title", "Scheduled task")
+                    if sched.get("is_system") and title == STALE_TASK_REAPER_TITLE:
+                        # Server-side built-in schedule; executed in API process.
+                        continue
 
                     # Trigger the schedule via API (creates request + task + records run)
                     try:
@@ -3038,9 +4173,14 @@ class LucentDaemon:
             task_id = str(task["id"])
             agent_type = task.get("agent_type", "code")
             task_model = task.get("model")  # per-task model override
-            selected_model = task_model or MODEL
             title = task.get("title", "")
             description = task.get("description", title)
+            selected_model, model_reason = _select_model_for_task(
+                agent_type=agent_type,
+                title=title,
+                description=description,
+                explicit_model=task_model,
+            )
 
             # Claim it atomically
             claimed = await RequestAPI.claim_task(task_id, self.instance_id)
@@ -3050,9 +4190,16 @@ class LucentDaemon:
             # Persist the resolved model before dispatch so it's recorded even if the task fails
             await RequestAPI.update_task_model(task_id, selected_model)
 
-            log(f"Dispatching tracked task {task_id[:8]} to {agent_type} model={selected_model}: {title[:80]}...")
+            log(
+                f"Dispatching tracked task {task_id[:8]} to {agent_type} "
+                f"model={selected_model}: {title[:80]}...",
+                request_id=task_id,
+                user_id=str(task.get("requesting_user_id")) if task.get("requesting_user_id") else None,
+            )
+            if not task_model:
+                log(f"Task {task_id[:8]} model selection: {model_reason}", "DEBUG")
             if self._tracer:
-                self._tasks_dispatched_total.add(1, {"agent_type": agent_type})
+                self._tasks_dispatched_total.add(1, attributes={"agent_type": agent_type})
 
             # Fetch parent request context and completed sibling results
             request_id = str(task.get("request_id", ""))
@@ -3110,9 +4257,25 @@ class LucentDaemon:
                     )
                 task_context = "\n\n".join(context_parts)
 
+                # Inject relevant technical memories if request targets a repo
+                if request_id:
+                    try:
+                        tech_context = await self._get_technical_context_for_request(request_id)
+                        if tech_context:
+                            task_context = task_context + "\n\n" + tech_context if task_context else tech_context
+                    except Exception as e:
+                        log(f"Technical context injection failed (non-fatal): {e}", "DEBUG")
+
             # Build and run the sub-agent
             agent_def_id = task.get("agent_definition_id")
             sandbox_config = task.get("sandbox_config")
+            # Defensive: if sandbox_config is a string (double-encoded JSON), parse it
+            if isinstance(sandbox_config, str):
+                try:
+                    import json as _sc_json
+                    sandbox_config = _sc_json.loads(sandbox_config)
+                except Exception:
+                    sandbox_config = None
             task_output_mode = task.get("output_mode")
             task_commit_approved = bool(task.get("commit_approved", False))
             sandbox_template_id = task.get("sandbox_template_id")
@@ -3225,8 +4388,74 @@ class LucentDaemon:
                         task_mcp_config[f"mcp-{server['id']}"] = conf
                 finally:
                     set_current_user(None)
+
+            # Determine memory scope for this task.
+            #
+            # Security model: a sub-agent executing a task MUST only see
+            # what the requesting user can see. We mint a user-scoped key
+            # for the request's creator so all memory ops run within that
+            # user's ACL — including reads of linked goals, writes of new
+            # memories, and updates of existing ones. The agent cannot read
+            # other users' private memories regardless of prompt content.
+            #
+            # The previous behavior — falling back to the daemon's unscoped
+            # key for tasks like post-completion review — broke this model
+            # by giving sub-agents org-wide read access. That's reverted.
+            # Per-user scope is the security boundary; nothing exempts it.
+            #
+            # Org-shared-only is reserved for system-level org maintenance
+            # (memory consolidation etc.) where there's no single owning user.
+            _request_title = ""
+            if request_id:
+                try:
+                    _req = await RequestAPI.get_request(request_id)
+                    _request_title = (_req or {}).get("title", "")
+                except Exception:
+                    pass
+
+            _scope_type: str | None
+            _scope_user: str | None
+            _override_scope = _get_required_memory_scope(title, _request_title)
+            if _override_scope == "org_shared_only":
+                # System maintenance task — operates on shared org memories only.
+                _scope_type = "org_shared_only"
+                _scope_user = None
+            else:
+                # Default and overwhelmingly the common case: scope to the
+                # request's owning user. This holds even for auto-created
+                # post-completion review tasks, which previously bypassed
+                # scoping and ran with daemon org-wide access.
+                _scope_type = "user"
+                _scope_user = requesting_user_id
+
             if MCP_CONFIG.get("memory-server"):
-                task_mcp_config["memory-server"] = MCP_CONFIG["memory-server"]
+                _scoped_key = await _mint_scoped_api_key(
+                    memory_scope=_scope_type,
+                    memory_scope_user_id=_scope_user,
+                    org_id=org_id,
+                    ttl_minutes=60,
+                )
+                if _scoped_key:
+                    task_mcp_config["memory-server"] = {
+                        "type": "http",
+                        "url": MCP_URL,
+                        "headers": {"Authorization": f"Bearer {_scoped_key}"},
+                        "tools": _TASK_MEMORY_SERVER_TOOLS,
+                    }
+                    log(f"Task {task_id[:8]} using {_scope_type} scoped key"
+                        f" (user: {_scope_user[:8] if _scope_user else 'shared'})")
+                else:
+                    # Mint failure is a security-sensitive event — refuse to
+                    # dispatch rather than silently fall back to a key with
+                    # broader access than the user is entitled to.
+                    reason = (
+                        f"Failed to mint {_scope_type} scoped key for "
+                        f"requesting user {requesting_user_id[:8]}"
+                    )
+                    log(reason, "ERROR")
+                    await _fail_owned(task_id, reason)
+                    await RequestAPI.add_event(task_id, "dispatch_denied", reason)
+                    continue
 
             # Mark running only after requester-scoped resources resolve successfully
             await _start_owned(task_id)
@@ -3236,6 +4465,37 @@ class LucentDaemon:
                 f"Dispatched to {agent_type} agent",
                 {"agent_type": agent_type, "instance_id": self.instance_id},
             )
+
+            # Special handling: Cognitive Planning schedule runs as per-user fan-out.
+            # We intentionally bypass a single unscoped planner session so each user
+            # gets planning against their private goals via scoped keys.
+            #
+            # IMPORTANT: only the original planning task on the schedule's request
+            # should fan out. Auto-created post-completion review tasks live on the
+            # same request and would otherwise also trigger fan-out, completing the
+            # review with garbage output and leaving the request stuck in `review`
+            # — which then spawns another review task next cycle, ad infinitum.
+            if (
+                _request_title.replace("[Scheduled] ", "") == "Cognitive Planning"
+                and not self._is_request_review_task(task)
+            ):
+                try:
+                    fanout_result = await self._run_cognitive_planning_fanout(
+                        task_id=task_id,
+                        org_id=org_id,
+                        system_message=system_message,
+                        mcp_config_base=task_mcp_config,
+                    )
+                    await _complete_owned(task_id, fanout_result[:4000])
+                except Exception as e:
+                    await _fail_owned(task_id, f"Cognitive planning fan-out failed: {e}")
+                    await RequestAPI.add_event(
+                        task_id,
+                        "fanout_failed",
+                        f"Cognitive planning fan-out failed: {e}",
+                    )
+                dispatched += 1
+                continue
 
             # Create sandbox if configured.
             # sandbox-orchestrator manages its own sandbox lifecycle — skip daemon-side
@@ -3248,14 +4508,27 @@ class LucentDaemon:
                     f"```json\n{_json.dumps(sandbox_config, indent=2, default=str)}\n```"
                 )
             elif sandbox_config:
+                sandbox_failed_reason = None
+                sandbox_failure_meta: dict | None = None
                 try:
-                    sandbox_id, task_sandbox_runtime_config = await self._create_task_sandbox(
+                    (
+                        sandbox_id,
+                        task_sandbox_runtime_config,
+                        sandbox_failure_meta,
+                    ) = await self._create_task_sandbox(
                         task_id,
                         sandbox_config,
+                        request_id=request_id,
                         requesting_user_id=requesting_user_id,
                         org_id=org_id,
                     )
-                    if sandbox_id:
+                    if not sandbox_id:
+                        detail = (
+                            (sandbox_failure_meta or {}).get("detail")
+                            or "Sandbox manager returned no sandbox_id"
+                        )
+                        sandbox_failed_reason = f"Sandbox creation failed: {detail}"
+                    else:
                         # Inject sandbox context into the task description
                         description = (
                             f"{description}\n\n"
@@ -3268,24 +4541,76 @@ class LucentDaemon:
                             task_id,
                             "sandbox_created",
                             f"Sandbox {sandbox_id[:12]} created for task",
-                            {"sandbox_id": sandbox_id},
+                            {
+                                "sandbox_id": sandbox_id,
+                                "image": sandbox_config.get("image"),
+                                "repo_url": sandbox_config.get("repo_url"),
+                                "branch": sandbox_config.get("branch"),
+                                "network_mode": sandbox_config.get("network_mode"),
+                            },
                         )
                 except Exception as e:
                     log(f"Sandbox creation failed for task {task_id[:8]}: {e}", "WARN")
+                    sandbox_failed_reason = f"Sandbox creation failed: {e}"
+                    sandbox_failure_meta = {
+                        "stage": "sandbox_create_exception",
+                        "detail": str(e),
+                        "exception_type": type(e).__name__,
+                    }
+
+                # If sandbox was required and failed, fail the task — do NOT
+                # run it locally. Sandboxes are a security boundary; silent
+                # fallback to local execution defeats the purpose.
+                if sandbox_failed_reason:
+                    event_detail = sandbox_failed_reason
+                    if sandbox_failure_meta and sandbox_failure_meta.get("image"):
+                        event_detail = (
+                            f"{sandbox_failed_reason} "
+                            f"[image={sandbox_failure_meta.get('image')!r}, "
+                            f"repo_url={sandbox_failure_meta.get('repo_url')!r}, "
+                            f"network_mode={sandbox_failure_meta.get('network_mode')!r}]"
+                        )
                     await RequestAPI.add_event(
                         task_id,
                         "sandbox_failed",
-                        f"Sandbox creation failed: {e}",
+                        event_detail,
+                        sandbox_failure_meta,
                     )
-                    # Continue without sandbox — task can still run
+                    await _fail_owned(
+                        task_id,
+                        f"{sandbox_failed_reason} Task requires sandbox execution for "
+                        f"security and will not fall back to local execution.",
+                    )
+                    dispatched += 1
+                    continue
 
-            result = await self.run_session(
-                f"{agent_type}-{task_id[:8]}",
-                system_message,
-                f"Execute this task:\n\n{description}",
-                model=selected_model,
-                mcp_config_override=task_mcp_config,
-            )
+            try:
+                result = await self.run_session(
+                    f"{agent_type}-{task_id[:8]}",
+                    system_message,
+                    f"Execute this task:\n\n{description}",
+                    model=selected_model,
+                    mcp_config_override=task_mcp_config,
+                )
+            except ModelNotAvailableError as exc:
+                log(
+                    f"Tracked task {task_id[:8]}: model '{exc.model}' is not available "
+                    f"in the runtime — failing task",
+                    "WARN",
+                )
+                await _fail_owned(
+                    task_id,
+                    f"Model '{exc.model}' is not available in the runtime. "
+                    f"Use a different model.",
+                )
+                await RequestAPI.add_event(
+                    task_id,
+                    "model_not_available",
+                    f"Model '{exc.model}' is not available. "
+                    f"Original error: {exc.original_error}",
+                )
+                dispatched += 1
+                continue
             dispatched += 1
 
             # Log MCP memory-tool usage summary as a queryable task event
@@ -3352,8 +4677,24 @@ class LucentDaemon:
                 except Exception as e:
                     log(f"Sandbox cleanup failed for {sandbox_id[:12]}: {e}", "WARN")
 
+            if _task_requires_mcp_tool_usage(agent_type, title, description) and not mcp_tracker:
+                reason = (
+                    f"{agent_type} task completed without any MCP tool calls. "
+                    "Tool-dependent tasks must perform real tool operations, not "
+                    "narrate intended changes."
+                )
+                log(f"Tracked task {task_id[:8]} failed: {reason}", "WARN")
+                await RequestAPI.add_event(
+                    task_id,
+                    "missing_required_tool_usage",
+                    reason,
+                    {"agent_type": agent_type, "model": selected_model},
+                )
+                await _fail_owned(task_id, reason)
+                continue
+
             # Validate
-            success, reason = self._validate_task_result(result)
+            success, reason = self._validate_task_result(result, task=task, tool_counts=tool_counts)
 
             if success:
                 output_contract = task.get("output_contract")
@@ -3429,20 +4770,20 @@ class LucentDaemon:
 
                 log(f"Tracked task {task_id[:8]} completed ({len(result) if result else 0} chars)")
                 if self._tracer:
-                    self._tasks_completed_total.add(1, {"status": "success", "agent_type": agent_type})
+                    self._tasks_completed_total.add(1, attributes={"status": "success", "agent_type": agent_type})
             else:
                 if self._is_request_review_task(task):
                     await self._handle_review_task_failure(task, reason)
                     if self._tracer:
                         self._tasks_completed_total.add(
-                            1, {"status": "manual_review", "agent_type": agent_type}
+                            1, attributes={"status": "manual_review", "agent_type": agent_type}
                         )
                 else:
                     await _fail_owned(task_id, reason)
                     log(f"Tracked task {task_id[:8]} failed: {reason}", "WARN")
                     if self._tracer:
                         self._tasks_completed_total.add(
-                            1, {"status": "failed", "agent_type": agent_type}
+                            1, attributes={"status": "failed", "agent_type": agent_type}
                         )
 
     async def _create_task_sandbox(
@@ -3450,10 +4791,17 @@ class LucentDaemon:
         task_id: str,
         sandbox_config: dict,
         *,
+        request_id: str | None = None,
         requesting_user_id: str,
         org_id: str,
-    ) -> tuple[str | None, "SandboxConfig | None"]:
-        """Create a sandbox for a task. Returns (sandbox_id, resolved_config)."""
+    ) -> tuple[str | None, "SandboxConfig | None", dict | None]:
+        """Create a sandbox for a task.
+
+        Returns ``(sandbox_id, resolved_config, failure)`` where ``failure``
+        is ``None`` on success, or a dict ``{"stage": str, "detail": str}``
+        describing what went wrong so the caller can surface it to the task's
+        error field and a task event.
+        """
         from lucent.sandbox.manager import get_sandbox_manager
         from lucent.sandbox.models import SandboxConfig
 
@@ -3463,32 +4811,140 @@ class LucentDaemon:
             env_vars = await resolve_secret_env_vars(sandbox_config.get("env_vars", {}), provider)
         finally:
             set_current_user(None)
+
+        # Auto-resolve GitHub credentials for private repo cloning.
+        # If the task didn't supply git_credentials explicitly but has a repo_url
+        # pointing at GitHub, look up the requesting user's stored GitHub token.
+        git_credentials = sandbox_config.get("git_credentials")
+        repo_url = sandbox_config.get("repo_url") or ""
+        if not git_credentials and repo_url and "github.com" in repo_url:
+            try:
+                from lucent.db import get_pool
+                from lucent.integrations.encryption import (
+                    BackendCredentialEncryptor,
+                    EncryptionError,
+                )
+
+                pool = await get_pool()
+
+                # Direct query + decrypt so we can distinguish "no credential"
+                # from "credential exists but decryption failed" (the latter
+                # happens when openbao's transit key is reset, e.g. dev restart).
+                async with pool.acquire() as conn:
+                    cred_row = await conn.fetchrow(
+                        """
+                        SELECT id, encrypted_secret_payload
+                        FROM enterprise_credentials
+                        WHERE integration_type = 'github'
+                          AND scope_type = 'user'
+                          AND owner_user_id = $1::uuid
+                          AND status = 'active'
+                        ORDER BY updated_at DESC
+                        LIMIT 1
+                        """,
+                        requesting_user_id,
+                    )
+
+                if not cred_row:
+                    log(
+                        f"No GitHub token on file for user {requesting_user_id[:8]}; "
+                        "private repo clones will fail. User can connect GitHub in settings.",
+                        "WARN",
+                    )
+                else:
+                    try:
+                        encryptor = BackendCredentialEncryptor()
+                        payload = encryptor.decrypt(cred_row["encrypted_secret_payload"])
+                        token = payload.get("access_token")
+                        if token:
+                            git_credentials = f"x-access-token:{token}"
+                            log(
+                                f"Resolved GitHub token for user "
+                                f"{requesting_user_id[:8]} for sandbox clone"
+                            )
+                        else:
+                            log(
+                                f"GitHub credential row for user {requesting_user_id[:8]} "
+                                "decrypted but has no access_token field",
+                                "WARN",
+                            )
+                    except EncryptionError as dec_err:
+                        log(
+                            f"GitHub credential for user {requesting_user_id[:8]} "
+                            f"could not be decrypted ({dec_err}). This usually means "
+                            "the OpenBao transit key has been rotated/reset since the "
+                            "credential was stored — the user must reconnect GitHub "
+                            "in Settings → Integrations.",
+                            "WARN",
+                        )
+            except Exception as e:
+                log(f"GitHub token lookup failed (non-fatal): {e}", "WARN")
+
+        # If a repo_url is set but no explicit network_mode, promote to
+        # "allowlist" with common package/git endpoints so git+apt can work.
+        # Pure "none" is incompatible with cloning a remote repo.
+        default_network_mode = "none"
+        default_allowed_hosts: list[str] = []
+        if sandbox_config.get("repo_url") and "network_mode" not in sandbox_config:
+            default_network_mode = "allowlist"
+            default_allowed_hosts = [
+                "github.com",
+                "api.github.com",
+                "raw.githubusercontent.com",
+                "codeload.github.com",
+                "objects.githubusercontent.com",
+                # Package repositories for git/iptables auto-install in base images
+                "deb.debian.org",
+                "security.debian.org",
+                "archive.ubuntu.com",
+                "security.ubuntu.com",
+                "dl-cdn.alpinelinux.org",
+            ]
+
         config = SandboxConfig(
             name=sandbox_config.get("name", f"task-{task_id[:12]}"),
-            image=sandbox_config.get("image", "python:3.12-slim"),
+            image=sandbox_config.get("image", "lucent-sandbox:base"),
             repo_url=sandbox_config.get("repo_url"),
             branch=sandbox_config.get("branch"),
-            git_credentials=sandbox_config.get("git_credentials"),
+            git_credentials=git_credentials,
             setup_commands=sandbox_config.get("setup_commands", []),
             env_vars=env_vars,
             working_dir=sandbox_config.get("working_dir", "/workspace"),
             memory_limit=sandbox_config.get("memory_limit", "2g"),
             cpu_limit=sandbox_config.get("cpu_limit", 2.0),
-            network_mode=sandbox_config.get("network_mode", "none"),
-            allowed_hosts=sandbox_config.get("allowed_hosts", []),
+            network_mode=sandbox_config.get("network_mode", default_network_mode),
+            allowed_hosts=sandbox_config.get("allowed_hosts", default_allowed_hosts),
             timeout_seconds=sandbox_config.get("timeout_seconds", 1800),
             output_mode=sandbox_config.get("output_mode"),
             commit_approved=bool(sandbox_config.get("commit_approved", False)),
             task_id=task_id,
+            request_id=request_id or sandbox_config.get("request_id"),
+            organization_id=org_id,
+            requesting_user_id=requesting_user_id,
         )
         manager = get_sandbox_manager()
         info = await manager.create(config)
         if info.status.value == "ready":
             log(f"Sandbox {info.id[:12]} created for task {task_id[:8]}")
-            return info.id, config
+            return info.id, config, None
         else:
-            log(f"Sandbox creation failed for task {task_id[:8]}: {info.error}", "WARN")
-            return None, None
+            err = info.error or "Sandbox creation failed without a specific error"
+            log(
+                f"Sandbox creation failed for task {task_id[:8]}: {err} "
+                f"(image={config.image!r}, repo_url={config.repo_url!r}, "
+                f"network_mode={config.network_mode!r})",
+                "WARN",
+            )
+            return None, None, {
+                "stage": "sandbox_create",
+                "detail": err,
+                "image": config.image,
+                "repo_url": config.repo_url,
+                "branch": config.branch,
+                "network_mode": config.network_mode,
+                "allowed_hosts": list(config.allowed_hosts or []),
+                "working_dir": config.working_dir,
+            }
 
     async def _destroy_task_sandbox(self, sandbox_id: str) -> None:
         """Destroy a task's sandbox."""
@@ -3497,6 +4953,96 @@ class LucentDaemon:
         manager = get_sandbox_manager()
         await manager.destroy(sandbox_id)
         log(f"Sandbox {sandbox_id[:12]} destroyed")
+
+    async def _get_technical_context_for_request(self, request_id: str) -> str | None:
+        """Look up the request's target_repo and inject relevant technical memories.
+
+        Returns a formatted context string with relevant technical memories,
+        or None if the request has no target_repo.
+        """
+        try:
+            req = await RequestAPI.get_request(request_id)
+            if not req:
+                return None
+
+            target_repo = req.get("target_repo")
+            target_paths = req.get("target_paths") or []
+
+            if not target_repo:
+                return None
+
+            # Search for technical memories matching this repo
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(
+                    f"{API_BASE}/search",
+                    headers=API_HEADERS,
+                    params={
+                        "q": target_repo,
+                        "type": "technical",
+                        "limit": "20",
+                    },
+                )
+                if resp.status_code != 200:
+                    return None
+
+                memories = resp.json().get("memories", [])
+
+            if not memories:
+                return None
+
+            # Filter to memories that match the target repo
+            relevant = []
+            for mem in memories:
+                meta = mem.get("metadata") or {}
+                mem_repo = meta.get("repo", "")
+                if mem_repo != target_repo:
+                    continue
+                relevant.append(mem)
+
+            if not relevant:
+                return None
+
+            # If target_paths specified, prioritize those but include repo-level too
+            if target_paths:
+                prioritized = []
+                general = []
+                for mem in relevant:
+                    meta = mem.get("metadata") or {}
+                    mem_dir = meta.get("directory", "")
+                    mem_file = meta.get("filename", "")
+                    is_targeted = any(
+                        (mem_dir and mem_dir.startswith(p)) or
+                        (mem_file and mem_file.startswith(p)) or
+                        (not mem_dir and not mem_file)  # repo-level always included
+                        for p in target_paths
+                    )
+                    if is_targeted:
+                        prioritized.append(mem)
+                    else:
+                        general.append(mem)
+                # Show prioritized first, then general context (limited)
+                relevant = prioritized + general[:3]
+
+            # Format the context
+            parts = [
+                f"--- TECHNICAL CONTEXT ({target_repo}) ---",
+                "The following technical memories describe the codebase conventions and patterns for this repository.",
+                "Follow these conventions in your work. These represent the established standards.\n",
+            ]
+
+            for mem in relevant:
+                meta = mem.get("metadata") or {}
+                scope = meta.get("filename") or meta.get("directory") or "(repo-level)"
+                content = mem.get("content", "")
+                parts.append(f"### {scope}")
+                parts.append(content)
+                parts.append("")
+
+            return "\n".join(parts)
+
+        except Exception as e:
+            log(f"Failed to fetch technical context: {e}", "DEBUG")
+            return None
 
     async def _resolve_sandbox_template(
         self,
@@ -3531,7 +5077,16 @@ class LucentDaemon:
             if not tpl:
                 log(f"Sandbox template {template_id[:8]} not found", "WARN")
                 return None
+            if tpl.get("status") and tpl["status"] != "approved":
+                log(
+                    f"Sandbox template '{tpl.get('name', template_id[:8])}' has "
+                    f"status={tpl['status']!r} — refusing dispatch. Only approved "
+                    "templates can be used by tasks.",
+                    "WARN",
+                )
+                return None
             config = repo.to_sandbox_config(tpl)
+            await repo.mark_used(template_id)
             log(f"Resolved sandbox template '{tpl.get('name', template_id[:8])}' for dispatch")
             return config
         except Exception as e:
@@ -3597,10 +5152,15 @@ class LucentDaemon:
         return passed
 
     def _is_request_review_task(self, task: dict) -> bool:
-        """Identify daemon-created post-completion review tasks."""
+        """Identify daemon-created post-completion review tasks.
+
+        Matches the canonical review-task title only. The legacy substring
+        check on description (\"REQUEST_REVIEW_DECISION:\") was removed because
+        any unrelated task whose description happened to mention that token
+        (docs, code about the review system, prompts) was being misclassified.
+        """
         title = (task.get("title") or "").strip().lower()
-        desc = task.get("description") or ""
-        return title == REQUEST_REVIEW_TASK_TITLE.lower() or "REQUEST_REVIEW_DECISION:" in desc
+        return title == REQUEST_REVIEW_TASK_TITLE.lower()
 
     def _parse_review_decision(self, text: str) -> dict:
         """Parse review output into a structured decision.
@@ -3611,6 +5171,7 @@ class LucentDaemon:
         Plus optional sections:
         - TASK_IDS_TO_REWORK: <id1>, <id2>, ...
         - FEEDBACK: ...
+        - MEMORIES_UPDATED: <id1>, <id2>, ... | none
         """
         raw = (text or "").strip()
         upper = raw.upper()
@@ -3652,11 +5213,29 @@ class LucentDaemon:
             flags=re.IGNORECASE | re.DOTALL,
         )
         feedback = (mf.group(1).strip() if mf else raw)[:10000]
+
+        memories_updated: list[str] = []
+        mm = re.search(
+            r"MEMORIES_UPDATED\s*:\s*(.+?)(?:\n[A-Z_ ]+\s*:|\Z)",
+            raw,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if mm:
+            blob = mm.group(1).strip()
+            if blob.lower() not in ("none", "n/a", "-", ""):
+                candidates = re.split(r"[\s,]+", blob)
+                memories_updated = [
+                    c.strip().strip("[](){}")
+                    for c in candidates
+                    if re.fullmatch(r"[0-9a-fA-F-]{8,64}", c.strip().strip("[](){}"))
+                ]
+
         return {
             "decision": decision,
             "task_ids": task_ids,
             "feedback": feedback,
             "recognized": recognized,
+            "memories_updated": memories_updated,
         }
 
     async def _find_review_agent_type(
@@ -3691,11 +5270,35 @@ class LucentDaemon:
     async def _create_request_review_task(self, request_id: str, request_data: dict) -> dict | None:
         """Create a review task when a request enters review state."""
         tasks = request_data.get("tasks", []) or []
+        review_tasks = [t for t in tasks if self._is_request_review_task(t)]
+        # Don't pile on if a review task is already in flight.
         if any(
-            self._is_request_review_task(t)
-            and t.get("status") in ("pending", "planned", "claimed", "running")
-            for t in tasks
+            t.get("status") in ("pending", "planned", "claimed", "running")
+            for t in review_tasks
         ):
+            return None
+        # Defense-in-depth against review loops: if the request is still in `review`
+        # status but a previous review task already completed, the processing layer
+        # failed to transition the request out of review (or the review task was
+        # misrouted and produced an unparseable result). Creating another review
+        # task will just produce the same outcome — force the request to completed
+        # so we don't accumulate thousands of useless tasks while waiting for an
+        # operator to notice.
+        completed_reviews = [t for t in review_tasks if t.get("status") == "completed"]
+        if completed_reviews:
+            log(
+                f"Request {request_id[:8]} still in `review` after "
+                f"{len(completed_reviews)} completed review task(s); auto-finalizing "
+                f"as completed to break loop. (Manually re-open if rework needed.)",
+                "WARN",
+            )
+            try:
+                await RequestAPI.update_request_status(request_id, "completed")
+            except Exception as e:
+                log(
+                    f"Failed to auto-finalize stuck request {request_id[:8]}: {e}",
+                    "WARN",
+                )
             return None
 
         org_id = str(request_data.get("organization_id", ""))
@@ -3749,7 +5352,9 @@ class LucentDaemon:
         memory_section = ""
         if linked_memories:
             mem_lines = []
+            mem_id_list = []
             for mem in linked_memories:
+                mem_id_list.append(str(mem["memory_id"]))
                 mem_lines.append(
                     f"- Memory ID: {mem['memory_id']}, relation: {mem['relation']}, "
                     f"type: {mem.get('memory_type', 'unknown')}\n"
@@ -3757,31 +5362,64 @@ class LucentDaemon:
                     f"  Status: {mem.get('status', 'unknown')}"
                 )
             memory_section = (
-                "\n\nLinked Memories:\n"
+                "\n\nLinked Memories (MANDATORY UPDATE TARGETS):\n"
                 + "\n".join(mem_lines)
-                + "\n\nIMPORTANT — Memory Updates Required:\n"
-                "After reviewing the task outcomes, you MUST update each linked memory:\n"
-                "- For 'goal' memories: Use update_memory to add progress_notes describing "
-                "what was accomplished. If a milestone was completed, mark it as such. "
-                "Only set the goal status to 'completed' if ALL milestones are done and "
-                "the goal is fully satisfied.\n"
-                "- For other memories: Update with any relevant new information from the results.\n"
-                "- Use link_task_memory to connect any new memories created by tasks back to this request.\n"
+                + "\n\n"
+                "=== MANDATORY MEMORY UPDATE STEP — DO NOT SKIP ===\n"
+                "Before you emit REQUEST_REVIEW_DECISION below, you MUST call "
+                "`update_memory` on EVERY memory listed above. This is a hard "
+                "precondition for emitting any decision \u2014 not a suggestion, not a "
+                "best practice, not 'if relevant'. The memory update IS part of the "
+                "review work. A review that skips it is incomplete and will be "
+                "rejected by the daemon.\n\n"
+                "Required calls (one per linked memory):\n"
+                + "\n".join(f"  - update_memory(memory_id=\"{mid}\", ...)" for mid in mem_id_list)
+                + "\n\n"
+                "What to update:\n"
+                "- For 'goal' memories: append a `progress_notes` entry describing "
+                "what was accomplished. If a milestone was completed, set that "
+                "milestone's `status` to \"completed\" and `completed_at` to today. "
+                "Set the overall goal `status` to \"completed\" ONLY if every "
+                "milestone is done.\n"
+                "- For other memory types: update with any relevant new information "
+                "from the task results, or call update_memory with a no-op note "
+                "explaining why no substantive change was needed.\n\n"
+                "After calling update_memory for each linked memory, also call "
+                "`link_task_memory` to attach any NEW memories created by tasks back "
+                "to this request.\n\n"
+                "In the FEEDBACK section of your decision block below, you MUST "
+                "include a line of the form:\n"
+                "  MEMORIES_UPDATED: <comma-separated memory IDs you called "
+                "update_memory on>\n"
+                "If this line is missing or doesn't list every linked memory ID, "
+                "the daemon will treat the review as incomplete and re-queue it.\n"
+                "=== END MANDATORY STEP ===\n"
             )
 
         review_description = (
             "Perform post-completion request review.\n\n"
-            "You are validating whether the request outcomes satisfy the original request goals.\n\n"
+            "You are validating whether the request outcomes satisfy the original "
+            "request goals AND propagating those outcomes into linked memories.\n\n"
             f"Original request title: {request_data.get('title', '')}\n"
             f"Original request description:\n{request_data.get('description', '')}\n\n"
             "Task outcomes:\n"
             f"{chr(10).join(task_summaries)}"
             f"{incomplete_note}"
             f"{memory_section}\n\n"
-            "Return your decision in this exact machine-readable shape:\n"
+            "Return your decision in this exact machine-readable shape "
+            "(emit it ONLY after completing all mandatory memory updates above):\n"
             "REQUEST_REVIEW_DECISION: APPROVED|NEEDS_REWORK\n"
             "TASK_IDS_TO_REWORK: <comma-separated task ids, optional when approved>\n"
-            "FEEDBACK: <actionable rationale and correction guidance>"
+            "FEEDBACK: <actionable rationale and correction guidance>\n"
+            "MEMORIES_UPDATED: <comma-separated memory IDs you called update_memory on; "
+            "use \"none\" only when no Linked Memories section was provided>"
+        )
+
+        review_model, review_model_reason = _select_model_for_task(
+            agent_type=agent_type,
+            title=REQUEST_REVIEW_TASK_TITLE,
+            description=review_description,
+            explicit_model=REQUEST_REVIEW_MODEL or None,
         )
 
         review_task = await RequestAPI.create_task(
@@ -3791,12 +5429,12 @@ class LucentDaemon:
             description=review_description,
             priority=request_data.get("priority", "medium"),
             sequence_order=10_000_000,
-            model=REQUEST_REVIEW_MODEL,
+            model=review_model,
         )
         if review_task:
             log(
                 f"Request {request_id[:8]} moved to review; created review task {str(review_task.get('id', ''))[:8]} "
-                f"agent={agent_type} mode={mode}",
+                f"agent={agent_type} mode={mode} model={review_model} ({review_model_reason})",
             )
         else:
             log(
@@ -3869,13 +5507,51 @@ class LucentDaemon:
             return
 
         if decision == "APPROVED":
+            # Enforce the mandatory memory-update precondition. If the request
+            # had linked memories but the review didn't attest to updating
+            # them (or attested incompletely), kick it back as NEEDS_REWORK.
+            # This is what makes the prompt's "MANDATORY" language real \u2014 the
+            # agent learns that skipping the memory updates costs a full
+            # re-review cycle.
+            linked_memories = await RequestAPI.get_request_memories(request_id)
+            if linked_memories:
+                expected_ids = {str(m["memory_id"]) for m in linked_memories}
+                attested_ids = {mid.lower() for mid in parsed.get("memories_updated", [])}
+                missing = sorted(
+                    eid for eid in expected_ids if eid.lower() not in attested_ids
+                )
+                if missing:
+                    await RequestAPI.add_event(
+                        str(task["id"]),
+                        "request_review_memory_update_missing",
+                        (
+                            "Review approved without attesting to required memory "
+                            f"updates. Missing MEMORIES_UPDATED entries for: "
+                            f"{', '.join(m[:8] for m in missing)}."
+                        ),
+                        {
+                            "expected_memory_ids": sorted(expected_ids),
+                            "attested_memory_ids": sorted(attested_ids),
+                            "missing_memory_ids": missing,
+                        },
+                    )
+                    await RequestAPI.update_request_status(request_id, "needs_rework")
+                    log(
+                        f"Request {request_id[:8]} review APPROVED but missing "
+                        f"memory updates for {len(missing)} memory/memories; "
+                        f"sent back for rework",
+                        "WARN",
+                    )
+                    return
+
             await RequestAPI.add_event(
                 str(task["id"]),
                 "request_review_approved",
-                f"Internal review: APPROVED. Auto-completing request.",
+                "Internal review: APPROVED. Auto-completing request.",
                 {
                     "recommendation": decision,
                     "feedback": feedback[:1500],
+                    "memories_updated": parsed.get("memories_updated", []),
                 },
             )
             await RequestAPI.update_request_status(request_id, "completed")
@@ -3886,7 +5562,7 @@ class LucentDaemon:
         await RequestAPI.add_event(
             str(task["id"]),
             "request_review_needs_rework",
-            f"Internal review: NEEDS_REWORK. Sending back for revision.",
+            "Internal review: NEEDS_REWORK. Sending back for revision.",
             {
                 "recommendation": decision,
                 "feedback": feedback[:1500],
@@ -3985,6 +5661,11 @@ class LucentDaemon:
         # Create a request/task record via the HTTP API so it appears on Activity
         task_id = None
         try:
+            memory_model, _memory_model_reason = _select_model_for_task(
+                agent_type="memory",
+                title="Consolidate memories",
+                description=MEMORY_CONSOLIDATION_PROMPT,
+            )
             request_record = await RequestAPI.create_request(
                 title="Memory consolidation",
                 description="Autonomic memory maintenance — consolidating fragments into long-term knowledge.",
@@ -4002,7 +5683,7 @@ class LucentDaemon:
                         "Run mandatory metadata normalization for metadata.repo, "
                         "metadata.directory, metadata.filename, then verify compliance."
                     ),
-                    model=MODEL,
+                    model=memory_model,
                 )
                 if task_record:
                     task_id = str(task_record["id"])
@@ -4019,6 +5700,7 @@ class LucentDaemon:
             "autonomic-maintenance",
             system_message,
             MEMORY_CONSOLIDATION_PROMPT,
+            model=memory_model if task_id else None,
         )
 
         # Update the request/task records with the outcome
@@ -4080,12 +5762,13 @@ class LucentDaemon:
                 "or 'rejection-lesson' or 'feedback-rejected' "
                 "or 'validated' that do "
                 "NOT have the 'lesson-extracted' tag. Cap at 10.\n"
-                "2. For each non-routine experience, find the existing memory "
-                "that this lesson is ABOUT (the technical or procedural memory "
-                "for that module/system/workflow).\n"
+                "2. For each non-routine experience, find the existing memory or skill "
+                "that this lesson is ABOUT (the technical memory for that module/system, "
+                "or the skill for that workflow).\n"
                 "3. Update that existing memory with the new knowledge. "
-                "If no related memory exists, create ONE well-scoped memory "
-                "that includes the lesson as part of its content.\n"
+                "If no related memory exists, create ONE well-scoped technical or "
+                "experience memory that includes the lesson as part of its content. "
+                "Reusable workflows belong in skills.\n"
                 "4. Tag processed source memories with 'lesson-extracted'.\n"
                 "5. Delete source experience memories that are now redundant "
                 "(their knowledge has been absorbed).\n"
@@ -4094,7 +5777,7 @@ class LucentDaemon:
                 "- NEVER create a new memory if an existing one covers the same scope — update it.\n"
                 "- The total memory count must go DOWN or stay the same, never up.\n"
                 "- Prefer update_memory and delete_memory. Only use create_memory for genuine gaps.\n"
-                "- Skip anything tagged 'daemon-heartbeat'."
+                "- Skip runtime heartbeat or telemetry records if any legacy records are still present."
             ),
         )
 
@@ -4133,7 +5816,7 @@ class LucentDaemon:
                 "Compress experience memories into daily digests.\n\n"
                 "## Process\n\n"
                 "1. Search for experience memories that are NOT tagged 'daily-digest' "
-                "and NOT tagged 'daemon-heartbeat' (use search_memories with type='experience', limit=50).\n\n"
+                "and not runtime heartbeat/telemetry records (use search_memories with type='experience', limit=50).\n\n"
                 "2. Group the results by date (use the created_at or updated_at field). "
                 f"Skip memories from today ({today}) — only compress older ones.\n\n"
                 "3. For each date that has 2+ experience memories:\n"
@@ -4229,8 +5912,6 @@ class LucentDaemon:
 
                 # Refresh instance liveness and lease heartbeats.
                 await self._update_heartbeat()
-                # Keep existing memory heartbeat for backward compatibility/observability.
-                await self._update_legacy_heartbeat_memory()
 
                 # Release stale tasks from dead instances
                 stale = await RequestAPI.release_stale(STALE_HEARTBEAT_MINUTES)
@@ -4248,8 +5929,12 @@ class LucentDaemon:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                log(f"Dispatch loop error: {e}", "ERROR")
+                import traceback as _tb
+                log(f"Dispatch loop error: {e}\n{_tb.format_exc()}", "ERROR")
                 await asyncio.sleep(5)
+                # Reconnect LISTEN if connection dropped
+                if self._listen_conn is None or self._listen_conn.is_closed():
+                    await self._setup_listen()
                 # Reconnect LISTEN if connection dropped
                 if self._listen_conn is None or self._listen_conn.is_closed():
                     await self._setup_listen()
@@ -4306,12 +5991,52 @@ class LucentDaemon:
                     continue
 
                 await self._check_due_schedules()
+
+                # Decomposition backfill: any non-terminal request older
+                # than ~5 min with zero tasks gets a focused decomposition
+                # session so the user has a visible breakdown to review.
+                # Backfill covers pending_approval, auto_approved, and
+                # approved requests — the failure mode (zero tasks) is the
+                # same regardless of approval state.
+                try:
+                    org_id = await self._get_daemon_org_id()
+                    if org_id:
+                        await self._backfill_pending_decomposition(
+                            org_id=org_id, min_age_seconds=300
+                        )
+                except Exception as e:
+                    log(f"Decomp backfill loop error: {e}", "WARN")
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 log(f"Scheduler loop error: {e}", "ERROR")
 
             await asyncio.sleep(SCHEDULER_CHECK_SECONDS)
+
+    async def _get_daemon_org_id(self) -> str | None:
+        """Return the daemon-service user's organization id (cached after first lookup)."""
+        cached = getattr(self, "_cached_daemon_org_id", None)
+        if cached:
+            return cached
+
+        import asyncpg
+
+        try:
+            conn = await asyncpg.connect(DATABASE_URL)
+        except Exception:
+            return None
+        try:
+            row = await conn.fetchrow(
+                "SELECT organization_id FROM users "
+                "WHERE external_id = 'daemon-service' AND is_active = true"
+            )
+            if not row or not row["organization_id"]:
+                return None
+            org_id = str(row["organization_id"])
+            self._cached_daemon_org_id = org_id
+            return org_id
+        finally:
+            await conn.close()
 
     async def _autonomic_loop(self):
         """Periodic maintenance: memory consolidation, learning extraction.
@@ -4579,8 +6304,7 @@ def main():
 
     # Initialize structured logging before anything else
     global _logger
-    get_logger_fn = _configure_daemon_logging()
-    _logger = get_logger_fn("daemon")
+    _logger = _configure_daemon_logging()
 
     parser = argparse.ArgumentParser(description="Lucent Daemon — Cognitive Architecture")
     parser.add_argument("--once", action="store_true", help="Run one cognitive cycle and exit")

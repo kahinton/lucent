@@ -4,14 +4,39 @@ Handles CRUD operations for memories including search functionality.
 """
 
 import logging
-from datetime import datetime
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime, timedelta
+from math import ceil
+from time import monotonic
 from typing import Any
 from uuid import UUID
 
 import asyncpg
 from asyncpg import Pool
 
+from lucent.metrics import metrics
+from lucent.settings import (
+    search_exclude_archived_enabled,
+    search_vitality_boost_alpha,
+    search_vitality_boost_enabled,
+    shadow_forget_enabled,
+)
+
 logger = logging.getLogger(__name__)
+
+
+@dataclass(slots=True, frozen=True)
+class MemoryShadowScoreModel:
+    """Typed row model for memory_shadow_scores sidecar entries."""
+
+    memory_id: UUID
+    strategy: str
+    score: float | None
+    shadow_action: str | None
+    signals: dict[str, Any]
+    computed_at: datetime
+    divergence_tag: str | None
 
 
 class VersionConflictError(Exception):
@@ -32,19 +57,108 @@ class MemoryRepository:
 
     TRUNCATE_LENGTH = 1000
 
+    # Mapping from goal metadata.status → lifecycle_stage.
+    # Only applied for goal-type memories.  Other types may have different
+    # lifecycle semantics and are left untouched.
+    _GOAL_STATUS_TO_LIFECYCLE: dict[str, str] = {
+        "active": "active",
+        "paused": "active",       # planner filters paused goals via metadata.status
+        "completed": "archived",
+        "done": "archived",
+        "abandoned": "archived",
+        "cancelled": "archived",
+    }
+    _ACTIVE_REQUEST_STATUSES: tuple[str, ...] = ("pending", "planned", "in_progress")
+
     # Shared column lists to avoid repetition across queries
     _FULL_COLUMNS = (
         "id, username, type, content, tags, importance, related_memory_ids, metadata, "
         "created_at, updated_at, deleted_at, user_id, "
-        "organization_id, shared, last_accessed_at, version"
+        "organization_id, shared, last_accessed_at, version, "
+        "lifecycle_stage, vitality_score, vitality_computed_at"
     )
     _SEARCH_COLUMNS = (
         "id, username, type, content, tags, importance, related_memory_ids, "
-        "created_at, updated_at, user_id, organization_id, shared, last_accessed_at"
+        "metadata, created_at, updated_at, user_id, organization_id, shared, last_accessed_at, "
+        "lifecycle_stage, vitality_score"
+    )
+    _SHADOW_SCORE_COLUMNS = (
+        "memory_id, strategy, score, shadow_action, signals, computed_at, divergence_tag"
     )
 
     def __init__(self, pool: Pool):
         self.pool = pool
+
+    @staticmethod
+    def _normalize_vitality_score(vitality_score: float | None) -> float:
+        """Normalize vitality into a bounded [0.0, 1.0] interval."""
+        if vitality_score is None:
+            return 0.5
+        return max(0.0, min(1.0, float(vitality_score)))
+
+    @classmethod
+    def _vitality_boosted_rank(
+        cls,
+        *,
+        similarity_score: float,
+        vitality_score: float | None,
+        alpha: float,
+    ) -> float:
+        """Apply phase-2 vitality boost to a base similarity score."""
+        centered_vitality = cls._normalize_vitality_score(vitality_score) - 0.5
+        return similarity_score + (alpha * centered_vitality)
+
+    @staticmethod
+    def _row_field(row: Mapping[str, Any] | Any, key: str, default: Any = None) -> Any:
+        """Read a field from dict-like rows (dict/asyncpg.Record)."""
+        if isinstance(row, Mapping):
+            return row.get(key, default)
+        if hasattr(row, "keys") and key in row.keys():
+            return row[key]
+        return default
+
+    @staticmethod
+    def _canonical_created_at(created_at: Any) -> datetime:
+        """Normalize created_at for deterministic canonical sorting."""
+        if isinstance(created_at, datetime):
+            dt = created_at
+        elif isinstance(created_at, str):
+            try:
+                dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+            except ValueError:
+                return datetime.max.replace(tzinfo=UTC)
+        else:
+            return datetime.max.replace(tzinfo=UTC)
+
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=UTC)
+        return dt.astimezone(UTC)
+
+    @classmethod
+    def select_canonical(
+        cls, rows: list[Mapping[str, Any] | Any]
+    ) -> Mapping[str, Any] | Any | None:
+        """Pick canonical consolidation target by vitality, then completeness, then age.
+
+        Ordering:
+        1. Highest vitality_score first (NULL treated as 0.5)
+        2. Highest importance first
+        3. Oldest created_at first
+        4. Lowest stringified id for deterministic final tie-break
+        """
+        if not rows:
+            return None
+
+        ranked = sorted(
+            rows,
+            key=lambda row: (
+                -cls._normalize_vitality_score(cls._row_field(row, "vitality_score")),
+                -int(cls._row_field(row, "importance", 0) or 0),
+                cls._canonical_created_at(cls._row_field(row, "created_at")),
+                str(cls._row_field(row, "id", "")),
+            ),
+        )
+        return ranked[0]
 
     async def create(
         self,
@@ -76,25 +190,42 @@ class MemoryRepository:
         Returns:
             The created memory record.
         """
-        query = f"""
-            INSERT INTO memories (username, type, content, tags,
-                importance, related_memory_ids, metadata,
-                user_id, organization_id, shared)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-            RETURNING {self._FULL_COLUMNS}
-        """
+        # Auto-sync lifecycle_stage for goal memories created with an
+        # initial metadata.status (e.g. importing a completed goal).
+        initial_stage = self._resolve_goal_lifecycle_stage(type, metadata)
+        if initial_stage and initial_stage != "active":
+            query = f"""
+                INSERT INTO memories (username, type, content, tags,
+                    importance, related_memory_ids, metadata,
+                    user_id, organization_id, shared, lifecycle_stage)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                RETURNING {self._FULL_COLUMNS}
+            """
+            logger.info(
+                "lifecycle auto-sync on create: goal memory with status=%s → lifecycle_stage=%s",
+                metadata.get("status") if metadata else None,
+                initial_stage,
+            )
+        else:
+            query = f"""
+                INSERT INTO memories (username, type, content, tags,
+                    importance, related_memory_ids, metadata,
+                    user_id, organization_id, shared)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                RETURNING {self._FULL_COLUMNS}
+            """
 
-        # Goal memories are always shared so the daemon's cognitive cycle can
-        # discover them for task planning regardless of which user created them.
-        effective_shared = True if type == "goal" else shared
+        # Sharing is now managed by the tool layer with type-based defaults.
+        # Goals are no longer force-shared here — the daemon processes goals
+        # per-user with scoped keys, so it doesn't need org-wide visibility.
+        effective_shared = shared
 
         async with self.pool.acquire() as conn:
             # Validate related memory IDs exist and are not deleted
             if related_memory_ids:
                 await self._validate_related_ids(related_memory_ids, conn=conn)
 
-            row = await conn.fetchrow(
-                query,
+            create_params: list[Any] = [
                 username,
                 type,
                 content,
@@ -105,7 +236,11 @@ class MemoryRepository:
                 str(user_id) if user_id else None,
                 str(organization_id) if organization_id else None,
                 effective_shared,
-            )
+            ]
+            if initial_stage and initial_stage != "active":
+                create_params.append(initial_stage)
+
+            row = await conn.fetchrow(query, *create_params)
 
         return self._row_to_dict(row)
 
@@ -137,6 +272,7 @@ class MemoryRepository:
         memory_id: UUID,
         user_id: UUID,
         organization_id: UUID,
+        memory_scope: str | None = None,
     ) -> dict[str, Any] | None:
         """Get a memory by ID with access control.
 
@@ -144,27 +280,44 @@ class MemoryRepository:
         - The user owns the memory, OR
         - The memory is shared within the user's organization
 
+        When memory_scope is 'user', only the user's own memories are returned.
+        When memory_scope is 'org_shared_only', only shared org memories are returned.
+
         Args:
             memory_id: The UUID of the memory to retrieve.
             user_id: The ID of the requesting user.
             organization_id: The organization of the requesting user.
+            memory_scope: Optional memory scope restriction ('user' or 'org_shared_only').
 
         Returns:
             The memory record, or None if not found, deleted, or not accessible.
         """
+        normalized_scope = (
+            memory_scope if memory_scope in {"user", "org_shared_only"} else None
+        )
+
+        # Keep placeholder numbering stable to avoid scope-dependent
+        # bind count mismatches in prepared statement execution paths.
         query = f"""
             SELECT {self._FULL_COLUMNS}
             FROM memories
             WHERE id = $1
               AND deleted_at IS NULL
               AND (
-                  user_id = $2
-                  OR (organization_id = $3 AND shared = true)
+                    ($4 = 'user' AND user_id = $2)
+                 OR ($4 = 'org_shared_only' AND organization_id = $3 AND shared = true)
+                 OR ($4 IS NULL AND (user_id = $2 OR (organization_id = $3 AND shared = true)))
               )
         """
 
         async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(query, str(memory_id), str(user_id), str(organization_id))
+            row = await conn.fetchrow(
+                query,
+                str(memory_id),
+                str(user_id),
+                str(organization_id),
+                normalized_scope,
+            )
 
         if row is None:
             return None
@@ -286,6 +439,44 @@ class MemoryRepository:
             updates.append(f"metadata = ${param_idx}")
             params.append(metadata)
             param_idx += 1
+
+        # Auto-sync lifecycle_stage for goal-type memories when
+        # metadata.status maps to a known lifecycle stage.  Uses a SQL
+        # CASE so non-goal rows are never touched.
+        #
+        # Reconsolidation-on-update (M9 Phase 2, goal 82b41acd): any update
+        # that touches a memory currently in 'consolidating' or 'archived'
+        # promotes it back to 'active'. 'forgotten' rows are awaiting hard
+        # delete and must NOT be reactivated. The goal-sync target wins when
+        # both apply (CASE branches are evaluated top-to-bottom).
+        # Only apply when the caller actually asked for a real field update —
+        # a no-op call still short-circuits to a plain get().
+        goal_target_stage: str | None = None
+        if metadata is not None:
+            goal_target_stage = self._resolve_goal_lifecycle_stage("goal", metadata)
+
+        if updates and goal_target_stage is not None:
+            updates.append(
+                f"lifecycle_stage = CASE "
+                f"WHEN type = 'goal' THEN ${param_idx} "
+                f"WHEN lifecycle_stage IN ('consolidating', 'archived') THEN 'active' "
+                f"ELSE lifecycle_stage END"
+            )
+            params.append(goal_target_stage)
+            param_idx += 1
+            logger.info(
+                "lifecycle auto-sync: memory %s metadata.status=%s → lifecycle_stage=%s "
+                "(applied only if type=goal)",
+                memory_id,
+                metadata.get("status") if metadata else None,
+                goal_target_stage,
+            )
+        elif updates:
+            updates.append(
+                "lifecycle_stage = CASE "
+                "WHEN lifecycle_stage IN ('consolidating', 'archived') THEN 'active' "
+                "ELSE lifecycle_stage END"
+            )
 
         if not updates:
             return await self.get(memory_id)
@@ -470,11 +661,21 @@ class MemoryRepository:
 
                 return self._row_to_dict(updated)
 
-    async def delete(self, memory_id: UUID) -> bool:
+    async def delete(
+        self,
+        memory_id: UUID,
+        *,
+        ldr_canonical_id: UUID | None = None,
+        force_delete_compliance: bool = False,
+    ) -> bool:
         """Soft delete a memory by setting deleted_at timestamp.
 
         Args:
             memory_id: The UUID of the memory to delete.
+            ldr_canonical_id: Optional canonical replacement edge target for
+                Candidate-C observation rows.
+            force_delete_compliance: Whether delete is compliance-required and
+                must remain hard-delete even with LDR.
 
         Returns:
             True if the memory was deleted, False if not found.
@@ -487,9 +688,83 @@ class MemoryRepository:
         """
 
         async with self.pool.acquire() as conn:
+            await self._record_ldr_observation(
+                source_id=memory_id,
+                canonical_id=ldr_canonical_id,
+                force_delete_compliance=force_delete_compliance,
+                conn=conn,
+            )
             result = await conn.fetchrow(query, str(memory_id))
 
         return result is not None
+
+    async def _record_ldr_observation(
+        self,
+        *,
+        source_id: UUID,
+        canonical_id: UUID | None,
+        force_delete_compliance: bool,
+        conn: asyncpg.Connection,
+    ) -> None:
+        """Record a Candidate-C LDR observation row before a delete attempt.
+
+        Strictly observation-only. Any error must not affect delete behavior.
+        """
+        if not shadow_forget_enabled():
+            return
+
+        try:
+            exists = await conn.fetchval(
+                """
+                SELECT EXISTS(
+                    SELECT 1
+                    FROM memories
+                    WHERE id = $1
+                      AND deleted_at IS NULL
+                )
+                """,
+                str(source_id),
+            )
+            if not exists:
+                return
+
+            edges_at_risk = await conn.fetchval(
+                """
+                SELECT COUNT(*)::BIGINT
+                FROM memories
+                WHERE deleted_at IS NULL
+                  AND id != $1
+                  AND $1 = ANY(related_memory_ids)
+                """,
+                str(source_id),
+            )
+            signals = {
+                "would_demote_source_id": str(source_id),
+                "would_link_canonical_id": str(canonical_id) if canonical_id else None,
+                "would_break_edges": int(edges_at_risk or 0),
+                "force_delete_compliance": force_delete_compliance,
+            }
+            await conn.execute(
+                """
+                INSERT INTO memory_shadow_scores (
+                    memory_id, strategy, score, shadow_action, signals, computed_at, divergence_tag
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                """,
+                str(source_id),
+                "ldr-obs-v1",
+                None,
+                "would_demote",
+                signals,
+                datetime.now(UTC),
+                None,
+            )
+        except Exception:
+            logger.warning(
+                "LDR observation insert failed for memory delete: source_id=%s",
+                source_id,
+                exc_info=True,
+            )
 
     async def search(
         self,
@@ -507,6 +782,10 @@ class MemoryRepository:
         # Access control parameters
         requesting_user_id: UUID | None = None,
         requesting_org_id: UUID | None = None,
+        memory_scope: str | None = None,
+        accessible_repos: list[str] | None = None,
+        vitality_boost: bool | None = None,
+        include_archived: bool = False,
     ) -> dict[str, Any]:
         """Search for memories with fuzzy matching and filters.
 
@@ -528,6 +807,15 @@ class MemoryRepository:
             limit: Maximum results to return.
             requesting_user_id: User ID for access control (if provided, enables access control).
             requesting_org_id: Organization ID for access control.
+            include_archived: When False (default) and the
+                ``LUCENT_SEARCH_EXCLUDE_ARCHIVED_ENABLED`` rollout flag is on,
+                memories with ``lifecycle_stage`` in ``('archived', 'forgotten')``
+                are excluded via a WHERE-clause addition. When True, archived
+                and forgotten memories are returned alongside active ones —
+                ``lifecycle_stage`` is already on each result so callers can
+                surface the distinction. With the env flag off (default),
+                this parameter is accepted but has no effect on the emitted
+                SQL — preserving byte-identical baseline behavior.
 
         Returns:
             Search result with memories, total count, and pagination info.
@@ -538,13 +826,34 @@ class MemoryRepository:
 
         # Add access control condition if user context is provided
         if requesting_user_id is not None and requesting_org_id is not None:
+            if memory_scope == "user":
+                conditions.append(f"user_id = ${param_idx}")
+                params.append(str(requesting_user_id))
+                param_idx += 1
+            elif memory_scope == "org_shared_only":
+                conditions.append(
+                    f"(organization_id = ${param_idx} AND shared = true)"
+                )
+                params.append(str(requesting_org_id))
+                param_idx += 1
+            else:
+                conditions.append(
+                    f"(user_id = ${param_idx} OR "
+                    f"(organization_id = ${param_idx + 1} AND shared = true))"
+                )
+                params.append(str(requesting_user_id))
+                params.append(str(requesting_org_id))
+                param_idx += 2
+
+        # GitHub repo ACL filter (None means caller is admin/owner — no filter).
+        if accessible_repos is not None:
             conditions.append(
-                f"(user_id = ${param_idx} OR "
-                f"(organization_id = ${param_idx + 1} AND shared = true))"
+                f"(metadata IS NULL "
+                f"OR NOT (metadata ? 'repo') "
+                f"OR LOWER(metadata->>'repo') = ANY(${param_idx}::text[]))"
             )
-            params.append(str(requesting_user_id))
-            params.append(str(requesting_org_id))
-            param_idx += 2
+            params.append([r.lower() for r in accessible_repos])
+            param_idx += 1
 
         # Build WHERE conditions
         if username is not None:
@@ -588,7 +897,22 @@ class MemoryRepository:
             params.extend(str(uid) for uid in memory_ids)
             param_idx += len(memory_ids)
 
+        # M9 Phase-2: lifecycle exclusion is gated behind a rollout flag so
+        # the default emitted SQL stays byte-identical to the pre-M9 baseline
+        # until an operator opts in. Only when the flag is ON and the caller
+        # did NOT request archived rows do we add the WHERE-clause addition.
+        if search_exclude_archived_enabled() and not include_archived:
+            conditions.append(
+                "(lifecycle_stage IS NULL "
+                "OR lifecycle_stage NOT IN ('archived', 'forgotten'))"
+            )
+
         where_clause = " AND ".join(conditions)
+
+        boost_enabled = (
+            search_vitality_boost_enabled() if vitality_boost is None else vitality_boost
+        )
+        boost_alpha = search_vitality_boost_alpha()
 
         # Build the query with optional fuzzy matching
         if query:
@@ -597,16 +921,34 @@ class MemoryRepository:
             params.append(query)
             param_idx += 1
 
-            search_query = f"""
-                SELECT {self._SEARCH_COLUMNS},
-                       similarity(content, ${similarity_param}) as sim_score
-                FROM memories
-                WHERE {where_clause}
-                  AND (content % ${similarity_param}
-                       OR content ILIKE '%' || ${similarity_param} || '%')
-                ORDER BY sim_score DESC, importance DESC, created_at DESC
-                LIMIT ${param_idx} OFFSET ${param_idx + 1}
-            """
+            if boost_enabled:
+                boost_alpha_param = param_idx
+                params.append(boost_alpha)
+                param_idx += 1
+                search_query = f"""
+                    SELECT {self._SEARCH_COLUMNS},
+                           similarity(content, ${similarity_param}) as sim_score,
+                           similarity(content, ${similarity_param})
+                             + (${boost_alpha_param}
+                                * (COALESCE(vitality_score, 0.5) - 0.5)) AS final_rank
+                    FROM memories
+                    WHERE {where_clause}
+                      AND (content % ${similarity_param}
+                           OR content ILIKE '%' || ${similarity_param} || '%')
+                    ORDER BY final_rank DESC, importance DESC, created_at DESC
+                    LIMIT ${param_idx} OFFSET ${param_idx + 1}
+                """
+            else:
+                search_query = f"""
+                    SELECT {self._SEARCH_COLUMNS},
+                           similarity(content, ${similarity_param}) as sim_score
+                    FROM memories
+                    WHERE {where_clause}
+                      AND (content % ${similarity_param}
+                           OR content ILIKE '%' || ${similarity_param} || '%')
+                    ORDER BY sim_score DESC, importance DESC, created_at DESC
+                    LIMIT ${param_idx} OFFSET ${param_idx + 1}
+                """
 
             count_query = f"""
                 SELECT COUNT(*) as total
@@ -664,6 +1006,10 @@ class MemoryRepository:
         # Access control parameters
         requesting_user_id: UUID | None = None,
         requesting_org_id: UUID | None = None,
+        memory_scope: str | None = None,
+        accessible_repos: list[str] | None = None,
+        vitality_boost: bool | None = None,
+        include_archived: bool = False,
     ) -> dict[str, Any]:
         """Search across all text fields: content, tags, and metadata.
 
@@ -684,6 +1030,9 @@ class MemoryRepository:
             limit: Maximum results to return.
             requesting_user_id: User ID for access control (if provided, enables access control).
             requesting_org_id: Organization ID for access control.
+            include_archived: See ``search``. Default-False with the rollout
+                flag off is a no-op (preserves baseline SQL); flag-on excludes
+                ``archived``/``forgotten`` rows unless explicitly included.
 
         Returns:
             Search result with memories, total count, and pagination info.
@@ -694,13 +1043,34 @@ class MemoryRepository:
 
         # Add access control condition if user context is provided
         if requesting_user_id is not None and requesting_org_id is not None:
+            if memory_scope == "user":
+                conditions.append(f"user_id = ${param_idx}")
+                params.append(str(requesting_user_id))
+                param_idx += 1
+            elif memory_scope == "org_shared_only":
+                conditions.append(
+                    f"(organization_id = ${param_idx} AND shared = true)"
+                )
+                params.append(str(requesting_org_id))
+                param_idx += 1
+            else:
+                conditions.append(
+                    f"(user_id = ${param_idx} OR "
+                    f"(organization_id = ${param_idx + 1} AND shared = true))"
+                )
+                params.append(str(requesting_user_id))
+                params.append(str(requesting_org_id))
+                param_idx += 2
+
+        # GitHub repo ACL filter (None means caller is admin/owner — no filter).
+        if accessible_repos is not None:
             conditions.append(
-                f"(user_id = ${param_idx} OR "
-                f"(organization_id = ${param_idx + 1} AND shared = true))"
+                f"(metadata IS NULL "
+                f"OR NOT (metadata ? 'repo') "
+                f"OR LOWER(metadata->>'repo') = ANY(${param_idx}::text[]))"
             )
-            params.append(str(requesting_user_id))
-            params.append(str(requesting_org_id))
-            param_idx += 2
+            params.append([r.lower() for r in accessible_repos])
+            param_idx += 1
 
         if username is not None:
             conditions.append(f"username = ${param_idx}")
@@ -722,7 +1092,21 @@ class MemoryRepository:
             params.append(importance_max)
             param_idx += 1
 
+        # M9 Phase-2: see ``search`` — gated lifecycle exclusion preserves the
+        # pre-M9 SQL baseline until ``LUCENT_SEARCH_EXCLUDE_ARCHIVED_ENABLED``
+        # is enabled.
+        if search_exclude_archived_enabled() and not include_archived:
+            conditions.append(
+                "(lifecycle_stage IS NULL "
+                "OR lifecycle_stage NOT IN ('archived', 'forgotten'))"
+            )
+
         where_clause = " AND ".join(conditions)
+
+        boost_enabled = (
+            search_vitality_boost_enabled() if vitality_boost is None else vitality_boost
+        )
+        boost_alpha = search_vitality_boost_alpha()
 
         # Build a combined text field for searching: content + tags + metadata
         query_param = param_idx
@@ -730,25 +1114,55 @@ class MemoryRepository:
         param_idx += 1
 
         # Search across content, array_to_string(tags), and metadata::text
-        search_query = f"""
-            SELECT {self._SEARCH_COLUMNS},
-                   GREATEST(
-                       similarity(content, ${query_param}),
-                       similarity(array_to_string(tags, ' '), ${query_param}),
-                       similarity(metadata::text, ${query_param})
-                   ) as sim_score
-            FROM memories
-            WHERE {where_clause}
-              AND (
-                  content % ${query_param} OR content ILIKE '%' || ${query_param} || '%'
-                  OR array_to_string(tags, ' ') % ${query_param}
-                  OR array_to_string(tags, ' ') ILIKE '%' || ${query_param} || '%'
-                  OR metadata::text % ${query_param}
-                  OR metadata::text ILIKE '%' || ${query_param} || '%'
-              )
-            ORDER BY sim_score DESC, importance DESC, created_at DESC
-            LIMIT ${param_idx} OFFSET ${param_idx + 1}
-        """
+        if boost_enabled:
+            boost_alpha_param = param_idx
+            params.append(boost_alpha)
+            param_idx += 1
+            search_query = f"""
+                SELECT {self._SEARCH_COLUMNS},
+                       GREATEST(
+                           similarity(content, ${query_param}),
+                           similarity(array_to_string(tags, ' '), ${query_param}),
+                           similarity(metadata::text, ${query_param})
+                       ) as sim_score,
+                       GREATEST(
+                           similarity(content, ${query_param}),
+                           similarity(array_to_string(tags, ' '), ${query_param}),
+                           similarity(metadata::text, ${query_param})
+                       ) + (${boost_alpha_param}
+                            * (COALESCE(vitality_score, 0.5) - 0.5)) AS final_rank
+                FROM memories
+                WHERE {where_clause}
+                  AND (
+                      content % ${query_param} OR content ILIKE '%' || ${query_param} || '%'
+                      OR array_to_string(tags, ' ') % ${query_param}
+                      OR array_to_string(tags, ' ') ILIKE '%' || ${query_param} || '%'
+                      OR metadata::text % ${query_param}
+                      OR metadata::text ILIKE '%' || ${query_param} || '%'
+                  )
+                ORDER BY final_rank DESC, importance DESC, created_at DESC
+                LIMIT ${param_idx} OFFSET ${param_idx + 1}
+            """
+        else:
+            search_query = f"""
+                SELECT {self._SEARCH_COLUMNS},
+                       GREATEST(
+                           similarity(content, ${query_param}),
+                           similarity(array_to_string(tags, ' '), ${query_param}),
+                           similarity(metadata::text, ${query_param})
+                       ) as sim_score
+                FROM memories
+                WHERE {where_clause}
+                  AND (
+                      content % ${query_param} OR content ILIKE '%' || ${query_param} || '%'
+                      OR array_to_string(tags, ' ') % ${query_param}
+                      OR array_to_string(tags, ' ') ILIKE '%' || ${query_param} || '%'
+                      OR metadata::text % ${query_param}
+                      OR metadata::text ILIKE '%' || ${query_param} || '%'
+                  )
+                ORDER BY sim_score DESC, importance DESC, created_at DESC
+                LIMIT ${param_idx} OFFSET ${param_idx + 1}
+            """
 
         count_query = f"""
             SELECT COUNT(*) as total
@@ -790,6 +1204,7 @@ class MemoryRepository:
         # Access control parameters
         requesting_user_id: UUID | None = None,
         requesting_org_id: UUID | None = None,
+        accessible_repos: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Get existing tags with usage counts.
 
@@ -799,6 +1214,10 @@ class MemoryRepository:
             limit: Maximum number of tags to return (default 50).
             requesting_user_id: User ID for access control (if provided, enables access control).
             requesting_org_id: Organization ID for access control.
+            accessible_repos: Optional GitHub repo allowlist (lowercased). When
+                provided, tag counts only include memories whose
+                ``metadata.repo`` is null/missing or appears in this list.
+                Pass ``None`` to skip the filter (admin/owner).
 
         Returns:
             List of {tag, count} sorted by count descending.
@@ -816,6 +1235,15 @@ class MemoryRepository:
             params.append(str(requesting_user_id))
             params.append(str(requesting_org_id))
             param_idx += 2
+
+        if accessible_repos is not None:
+            conditions.append(
+                f"(metadata IS NULL "
+                f"OR NOT (metadata ? 'repo') "
+                f"OR LOWER(metadata->>'repo') = ANY(${param_idx}::text[]))"
+            )
+            params.append([r.lower() for r in accessible_repos])
+            param_idx += 1
 
         if username is not None:
             conditions.append(f"username = ${param_idx}")
@@ -852,6 +1280,7 @@ class MemoryRepository:
         # Access control parameters
         requesting_user_id: UUID | None = None,
         requesting_org_id: UUID | None = None,
+        accessible_repos: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Get tag suggestions based on fuzzy matching.
 
@@ -861,6 +1290,7 @@ class MemoryRepository:
             limit: Maximum number of suggestions (default 10).
             requesting_user_id: User ID for access control (if provided, enables access control).
             requesting_org_id: Organization ID for access control.
+            accessible_repos: Optional GitHub repo allowlist; see ``get_existing_tags``.
 
         Returns:
             List of {tag, count, similarity} sorted by similarity descending.
@@ -878,6 +1308,15 @@ class MemoryRepository:
             params.append(str(requesting_user_id))
             params.append(str(requesting_org_id))
             param_idx += 2
+
+        if accessible_repos is not None:
+            conditions.append(
+                f"(metadata IS NULL "
+                f"OR NOT (metadata ? 'repo') "
+                f"OR LOWER(metadata->>'repo') = ANY(${param_idx}::text[]))"
+            )
+            params.append([r.lower() for r in accessible_repos])
+            param_idx += 1
 
         if username is not None:
             conditions.append(f"username = ${param_idx}")
@@ -918,6 +1357,7 @@ class MemoryRepository:
         created_before: datetime | None = None,
         requesting_user_id: UUID | None = None,
         requesting_org_id: UUID | None = None,
+        memory_scope: str | None = None,
     ) -> list[dict[str, Any]]:
         """Export memories with full content and metadata.
 
@@ -943,13 +1383,24 @@ class MemoryRepository:
         param_idx = 1
 
         if requesting_user_id is not None and requesting_org_id is not None:
-            conditions.append(
-                f"(user_id = ${param_idx} OR "
-                f"(organization_id = ${param_idx + 1} AND shared = true))"
-            )
-            params.append(str(requesting_user_id))
-            params.append(str(requesting_org_id))
-            param_idx += 2
+            if memory_scope == "user":
+                conditions.append(f"user_id = ${param_idx}")
+                params.append(str(requesting_user_id))
+                param_idx += 1
+            elif memory_scope == "org_shared_only":
+                conditions.append(
+                    f"(organization_id = ${param_idx} AND shared = true)"
+                )
+                params.append(str(requesting_org_id))
+                param_idx += 1
+            else:
+                conditions.append(
+                    f"(user_id = ${param_idx} OR "
+                    f"(organization_id = ${param_idx + 1} AND shared = true))"
+                )
+                params.append(str(requesting_user_id))
+                params.append(str(requesting_org_id))
+                param_idx += 2
 
         if type is not None:
             conditions.append(f"type = ${param_idx}")
@@ -1149,6 +1600,694 @@ class MemoryRepository:
             "total": len(memories),
         }
 
+    async def compute_vitality_scores(self, batch_size: int = 500) -> dict[str, Any]:
+        """Compute and persist vitality scores for all non-deleted, non-forgotten memories."""
+        from lucent.memory.decay import DecayConfig, MemoryDecayInput, compute_memory_vitality
+
+        cfg = DecayConfig.from_env()
+        now = datetime.now(UTC)
+        processed = 0
+        updated = 0
+        stage_transitions = 0
+        offset = 0
+
+        while True:
+            async with self.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    f"""
+                    SELECT {self._FULL_COLUMNS}
+                    FROM memories
+                    WHERE deleted_at IS NULL
+                      AND lifecycle_stage != 'forgotten'
+                    ORDER BY created_at ASC
+                    LIMIT $1 OFFSET $2
+                    """,
+                    batch_size,
+                    offset,
+                )
+
+            if not rows:
+                break
+
+            memory_dicts = [self._row_to_dict(row) for row in rows]
+            memory_ids = [item["id"] for item in memory_dicts]
+            access_counts = await self._get_access_counts_last_n_days(memory_ids, days=90, now=now)
+            frequency_baseline = self._compute_p75_baseline(
+                counts=[access_counts.get(memory_id, 0) for memory_id in memory_ids],
+                default=cfg.frequency_baseline,
+            )
+
+            for mem in memory_dicts:
+                profile = MemoryDecayInput(
+                    memory_id=mem["id"],
+                    memory_type=mem["type"],
+                    importance=mem["importance"],
+                    created_at=self._utc(mem["created_at"]),
+                    updated_at=self._utc(mem["updated_at"]),
+                    last_accessed_at=self._utc(mem["last_accessed_at"])
+                    if mem.get("last_accessed_at")
+                    else None,
+                    access_count=access_counts.get(mem["id"], 0),
+                    tags=mem.get("tags") or [],
+                    metadata=mem.get("metadata") or {},
+                )
+                score_result = compute_memory_vitality(
+                    profile,
+                    config=cfg,
+                    now=now,
+                    frequency_baseline=frequency_baseline,
+                )
+                computed_stage = self._map_action_to_lifecycle_stage(score_result.action)
+
+                async with self.pool.acquire() as conn:
+                    await conn.execute(
+                        """
+                        UPDATE memories
+                        SET vitality_score = $2,
+                            vitality_computed_at = $3,
+                            lifecycle_stage = $4
+                        WHERE id = $1
+                          AND deleted_at IS NULL
+                        """,
+                        str(mem["id"]),
+                        score_result.score,
+                        now,
+                        computed_stage,
+                    )
+
+                processed += 1
+                updated += 1
+                if (mem.get("lifecycle_stage") or "active") != computed_stage:
+                    stage_transitions += 1
+
+            offset += batch_size
+
+        return {
+            "processed": processed,
+            "updated": updated,
+            "stage_transitions": stage_transitions,
+            "computed_at": now,
+        }
+
+    async def compute_shadow_forget_scores(
+        self,
+        *,
+        strategy: str = "gcp-v1",
+        batch_size: int = 500,
+    ) -> dict[str, Any]:
+        """Compute Candidate-A shadow scores and write sidecar rows only."""
+        from lucent.memory.decay import (
+            GcpConfig,
+            GraphConnectednessInput,
+            compute_graph_connectedness,
+        )
+
+        if not shadow_forget_enabled():
+            return {
+                "enabled": False,
+                "strategy": strategy,
+                "processed": 0,
+                "inserted": 0,
+                "computed_at": datetime.now(UTC),
+                "comparison_metrics": {},
+                "duration_seconds": 0.0,
+            }
+        if strategy != "gcp-v1":
+            raise ValueError("Unsupported shadow strategy. Supported: gcp-v1")
+
+        started = monotonic()
+        now = datetime.now(UTC)
+        processed = 0
+        inserted = 0
+        offset = 0
+        cfg = GcpConfig()
+
+        while True:
+            async with self.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    f"""
+                    SELECT {self._FULL_COLUMNS}
+                    FROM memories
+                    WHERE deleted_at IS NULL
+                      AND lifecycle_stage != 'forgotten'
+                    ORDER BY created_at ASC
+                    LIMIT $1 OFFSET $2
+                    """,
+                    batch_size,
+                    offset,
+                )
+            if not rows:
+                break
+
+            memory_dicts = [self._row_to_dict(row) for row in rows]
+            memory_ids = [item["id"] for item in memory_dicts]
+            graph_signals = await self._get_graph_connectedness_signals(
+                memory_ids=memory_ids,
+                now=now,
+            )
+
+            async with self.pool.acquire() as conn:
+                for mem in memory_dicts:
+                    signals = graph_signals.get(mem["id"], {})
+                    signals["out_degree"] = len(mem.get("related_memory_ids") or [])
+                    created_at = self._utc(mem["created_at"])
+                    age_days = max(0, (now - created_at).days)
+                    profile = GraphConnectednessInput(
+                        memory_id=mem["id"],
+                        importance=int(mem["importance"]),
+                        age_days=age_days,
+                        in_degree=int(signals.get("in_degree", 0)),
+                        out_degree=int(signals.get("out_degree", 0)),
+                        active_request_links=int(signals.get("active_request_links", 0)),
+                        version_depth=max(1, int(mem.get("version", 1))),
+                        distinct_readers_90d=int(signals.get("distinct_readers_90d", 0)),
+                        tags=mem.get("tags") or [],
+                        metadata=mem.get("metadata") or {},
+                    )
+                    gcp_result = compute_graph_connectedness(profile, config=cfg)
+                    divergence = self._classify_shadow_divergence(
+                        shadow_action=gcp_result.action,
+                        lifecycle_stage=mem.get("lifecycle_stage"),
+                    )
+
+                    await conn.execute(
+                        """
+                        INSERT INTO memory_shadow_scores (
+                            memory_id, strategy, score, shadow_action,
+                            signals, computed_at, divergence_tag
+                        )
+                        VALUES ($1, $2, $3, $4, $5, $6, $7)
+                        """,
+                        str(mem["id"]),
+                        strategy,
+                        gcp_result.score,
+                        gcp_result.action,
+                        gcp_result.signals,
+                        now,
+                        divergence,
+                    )
+                    processed += 1
+                    inserted += 1
+
+            offset += batch_size
+
+        comparison = await self.get_shadow_forget_comparison(
+            strategy=strategy,
+            window_hours=168,
+            limit=100,
+        )
+        duration_seconds = monotonic() - started
+        self._emit_shadow_forget_metrics(
+            strategy=strategy,
+            comparison=comparison,
+            duration_seconds=duration_seconds,
+        )
+
+        return {
+            "enabled": True,
+            "strategy": strategy,
+            "processed": processed,
+            "inserted": inserted,
+            "computed_at": now,
+            "comparison_metrics": comparison.get("metrics", {}),
+            "duration_seconds": duration_seconds,
+        }
+
+    async def get_shadow_forget_comparison(
+        self,
+        *,
+        strategy: str = "gcp-v1",
+        window_hours: int = 168,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        """Return aggregate shadow-vs-vitality comparison statistics."""
+        if strategy != "gcp-v1":
+            raise ValueError("Unsupported shadow strategy. Supported: gcp-v1")
+
+        window_hours = max(1, min(window_hours, 24 * 30))
+        limit = max(1, min(limit, 500))
+        cutoff = datetime.now(UTC) - timedelta(hours=window_hours)
+
+        async with self.pool.acquire() as conn:
+            latest_rows = await conn.fetch(
+                """
+                SELECT DISTINCT ON (ms.memory_id)
+                       ms.memory_id,
+                       ms.score,
+                       ms.shadow_action,
+                       ms.divergence_tag,
+                       ms.signals,
+                       ms.computed_at,
+                       m.lifecycle_stage,
+                       m.vitality_score
+                FROM memory_shadow_scores ms
+                JOIN memories m ON m.id = ms.memory_id
+                WHERE ms.strategy = $1
+                  AND ms.computed_at >= $2
+                  AND m.deleted_at IS NULL
+                ORDER BY ms.memory_id, ms.computed_at DESC
+                """,
+                strategy,
+                cutoff,
+            )
+            ldr_rows = await conn.fetch(
+                """
+                SELECT signals
+                FROM memory_shadow_scores
+                WHERE strategy = 'ldr-obs-v1'
+                  AND computed_at >= $1
+                """,
+                cutoff,
+            )
+
+        latest = [dict(row) for row in latest_rows]
+        total = len(latest)
+        k = max(1, ceil(total * 0.01)) if total else 0
+
+        vitality_top = sorted(
+            [row for row in latest if row.get("vitality_score") is not None],
+            key=lambda row: (float(row["vitality_score"]), str(row["memory_id"])),
+        )[:k]
+        gcp_top = sorted(
+            [row for row in latest if row.get("shadow_action") == "forgetting_candidate"],
+            key=lambda row: (float(row.get("score") or 0.0), str(row["memory_id"])),
+        )[:k]
+
+        vitality_ids = {str(row["memory_id"]) for row in vitality_top}
+        gcp_ids = {str(row["memory_id"]) for row in gcp_top}
+        agreement_n = len(vitality_ids & gcp_ids)
+        top_k_agreement = (agreement_n / k) if k else 1.0
+
+        orphan_reclaims = [
+            row
+            for row in latest
+            if row.get("shadow_action") == "forgetting_candidate"
+            and str(row.get("lifecycle_stage") or "active") == "active"
+        ]
+        orphan_n = len(orphan_reclaims)
+        orphan_reclaim_rate = (
+            orphan_n
+            / max(
+                1,
+                sum(
+                    1
+                    for row in latest
+                    if row.get("shadow_action") == "forgetting_candidate"
+                ),
+            )
+        )
+        orphan_avg_in_degree = (
+            sum(int((row.get("signals") or {}).get("in_degree", 0)) for row in orphan_reclaims)
+            / orphan_n
+            if orphan_n
+            else 0.0
+        )
+
+        load_bearing = [
+            row
+            for row in latest
+            if int((row.get("signals") or {}).get("in_degree", 0)) >= 5
+            or int((row.get("signals") or {}).get("active_request_links", 0)) >= 1
+        ]
+        load_bearing_archived = [
+            row
+            for row in load_bearing
+            if str(row.get("lifecycle_stage") or "") in {"consolidating", "archived"}
+        ]
+        load_bearing_protection_rate = (
+            len(load_bearing_archived) / len(load_bearing) if load_bearing else 0.0
+        )
+
+        ldr_edges_values = [
+            int(((row["signals"] or {}).get("would_break_edges", 0)))
+            for row in ldr_rows
+        ]
+        ldr_edges_sum = int(sum(ldr_edges_values))
+        ldr_edges_mean = (ldr_edges_sum / len(ldr_edges_values)) if ldr_edges_values else 0.0
+        ldr_edges_max = max(ldr_edges_values) if ldr_edges_values else 0
+
+        disagreements = [
+            row
+            for row in latest
+            if row.get("divergence_tag")
+            in {"gcp-protects-vitality-archives", "gcp-forgets-vitality-keeps"}
+        ]
+        top_disagreements = sorted(
+            disagreements,
+            key=lambda row: abs(float(row.get("score") or 0.0)),
+            reverse=True,
+        )[:limit]
+
+        return {
+            "strategy": strategy,
+            "window_hours": window_hours,
+            "sample_size": total,
+            "k": k,
+            "metrics": {
+                "top_k_agreement": top_k_agreement,
+                "orphan_reclaim_rate": orphan_reclaim_rate,
+                "orphan_reclaim_count": orphan_n,
+                "orphan_reclaim_avg_in_degree": orphan_avg_in_degree,
+                "load_bearing_protection_rate": load_bearing_protection_rate,
+                "load_bearing_total": len(load_bearing),
+                "ldr_edges_at_risk_sum": ldr_edges_sum,
+                "ldr_edges_at_risk_mean": ldr_edges_mean,
+                "ldr_edges_at_risk_max": ldr_edges_max,
+            },
+            "divergence_counts": {
+                "agree": sum(1 for row in latest if row.get("divergence_tag") == "agree"),
+                "gcp-protects-vitality-archives": sum(
+                    1
+                    for row in latest
+                    if row.get("divergence_tag") == "gcp-protects-vitality-archives"
+                ),
+                "gcp-forgets-vitality-keeps": sum(
+                    1
+                    for row in latest
+                    if row.get("divergence_tag") == "gcp-forgets-vitality-keeps"
+                ),
+            },
+            "top_disagreements": [
+                {
+                    "memory_id": str(row["memory_id"]),
+                    "score": float(row.get("score") or 0.0),
+                    "shadow_action": row.get("shadow_action"),
+                    "lifecycle_stage": row.get("lifecycle_stage"),
+                    "divergence_tag": row.get("divergence_tag"),
+                    "signals": row.get("signals") or {},
+                    "computed_at": row["computed_at"],
+                }
+                for row in top_disagreements
+            ],
+        }
+
+    async def _get_graph_connectedness_signals(
+        self,
+        *,
+        memory_ids: list[UUID],
+        now: datetime,
+    ) -> dict[UUID, dict[str, int]]:
+        """Collect graph and usage signals for Candidate-A scoring."""
+        if not memory_ids:
+            return {}
+
+        cutoff = now - timedelta(days=90)
+
+        async with self.pool.acquire() as conn:
+            in_degree_rows = await conn.fetch(
+                """
+                SELECT rel_id::uuid AS memory_id, COUNT(*)::BIGINT AS in_degree
+                FROM memories m,
+                     unnest(m.related_memory_ids) AS rel_id
+                WHERE m.deleted_at IS NULL
+                  AND rel_id = ANY($1::uuid[])
+                GROUP BY rel_id
+                """,
+                memory_ids,
+            )
+            request_rows = await conn.fetch(
+                """
+                SELECT rm.memory_id, COUNT(*)::BIGINT AS active_request_links
+                FROM request_memories rm
+                JOIN requests r ON r.id = rm.request_id
+                WHERE rm.memory_id = ANY($1::uuid[])
+                  AND r.status = ANY($2::text[])
+                GROUP BY rm.memory_id
+                """,
+                memory_ids,
+                list(self._ACTIVE_REQUEST_STATUSES),
+            )
+            reader_rows = await conn.fetch(
+                """
+                SELECT memory_id, COUNT(DISTINCT user_id)::BIGINT AS distinct_readers_90d
+                FROM memory_access_log
+                WHERE memory_id = ANY($1::uuid[])
+                  AND user_id IS NOT NULL
+                  AND accessed_at >= $2
+                GROUP BY memory_id
+                """,
+                memory_ids,
+                cutoff,
+            )
+
+        in_degree = {UUID(str(row["memory_id"])): int(row["in_degree"]) for row in in_degree_rows}
+        active_links = {
+            UUID(str(row["memory_id"])): int(row["active_request_links"]) for row in request_rows
+        }
+        readers = {
+            UUID(str(row["memory_id"])): int(row["distinct_readers_90d"]) for row in reader_rows
+        }
+
+        return {
+            memory_id: {
+                "in_degree": in_degree.get(memory_id, 0),
+                "out_degree": 0,
+                "active_request_links": active_links.get(memory_id, 0),
+                "distinct_readers_90d": readers.get(memory_id, 0),
+            }
+            for memory_id in memory_ids
+        }
+
+    def _classify_shadow_divergence(
+        self,
+        *,
+        shadow_action: str,
+        lifecycle_stage: str | None,
+    ) -> str:
+        """Classify agreement/divergence tag versus current vitality lifecycle stage."""
+        stage = str(lifecycle_stage or "active")
+        vitality_archives = stage in {"consolidating", "archived"}
+        shadow_forgets = shadow_action == "forgetting_candidate"
+
+        if not vitality_archives and shadow_forgets:
+            return "gcp-forgets-vitality-keeps"
+        if vitality_archives and shadow_action in {"keep", "protected_hub"}:
+            return "gcp-protects-vitality-archives"
+        return "agree"
+
+    def _emit_shadow_forget_metrics(
+        self,
+        *,
+        strategy: str,
+        comparison: dict[str, Any],
+        duration_seconds: float,
+    ) -> None:
+        """Emit shadow comparison metrics through OTEL."""
+        metric_values = comparison.get("metrics", {})
+        attrs = {"strategy": strategy, "window_hours": str(comparison.get("window_hours", 168))}
+        metrics.shadow_forget_top_k_agreement.record(
+            float(metric_values.get("top_k_agreement", 0.0)),
+            attrs,
+        )
+        metrics.shadow_forget_orphan_reclaim.record(
+            float(metric_values.get("orphan_reclaim_rate", 0.0)),
+            attrs,
+        )
+        metrics.shadow_forget_load_bearing_protection.record(
+            float(metric_values.get("load_bearing_protection_rate", 0.0)),
+            attrs,
+        )
+        metrics.shadow_forget_ldr_edges_at_risk.record(
+            float(metric_values.get("ldr_edges_at_risk_sum", 0.0)),
+            attrs,
+        )
+        metrics.shadow_forget_compute_overhead.record(max(0.0, duration_seconds), attrs)
+
+    async def get_lifecycle_stats(
+        self,
+        organization_id: UUID | None = None,
+    ) -> dict[str, Any]:
+        """Return lifecycle distribution and vitality histogram for observability."""
+        params: list[Any] = []
+        org_filter = ""
+        if organization_id:
+            org_filter = "AND organization_id = $1"
+            params.append(str(organization_id))
+
+        async with self.pool.acquire() as conn:
+            stage_rows = await conn.fetch(
+                f"""
+                SELECT lifecycle_stage, COUNT(*) AS count
+                FROM memories
+                WHERE deleted_at IS NULL {org_filter}
+                GROUP BY lifecycle_stage
+                """,
+                *params,
+            )
+            histogram_rows = await conn.fetch(
+                f"""
+                SELECT
+                    CASE
+                        WHEN vitality_score IS NULL THEN 'unscored'
+                        WHEN vitality_score < 0.1 THEN '0.0-0.1'
+                        WHEN vitality_score < 0.2 THEN '0.1-0.2'
+                        WHEN vitality_score < 0.3 THEN '0.2-0.3'
+                        WHEN vitality_score < 0.4 THEN '0.3-0.4'
+                        WHEN vitality_score < 0.5 THEN '0.4-0.5'
+                        WHEN vitality_score < 0.6 THEN '0.5-0.6'
+                        WHEN vitality_score < 0.7 THEN '0.6-0.7'
+                        WHEN vitality_score < 0.8 THEN '0.7-0.8'
+                        WHEN vitality_score < 0.9 THEN '0.8-0.9'
+                        ELSE '0.9-1.0'
+                    END AS bucket,
+                    COUNT(*) AS count
+                FROM memories
+                WHERE deleted_at IS NULL {org_filter}
+                GROUP BY bucket
+                """,
+                *params,
+            )
+            total_count_row = await conn.fetchrow(
+                f"""
+                SELECT COUNT(*) AS total
+                FROM memories
+                WHERE deleted_at IS NULL {org_filter}
+                """,
+                *params,
+            )
+
+        default_stages = {
+            "active": 0,
+            "consolidating": 0,
+            "archived": 0,
+            "forgotten": 0,
+        }
+        stage_distribution = {
+            row["lifecycle_stage"] or "active": row["count"] for row in stage_rows
+        }
+        stage_distribution = {**default_stages, **stage_distribution}
+
+        default_histogram = {
+            "unscored": 0,
+            "0.0-0.1": 0,
+            "0.1-0.2": 0,
+            "0.2-0.3": 0,
+            "0.3-0.4": 0,
+            "0.4-0.5": 0,
+            "0.5-0.6": 0,
+            "0.6-0.7": 0,
+            "0.7-0.8": 0,
+            "0.8-0.9": 0,
+            "0.9-1.0": 0,
+        }
+        vitality_histogram = {row["bucket"]: row["count"] for row in histogram_rows}
+        vitality_histogram = {**default_histogram, **vitality_histogram}
+
+        return {
+            "stage_distribution": stage_distribution,
+            "vitality_histogram": vitality_histogram,
+            "total_memories": total_count_row["total"] if total_count_row else 0,
+        }
+
+    async def insert_shadow_score(
+        self,
+        *,
+        memory_id: UUID,
+        strategy: str,
+        signals: dict[str, Any],
+        score: float | None = None,
+        shadow_action: str | None = None,
+        computed_at: datetime | None = None,
+        divergence_tag: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Insert a single shadow score sidecar row (feature-flag gated)."""
+        if not shadow_forget_enabled():
+            return None
+
+        effective_computed_at = self._utc(computed_at) if computed_at else datetime.now(UTC)
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f"""
+                INSERT INTO memory_shadow_scores (
+                    memory_id, strategy, score, shadow_action, signals, computed_at, divergence_tag
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                RETURNING {self._SHADOW_SCORE_COLUMNS}
+                """,
+                str(memory_id),
+                strategy,
+                score,
+                shadow_action,
+                signals,
+                effective_computed_at,
+                divergence_tag,
+            )
+
+        if row is None:
+            return None
+        return self._shadow_row_to_dict(row)
+
+    async def upsert_shadow_score(
+        self,
+        *,
+        memory_id: UUID,
+        strategy: str,
+        signals: dict[str, Any],
+        score: float | None = None,
+        shadow_action: str | None = None,
+        computed_at: datetime | None = None,
+        divergence_tag: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Upsert a shadow score sidecar row keyed by (memory_id, strategy, computed_at)."""
+        if not shadow_forget_enabled():
+            return None
+
+        effective_computed_at = self._utc(computed_at) if computed_at else datetime.now(UTC)
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f"""
+                INSERT INTO memory_shadow_scores (
+                    memory_id, strategy, score, shadow_action, signals, computed_at, divergence_tag
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                ON CONFLICT (memory_id, strategy, computed_at)
+                DO UPDATE SET
+                    score = EXCLUDED.score,
+                    shadow_action = EXCLUDED.shadow_action,
+                    signals = EXCLUDED.signals,
+                    divergence_tag = EXCLUDED.divergence_tag
+                RETURNING {self._SHADOW_SCORE_COLUMNS}
+                """,
+                str(memory_id),
+                strategy,
+                score,
+                shadow_action,
+                signals,
+                effective_computed_at,
+                divergence_tag,
+            )
+
+        if row is None:
+            return None
+        return self._shadow_row_to_dict(row)
+
+    async def get_latest_shadow_score(
+        self,
+        *,
+        memory_id: UUID,
+        strategy: str,
+    ) -> dict[str, Any] | None:
+        """Fetch latest sidecar row for a memory+strategy (feature-flag gated)."""
+        if not shadow_forget_enabled():
+            return None
+
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f"""
+                SELECT {self._SHADOW_SCORE_COLUMNS}
+                FROM memory_shadow_scores
+                WHERE memory_id = $1
+                  AND strategy = $2
+                ORDER BY computed_at DESC
+                LIMIT 1
+                """,
+                str(memory_id),
+                strategy,
+            )
+        if row is None:
+            return None
+        return self._shadow_row_to_dict(row)
+
     async def _validate_related_ids(
         self,
         related_ids: list[UUID],
@@ -1227,6 +2366,7 @@ class MemoryRepository:
             "tags": row["tags"],
             "importance": row["importance"],
             "related_memory_ids": related_ids,
+            "metadata": row["metadata"] if "metadata" in row.keys() else {},
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
             "similarity_score": row["sim_score"],
@@ -1234,6 +2374,10 @@ class MemoryRepository:
             "organization_id": org_id,
             "shared": row["shared"],
             "last_accessed_at": row["last_accessed_at"],
+            "lifecycle_stage": (
+                row["lifecycle_stage"] if "lifecycle_stage" in row.keys() else "active"
+            ),
+            "vitality_score": row["vitality_score"] if "vitality_score" in row.keys() else None,
         }
 
     def _row_to_dict(self, row: asyncpg.Record) -> dict[str, Any]:
@@ -1284,4 +2428,103 @@ class MemoryRepository:
             "shared": shared,
             "last_accessed_at": last_accessed_at,
             "version": row["version"] if "version" in row.keys() else 1,
+            "lifecycle_stage": (
+                row["lifecycle_stage"] if "lifecycle_stage" in row.keys() else "active"
+            ),
+            "vitality_score": row["vitality_score"] if "vitality_score" in row.keys() else None,
+            "vitality_computed_at": (
+                row["vitality_computed_at"] if "vitality_computed_at" in row.keys() else None
+            ),
         }
+
+    def _shadow_row_to_dict(self, row: asyncpg.Record) -> dict[str, Any]:
+        memory_id = (
+            row["memory_id"]
+            if isinstance(row["memory_id"], UUID)
+            else UUID(row["memory_id"])
+        )
+        model = MemoryShadowScoreModel(
+            memory_id=memory_id,
+            strategy=row["strategy"],
+            score=row["score"],
+            shadow_action=row["shadow_action"],
+            signals=row["signals"] or {},
+            computed_at=row["computed_at"],
+            divergence_tag=row["divergence_tag"],
+        )
+        return asdict(model)
+
+    async def _get_access_counts_last_n_days(
+        self,
+        memory_ids: list[UUID],
+        *,
+        days: int,
+        now: datetime,
+    ) -> dict[UUID, int]:
+        if not memory_ids:
+            return {}
+
+        cutoff = now - timedelta(days=days)
+        placeholders = ", ".join(f"${i + 1}" for i in range(len(memory_ids)))
+        cutoff_param = len(memory_ids) + 1
+        query = f"""
+            SELECT memory_id, COUNT(*) AS access_count
+            FROM memory_access_log
+            WHERE memory_id IN ({placeholders})
+              AND accessed_at >= ${cutoff_param}
+            GROUP BY memory_id
+        """
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(query, *[str(mid) for mid in memory_ids], cutoff)
+
+        counts: dict[UUID, int] = {memory_id: 0 for memory_id in memory_ids}
+        for row in rows:
+            memory_id = (
+                row["memory_id"] if isinstance(row["memory_id"], UUID) else UUID(row["memory_id"])
+            )
+            counts[memory_id] = row["access_count"]
+        return counts
+
+    @staticmethod
+    def _compute_p75_baseline(*, counts: list[int], default: int) -> int:
+        non_negative = sorted(max(0, c) for c in counts)
+        if not non_negative:
+            return max(1, default)
+
+        rank = max(1, ceil(0.75 * len(non_negative)))
+        p75 = non_negative[rank - 1]
+        return max(1, p75 if p75 > 0 else default)
+
+    @staticmethod
+    def _map_action_to_lifecycle_stage(action: str) -> str:
+        if action == "archive-candidate":
+            return "archived"
+        if action == "suggest-cleanup":
+            return "consolidating"
+        return "active"
+
+    @classmethod
+    def _resolve_goal_lifecycle_stage(
+        cls,
+        memory_type: str,
+        metadata: dict[str, Any] | None,
+    ) -> str | None:
+        """Return the lifecycle_stage implied by a goal's metadata.status.
+
+        Returns None when no sync is needed (non-goal type, no metadata,
+        no status key, or status not in the mapping).
+        """
+        if memory_type != "goal" or not metadata:
+            return None
+        status = metadata.get("status")
+        if not isinstance(status, str):
+            return None
+        return cls._GOAL_STATUS_TO_LIFECYCLE.get(status.lower().strip())
+
+    @staticmethod
+    def _utc(value: datetime | None) -> datetime:
+        if value is None:
+            return datetime.now(UTC)
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)

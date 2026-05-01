@@ -35,6 +35,19 @@ class SessionEvent:
     raw: Any = None  # Original event object from the backend
 
 
+class ModelNotAvailableError(Exception):
+    """Raised when the requested model is not available in the runtime.
+
+    This replaces the silent None return that previously hid JSON-RPC -32603
+    errors ("Model X is not available") behind generic "no output" failures.
+    """
+
+    def __init__(self, model: str, original_error: Exception | None = None):
+        self.model = model
+        self.original_error = original_error
+        super().__init__(f"Model '{model}' is not available in the runtime")
+
+
 class LLMEngine(ABC):
     """Abstract base class for LLM backends.
 
@@ -56,7 +69,7 @@ class LLMEngine(ABC):
         This is used by the chat endpoint (send_and_wait pattern).
 
         Args:
-            model: Model identifier (e.g. "claude-opus-4.6").
+            model: Enabled model identifier from the model registry.
             system_message: System prompt text.
             prompt: User prompt text.
             mcp_config: MCP server configuration dict for tool access.

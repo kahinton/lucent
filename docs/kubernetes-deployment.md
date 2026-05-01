@@ -101,7 +101,7 @@ All parameters are set via `--set` flags or `values.yaml` overrides. The chart s
 |---|---|---|---|
 | `server.replicaCount` | int | `1` | Number of lucent-server pods |
 | `server.image.repository` | string | `lucent` | Container image repository |
-| `server.image.tag` | string | `0.2.0` | Container image tag |
+| `server.image.tag` | string | `0.4.0` | Container image tag |
 | `server.image.pullPolicy` | string | `IfNotPresent` | Image pull policy |
 | `server.service.type` | string | `ClusterIP` | Kubernetes service type |
 | `server.service.port` | int | `8766` | Service port |
@@ -162,7 +162,7 @@ All parameters are set via `--set` flags or `values.yaml` overrides. The chart s
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `llm.engine` | string | `copilot` | LLM backend: `copilot` or `langchain` |
-| `llm.daemonModel` | string | `claude-opus-4.6` | Model for daemon cognitive loop |
+| `llm.daemonModel` | string | `""` | Optional model override for daemon cognitive loop |
 | `llm.providers.anthropic.secretRef` | string | `""` | Secret containing `ANTHROPIC_API_KEY` |
 | `llm.providers.openai.secretRef` | string | `""` | Secret containing `OPENAI_API_KEY` |
 | `llm.providers.google.secretRef` | string | `""` | Secret containing `GOOGLE_API_KEY` |
@@ -229,7 +229,7 @@ All parameters are set via `--set` flags or `values.yaml` overrides. The chart s
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `daemon.enabled` | bool | `true` | Enable the autonomous daemon process |
-| `daemon.model` | string | `claude-opus-4.6` | Model for daemon cognitive loop |
+| `daemon.model` | string | `""` | Optional model override for daemon cognitive loop |
 | `daemon.maxConcurrentSessions` | int | `3` | Max parallel sub-agent sessions |
 | `daemon.env.LUCENT_DAEMON_INTERVAL` | string | `15` | Minutes between cognitive cycles |
 | `daemon.env.LUCENT_STALE_HEARTBEAT_MINUTES` | string | `30` | Minutes before a claimed task is considered stale |
@@ -351,7 +351,7 @@ GPU nodes are required for performant inference.
 ```bash
 REGISTRY=registry.internal.example.com
 
-for IMAGE in lucent:0.2.0 postgres:16-alpine openbao/openbao:2.1.0 ollama/ollama:latest; do
+for IMAGE in lucent:0.4.0 postgres:16-alpine openbao/openbao:2.1.0 ollama/ollama:latest; do
   docker pull $IMAGE
   docker tag $IMAGE $REGISTRY/$IMAGE
   docker push $REGISTRY/$IMAGE
@@ -608,7 +608,7 @@ To run migrations manually (e.g., before a zero-downtime canary):
 
 ```bash
 kubectl -n lucent run lucent-migrate --rm -i --restart=Never \
-  --image=lucent:0.3.0 \
+  --image=lucent:0.4.0 \
   --env="DATABASE_URL=$(kubectl -n lucent get secret lucent-db-credentials -o jsonpath='{.data.DATABASE_URL}' | base64 -d)" \
   -- python -m lucent.migrate
 ```

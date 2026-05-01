@@ -785,3 +785,90 @@ async def update_mcp_tools_web(request: Request, agent_id: str, server_id: str):
         org_id=str(user.organization_id), user_id=str(user.id),
     )
     return RedirectResponse(url=f"/definitions/agents/{agent_id}", status_code=303)
+
+
+# ── Import endpoints (session-authenticated for web UI) ──────────────────
+
+
+@router.post("/definitions/import/preview")
+async def import_preview_web(request: Request):
+    """Preview an import — session-authenticated endpoint for the web UI."""
+    user = await get_user_context(request)
+    body = await request.json()
+
+    from lucent.services.definition_import import ImportSourceType, import_definition
+
+    result = await import_definition(
+        source_type=ImportSourceType(body.get("source_type", "raw")),
+        source=body.get("source", ""),
+        definition_type_hint=body.get("definition_type"),
+    )
+    return JSONResponse(result.to_dict())
+
+
+@router.post("/definitions/import/commit")
+async def import_commit_web(request: Request):
+    """Import a definition — session-authenticated endpoint for the web UI."""
+    user = await get_user_context(request)
+    body = await request.json()
+
+    from lucent.db.audit import AuditRepository
+    from lucent.db.definitions import DefinitionRepository
+    from lucent.services.definition_import import (
+        DefinitionType,
+        ImportSourceType,
+        import_definition,
+    )
+
+    result = await import_definition(
+        source_type=ImportSourceType(body.get("source_type", "raw")),
+        source=body.get("source", ""),
+        definition_type_hint=body.get("definition_type"),
+    )
+
+    if not result.success:
+        return JSONResponse({"status": "error", "error": result.error}, status_code=400)
+
+    if result.has_critical_findings:
+        return JSONResponse({
+            "status": "blocked",
+            "reason": "Critical security findings detected.",
+            **result.to_dict(),
+        })
+
+    pool = await get_pool()
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+
+    created = None
+    if result.definition_type == DefinitionType.AGENT:
+        created = await repo.create_agent(
+            name=result.name,
+            description=result.description,
+            content=result.content,
+            org_id=str(user.organization_id),
+            created_by=str(user.id),
+        )
+        if result.skill_names:
+            created["suggested_skills"] = result.skill_names
+    elif result.definition_type == DefinitionType.SKILL:
+        created = await repo.create_skill(
+            name=result.name,
+            description=result.description,
+            content=result.content,
+            org_id=str(user.organization_id),
+            created_by=str(user.id),
+        )
+
+    if not created:
+        return JSONResponse({"status": "error", "error": "Failed to create definition"}, status_code=500)
+
+    return JSONResponse({
+        "status": "imported",
+        "definition": {k: str(v) if hasattr(v, 'hex') else v for k, v in created.items()},
+        "security_findings": [
+            {"severity": f.severity.value, "category": f.category, "detail": f.detail}
+            for f in result.security_findings
+        ],
+        "source_url": result.source_url,
+        "content_hash": result.content_hash,
+    })

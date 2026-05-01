@@ -166,7 +166,6 @@ src/lucent/
 |------|---------|--------------|
 | **experience** | Store interactions and their outcomes | context, outcome, lessons_learned |
 | **technical** | Code patterns, solutions, technical knowledge | language, code_snippet, repo, filename |
-| **procedural** | Step-by-step processes and workflows | steps, prerequisites, estimated_time |
 | **goal** | Track long-term objectives | status, deadline, milestones, blockers |
 | **individual** | Information about people | name, relationship, organization, preferences |
 
@@ -286,7 +285,7 @@ Every memory update is versioned. Use `get_memory_versions` to browse history an
 
 ```
 Arguments:
-- type (required): experience | technical | procedural | goal
+- type (required): experience | technical | goal
 - content (required): Main content of the memory
 - username: Owner username (defaults to authenticated user)
 - tags: List of categorization tags

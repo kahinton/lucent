@@ -931,7 +931,7 @@ class TestRouterHelpers:
 
         with (
             patch.dict("os.environ", {}, clear=True),
-            patch("lucent.integrations.router.FernetEncryptor", side_effect=Exception("no key")),
+            patch("lucent.integrations.router.BackendCredentialEncryptor", side_effect=Exception("no key")),
         ):
             with pytest.raises(Exception):
                 _get_encryptor()

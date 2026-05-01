@@ -137,21 +137,21 @@ def _csrf_data(client: httpx.AsyncClient, extra: dict | None = None) -> dict:
 
 
 # ============================================================================
-# GET /groups — list
+# GET /settings/groups — list
 # ============================================================================
 
 
 @pytest.mark.asyncio
 async def test_groups_list_renders(client):
-    """GET /groups returns 200 with HTML (available in all modes)."""
-    resp = await client.get("/groups")
+    """GET /settings/groups returns 200 with HTML."""
+    resp = await client.get("/settings/groups")
     assert resp.status_code == 200
     assert "text/html" in resp.headers["content-type"]
     assert "Groups" in resp.text
 
 
 # ============================================================================
-# POST /groups/create
+# POST /settings/groups/create
 # ============================================================================
 
 
@@ -159,19 +159,19 @@ async def test_groups_list_renders(client):
 async def test_create_group_as_owner(client, web_prefix):
     """Owner can create a group; expect 303 redirect."""
     resp = await client.post(
-        "/groups/create",
+        "/settings/groups/create",
         data=_csrf_data(client, {"name": f"{web_prefix}testgroup", "description": "A test group"}),
         follow_redirects=False,
     )
     assert resp.status_code == 303
-    assert "/groups/" in resp.headers["location"]
+    assert "/settings/groups/" in resp.headers["location"]
 
 
 @pytest.mark.asyncio
 async def test_create_group_as_member_returns_403(member_client, web_prefix):
     """Members cannot create groups; expect 403."""
     resp = await member_client.post(
-        "/groups/create",
+        "/settings/groups/create",
         data=_csrf_data(member_client, {"name": f"{web_prefix}sneaky"}),
         follow_redirects=False,
     )
@@ -179,7 +179,7 @@ async def test_create_group_as_member_returns_403(member_client, web_prefix):
 
 
 # ============================================================================
-# GET /groups/{group_id} — detail
+# GET /settings/groups/{group_id} — detail
 # ============================================================================
 
 
@@ -192,7 +192,7 @@ async def test_group_detail_renders(client, db_pool, owner_user, web_prefix):
         name=f"{web_prefix}detail_test",
         org_id=str(org["id"]),
     )
-    resp = await client.get(f"/groups/{group['id']}")
+    resp = await client.get(f"/settings/groups/{group['id']}")
     assert resp.status_code == 200
     assert group["name"] in resp.text
 
@@ -200,12 +200,12 @@ async def test_group_detail_renders(client, db_pool, owner_user, web_prefix):
 @pytest.mark.asyncio
 async def test_group_detail_not_found(client):
     """GET /groups/{nonexistent} returns 404."""
-    resp = await client.get(f"/groups/{uuid4()}")
+    resp = await client.get(f"/settings/groups/{uuid4()}")
     assert resp.status_code == 404
 
 
 # ============================================================================
-# POST /groups/{group_id}/edit
+# POST /settings/groups/{group_id}/edit
 # ============================================================================
 
 
@@ -219,16 +219,16 @@ async def test_edit_group(client, db_pool, owner_user, web_prefix):
         org_id=str(org["id"]),
     )
     resp = await client.post(
-        f"/groups/{group['id']}/edit",
+        f"/settings/groups/{group['id']}/edit",
         data=_csrf_data(client, {"name": f"{web_prefix}edited", "description": "Updated"}),
         follow_redirects=False,
     )
     assert resp.status_code == 303
-    assert f"/groups/{group['id']}" in resp.headers["location"]
+    assert f"/settings/groups/{group['id']}" in resp.headers["location"]
 
 
 # ============================================================================
-# POST /groups/{group_id}/delete
+# POST /settings/groups/{group_id}/delete
 # ============================================================================
 
 
@@ -242,12 +242,12 @@ async def test_delete_group(client, db_pool, owner_user, web_prefix):
         org_id=str(org["id"]),
     )
     resp = await client.post(
-        f"/groups/{group['id']}/delete",
+        f"/settings/groups/{group['id']}/delete",
         data=_csrf_data(client),
         follow_redirects=False,
     )
     assert resp.status_code == 303
-    assert "/groups" in resp.headers["location"]
+    assert "/settings/groups" in resp.headers["location"]
 
 
 @pytest.mark.asyncio
@@ -262,7 +262,7 @@ async def test_delete_group_as_member_returns_403(
         org_id=str(org["id"]),
     )
     resp = await member_client.post(
-        f"/groups/{group['id']}/delete",
+        f"/settings/groups/{group['id']}/delete",
         data=_csrf_data(member_client),
         follow_redirects=False,
     )
@@ -270,7 +270,7 @@ async def test_delete_group_as_member_returns_403(
 
 
 # ============================================================================
-# POST /groups/{group_id}/members/add
+# POST /settings/groups/{group_id}/members/add
 # ============================================================================
 
 
@@ -285,12 +285,12 @@ async def test_add_member(client, db_pool, owner_user, member_user, web_prefix):
         org_id=str(org["id"]),
     )
     resp = await client.post(
-        f"/groups/{group['id']}/members/add",
+        f"/settings/groups/{group['id']}/members/add",
         data=_csrf_data(client, {"user_id": str(target["id"]), "role": "member"}),
         follow_redirects=False,
     )
     assert resp.status_code == 303
-    assert f"/groups/{group['id']}" in resp.headers["location"]
+    assert f"/settings/groups/{group['id']}" in resp.headers["location"]
 
     # Verify member was added
     members = await repo.list_members(str(group["id"]), str(org["id"]))
@@ -298,7 +298,7 @@ async def test_add_member(client, db_pool, owner_user, member_user, web_prefix):
 
 
 # ============================================================================
-# POST /groups/{group_id}/members/{member_id}/remove
+# POST /settings/groups/{group_id}/members/{member_id}/remove
 # ============================================================================
 
 
@@ -315,7 +315,7 @@ async def test_remove_member(client, db_pool, owner_user, member_user, web_prefi
     await repo.add_member(str(group["id"]), str(target["id"]))
 
     resp = await client.post(
-        f"/groups/{group['id']}/members/{target['id']}/remove",
+        f"/settings/groups/{group['id']}/members/{target['id']}/remove",
         data=_csrf_data(client),
         follow_redirects=False,
     )

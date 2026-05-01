@@ -160,6 +160,19 @@ class TestAgentCRUD:
         assert data["status"] == "proposed"
         assert data["scope"] == "instance"
 
+    async def test_create_agent_rejects_active_or_builtin_bypass(self, client, def_prefix):
+        resp = await client.post(
+            "/api/definitions/agents",
+            json={
+                "name": f"{def_prefix}bypass_agent",
+                "description": "Should not bypass approval",
+                "content": "# Bypass",
+                "status": "active",
+                "scope": "built-in",
+            },
+        )
+        assert resp.status_code == 403
+
     async def test_list_agents(self, client, def_prefix):
         # Create two agents
         for name in ["alpha", "beta"]:
@@ -368,6 +381,19 @@ class TestSkillCRUD:
         assert data["name"] == f"{def_prefix}memory-init"
         assert data["status"] == "proposed"
 
+    async def test_create_skill_rejects_active_or_builtin_bypass(self, client, def_prefix):
+        resp = await client.post(
+            "/api/definitions/skills",
+            json={
+                "name": f"{def_prefix}bypass_skill",
+                "description": "Should not bypass approval",
+                "content": "# Bypass Skill",
+                "status": "active",
+                "scope": "built-in",
+            },
+        )
+        assert resp.status_code == 403
+
     async def test_list_skills(self, client, def_prefix):
         await client.post(
             "/api/definitions/skills",
@@ -546,7 +572,10 @@ class TestMCPServerCRUD:
         async def fake_get_discovered_tools(self, server_id_arg, org_id_arg):
             return {"discovered_tools": [], "tools_discovered_at": datetime.now(timezone.utc)}
 
-        monkeypatch.setattr("lucent.api.routers.definitions.get_tools_cached", fake_get_tools_cached)
+        monkeypatch.setattr(
+            "lucent.api.routers.definitions.get_tools_cached",
+            fake_get_tools_cached,
+        )
         monkeypatch.setattr(
             "lucent.api.routers.definitions.DefinitionRepository.get_discovered_tools",
             fake_get_discovered_tools,
@@ -572,6 +601,10 @@ class TestMCPServerCRUD:
             },
         )
         server_id = create_resp.json()["id"]
+        approve_resp = await client.post(
+            f"/api/definitions/mcp-servers/{server_id}/approve"
+        )
+        assert approve_resp.status_code == 200
 
         async def fake_discover_mcp_tools(server_config, db_pool):
             assert str(server_config["id"]) == str(server_id)
@@ -580,7 +613,10 @@ class TestMCPServerCRUD:
         async def fake_get_discovered_tools(self, server_id_arg, org_id_arg):
             return {"discovered_tools": [], "tools_discovered_at": datetime.now(timezone.utc)}
 
-        monkeypatch.setattr("lucent.api.routers.definitions.discover_mcp_tools", fake_discover_mcp_tools)
+        monkeypatch.setattr(
+            "lucent.api.routers.definitions.discover_mcp_tools",
+            fake_discover_mcp_tools,
+        )
         monkeypatch.setattr(
             "lucent.api.routers.definitions.DefinitionRepository.get_discovered_tools",
             fake_get_discovered_tools,
@@ -611,7 +647,10 @@ class TestMCPServerCRUD:
         async def fake_get_tools_cached(server_id_arg, org_id_arg, db_pool, max_age_seconds=60):
             raise MCPDiscoveryError("boom")
 
-        monkeypatch.setattr("lucent.api.routers.definitions.get_tools_cached", fake_get_tools_cached)
+        monkeypatch.setattr(
+            "lucent.api.routers.definitions.get_tools_cached",
+            fake_get_tools_cached,
+        )
 
         resp = await client.get(f"/api/definitions/mcp-servers/{server_id}/tools")
         assert resp.status_code == 200

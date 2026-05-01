@@ -6,7 +6,8 @@ from uuid import UUID
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from lucent.db import GroupRepository, UserRepository, get_pool
+from lucent.db import AdminAuditRepository, GroupRepository, UserRepository, get_pool
+from lucent.db import admin_audit as audit_actions
 
 from ._shared import _check_csrf, get_user_context, templates
 
@@ -124,13 +125,22 @@ async def create_group(
             org_id=str(user.organization_id),
             created_by=str(user.id),
         )
+        audit_repo = AdminAuditRepository(pool)
+        await audit_repo.log_for_user(
+            user, request,
+            action=audit_actions.GROUP_CREATE,
+            entity_type="group",
+            entity_id=group["id"],
+            entity_label=group["name"],
+            new_values={"name": group["name"], "description": description.strip()},
+        )
         return RedirectResponse(
-            f"/groups/{group['id']}?success=Group+created", status_code=303
+            f"/settings/groups/{group['id']}?success=Group+created", status_code=303
         )
     except Exception as exc:
         if "unique" in str(exc).lower() or exc.__class__.__name__ == "UniqueViolationError":
             return RedirectResponse(
-                f"/groups?error={quote('A group with this name already exists.')}",
+                f"/settings/groups?error={quote('A group with this name already exists.')}",
                 status_code=303,
             )
         raise
@@ -168,12 +178,12 @@ async def edit_group(
             str(group_id), org_id, name=name.strip(), description=description.strip()
         )
         return RedirectResponse(
-            f"/groups/{group_id}?success=Group+updated", status_code=303
+            f"/settings/groups/{group_id}?success=Group+updated", status_code=303
         )
     except Exception as exc:
         if "unique" in str(exc).lower() or exc.__class__.__name__ == "UniqueViolationError":
             return RedirectResponse(
-                f"/groups/{group_id}?error={quote('A group with this name already exists.')}",
+                f"/settings/groups/{group_id}?error={quote('A group with this name already exists.')}",
                 status_code=303,
             )
         raise
@@ -197,10 +207,20 @@ async def delete_group(request: Request, group_id: UUID):
     repo = GroupRepository(pool)
     org_id = str(user.organization_id)
 
+    existing = await repo.get_group(str(group_id), org_id)
     if not await repo.delete_group(str(group_id), org_id):
         raise HTTPException(status_code=404, detail="Group not found")
 
-    return RedirectResponse("/groups?success=Group+deleted", status_code=303)
+    audit_repo = AdminAuditRepository(pool)
+    await audit_repo.log_for_user(
+        user, request,
+        action=audit_actions.GROUP_DELETE,
+        entity_type="group",
+        entity_id=group_id,
+        entity_label=(existing or {}).get("name"),
+    )
+
+    return RedirectResponse("/settings/groups?success=Group+deleted", status_code=303)
 
 
 # =============================================================================
@@ -239,18 +259,27 @@ async def add_member(
         target_user = await user_repo.get_by_id(UUID(user_id.strip()))
         if not target_user or target_user.get("organization_id") != user.organization_id:
             return RedirectResponse(
-                f"/groups/{group_id}?error={quote('User not found in this organization.')}",
+                f"/settings/groups/{group_id}?error={quote('User not found in this organization.')}",
                 status_code=303,
             )
 
         await repo.add_member(str(group_id), user_id.strip(), role=role)
+        audit_repo = AdminAuditRepository(pool)
+        await audit_repo.log_for_user(
+            user, request,
+            action=audit_actions.GROUP_MEMBER_ADD,
+            entity_type="group",
+            entity_id=group_id,
+            entity_label=group.get("name"),
+            new_values={"member_user_id": user_id.strip(), "role": role},
+        )
         return RedirectResponse(
-            f"/groups/{group_id}?success=Member+added", status_code=303
+            f"/settings/groups/{group_id}?success=Member+added", status_code=303
         )
     except Exception as exc:
         if "unique" in str(exc).lower() or exc.__class__.__name__ == "UniqueViolationError":
             return RedirectResponse(
-                f"/groups/{group_id}?error={quote('User is already a member of this group.')}",
+                f"/settings/groups/{group_id}?error={quote('User is already a member of this group.')}",
                 status_code=303,
             )
         raise
@@ -280,9 +309,19 @@ async def remove_member(request: Request, group_id: UUID, member_id: UUID):
 
     if not await repo.remove_member(str(group_id), str(member_id)):
         return RedirectResponse(
-            f"/groups/{group_id}?error={quote('Member not found.')}", status_code=303
+            f"/settings/groups/{group_id}?error={quote('Member not found.')}", status_code=303
         )
 
+    audit_repo = AdminAuditRepository(pool)
+    await audit_repo.log_for_user(
+        user, request,
+        action=audit_actions.GROUP_MEMBER_REMOVE,
+        entity_type="group",
+        entity_id=group_id,
+        entity_label=group.get("name"),
+        old_values={"member_user_id": str(member_id)},
+    )
+
     return RedirectResponse(
-        f"/groups/{group_id}?success=Member+removed", status_code=303
+        f"/settings/groups/{group_id}?success=Member+removed", status_code=303
     )

@@ -107,6 +107,7 @@ Key variables for Docker Compose:
 | `LUCENT_MODE` | `personal` | `personal` or `team` |
 | `LUCENT_SECRET_PROVIDER` | `auto` | Secret backend: `auto`, `builtin`, `transit`, `vault` |
 | `LUCENT_SECRET_KEY` | `lucent-dev-secret-key-change-in-production` | Fernet key (only needed for `builtin` provider) |
+| `DAEMON_DB_PASSWORD` | `change-me-insecure-daemon-password` | Restricted daemon DB role password |
 | `VAULT_TOKEN` | `change-me-insecure-dev-root-token` | OpenBao/Vault token |
 
 ## PostgreSQL Setup
@@ -118,12 +119,15 @@ Key variables for Docker Compose:
 
 ### Using Docker Compose (Recommended)
 
-The included PostgreSQL container auto-installs required extensions via `docker/init.sql`:
+The included PostgreSQL container auto-installs required extensions and creates the
+restricted daemon role via `docker/postgres-init.sh`:
 
 ```sql
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS "pg_trgm";
 ALTER DATABASE lucent SET pg_trgm.similarity_threshold = 0.3;
+CREATE ROLE lucent_daemon WITH LOGIN;
+ALTER ROLE lucent_daemon WITH PASSWORD '<from DAEMON_DB_PASSWORD>';
 ```
 
 ### Using an External Database
@@ -134,6 +138,7 @@ If you bring your own PostgreSQL instance:
 
 ```sql
 CREATE USER lucent WITH PASSWORD 'your_secure_password';
+CREATE USER lucent_daemon WITH PASSWORD 'your_daemon_role_password';
 CREATE DATABASE lucent OWNER lucent;
 ```
 
@@ -150,6 +155,7 @@ ALTER DATABASE lucent SET pg_trgm.similarity_threshold = 0.3;
 
 ```bash
 export DATABASE_URL=postgresql://lucent:your_secure_password@your-host:5432/lucent
+export DAEMON_DATABASE_URL=postgresql://lucent_daemon:your_daemon_role_password@your-host:5432/lucent
 ```
 
 ### Migrations
@@ -235,7 +241,7 @@ docker run --rm -v lucent_data:/data -v $(pwd):/backup alpine \
 |----------|---------|-------------|
 | `LUCENT_MAX_SESSIONS` | `3` | Max concurrent sub-agent sessions |
 | `LUCENT_DAEMON_INTERVAL` | `15` | Minutes between cognitive cycles |
-| `LUCENT_DAEMON_MODEL` | `claude-opus-4.6` | Default model for daemon sessions |
+| `LUCENT_DAEMON_MODEL` | *(model registry default)* | Optional override for daemon sessions |
 | `LUCENT_DAEMON_ROLES` | `all` | Loops to enable: `cognitive`, `dispatcher`, `scheduler`, `autonomic` (comma-separated) |
 | `LUCENT_MCP_URL` | `http://localhost:8766/mcp` | MCP endpoint URL |
 | `LUCENT_MCP_API_KEY` | — | API key for daemon MCP access |

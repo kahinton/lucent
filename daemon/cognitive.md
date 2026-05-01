@@ -19,7 +19,7 @@ Each cycle: perceive, reason, decide, act.
 - Call `list_pending_requests()` to find requests waiting for task planning (subset of active work with 0 tasks)
 - Call `list_pending_tasks()` to see what's queued for dispatch
 - Search for pending `daemon-task` memories (legacy task format — prefer tracked requests)
-- **Scan active goals** (see Goal Processing below)
+- **Goal processing runs per-user** (see Goal Processing below) — the daemon fans out across all users with active goals, not just the daemon-service user
 - Assess what's changed in your environment
 
 ### Value Check (Required Before Full Reasoning)
@@ -28,7 +28,7 @@ Before entering deep reasoning, classify the cycle:
 - **Productive trigger** (do full cycle):
   - New/updated user request, feedback, or daemon message
   - A blocked high-priority request became unblocked
-  - Active goal has no request, stalled request, or clear next milestone to plan
+  - Active goal (for any user) has no request, stalled request, or clear next milestone to plan
   - A scheduled maintenance action has qualifying input (new memories, unresolved review items, etc.)
 - **Maintenance trigger** (targeted, bounded action):
   - Housekeeping is due **and** there is concrete material to process
@@ -68,7 +68,7 @@ For non-goal work, check `list_active_work()` results before creating requests t
 
 ### Act
 **For tracked work (preferred for significant items), use request tracking tools:**
-- **create_request**: Create a tracked request for significant work items (source: "cognitive"). Pass `goal_id` when the request is for a goal memory.
+- **create_request**: Create a tracked request for significant work items (source: "cognitive"). Pass `goal_id` when the request is for a goal memory. **Every `create_request` you make MUST be followed by one or more `create_task` calls in the same session — never leave a request without tasks. The user's approval review depends on seeing the breakdown.**
 - **create_task**: Break a request into individual tasks with agent_type assignments (validates against approved definitions)
 - **log_task_event**: Record progress during task execution (event_type: "progress", "info", "warning", etc.)
 - **link_task_memory**: Connect memories to tasks for full lineage (relation: "created", "read", "updated")
@@ -83,21 +83,26 @@ This creates a visible trail from initial work item through planning, execution,
 - Update state only when there is a meaningful delta (new decision, status transition, completed action, changed blocker, or new follow-through commitment).
 - If cycle outcome is idle/no-op, prefer a lightweight log/event over duplicative state rewrites.
 
-**Model Assignment (MANDATORY for every `create_task` call)**:
-Every task MUST have an explicit `model` field. Never leave `model=null`.
+**Model Assignment:**
+Before assigning models, call `list_available_models()` to see which models are
+currently enabled and what the default model is. Only assign models from that
+list. Do NOT hardcode model names; the available models change by deployment
+and user configuration.
 
-**Before assigning models, call `list_available_models()` to see which models are currently enabled.** Only assign models from that list. Choose based on task complexity:
-- **Lightweight tasks** (memory ops, simple lookups): pick the fastest/cheapest available model
-- **Standard tasks** (research, documentation, code): pick a capable mid-tier model
-- **Complex tasks** (deep reasoning, reflection, multi-step agentic work): pick the most capable available model
-
-Do NOT hardcode model names. The available models change based on user configuration.
+Default behavior: use the returned `default_model` whenever there is no clear
+reason to pick a specialized model. It is valid to omit the `model` field on
+`create_task`; the daemon will apply the same default-aware selector at
+dispatch time. Set an explicit `model` only when the task has a concrete need:
+- **Lightweight tasks** (memory ops, simple lookups): use a fast/cheap enabled model if one exists.
+- **Specialized complex tasks** (security, architecture, root-cause analysis, large synthesis): use an enabled reasoning model if one exists.
+- **Sustained autonomous coding/refactors**: use an enabled agentic/coding model if one exists.
+- **Standard research, documentation, code, planning, and review:** use the default model.
 
 **For lightweight state management, use memory tools directly:**
-- **Update state**: search for and update `daemon-state` memory (type: "procedural")
+- **Update state**: search for and update `daemon-state` memory
 - **Send messages**: create memory with tags `daemon-message` and urgency level (type: "experience")
 - **Save insights**: create memory with tags `daemon` and `self-improvement` (type: "experience")
-- **Legacy daemon tasks**: type "procedural", tags `daemon-task` + `pending` + agent type (prefer tracked requests instead)
+- **Tracked work**: use requests/tasks; do not create ad-hoc task memories
 
 **Memory quality bar:**
 - Every created memory must capture genuine insight, decision, or non-obvious outcome.
@@ -120,12 +125,37 @@ Output a brief summary of decisions for the log.
 
 ## Goal Processing
 
-**Every cognitive cycle MUST scan for active goal memories.** Goals are the primary driver of new work.
+**Every cognitive cycle MUST process active goal memories.** Goals are the primary driver of new work.
 
-### Procedure
-1. **Search for active goals**: Call `search_memories(type="goal", limit=20)` to find all goal memories.
-2. **Filter to active goals**: Only process goals where `metadata.status == "active"`.
-3. **For each active goal**, create a request with the goal's memory ID attached:
+### Per-User Fan-Out Model
+
+Goal processing runs **per-user**, not as a single daemon-scoped session. This ensures every user's private goals are visible to the planner — the daemon-service user cannot see private (`shared=false`) goals owned by other users, so a single-session scan would miss them.
+
+**How it works:**
+
+1. **Enumerate users with active goals**: The daemon queries for all users who have at least one goal memory with `lifecycle_stage='active'` and `metadata.status='active'`.
+2. **Users with no active goals are skipped** — they receive no fan-out iteration.
+3. **For each qualifying user**, the daemon:
+   a. Mints a short-lived **scoped API key** (`memory_scope='user'`, `memory_scope_user_id=<user_id>`, TTL ≤ 60 min) using `_mint_scoped_api_key()`.
+   b. Dispatches a **sub-planner session** using that scoped key. The session sees ONLY that user's memories — the access boundary is enforced server-side.
+   c. The sub-planner searches for the user's active goals and creates requests for any that don't already have active work.
+4. **Error isolation**: If one user's planning session fails, the loop continues to the next user. Failures are logged but do not block other users.
+5. **Structured logging**: Each user iteration emits a log line with `user_id`, `goals_scanned`, `requests_created`, `errors`, and `duration_ms`.
+
+### Request Attribution and Approval
+
+Requests created during a user-scoped planning session have special properties:
+
+- **`created_by` = the target user's ID** (NOT the daemon-service user). The scoped key resolves the effective user to the scoped user, so all downstream operations are attributed to them.
+- **`approval_status` = `pending_approval`** — user-scoped requests always require user approval. The daemon's auto-approve bypass for system schedules does NOT apply. This means the owning user must approve the request in the UI before tasks are dispatched.
+- **Deduplication still works** — the sub-planner MUST pass `goal_id` when creating requests. The system checks whether the goal already has an active request and returns the existing one instead of creating a duplicate.
+
+### Sub-Planner Procedure
+
+Within each user-scoped session, the sub-planner follows this procedure:
+
+1. **Search for active goals**: Call `search_memories(type="goal", limit=50)` — the scoped key ensures only this user's goals are returned.
+2. **For each unaddressed active goal**, create a request:
 
 ```
 create_request(
@@ -136,11 +166,35 @@ create_request(
 )
 ```
 
-**You MUST pass `goal_id`** — this is how the system prevents duplicate requests. If this goal already has an active request, the existing one is returned. If you forget `goal_id`, the system cannot deduplicate and will create duplicates every cycle.
+3. **You MUST pass `goal_id`** — this is how the system prevents duplicate requests. If this goal already has an active request, the existing one is returned. If you forget `goal_id`, the system cannot deduplicate and will create duplicates every cycle.
 
-4. **When creating tasks for a goal request**, include the goal memory ID in the task description so the agent has context about what goal it's serving. You do NOT need to instruct the task agent to update the goal — the post-completion review task handles that automatically.
+4. **Do NOT create tasks** in the sub-planner session — only create requests. Task planning happens in subsequent cognitive cycles after the user approves the request.
 
-5. **Memory updates happen at review time** — when a request completes, the post-completion review task receives all linked memories and is responsible for updating them (adding progress_notes, completing milestones, or marking goals as done when appropriate). A single request may only complete one milestone of a larger goal — that's fine. Goals are long-term items.
+**Setting `target_repo` and `target_paths` (IMPORTANT for code work)**:
+When a request involves working on a specific codebase, ALWAYS set `target_repo` (in owner/repo format) and optionally `target_paths` (specific directories/files). This causes the daemon to automatically inject relevant technical memories into the working agent's context, so it understands the codebase conventions before writing any code.
+
+```
+create_request(
+    title="Add pagination to the schedules API",
+    description="Add offset/limit pagination to GET /api/schedules.",
+    source="cognitive",
+    goal_id="...",
+    target_repo="octocat/hello-world",
+    target_paths=["src/api/routers/", "src/db/"]
+)
+```
+
+The technical memories for that repo and paths are automatically loaded into task context at dispatch time — you do NOT need to tell the task agent to search for them.
+
+### Post-Creation Lifecycle
+
+5. **When creating tasks for a goal request** (after user approval), include the goal memory ID in the task description so the agent has context about what goal it's serving. You do NOT need to instruct the task agent to update the goal — the post-completion review task handles that automatically.
+
+6. **Memory updates happen at review time** — when a request completes, the post-completion review task receives all linked memories and is responsible for updating them (adding progress_notes, completing milestones, or marking goals as done when appropriate). A single request may only complete one milestone of a larger goal — that's fine. Goals are long-term items.
+
+### Daemon-Service User Compatibility
+
+The daemon-service user is just another user in the fan-out loop. If the daemon-service user owns active goals (e.g. system maintenance goals), it receives its own planning iteration like any other user. This preserves backward compatibility — org-wide planning for daemon-owned goals continues to work as before.
 
 ### Goal Follow-Through Rules (Depth Over Breadth)
 - Prefer advancing existing active goals before introducing new parallel initiatives.
@@ -151,14 +205,15 @@ create_request(
 
 ### Quick-Check Goal Handling During Idle Streaks
 When in idle back-off mode, still do a lightweight goal check:
-- Confirm no active goal is currently unplanned
+- Confirm no active goal is currently unplanned (across all users)
 - Confirm no active goal request transitioned to failed/stalled since last check
 - If either condition is true, exit idle mode and run full cycle
 
 ### Important
 - Goals are created by users (in conversation or via the UI). They represent what the user **wants done**.
 - A goal with `metadata.status == "active"` and no corresponding request means **work has not been planned yet** — this is a gap that must be filled.
-- Don't skip goal scanning because other work exists. Goals are the user's explicit priorities.
+- Don't skip goal processing because other work exists. Goals are the user's explicit priorities.
+- Private goals (`shared=false`) are only visible to the owning user's scoped session — this is by design. The per-user fan-out ensures every user's private goals get planned.
 
 ## Feedback Processing
 
@@ -196,7 +251,7 @@ For each `rejection_processing` request:
 3. Update each linked goal memory based on the feedback:
    - If the goal is obsolete or already accomplished → update `metadata.status` to `'abandoned'` and add the reason to the goal's content
    - If the approach was wrong but the goal is still valid → add the rejection feedback to the goal's content so future requests take it into account
-4. Call `update_request_status` to transition the request to `'cancelled'`
+4. Call `mark_rejection_processed(request_id, note=...)` to close out the request (transitions it from `rejection_processing` to `cancelled`)
 5. Search for `feedback-rejected` memories linked to this request and tag them `feedback-processed`
 
 **This is critical for the feedback loop.** Until you process these, the request stays in `rejection_processing` which blocks duplicate creation through dedup. Completing this step closes the loop and ensures your future work reflects the user's feedback.

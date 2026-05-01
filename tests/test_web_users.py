@@ -147,38 +147,36 @@ def _csrf_data(client: httpx.AsyncClient, extra: dict | None = None) -> dict:
 
 
 # ============================================================================
-# GET /users — list
+# GET /settings/users — list
 # ============================================================================
 
 
 @pytest.mark.asyncio
-@patch("lucent.web.routes.admin.is_team_mode", return_value=True)
-async def test_users_list_in_team_mode(_mock_tm, client):
-    """With team mode on and an owner user, GET /users returns 200."""
-    resp = await client.get("/users")
+async def test_users_list_renders(client):
+    """With an owner user, GET /settings/users returns 200."""
+    resp = await client.get("/settings/users")
     assert resp.status_code == 200
     assert "text/html" in resp.headers["content-type"]
 
 
 @pytest.mark.asyncio
 async def test_users_list_not_team_mode_returns_404(client):
-    """Without team mode, GET /users returns 404."""
+    """Legacy root /users path is no longer mounted."""
     resp = await client.get("/users")
     assert resp.status_code == 404
 
 
 # ============================================================================
-# POST /users/create
+# POST /settings/users/create
 # ============================================================================
 
 
 @pytest.mark.asyncio
 @patch("secrets.token_urlsafe", return_value="TempPass1safe")
-@patch("lucent.web.routes.admin.is_team_mode", return_value=True)
-async def test_create_user_as_owner(_mock_tm, _mock_pw, client):
-    """Owner can create a new user; expect 303 redirect to /users?success=."""
+async def test_create_user_as_owner(_mock_pw, client):
+    """Owner can create a new user; expect 303 redirect to settings users."""
     resp = await client.post(
-        "/users/create",
+        "/settings/users/create",
         data=_csrf_data(
             client,
             {
@@ -190,16 +188,15 @@ async def test_create_user_as_owner(_mock_tm, _mock_pw, client):
         follow_redirects=False,
     )
     assert resp.status_code == 303
-    assert "/users" in resp.headers["location"]
+    assert "/settings/users" in resp.headers["location"]
     assert "success=" in resp.headers["location"]
 
 
 @pytest.mark.asyncio
-@patch("lucent.web.routes.admin.is_team_mode", return_value=True)
-async def test_create_user_without_permission_returns_403(_mock_tm, member_client):
+async def test_create_user_without_permission_returns_403(member_client):
     """A member user cannot create users; expect 403."""
     resp = await member_client.post(
-        "/users/create",
+        "/settings/users/create",
         data=_csrf_data(
             member_client,
             {
@@ -214,17 +211,16 @@ async def test_create_user_without_permission_returns_403(_mock_tm, member_clien
 
 
 # ============================================================================
-# POST /users/{user_id}/impersonate
+# POST /settings/users/{user_id}/impersonate
 # ============================================================================
 
 
 @pytest.mark.asyncio
-@patch("lucent.web.routes.admin.is_team_mode", return_value=True)
-async def test_impersonate_user(_mock_tm, client, member_user):
+async def test_impersonate_user(client, member_user):
     """Owner can impersonate a member; expect 303 redirect."""
     target_user, _, _ = member_user
     resp = await client.post(
-        f"/users/{target_user['id']}/impersonate",
+        f"/settings/users/{target_user['id']}/impersonate",
         data=_csrf_data(client),
         follow_redirects=False,
     )
@@ -233,12 +229,11 @@ async def test_impersonate_user(_mock_tm, client, member_user):
 
 
 @pytest.mark.asyncio
-@patch("lucent.web.routes.admin.is_team_mode", return_value=True)
-async def test_impersonate_self_redirects_with_error(_mock_tm, client, owner_user):
-    """Owner cannot impersonate themselves; expect redirect to /users?error=."""
+async def test_impersonate_self_redirects_with_error(client, owner_user):
+    """Owner cannot impersonate themselves; expect settings users error redirect."""
     owner, _, _ = owner_user
     resp = await client.post(
-        f"/users/{owner['id']}/impersonate",
+        f"/settings/users/{owner['id']}/impersonate",
         data=_csrf_data(client),
         follow_redirects=False,
     )
@@ -247,18 +242,17 @@ async def test_impersonate_self_redirects_with_error(_mock_tm, client, owner_use
 
 
 # ============================================================================
-# POST /users/stop-impersonation
+# POST /settings/users/stop-impersonation
 # ============================================================================
 
 
 @pytest.mark.asyncio
-@patch("lucent.web.routes.admin.is_team_mode", return_value=True)
-async def test_stop_impersonation(_mock_tm, client):
-    """POST /users/stop-impersonation returns 303 redirect to /users."""
+async def test_stop_impersonation(client):
+    """POST /settings/users/stop-impersonation returns 303 redirect to settings users."""
     resp = await client.post(
-        "/users/stop-impersonation",
+        "/settings/users/stop-impersonation",
         data=_csrf_data(client),
         follow_redirects=False,
     )
     assert resp.status_code == 303
-    assert "/users" in resp.headers["location"]
+    assert "/settings/users" in resp.headers["location"]

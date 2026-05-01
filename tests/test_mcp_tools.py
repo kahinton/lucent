@@ -10,13 +10,16 @@ Tests the MCP tool layer that wraps the DB layer, verifying:
 import json
 import os
 from unittest.mock import patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest_asyncio
 from mcp.server.fastmcp import FastMCP
 
 from lucent.auth import set_current_user
-from lucent.db import MemoryRepository
+from lucent.db import (
+    MemoryRepository,
+    UserRepository,
+)
 from lucent.tools.memories import register_tools
 
 # ============================================================================
@@ -83,6 +86,24 @@ class TestCreateMemory:
         assert sorted(result["tags"]) == ["mcp", "test"]
         assert result["importance"] == 7
         assert result["version"] == 1
+
+    async def test_create_retired_type_rejected(
+        self, mcp_tools, auth_user, clean_test_data
+    ):
+        """Retired memory types cannot be newly created via MCP."""
+        prefix = clean_test_data
+        result = await _call(
+            mcp_tools,
+            "create_memory",
+            {
+                "type": "procedural",
+                "content": f"{prefix} Retired type memory",
+                "username": f"{prefix}user",
+            },
+        )
+
+        assert "error" in result
+        assert "invalid memory type" in result["error"].lower()
 
     async def test_create_memory_invalid_type(self, mcp_tools, auth_user):
         """Test that an invalid memory type returns an error."""
@@ -223,6 +244,39 @@ class TestGetMemory:
 
         assert "error" in result
         assert "Invalid" in result["error"]
+
+    async def test_get_memory_repo_acl_blocks_when_access_denied(
+        self, mcp_tools, auth_user, clean_test_data, monkeypatch
+    ):
+        prefix = clean_test_data
+        created = await _call(
+            mcp_tools,
+            "create_memory",
+            {
+                "type": "technical",
+                "content": f"{prefix} Private repo memory",
+                "username": f"{prefix}user",
+                "metadata": {"repo": "org/private-repo"},
+            },
+        )
+
+        async def _deny_access(self, user_id, repo_full_name):  # pragma: no cover - signature shim
+            return False
+
+        monkeypatch.setattr(
+            "lucent.integrations.github_repo_access_service.GitHubRepoAccessService.check_access",
+            _deny_access,
+        )
+
+        result = await _call(
+            mcp_tools,
+            "get_memory",
+            {
+                "memory_id": created["id"],
+            },
+        )
+        assert "error" in result
+        assert "not found" in result["error"].lower()
 
 
 # ============================================================================
@@ -366,6 +420,53 @@ class TestSearchMemories:
         for mem in result["memories"]:
             assert mem["type"] == "technical"
 
+    async def test_search_repo_acl_filters_repo_tagged_results(
+        self, mcp_tools, auth_user, clean_test_data, monkeypatch
+    ):
+        prefix = clean_test_data
+        await _call(
+            mcp_tools,
+            "create_memory",
+            {
+                "type": "technical",
+                "content": f"{prefix} private repo result",
+                "username": f"{prefix}user",
+                "metadata": {"repo": "org/private-repo"},
+                "tags": ["acl", "private"],
+            },
+        )
+        visible = await _call(
+            mcp_tools,
+            "create_memory",
+            {
+                "type": "experience",
+                "content": f"{prefix} visible result",
+                "username": f"{prefix}user",
+                "tags": ["acl", "visible"],
+            },
+        )
+
+        async def _deny_access(self, user_id, repo_full_name):  # pragma: no cover - signature shim
+            return False
+
+        monkeypatch.setattr(
+            "lucent.integrations.github_repo_access_service.GitHubRepoAccessService.check_access",
+            _deny_access,
+        )
+
+        result = await _call(
+            mcp_tools,
+            "search_memories",
+            {
+                "query": prefix,
+                "limit": 20,
+            },
+        )
+
+        ids = {m["id"] for m in result["memories"]}
+        assert visible["id"] in ids
+        assert all("private repo result" not in m["content"] for m in result["memories"])
+
     async def test_search_limit_and_offset(self, mcp_tools, auth_user, clean_test_data):
         """Test pagination with limit and offset."""
         prefix = clean_test_data
@@ -495,17 +596,18 @@ class TestSearchMemoriesFull:
         assert "error" in result
         assert "required" in result["error"].lower()
 
-    async def test_full_search_with_type_filter(self, mcp_tools, auth_user, clean_test_data):
+    async def test_full_search_with_type_filter(
+        self, mcp_tools, auth_user, clean_test_data, db_pool
+    ):
         """Test full search with type filter."""
         prefix = clean_test_data
-        await _call(
-            mcp_tools,
-            "create_memory",
-            {
-                "type": "procedural",
-                "content": f"{prefix} Procedural full search",
-                "username": f"{prefix}user",
-            },
+        repo = MemoryRepository(db_pool)
+        await repo.create(
+            username=f"{prefix}user",
+            type="procedural",
+            content=f"{prefix} Procedural full search",
+            user_id=auth_user["id"],
+            organization_id=auth_user["organization_id"],
         )
 
         result = await _call(
@@ -520,6 +622,114 @@ class TestSearchMemoriesFull:
         assert result["total_count"] >= 1
         for mem in result["memories"]:
             assert mem["type"] == "procedural"
+
+
+# ============================================================================
+# include_archived (M9 Phase-2)
+# ============================================================================
+
+
+class TestSearchIncludeArchived:
+    """``include_archived`` flag wiring through the MCP search tools."""
+
+    async def _archive(self, db_pool, memory_id):
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE memories SET lifecycle_stage = 'archived' WHERE id = $1",
+                memory_id,
+            )
+
+    async def test_search_memories_default_excludes_archived(
+        self, mcp_tools, auth_user, clean_test_data, db_pool, monkeypatch
+    ):
+        monkeypatch.setenv("LUCENT_SEARCH_EXCLUDE_ARCHIVED_ENABLED", "true")
+        prefix = clean_test_data
+
+        active = await _call(
+            mcp_tools,
+            "create_memory",
+            {
+                "type": "experience",
+                "content": f"{prefix} mcp-include-archived ACTIVE",
+                "username": f"{prefix}u",
+            },
+        )
+        archived = await _call(
+            mcp_tools,
+            "create_memory",
+            {
+                "type": "experience",
+                "content": f"{prefix} mcp-include-archived ARCHIVED",
+                "username": f"{prefix}u",
+            },
+        )
+        await self._archive(db_pool, archived["id"])
+
+        default = await _call(
+            mcp_tools,
+            "search_memories",
+            {"query": f"{prefix} mcp-include-archived"},
+        )
+        ids = {m["id"] for m in default["memories"]}
+        assert active["id"] in ids
+        assert archived["id"] not in ids
+
+        inclusive = await _call(
+            mcp_tools,
+            "search_memories",
+            {
+                "query": f"{prefix} mcp-include-archived",
+                "include_archived": True,
+            },
+        )
+        ids = {m["id"] for m in inclusive["memories"]}
+        assert archived["id"] in ids
+
+    async def test_search_memories_full_default_excludes_archived(
+        self, mcp_tools, auth_user, clean_test_data, db_pool, monkeypatch
+    ):
+        monkeypatch.setenv("LUCENT_SEARCH_EXCLUDE_ARCHIVED_ENABLED", "true")
+        prefix = clean_test_data
+
+        active = await _call(
+            mcp_tools,
+            "create_memory",
+            {
+                "type": "technical",
+                "content": f"{prefix} mcp-full-archived ACTIVE row",
+                "username": f"{prefix}u",
+            },
+        )
+        archived = await _call(
+            mcp_tools,
+            "create_memory",
+            {
+                "type": "technical",
+                "content": f"{prefix} mcp-full-archived ARCHIVED row",
+                "username": f"{prefix}u",
+            },
+        )
+        await self._archive(db_pool, archived["id"])
+
+        default = await _call(
+            mcp_tools,
+            "search_memories_full",
+            {"query": f"{prefix} mcp-full-archived"},
+        )
+        ids = {m["id"] for m in default["memories"]}
+        assert active["id"] in ids
+        assert archived["id"] not in ids
+
+        inclusive = await _call(
+            mcp_tools,
+            "search_memories_full",
+            {
+                "query": f"{prefix} mcp-full-archived",
+                "include_archived": True,
+            },
+        )
+        ids = {m["id"] for m in inclusive["memories"]}
+        assert archived["id"] in ids
 
 
 # ============================================================================
@@ -659,6 +869,145 @@ class TestUpdateMemory:
 
 
 # ============================================================================
+# pin_memory / unpin_memory
+# ============================================================================
+
+
+class TestPinUnpinMemory:
+    """Tests for the pin_memory / unpin_memory MCP tools."""
+
+    async def test_pin_adds_pinned_tag_and_bumps_version(
+        self, mcp_tools, auth_user, test_memory
+    ):
+        result = await _call(
+            mcp_tools, "pin_memory", {"memory_id": str(test_memory["id"])}
+        )
+        assert "error" not in result, result
+        assert "pinned" in result["tags"]
+        # other tags preserved
+        assert "test" in result["tags"]
+        assert "fixture" in result["tags"]
+        assert result["version"] == 2
+
+    async def test_pin_is_idempotent(self, mcp_tools, auth_user, test_memory):
+        first = await _call(
+            mcp_tools, "pin_memory", {"memory_id": str(test_memory["id"])}
+        )
+        second = await _call(
+            mcp_tools, "pin_memory", {"memory_id": str(test_memory["id"])}
+        )
+        assert first["tags"].count("pinned") == 1
+        assert second["tags"].count("pinned") == 1
+        # Version bumps both times (matches update_memory semantics).
+        assert second["version"] == first["version"] + 1
+
+    async def test_unpin_removes_pinned_tag(self, mcp_tools, auth_user, test_memory):
+        await _call(mcp_tools, "pin_memory", {"memory_id": str(test_memory["id"])})
+        result = await _call(
+            mcp_tools, "unpin_memory", {"memory_id": str(test_memory["id"])}
+        )
+        assert "error" not in result, result
+        assert "pinned" not in result["tags"]
+        assert "test" in result["tags"]
+
+    async def test_unpin_is_idempotent(self, mcp_tools, auth_user, test_memory):
+        # Memory was never pinned — unpin should still succeed.
+        result = await _call(
+            mcp_tools, "unpin_memory", {"memory_id": str(test_memory["id"])}
+        )
+        assert "error" not in result, result
+        assert "pinned" not in result["tags"]
+
+    async def test_pin_nonexistent_memory(self, mcp_tools, auth_user):
+        result = await _call(
+            mcp_tools, "pin_memory", {"memory_id": str(uuid4())}
+        )
+        assert "error" in result
+        assert "not accessible" in result["error"].lower() or "not found" in result["error"].lower()
+
+    async def test_unpin_nonexistent_memory(self, mcp_tools, auth_user):
+        result = await _call(
+            mcp_tools, "unpin_memory", {"memory_id": str(uuid4())}
+        )
+        assert "error" in result
+
+    async def test_pin_requires_auth(self, mcp_tools, test_memory):
+        set_current_user(None)
+        result = await _call(
+            mcp_tools, "pin_memory", {"memory_id": str(test_memory["id"])}
+        )
+        assert "error" in result
+        assert "auth" in result["error"].lower()
+
+    async def test_unpin_requires_auth(self, mcp_tools, test_memory):
+        set_current_user(None)
+        result = await _call(
+            mcp_tools, "unpin_memory", {"memory_id": str(test_memory["id"])}
+        )
+        assert "error" in result
+        assert "auth" in result["error"].lower()
+
+    async def test_pin_acl_blocks_non_owner(
+        self, mcp_tools, db_pool, test_memory, test_organization, clean_test_data
+    ):
+        """Non-owner in same org cannot pin another user's private memory."""
+        prefix = clean_test_data
+
+        user_repo = UserRepository(db_pool)
+        other_user = await user_repo.create(
+            external_id=f"{prefix}pin_other",
+            provider="local",
+            organization_id=test_organization["id"],
+            email=f"{prefix}pin_other@test.com",
+            display_name=f"{prefix}Pin Other",
+        )
+        set_current_user(
+            {
+                "id": other_user["id"],
+                "organization_id": other_user["organization_id"],
+                "role": "member",
+            }
+        )
+
+        result = await _call(
+            mcp_tools, "pin_memory", {"memory_id": str(test_memory["id"])}
+        )
+        assert "error" in result
+        err = result["error"].lower()
+        assert "not accessible" in err or "permission denied" in err
+        set_current_user(None)
+
+    async def test_unpin_acl_blocks_non_owner(
+        self, mcp_tools, db_pool, test_memory, test_organization, clean_test_data
+    ):
+        prefix = clean_test_data
+
+        user_repo = UserRepository(db_pool)
+        other_user = await user_repo.create(
+            external_id=f"{prefix}unpin_other",
+            provider="local",
+            organization_id=test_organization["id"],
+            email=f"{prefix}unpin_other@test.com",
+            display_name=f"{prefix}Unpin Other",
+        )
+        set_current_user(
+            {
+                "id": other_user["id"],
+                "organization_id": other_user["organization_id"],
+                "role": "member",
+            }
+        )
+
+        result = await _call(
+            mcp_tools, "unpin_memory", {"memory_id": str(test_memory["id"])}
+        )
+        assert "error" in result
+        err = result["error"].lower()
+        assert "not accessible" in err or "permission denied" in err
+        set_current_user(None)
+
+
+# ============================================================================
 # delete_memory
 # ============================================================================
 
@@ -700,6 +1049,100 @@ class TestDeleteMemory:
             },
         )
         assert "error" in get_result
+
+    async def test_soft_delete_flag_off_has_no_ldr_sidecar_write(
+        self, mcp_tools, auth_user, db_pool, clean_test_data, monkeypatch
+    ):
+        """Flag OFF keeps delete behavior and emits no LDR observation rows."""
+        monkeypatch.delenv("LUCENT_SHADOW_FORGET_ENABLED", raising=False)
+        prefix = clean_test_data
+
+        created = await _call(
+            mcp_tools,
+            "create_memory",
+            {
+                "type": "experience",
+                "content": f"{prefix} Memory to delete no ldr row",
+                "username": f"{prefix}user",
+            },
+        )
+        memory_id = created["id"]
+
+        result = await _call(mcp_tools, "delete_memory", {"memory_id": memory_id})
+        assert result["success"] is True
+
+        get_result = await _call(mcp_tools, "get_memory", {"memory_id": memory_id})
+        assert "error" in get_result
+
+        async with db_pool.acquire() as conn:
+            count = await conn.fetchval(
+                """
+                SELECT COUNT(*)
+                FROM memory_shadow_scores
+                WHERE memory_id = $1
+                  AND strategy = 'ldr-obs-v1'
+                """,
+                UUID(memory_id),
+            )
+        assert count == 0
+
+    async def test_soft_delete_flag_on_writes_ldr_row_with_replacement_metadata(
+        self, mcp_tools, auth_user, db_pool, clean_test_data, monkeypatch
+    ):
+        """Flag ON writes LDR observation row with edges-at-risk and canonical metadata."""
+        monkeypatch.setenv("LUCENT_SHADOW_FORGET_ENABLED", "true")
+        prefix = clean_test_data
+        repo = MemoryRepository(db_pool)
+
+        canonical = await repo.create(
+            username=f"{prefix}user",
+            type="technical",
+            content=f"{prefix} canonical target",
+            user_id=auth_user["id"],
+            organization_id=auth_user["organization_id"],
+        )
+        source = await repo.create(
+            username=f"{prefix}user",
+            type="experience",
+            content=f"{prefix} source to delete",
+            metadata={"canonical_memory_id": str(canonical["id"])},
+            user_id=auth_user["id"],
+            organization_id=auth_user["organization_id"],
+        )
+        await repo.create(
+            username=f"{prefix}user",
+            type="experience",
+            content=f"{prefix} inbound edge source",
+            related_memory_ids=[source["id"]],
+            user_id=auth_user["id"],
+            organization_id=auth_user["organization_id"],
+        )
+
+        result = await _call(
+            mcp_tools,
+            "delete_memory",
+            {"memory_id": str(source["id"])},
+        )
+        assert result["success"] is True
+
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT shadow_action, signals
+                FROM memory_shadow_scores
+                WHERE memory_id = $1
+                  AND strategy = 'ldr-obs-v1'
+                ORDER BY computed_at DESC
+                LIMIT 1
+                """,
+                source["id"],
+            )
+        assert row is not None
+        assert row["shadow_action"] == "would_demote"
+        assert row["signals"]["would_demote_source_id"] == str(source["id"])
+        assert row["signals"]["would_link_canonical_id"] == str(canonical["id"])
+        assert row["signals"]["would_break_edges"] == 1
+        assert row["signals"]["force_delete_compliance"] is False
 
     async def test_delete_nonexistent(self, mcp_tools, auth_user):
         """Test deleting a memory that doesn't exist."""
@@ -1501,6 +1944,50 @@ class TestExportMemories:
         for mem in result["memories"]:
             assert mem["importance"] >= 8
 
+    async def test_export_repo_acl_filters_repo_tagged_results(
+        self, mcp_tools, auth_user, clean_test_data, monkeypatch
+    ):
+        prefix = clean_test_data
+        await _call(
+            mcp_tools,
+            "create_memory",
+            {
+                "type": "technical",
+                "content": f"{prefix} Private repo export",
+                "username": f"{prefix}user",
+                "metadata": {"repo": "org/private-repo"},
+                "tags": ["acl-export", "private"],
+            },
+        )
+        await _call(
+            mcp_tools,
+            "create_memory",
+            {
+                "type": "technical",
+                "content": f"{prefix} Untagged export",
+                "username": f"{prefix}user",
+                "tags": ["acl-export", "visible"],
+            },
+        )
+
+        async def _deny_access(self, user_id, repo_full_name):  # pragma: no cover - signature shim
+            return False
+
+        monkeypatch.setattr(
+            "lucent.integrations.github_repo_access_service.GitHubRepoAccessService.check_access",
+            _deny_access,
+        )
+
+        result = await _call(
+            mcp_tools,
+            "export_memories",
+            {"tags": ["acl-export"]},
+        )
+
+        contents = {m["content"] for m in result["memories"]}
+        assert f"{prefix} Private repo export" not in contents
+        assert f"{prefix} Untagged export" in contents
+
 
 # ============================================================================
 # import_memories
@@ -1594,6 +2081,21 @@ class TestImportMemories:
 
         assert "error" in result
 
+
+# ============================================================================
+# get_memory_stats
+# ============================================================================
+
+
+class TestLifecycleToolsNotExposed:
+    """Lifecycle/stat maintenance routines must not be registered as MCP tools."""
+
+    def test_lifecycle_tools_are_not_public_mcp_tools(self, mcp_tools):
+        registered = set(mcp_tools._tool_manager._tools)
+        assert "get_memory_stats" not in registered
+        assert "compute_vitality_scores" not in registered
+        assert "compute_shadow_forget_scores" not in registered
+        assert "get_shadow_forget_comparison" not in registered
 
 # ============================================================================
 # Team-mode fixtures and tests for share_memory / unshare_memory

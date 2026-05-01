@@ -9,7 +9,7 @@ Common issues and solutions for running Lucent.
 The server won't start without a PostgreSQL connection string.
 
 ```bash
-export DATABASE_URL=postgresql://lucent:lucent_dev_password@localhost:5433/lucent
+export DATABASE_URL=postgresql://lucent:change-me-insecure-dev-password@localhost:5433/lucent
 ```
 
 If using Docker Compose, this is set automatically via the `docker-compose.yml` environment block. Check that the `postgres` service is healthy:
@@ -34,7 +34,7 @@ docker compose ps
 2. **Wrong port:** Docker Compose maps PostgreSQL to host port `5433` (not the default 5432). If connecting from outside Docker:
 
 ```bash
-DATABASE_URL=postgresql://lucent:lucent_dev_password@localhost:5433/lucent
+DATABASE_URL=postgresql://lucent:change-me-insecure-dev-password@localhost:5433/lucent
 ```
 
 3. **Networking between containers:** Inside Docker Compose, the hostname is `postgres` (the service name), not `localhost`:
@@ -108,7 +108,7 @@ Then use the Python shell to reset:
 ```bash
 python -c "
 import asyncio, os
-os.environ['DATABASE_URL'] = 'postgresql://lucent:lucent_dev_password@localhost:5433/lucent'
+os.environ['DATABASE_URL'] = 'postgresql://lucent:change-me-insecure-dev-password@localhost:5433/lucent'
 from lucent.db import init_db
 from lucent.auth_providers import set_user_password
 async def reset():

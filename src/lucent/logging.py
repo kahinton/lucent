@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from typing import Any
 
+from lucent.log_context import get_request_id, get_user_id
+
 # Custom log levels for daemon visibility
 THOUGHT = 15  # Between DEBUG(10) and INFO(20) — full output dumps
 STREAM = 12  # Between DEBUG(10) and THOUGHT(15) — real-time event tracking
@@ -77,6 +79,15 @@ class JSONFormatter(logging.Formatter):
         if cid:
             log_data["correlation_id"] = cid
 
+        # Add request-scoped context from contextvars if present
+        request_id = get_request_id()
+        if request_id:
+            log_data["request_id"] = request_id
+
+        user_id = get_user_id()
+        if user_id:
+            log_data["user_id"] = user_id
+
         # Add location info
         if record.pathname:
             log_data["location"] = {
@@ -120,7 +131,8 @@ class JSONFormatter(logging.Formatter):
                 "taskName",
                 "correlation_id",
             ):
-                log_data[key] = value
+                if key not in log_data:
+                    log_data[key] = value
 
         return json.dumps(log_data, default=str)
 
@@ -156,8 +168,17 @@ class HumanFormatter(logging.Formatter):
 
         message = record.getMessage()
         cid = getattr(record, "correlation_id", None)
-        cid_str = f" [{cid}]" if cid else ""
-        base = f"{timestamp} {level_str} [{record.name}]{cid_str} {message}"
+        request_id = get_request_id()
+        user_id = get_user_id()
+        context_parts = []
+        if cid:
+            context_parts.append(cid)
+        if request_id:
+            context_parts.append(f"request_id={request_id}")
+        if user_id:
+            context_parts.append(f"user_id={user_id}")
+        context_str = "".join(f" [{part}]" for part in context_parts)
+        base = f"{timestamp} {level_str} [{record.name}]{context_str} {message}"
 
         # Add exception info if present
         if record.exc_info:
@@ -235,6 +256,11 @@ def configure_logging() -> None:
         LUCENT_LOG_MODULES: Per-module log level overrides, comma-separated.
                             Format: 'module:LEVEL,module:LEVEL'
                             Example: 'lucent.api:DEBUG,lucent.tools:WARNING'
+        LUCENT_LOG_STDERR: If 'false'/'0'/'no', do NOT attach the stderr
+                           handler. Useful for processes (like the daemon)
+                           whose stderr is already redirected to the same
+                           file as LUCENT_LOG_FILE, to avoid every log line
+                           being written twice. Default: 'true'.
     """
     log_level_str = os.environ.get("LUCENT_LOG_LEVEL", "INFO").upper()
     log_format = os.environ.get("LUCENT_LOG_FORMAT", "human").lower()
@@ -242,13 +268,20 @@ def configure_logging() -> None:
     max_bytes = int(os.environ.get("LUCENT_LOG_FILE_MAX_BYTES", "10485760"))
     backup_count = int(os.environ.get("LUCENT_LOG_FILE_BACKUP_COUNT", "5"))
     module_overrides = os.environ.get("LUCENT_LOG_MODULES", "")
+    stderr_enabled = os.environ.get("LUCENT_LOG_STDERR", "true").strip().lower() not in (
+        "false",
+        "0",
+        "no",
+        "off",
+    )
 
     log_level = _parse_level(log_level_str)
 
-    # Always create stderr handler
-    stderr_handler = _make_handler(log_format, log_level)
+    handlers: list[logging.Handler] = []
 
-    handlers: list[logging.Handler] = [stderr_handler]
+    # Stderr handler — on by default, opt-out via LUCENT_LOG_STDERR=false.
+    if stderr_enabled:
+        handlers.append(_make_handler(log_format, log_level))
 
     # Optionally add rotating file handler
     if log_file:
@@ -260,6 +293,12 @@ def configure_logging() -> None:
             backup_count=backup_count,
         )
         handlers.append(file_handler)
+
+    # Always have at least one handler — if the caller disabled both stderr
+    # and didn't set a log file, fall back to stderr so logs aren't silently
+    # dropped.
+    if not handlers:
+        handlers.append(_make_handler(log_format, log_level))
 
     # Configure root logger for lucent
     logger = logging.getLogger("lucent")

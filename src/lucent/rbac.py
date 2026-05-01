@@ -116,14 +116,15 @@ ROLE_PERMISSIONS: dict[Role, set[Permission]] = {
         Permission.ORG_VIEW,
     },
     Role.DAEMON: {
-        # Memory — full access for consolidation and maintenance
+        # Memory — scoped access for consolidation and maintenance.
+        # MEMORY_READ_ALL intentionally removed — daemon uses scoped API keys
+        # for per-user processing. MEMORY_DELETE_ANY removed — daemon should
+        # only delete via scoped keys that restrict to one user's memories.
         Permission.MEMORY_CREATE,
         Permission.MEMORY_READ_OWN,
         Permission.MEMORY_READ_SHARED,
-        Permission.MEMORY_READ_ALL,
         Permission.MEMORY_UPDATE_OWN,
         Permission.MEMORY_DELETE_OWN,
-        Permission.MEMORY_DELETE_ANY,
         Permission.MEMORY_SHARE,
         # Audit (own only — daemon can see its own actions)
         Permission.AUDIT_VIEW_OWN,

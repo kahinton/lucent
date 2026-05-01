@@ -1,0 +1,35 @@
+name: devcontainer-builder
+description: |
+  Sandbox for repositories that ship a `.devcontainer/devcontainer.json`. The
+  Lucent sandbox runtime auto-detects the devcontainer manifest and rebuilds
+  the container using the image (or Dockerfile) it specifies, then runs the
+  devcontainer's onCreate / postCreate / postStart lifecycle commands. This
+  template provides a minimal, write-friendly base layer that the rebuild
+  step replaces with whatever the repo's devcontainer declares — so it works
+  for Python, Node, Go, multi-language repos, and so on.
+
+  Use this when the target repo is known to have (or might have) a
+  devcontainer config — it gives the running agent the same environment a
+  human contributor would get from VS Code's "Reopen in Container".
+image: mcr.microsoft.com/devcontainers/base:debian
+working_dir: /workspace
+network_mode: allowlist
+allowed_hosts:
+  - github.com
+  - api.github.com
+  - codeload.github.com
+  - objects.githubusercontent.com
+  - mcr.microsoft.com
+  - ghcr.io
+  - registry.npmjs.org
+  - registry.yarnpkg.com
+  - pypi.org
+  - files.pythonhosted.org
+  - deb.debian.org
+  - security.debian.org
+setup_commands: []
+env_vars: {}
+memory_limit: 4g
+cpu_limit: 4.0
+disk_limit: 20g
+timeout_seconds: 3600

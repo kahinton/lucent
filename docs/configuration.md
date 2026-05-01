@@ -53,7 +53,7 @@ For detailed secret storage configuration, see [Secret Storage](secret-storage.m
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `LUCENT_LLM_ENGINE` | `copilot` | LLM backend: `copilot` (GitHub Copilot SDK) or `langchain` |
-| `LUCENT_CHAT_MODEL` | `claude-opus-4.6` | Default model for chat sessions |
+| `LUCENT_CHAT_MODEL` | *(model registry default)* | Optional override for chat sessions |
 | `LUCENT_MODEL_VALIDATION` | `strict` | Model validation mode: `strict` rejects unknown models, `lenient` allows them |
 | `LUCENT_CHAT_MCP_URL` | `http://localhost:8766/mcp` | MCP URL for chat-initiated tool calls |
 | `LUCENT_CHAT_TIMEOUT` | `300` | Chat session timeout in seconds |
@@ -69,7 +69,7 @@ For detailed secret storage configuration, see [Secret Storage](secret-storage.m
 |----------|---------|-------------|
 | `LUCENT_MAX_SESSIONS` | `3` | Max concurrent sub-agent sessions |
 | `LUCENT_DAEMON_INTERVAL` | `15` | Minutes between cognitive cycles |
-| `LUCENT_DAEMON_MODEL` | `claude-opus-4.6` | Default model for daemon sessions |
+| `LUCENT_DAEMON_MODEL` | *(model registry default)* | Optional override for daemon sessions |
 | `LUCENT_DAEMON_ROLES` | `all` | Enable specific loops: `cognitive`, `dispatcher`, `scheduler`, `autonomic` (comma-separated, or `all`) |
 | `LUCENT_MCP_URL` | `http://localhost:8766/mcp` | MCP server URL for memory access |
 | `LUCENT_MCP_API_KEY` | — | API key for MCP authentication |
@@ -123,6 +123,29 @@ Requests go through a two-stage gate:
 | `LUCENT_ALLOW_GIT_COMMIT` | `false` | Allow the daemon to create git commits |
 | `LUCENT_ALLOW_GIT_PUSH` | `false` | Allow the daemon to push to remote (requires `LUCENT_ALLOW_GIT_COMMIT=true`) |
 
+## Connections & Feature Flags
+
+Controls the **Settings → Connections** page and per-feature gating of personal access tokens, env-token claim, OAuth, workspace integrations, and the GitHub App. Defaults are tuned for friendly local/open-source use.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LUCENT_CONNECTIONS_PAT_ENABLED` | `true` | Show the PAT entry form and accept `POST /settings/connections/pat`. When `false`, UI hides the form and the backend rejects with `403 feature_disabled`. |
+| `LUCENT_CONNECTIONS_ENV_TOKEN_CLAIM_ENABLED` | `true` | Show the env-token detection card and accept `POST /settings/connections/env/claim`. Also gates the `GITHUB_TOKEN` fallback used in repo-existence checks (never user ACL). |
+| `LUCENT_CONNECTIONS_OAUTH_ENABLED` | `true` | Show OAuth "Connect with …" buttons. Per-provider visibility additionally requires `LUCENT_OAUTH_<PROVIDER>_CLIENT_ID` to be set. |
+| `LUCENT_WORKSPACE_INTEGRATIONS_ENABLED` | `true` | Show the **Workspace connections** section and load workspace rows. When `false`, the section is hidden and the read model short-circuits. |
+| `LUCENT_GITHUB_APP_ENABLED` | `false` | Enable GitHub App install rows and `app_installation_can_see_repo()` queries. Does **not** affect user ACL. |
+| `LUCENT_REQUIRE_USER_GITHUB_CONNECTION_FOR_REPO_ACL` | `false` | Strict mode: deny repo access for users without a personal GitHub credential. When `false`, no-credential users are allowed for back-compat. |
+
+Per-provider OAuth client configuration (read by `LUCENT_CONNECTIONS_OAUTH_ENABLED`):
+
+| Variable | Description |
+|----------|-------------|
+| `LUCENT_OAUTH_GITHUB_CLIENT_ID` / `_CLIENT_SECRET` | GitHub OAuth app credentials |
+| `LUCENT_OAUTH_SLACK_CLIENT_ID` / `_CLIENT_SECRET` | Slack OAuth app credentials |
+| `LUCENT_OAUTH_JIRA_CLIENT_ID` / `_CLIENT_SECRET` | Jira OAuth app credentials |
+
+For the full two-tier model, recommended setup profiles (simple / team / enterprise), and the GitHub repo ACL rule, see [Connections](connections.md).
+
 ## Sandbox Configuration
 
 | Variable | Default | Description |
@@ -137,9 +160,9 @@ Requests go through a two-stage gate:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `POSTGRES_PASSWORD` | `lucent_dev_password` | PostgreSQL password |
+| `POSTGRES_PASSWORD` | `change-me-insecure-dev-password` | PostgreSQL password for local Docker Compose only |
 | `LUCENT_DB_PORT` | `5433` | Host port for the PostgreSQL container |
-| `DAEMON_DB_PASSWORD` | `lucent_daemon_dev_password` | Password for the restricted `lucent_daemon` database role |
+| `DAEMON_DB_PASSWORD` | `change-me-insecure-daemon-password` | Password for the restricted `lucent_daemon` database role in local Docker Compose |
 
 ### Observability Stack
 
@@ -197,6 +220,7 @@ docker compose exec postgres pg_dump -U lucent lucent > backup.sql
 
 - [Getting Started](getting-started.md) — installation and first-run setup
 - [Deployment Guide](deployment-guide.md) — production deployment
+- [Connections](connections.md) — two-tier connections model and feature-flag profiles
 - [Secret Storage](secret-storage.md) — secret storage providers in detail
 - [Observability](observability.md) — metrics, traces, dashboards
 - [Security Model](security-model.md) — authentication and access control

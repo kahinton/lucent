@@ -35,13 +35,13 @@ search_memories(tags=["feedback-processed"], limit=10)
 
 Filter to memories that do NOT have the `lesson-extracted` tag.
 
-Cap at 10 per run. Skip anything tagged `daemon-heartbeat`.
+Cap at 10 per run. Skip runtime heartbeat or telemetry records if legacy records are still present.
 
 ## Step 2: Classify Each Experience
 
 | Classification | Criteria | Action |
 |---------------|----------|--------|
-| **Success pattern** | Task completed, validated, produced good output | Find the related technical/procedural memory and add what worked |
+| **Success pattern** | Task completed, validated, produced good output | Find the related technical memory or skill and add what worked |
 | **Failure pattern** | Task failed, rejected, or produced poor output | Find the related memory and add the gotcha/pitfall |
 | **Correction** | User or system corrected a behavior | Find the related memory and update it with the correct approach |
 | **Discovery** | New information about the domain or tools | Find the related memory and add the new knowledge |
@@ -52,14 +52,14 @@ Cap at 10 per run. Skip anything tagged `daemon-heartbeat`.
 Before adding `lesson-extracted`, verify the candidate is a real lesson.
 
 A memory qualifies for `lesson-extracted` **only if all are true**:
-1. It is a **structured procedural lesson**, not narrative reporting.
+1. It is a **structured operational lesson**, not narrative reporting.
 2. It identifies a concrete mistake, gap, or failure mode.
 3. It prescribes a specific **Behavioral Change** (what to do differently next time).
 4. It includes explicit **Verification** (how to confirm the new behavior is actually happening).
 
 If any criterion fails:
 - Do **not** add `lesson-extracted`.
-- You may still integrate useful facts into technical/procedural memories.
+- You may still integrate useful facts into existing technical memories or skills.
 - For pure summaries/digests/documentation, treat as reference material, not lessons.
 
 ### Negative Examples (Not Lessons)
@@ -78,12 +78,12 @@ search_memories(query="<the topic/module/system this lesson is about>", limit=10
 
 Look for:
 - Technical memories about the relevant file, module, or system
-- Procedural memories about the relevant workflow or process
+- Skills about the relevant workflow or process
 - Any memory whose scope covers this lesson's domain
 
 **If a matching memory exists**: Update it with the new knowledge using `update_memory`. Append the insight to the existing content — don't rewrite the whole thing, just add what's new.
 
-**If no matching memory exists**: This reveals a genuine knowledge gap. Create ONE technical or procedural memory scoped to the right level (file, module, or system). Include the lesson as part of its content, not as a standalone "Lesson:" entry.
+**If no matching memory exists**: This reveals a genuine knowledge gap. Create ONE technical or experience memory scoped to the right level (file, module, system, or work session). Include the lesson as part of its content, not as a standalone "Lesson:" entry. If the gap is a reusable workflow, update/create a skill through the built-in skill workflow.
 
 **For correction-tagged memories**: When integrating a correction, note the correction source in the updated memory. User corrections (tagged `correction`): note "Corrected by user feedback" with date. Self-corrections (tagged `self-correction`): note "Self-corrected" with date. This creates traceable lineage from correction event to knowledge update.
 

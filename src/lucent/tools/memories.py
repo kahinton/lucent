@@ -17,6 +17,7 @@ from lucent.db import (
     get_pool,
     init_db,
 )
+from lucent.integrations.github_repo_access_service import GitHubRepoAccessService
 from lucent.logging import get_logger
 from lucent.mode import is_team_mode
 from lucent.models.memory import (
@@ -27,8 +28,10 @@ from lucent.models.memory import (
 )
 from lucent.models.validation import normalize_tags, validate_metadata
 from lucent.security import scan_content_for_injection
+from lucent.services.memory_access_service import MemoryAccessService
 
 logger = get_logger("tools.memories")
+CREATABLE_MEMORY_TYPES = {MemoryType.EXPERIENCE, MemoryType.TECHNICAL, MemoryType.GOAL}
 
 
 def _error_response(message: str) -> str:
@@ -51,20 +54,36 @@ async def _get_current_user_id() -> UUID | None:
     return None
 
 
-async def _get_current_user_context() -> tuple[UUID | None, UUID | None, str | None]:
-    """Get the current user ID, organization ID, and role.
+async def _get_current_user_context() -> tuple[UUID | None, UUID | None, str | None, str | None, UUID | None]:
+    """Get the current user ID, organization ID, role, and memory scope info.
+
+    When memory_scope == 'user' and memory_scope_user_id is set, the returned
+    user_id is the scoped user (not the API key owner), so all downstream
+    memory operations are automatically restricted to that user.
 
     Returns:
-        Tuple of (user_id, organization_id, role), any may be None.
+        Tuple of (user_id, organization_id, role, memory_scope, memory_scope_user_id).
+        Any may be None.
     """
     current_user = get_current_user()
     if current_user:
+        memory_scope = current_user.get("memory_scope")
+        raw_scope_uid = current_user.get("memory_scope_user_id")
+        memory_scope_user_id = UUID(str(raw_scope_uid)) if raw_scope_uid else None
+
+        # When scoped to a specific user, return that user's ID as the effective user_id
+        effective_user_id = current_user["id"]
+        if memory_scope == "user" and memory_scope_user_id is not None:
+            effective_user_id = memory_scope_user_id
+
         return (
-            current_user["id"],
+            effective_user_id,
             current_user.get("organization_id"),
             current_user.get("role", "member"),
+            memory_scope,
+            memory_scope_user_id,
         )
-    return None, None, None
+    return None, None, None, None, None
 
 
 def _get_current_username() -> str | None:
@@ -120,6 +139,24 @@ def _build_snapshot(memory: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _extract_ldr_canonical_id(memory: dict[str, Any]) -> UUID | None:
+    """Extract optional replacement-edge canonical ID for LDR observation."""
+    metadata = memory.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+
+    for key in ("canonical_memory_id", "canonical_id", "replacement_memory_id"):
+        raw_value = metadata.get(key)
+        if raw_value is None:
+            continue
+        try:
+            return UUID(str(raw_value))
+        except (TypeError, ValueError):
+            logger.debug("Ignoring invalid LDR canonical id metadata key=%s", key)
+            return None
+    return None
+
+
 async def _get_repository() -> MemoryRepository:
     """Get a memory repository, initializing the database if needed."""
     try:
@@ -157,6 +194,21 @@ async def _get_access_repository() -> AccessRepository:
     return AccessRepository(pool)
 
 
+async def _get_memory_access_service(user_role: str | None = None) -> MemoryAccessService:
+    repo = await _get_repository()
+    try:
+        pool = await get_pool()
+    except RuntimeError:
+        database_url = os.environ.get("DATABASE_URL")
+        if not database_url:
+            raise RuntimeError("DATABASE_URL environment variable is required")
+        pool = await init_db(database_url)
+    is_admin = (user_role or "").lower() in {"admin", "owner"}
+    return MemoryAccessService(
+        repo, GitHubRepoAccessService(pool), is_admin=is_admin
+    )
+
+
 def register_tools(mcp: FastMCP) -> None:
     """Register all memory tools with the MCP server."""
 
@@ -165,7 +217,7 @@ def register_tools(mcp: FastMCP) -> None:
     create_memory_description = """Create a new memory in the knowledge base.
 
 Args:
-    type: Type of memory - one of: experience, technical, procedural, goal.
+    type: Type of memory - one of: experience, technical, goal.
     content: The main content/description of the memory.
     username: Optional username (defaults to authenticated user).
     tags: Optional list of tags for categorization.
@@ -173,10 +225,7 @@ Args:
     related_memory_ids: Optional list of UUIDs of related memories to link.
     metadata: Optional type-specific metadata. Structure depends on memory type:
         - experience: {context, outcome, lessons_learned[], related_entities[]}
-        - technical: {category, language, code_snippet, references[], version_info, repo, filename}
-        - procedural: {steps[{order, description, notes}],
-          prerequisites[], estimated_time, success_criteria,
-          common_pitfalls[]}
+        - technical: {category, language, code_snippet, references[], version_info, repo, directory, filename}
         - goal: {status, deadline,
           milestones[{description, status, completed_at}],
           blockers[], progress_notes[{date, note}], priority}
@@ -215,6 +264,11 @@ Returns:
                     " are added to the system."
                 )
 
+            if memory_type not in CREATABLE_MEMORY_TYPES:
+                return _error_response(
+                    "Invalid memory type. Must be one of: experience, technical, goal"
+                )
+
             # Validate and normalize metadata for the memory type
             validated_metadata = validate_metadata(memory_type, metadata)
 
@@ -228,7 +282,7 @@ Returns:
             logger.info("create_memory: type=%s, user=%s, tags=%s", type, effective_username, tags)
 
             # Get current user context (from auth context or dev mode)
-            user_id, org_id, user_role = await _get_current_user_context()
+            user_id, org_id, user_role, memory_scope, memory_scope_user_id = await _get_current_user_context()
 
             # Detect daemon caller for auto-sharing and auto-tagging
             current_user = get_current_user()
@@ -262,14 +316,30 @@ Returns:
                 metadata=validated_metadata,
             )
 
-            # Daemon-created memories should always be shared so org members
-            # can see them in the review queue and search results
-            effective_shared = shared
-            if is_daemon:
+            # Type-based default sharing:
+            # - technical: shared by default (org knowledge)
+            # - experience: private by default (personal work log)
+            # - goal: shared with Lucent (working contract), respects explicit shared param
+            # - individual: always private (handled separately, can't be created via MCP)
+            #
+            # Daemon-created memories in scoped sessions inherit the scope's
+            # sharing context (scoped key already restricts to correct user).
+            if memory_type == MemoryType.TECHNICAL:
+                # Shared by default unless caller explicitly sets shared=False
+                effective_shared = shared if shared is not None else True
+            elif memory_type == MemoryType.EXPERIENCE:
+                # Private by default
+                effective_shared = shared if shared else False
+            else:
+                # Goals and others: respect caller preference
+                effective_shared = shared
+
+            # Daemon-created memories outside of a scoped session should
+            # still be shared (daemon's own state, heartbeats, etc.)
+            if is_daemon and memory_scope is None:
                 effective_shared = True
 
             repo = await _get_repository()
-
             result = await repo.create(
                 username=effective_username,
                 type=input_data.type.value,
@@ -331,21 +401,26 @@ Returns:
 
             logger.debug("get_memory: id=%s", memory_id)
 
-            repo = await _get_repository()
+            memory_access = await _get_memory_access_service()
 
             # Get current user context for access control
-            user_id, org_id, user_role = await _get_current_user_context()
+            user_id, org_id, user_role, memory_scope, memory_scope_user_id = await _get_current_user_context()
 
             if user_id is not None and org_id is not None:
                 # Use access-controlled get
-                result = await repo.get_accessible(uuid_id, user_id, org_id)
+                result = await memory_access.get_accessible(
+                    uuid_id,
+                    user_id,
+                    org_id,
+                    memory_scope=memory_scope,
+                )
             else:
                 # No auth context — deny access rather than falling back to unscoped query
                 return _error_response(
                     "Authentication required: unable to determine user context for access control"
                 )
 
-            if result is None:
+            if result is None or result.get("_access_denied"):
                 return _error_response(f"Memory not found or not accessible: {memory_id}")
 
             # Log the access
@@ -399,18 +474,24 @@ Returns:
             except ValueError as e:
                 return _error_response(f"Invalid memory ID format: {e}")
 
-            repo = await _get_repository()
+            memory_access = await _get_memory_access_service()
             access_repo = await _get_access_repository()
 
             # Get current user context for access control
-            user_id, org_id, user_role = await _get_current_user_context()
+            user_id, org_id, user_role, memory_scope, memory_scope_user_id = await _get_current_user_context()
 
             memories = []
             not_found = []
+            accessed_ids: list[UUID] = []
 
             for uuid_id, original_id in zip(uuid_ids, memory_ids):
                 if user_id is not None and org_id is not None:
-                    result = await repo.get_accessible(uuid_id, user_id, org_id)
+                    result = await memory_access.get_accessible(
+                        uuid_id,
+                        user_id,
+                        org_id,
+                        memory_scope=memory_scope,
+                    )
                 else:
                     # No auth context — deny access rather than falling back to unscoped query
                     return _error_response(
@@ -422,16 +503,21 @@ Returns:
                     not_found.append(original_id)
                 else:
                     memories.append(_serialize_memory(result))
-                    # Log access
-                    try:
-                        await access_repo.log_access(
-                            memory_id=uuid_id,
-                            access_type="view",
-                            user_id=user_id,
-                            organization_id=org_id,
-                        )
-                    except Exception:
-                        logger.debug("Access log failed for get_memories", exc_info=True)
+                    accessed_ids.append(uuid_id)
+
+            # Log access in a single batch — emits per-memory audit log rows
+            # but issues ONE UPDATE statement to refresh last_accessed_at and
+            # reactivate any qualifying lifecycle stages (M9 Phase 2).
+            if accessed_ids:
+                try:
+                    await access_repo.log_batch_access(
+                        memory_ids=accessed_ids,
+                        access_type="view",
+                        user_id=user_id,
+                        organization_id=org_id,
+                    )
+                except Exception:
+                    logger.debug("Batch access log failed for get_memories", exc_info=True)
 
             return json.dumps(
                 {
@@ -463,7 +549,7 @@ Returns:
             - error: Error message if not authenticated
         """
         try:
-            user_id, org_id, user_role = await _get_current_user_context()
+            user_id, org_id, user_role, memory_scope, memory_scope_user_id = await _get_current_user_context()
 
             if user_id is None:
                 return _error_response("Not authenticated")
@@ -511,6 +597,7 @@ Returns:
         memory_ids: list[str] | None = None,
         offset: int = 0,
         limit: int = 5,
+        include_archived: bool = False,
     ) -> str:
         """Search for memories by content with fuzzy matching and filters.
 
@@ -521,7 +608,7 @@ Returns:
             query: Optional fuzzy search query to match against memory CONTENT only.
             username: Optional filter to only return memories for a specific user.
             type: Optional filter by memory type
-                (experience, technical, procedural, goal, individual).
+                (experience, technical, goal, individual).
             tags: Optional list of tags to filter by
                 (memories must have all specified tags).
             importance_min: Optional minimum importance rating (1-10).
@@ -532,6 +619,12 @@ Returns:
             memory_ids: Optional list of specific memory UUIDs to retrieve.
             offset: Pagination offset (default 0).
             limit: Maximum number of results to return (default 5, max 50).
+            include_archived: When False (default), memories with
+                ``lifecycle_stage`` in ``('archived', 'forgotten')`` are
+                excluded — but only when the
+                ``LUCENT_SEARCH_EXCLUDE_ARCHIVED_ENABLED`` rollout flag is on.
+                When True, archived/forgotten memories are returned alongside
+                active ones (each result already exposes ``lifecycle_stage``).
 
         Returns:
             JSON string with search results including:
@@ -566,12 +659,13 @@ Returns:
                 limit=min(limit, 50),
             )
 
-            repo = await _get_repository()
+            memory_access = await _get_memory_access_service()
 
             # Get current user context for access control
-            user_id, org_id, user_role = await _get_current_user_context()
+            user_id, org_id, user_role, memory_scope, memory_scope_user_id = await _get_current_user_context()
 
-            result = await repo.search(
+            result = await memory_access.search(
+                user_id=user_id,
                 query=search_input.query,
                 username=search_input.username,
                 type=search_input.type.value if search_input.type else None,
@@ -585,6 +679,8 @@ Returns:
                 limit=search_input.limit,
                 requesting_user_id=user_id,
                 requesting_org_id=org_id,
+                memory_scope=memory_scope,
+                include_archived=include_archived,
             )
 
             # Log access for returned memories
@@ -632,6 +728,7 @@ Returns:
         importance_max: int | None = None,
         offset: int = 0,
         limit: int = 5,
+        include_archived: bool = False,
     ) -> str:
         """Search across ALL text fields: content, tags, and metadata.
 
@@ -643,11 +740,14 @@ Returns:
             query: Search query to match against content, tags, and metadata (required).
             username: Optional filter to only return memories for a specific user.
             type: Optional filter by memory type
-                (experience, technical, procedural, goal, individual).
+                (experience, technical, goal, individual).
             importance_min: Optional minimum importance rating (1-10).
             importance_max: Optional maximum importance rating (1-10).
             offset: Pagination offset (default 0).
             limit: Maximum number of results to return (default 5, max 50).
+            include_archived: See ``search_memories``. Default-False is a
+                no-op until the ``LUCENT_SEARCH_EXCLUDE_ARCHIVED_ENABLED``
+                rollout flag is enabled.
 
         Returns:
             JSON string with search results including:
@@ -665,12 +765,13 @@ Returns:
 
             memory_type = MemoryType(type) if type else None
 
-            repo = await _get_repository()
+            memory_access = await _get_memory_access_service()
 
             # Get current user context for access control
-            user_id, org_id, user_role = await _get_current_user_context()
+            user_id, org_id, user_role, memory_scope, memory_scope_user_id = await _get_current_user_context()
 
-            result = await repo.search_full(
+            result = await memory_access.search_full(
+                user_id=user_id,
                 query=query.strip(),
                 username=username,
                 type=memory_type.value if memory_type else None,
@@ -680,6 +781,8 @@ Returns:
                 limit=min(limit, 50),
                 requesting_user_id=user_id,
                 requesting_org_id=org_id,
+                memory_scope=memory_scope,
+                include_archived=include_archived,
             )
 
             # Log access for returned memories
@@ -754,14 +857,14 @@ Returns:
             repo = await _get_repository()
 
             # Get current user context for ownership check
-            user_id, org_id, user_role = await _get_current_user_context()
+            user_id, org_id, user_role, memory_scope, memory_scope_user_id = await _get_current_user_context()
 
             if user_id is None:
                 return _error_response("Authentication required to update memories")
 
             # Get old values before update for audit (also needed for metadata validation)
             # Use get_accessible to ensure user can at least see this memory
-            old_memory = await repo.get_accessible(uuid_id, user_id, org_id)
+            old_memory = await repo.get_accessible(uuid_id, user_id, org_id, memory_scope=memory_scope)
             if old_memory is None:
                 return _error_response(f"Memory not found or not accessible: {memory_id}")
 
@@ -865,6 +968,132 @@ Returns:
             logger.error("update_memory failed: id=%s", memory_id, exc_info=e)
             return _error_response(f"Failed to update memory: {str(e)}")
 
+    async def _toggle_pin(memory_id: str, *, pin: bool) -> str:
+        """Shared implementation for pin_memory / unpin_memory.
+
+        Adds or removes the ``pinned`` tag idempotently with the same ACL rules
+        as ``update_memory``. Bumps the memory version and emits a structured
+        log line ("memory.pinned" / "memory.unpinned") with memory_id and
+        caller user_id.
+        """
+        action = "pin" if pin else "unpin"
+        log_event = "memory.pinned" if pin else "memory.unpinned"
+        try:
+            uuid_id = UUID(memory_id)
+
+            repo = await _get_repository()
+
+            user_id, org_id, user_role, memory_scope, _ = await _get_current_user_context()
+
+            if user_id is None:
+                return _error_response(f"Authentication required to {action} memories")
+
+            old_memory = await repo.get_accessible(
+                uuid_id, user_id, org_id, memory_scope=memory_scope
+            )
+            if old_memory is None:
+                return _error_response(f"Memory not found or not accessible: {memory_id}")
+
+            # Same ACL as update_memory: owner (or daemon role in same org) only.
+            if old_memory.get("user_id") != user_id and user_role != "daemon":
+                return _error_response(
+                    f"Permission denied: only the owner can {action} this memory"
+                )
+
+            current_tags = list(old_memory.get("tags") or [])
+            if pin:
+                if "pinned" in current_tags:
+                    new_tags = current_tags  # idempotent — no change
+                    changed = False
+                else:
+                    new_tags = current_tags + ["pinned"]
+                    changed = True
+            else:
+                if "pinned" not in current_tags:
+                    new_tags = current_tags
+                    changed = False
+                else:
+                    new_tags = [t for t in current_tags if t != "pinned"]
+                    changed = True
+
+            # Always call update so the version bumps even on idempotent calls,
+            # matching update_memory semantics for visibility/auditability.
+            result = await repo.update(
+                memory_id=uuid_id,
+                tags=new_tags,
+            )
+
+            if result is None:
+                return _error_response(f"Memory not found: {memory_id}")
+
+            logger.info(
+                "%s memory_id=%s caller=%s changed=%s",
+                log_event,
+                memory_id,
+                user_id,
+                changed,
+            )
+
+            if changed:
+                audit_repo = await _get_audit_repository()
+                await audit_repo.log(
+                    memory_id=uuid_id,
+                    action_type="update",
+                    user_id=user_id,
+                    organization_id=org_id,
+                    changed_fields=["tags"],
+                    old_values={"tags": current_tags},
+                    new_values={"tags": new_tags},
+                    context=_get_audit_context(),
+                    version=result["version"],
+                    snapshot=_build_snapshot(result),
+                )
+
+            return json.dumps(_serialize_memory(result), indent=2)
+
+        except ValueError as e:
+            return _error_response(f"Invalid input: {str(e)}")
+        except Exception as e:
+            logger.error("%s_memory failed: id=%s", action, memory_id, exc_info=e)
+            return _error_response(f"Failed to {action} memory: {str(e)}")
+
+    @mcp.tool()
+    async def pin_memory(memory_id: str) -> str:
+        """Pin a memory so it is hard-exempt from consolidation and forgetting.
+
+        Adds the ``pinned`` tag to the memory (idempotent — pinning an already
+        pinned memory is a no-op that still bumps the version). Pinned memories
+        are short-circuited out of consolidation/forgetting candidate selection
+        in addition to the existing individual + active-goal exemptions. ACL is
+        the same as ``update_memory``: only the owner (or a daemon-role caller
+        in the same org) may pin a memory.
+
+        Args:
+            memory_id: The UUID of the memory to pin.
+
+        Returns:
+            JSON string with the updated memory, or an error if not found / not
+            accessible / permission denied.
+        """
+        return await _toggle_pin(memory_id, pin=True)
+
+    @mcp.tool()
+    async def unpin_memory(memory_id: str) -> str:
+        """Unpin a memory, re-enabling normal lifecycle transitions.
+
+        Removes the ``pinned`` tag from the memory (idempotent — unpinning a
+        memory that was not pinned is a no-op). ACL matches ``update_memory``:
+        only the owner (or a daemon-role caller in the same org) may unpin.
+
+        Args:
+            memory_id: The UUID of the memory to unpin.
+
+        Returns:
+            JSON string with the updated memory, or an error if not found / not
+            accessible / permission denied.
+        """
+        return await _toggle_pin(memory_id, pin=False)
+
     @mcp.tool()
     async def delete_memory(memory_id: str) -> str:
         """Delete a memory (soft delete - can be recovered).
@@ -886,23 +1115,26 @@ Returns:
             repo = await _get_repository()
 
             # Get current user context for ownership check
-            user_id, org_id, user_role = await _get_current_user_context()
+            user_id, org_id, user_role, memory_scope, memory_scope_user_id = await _get_current_user_context()
 
             if user_id is None:
                 return _error_response("Authentication required to delete memories")
 
             # Get memory info before deletion for audit
             # Use get_accessible to ensure user can at least see this memory
-            old_memory = await repo.get_accessible(uuid_id, user_id, org_id)
+            old_memory = await repo.get_accessible(uuid_id, user_id, org_id, memory_scope=memory_scope)
             if old_memory is None:
                 return _error_response(f"Memory not found or not accessible: {memory_id}")
 
             # Check ownership OR MEMORY_DELETE_ANY permission
             if old_memory.get("user_id") != user_id:
-                from lucent.rbac import Permission, has_permission, Role
+                from lucent.rbac import Permission, Role, has_permission
+
                 role = Role.from_string(user_role or "member")
                 if not has_permission(role, Permission.MEMORY_DELETE_ANY):
-                    return _error_response("Permission denied: only the owner can delete this memory")
+                    return _error_response(
+                        "Permission denied: only the owner can delete this memory"
+                    )
 
             # Individual memories cannot be deleted via MCP
             # - they are deleted when users are removed
@@ -913,7 +1145,11 @@ Returns:
                     " are removed from the system."
                 )
 
-            success = await repo.delete(uuid_id)
+            success = await repo.delete(
+                uuid_id,
+                ldr_canonical_id=_extract_ldr_canonical_id(old_memory),
+                force_delete_compliance=False,
+            )
 
             if not success:
                 return _error_response(f"Memory not found: {memory_id}")
@@ -961,24 +1197,25 @@ Returns:
         Args:
             username: Optional filter to only show tags used by a specific user.
             type: Optional filter by memory type
-                (experience, technical, procedural, goal, individual).
+                (experience, technical, goal, individual).
             limit: Maximum number of tags to return (default 50, max 100).
 
         Returns:
             JSON string with list of {tag, count} sorted by usage count descending.
         """
         try:
-            repo = await _get_repository()
-
             # Get current user context for access control
-            user_id, org_id, user_role = await _get_current_user_context()
+            user_id, org_id, user_role, memory_scope, memory_scope_user_id = await _get_current_user_context()
+            memory_access = await _get_memory_access_service(user_role)
 
-            result = await repo.get_existing_tags(
+            result = await memory_access.get_existing_tags(
+                user_id=user_id,
                 username=username,
                 type=type,
                 limit=min(limit, 100),
                 requesting_user_id=user_id,
                 requesting_org_id=org_id,
+                memory_scope=memory_scope,
             )
 
             return json.dumps(
@@ -1016,17 +1253,18 @@ Returns:
             if not query or not query.strip():
                 return _error_response("Query is required")
 
-            repo = await _get_repository()
-
             # Get current user context for access control
-            user_id, org_id, user_role = await _get_current_user_context()
+            user_id, org_id, user_role, memory_scope, memory_scope_user_id = await _get_current_user_context()
+            memory_access = await _get_memory_access_service(user_role)
 
-            result = await repo.get_tag_suggestions(
+            result = await memory_access.get_tag_suggestions(
+                user_id=user_id,
                 query=query.strip(),
                 username=username,
                 limit=min(limit, 25),
                 requesting_user_id=user_id,
                 requesting_org_id=org_id,
+                memory_scope=memory_scope,
             )
 
             return json.dumps(
@@ -1073,11 +1311,11 @@ Returns:
             audit_repo = await _get_audit_repository()
 
             # Verify the user can access this memory
-            user_id, org_id, user_role = await _get_current_user_context()
+            user_id, org_id, user_role, memory_scope, memory_scope_user_id = await _get_current_user_context()
             if user_id is None:
                 return _error_response("Authentication required")
 
-            memory = await repo.get_accessible(uuid_id, user_id, org_id)
+            memory = await repo.get_accessible(uuid_id, user_id, org_id, memory_scope=memory_scope)
             if memory is None:
                 return _error_response(f"Memory not found or not accessible: {memory_id}")
 
@@ -1149,11 +1387,11 @@ Returns:
             audit_repo = await _get_audit_repository()
 
             # Verify ownership
-            user_id, org_id, user_role = await _get_current_user_context()
+            user_id, org_id, user_role, memory_scope, memory_scope_user_id = await _get_current_user_context()
             if user_id is None:
                 return _error_response("Authentication required to restore memories")
 
-            memory = await repo.get_accessible(uuid_id, user_id, org_id)
+            memory = await repo.get_accessible(uuid_id, user_id, org_id, memory_scope=memory_scope)
             if memory is None:
                 return _error_response(f"Memory not found or not accessible: {memory_id}")
 
@@ -1239,7 +1477,7 @@ Returns:
             """
             try:
                 # Get current user context
-                user_id, org_id, user_role = await _get_current_user_context()
+                user_id, org_id, user_role, memory_scope, memory_scope_user_id = await _get_current_user_context()
 
                 if user_id is None:
                     return _error_response("Authentication required to share memories")
@@ -1294,7 +1532,7 @@ Returns:
             """
             try:
                 # Get current user context
-                user_id, org_id, user_role = await _get_current_user_context()
+                user_id, org_id, user_role, memory_scope, memory_scope_user_id = await _get_current_user_context()
 
                 if user_id is None:
                     return _error_response("Authentication required to unshare memories")
@@ -1381,7 +1619,7 @@ Returns:
 
         try:
             repo = await _get_repository()
-            user_id, org_id, _ = await _get_current_user_context()
+            user_id, org_id, user_role, memory_scope, memory_scope_user_id = await _get_current_user_context()
             if user_id is None:
                 return _error_response("Authentication required")
 
@@ -1450,12 +1688,12 @@ Returns:
             uuid_id = UUID(memory_id)
             repo = await _get_repository()
 
-            user_id, org_id, _ = await _get_current_user_context()
+            user_id, org_id, user_role, memory_scope, memory_scope_user_id = await _get_current_user_context()
             if user_id is None:
                 return _error_response("Authentication required")
 
             # Anti-spoofing V3: verify task belongs to caller's org before claiming
-            task_memory = await repo.get_accessible(uuid_id, user_id, org_id)
+            task_memory = await repo.get_accessible(uuid_id, user_id, org_id, memory_scope=memory_scope)
             if task_memory is None:
                 return _error_response(
                     f"Could not claim task {memory_id}: not found or not accessible."
@@ -1520,12 +1758,12 @@ Returns:
             uuid_id = UUID(memory_id)
             repo = await _get_repository()
 
-            user_id, org_id, _ = await _get_current_user_context()
+            user_id, org_id, user_role, memory_scope, memory_scope_user_id = await _get_current_user_context()
             if user_id is None:
                 return _error_response("Authentication required")
 
             # Anti-spoofing V3: verify task belongs to caller's org before releasing
-            task_memory = await repo.get_accessible(uuid_id, user_id, org_id)
+            task_memory = await repo.get_accessible(uuid_id, user_id, org_id, memory_scope=memory_scope)
             if task_memory is None:
                 return _error_response(
                     f"Could not release task {memory_id}: not found or not accessible."
@@ -1586,7 +1824,7 @@ Returns:
         you own or that are shared within your organization.
 
         Args:
-            type: Filter by memory type (experience, technical, procedural, goal, individual).
+            type: Filter by memory type (experience, technical, goal, individual).
             tags: Filter by tags (returns memories matching any provided tag).
             importance_min: Minimum importance (1-10).
             importance_max: Maximum importance (1-10).
@@ -1598,7 +1836,7 @@ Returns:
             JSON string with export metadata and full memory records.
         """
         try:
-            user_id, org_id, user_role = await _get_current_user_context()
+            user_id, org_id, user_role, memory_scope, memory_scope_user_id = await _get_current_user_context()
 
             parsed_after = datetime.fromisoformat(created_after) if created_after else None
             parsed_before = datetime.fromisoformat(created_before) if created_before else None
@@ -1614,6 +1852,8 @@ Returns:
                 requesting_user_id=user_id,
                 requesting_org_id=org_id,
             )
+            memory_access = await _get_memory_access_service()
+            memories = await memory_access.filter_memories(memories, user_id)
 
             serialized = [_serialize_memory(m) for m in memories]
 
@@ -1666,7 +1906,7 @@ Returns:
             errors, and total.
         """
         try:
-            user_id, org_id, user_role = await _get_current_user_context()
+            user_id, org_id, user_role, memory_scope, memory_scope_user_id = await _get_current_user_context()
             username = _get_current_username()
 
             # Parse input
@@ -1702,7 +1942,6 @@ Returns:
             logger.error("import_memories failed", exc_info=e)
             return _error_response(f"Failed to import memories: {str(e)}")
 
-
 def _serialize_memory(memory: dict[str, Any]) -> dict[str, Any]:
     """Serialize a memory dict for JSON output."""
     return {
@@ -1725,6 +1964,11 @@ def _serialize_memory(memory: dict[str, Any]) -> dict[str, Any]:
         "shared": memory.get("shared", False),
         "last_accessed_at": memory["last_accessed_at"].isoformat()
         if memory.get("last_accessed_at")
+        else None,
+        "lifecycle_stage": memory.get("lifecycle_stage", "active"),
+        "vitality_score": memory.get("vitality_score"),
+        "vitality_computed_at": memory["vitality_computed_at"].isoformat()
+        if memory.get("vitality_computed_at")
         else None,
     }
 
@@ -1751,4 +1995,5 @@ def _serialize_truncated_memory(memory: dict[str, Any]) -> dict[str, Any]:
         "last_accessed_at": memory["last_accessed_at"].isoformat()
         if memory.get("last_accessed_at")
         else None,
+        "lifecycle_stage": memory.get("lifecycle_stage", "active"),
     }

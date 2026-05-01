@@ -14,6 +14,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY pyproject.toml README.md ./
 COPY src/ src/
 
+# Keep pip patched before building and installing project wheels.
+RUN python -m pip install --no-cache-dir --upgrade pip
+
 # Install the package
 RUN pip install --no-cache-dir build && \
     python -m build --wheel && \

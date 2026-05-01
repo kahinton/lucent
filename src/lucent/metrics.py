@@ -77,6 +77,29 @@ class _MetricsRegistry:
             description="pg_notify wake signal failures",
         )
 
+        # Shadow forgetting comparison metrics
+        self.shadow_forget_top_k_agreement = meter.create_histogram(
+            "lucent.shadow_forget.top_k_agreement",
+            description="Top-K agreement rate between vitality and shadow strategy",
+        )
+        self.shadow_forget_orphan_reclaim = meter.create_histogram(
+            "lucent.shadow_forget.orphan_reclaim",
+            description="Orphan reclaim rate for shadow forgetting candidates",
+        )
+        self.shadow_forget_load_bearing_protection = meter.create_histogram(
+            "lucent.shadow_forget.load_bearing_protection",
+            description="Rate of load-bearing memories vitality places in archive band",
+        )
+        self.shadow_forget_ldr_edges_at_risk = meter.create_histogram(
+            "lucent.shadow_forget.ldr_edges_at_risk",
+            description="LDR observation edges-at-risk over comparison window",
+        )
+        self.shadow_forget_compute_overhead = meter.create_histogram(
+            "lucent.shadow_forget.compute_overhead",
+            unit="s",
+            description="Wall time overhead for shadow forgetting batch computation",
+        )
+
     def __getattr__(self, name: str) -> object:
         # Trigger lazy init when any instrument attribute is accessed
         if name.startswith("_"):

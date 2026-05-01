@@ -22,12 +22,36 @@ logger = get_logger("chat")
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
-CHAT_MODEL = os.environ.get("LUCENT_CHAT_MODEL", "claude-opus-4.6")
+CHAT_MODEL = os.environ.get("LUCENT_CHAT_MODEL", "").strip()
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 # MCP server URL — localhost inside the container, configurable for external
 MCP_URL = os.environ.get("LUCENT_CHAT_MCP_URL", "http://localhost:8766/mcp")
 # Session timeout for chat (shorter than daemon — chat should be snappy)
 CHAT_SESSION_TIMEOUT = int(os.environ.get("LUCENT_CHAT_TIMEOUT", "300"))
+CHAT_ALLOWED_TOOLS = [
+    "get_current_user_context",
+    "search_memories",
+    "search_memories_full",
+    "get_memory",
+    "get_memories",
+    "create_memory",
+    "update_memory",
+    "delete_memory",
+    "get_existing_tags",
+    "get_tag_suggestions",
+    "list_active_work",
+    "list_pending_requests",
+    "list_pending_tasks",
+    "get_request_details",
+]
+
+
+def _resolve_chat_model(override: str | None = None) -> str:
+    from lucent.model_registry import get_default_model_id
+
+    if override:
+        return override
+    return get_default_model_id(preferred_model=(CHAT_MODEL or None))
 
 
 class ChatMessage(BaseModel):
@@ -71,9 +95,23 @@ def _build_mcp_config(session_token: str) -> dict:
             "type": "http",
             "url": MCP_URL,
             "headers": {"Authorization": f"Bearer {session_token}"},
-            "tools": ["*"],
+            "tools": CHAT_ALLOWED_TOOLS,
         },
     }
+
+
+def _chat_tool_grounding_instructions() -> str:
+    """Runtime instructions that keep chat answers grounded in actual tool results."""
+    return (
+        "## Tool and memory grounding\n"
+        "You have access to MCP tools. For questions about the user's memories, "
+        "use `get_current_user_context`, `search_memories`, `search_memories_full`, "
+        "or `get_memory` as needed before answering. If a tool returns memory content "
+        "or page context includes memory content, you may quote or summarize it for "
+        "this authenticated user. If tools are unavailable or return an access error, "
+        "say that plainly. Do not invent Lucent security policies, hidden rules, or "
+        "confidentiality restrictions to explain missing information."
+    )
 
 
 async def _build_system_prompt(user: dict, pool, page_context: dict | None) -> str:
@@ -89,6 +127,7 @@ async def _build_system_prompt(user: dict, pool, page_context: dict | None) -> s
         "use it to search, create, update, and manage memories when the user asks.",
         "When the user asks about their memories, use the MCP tools to search and "
         "retrieve accurate information rather than relying only on the page context.",
+        _chat_tool_grounding_instructions(),
         "Answer questions about their data, explain what they're seeing, "
         "and help them use the system.",
         "Format responses in markdown when helpful. Keep answers focused and practical.",
@@ -195,11 +234,15 @@ async def chat_stream(
     """Stream a chat response. Model defaults to CHAT_MODEL but can be overridden per-request."""
     user, pool = await _get_session_user(request)
 
-    from lucent.llm import get_engine
+    from lucent.llm import get_engine_for_model
+    from lucent.model_registry import validate_model
 
-    engine = get_engine()
+    selected_model = _resolve_chat_model(body.model)
+    validation_error = validate_model(selected_model)
+    if validation_error:
+        raise HTTPException(status_code=400, detail=validation_error)
 
-    selected_model = body.model or CHAT_MODEL
+    engine = get_engine_for_model(selected_model)
 
     system_prompt = await _build_system_prompt(user, pool, body.page_context)
 
@@ -273,7 +316,7 @@ async def chat_models(request: Request):
 
     models = registry_list_models()
     return {
-        "default": CHAT_MODEL,
+        "default": _resolve_chat_model(),
         "models": [
             {
                 "id": m.id,
@@ -297,9 +340,25 @@ async def chat_status(request: Request):
 
     return {
         "available": True,
-        "model": CHAT_MODEL,
+        "model": _resolve_chat_model(),
         "engine": get_engine_name(),
     }
+
+
+@router.get("/agents")
+async def chat_agents(request: Request):
+    """List available agents for the chat agent picker (session-authenticated)."""
+    user, pool = await _get_session_user(request)
+    from lucent.db.definitions import DefinitionRepository
+
+    repo = DefinitionRepository(pool)
+    result = await repo.list_agents(
+        str(user["organization_id"]),
+        status="active",
+        requester_user_id=str(user["id"]),
+        requester_role=user.get("role", "member"),
+    )
+    return result.get("items", result) if isinstance(result, dict) else result
 
 
 @router.post("/stream-v2")
@@ -325,11 +384,16 @@ async def chat_stream_v2(
 
     user, pool = await _get_session_user(request)
 
-    from lucent.llm import get_engine
+    from lucent.llm import get_engine_for_model
     from lucent.llm.engine import SessionEvent, SessionEventType
+    from lucent.model_registry import validate_model
 
-    engine = get_engine()
-    selected_model = body.model or CHAT_MODEL
+    selected_model = _resolve_chat_model(body.model)
+    validation_error = validate_model(selected_model)
+    if validation_error:
+        raise HTTPException(status_code=400, detail=validation_error)
+
+    engine = get_engine_for_model(selected_model)
 
     # Build system prompt — optionally load agent definition
     system_prompt_parts = []
@@ -366,9 +430,13 @@ async def chat_stream_v2(
             f"You're talking with {display_name}.\n"
             "Be helpful, concise, and knowledgeable. "
             "You have access to MCP tools for memory search, creation, and management.\n"
+            f"{_chat_tool_grounding_instructions()}\n"
             "Format responses in markdown when helpful.\n"
             f"Current time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}."
         )
+
+    if body.agent_id and agent_name:
+        system_prompt_parts.append(_chat_tool_grounding_instructions())
 
     system_prompt = "\n\n".join(system_prompt_parts)
 
@@ -410,10 +478,16 @@ async def chat_stream_v2(
                 "text": event.content or "",
             })
         elif event.type == SessionEventType.TOOL_CALL:
+            tool_input = event.content or ""
+            if event.tool_input is not None:
+                try:
+                    tool_input = json.dumps(event.tool_input, default=str)
+                except Exception:
+                    tool_input = str(event.tool_input)
             event_queue.put_nowait({
                 "type": "tool_call",
                 "tool": event.tool_name or "unknown",
-                "input": event.content or "",
+                "input": tool_input,
             })
         elif event.type == SessionEventType.TOOL_RESULT:
             event_queue.put_nowait({

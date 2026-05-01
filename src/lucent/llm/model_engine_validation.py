@@ -5,7 +5,7 @@ from __future__ import annotations
 from importlib.util import find_spec
 
 ALLOWED_ENGINES = {"copilot", "langchain"}
-COPILOT_SUPPORTED_PROVIDERS = {"anthropic", "openai", "google", "ollama"}
+COPILOT_SUPPORTED_PROVIDERS = {"anthropic", "copilot", "google", "ollama", "openai", "xai"}
 LANGCHAIN_PROVIDER_PACKAGES = {
     "anthropic": "langchain_anthropic",
     "openai": "langchain_openai",

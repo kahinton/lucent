@@ -9,11 +9,10 @@ from __future__ import annotations
 import json
 import logging
 import time
+from contextlib import AsyncExitStack
 from typing import Any
 
-import httpx
-
-from lucent.url_validation import SSRFError, validate_url
+from lucent.url_validation import validate_url
 
 logger = logging.getLogger(__name__)
 
@@ -48,14 +47,51 @@ class MCPToolBridge:
         mcp_url: str,
         headers: dict[str, str] | None = None,
         *,
+        allowed_tools: list[str] | None = None,
         skip_url_validation: bool = False,
     ):
         if not skip_url_validation:
             validate_url(mcp_url, purpose="MCP bridge")
         self._mcp_url = mcp_url
         self._headers = headers or {}
+        self._allowed_tools = set(allowed_tools or ["*"])
         self._tools: list[dict[str, Any]] = []
-        self._client = httpx.AsyncClient(timeout=30.0)
+        self._exit_stack: AsyncExitStack | None = None
+        self._session: Any | None = None
+
+    def _is_tool_allowed(self, tool_name: str) -> bool:
+        return "*" in self._allowed_tools or tool_name in self._allowed_tools
+
+    async def _ensure_session(self) -> Any:
+        """Open an MCP streamable HTTP session if one is not already active."""
+        if self._session is not None:
+            return self._session
+
+        try:
+            from mcp import ClientSession
+            from mcp.client.streamable_http import streamablehttp_client
+        except ImportError as exc:
+            raise RuntimeError("MCP client package is required for MCP tool bridge") from exc
+
+        stack = AsyncExitStack()
+        try:
+            read_stream, write_stream, _get_session_id = await stack.enter_async_context(
+                streamablehttp_client(
+                    self._mcp_url,
+                    headers=self._headers,
+                    timeout=30,
+                    sse_read_timeout=300,
+                )
+            )
+            session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
+            await session.initialize()
+        except Exception:
+            await stack.aclose()
+            raise
+
+        self._exit_stack = stack
+        self._session = session
+        return session
 
     async def discover_tools(self) -> list[dict[str, Any]]:
         """Discover available tools from the MCP server.
@@ -64,19 +100,14 @@ class MCPToolBridge:
         to LangChain-compatible tool schemas.
         """
         try:
-            response = await self._client.post(
-                self._mcp_url,
-                headers={**self._headers, "Content-Type": "application/json"},
-                json={
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "tools/list",
-                },
-            )
-            response.raise_for_status()
-            data = response.json()
-
-            mcp_tools = data.get("result", {}).get("tools", [])
+            session = await self._ensure_session()
+            listed = await session.list_tools()
+            raw_tools = getattr(listed, "tools", []) or []
+            mcp_tools = [
+                tool
+                for tool in (_normalize_tool(tool) for tool in raw_tools)
+                if self._is_tool_allowed(str(tool.get("name", "")))
+            ]
             self._tools = mcp_tools
             return self._to_langchain_tools(mcp_tools)
         except Exception as e:
@@ -95,12 +126,15 @@ class MCPToolBridge:
         """
         langchain_tools = []
         for tool in mcp_tools:
+            params = tool.get("inputSchema") or tool.get(
+                "input_schema", {"type": "object", "properties": {}}
+            )
             schema = {
                 "type": "function",
                 "function": {
                     "name": tool["name"],
                     "description": tool.get("description", ""),
-                    "parameters": tool.get("inputSchema", {"type": "object", "properties": {}}),
+                    "parameters": params,
                 },
             }
             langchain_tools.append(schema)
@@ -120,33 +154,12 @@ class MCPToolBridge:
         start = time.monotonic()
 
         try:
-            response = await self._client.post(
-                self._mcp_url,
-                headers={**self._headers, "Content-Type": "application/json"},
-                json={
-                    "jsonrpc": "2.0",
-                    "id": 2,
-                    "method": "tools/call",
-                    "params": {
-                        "name": tool_name,
-                        "arguments": arguments,
-                    },
-                },
-            )
-            response.raise_for_status()
-            data = response.json()
+            if not self._is_tool_allowed(tool_name):
+                return f"Error calling tool {tool_name}: tool is not allowed in this session"
 
-            result = data.get("result", {})
-            # MCP returns content as a list of content blocks
-            content_blocks = result.get("content", [])
-            if content_blocks:
-                result_text = "\n".join(
-                    block.get("text", json.dumps(block))
-                    for block in content_blocks
-                    if isinstance(block, dict)
-                )
-            else:
-                result_text = json.dumps(result)
+            session = await self._ensure_session()
+            result = await session.call_tool(tool_name, arguments or {})
+            result_text = _call_result_to_text(result)
 
             if is_memory_tool:
                 elapsed_ms = (time.monotonic() - start) * 1000
@@ -175,7 +188,55 @@ class MCPToolBridge:
 
     async def close(self) -> None:
         """Close the HTTP client."""
-        await self._client.aclose()
+        if self._exit_stack is not None:
+            await self._exit_stack.aclose()
+        self._exit_stack = None
+        self._session = None
+
+
+def _normalize_tool(tool: Any) -> dict[str, Any]:
+    """Normalize MCP SDK tool objects and dicts to the bridge's dict shape."""
+    if hasattr(tool, "model_dump"):
+        data = tool.model_dump(by_alias=True)
+    elif isinstance(tool, dict):
+        data = dict(tool)
+    else:
+        data = {
+            "name": getattr(tool, "name", None),
+            "description": getattr(tool, "description", ""),
+            "inputSchema": getattr(tool, "inputSchema", None)
+            or getattr(tool, "input_schema", None),
+        }
+
+    if "inputSchema" not in data and "input_schema" in data:
+        data["inputSchema"] = data["input_schema"]
+    if not data.get("inputSchema"):
+        data["inputSchema"] = {"type": "object", "properties": {}}
+    return data
+
+
+def _call_result_to_text(result: Any) -> str:
+    """Serialize an MCP call result into text for model follow-up messages."""
+    content_blocks = getattr(result, "content", None)
+    if isinstance(result, dict):
+        content_blocks = result.get("content", content_blocks)
+
+    if content_blocks:
+        parts: list[str] = []
+        for block in content_blocks:
+            if isinstance(block, dict):
+                parts.append(str(block.get("text") or json.dumps(block, default=str)))
+            elif hasattr(block, "text"):
+                parts.append(str(block.text))
+            elif hasattr(block, "model_dump"):
+                parts.append(json.dumps(block.model_dump(mode="json"), default=str))
+            else:
+                parts.append(str(block))
+        return "\n".join(parts)
+
+    if hasattr(result, "model_dump"):
+        return json.dumps(result.model_dump(mode="json"), default=str)
+    return json.dumps(result, default=str)
 
 
 def _summarize_memory_tool_params(tool_name: str, arguments: dict[str, Any]) -> str:

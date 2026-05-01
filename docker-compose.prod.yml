@@ -28,9 +28,10 @@ services:
       POSTGRES_USER: lucent
       # REQUIRED: No default — must be explicitly set
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      DAEMON_DB_PASSWORD: ${DAEMON_DB_PASSWORD:?DAEMON_DB_PASSWORD is required}
     volumes:
       - lucent_data:/var/lib/postgresql/data
-      - ./docker/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./docker/postgres-init.sh:/docker-entrypoint-initdb.d/10-lucent-init.sh:ro
     # No ports exposed to host — internal network only
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U lucent -d lucent"]
@@ -120,7 +121,8 @@ services:
       DAEMON_DATABASE_URL: postgresql://lucent_daemon:${DAEMON_DB_PASSWORD:?DAEMON_DB_PASSWORD is required}@postgres:5432/lucent
       LUCENT_MODE: ${LUCENT_MODE:-team}
       LUCENT_LICENSE_KEY: ${LUCENT_LICENSE_KEY:?LUCENT_LICENSE_KEY is required for team mode}
-      LUCENT_CHAT_MODEL: ${LUCENT_CHAT_MODEL:-claude-opus-4.6}
+      LUCENT_DEFAULT_MODEL: ${LUCENT_DEFAULT_MODEL:-}
+      LUCENT_CHAT_MODEL: ${LUCENT_CHAT_MODEL:-}
       LUCENT_LLM_ENGINE: ${LUCENT_LLM_ENGINE:-copilot}
       # Secret storage
       LUCENT_SECRET_PROVIDER: ${LUCENT_SECRET_PROVIDER:-builtin}
@@ -142,6 +144,7 @@ services:
     volumes:
       - ./.github/skills:/app/.github/skills:ro
       - ./.github/agents/definitions:/app/.github/agents/definitions:ro
+      - ./.github/sandbox-templates:/app/.github/sandbox-templates:ro
     ports:
       - "${LUCENT_PORT:-8766}:8766"
     healthcheck:

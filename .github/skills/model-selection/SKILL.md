@@ -5,29 +5,33 @@ description: 'Choose the right LLM model for a task based on complexity, cost, s
 
 # Model Selection
 
-How to pick the right model for a given task. The goal is matching task demands to model strengths — not always using the most powerful option.
+How to pick the right model for a given task. The goal is matching task demands
+to model strengths — not always using the most powerful option, and not
+hardcoding model IDs that may not be enabled in a deployment.
 
 ## When to Use
 
-- Creating a task via `create_task` and choosing the `model` field
+- Creating a task via `create_task` and deciding whether to set the `model` field
 - Daemon dispatch deciding which model to assign to a sub-agent
 - Reviewing task failures that might be caused by model mismatch
-- Optimizing cost by downgrading tasks that don't need premium models
+- Optimizing cost by avoiding premium models where the default is sufficient
 
-## Model Comparison Table
+## Selection Principle
 
-| Model | Category | Strengths | Cost Tier | Recommended agent_types |
-|-------|----------|-----------|-----------|------------------------|
-| `claude-haiku-4.5` | Fast | Speed, simple tasks, low cost | Cheap | memory, fast |
-| `gemini-3-flash` | Fast | Speed, lightweight inference | Cheap | memory, fast |
-| `gpt-5-mini` | Fast | Cheap, decent quality | Cheap | memory, fast |
-| `gpt-4.1` | General | Balanced quality/cost, tool use | Standard | code, documentation |
-| `claude-sonnet-4.6` | General | Strong coding, vision, tools | Standard | code, documentation, review |
-| `claude-sonnet-4.5` | General | Coding, tool use | Standard | code, documentation |
-| `gemini-3-pro` | Reasoning | Long context, research synthesis | Premium | research, planning |
-| `claude-opus-4.6` | Reasoning | Deep reasoning, nuanced judgment | Premium | reflection, planning, review |
-| `gpt-5.3-codex` | Agentic | Multi-step execution, edit-test loops | Premium | code (agentic), refactoring |
-| `gpt-5.2-codex` | Agentic | Sustained tool-calling workflows | Premium | code (agentic) |
+Default first. Use the configured/enabled default model whenever there is no
+clear reason to specialize. Model catalogs are provider- and user-specific, so
+do not hardcode model IDs in plans, prompts, or task decomposition. Ask for the
+available models and choose by capability category.
+
+## Capability Categories
+
+| Category | Strengths | Cost tendency | Use when |
+|----------|-----------|---------------|----------|
+| `fast` | Speed, simple tasks, low cost | Cheap | Memory tagging, simple lookups, formatting, status checks |
+| `general` | Balanced quality/cost, tool use | Standard | Most code, docs, review, planning, and research tasks |
+| `reasoning` | Deep analysis, trade-offs, synthesis | Premium | Architecture, security, root-cause analysis, complex planning |
+| `agentic` | Sustained execution and edit-test loops | Premium | Large refactors, multi-file implementation, autonomous coding sessions |
+| `visual` | Image/input understanding | Varies | Tasks with explicit image or visual context |
 
 ## Procedure
 
@@ -42,87 +46,88 @@ Classify the task into one of these tiers:
 | **Complex** | Multi-step reasoning, trade-off analysis, judgment | Architecture decisions, security review, planning |
 | **Agentic** | Sustained autonomous execution, edit-test loops | Large refactors, autonomous coding sessions |
 
-### Step 2: Check agent_type Recommendation
+### Step 2: Check Available Models and Default
 
-Call `list_available_models(agent_type="<type>")` to get the system's recommended model for the agent. Use the Model Comparison Table above to verify the recommendation fits the task's actual complexity — the default may over- or under-shoot.
+Call `list_available_models(agent_type="<type>")` to get the enabled model list,
+the configured `default_model`, and the selector's recommendation. Use the
+default unless task requirements clearly justify a specialized category.
 
 ### Step 3: Consider Cost/Speed Tradeoff
 
 Apply this decision rule:
 
-- **Must be fast, accuracy non-critical** → Cheap tier (Haiku, Flash, GPT-5-mini)
-- **Must be correct, speed acceptable** → Standard tier (Sonnet, GPT-4.1)
-- **Must be deeply correct, cost acceptable** → Premium tier (Opus, Gemini Pro)
-- **Must run autonomously for many steps** → Agentic tier (Codex models)
+- **No clear specialized need** → default model
+- **Must be fast, accuracy non-critical** → enabled `fast` model
+- **Must be deeply correct, cost acceptable** → enabled `reasoning` model
+- **Must run autonomously for many steps** → enabled `agentic` model
 
 If rate limits are being hit, downgrade non-critical tasks one tier.
 
 ### Step 4: Select Model
 
-Pick the model that matches the intersection of complexity tier and cost tolerance. If the system recommendation from Step 2 aligns, use it. If not, override with your selection and note the reason.
+Pick the default model unless the task's requirements match a specialized
+category. If overriding the default, note the reason in the task description or
+planning summary.
 
-```
-create_task(request_id=..., title=..., model="<selected-model>", ...)
+```text
+create_task(request_id=..., title=..., model="<selected-model only if needed>", ...)
 ```
 
-## Reference: Task Type → Model Mapping
+## Reference: Task Type → Category Mapping
 
 ### Fast / Lightweight
 Tasks: memory tagging, simple lookups, formatting, status checks, boilerplate generation
 
-**Pick:** `claude-haiku-4.5` or `gemini-3-flash`
-
-These are cheap and fast. Use them for anything that doesn't require multi-step reasoning. If a task is mechanical — extracting tags, reformatting text, simple CRUD — don't waste a premium model on it.
+Pick an enabled `fast` model when one exists. If no fast model is enabled, use
+the default model.
 
 ### General Coding
 Tasks: feature implementation, bug fixes, test writing, refactoring, documentation
 
-**Pick:** `claude-sonnet-4.6` (default) or `gpt-4.1`
-
-The workhorse tier. Sonnet 4.6 is the default for a reason — it handles most coding tasks well, supports vision and tools, and balances quality with cost. GPT-4.1 is a solid alternative.
+Use the default model. Only override for multi-file, sustained, or high-risk
+work where a specialized category is clearly justified.
 
 ### Deep Reasoning / Analysis
 Tasks: architecture decisions, complex debugging, security review, code analysis, planning
 
-**Pick:** `claude-opus-4.6`, `gpt-5.4`, or `gemini-3-pro`
-
-When the task requires thinking through multiple steps, weighing trade-offs, or analyzing a large codebase. Opus is strongest here. GPT-5.4 and Gemini 3 Pro are alternatives if you need provider diversity.
+Pick an enabled `reasoning` model when the task requires thinking through
+multiple steps, weighing trade-offs, or analyzing a large codebase. Otherwise,
+use the default model.
 
 ### Agentic / Multi-step Execution
 Tasks: autonomous coding sessions, edit-test loops, complex refactors across many files
 
-**Pick:** `gpt-5.3-codex` or `gpt-5.2-codex`
-
-OpenAI's Codex models are optimized for agentic workflows — they're better at sustained multi-step execution with tool calls. Use these when the task involves iterating through edit-test cycles.
+Pick an enabled `agentic` model when the task involves sustained edit-test
+cycles or a large autonomous refactor. Otherwise, use the default model.
 
 ### Research / Long Context
 Tasks: reading large documents, cross-referencing multiple sources, literature review
 
-**Pick:** `gemini-3-pro` or `gemini-2.5-pro`
-
-Google's models handle long contexts well and are strong at research-style synthesis across multiple sources.
+Prefer the default model for ordinary research. Pick an enabled long-context or
+`reasoning` model only when the source volume or synthesis complexity requires it.
 
 ### Reflection / Self-Assessment
 Tasks: reviewing own output quality, extracting lessons, meta-analysis
 
-**Pick:** `claude-opus-4.6`
-
-Reflection benefits from the highest reasoning capability available. This is where you want the model that's best at nuanced judgment.
+Use the default model for ordinary review. Pick an enabled `reasoning` model for
+high-stakes reflection, complex failure analysis, or nuanced judgment.
 
 ## Cost Awareness
 
 Models have different premium request costs. In rough order from cheapest to most expensive:
 
-1. **Cheapest:** Haiku 4.5, Gemini 3 Flash, GPT-5 mini
-2. **Standard:** Sonnet 4.5/4.6, GPT-4.1, Qwen2.5
-3. **Premium:** Opus 4.5/4.6, GPT-5.1+, Gemini 3 Pro
-4. **Most expensive:** GPT-5.1-codex-max, GPT-5.3-codex
+1. **Cheapest:** `fast` models
+2. **Standard:** `general` models
+3. **Premium:** `reasoning` models
+4. **Most expensive:** large-context or `agentic` models
 
-Don't use premium models for tasks that a standard model handles fine. Save the expensive ones for where they make a real difference.
+Don't use premium models for tasks that a standard/default model handles fine.
+Save the expensive ones for where they make a real difference.
 
 ## When to Override Defaults
 
-The `get_recommended_model()` function in `src/lucent/model_registry.py` provides baseline recommendations. Override when:
+The `select_model_for_task()` function in `src/lucent/model_registry.py` provides
+baseline recommendations. Override when:
 
 - A task failed with the default model and needs more reasoning power
 - Rate limits are being hit — downgrade non-critical tasks to cheaper models
@@ -132,7 +137,8 @@ The `get_recommended_model()` function in `src/lucent/model_registry.py` provide
 
 ## Anti-Patterns
 
-- **Always using Opus** — It's the most powerful but also the most expensive. Most tasks don't need it.
+- **Always using premium reasoning models** — Most tasks don't need them.
 - **Ignoring task failures** — If a model consistently fails on a task type, try a different one rather than retrying with the same model.
-- **Not specifying a model** — Letting everything fall to the default means you're not thinking about what the task actually needs.
+- **Specifying a model without a reason** — Let the default selector handle standard tasks.
 - **Chasing new models** — A model being newer doesn't make it better for your specific task. Stick with what works until you have evidence otherwise.
+

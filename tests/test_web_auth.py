@@ -536,7 +536,7 @@ class TestPasswordChange:
             follow_redirects=False,
         )
         assert resp.status_code == 303
-        assert "password_changed=1" in resp.headers.get("location", "")
+        assert "success=" in resp.headers.get("location", "")
         # New session cookie should be set
         assert SESSION_COOKIE_NAME in resp.cookies
 

@@ -110,7 +110,7 @@ async def test_settings_unauthenticated_redirects(db_pool):
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         resp = await c.get("/settings", follow_redirects=False)
         assert resp.status_code in (302, 303)
-        assert "/login" in resp.headers.get("location", "")
+        assert resp.headers.get("location", "") == "/settings/account"
 
 
 # ---------------------------------------------------------------------------

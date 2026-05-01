@@ -208,7 +208,7 @@ Navigate to `http://localhost:8766/memories` and take a screenshot.
 Explain:
 > This is the Memories page — where you can browse and search everything I remember.
 >
-> Memories have types: **experience** (things I've learned), **technical** (code knowledge, architecture), **procedural** (how-to steps), **goal** (objectives we're working toward), and **individual** (what I know about specific people — like the profile we just created for you).
+> Memories have types: **experience** (things I've learned), **technical** (code knowledge, architecture), **goal** (objectives we're working toward), and **individual** (what I know about specific people — like the profile we just created for you).
 >
 > You can search by text, filter by tags, or create new memories manually. Everything here is also accessible through the MCP tools in our chat.
 

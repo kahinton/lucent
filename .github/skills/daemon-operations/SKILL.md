@@ -30,10 +30,10 @@ This skill is for **monitoring and optimizing** a healthy daemon — throughput,
 
 | Tool | Purpose | Key Parameters |
 |------|---------|---------------|
-| `memory-server-search_memories` | Check heartbeat status | `tags=["daemon-heartbeat"]`, `limit=5` |
 | `memory-server-search_memories` | Read cycle state | `tags=["daemon-state"]`, `limit=1` |
 | `memory-server-search_memories` | Check for messages | `tags=["daemon-message"]` |
-| `memory-server-get_memory` | Get full heartbeat/state detail | `memory_id` from search results |
+| SQL / dashboard | Check daemon instance heartbeat | `daemon_instances.last_seen_at`, `status`, `metadata` |
+| `memory-server-get_memory` | Get full daemon-state detail | `memory_id` from search results |
 | `memory-server-create_memory` | Save operations findings | `type="technical"`, `tags=["daemon","operations"]`, `shared=true` |
 
 ## Architecture Quick Reference
@@ -53,25 +53,28 @@ The daemon (`daemon/daemon.py`) has three layers:
 1. **Check process**: `ps aux | grep daemon.py`
 2. **Check server**: `curl -s http://localhost:8766/api/health | python -m json.tool`
 3. **Check database**: `docker exec lucent-db pg_isready -U lucent`
-4. **Check heartbeat**:
+4. **Check daemon instance heartbeat**:
    ```
-   memory-server-search_memories(tags=["daemon-heartbeat"], limit=5)
+   docker exec lucent-db psql -U lucent -d lucent -c \
+     "SELECT instance_id, status, last_seen_at, metadata FROM daemon_instances ORDER BY last_seen_at DESC LIMIT 5;"
    ```
-   Verify `timestamp` is within the last `DAEMON_INTERVAL_MINUTES` + buffer minutes.
+   Verify `last_seen_at` is within the last `DAEMON_INTERVAL_MINUTES` + buffer minutes.
 5. **Check recent logs**: `tail -20 daemon/daemon.log`
 6. **Check pending queue**: `curl -s http://localhost:8766/api/requests/queue/pending`
 
-### Heartbeat Memory Schema
+### Daemon Instance Heartbeat Schema
 
-The heartbeat contains:
+Heartbeats are system-level rows in `daemon_instances`, not memories. The row contains:
 - `instance_id`: `{hostname}-{pid}-{timestamp}` — unique per daemon process
-- `cycle_count`: increments each cycle — confirms the loop is progressing
-- `timestamp`: last update — stale means the daemon is stuck or dead
-- `model`: which LLM model is running the cognitive loop
-- `max_sessions`: concurrency limit
+- `status`: active/stopped
+- `last_seen_at`: last heartbeat timestamp — stale means the daemon is stuck or dead
+- `roles`: dispatcher/scheduler role set
+- `metadata.cycle_count`: increments each cycle — confirms the loop is progressing
+- `metadata.model`: which LLM model is running the cognitive loop
+- `metadata.max_sessions`: concurrency limit
 
-**Healthy**: `timestamp` within the last `DAEMON_INTERVAL_MINUTES` + a few minutes of buffer.
-**Stale**: `timestamp` older than 2× the interval — daemon likely crashed or watchdog killed it.
+**Healthy**: `last_seen_at` within the last `DAEMON_INTERVAL_MINUTES` + a few minutes of buffer.
+**Stale**: `last_seen_at` older than 2× the interval — daemon likely crashed or watchdog killed it.
 
 ## Decision: What's Wrong?
 
@@ -151,11 +154,10 @@ The interval is the **pause between cycles**, not cycle duration. Actual time be
 | Tag | Expected Growth | Alert If |
 |-----|----------------|----------|
 | `daemon-state` | 1 per cycle (updated in place) | Multiple exist (should be singleton) |
-| `daemon-heartbeat` | 1 per instance | Multiple stale heartbeats (crashed instances) |
 | `daemon-message` | Sporadic (inter-agent comms) | Unprocessed messages accumulating |
 | `lesson` | Grows slowly via learning extraction | Duplicates (check `memory-management` skill) |
 
-**Note**: Tasks and requests are stored in the database `requests` and `tasks` tables, not as memories. Use the Activity page or requests API to monitor them.
+**Note**: Heartbeats, tasks, and requests are stored in system tables (`daemon_instances`, `requests`, `tasks`), not as memories. Use the dashboard, Activity page, requests API, or direct SQL to monitor them.
 
 ### Memory Cleanup Triggers
 
@@ -173,16 +175,17 @@ If memories are growing too fast:
 Multiple daemon instances share the same database. Coordination is atomic:
 
 1. **Task claiming**: Atomic `claim_task(task_id, instance_id)` — database-level lock. First writer wins.
-2. **Heartbeat tracking**: Each instance writes its own heartbeat memory.
+2. **Heartbeat tracking**: Each instance updates its own `daemon_instances` row.
 3. **Stale release**: `POST /api/requests/queue/release-stale?stale_minutes=30` releases stuck tasks.
 
 ### Monitoring Multi-Instance
 
 ```
-memory-server-search_memories(tags=["daemon-heartbeat"])
+docker exec lucent-db psql -U lucent -d lucent -c \
+  "SELECT instance_id, status, last_seen_at, metadata FROM daemon_instances ORDER BY last_seen_at DESC;"
 ```
 
-Each heartbeat should have a unique `instance_id` and recent `timestamp`. Count active instances: heartbeats with `timestamp` < 2× interval.
+Each row should have a unique `instance_id` and recent `last_seen_at`. Count active instances as rows with `status='active'` and `last_seen_at` < 2× interval old.
 
 ## Operational Runbook
 
@@ -208,10 +211,10 @@ curl -s -X POST http://localhost:8766/api/requests/queue/release-stale?stale_min
 ### After Configuration Changes
 
 When changing environment variables:
-1. Stop the daemon: kill the process (note the PID from heartbeat)
+1. Stop the daemon: kill the process (note the PID from `daemon_instances` or `ps`)
 2. Update env vars
 3. Restart and watch logs: `tail -f daemon/daemon.log`
-4. Verify heartbeat updates within one interval
+4. Verify `daemon_instances.last_seen_at` updates within one interval
 5. Verify a cognitive cycle completes successfully
 
 ### After Code Changes
@@ -226,7 +229,7 @@ The daemon watches source files for changes and auto-reloads (`run_forever()` wa
 - Never restart a daemon without first checking the task queue state — in-flight claimed tasks will be abandoned and may stay in `claimed` state indefinitely, blocking future dispatch until stale-release runs.
 - Don't ignore cycle timing drift — if actual time between cycle starts grows well beyond `DAEMON_INTERVAL_MINUTES + typical cycle duration`, it signals a bottleneck (LLM timeout, session saturation) that will compound if left unaddressed.
 - Don't correlate memory growth in isolation from cycle count — a rising memory count is only a problem if it scales faster than expected per cycle; check the autonomic interval and learning extraction frequency before concluding there's a leak.
-- Never kill and restart a daemon instance without noting its `instance_id` — stale heartbeat memories from the dead instance will mislead health checks until they expire.
+- Never kill and restart a daemon instance without noting its `instance_id` — use the `daemon_instances` row to distinguish stopped/stale instances from the replacement process.
 
 ## Environment Variables Reference
 

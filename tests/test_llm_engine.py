@@ -107,6 +107,13 @@ class TestModelResolve:
         assert provider == "anthropic"
         assert model_id == "claude-opus-4-6-20260301"
 
+    def test_resolve_anthropic_latest_default(self):
+        from lucent.llm.langchain_engine import _resolve_model
+
+        provider, model_id = _resolve_model("claude-opus-4.7")
+        assert provider == "anthropic"
+        assert model_id == "claude-opus-4.7"
+
     def test_resolve_openai(self):
         from lucent.llm.langchain_engine import _resolve_model
 
@@ -145,7 +152,12 @@ class TestEngineRoutingByModel:
     def test_explicit_langchain_override_wins(self):
         from lucent.llm.langchain_engine import register_model
 
-        register_model("anthropic-via-langchain", "anthropic", "claude-sonnet-4-6-20260115", "langchain")
+        register_model(
+            "anthropic-via-langchain",
+            "anthropic",
+            "claude-sonnet-4-6-20260115",
+            "langchain",
+        )
         engine = get_engine_for_model("anthropic-via-langchain")
         assert engine.name == "langchain"
 
@@ -177,6 +189,28 @@ class TestEngineRoutingByModel:
         register_model("openai-via-copilot", "openai", "gpt-5.2", "copilot")
         engine = get_engine_for_model("openai-via-copilot")
         assert engine.name == "copilot"
+
+    def test_static_engine_override_for_copilot_hosted_model(self, monkeypatch):
+        from lucent import model_registry
+        from lucent.model_registry import ModelInfo
+
+        monkeypatch.setattr(model_registry, "_db_models", None)
+        monkeypatch.setitem(
+            model_registry._MODEL_BY_ID,
+            "copilot-static-test",
+            ModelInfo(
+                id="copilot-static-test",
+                provider="copilot",
+                name="Copilot Static Test",
+                category="general",
+                api_model_id="copilot-static-test",
+                engine="copilot",
+            ),
+        )
+        with patch.dict(os.environ, {"LUCENT_LLM_ENGINE": "langchain"}):
+            reset_engine()
+            engine = get_engine_for_model("copilot-static-test")
+            assert engine.name == "copilot"
 
     def test_register_model_override_replaces_auto_detection(self):
         from lucent.llm.langchain_engine import register_model
@@ -236,10 +270,19 @@ class TestModelEngineValidation:
 
 
 class TestModelRegistry:
+    def setup_method(self):
+        from lucent import model_registry
+
+        model_registry._db_models = None
+        model_registry._db_model_by_id = {}
+        model_registry._db_enabled_ids = set()
+        model_registry._MODEL_BY_ID = {m.id: m for m in model_registry.MODELS}
+
     def test_api_model_id(self):
         from lucent.model_registry import get_api_model_id
 
         assert get_api_model_id("claude-opus-4.6") == "claude-opus-4-6-20260301"
+        assert get_api_model_id("claude-opus-4.7") == "claude-opus-4.7"
         assert get_api_model_id("gpt-5.2") == "gpt-5.2"
         assert get_api_model_id("unknown-model") == "unknown-model"
 
@@ -247,6 +290,7 @@ class TestModelRegistry:
         from lucent.model_registry import get_provider
 
         assert get_provider("claude-opus-4.6") == "anthropic"
+        assert get_provider("claude-opus-4.7") == "anthropic"
         assert get_provider("gpt-5.2") == "openai"
         assert get_provider("gemini-3-pro") == "google"
         assert get_provider("unknown") is None
@@ -258,6 +302,170 @@ class TestModelRegistry:
         assert get_provider("gpt-6") == "openai"
         assert get_provider("gemini-4") == "google"
 
+    def test_default_model_prefers_enabled_general_model(self, monkeypatch):
+        from lucent import model_registry
+        from lucent.model_registry import ModelInfo, get_default_model_id
+
+        models = [
+            ModelInfo(id="expensive-reasoner", provider="x", name="Reasoner", category="reasoning"),
+            ModelInfo(id="balanced-default", provider="x", name="Balanced", category="general"),
+        ]
+        monkeypatch.setattr(model_registry, "_db_models", models)
+        monkeypatch.setattr(model_registry, "_db_enabled_ids", {m.id for m in models})
+        monkeypatch.setattr(model_registry, "_MODEL_BY_ID", {m.id: m for m in models})
+
+        assert get_default_model_id() == "balanced-default"
+
+    def test_task_selection_uses_default_without_clear_specialized_need(self, monkeypatch):
+        from lucent import model_registry
+        from lucent.model_registry import ModelInfo, select_model_for_task
+
+        models = [
+            ModelInfo(id="balanced-default", provider="x", name="Balanced", category="general"),
+            ModelInfo(id="expensive-reasoner", provider="x", name="Reasoner", category="reasoning"),
+        ]
+        monkeypatch.setattr(model_registry, "_db_models", models)
+        monkeypatch.setattr(model_registry, "_db_enabled_ids", {m.id for m in models})
+        monkeypatch.setattr(model_registry, "_MODEL_BY_ID", {m.id: m for m in models})
+
+        selection = select_model_for_task(agent_type="planning", title="Break down request")
+
+        assert selection.model_id == "balanced-default"
+        assert selection.source == "default"
+
+    def test_task_selection_specializes_for_clear_reasoning_signal(self, monkeypatch):
+        from lucent import model_registry
+        from lucent.model_registry import ModelInfo, select_model_for_task
+
+        models = [
+            ModelInfo(id="balanced-default", provider="x", name="Balanced", category="general"),
+            ModelInfo(id="deep-reasoner", provider="x", name="Deep", category="reasoning"),
+        ]
+        monkeypatch.setattr(model_registry, "_db_models", models)
+        monkeypatch.setattr(model_registry, "_db_enabled_ids", {m.id for m in models})
+        monkeypatch.setattr(model_registry, "_MODEL_BY_ID", {m.id: m for m in models})
+
+        selection = select_model_for_task(
+            agent_type="research",
+            title="Investigate root cause of a complex architecture issue",
+        )
+
+        assert selection.model_id == "deep-reasoner"
+        assert selection.source == "specialized"
+
+    def test_task_selection_uses_fast_for_memory_when_available(self, monkeypatch):
+        from lucent import model_registry
+        from lucent.model_registry import ModelInfo, select_model_for_task
+
+        models = [
+            ModelInfo(id="balanced-default", provider="x", name="Balanced", category="general"),
+            ModelInfo(id="cheap-fast", provider="x", name="Cheap", category="fast"),
+        ]
+        monkeypatch.setattr(model_registry, "_db_models", models)
+        monkeypatch.setattr(model_registry, "_db_enabled_ids", {m.id for m in models})
+        monkeypatch.setattr(model_registry, "_MODEL_BY_ID", {m.id: m for m in models})
+
+        selection = select_model_for_task(agent_type="memory", title="Tag memories")
+
+        assert selection.model_id == "cheap-fast"
+        assert selection.source == "specialized"
+
+    def test_task_selection_filters_non_tool_models_when_required(self, monkeypatch):
+        from lucent import model_registry
+        from lucent.model_registry import ModelInfo, select_model_for_task
+
+        models = [
+            ModelInfo(
+                id="cheap-fast-no-tools",
+                provider="ollama",
+                name="Cheap",
+                category="fast",
+                supports_tools=False,
+            ),
+            ModelInfo(id="tool-default", provider="x", name="Tool", category="general"),
+        ]
+        monkeypatch.setattr(model_registry, "_db_models", models)
+        monkeypatch.setattr(model_registry, "_db_enabled_ids", {m.id for m in models})
+        monkeypatch.setattr(model_registry, "_MODEL_BY_ID", {m.id: m for m in models})
+
+        selection = select_model_for_task(
+            agent_type="memory",
+            title="Tag memories",
+            require_tools=True,
+        )
+
+        assert selection.model_id == "tool-default"
+
+    def test_task_selection_does_not_honor_explicit_non_tool_model_for_tool_task(self, monkeypatch):
+        from lucent import model_registry
+        from lucent.model_registry import ModelInfo, select_model_for_task
+
+        models = [
+            ModelInfo(
+                id="local-text-only",
+                provider="ollama",
+                name="Text Only",
+                category="fast",
+                supports_tools=False,
+            ),
+            ModelInfo(id="tool-default", provider="x", name="Tool", category="general"),
+        ]
+        monkeypatch.setattr(model_registry, "_db_models", models)
+        monkeypatch.setattr(model_registry, "_db_enabled_ids", {m.id for m in models})
+        monkeypatch.setattr(model_registry, "_MODEL_BY_ID", {m.id: m for m in models})
+
+        selection = select_model_for_task(
+            agent_type="memory",
+            title="Tag memories",
+            explicit_model="local-text-only",
+            require_tools=True,
+        )
+
+        assert selection.model_id == "tool-default"
+        assert "lacks required capability" in selection.reason
+
+    def test_high_risk_memory_task_prefers_reasoning_over_fast(self, monkeypatch):
+        from lucent import model_registry
+        from lucent.model_registry import ModelInfo, select_model_for_task
+
+        models = [
+            ModelInfo(id="balanced-default", provider="x", name="Balanced", category="general"),
+            ModelInfo(id="cheap-fast", provider="x", name="Cheap", category="fast"),
+            ModelInfo(id="deep-reasoner", provider="x", name="Deep", category="reasoning"),
+        ]
+        monkeypatch.setattr(model_registry, "_db_models", models)
+        monkeypatch.setattr(model_registry, "_db_enabled_ids", {m.id for m in models})
+        monkeypatch.setattr(model_registry, "_MODEL_BY_ID", {m.id: m for m in models})
+
+        selection = select_model_for_task(
+            agent_type="memory",
+            title="Soft-delete retired memories and verify zero active records",
+            require_tools=True,
+        )
+
+        assert selection.model_id == "deep-reasoner"
+        assert selection.requested_category == "reasoning"
+
+    def test_validate_model_can_require_tools(self, monkeypatch):
+        from lucent import model_registry
+        from lucent.model_registry import ModelInfo, validate_model
+
+        m = ModelInfo(
+            id="text-only",
+            provider="ollama",
+            name="Text Only",
+            category="general",
+            supports_tools=False,
+        )
+        monkeypatch.setattr(model_registry, "_db_models", [m])
+        monkeypatch.setattr(model_registry, "_db_model_by_id", {m.id: m})
+        monkeypatch.setattr(model_registry, "_db_enabled_ids", {m.id})
+
+        assert validate_model("text-only") is None
+        error = validate_model("text-only", require_tools=True)
+        assert error is not None
+        assert "does not support tool" in error
+
     @pytest.mark.asyncio
     async def test_db_load_keeps_null_engine_for_existing_models(self, monkeypatch):
         from lucent import model_registry
@@ -266,7 +474,7 @@ class TestModelRegistry:
             def __init__(self, _pool):
                 pass
 
-            async def list_models(self):
+            async def list_models(self, **_kwargs):
                 return {
                     "items": [
                         {
@@ -294,7 +502,7 @@ class TestModelRegistry:
             def __init__(self, _pool):
                 pass
 
-            async def list_models(self):
+            async def list_models(self, **_kwargs):
                 return {
                     "items": [
                         {
@@ -313,6 +521,47 @@ class TestModelRegistry:
         loaded = await model_registry.load_models_from_db(object())
         match = next(m for m in loaded if m.id == "resync-model")
         assert match.engine == "langchain"
+
+    @pytest.mark.asyncio
+    async def test_db_load_registers_ollama_model_for_runtime_routing(self, monkeypatch):
+        from lucent import model_registry
+        from lucent.llm.langchain_engine import _resolve_model, _runtime_model_registry
+
+        class _Repo:
+            def __init__(self, _pool):
+                pass
+
+            async def list_models(self, **_kwargs):
+                return {
+                    "items": [
+                        {
+                            "id": "local-llama",
+                            "provider": "ollama",
+                            "name": "Local Llama",
+                            "category": "general",
+                            "api_model_id": "llama3.2:latest",
+                            "engine": None,
+                            "is_enabled": True,
+                        }
+                    ]
+                }
+
+        _runtime_model_registry.clear()
+        monkeypatch.setattr("lucent.db.models.ModelRepository", _Repo)
+        try:
+            await model_registry.load_models_from_db(object())
+            provider, provider_model_id = _resolve_model("local-llama")
+            assert provider == "ollama"
+            assert provider_model_id == "llama3.2:latest"
+            assert get_engine_for_model("local-llama").name == "langchain"
+        finally:
+            _runtime_model_registry.clear()
+            monkeypatch.setattr(model_registry, "_db_models", None)
+            monkeypatch.setattr(
+                model_registry,
+                "_MODEL_BY_ID",
+                {m.id: m for m in model_registry.MODELS},
+            )
 
 
 class TestValidateModel:

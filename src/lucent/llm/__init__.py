@@ -8,17 +8,18 @@ Usage:
 
     engine = get_engine()
     result = await engine.run_session(
-        model="claude-opus-4.6",
+        model="your-enabled-model-id",
         system_message="You are a helpful assistant.",
         prompt="Hello!",
     )
 """
 
-from lucent.llm.engine import LLMEngine, SessionEvent, SessionEventType
+from lucent.llm.engine import LLMEngine, ModelNotAvailableError, SessionEvent, SessionEventType
 from lucent.llm.factory import get_engine, get_engine_for_model, get_engine_name
 
 __all__ = [
     "LLMEngine",
+    "ModelNotAvailableError",
     "SessionEvent",
     "SessionEventType",
     "get_engine",

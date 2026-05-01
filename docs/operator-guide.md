@@ -120,7 +120,7 @@ All fields live under `spec` of a `LucentInstance` resource (`apiVersion: lucent
 |---|---|---|---|
 | `replicas` | integer | — (**required**) | Number of `lucent-server` pod replicas. Minimum: 1. |
 | `image.repository` | string | `lucent` | Container image repository. |
-| `image.tag` | string | `0.2.0` | Image tag / version to deploy. |
+| `image.tag` | string | `0.4.0` | Image tag / version to deploy. |
 | `image.pullPolicy` | string | `IfNotPresent` | One of `Always`, `IfNotPresent`, `Never`. |
 
 ### `database`
@@ -152,7 +152,7 @@ An array of LLM model configurations. Each entry has:
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `id` | string | yes | Model identifier (e.g. `claude-opus-4.6`, `qwen2.5-coder-3b`). |
+| `id` | string | yes | Model identifier (e.g. `claude-opus-4.7`, `qwen2.5-coder-3b`). |
 | `provider` | string | yes | One of `anthropic`, `openai`, `google`, `ollama`, `copilot`. |
 | `engine` | string | yes | One of `copilot`, `langchain`. Controls which LLM backend processes requests. |
 | `temperature` | number | no | Sampling temperature (provider-specific range). |
@@ -164,7 +164,7 @@ The first model in the list determines the `LUCENT_LLM_ENGINE` setting applied t
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `daemon.defaultModel` | string | `claude-opus-4.6` | Model ID used for daemon cognitive cycles. Must match an `id` in `models`. |
+| `daemon.defaultModel` | string | `""` | Optional model override for daemon cognitive cycles. Empty uses the enabled model registry default. |
 | `daemon.maxConcurrentSessions` | integer | `3` | Maximum number of parallel sub-agent sessions. Range: 1–100. |
 | `daemon.intervalMinutes` | integer | `15` | Minutes between daemon cognitive cycles. Minimum: 1. |
 
@@ -262,7 +262,7 @@ spec:
   replicas: 2
   image:
     repository: ghcr.io/lucent/lucent
-    tag: "0.2.0"
+    tag: "0.4.0"
   database:
     embedded: false
     host: pg-cluster.default.svc
@@ -271,11 +271,11 @@ spec:
     embedded: true
     init: true
   models:
-    - id: claude-opus-4.6
+    - id: claude-opus-4.7
       provider: anthropic
       engine: copilot
   daemon:
-    defaultModel: claude-opus-4.6
+    defaultModel: ""
     maxConcurrentSessions: 5
   observability:
     enabled: true
@@ -301,8 +301,8 @@ kubectl -n lucent get lucentinstance production -w
 
 ```
 NAME         READY       REPLICAS   VERSION   AGE
-production   Pending     2          0.2.0     5s
-production   Running     2          0.2.0     42s
+production   Pending     2          0.4.0     5s
+production   Running     2          0.4.0     42s
 ```
 
 ### 5. Verify pods are running
@@ -337,7 +337,7 @@ If the migration job fails, the operator emits a `Warning` event and stops the r
 ```bash
 kubectl -n lucent patch lucentinstance production \
   --type=merge \
-  -p '{"spec":{"image":{"tag":"0.3.0"}}}'
+  -p '{"spec":{"image":{"tag":"0.4.0"}}}'
 ```
 
 Watch migration job completion:
@@ -348,8 +348,8 @@ kubectl -n lucent get jobs -w
 
 ```
 NAME                         COMPLETIONS   DURATION   AGE
-production-migrate-0.3.0     0/1           5s         5s
-production-migrate-0.3.0     1/1           18s        18s
+production-migrate-0.4.0     0/1           5s         5s
+production-migrate-0.4.0     1/1           18s        18s
 ```
 
 ### Canary deployments
@@ -500,7 +500,7 @@ kubectl -n lucent get lucentinstance production \
 ```json
 {
   "phase": "Running",
-  "version": "0.2.0",
+  "version": "0.4.0",
   "readyReplicas": 2,
   "lastReconcileTime": "2024-01-15T02:05:33Z",
   "health": {
@@ -532,10 +532,10 @@ A canary deployment runs a new image version alongside the stable release, recei
 ```yaml
 spec:
   image:
-    tag: "0.2.0"          # stable
+    tag: "0.4.0"          # stable
   canary:
     enabled: true
-    imageTag: "0.3.0-rc1" # canary
+    imageTag: "0.4.1-rc1" # canary
     replicas: 1
     weight: 10             # 10% of traffic
     promotionPolicy: manual
@@ -549,7 +549,7 @@ Once you've validated the canary, promote it by updating the stable image tag an
 
 ```bash
 kubectl -n lucent patch lucentinstance production --type=merge -p \
-  '{"spec":{"image":{"tag":"0.3.0-rc1"},"canary":{"enabled":false}}}'
+  '{"spec":{"image":{"tag":"0.4.1-rc1"},"canary":{"enabled":false}}}'
 ```
 
 The operator runs the migration job, promotes the stable Deployment to the new image, and removes the canary Deployment.
@@ -578,8 +578,8 @@ kubectl get lucentinstance --all-namespaces
 
 ```
 NAMESPACE        NAME         READY     REPLICAS   VERSION   AGE
-lucent-staging   staging      Running   1          0.2.0     2d
-lucent-prod      production   Running   3          0.2.0     7d
+lucent-staging   staging      Running   1          0.4.0     2d
+lucent-prod      production   Running   3          0.4.0     7d
 ```
 
 ### Custom Resource Status Interpretation

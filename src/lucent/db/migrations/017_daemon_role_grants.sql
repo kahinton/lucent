@@ -1,5 +1,5 @@
 -- Migration 017: Least-privilege grants for the daemon DB role
--- The lucent_daemon role is created in docker/init.sql (Docker) or manually.
+-- The lucent_daemon role is created in docker/postgres-init.sh (Docker) or manually.
 -- This migration grants only what the daemon needs: read users/orgs to find
 -- its service account, and full CRUD on api_keys to manage its own keys.
 -- If the role doesn't exist, the migration is a safe no-op.

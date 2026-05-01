@@ -25,7 +25,7 @@ async def test():
 
     session = await client.create_session(
         {
-            "model": "claude-opus-4.6",
+            "model": "claude-opus-4.7",
             "system_message": {"content": build_system_message()},
             "on_permission_request": PermissionHandler.approve_all,
             "tools": MEMORY_TOOLS,

@@ -22,6 +22,14 @@ async def _get_schedule_repository() -> ScheduleRepository:
 def register_schedule_tools(mcp: FastMCP) -> None:
     """Register schedule management tools with the MCP server."""
 
+    def _can_manage_schedule(schedule: dict, user_id: str | None, user_role: str | None) -> bool:
+        if user_role in ("admin", "owner", "daemon"):
+            return True
+        created_by = schedule.get("created_by")
+        if not created_by:
+            return True
+        return bool(user_id and created_by and str(created_by) == str(user_id))
+
     @mcp.tool(
         description="""Create a scheduled task — either one-time or repeating.
 
@@ -59,7 +67,7 @@ Returns: JSON with the created schedule including its ID and next_run_at."""
         max_runs: int | None = None,
         sandbox_template_id: str | None = None,
     ) -> str:
-        user_id, org_id, _ = await _get_current_user_context()
+        user_id, org_id, _, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
 
@@ -124,7 +132,7 @@ Returns: JSON array of schedules."""
         status: str | None = None,
         enabled_only: bool = False,
     ) -> str:
-        user_id, org_id, _ = await _get_current_user_context()
+        user_id, org_id, _, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
 
@@ -154,11 +162,16 @@ Args:
 Returns: JSON with the updated schedule."""
     )
     async def toggle_schedule(schedule_id: str, enabled: bool) -> str:
-        user_id, org_id, user_role = await _get_current_user_context()
+        user_id, org_id, user_role, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
 
         repo = await _get_schedule_repository()
+        schedule = await repo.get_schedule(schedule_id, str(org_id))
+        if not schedule:
+            return json.dumps({"error": "Schedule not found"})
+        if not _can_manage_schedule(schedule, str(user_id) if user_id else None, user_role):
+            return json.dumps({"error": "Schedule not found"})
         try:
             result = await repo.toggle_schedule(
                 schedule_id, str(org_id), enabled, requester_role=user_role,
@@ -180,7 +193,7 @@ Args:
 Returns: JSON with the schedule details and its run history."""
     )
     async def get_schedule_details(schedule_id: str) -> str:
-        user_id, org_id, _ = await _get_current_user_context()
+        user_id, org_id, _, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
 

@@ -160,10 +160,23 @@ docker compose --profile multi-daemon up -d
 
 See [Architecture — Autonomous Daemon](architecture.md#autonomous-daemon) for details on the four daemon loops.
 
+## 6. Connect GitHub (Optional)
+
+If you want Lucent to read your GitHub repos for context, the simplest path is to add a personal access token from **Settings → Connections**:
+
+1. Open http://localhost:8766/settings/connections.
+2. Under **Your connected accounts**, paste a GitHub PAT (classic or fine-grained, with `repo` scope) into the PAT form.
+3. Lucent stores it encrypted at rest and uses it for repo ACL checks.
+
+Already have `GITHUB_TOKEN` set in your environment (e.g. for the daemon)? The same page detects it and lets you claim it as a personal credential in one click.
+
+This is the **simple local / open-source profile** — defaults are already correct, no extra env vars required. For team and enterprise setups (OAuth, GitHub App, strict ACL), see [Connections](connections.md).
+
 ## Next Steps
 
 - [Architecture](architecture.md) — how Lucent's components fit together
 - [Configuration](configuration.md) — all environment variables and settings
+- [Connections](connections.md) — two-tier connections model, feature flags, setup profiles
 - [API Reference](api-reference.md) — REST API documentation
 - [Deployment Guide](deployment-guide.md) — production deployment
 - [Troubleshooting](troubleshooting.md) — common issues and fixes

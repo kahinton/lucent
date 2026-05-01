@@ -98,6 +98,10 @@ class SandboxManager:
         try:
             repo = await self._repo()
             config_dict = asdict(effective_config)
+            if "env_vars" in config_dict and isinstance(config_dict["env_vars"], dict):
+                config_dict["env_vars"] = dict(config_dict["env_vars"])
+                if "LUCENT_SANDBOX_MCP_API_KEY" in config_dict["env_vars"]:
+                    config_dict["env_vars"]["LUCENT_SANDBOX_MCP_API_KEY"] = "***"
             await repo.create(
                 id=info.id,
                 name=info.name,
@@ -382,8 +386,9 @@ class SandboxManager:
             row = await conn.fetchrow(
                 """
                 INSERT INTO api_keys
-                    (user_id, organization_id, name, key_prefix, key_hash, scopes, expires_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    (user_id, organization_id, name, key_prefix, key_hash, scopes, expires_at,
+                     memory_scope_user_id, memory_scope)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                 RETURNING id
                 """,
                 user_id,
@@ -393,6 +398,8 @@ class SandboxManager:
                 key_hash,
                 ["sandbox-memory", "sandbox-task-events"],
                 expires_at,
+                config.requesting_user_id,
+                "user" if config.requesting_user_id else None,
             )
         return row["id"], plain_key
 
@@ -416,24 +423,30 @@ class SandboxManager:
     async def _ensure_daemon_service_user(self, organization_id: str | None) -> dict:
         pool = await self._pool()
         org_uuid = UUID(organization_id) if organization_id else None
+        service_external_id = (
+            "daemon-service" if org_uuid is None else f"daemon-service:{org_uuid}"
+        )
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
                 SELECT id, organization_id
                 FROM users
-                WHERE external_id = 'daemon-service'
+                WHERE (external_id = $2 OR external_id = 'daemon-service')
                   AND is_active = true
                   AND ($1::uuid IS NULL OR organization_id = $1)
                 ORDER BY created_at ASC
                 LIMIT 1
                 """,
                 org_uuid,
+                service_external_id,
             )
             if row:
                 return dict(row)
 
             if org_uuid is None:
-                org = await conn.fetchrow("SELECT id FROM organizations ORDER BY created_at ASC LIMIT 1")
+                org = await conn.fetchrow(
+                    "SELECT id FROM organizations ORDER BY created_at ASC LIMIT 1"
+                )
                 if not org:
                     raise RuntimeError("No organization available for sandbox API key provisioning")
                 org_uuid = org["id"]
@@ -448,10 +461,16 @@ class SandboxManager:
                     display_name,
                     role
                 )
-                VALUES ('daemon-service', 'local', $1, 'daemon@lucent.local', 'Lucent Daemon', 'member')
+                                VALUES ($2, 'local', $1, $3, 'Lucent Daemon', 'member')
                 RETURNING id, organization_id
                 """,
                 org_uuid,
+                service_external_id,
+                (
+                    "daemon@lucent.local"
+                    if org_uuid is None
+                    else f"daemon+{str(org_uuid)[:8]}@lucent.local"
+                ),
             )
             return dict(created)
 

@@ -12,12 +12,24 @@ from lucent.api.models import (
     SearchResultMemory,
 )
 from lucent.db import AccessRepository, MemoryRepository, get_pool
+from lucent.integrations.github_repo_access_service import GitHubRepoAccessService
 from lucent.logging import get_logger
+from lucent.memory.observability import maybe_log_boost_comparison
+from lucent.rbac import Role
+from lucent.services.memory_access_service import MemoryAccessService
 
 logger = get_logger("api.search")
 
 
 router = APIRouter()
+
+
+def _effective_memory_user_id(user: AuthenticatedUser):
+    return user.effective_memory_user_id
+
+
+def _memory_admin_override(user: AuthenticatedUser) -> bool:
+    return user.role in (Role.ADMIN, Role.OWNER) and not user.is_memory_scoped
 
 
 def _memory_to_search_result(memory: dict[str, Any]) -> SearchResultMemory:
@@ -39,6 +51,7 @@ def _memory_to_search_result(memory: dict[str, Any]) -> SearchResultMemory:
         organization_id=memory.get("organization_id"),
         shared=memory.get("shared", False),
         last_accessed_at=memory.get("last_accessed_at"),
+        lifecycle_stage=memory.get("lifecycle_stage"),
     )
 
 
@@ -53,13 +66,20 @@ async def search_memories(
     """Search memories by content with fuzzy matching."""
     pool = await get_pool()
     repo = MemoryRepository(pool)
+    memory_access = MemoryAccessService(
+        repo,
+        GitHubRepoAccessService(pool),
+        is_admin=_memory_admin_override(user),
+    )
     access_repo = AccessRepository(pool)
+    effective_user_id = _effective_memory_user_id(user)
 
     logger.info(
         "Search: query=%s, type=%s, tags=%s, user=%s", data.query, data.type, data.tags, user.id
     )
 
-    result = await repo.search(
+    result = await memory_access.search(
+        user_id=effective_user_id,
         query=data.query,
         username=data.username,
         type=data.type,
@@ -70,8 +90,37 @@ async def search_memories(
         created_before=data.created_before,
         offset=data.offset,
         limit=data.limit,
-        requesting_user_id=user.id,
+        requesting_user_id=effective_user_id,
         requesting_org_id=user.organization_id,
+        memory_scope=user.memory_scope,
+        include_archived=data.include_archived,
+    )
+
+    # Phase-2 observability: when the vitality boost flag is on, sample a
+    # fraction of queries and emit a structured legacy-vs-boosted comparison.
+    # No-op when the flag is off (default) or sample rate is 0.0 (default).
+    await maybe_log_boost_comparison(
+        legacy_search=memory_access.search,
+        legacy_search_kwargs={
+            "user_id": effective_user_id,
+            "query": data.query,
+            "username": data.username,
+            "type": data.type,
+            "tags": data.tags,
+            "importance_min": data.importance_min,
+            "importance_max": data.importance_max,
+            "created_after": data.created_after,
+            "created_before": data.created_before,
+            "offset": data.offset,
+            "limit": data.limit,
+            "requesting_user_id": effective_user_id,
+            "requesting_org_id": user.organization_id,
+            "memory_scope": user.memory_scope,
+            "include_archived": data.include_archived,
+        },
+        boosted_result=result,
+        query=data.query,
+        search_kind="search",
     )
 
     # Log access for returned memories
@@ -80,7 +129,7 @@ async def search_memories(
         await access_repo.log_batch_access(
             memory_ids=memory_ids,
             access_type="search_result",
-            user_id=user.id,
+            user_id=effective_user_id,
             organization_id=user.organization_id,
             context={
                 "query": data.query,
@@ -117,6 +166,7 @@ async def search_memories_get(
     created_before: datetime | None = Query(default=None),
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=20, ge=1, le=100),
+    include_archived: bool = Query(default=False),
 ) -> SearchResponse:
     """Search memories by content (GET version for convenience)."""
     request = SearchRequest(
@@ -130,6 +180,7 @@ async def search_memories_get(
         created_before=created_before,
         offset=offset,
         limit=limit,
+        include_archived=include_archived,
     )
     return await search_memories(request, user)
 
@@ -154,9 +205,16 @@ async def search_memories_full(
 
     pool = await get_pool()
     repo = MemoryRepository(pool)
+    memory_access = MemoryAccessService(
+        repo,
+        GitHubRepoAccessService(pool),
+        is_admin=_memory_admin_override(user),
+    )
     access_repo = AccessRepository(pool)
+    effective_user_id = _effective_memory_user_id(user)
 
-    result = await repo.search_full(
+    result = await memory_access.search_full(
+        user_id=effective_user_id,
         query=data.query,
         username=data.username,
         type=data.type,
@@ -164,8 +222,31 @@ async def search_memories_full(
         importance_max=data.importance_max,
         offset=data.offset,
         limit=data.limit,
-        requesting_user_id=user.id,
+        requesting_user_id=effective_user_id,
         requesting_org_id=user.organization_id,
+        memory_scope=user.memory_scope,
+        include_archived=data.include_archived,
+    )
+
+    await maybe_log_boost_comparison(
+        legacy_search=memory_access.search_full,
+        legacy_search_kwargs={
+            "user_id": effective_user_id,
+            "query": data.query,
+            "username": data.username,
+            "type": data.type,
+            "importance_min": data.importance_min,
+            "importance_max": data.importance_max,
+            "offset": data.offset,
+            "limit": data.limit,
+            "requesting_user_id": effective_user_id,
+            "requesting_org_id": user.organization_id,
+            "memory_scope": user.memory_scope,
+            "include_archived": data.include_archived,
+        },
+        boosted_result=result,
+        query=data.query,
+        search_kind="search_full",
     )
 
     # Log access for returned memories
@@ -174,7 +255,7 @@ async def search_memories_full(
         await access_repo.log_batch_access(
             memory_ids=memory_ids,
             access_type="search_result",
-            user_id=user.id,
+            user_id=effective_user_id,
             organization_id=user.organization_id,
             context={
                 "query": data.query,

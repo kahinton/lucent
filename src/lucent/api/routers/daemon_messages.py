@@ -7,6 +7,7 @@ The 'pending' tag indicates unacknowledged human messages.
 Requires API key with 'daemon-tasks' scope (reuses daemon scope).
 """
 
+import logging
 from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
@@ -22,9 +23,8 @@ from lucent.api.models import (
     SuccessResponse,
 )
 from lucent.db import MemoryRepository, get_pool
-from lucent.logging import get_logger
 
-logger = get_logger("api.daemon_messages")
+logger = logging.getLogger(__name__)
 
 
 router = APIRouter()
@@ -110,7 +110,16 @@ async def send_daemon_message(
         organization_id=user.organization_id,
     )
 
-    logger.info("Daemon message sent: id=%s, reply_to=%s", result["id"], data.in_reply_to)
+    logger.info(
+        "Daemon message sent: id=%s, reply_to=%s",
+        result["id"],
+        data.in_reply_to,
+        extra={
+            "memory_id": str(result["id"]),
+            "in_reply_to": str(data.in_reply_to) if data.in_reply_to else None,
+            "organization_id": str(user.organization_id),
+        },
+    )
 
     return _memory_to_message(result)
 

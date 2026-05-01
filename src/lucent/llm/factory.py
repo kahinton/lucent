@@ -78,6 +78,13 @@ def get_engine_for_model(model_id: str) -> LLMEngine:
     """
     try:
         from lucent.llm.langchain_engine import _resolve_model, get_registered_engine
+        from lucent.model_registry import get_model
+
+        model_info = get_model(model_id)
+        if model_info and model_info.engine == "copilot":
+            return _get_copilot_engine()
+        if model_info and model_info.engine == "langchain":
+            return _get_langchain_engine()
 
         engine_override = get_registered_engine(model_id)
         if engine_override == "copilot":
@@ -85,7 +92,7 @@ def get_engine_for_model(model_id: str) -> LLMEngine:
         if engine_override == "langchain":
             return _get_langchain_engine()
 
-        provider, _ = _resolve_model(model_id)
+        provider = model_info.provider if model_info else _resolve_model(model_id)[0]
         if provider in _LANGCHAIN_PROVIDERS:
             return _get_langchain_engine()
     except ImportError:

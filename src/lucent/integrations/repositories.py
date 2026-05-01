@@ -58,6 +58,7 @@ class IntegrationRepo:
         encrypted_config: bytes,
         created_by: str,
         external_workspace_id: str | None = None,
+        install_id: str | None = None,
         allowed_channels: list[str] | None = None,
     ) -> dict[str, Any]:
         """Insert a new integration (status defaults to ``active``)."""
@@ -66,8 +67,8 @@ class IntegrationRepo:
                 """
                 INSERT INTO integrations
                     (organization_id, type, encrypted_config, created_by,
-                     external_workspace_id, allowed_channels)
-                VALUES ($1, $2, $3, $4, $5, $6)
+                     external_workspace_id, install_id, allowed_channels)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
                 RETURNING *
                 """,
                 UUID(organization_id),
@@ -75,6 +76,7 @@ class IntegrationRepo:
                 encrypted_config,
                 UUID(created_by),
                 external_workspace_id,
+                install_id,
                 json.dumps(allowed_channels or []),
             )
         logger.info(
@@ -316,6 +318,39 @@ class IntegrationRepo:
         if isinstance(result.get("allowed_channels"), str):
             result["allowed_channels"] = json.loads(result["allowed_channels"])
         return result
+
+    # -- Health --------------------------------------------------------------
+
+    async def set_health(
+        self,
+        integration_id: str,
+        organization_id: str,
+        *,
+        status: str,
+        detail: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Record the most recently observed health probe for an integration.
+
+        ``status`` must be one of the values allowed by the
+        ``integrations_health_status_check`` constraint added in
+        migration 069: ``unknown``, ``healthy``, ``degraded``, ``failed``.
+        """
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                UPDATE integrations
+                   SET health_status = $3,
+                       health_detail = $4,
+                       health_checked_at = NOW()
+                 WHERE id = $1 AND organization_id = $2
+             RETURNING *
+                """,
+                UUID(integration_id),
+                UUID(organization_id),
+                status,
+                detail,
+            )
+        return self._row_to_dict(row) if row else None
 
 
 # ---------------------------------------------------------------------------

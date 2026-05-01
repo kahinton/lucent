@@ -60,10 +60,14 @@ class TechnicalMetadata(BaseModel):
     )
     version_info: str | None = Field(default=None, description="Version-specific information")
     repo: str | None = Field(
-        default=None, description="Repository name this knowledge relates to (e.g. 'hindsight')"
+        default=None, description="Repository name in owner/repo format (e.g. 'octocat/hello-world')"
+    )
+    directory: str | None = Field(
+        default=None,
+        description="Directory path within the repo this knowledge relates to (e.g. 'src/lucent/api/'). Null for repo-level knowledge.",
     )
     filename: str | None = Field(
-        default=None, description="File or directory path this knowledge relates to (e.g. 'src/lucent/api/' for directory, 'src/lucent/db/memory.py' for file). Null for repo-level knowledge."
+        default=None, description="Specific file path this knowledge relates to (e.g. 'src/lucent/db/memory.py'). Null for repo-level or directory-level knowledge."
     )
 
 
@@ -76,7 +80,7 @@ class ProceduralStep(BaseModel):
 
 
 class ProceduralMetadata(BaseModel):
-    """Metadata specific to procedural memories."""
+    """Metadata retained for retired workflow records."""
 
     steps: list[ProceduralStep] = Field(
         default_factory=list, description="Ordered steps to complete the procedure"

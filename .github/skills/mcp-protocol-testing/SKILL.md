@@ -74,7 +74,7 @@ Test each tool with invalid inputs to verify error handling returns JSON `{"erro
 **Type validation** (`create_memory`):
 - Invalid type string (e.g., `"invalid"`) → `MemoryType(type)` raises error
 - `"individual"` type → explicitly blocked, returns error
-- Valid types: `"experience"`, `"technical"`, `"procedural"`, `"goal"`
+- Creatable types: `"experience"`, `"technical"`, `"goal"`
 
 **Limit capping**:
 - `search_memories(limit=100)` → silently capped to 50 via `min(limit, 50)`
@@ -170,7 +170,7 @@ Test `get_memories` with mixed valid/invalid IDs:
 docker compose up -d postgres
 
 # Set test database URL
-export TEST_DATABASE_URL="postgresql://lucent:lucent_dev_password@localhost:5433/lucent_test"
+export TEST_DATABASE_URL="postgresql://lucent:change-me-insecure-dev-password@localhost:5433/lucent_test"
 
 # Run MCP tool tests
 pytest tests/test_mcp_tools.py -v

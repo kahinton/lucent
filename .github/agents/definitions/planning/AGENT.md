@@ -54,6 +54,21 @@ create_request(
 )
 ```
 
+### Repository Targeting
+
+When a request involves work on a specific codebase, set `target_repo` (owner/repo format) and optionally `target_paths` (specific directories). This automatically injects relevant technical memories into the working agent's context at dispatch time.
+
+```
+create_request(
+    title="Add rate limiting to the search endpoint",
+    description="...",
+    target_repo="octocat/hello-world",
+    target_paths=["src/api/", "src/middleware/"]
+)
+```
+
+This eliminates the need to manually instruct agents to "search for relevant memories" — the system handles it. Always set `target_repo` when the work involves code changes.
+
 Then create each task with the fields specified in the **daemon-task-authoring** skill. Use `sequence_order` to express dependencies:
 
 **Sequential** (builds on prior results): `0 → 1 → 2`
@@ -66,20 +81,53 @@ Follow the **daemon-task-authoring** skill's validation section:
 - Are dependencies correct in `sequence_order`?
 - Is any task too large for a 720-second session?
 - Are agent types appropriate?
+- Does every sandboxed task reference an **approved** `sandbox_template_id`?
+  Inline `sandbox_config` is rejected — see the sandbox section below.
+
+### Sandbox Selection (required for any task that needs to run code)
+
+Tasks that execute code, clone repos, or read filesystem state must run in a
+sandbox. Sandboxes must come from approved templates only — the planner
+cannot ad-hoc a sandbox config.
+
+```
+list_sandbox_templates()      # discover approved templates
+```
+
+Pick the closest fit and pass its id as `sandbox_template_id` on `create_task`.
+You may set a small whitelist of overrides via `sandbox_overrides` (currently
+just `repo_url`, `branch`, `timeout_seconds`, `output_mode`, `commit_approved`).
+
+If none of the approved templates fit:
+
+```
+propose_sandbox_template(
+    name="...",
+    description="...",
+    image="...",
+    reason="why no existing template suffices",
+    network_mode="allowlist",
+    allowed_hosts=[...],
+    ...
+)
+```
+
+Proposed templates land in the admin review queue. You cannot reference a
+proposed template in a task — wait for approval, or pick the closest existing
+approved template and shape the task description around its constraints.
+
+**For repos that ship `.devcontainer/devcontainer.json`**, prefer the built-in
+`devcontainer-builder` template — the sandbox runtime detects the manifest
+and rebuilds the container with the image/Dockerfile and lifecycle commands
+the repo declares.
 
 ### 5. Record the Plan
 
-Follow the **memory-capture** skill:
-
-```
-create_memory(
-  type="procedural",
-  content="## Plan: <goal>\n\n**Objective**: <what we're achieving>\n**Request ID**: <id>\n**Tasks**: <ordered list with agent types>\n**Dependencies**: <which tasks block which>\n**Success criteria**: <how we know the goal is met>",
-  tags=["daemon", "planning", "<initiative>"],
-  importance=7,
-  shared=true
-)
-```
+Record the plan in the request/task tree and task events. Do **not** create
+memory entries just to log plans. If planning reveals a durable technical
+decision, update the relevant technical memory; if it reveals a reusable
+planning workflow, propose or update a skill through the built-in skill
+workflow.
 
 ## Decision Framework
 

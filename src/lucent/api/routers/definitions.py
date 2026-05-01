@@ -4,6 +4,7 @@ Provides CRUD endpoints and approval workflow for managing definitions.
 Agents can be granted access to specific skills and MCP servers.
 """
 
+import logging
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException
@@ -14,6 +15,8 @@ from lucent.api.deps import AdminUser, AuthenticatedUser
 from lucent.db import DefinitionRepository, get_pool
 from lucent.db.audit import AuditRepository
 from lucent.db.definitions import BuiltInProtectionError
+from lucent.rbac import Role
+from lucent.security import scan_content_for_injection
 from lucent.services.mcp_discovery import (
     MCPDiscoveryError,
     discover_mcp_tools,
@@ -21,7 +24,26 @@ from lucent.services.mcp_discovery import (
 )
 from lucent.url_validation import SSRFError, validate_url
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/definitions", tags=["definitions"])
+
+
+def _validate_user_definition_create(status_value: str, scope_value: str) -> None:
+    if status_value != "proposed" or scope_value != "instance":
+        raise HTTPException(
+            403,
+            "Definitions created through the API must start as proposed instance definitions",
+        )
+
+
+def _require_admin_for_stdio(
+    user: AuthenticatedUser,
+    server_type: str | None,
+    command: str | None = None,
+) -> None:
+    if (server_type == "stdio" or command is not None) and user.role < Role.ADMIN:
+        raise HTTPException(403, "Stdio MCP servers require admin or owner role")
 
 
 # ── Request Models ────────────────────────────────────────────────────────
@@ -31,12 +53,16 @@ class CreateAgent(BaseModel):
     name: str = Field(max_length=64)
     description: str | None = None
     content: str
+    status: Literal["proposed", "active", "rejected"] = "proposed"
+    scope: Literal["instance", "built-in"] = "instance"
 
 
 class CreateSkill(BaseModel):
     name: str = Field(max_length=64)
     description: str | None = None
     content: str
+    status: Literal["proposed", "active", "rejected"] = "proposed"
+    scope: Literal["instance", "built-in"] = "instance"
 
 
 class CreateMCPServer(BaseModel):
@@ -65,6 +91,26 @@ class GrantAccess(BaseModel):
     target_id: str  # skill_id or mcp_server_id
 
 
+class ImportRequest(BaseModel):
+    """Request body for importing a definition from an external source."""
+    source_type: str = Field(
+        ...,
+        pattern=r"^(url|github|raw)$",
+        description="Import source: 'url', 'github', or 'raw'",
+    )
+    source: str = Field(
+        ...,
+        min_length=1,
+        max_length=100000,
+        description="URL, GitHub path (owner/repo/path), or raw markdown content",
+    )
+    definition_type: str | None = Field(
+        None,
+        pattern=r"^(agent|skill)$",
+        description="Hint: 'agent' or 'skill'. Auto-detected if not provided.",
+    )
+
+
 # ── Agent Endpoints ──────────────────────────────────────────────────────
 
 
@@ -89,16 +135,26 @@ async def list_agents(
 
 @router.post("/agents", status_code=201)
 async def create_agent(body: CreateAgent, user: AuthenticatedUser):
+    _validate_user_definition_create(body.status, body.scope)
     pool = await get_pool()
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
-    return await repo.create_agent(
+    result = await repo.create_agent(
         name=body.name,
         description=body.description or "",
         content=body.content,
         org_id=str(user.organization_id),
         created_by=str(user.id),
+        status=body.status,
+        scope=body.scope,
         owner_user_id=str(user.id),
     )
+    security_flags = scan_content_for_injection(body.content or "")
+    if body.description:
+        security_flags.extend(scan_content_for_injection(body.description))
+    if security_flags:
+        logger.warning("Definition '%s' flagged: %s", body.name, security_flags)
+        result["security_warnings"] = security_flags
+    return result
 
 
 @router.get("/agents/{agent_id}")
@@ -265,16 +321,26 @@ async def list_skills(
 
 @router.post("/skills", status_code=201)
 async def create_skill(body: CreateSkill, user: AuthenticatedUser):
+    _validate_user_definition_create(body.status, body.scope)
     pool = await get_pool()
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
-    return await repo.create_skill(
+    result = await repo.create_skill(
         name=body.name,
         description=body.description or "",
         content=body.content,
         org_id=str(user.organization_id),
         created_by=str(user.id),
+        status=body.status,
+        scope=body.scope,
         owner_user_id=str(user.id),
     )
+    security_flags = scan_content_for_injection(body.content or "")
+    if body.description:
+        security_flags.extend(scan_content_for_injection(body.description))
+    if security_flags:
+        logger.warning("Definition '%s' flagged: %s", body.name, security_flags)
+        result["security_warnings"] = security_flags
+    return result
 
 
 @router.get("/skills/{skill_id}")
@@ -344,6 +410,7 @@ async def list_mcp_servers(
 
 @router.post("/mcp-servers", status_code=201)
 async def create_mcp_server(body: CreateMCPServer, user: AuthenticatedUser):
+    _require_admin_for_stdio(user, body.server_type, body.command)
     # Validate URL against SSRF before persisting.
     if body.server_type == "http" and body.url:
         try:
@@ -392,6 +459,16 @@ async def update_mcp_server(server_id: str, body: UpdateMCPServer, user: Authent
     if not await acl.can_modify(str(user.id), "mcp_server", server_id, str(user.organization_id)):
         raise HTTPException(404, "MCP server not found")
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    existing = await repo.get_mcp_server(
+        server_id,
+        str(user.organization_id),
+        requester_user_id=str(user.id),
+        requester_role=user.role.value,
+    )
+    if not existing:
+        raise HTTPException(404, "MCP server not found")
+    effective_type = body.server_type or existing.get("server_type")
+    _require_admin_for_stdio(user, effective_type, body.command)
     updates = body.model_dump(exclude_none=True)
     try:
         result = await repo.update_mcp_server(
@@ -433,6 +510,12 @@ async def discover_mcp_server_tools(
     if not server:
         raise HTTPException(404, "MCP server not found")
 
+    if refresh:
+        if server.get("status") != "active":
+            raise HTTPException(409, "MCP tool discovery requires an active approved server")
+        if server.get("server_type") == "stdio" and user.role < Role.ADMIN:
+            raise HTTPException(403, "Stdio MCP tool discovery requires admin or owner role")
+
     try:
         if refresh:
             tools = await discover_mcp_tools(server, pool)
@@ -467,3 +550,92 @@ async def list_proposals(user: AuthenticatedUser):
     pool = await get_pool()
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     return await repo.get_pending_proposals(str(user.organization_id))
+
+
+# ── Import Endpoints ──────────────────────────────────────────────────────
+
+
+@router.post("/import/preview")
+async def preview_import(body: ImportRequest, user: AuthenticatedUser):
+    """Preview an import — fetch, parse, and scan without creating anything.
+
+    Returns the parsed definition, security findings, and what would be created.
+    Use this to review before committing the import.
+    """
+    from lucent.services.definition_import import ImportSourceType, import_definition
+
+    result = await import_definition(
+        source_type=ImportSourceType(body.source_type),
+        source=body.source,
+        definition_type_hint=body.definition_type,
+    )
+    return result.to_dict()
+
+
+@router.post("/import/commit", status_code=201)
+async def commit_import(body: ImportRequest, user: AuthenticatedUser):
+    """Import a definition — fetch, parse, scan, and create in proposed status.
+
+    The definition goes through the normal approval workflow.
+    Security findings are included in the response for admin review.
+    """
+    from lucent.services.definition_import import (
+        DefinitionType,
+        ImportSourceType,
+        import_definition,
+    )
+
+    result = await import_definition(
+        source_type=ImportSourceType(body.source_type),
+        source=body.source,
+        definition_type_hint=body.definition_type,
+    )
+
+    if not result.success:
+        raise HTTPException(400, result.error or "Import failed")
+
+    if result.has_critical_findings:
+        # Don't create — return the findings for review
+        return {
+            "status": "blocked",
+            "reason": "Critical security findings detected. Review findings before importing.",
+            **result.to_dict(),
+        }
+
+    pool = await get_pool()
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+
+    created = None
+    if result.definition_type == DefinitionType.AGENT:
+        created = await repo.create_agent(
+            name=result.name,
+            description=result.description,
+            content=result.content,
+            org_id=str(user.organization_id),
+            created_by=str(user.id),
+        )
+        # If skill_names were specified, log them (can't auto-grant without existing skill IDs)
+        if result.skill_names:
+            created["suggested_skills"] = result.skill_names
+    elif result.definition_type == DefinitionType.SKILL:
+        created = await repo.create_skill(
+            name=result.name,
+            description=result.description,
+            content=result.content,
+            org_id=str(user.organization_id),
+            created_by=str(user.id),
+        )
+
+    if not created:
+        raise HTTPException(500, "Failed to create definition")
+
+    return {
+        "status": "imported",
+        "definition": created,
+        "security_findings": [
+            {"severity": f.severity.value, "category": f.category, "detail": f.detail}
+            for f in result.security_findings
+        ],
+        "source_url": result.source_url,
+        "content_hash": result.content_hash,
+    }

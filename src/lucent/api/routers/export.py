@@ -15,13 +15,32 @@ from lucent.api.models import (
     ImportResponse,
     MemoryResponse,
 )
-from lucent.db import MemoryRepository, get_pool
+from lucent.db import MemoryRepository, UserRepository, get_pool
+from lucent.integrations.github_repo_access_service import GitHubRepoAccessService
 from lucent.logging import get_logger
+from lucent.services.memory_access_service import MemoryAccessService
 
 logger = get_logger("api.export")
 
 
 router = APIRouter()
+
+
+def _effective_memory_user_id(user: AuthenticatedUser):
+    return user.effective_memory_user_id
+
+
+async def _effective_memory_username(user: AuthenticatedUser, pool) -> str:
+    effective_user_id = _effective_memory_user_id(user)
+    if effective_user_id != user.id:
+        scoped_user = await UserRepository(pool).get_by_id(effective_user_id)
+        if scoped_user:
+            return (
+                scoped_user.get("display_name")
+                or scoped_user.get("email")
+                or str(effective_user_id)
+            )
+    return user.display_name or user.email or str(user.id)
 
 
 def _memory_to_response(memory: dict[str, Any]) -> MemoryResponse:
@@ -95,6 +114,8 @@ async def export_memories(
     """
     pool = await get_pool()
     repo = MemoryRepository(pool)
+    memory_access = MemoryAccessService(repo, GitHubRepoAccessService(pool))
+    effective_user_id = _effective_memory_user_id(user)
 
     memories = await repo.export(
         type=type,
@@ -103,9 +124,11 @@ async def export_memories(
         importance_max=importance_max,
         created_after=created_after,
         created_before=created_before,
-        requesting_user_id=user.id,
+        requesting_user_id=effective_user_id,
         requesting_org_id=user.organization_id,
+        memory_scope=user.memory_scope,
     )
+    memories = await memory_access.filter_memories(memories, effective_user_id)
 
     filters = _build_filters_dict(
         type,
@@ -185,9 +208,9 @@ async def import_memories(
 
     result = await repo.import_memories(
         memories=memory_dicts,
-        requesting_user_id=user.id,
+        requesting_user_id=_effective_memory_user_id(user),
         requesting_org_id=user.organization_id,
-        requesting_username=user.display_name or user.email or str(user.id),
+        requesting_username=await _effective_memory_username(user, pool),
     )
 
     logger.info(

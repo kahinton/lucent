@@ -14,6 +14,8 @@ Tests the HTML-serving memory endpoints:
 Uses real DB sessions + CSRF tokens through the full ASGI stack.
 """
 
+import json
+import re
 from uuid import uuid4
 
 import httpx
@@ -209,6 +211,121 @@ class TestMemoriesList:
             assert resp.status_code == 303
             assert "/login" in resp.headers.get("location", "")
 
+    async def test_list_repo_acl_filters_repo_tagged_memories(
+        self, client, db_pool, web_user, web_prefix, monkeypatch
+    ):
+        user, org, _token = web_user
+        repo = MemoryRepository(db_pool)
+        await repo.create(
+            username=f"{web_prefix}User",
+            type="technical",
+            content=f"{web_prefix}Hidden repo list memory",
+            tags=["acl-list"],
+            metadata={"repo": "org/private-repo"},
+            user_id=user["id"],
+            organization_id=org["id"],
+        )
+        await repo.create(
+            username=f"{web_prefix}User",
+            type="experience",
+            content=f"{web_prefix}Visible list memory",
+            tags=["acl-list"],
+            user_id=user["id"],
+            organization_id=org["id"],
+        )
+
+        async def _deny_access(self, user_id, repo_full_name):  # pragma: no cover - signature shim
+            return False
+
+        monkeypatch.setattr(
+            "lucent.integrations.github_repo_access_service.GitHubRepoAccessService.check_access",
+            _deny_access,
+        )
+
+        resp = await client.get("/memories", params={"tag": "acl-list"})
+        assert resp.status_code == 200
+        assert f"{web_prefix}Visible list memory" in resp.text
+        assert f"{web_prefix}Hidden repo list memory" not in resp.text
+
+
+# ============================================================================
+# GET /knowledge — knowledge tree
+# ============================================================================
+
+
+class TestKnowledgeTree:
+    async def test_repo_root_memory_is_available_from_repo_node(
+        self, client, db_pool, web_user, web_prefix, monkeypatch
+    ):
+        user, org, _token = web_user
+        repo = MemoryRepository(db_pool)
+        root_memory = await repo.create(
+            username=f"{web_prefix}User",
+            type="technical",
+            content=(
+                f"{web_prefix}Project environment assessment\n\n"
+                "## Source Layout\nsrc/lucent contains the app.\n"
+                "## Build/test\nRun pytest and ruff before shipping."
+            ),
+            tags=["knowledge-tree", "repo-root", "environment", "codebase"],
+            importance=8,
+            metadata={"repo": "org/root-visible", "category": "architecture"},
+            user_id=user["id"],
+            organization_id=org["id"],
+            shared=True,
+        )
+        audit_memory = await repo.create(
+            username=f"{web_prefix}User",
+            type="technical",
+            content=f"{web_prefix}One-off audit result, needs review",
+            tags=["knowledge-tree", "needs-review", "research"],
+            importance=9,
+            metadata={"repo": "org/root-visible", "category": "research"},
+            user_id=user["id"],
+            organization_id=org["id"],
+            shared=True,
+        )
+        await repo.create(
+            username=f"{web_prefix}User",
+            type="technical",
+            content=f"{web_prefix}File-level child memory",
+            tags=["knowledge-tree", "file"],
+            importance=5,
+            metadata={
+                "repo": "org/root-visible",
+                "directory": "src/",
+                "filename": "src/app.py",
+            },
+            user_id=user["id"],
+            organization_id=org["id"],
+            shared=True,
+        )
+
+        async def _repo_exists(self, repo_full_name):  # pragma: no cover - signature shim
+            return True
+
+        monkeypatch.setattr(
+            "lucent.integrations.github_repo_access_service.GitHubRepoAccessService.check_repo_exists",
+            _repo_exists,
+        )
+
+        resp = await client.get("/knowledge")
+
+        assert resp.status_code == 200
+        assert "org/root-visible" in resp.text
+        assert str(root_memory["id"]) in resp.text
+        assert str(audit_memory["id"]) not in resp.text
+        match = re.search(r"const treeData = (.*?);\n", resp.text, re.S)
+        assert match is not None
+        tree = json.loads(match.group(1))
+        assert tree["org/root-visible"]["memory"]["id"] == str(root_memory["id"])
+        # Parent nodes keep immediate row-click expand/collapse, while the
+        # explicit info badge exposes the root memory details.
+        assert "showNodeDetail(n);" in resp.text
+        assert "memory-open" in resp.text
+        assert "if (n.childIdxs.length > 0)" in resp.text
+        assert "toggleNode(idx);" in resp.text
+
 
 # ============================================================================
 # GET /memories/new — new memory form
@@ -267,6 +384,21 @@ class TestMemoryNewSubmit:
         )
         assert resp.status_code == 400
 
+    async def test_create_retired_type_returns_400(self, client):
+        resp = await client.post(
+            "/memories/new",
+            data=_csrf_data(
+                client,
+                {
+                    "type": "procedural",
+                    "content": "Should not work",
+                },
+            ),
+            follow_redirects=False,
+        )
+        assert resp.status_code == 400
+        assert "invalid memory type" in resp.text.lower()
+
     async def test_create_missing_csrf_fails(self, client):
         resp = await client.post(
             "/memories/new",
@@ -316,6 +448,56 @@ class TestMemoryDetail:
         assert resp.status_code == 200
         assert "Access Count" in resp.text
 
+    async def test_detail_has_clear_owner_actions_with_csrf(self, client, web_memory):
+        resp = await client.get(f"/memories/{web_memory['id']}")
+        assert resp.status_code == 200
+        assert f'href="/memories/{web_memory["id"]}/edit"' in resp.text
+        assert f'action="/memories/{web_memory["id"]}/delete"' in resp.text
+        assert CSRF_FIELD_NAME in resp.text
+        assert client._csrf_token in resp.text  # type: ignore[attr-defined]
+
+    async def test_detail_does_not_show_legacy_feedback_for_daemon_tag(
+        self, client, db_pool, web_user, web_prefix
+    ):
+        user, org, _token = web_user
+        memory = await MemoryRepository(db_pool).create(
+            username=f"{web_prefix}User",
+            type="experience",
+            content="Daemon-tagged memory should not show accept/reject controls",
+            tags=["daemon", "needs-review"],
+            importance=5,
+            user_id=user["id"],
+            organization_id=org["id"],
+        )
+
+        resp = await client.get(f"/memories/{memory['id']}")
+        assert resp.status_code == 200
+        assert "Feedback" not in resp.text
+        assert "Accept" not in resp.text
+        assert "Reject" not in resp.text
+
+    async def test_detail_shows_version_content_changes(self, client, web_memory):
+        await client.post(
+            f"/memories/{web_memory['id']}/edit",
+            data=_csrf_data(
+                client,
+                {
+                    "content": "Updated version history content",
+                    "tags": "updated,history",
+                    "importance": "7",
+                },
+            ),
+        )
+
+        resp = await client.get(f"/memories/{web_memory['id']}")
+        assert resp.status_code == 200
+        assert "Content changed — view before/after" in resp.text
+        assert "Before edit" in resp.text
+        assert "After edit" in resp.text
+        assert "Test memory content for web tests" in resp.text
+        assert "Updated version history content" in resp.text
+        assert "View tag, importance, and metadata changes" in resp.text
+
     async def test_detail_not_found(self, client):
         resp = await client.get(f"/memories/{uuid4()}")
         assert resp.status_code == 404
@@ -327,6 +509,32 @@ class TestMemoryDetail:
             resp = await c.get(f"/memories/{web_memory['id']}", follow_redirects=False)
             assert resp.status_code == 303
             assert "/login" in resp.headers.get("location", "")
+
+    async def test_detail_repo_tagged_memory_denied_when_acl_fails(
+        self, client, db_pool, web_user, web_prefix, monkeypatch
+    ):
+        user, org, _token = web_user
+        repo = MemoryRepository(db_pool)
+        memory = await repo.create(
+            username=f"{web_prefix}User",
+            type="technical",
+            content=f"{web_prefix}Hidden repo detail memory",
+            tags=["acl-detail"],
+            metadata={"repo": "org/private-repo"},
+            user_id=user["id"],
+            organization_id=org["id"],
+        )
+
+        async def _deny_access(self, user_id, repo_full_name):  # pragma: no cover - signature shim
+            return False
+
+        monkeypatch.setattr(
+            "lucent.integrations.github_repo_access_service.GitHubRepoAccessService.check_access",
+            _deny_access,
+        )
+
+        resp = await client.get(f"/memories/{memory['id']}")
+        assert resp.status_code == 404
 
 
 # ============================================================================
@@ -358,6 +566,32 @@ class TestMemoryEditForm:
             )
             assert resp.status_code == 303
             assert "/login" in resp.headers.get("location", "")
+
+    async def test_edit_form_repo_tagged_memory_denied_when_acl_fails(
+        self, client, db_pool, web_user, web_prefix, monkeypatch
+    ):
+        user, org, _token = web_user
+        repo = MemoryRepository(db_pool)
+        memory = await repo.create(
+            username=f"{web_prefix}User",
+            type="technical",
+            content=f"{web_prefix}Hidden repo edit memory",
+            tags=["acl-edit"],
+            metadata={"repo": "org/private-repo"},
+            user_id=user["id"],
+            organization_id=org["id"],
+        )
+
+        async def _deny_access(self, user_id, repo_full_name):  # pragma: no cover - signature shim
+            return False
+
+        monkeypatch.setattr(
+            "lucent.integrations.github_repo_access_service.GitHubRepoAccessService.check_access",
+            _deny_access,
+        )
+
+        resp = await client.get(f"/memories/{memory['id']}/edit")
+        assert resp.status_code == 404
 
 
 # ============================================================================
@@ -536,6 +770,36 @@ class TestMemoryDelete:
             follow_redirects=False,
         )
         assert resp.status_code == 403
+
+    async def test_delete_repo_tagged_memory_denied_when_acl_fails(
+        self, client, db_pool, web_user, web_prefix, monkeypatch
+    ):
+        user, org, _token = web_user
+        repo = MemoryRepository(db_pool)
+        memory = await repo.create(
+            username=f"{web_prefix}User",
+            type="technical",
+            content=f"{web_prefix}Hidden repo delete memory",
+            tags=["acl-delete"],
+            metadata={"repo": "org/private-repo"},
+            user_id=user["id"],
+            organization_id=org["id"],
+        )
+
+        async def _deny_access(self, user_id, repo_full_name):  # pragma: no cover - signature shim
+            return False
+
+        monkeypatch.setattr(
+            "lucent.integrations.github_repo_access_service.GitHubRepoAccessService.check_access",
+            _deny_access,
+        )
+
+        resp = await client.post(
+            f"/memories/{memory['id']}/delete",
+            data=_csrf_data(client),
+            follow_redirects=False,
+        )
+        assert resp.status_code == 404
 
 
 # ============================================================================

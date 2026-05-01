@@ -3,6 +3,7 @@
 import json
 import logging
 
+from lucent.log_context import clear_log_context, set_request_id, set_user_id
 from lucent.logging import (
     HumanFormatter,
     JSONFormatter,
@@ -82,6 +83,26 @@ class TestJSONFormatter:
         assert "args" not in data
         assert "created" not in data
 
+    def test_includes_request_and_user_id_from_log_context_when_present(self):
+        set_request_id("req-123")
+        set_user_id("user-456")
+        try:
+            formatter = JSONFormatter()
+            record = self._make_record()
+            data = json.loads(formatter.format(record))
+            assert data["request_id"] == "req-123"
+            assert data["user_id"] == "user-456"
+        finally:
+            clear_log_context()
+
+    def test_omits_request_and_user_id_when_absent_from_log_context(self):
+        clear_log_context()
+        formatter = JSONFormatter()
+        record = self._make_record()
+        data = json.loads(formatter.format(record))
+        assert "request_id" not in data
+        assert "user_id" not in data
+
 
 class TestHumanFormatter:
     """Tests for human-readable log formatter."""
@@ -137,6 +158,26 @@ class TestHumanFormatter:
         record = self._make_record(level=logging.WARNING)
         output = formatter.format(record)
         assert "WARNING" in output
+
+    def test_includes_request_and_user_id_from_log_context_when_present(self):
+        set_request_id("req-123")
+        set_user_id("user-456")
+        try:
+            formatter = HumanFormatter(use_colors=False)
+            record = self._make_record()
+            output = formatter.format(record)
+            assert "[request_id=req-123]" in output
+            assert "[user_id=user-456]" in output
+        finally:
+            clear_log_context()
+
+    def test_omits_request_and_user_id_when_absent_from_log_context(self):
+        clear_log_context()
+        formatter = HumanFormatter(use_colors=False)
+        record = self._make_record()
+        output = formatter.format(record)
+        assert "[request_id=" not in output
+        assert "[user_id=" not in output
 
 
 class TestConfigureLogging:

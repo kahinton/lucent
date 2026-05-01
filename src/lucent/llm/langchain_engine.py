@@ -25,6 +25,7 @@ PROVIDER_MODEL_MAP: dict[str, tuple[str, str]] = {
     "claude-haiku-4.5": ("anthropic", "claude-haiku-4-5-20251001"),
     "claude-opus-4.5": ("anthropic", "claude-opus-4-5-20251101"),
     "claude-opus-4.6": ("anthropic", "claude-opus-4-6-20260301"),
+    "claude-opus-4.7": ("anthropic", "claude-opus-4.7"),
     "claude-sonnet-4.0": ("anthropic", "claude-sonnet-4-20250514"),
     "claude-sonnet-4.5": ("anthropic", "claude-sonnet-4-5-20250620"),
     "claude-sonnet-4.6": ("anthropic", "claude-sonnet-4-6-20260115"),
@@ -40,6 +41,9 @@ PROVIDER_MODEL_MAP: dict[str, tuple[str, str]] = {
     "gpt-5.2-codex": ("openai", "gpt-5.2-codex"),
     "gpt-5.3-codex": ("openai", "gpt-5.3-codex"),
     "gpt-5.4": ("openai", "gpt-5.4"),
+    "gpt-5.4-mini": ("openai", "gpt-5.4-mini"),
+    "gpt-5.4-nano": ("openai", "gpt-5.4-nano"),
+    "gpt-5.5": ("openai", "gpt-5.5"),
     # Google
     "gemini-2.5-pro": ("google_genai", "gemini-2.5-pro"),
     "gemini-3-flash": ("google_genai", "gemini-3-flash"),
@@ -76,6 +80,16 @@ def register_model(
         api_model_id or model_id,
         _normalize_engine(engine),
     )
+
+
+def clear_runtime_model_registry() -> None:
+    """Clear DB/runtime model registrations.
+
+    Static provider mappings remain available. This is used when the admin
+    model registry is reloaded so deleted/renamed DB models do not linger in
+    process-local routing state.
+    """
+    _runtime_model_registry.clear()
 
 
 def get_registered_engine(model_id: str) -> str | None:
@@ -330,6 +344,7 @@ class LangChainEngine(LLMEngine):
                 return MCPToolBridge(
                     mcp_url=server_conf["url"],
                     headers=server_conf.get("headers"),
+                    allowed_tools=server_conf.get("tools"),
                 )
         return None
 

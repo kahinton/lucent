@@ -171,10 +171,11 @@ class ScheduleRepository:
         prompt: str = "",
         created_by: str | None = None,
     ) -> dict:
-        """Create a system schedule if it doesn't exist, or return the existing one.
+        """Create a system schedule if it doesn't exist, or refresh and return it.
 
         System schedules are identified by title + org_id + is_system=true.
-        They can be modified by users but never deleted.
+        Their source-controlled definition fields are refreshed by startup
+        seeding; runtime state such as enabled/next_run_at is preserved.
         """
         async with self.pool.acquire() as conn:
             existing = await conn.fetchrow(
@@ -184,7 +185,30 @@ class ScheduleRepository:
                 org_id,
             )
             if existing:
-                return dict(existing)
+                row = await conn.fetchrow(
+                    """UPDATE schedules SET
+                           description = $3,
+                           agent_type = $4,
+                           schedule_type = $5,
+                           interval_seconds = $6,
+                           cron_expression = $7,
+                           priority = $8,
+                           prompt = $9,
+                           updated_at = NOW()
+                       WHERE id = $1::uuid AND organization_id = $2::uuid
+                         AND is_system = true
+                       RETURNING *""",
+                    str(existing["id"]),
+                    org_id,
+                    description,
+                    agent_type,
+                    schedule_type,
+                    interval_seconds,
+                    cron_expression,
+                    priority,
+                    prompt,
+                )
+                return dict(row)
 
             now = datetime.now(timezone.utc)
             if schedule_type == "interval" and interval_seconds:
@@ -265,7 +289,9 @@ class ScheduleRepository:
                 agent_type,
                 model,
                 json.dumps(task_template or {}),
-                json.dumps(sandbox_config) if sandbox_config else None,
+                json.dumps(sandbox_config) if isinstance(sandbox_config, dict)
+                else sandbox_config if isinstance(sandbox_config, str) and sandbox_config
+                else None,
                 sandbox_template_id,
                 schedule_type,
                 cron_expression,

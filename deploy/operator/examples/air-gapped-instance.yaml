@@ -26,7 +26,7 @@ spec:
   image:
     # Point to your internal registry mirror
     repository: registry.internal.corp/lucent/lucent
-    tag: "0.2.0"
+    tag: "0.4.0"
     pullPolicy: IfNotPresent
 
   database:

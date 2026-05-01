@@ -41,10 +41,20 @@ class AccessRepository:
             VALUES ($1, $2, $3, $4, $5)
         """
 
-        # Update last_accessed_at on the memory
+        # Update last_accessed_at on the memory and, in the same statement,
+        # reactivate the lifecycle stage if the memory had been moved into
+        # 'consolidating' or 'archived'. 'forgotten' memories are slated for
+        # hard deletion and must NOT be reactivated. Vitality is intentionally
+        # NOT recomputed inline — the vitality schedule will catch up.
+        # See M9 Phase 2 (goal 82b41acd).
         update_query = """
             UPDATE memories
-            SET last_accessed_at = NOW()
+            SET last_accessed_at = NOW(),
+                lifecycle_stage = CASE
+                    WHEN lifecycle_stage IN ('consolidating', 'archived')
+                        THEN 'active'
+                    ELSE lifecycle_stage
+                END
             WHERE id = $1 AND deleted_at IS NULL
         """
 
@@ -98,11 +108,19 @@ class AccessRepository:
                     [(str(mid), user_id_str, org_id_str, access_type, ctx) for mid in memory_ids],
                 )
 
-                # Batch update last_accessed_at
+                # Batch update last_accessed_at and reactivate any qualifying
+                # lifecycle stages in a SINGLE UPDATE statement (M9 Phase 2,
+                # goal 82b41acd). 'forgotten' rows stay forgotten — they are
+                # awaiting hard delete.
                 placeholders = ", ".join(f"${i + 1}" for i in range(len(memory_ids)))
                 update_query = f"""
                     UPDATE memories
-                    SET last_accessed_at = NOW()
+                    SET last_accessed_at = NOW(),
+                        lifecycle_stage = CASE
+                            WHEN lifecycle_stage IN ('consolidating', 'archived')
+                                THEN 'active'
+                            ELSE lifecycle_stage
+                        END
                     WHERE id IN ({placeholders}) AND deleted_at IS NULL
                 """
                 await conn.execute(update_query, *[str(mid) for mid in memory_ids])

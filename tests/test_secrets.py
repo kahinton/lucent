@@ -20,7 +20,7 @@ from httpx import ASGITransport
 
 from lucent.api.app import create_app
 from lucent.api.deps import CurrentUser, get_current_user
-from lucent.db import OrganizationRepository, UserRepository
+from lucent.db import GroupRepository, OrganizationRepository, UserRepository
 from lucent.secrets import SecretRegistry, SecretScope
 from lucent.secrets.builtin import (
     BuiltinSecretProvider,
@@ -374,6 +374,62 @@ class TestSecretsAPI:
         async with _make_client(app, org_and_users["user_b"]) as client:
             resp = await client.get(f"/api/secrets/{secret_prefix}private")
         assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_non_member_cannot_list_group_secret_names(
+        self, registered_provider, org_and_users, db_pool, secret_prefix
+    ):
+        group_repo = GroupRepository(db_pool)
+        group = await group_repo.create_group(
+            org_id=str(org_and_users["org"]["id"]),
+            name=f"{secret_prefix}group",
+            description="Secret group",
+            created_by=str(org_and_users["user_a"]["id"]),
+        )
+        await group_repo.add_member(
+            str(group["id"]),
+            str(org_and_users["user_a"]["id"]),
+            role="admin",
+        )
+        scope = SecretScope(
+            organization_id=str(org_and_users["org"]["id"]),
+            owner_group_id=str(group["id"]),
+        )
+        await registered_provider.set(f"{secret_prefix}group_secret", "val", scope)
+
+        app = create_app()
+        async with _make_client(app, org_and_users["user_b"]) as client:
+            resp = await client.get(f"/api/secrets?owner_group_id={group['id']}")
+        assert resp.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_non_group_admin_cannot_create_group_secret(
+        self, registered_provider, org_and_users, db_pool, secret_prefix
+    ):
+        group_repo = GroupRepository(db_pool)
+        group = await group_repo.create_group(
+            org_id=str(org_and_users["org"]["id"]),
+            name=f"{secret_prefix}writers",
+            description="Secret writers",
+            created_by=str(org_and_users["user_a"]["id"]),
+        )
+        await group_repo.add_member(
+            str(group["id"]),
+            str(org_and_users["user_b"]["id"]),
+            role="member",
+        )
+
+        app = create_app()
+        async with _make_client(app, org_and_users["user_b"]) as client:
+            resp = await client.post(
+                "/api/secrets",
+                json={
+                    "key": f"{secret_prefix}poison",
+                    "value": "bad",
+                    "owner_group_id": str(group["id"]),
+                },
+            )
+        assert resp.status_code == 403
 
     @pytest.mark.asyncio
     async def test_audit_log_on_read(

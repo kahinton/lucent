@@ -524,7 +524,13 @@ class TestRestApiEndpoint:
         assert body["tools"] == []
         assert body["error"] == "Connection failed: boom"
 
-    async def test_refresh_parameter_bypasses_cache(self, api_client, mcpd_http_server, monkeypatch):
+    async def test_refresh_parameter_bypasses_cache(
+        self, api_client, mcpd_http_server, mcpd_repo, mcpd_org_user, monkeypatch
+    ):
+        org, user = mcpd_org_user
+        await mcpd_repo.approve_mcp_server(
+            str(mcpd_http_server["id"]), str(org["id"]), str(user["id"])
+        )
         called = {"discover": False}
 
         async def fake_discover(server, _pool):

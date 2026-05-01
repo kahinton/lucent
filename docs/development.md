@@ -41,7 +41,7 @@ pip install -e ".[dev]"
 cp .env.example .env
 
 # Run the server
-export DATABASE_URL="postgresql://lucent:lucent_dev_password@localhost:5433/lucent"
+export DATABASE_URL="postgresql://lucent:change-me-insecure-dev-password@localhost:5433/lucent"
 lucent
 ```
 

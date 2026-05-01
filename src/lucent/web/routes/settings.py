@@ -1,4 +1,16 @@
-"""Settings, password change, force password change, and API key routes."""
+"""Settings, password change, force password change, and API key routes.
+
+After the M5 settings redesign, this module hosts the unified settings hub:
+    /settings                   -> redirect to /settings/account
+    /settings/account           -> profile + change password
+    /settings/api-keys          -> list/create/revoke API keys
+    /settings/api-access        -> developer reference
+    /settings/organization      -> view (everyone) / edit (owner)
+    /settings/danger            -> owner-only destructive actions
+
+POST endpoints under /settings/* are CSRF-protected and audit-logged via
+:class:`AdminAuditRepository` for security-sensitive actions.
+"""
 
 from urllib.parse import quote
 from uuid import UUID
@@ -20,33 +32,34 @@ from lucent.auth_providers import (
     validate_password_complexity,
     verify_signed_value,
 )
-from lucent.db import ApiKeyRepository, OrganizationRepository, get_pool
+from lucent.db import (
+    AdminAuditRepository,
+    ApiKeyRepository,
+    OrganizationRepository,
+    UserRepository,
+    get_pool,
+)
+from lucent.db import admin_audit as audit_actions
 
 from ._shared import _check_csrf, _set_csrf_cookie, get_user_context, templates
 
 router = APIRouter()
 
 
-# =============================================================================
-# Settings
-# =============================================================================
+# ---------------------------------------------------------------------------
+# helpers
+# ---------------------------------------------------------------------------
 
-# Temporary storage for newly created API keys (shown once after redirect)
-# Uses signed values to pass securely through query params.
-# The key is encrypted in the redirect URL and verified on the settings page.
+
+def _role_value(user) -> str:
+    return user.role.value if hasattr(user.role, "value") else str(user.role)
 
 
 def _encode_pending_key(key_id: str, plain_key: str) -> str:
-    """Encode an API key ID and value as a signed string for URL transport."""
     return sign_value(f"{key_id}:{plain_key}")
 
 
 def _decode_pending_key(signed: str) -> tuple[str, str] | None:
-    """Decode and verify a signed API key string.
-
-    Returns:
-        Tuple of (key_id, plain_key) or None if invalid.
-    """
     value = verify_signed_value(signed)
     if not value or ":" not in value:
         return None
@@ -54,52 +67,82 @@ def _decode_pending_key(signed: str) -> tuple[str, str] | None:
     return key_id, plain_key
 
 
-@router.get("/settings", response_class=HTMLResponse)
-async def settings(
+# ---------------------------------------------------------------------------
+# /settings — landing redirect
+# ---------------------------------------------------------------------------
+
+
+@router.get("/settings")
+async def settings_root(request: Request):
+    """Settings root — redirect to the Account section."""
+    return RedirectResponse("/settings/account", status_code=303)
+
+
+# ---------------------------------------------------------------------------
+# /settings/account — profile + change password
+# ---------------------------------------------------------------------------
+
+
+@router.get("/settings/account", response_class=HTMLResponse)
+async def settings_account(
     request: Request,
-    new_key: str | None = Query(default=None),
     error: str | None = Query(default=None),
+    success: str | None = Query(default=None),
     password_changed: str | None = Query(default=None),
 ):
-    """User and organization settings."""
     user = await get_user_context(request)
-    pool = await get_pool()
-    org_repo = OrganizationRepository(pool)
-    api_key_repo = ApiKeyRepository(pool)
-
-    org = await org_repo.get_by_id(user.organization_id)
-    api_keys = (await api_key_repo.list_by_user(user.id))["items"]
-
-    # Check for newly created key to display (passed via signed query param)
-    new_api_key = None
-    new_key_name = None
-    if new_key:
-        decoded = _decode_pending_key(new_key)
-        if decoded:
-            key_id, new_api_key = decoded
-            for key in api_keys:
-                if str(key["id"]) == key_id:
-                    new_key_name = key["name"]
-                    break
-
+    if password_changed and not success:
+        success = "Password changed successfully."
     return templates.TemplateResponse(
         request,
-        "settings.html",
+        "settings/account.html",
         {
             "user": user,
-            "organization": org,
-            "api_keys": api_keys,
-            "new_api_key": new_api_key,
-            "new_key_name": new_key_name,
             "error": error,
-            "password_changed": password_changed is not None,
+            "success": success,
         },
     )
 
 
-# =============================================================================
-# Password Change
-# =============================================================================
+@router.post("/settings/profile")
+async def settings_update_profile(
+    request: Request,
+    display_name: str = Form(""),
+):
+    """Update the current user's display name."""
+    user = await get_user_context(request)
+    await _check_csrf(request)
+    pool = await get_pool()
+    user_repo = UserRepository(pool)
+    audit_repo = AdminAuditRepository(pool)
+
+    new_name = (display_name or "").strip()[:120]
+    old_name = user.display_name or ""
+
+    if new_name == old_name:
+        return RedirectResponse("/settings/account", status_code=303)
+
+    await user_repo.update(user.id, display_name=new_name or None)
+    await audit_repo.log_for_user(
+        user,
+        request,
+        action=audit_actions.USER_UPDATE,
+        entity_type="user",
+        entity_id=user.id,
+        entity_label=new_name or old_name,
+        changed_fields=["display_name"],
+        old_values={"display_name": old_name},
+        new_values={"display_name": new_name},
+        notes="self profile update",
+    )
+    return RedirectResponse(
+        f"/settings/account?success={quote('Profile updated.')}", status_code=303
+    )
+
+
+# ---------------------------------------------------------------------------
+# Password change
+# ---------------------------------------------------------------------------
 
 
 @router.post("/settings/password")
@@ -108,54 +151,70 @@ async def change_password(request: Request):
     await _check_csrf(request)
     user = await get_user_context(request)
     pool = await get_pool()
+    audit_repo = AdminAuditRepository(pool)
     form = await request.form()
 
     current_password = str(form.get("current_password", ""))
     new_password = str(form.get("new_password", ""))
     confirm_password = str(form.get("confirm_password", ""))
 
-    # Validate new password
-    if len(new_password) < 8:
+    def _err(msg: str) -> RedirectResponse:
         return RedirectResponse(
-            f"/settings?error={quote('New password must be at least 8 characters.')}",
-            status_code=303,
+            f"/settings/account?error={quote(msg)}", status_code=303
         )
 
+    if len(new_password) < 8:
+        return _err("New password must be at least 8 characters.")
     complexity_error = validate_password_complexity(new_password)
     if complexity_error:
-        return RedirectResponse(
-            f"/settings?error={quote(complexity_error)}",
-            status_code=303,
-        )
-
+        return _err(complexity_error)
     if new_password != confirm_password:
-        return RedirectResponse(
-            f"/settings?error={quote('New passwords do not match.')}", status_code=303
-        )
+        return _err("New passwords do not match.")
 
-    # Verify current password
     query = "SELECT password_hash FROM users WHERE id = $1"
     async with pool.acquire() as conn:
         row = await conn.fetchrow(query, str(user.id))
 
     if not row or not row["password_hash"]:
-        return RedirectResponse(
-            f"/settings?error={quote('No password set on this account.')}", status_code=303
+        await audit_repo.log_for_user(
+            user, request,
+            action=audit_actions.PASSWORD_CHANGE,
+            entity_type="user",
+            entity_id=user.id,
+            outcome="failed",
+            notes="no password set",
         )
+        return _err("No password set on this account.")
 
-    if not bcrypt.checkpw(current_password.encode("utf-8"), row["password_hash"].encode("utf-8")):
-        return RedirectResponse(
-            f"/settings?error={quote('Current password is incorrect.')}", status_code=303
+    if not bcrypt.checkpw(
+        current_password.encode("utf-8"), row["password_hash"].encode("utf-8")
+    ):
+        await audit_repo.log_for_user(
+            user, request,
+            action=audit_actions.PASSWORD_CHANGE,
+            entity_type="user",
+            entity_id=user.id,
+            outcome="denied",
+            notes="incorrect current password",
         )
+        return _err("Current password is incorrect.")
 
-    # Set new password
     await set_user_password(pool, user.id, new_password)
-
-    # Invalidate all existing sessions and create a fresh one
     await destroy_session(pool, user.id)
     new_token = await create_session(pool, user.id)
 
-    response = RedirectResponse("/settings?password_changed=1", status_code=303)
+    await audit_repo.log_for_user(
+        user, request,
+        action=audit_actions.PASSWORD_CHANGE,
+        entity_type="user",
+        entity_id=user.id,
+        notes="self-service password change; all other sessions revoked",
+    )
+
+    response = RedirectResponse(
+        f"/settings/account?success={quote('Password updated. Other sessions were signed out.')}",
+        status_code=303,
+    )
     params = get_cookie_params()
     response.set_cookie(
         key=SESSION_COOKIE_NAME,
@@ -167,9 +226,9 @@ async def change_password(request: Request):
     return response
 
 
-# =============================================================================
-# Force Password Change
-# =============================================================================
+# ---------------------------------------------------------------------------
+# Force password change (unchanged URL — referenced by login flow)
+# ---------------------------------------------------------------------------
 
 
 @router.get("/force-password-change", response_class=HTMLResponse)
@@ -177,7 +236,6 @@ async def force_password_change_page(request: Request):
     """Show the forced password change page."""
     user = await get_user_context(request, allow_force_password_change=True)
 
-    # If no force flag set, redirect to dashboard
     pool = await get_pool()
     query = "SELECT force_password_change FROM users WHERE id = $1"
     async with pool.acquire() as conn:
@@ -203,7 +261,6 @@ async def force_password_change_page(request: Request):
 
 @router.post("/force-password-change")
 async def force_password_change_submit(request: Request):
-    """Handle forced password change submission."""
     user = await get_user_context(request, allow_force_password_change=True)
 
     form = await request.form()
@@ -211,37 +268,37 @@ async def force_password_change_submit(request: Request):
     await _check_csrf(request, form_token=csrf_form_token)
 
     pool = await get_pool()
+    audit_repo = AdminAuditRepository(pool)
     new_password = str(form.get("new_password", ""))
     confirm_password = str(form.get("confirm_password", ""))
 
-    if len(new_password) < 8:
+    def _err(msg: str) -> RedirectResponse:
         return RedirectResponse(
-            f"/force-password-change?error={quote('Password must be at least 8 characters.')}",
-            status_code=303,
+            f"/force-password-change?error={quote(msg)}", status_code=303
         )
 
+    if len(new_password) < 8:
+        return _err("Password must be at least 8 characters.")
     complexity_error = validate_password_complexity(new_password)
     if complexity_error:
-        return RedirectResponse(
-            f"/force-password-change?error={quote(complexity_error)}",
-            status_code=303,
-        )
-
+        return _err(complexity_error)
     if new_password != confirm_password:
-        return RedirectResponse(
-            f"/force-password-change?error={quote('Passwords do not match.')}",
-            status_code=303,
-        )
+        return _err("Passwords do not match.")
 
-    # Set new password and clear force flag
     await set_user_password(pool, user.id, new_password)
     from lucent.auth_providers import clear_force_password_change
-
     await clear_force_password_change(pool, user.id)
 
-    # Create fresh session
     await destroy_session(pool, user.id)
     new_token = await create_session(pool, user.id)
+
+    await audit_repo.log_for_user(
+        user, request,
+        action=audit_actions.PASSWORD_CHANGE,
+        entity_type="user",
+        entity_id=user.id,
+        notes="forced password change at first login",
+    )
 
     response = RedirectResponse("/", status_code=303)
     params = get_cookie_params()
@@ -255,57 +312,372 @@ async def force_password_change_submit(request: Request):
     return response
 
 
-# =============================================================================
-# API Keys
-# =============================================================================
+# ---------------------------------------------------------------------------
+# /settings/api-keys
+# ---------------------------------------------------------------------------
+
+
+@router.get("/settings/api-keys", response_class=HTMLResponse)
+async def settings_api_keys(
+    request: Request,
+    new_key: str | None = Query(default=None),
+    error: str | None = Query(default=None),
+    success: str | None = Query(default=None),
+):
+    user = await get_user_context(request)
+    pool = await get_pool()
+    api_key_repo = ApiKeyRepository(pool)
+    api_keys = (await api_key_repo.list_by_user(user.id))["items"]
+
+    new_api_key = None
+    new_key_name = None
+    if new_key:
+        decoded = _decode_pending_key(new_key)
+        if decoded:
+            key_id, new_api_key = decoded
+            for k in api_keys:
+                if str(k["id"]) == key_id:
+                    new_key_name = k["name"]
+                    break
+
+    return templates.TemplateResponse(
+        request,
+        "settings/api_keys.html",
+        {
+            "user": user,
+            "api_keys": api_keys,
+            "new_api_key": new_api_key,
+            "new_key_name": new_key_name,
+            "error": error,
+            "success": success,
+        },
+    )
 
 
 @router.post("/settings/api-keys")
-async def create_api_key(
-    request: Request,
-    name: str = Form(...),
-):
-    """Create a new API key."""
+async def create_api_key(request: Request, name: str = Form(...)):
+    """Create a new API key for the current user."""
     user = await get_user_context(request)
     await _check_csrf(request)
     pool = await get_pool()
     api_key_repo = ApiKeyRepository(pool)
+    audit_repo = AdminAuditRepository(pool)
 
     try:
-        # Create the new key
         key_record, plain_key = await api_key_repo.create(
             user_id=user.id,
             organization_id=user.organization_id,
             name=name.strip(),
         )
-
-        # Encode the key in a signed query param for the redirect
         key_id = str(key_record["id"])
+        await audit_repo.log_for_user(
+            user, request,
+            action=audit_actions.API_KEY_CREATE,
+            entity_type="api_key",
+            entity_id=key_id,
+            entity_label=key_record["name"],
+            new_values={
+                "name": key_record["name"],
+                "key_prefix": key_record["key_prefix"],
+                "scopes": list(key_record.get("scopes") or []),
+            },
+        )
         signed = _encode_pending_key(key_id, plain_key)
-
-        # Redirect to settings with signed key (POST-Redirect-GET pattern)
-        from urllib.parse import quote
-
-        return RedirectResponse(f"/settings?new_key={quote(signed)}", status_code=303)
-
+        return RedirectResponse(
+            f"/settings/api-keys?new_key={quote(signed)}", status_code=303
+        )
     except ValueError as e:
-        # Duplicate name error
-        from urllib.parse import quote
-
-        return RedirectResponse(f"/settings?error={quote(str(e))}", status_code=303)
+        return RedirectResponse(
+            f"/settings/api-keys?error={quote(str(e))}", status_code=303
+        )
 
 
 @router.post("/settings/api-keys/{key_id}/revoke", response_class=HTMLResponse)
 async def revoke_api_key(request: Request, key_id: UUID):
-    """Revoke an API key."""
     user = await get_user_context(request)
     await _check_csrf(request)
     pool = await get_pool()
     api_key_repo = ApiKeyRepository(pool)
+    audit_repo = AdminAuditRepository(pool)
 
+    existing = await api_key_repo.get_by_id(key_id, user.id)
     success = await api_key_repo.revoke(key_id, user.id)
-
     if not success:
         raise HTTPException(status_code=404, detail="API key not found")
 
-    return RedirectResponse("/settings", status_code=303)
+    await audit_repo.log_for_user(
+        user, request,
+        action=audit_actions.API_KEY_REVOKE,
+        entity_type="api_key",
+        entity_id=key_id,
+        entity_label=(existing or {}).get("name"),
+    )
+    return RedirectResponse(
+        f"/settings/api-keys?success={quote('API key revoked.')}", status_code=303
+    )
+
+
+# ---------------------------------------------------------------------------
+# /settings/api-access
+# ---------------------------------------------------------------------------
+
+
+@router.get("/settings/api-access", response_class=HTMLResponse)
+async def settings_api_access(request: Request):
+    user = await get_user_context(request)
+    # Build a base URL that matches the host that served this request so users
+    # can copy/paste straight into clients without editing.
+    scheme = request.url.scheme
+    host = request.headers.get("host") or "localhost:8766"
+    base_url = f"{scheme}://{host}"
+    return templates.TemplateResponse(
+        request,
+        "settings/api_access.html",
+        {"user": user, "base_url": base_url},
+    )
+
+
+# ---------------------------------------------------------------------------
+# /settings/organization — visible to all; editable by owner
+# ---------------------------------------------------------------------------
+
+
+@router.get("/settings/organization", response_class=HTMLResponse)
+async def settings_organization(
+    request: Request,
+    error: str | None = Query(default=None),
+    success: str | None = Query(default=None),
+):
+    user = await get_user_context(request)
+    pool = await get_pool()
+    org_repo = OrganizationRepository(pool)
+    user_repo = UserRepository(pool)
+    api_key_repo = ApiKeyRepository(pool)
+
+    org = await org_repo.get_by_id(user.organization_id)
+    members = await user_repo.get_by_organization(user.organization_id)
+    admin_count = sum(1 for m in members if m.get("role") in ("admin", "owner"))
+    api_keys_total = 0
+    try:
+        # Count total active keys for the org. ApiKeyRepository doesn't have an
+        # org-level method, so we sum across users. This is fine for typical org
+        # sizes during launch; a dedicated method can come later.
+        for m in members:
+            keys = await api_key_repo.list_by_user(m["id"], limit=1000)
+            api_keys_total += sum(1 for k in keys["items"] if k.get("is_active"))
+    except Exception:
+        pass
+
+    return templates.TemplateResponse(
+        request,
+        "settings/organization.html",
+        {
+            "user": user,
+            "organization": org,
+            "stats": {
+                "total_users": len(members),
+                "admin_count": admin_count,
+                "api_key_count": api_keys_total,
+            },
+            "error": error,
+            "success": success,
+        },
+    )
+
+
+@router.post("/settings/organization")
+async def settings_organization_update(request: Request, name: str = Form(...)):
+    """Owner-only: rename the workspace."""
+    user = await get_user_context(request)
+    await _check_csrf(request)
+    if _role_value(user) != "owner":
+        raise HTTPException(status_code=403, detail="Only the workspace owner can change this.")
+
+    pool = await get_pool()
+    org_repo = OrganizationRepository(pool)
+    audit_repo = AdminAuditRepository(pool)
+
+    new_name = name.strip()[:120]
+    if not new_name:
+        return RedirectResponse(
+            f"/settings/organization?error={quote('Name is required.')}", status_code=303
+        )
+
+    org = await org_repo.get_by_id(user.organization_id)
+    old_name = (org or {}).get("name", "")
+    if new_name == old_name:
+        return RedirectResponse("/settings/organization", status_code=303)
+
+    await org_repo.update(organization_id=user.organization_id, name=new_name)
+    await audit_repo.log_for_user(
+        user, request,
+        action=audit_actions.ORG_UPDATE,
+        entity_type="organization",
+        entity_id=user.organization_id,
+        entity_label=new_name,
+        changed_fields=["name"],
+        old_values={"name": old_name},
+        new_values={"name": new_name},
+    )
+    return RedirectResponse(
+        f"/settings/organization?success={quote('Workspace updated.')}", status_code=303
+    )
+
+
+# ---------------------------------------------------------------------------
+# /settings/danger — owner-only destructive actions
+# ---------------------------------------------------------------------------
+
+
+@router.get("/settings/danger", response_class=HTMLResponse)
+async def settings_danger(
+    request: Request,
+    error: str | None = Query(default=None),
+    success: str | None = Query(default=None),
+):
+    user = await get_user_context(request)
+    if _role_value(user) != "owner":
+        raise HTTPException(status_code=403, detail="Owner access required.")
+    pool = await get_pool()
+    org_repo = OrganizationRepository(pool)
+    user_repo = UserRepository(pool)
+
+    org = await org_repo.get_by_id(user.organization_id)
+    members = await user_repo.get_by_organization(user.organization_id)
+    eligible_owners = [
+        m for m in members
+        if m.get("role") == "admin" and m.get("is_active") and m["id"] != user.id
+    ]
+    return templates.TemplateResponse(
+        request,
+        "settings/danger.html",
+        {
+            "user": user,
+            "organization": org,
+            "eligible_owners": eligible_owners,
+            "error": error,
+            "success": success,
+        },
+    )
+
+
+@router.post("/settings/sessions/revoke-all")
+async def settings_revoke_all_sessions(request: Request):
+    """Sign every device out for the current user."""
+    user = await get_user_context(request)
+    await _check_csrf(request)
+    pool = await get_pool()
+    audit_repo = AdminAuditRepository(pool)
+
+    await destroy_session(pool, user.id)
+    await audit_repo.log_for_user(
+        user, request,
+        action=audit_actions.SESSION_REVOKE_ALL,
+        entity_type="user",
+        entity_id=user.id,
+        notes="self-service revoke-all-sessions",
+    )
+
+    response = RedirectResponse("/login", status_code=303)
+    params = get_cookie_params()
+    response.delete_cookie(SESSION_COOKIE_NAME, **params)
+    response.delete_cookie("lucent_impersonate", **params)
+    return response
+
+
+@router.post("/settings/organization/transfer-ownership")
+async def settings_transfer_ownership(
+    request: Request, new_owner_id: UUID = Form(...)
+):
+    """Owner-only: transfer the owner role to another admin."""
+    user = await get_user_context(request)
+    await _check_csrf(request)
+    if _role_value(user) != "owner":
+        raise HTTPException(status_code=403, detail="Owner access required.")
+    if new_owner_id == user.id:
+        return RedirectResponse(
+            f"/settings/danger?error={quote('You are already the owner.')}", status_code=303
+        )
+
+    pool = await get_pool()
+    user_repo = UserRepository(pool)
+    audit_repo = AdminAuditRepository(pool)
+
+    target = await user_repo.get_by_id(new_owner_id)
+    if not target or target.get("organization_id") != user.organization_id:
+        return RedirectResponse(
+            f"/settings/danger?error={quote('User not found in this workspace.')}",
+            status_code=303,
+        )
+    if target.get("role") != "admin":
+        return RedirectResponse(
+            f"/settings/danger?error={quote('You can only transfer ownership to an admin.')}",
+            status_code=303,
+        )
+
+    # Promote target, demote self. The unique-owner constraint requires we do
+    # the demotion first to avoid a partial-index conflict.
+    await user_repo.update_role(user.id, "admin")
+    try:
+        await user_repo.update_role(new_owner_id, "owner")
+    except Exception:
+        # Rollback: restore self as owner.
+        await user_repo.update_role(user.id, "owner")
+        return RedirectResponse(
+            f"/settings/danger?error={quote('Transfer failed; ownership unchanged.')}",
+            status_code=303,
+        )
+
+    await audit_repo.log_for_user(
+        user, request,
+        action=audit_actions.ORG_TRANSFER_OWNERSHIP,
+        entity_type="organization",
+        entity_id=user.organization_id,
+        old_values={"owner_id": str(user.id)},
+        new_values={"owner_id": str(new_owner_id)},
+        notes="ownership transferred",
+    )
+    return RedirectResponse(
+        f"/settings/account?success={quote('Ownership transferred. You are now an admin.')}",
+        status_code=303,
+    )
+
+
+@router.post("/settings/organization/delete")
+async def settings_delete_org(request: Request, confirm_name: str = Form(...)):
+    """Owner-only: permanently delete the workspace (irreversible)."""
+    user = await get_user_context(request)
+    await _check_csrf(request)
+    if _role_value(user) != "owner":
+        raise HTTPException(status_code=403, detail="Owner access required.")
+
+    pool = await get_pool()
+    org_repo = OrganizationRepository(pool)
+    audit_repo = AdminAuditRepository(pool)
+
+    org = await org_repo.get_by_id(user.organization_id)
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+    if confirm_name.strip() != org["name"]:
+        return RedirectResponse(
+            f"/settings/danger?error={quote('Confirmation name did not match.')}",
+            status_code=303,
+        )
+
+    # Log BEFORE deleting — audit row gets dropped on cascade, but we log so
+    # the action is at least visible until the cascade fires. For real
+    # multi-org deployments the audit log should live in a separate db.
+    await audit_repo.log_for_user(
+        user, request,
+        action=audit_actions.ORG_DELETE,
+        entity_type="organization",
+        entity_id=user.organization_id,
+        entity_label=org["name"],
+        notes="workspace permanently deleted by owner",
+    )
+    await org_repo.delete(user.organization_id)
+
+    response = RedirectResponse("/login?deleted=1", status_code=303)
+    params = get_cookie_params()
+    response.delete_cookie(SESSION_COOKIE_NAME, **params)
+    return response

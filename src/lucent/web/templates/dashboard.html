@@ -3,121 +3,340 @@
 {% block title %}Dashboard - Lucent{% endblock %}
 
 {% block content %}
+{% set activity_summary = activity_summary if activity_summary is defined else {'requests': {}, 'tasks': {}} %}
+{% set active_work = active_work if active_work is defined else [] %}
+{% set recent_events = recent_events if recent_events is defined else [] %}
+{% set recently_completed = recently_completed if recently_completed is defined else [] %}
+{% set completed_24h_count = completed_24h_count if completed_24h_count is defined else 0 %}
+{% set pending_approval_count = pending_approval_count if pending_approval_count is defined else 0 %}
+{% set review_count = review_count if review_count is defined else 0 %}
+{% set active_mcp_servers = active_mcp_servers if active_mcp_servers is defined else 0 %}
+{% set is_admin_or_owner = is_admin_or_owner if is_admin_or_owner is defined else false %}
+{% set pending_approvals = pending_approvals if pending_approvals is defined else [] %}
+{% set pending_proposals = pending_proposals if pending_proposals is defined else {'agents': [], 'skills': [], 'mcp_servers': [], 'total': 0} %}
+{% set proposed_sandbox_templates = proposed_sandbox_templates if proposed_sandbox_templates is defined else [] %}
+{% set admin_summary = admin_summary if admin_summary is defined else {} %}
+{% set active_goal_count = active_goal_count if active_goal_count is defined else 0 %}
+{% set paused_goal_count = paused_goal_count if paused_goal_count is defined else 0 %}
+{% set completed_goal_count = completed_goal_count if completed_goal_count is defined else 0 %}
+{% set goal_milestone_total = goal_milestone_total if goal_milestone_total is defined else 0 %}
+{% set goal_milestone_completed = goal_milestone_completed if goal_milestone_completed is defined else 0 %}
+{% set goal_cards = goal_cards if goal_cards is defined else [] %}
+{% set paused_goal_cards = paused_goal_cards if paused_goal_cards is defined else [] %}
 <!-- Page Header -->
 <div class="mb-8">
-    <h1 class="text-2xl font-bold text-gray-900">Dashboard</h1>
-    <p class="mt-1 text-sm text-gray-500">What's happening with Lucent</p>
-</div>
-
-<!-- Stats Grid -->
-<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
-    <div class="bg-white rounded-xl border border-gray-200 p-6 shadow-sm hover:shadow-md transition-shadow">
-        <div class="flex items-center gap-4">
-            <div class="flex items-center justify-center w-12 h-12 rounded-lg bg-primary-100">
-                <svg class="w-6 h-6 text-primary-600" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375m16.5 0v3.75m-16.5-3.75v3.75m16.5 0v3.75C20.25 16.153 16.556 18 12 18s-8.25-1.847-8.25-4.125v-3.75m16.5 0c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125" />
-                </svg>
-            </div>
-            <div>
-                <p class="text-sm font-medium text-gray-500">Memories</p>
-                <p class="text-3xl font-bold text-gray-900">{{ total_memories }}</p>
-            </div>
+    <div class="flex items-start justify-between gap-6">
+        <div>
+            <h1 class="text-2xl font-bold text-gray-900">Dashboard</h1>
+            <p class="mt-1 text-sm text-gray-500">A quick read on what Lucent is doing, what is waiting, and what needs attention.</p>
+        </div>
+        <div class="flex items-center gap-2 px-3 py-2 rounded-full text-sm font-medium
+            {% if daemon_status_level == 'online' %}bg-green-100 text-green-700
+            {% elif daemon_status_level == 'stale' %}bg-amber-100 text-amber-700
+            {% else %}bg-red-100 text-red-700{% endif %}">
+            <span class="w-2 h-2 rounded-full
+                {% if daemon_status_level == 'online' %}bg-green-500
+                {% elif daemon_status_level == 'stale' %}bg-amber-500
+                {% else %}bg-red-500{% endif %}"></span>
+            Lucent {{ daemon_status_label | lower }}
         </div>
     </div>
-    
-    <a href="/definitions?tab=agents" class="bg-white rounded-xl border border-gray-200 p-6 shadow-sm hover:shadow-md transition-shadow">
-        <div class="flex items-center gap-4">
-            <div class="flex items-center justify-center w-12 h-12 rounded-lg bg-violet-100">
-                <svg class="w-6 h-6 text-violet-600" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+</div>
+
+<!-- System Overview -->
+<div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-5 mb-8">
+    <a href="/memories?type=goal" class="bg-white rounded-xl border border-gray-200 p-5 shadow-sm hover:shadow-md transition-shadow">
+        <div class="flex items-center justify-between">
+            <div>
+                <p class="text-sm font-medium text-gray-500">Active Goals</p>
+                <p class="mt-2 text-3xl font-bold text-gray-900">{{ active_goal_count }}</p>
+            </div>
+            <div class="flex items-center justify-center w-11 h-11 rounded-lg bg-blue-100">
+                <svg class="w-5 h-5 text-blue-600" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 013 19.875v-6.75zM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V8.625zM16.5 4.125C16.5 3.504 17.004 3 17.625 3h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V4.125z" />
+                </svg>
+            </div>
+        </div>
+        <p class="mt-3 text-xs text-gray-500">{{ paused_goal_count }} paused · {{ completed_goal_count }} completed</p>
+    </a>
+
+    <a href="/memories?type=goal" class="bg-white rounded-xl border border-gray-200 p-5 shadow-sm hover:shadow-md transition-shadow">
+        <div class="flex items-center justify-between">
+            <div>
+                <p class="text-sm font-medium text-gray-500">Goal Milestones</p>
+                <p class="mt-2 text-3xl font-bold text-gray-900">{{ goal_milestone_completed }}</p>
+            </div>
+            <div class="flex items-center justify-center w-11 h-11 rounded-lg bg-emerald-100">
+                <svg class="w-5 h-5 text-emerald-600" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12c0 1.268-.63 2.39-1.593 3.068a3.745 3.745 0 01-1.043 3.296 3.745 3.745 0 01-3.296 1.043A3.745 3.745 0 0112 21a3.745 3.745 0 01-3.068-1.593 3.745 3.745 0 01-3.296-1.043 3.745 3.745 0 01-1.043-3.296A3.745 3.745 0 013 12c0-1.268.63-2.39 1.593-3.068a3.745 3.745 0 011.043-3.296 3.745 3.745 0 013.296-1.043A3.745 3.745 0 0112 3c1.268 0 2.39.63 3.068 1.593a3.745 3.745 0 013.296 1.043 3.745 3.745 0 011.043 3.296A3.745 3.745 0 0121 12z" />
+                </svg>
+            </div>
+        </div>
+        <p class="mt-3 text-xs text-gray-500">of {{ goal_milestone_total }} milestones on active goals</p>
+    </a>
+
+    <a href="/activity" class="bg-white rounded-xl border border-gray-200 p-5 shadow-sm hover:shadow-md transition-shadow">
+        <div class="flex items-center justify-between">
+            <div>
+                <p class="text-sm font-medium text-gray-500">Current Work</p>
+                <p class="mt-2 text-3xl font-bold text-gray-900">{{ active_request_count }}</p>
+            </div>
+            <div class="flex items-center justify-center w-11 h-11 rounded-lg bg-indigo-100">
+                <svg class="w-5 h-5 text-indigo-600" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
                     <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
                 </svg>
             </div>
-            <div>
-                <p class="text-sm font-medium text-gray-500">Active Agents</p>
-                <p class="text-3xl font-bold text-gray-900">{{ active_agents }}</p>
-            </div>
         </div>
+        <p class="mt-3 text-xs text-gray-500">{{ activity_summary.requests.pending or 0 }} ready · {{ activity_summary.requests.active or 0 }} in motion</p>
     </a>
-    
-    <a href="/definitions?tab=skills" class="bg-white rounded-xl border border-gray-200 p-6 shadow-sm hover:shadow-md transition-shadow">
-        <div class="flex items-center gap-4">
-            <div class="flex items-center justify-center w-12 h-12 rounded-lg bg-emerald-100">
-                <svg class="w-6 h-6 text-emerald-600" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M4.26 10.147a60.438 60.438 0 00-.491 6.347A48.62 48.62 0 0112 20.904a48.62 48.62 0 018.232-4.41 60.46 60.46 0 00-.491-6.347m-15.482 0a50.636 50.636 0 00-2.658-.813A59.906 59.906 0 0112 3.493a59.903 59.903 0 0110.399 5.84c-.896.248-1.783.52-2.658.814m-15.482 0A50.717 50.717 0 0112 13.489a50.702 50.702 0 017.74-3.342" />
+
+    {% if is_admin_or_owner %}
+    <a href="/daemon/review" class="bg-white rounded-xl border border-gray-200 p-5 shadow-sm hover:shadow-md transition-shadow">
+        <div class="flex items-center justify-between">
+            <div>
+                <p class="text-sm font-medium text-gray-500">Needs Approval</p>
+                <p class="mt-2 text-3xl font-bold text-gray-900">{{ pending_approval_count }}</p>
+            </div>
+            <div class="flex items-center justify-center w-11 h-11 rounded-lg bg-amber-100">
+                <svg class="w-5 h-5 text-amber-600" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" />
                 </svg>
             </div>
-            <div>
-                <p class="text-sm font-medium text-gray-500">Active Skills</p>
-                <p class="text-3xl font-bold text-gray-900">{{ active_skills }}</p>
-            </div>
         </div>
+        <p class="mt-3 text-xs text-gray-500">Pending work approvals · {{ review_count }} in review/rework</p>
     </a>
-    
-    <a href="/activity" class="bg-white rounded-xl border border-gray-200 p-6 shadow-sm hover:shadow-md transition-shadow">
-        <div class="flex items-center gap-4">
-            <div class="flex items-center justify-center w-12 h-12 rounded-lg bg-amber-100">
-                <svg class="w-6 h-6 text-amber-600" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 12h16.5m-16.5 3.75h16.5M3.75 19.5h16.5M5.625 4.5h12.75a1.875 1.875 0 010 3.75H5.625a1.875 1.875 0 010-3.75z" />
+    {% else %}
+    <a href="/activity?status=completed" class="bg-white rounded-xl border border-gray-200 p-5 shadow-sm hover:shadow-md transition-shadow">
+        <div class="flex items-center justify-between">
+            <div>
+                <p class="text-sm font-medium text-gray-500">Finished Today</p>
+                <p class="mt-2 text-3xl font-bold text-gray-900">{{ completed_24h_count }}</p>
+            </div>
+            <div class="flex items-center justify-center w-11 h-11 rounded-lg bg-green-100">
+                <svg class="w-5 h-5 text-green-600" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                 </svg>
             </div>
-            <div>
-                <p class="text-sm font-medium text-gray-500">Active Requests</p>
-                <p class="text-3xl font-bold text-gray-900">{{ active_request_count }}</p>
-            </div>
         </div>
+        <p class="mt-3 text-xs text-gray-500">Recent completions from user and Lucent work</p>
     </a>
+    {% endif %}
+
 </div>
 
-<!-- Two Column Layout -->
-<div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
-    <!-- Daemon Status -->
-    <div class="bg-white rounded-xl border border-gray-200 shadow-sm">
-        <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-            <h2 class="text-lg font-semibold text-gray-900">Daemon Status</h2>
-            <span class="inline-flex items-center gap-2 px-2.5 py-1 rounded-full text-xs font-medium
-                {% if daemon_status_level == 'online' %}bg-green-100 text-green-700
-                {% elif daemon_status_level == 'stale' %}bg-amber-100 text-amber-700
-                {% else %}bg-red-100 text-red-700{% endif %}">
-                <span class="w-1.5 h-1.5 rounded-full
-                    {% if daemon_status_level == 'online' %}bg-green-500
-                    {% elif daemon_status_level == 'stale' %}bg-amber-500
-                    {% else %}bg-red-500{% endif %}"></span>
-                {{ daemon_status_label }}
-            </span>
-        </div>
-        <div class="p-6 space-y-3">
-            <p class="text-sm text-gray-600">{{ daemon_status_detail }}</p>
-            {% if daemon_cycle_count is not none %}
-            <p class="text-sm text-gray-700">
-                <span class="font-medium">Cycle count:</span> {{ daemon_cycle_count }}
-            </p>
-            {% endif %}
-            {% if daemon_instance_id %}
-            <p class="text-xs text-gray-500 font-mono">
-                Instance: {{ daemon_instance_id | truncate(40) }}
-            </p>
-            {% endif %}
-            {% if daemon_state_summary %}
-            <div class="mt-4 p-3 rounded-lg bg-gray-50 border border-gray-100">
-                <p class="text-xs uppercase tracking-wide text-gray-500 mb-1">Current focus</p>
-                <p class="text-sm text-gray-700">{{ daemon_state_summary | truncate(160) }}</p>
+<!-- Main Layout -->
+<div class="grid grid-cols-1 xl:grid-cols-3 gap-6 mb-8">
+    <div class="xl:col-span-2 space-y-6">
+        <!-- Active Goals -->
+        <div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+            <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+                <div>
+                    <h2 class="text-lg font-semibold text-gray-900">Goals we're pursuing together</h2>
+                    <p class="text-sm text-gray-500">Shared outcomes, milestone progress, and the current request moving each goal forward.</p>
+                </div>
+                <a href="/memories?type=goal" class="text-sm font-medium text-primary-600 hover:text-primary-700">View goals →</a>
+            </div>
+            {% if goal_cards %}
+            <div class="divide-y divide-gray-100">
+                {% for goal in goal_cards %}
+                <a href="/memories/{{ goal.id }}" class="block px-6 py-5 hover:bg-gray-50 transition-colors">
+                    <div class="flex items-start justify-between gap-4">
+                        <div class="min-w-0 flex-1">
+                            <div class="flex items-center gap-2 mb-2">
+                                <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-700">active</span>
+                                {% if goal.current_request %}
+                                <span class="text-xs text-gray-500">{{ goal.current_request.status | replace('_', ' ') }} request</span>
+                                {% else %}
+                                <span class="text-xs text-gray-500">no current request linked</span>
+                                {% endif %}
+                            </div>
+                            <p class="text-base font-semibold text-gray-900 truncate">{{ goal.title }}</p>
+                            {% if goal.current_milestone_label %}
+                            <p class="mt-1 text-sm text-gray-600 line-clamp-2">Next: {{ goal.current_milestone_label }}</p>
+                            {% elif goal.milestone_total > 0 %}
+                            <p class="mt-1 text-sm text-gray-600">All tracked milestones are complete.</p>
+                            {% else %}
+                            <p class="mt-1 text-sm text-gray-600">No milestones are tracked yet.</p>
+                            {% endif %}
+                        </div>
+                        <div class="shrink-0 text-right text-sm text-gray-500">
+                            {% if goal.milestone_total > 0 %}
+                            <p class="font-semibold text-gray-900">{{ goal.milestone_completed }}/{{ goal.milestone_total }}</p>
+                            <p class="text-xs">milestones</p>
+                            {% else %}
+                            <p class="text-xs">untracked</p>
+                            {% endif %}
+                        </div>
+                    </div>
+                    <div class="mt-4 h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                        <div class="h-full bg-primary-500 rounded-full" style="width: {% if goal.progress_pct is not none %}{{ goal.progress_pct }}{% else %}0{% endif %}%"></div>
+                    </div>
+                    <div class="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-500">
+                        {% if goal.milestone_total > 0 %}
+                        <span>{{ goal.milestone_completed }} of {{ goal.milestone_total }} milestones complete</span>
+                        {% endif %}
+                        {% if goal.current_request %}
+                        <span>Current: {{ goal.current_request.title | truncate(70) }}</span>
+                        {% elif goal.latest_completed_request %}
+                        <span>Latest: {{ goal.latest_completed_request.title | truncate(70) }}</span>
+                        {% endif %}
+                    </div>
+                </a>
+                {% endfor %}
+            </div>
+            {% else %}
+            <div class="px-6 py-12 text-center">
+                <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <p class="mt-4 text-sm font-medium text-gray-900">No active goals right now</p>
+                <p class="mt-1 text-sm text-gray-500">There is no shared outcome currently marked active.</p>
+                {% if paused_goal_cards %}
+                <div class="mt-5 max-w-xl mx-auto rounded-lg bg-amber-50 border border-amber-100 p-4 text-left">
+                    <p class="text-xs font-medium uppercase tracking-wide text-amber-700">Paused goals</p>
+                    {% for goal in paused_goal_cards %}
+                    <a href="/memories/{{ goal.id }}" class="mt-2 block text-sm font-medium text-amber-900 hover:underline">{{ goal.title }}</a>
+                    {% endfor %}
+                </div>
+                {% endif %}
             </div>
             {% endif %}
         </div>
+
+        {% if is_admin_or_owner %}
+        <!-- Processing Events -->
+        <div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+            <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+                <div>
+                    <h2 class="text-lg font-semibold text-gray-900">Processing events</h2>
+                    <p class="text-sm text-gray-500">Admin view of task events emitted by Lucent agents and the daemon.</p>
+                </div>
+            </div>
+            {% if recent_events %}
+            <div class="divide-y divide-gray-100">
+                {% for event in recent_events %}
+                <a href="/activity/{{ event.request_id }}" class="flex gap-3 px-6 py-4 hover:bg-gray-50 transition-colors">
+                    <div class="mt-1 w-2 h-2 rounded-full shrink-0
+                        {% if event.event_type in ['warning', 'failed', 'error'] %}bg-red-500
+                        {% elif event.event_type in ['agent_completed', 'completed'] %}bg-green-500
+                        {% elif event.event_type in ['agent_dispatched', 'progress'] %}bg-blue-500
+                        {% else %}bg-gray-400{% endif %}"></div>
+                    <div class="min-w-0 flex-1">
+                        <div class="flex items-center justify-between gap-3">
+                            <p class="text-sm font-medium text-gray-900 truncate">{{ event.request_title }}</p>
+                            <span class="text-xs text-gray-400 shrink-0">{{ event.created_at | datetime }}</span>
+                        </div>
+                        <p class="mt-0.5 text-sm text-gray-600 truncate">{{ event.detail or event.event_type | replace('_', ' ') | title }}</p>
+                        <p class="mt-1 text-xs text-gray-500 truncate">{{ event.task_title }}{% if event.agent_type %} · {{ event.agent_type }}{% endif %}</p>
+                    </div>
+                </a>
+                {% endfor %}
+            </div>
+            {% else %}
+            <div class="px-6 py-10 text-center text-sm text-gray-500">No task events have been recorded yet.</div>
+            {% endif %}
+        </div>
+        {% endif %}
     </div>
 
-    <!-- Recent Memories -->
-    <div class="bg-white rounded-xl border border-gray-200 shadow-sm">
-        <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-            <h2 class="text-lg font-semibold text-gray-900">Recent Memories</h2>
-            <a href="/memories" class="text-sm font-medium text-primary-600 hover:text-primary-700">View all →</a>
+    <div class="space-y-6">
+        {% if is_admin_or_owner %}
+        <!-- Daemon Status -->
+        <div class="bg-white rounded-xl border border-gray-200 shadow-sm">
+            <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+                <h2 class="text-lg font-semibold text-gray-900">Daemon Status</h2>
+                <span class="inline-flex items-center gap-2 px-2.5 py-1 rounded-full text-xs font-medium
+                    {% if daemon_status_level == 'online' %}bg-green-100 text-green-700
+                    {% elif daemon_status_level == 'stale' %}bg-amber-100 text-amber-700
+                    {% else %}bg-red-100 text-red-700{% endif %}">
+                    <span class="w-1.5 h-1.5 rounded-full
+                        {% if daemon_status_level == 'online' %}bg-green-500
+                        {% elif daemon_status_level == 'stale' %}bg-amber-500
+                        {% else %}bg-red-500{% endif %}"></span>
+                    {{ daemon_status_label }}
+                </span>
+            </div>
+            <div class="p-6 space-y-3">
+                <p class="text-sm text-gray-600">{{ daemon_status_detail }}</p>
+                {% if daemon_cycle_count is not none %}
+                <p class="text-sm text-gray-700">
+                    <span class="font-medium">Cycle count:</span> {{ daemon_cycle_count }}
+                </p>
+                {% endif %}
+                {% if daemon_state_summary %}
+                <div class="mt-4 p-3 rounded-lg bg-gray-50 border border-gray-100">
+                    <p class="text-xs uppercase tracking-wide text-gray-500 mb-1">Current focus</p>
+                    <p class="text-sm text-gray-700">{{ daemon_state_summary | truncate(160) }}</p>
+                </div>
+                {% endif %}
+                {% if is_admin_or_owner and daemon_instance_id %}
+                <p class="text-xs text-gray-500 font-mono break-all">Instance: {{ daemon_instance_id }}</p>
+                {% endif %}
+            </div>
         </div>
-        <div class="divide-y divide-gray-100">
+        {% endif %}
+
+        <!-- Current Requests -->
+        <div class="bg-white rounded-xl border border-gray-200 shadow-sm">
+            <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+                <div>
+                    <h2 class="text-lg font-semibold text-gray-900">Current requests</h2>
+                    <p class="text-sm text-gray-500">Open approved work tied to the current plan.</p>
+                </div>
+                <a href="/activity" class="text-sm font-medium text-primary-600 hover:text-primary-700">View →</a>
+            </div>
+            {% if active_work %}
+            <div class="divide-y divide-gray-100">
+                {% for item in active_work[:4] %}
+                <a href="/activity/{{ item.id }}" class="block px-6 py-3 hover:bg-gray-50 transition-colors">
+                    <div class="flex items-center justify-between gap-3">
+                        <p class="text-sm font-medium text-gray-900 truncate">{{ item.title }}</p>
+                        <span class="shrink-0 text-xs text-gray-500">{{ item.status | replace('_', ' ') }}</span>
+                    </div>
+                    <p class="mt-1 text-xs text-gray-500">{{ item.tasks_completed or 0 }} of {{ item.tasks_total or 0 }} tasks complete</p>
+                </a>
+                {% endfor %}
+            </div>
+            {% else %}
+            <div class="px-6 py-8 text-center text-sm text-gray-500">No open requests right now.</div>
+            {% endif %}
+        </div>
+
+        <!-- Recently Completed -->
+        <div class="bg-white rounded-xl border border-gray-200 shadow-sm">
+            <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+                <h2 class="text-lg font-semibold text-gray-900">Recently completed</h2>
+                <a href="/activity?status=completed" class="text-sm font-medium text-primary-600 hover:text-primary-700">View all →</a>
+            </div>
+            {% if recently_completed %}
+            <div class="divide-y divide-gray-100">
+                {% for item in recently_completed %}
+                <a href="/activity/{{ item.id }}" class="block px-6 py-3 hover:bg-gray-50 transition-colors">
+                    <p class="text-sm font-medium text-gray-900 truncate">{{ item.title }}</p>
+                    <p class="mt-1 text-xs text-gray-500">{{ item.source or 'user' }} · {{ item.completed_at | datetime }}</p>
+                </a>
+                {% endfor %}
+            </div>
+            {% else %}
+            <div class="px-6 py-8 text-center text-sm text-gray-500">No completions in the last 24 hours.</div>
+            {% endif %}
+        </div>
+
+        <!-- Knowledge Updates -->
+        <div class="bg-white rounded-xl border border-gray-200 shadow-sm">
+            <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+                <div>
+                    <h2 class="text-lg font-semibold text-gray-900">Knowledge updates</h2>
+                    <p class="text-xs text-gray-500">{{ total_memories }} accessible memories</p>
+                </div>
+                <a href="/memories" class="text-sm font-medium text-primary-600 hover:text-primary-700">Browse →</a>
+            </div>
             {% if recent_memories %}
-                {% for memory in recent_memories %}
-                <a href="/memories/{{ memory.id }}" class="block px-6 py-4 hover:bg-gray-50 transition-colors">
-                    <div class="flex items-start gap-3">
-                        <span class="inline-flex items-center px-2 py-1 rounded-md text-xs font-medium
+            <div class="divide-y divide-gray-100">
+                {% for memory in recent_memories[:3] %}
+                <a href="/memories/{{ memory.id }}" class="block px-6 py-3 hover:bg-gray-50 transition-colors">
+                    <div class="flex items-center gap-2 mb-1">
+                        <span class="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium
                             {% if memory.type == 'technical' %}bg-emerald-100 text-emerald-700
                             {% elif memory.type == 'experience' %}bg-blue-100 text-blue-700
                             {% elif memory.type == 'procedural' %}bg-amber-100 text-amber-700
@@ -125,121 +344,78 @@
                             {% else %}bg-pink-100 text-pink-700{% endif %}">
                             {{ memory.type }}
                         </span>
-                        <div class="flex-1 min-w-0">
-                            <p class="text-sm font-medium text-gray-900 truncate">{{ memory.content | truncate(60) }}</p>
-                            <p class="text-xs text-gray-500 mt-1">{{ memory.created_at | datetime }}</p>
-                        </div>
+                        <span class="text-xs text-gray-500">{{ memory.created_at | datetime }}</span>
                     </div>
-                </a>
-                {% endfor %}
-            {% else %}
-                <div class="px-6 py-12 text-center">
-                    <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375" />
-                    </svg>
-                    <p class="mt-4 text-sm text-gray-500">No memories yet</p>
-                    <a href="/memories/new" class="mt-4 inline-flex items-center px-4 py-2 text-sm font-medium text-white bg-primary-600 rounded-lg hover:bg-primary-700">
-                        Create your first memory
-                    </a>
-                </div>
-            {% endif %}
-        </div>
-    </div>
-    
-    <!-- Top Tags -->
-    <div class="bg-white rounded-xl border border-gray-200 shadow-sm">
-        <div class="px-6 py-4 border-b border-gray-100">
-            <h2 class="text-lg font-semibold text-gray-900">Popular Tags</h2>
-        </div>
-        <div class="p-6">
-            {% if top_tags %}
-            <div class="flex flex-wrap gap-2">
-                {% for tag in top_tags %}
-                <a href="/memories?q={{ tag.tag }}" 
-                   class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm font-medium bg-gray-100 text-gray-700 hover:bg-primary-100 hover:text-primary-700 transition-colors">
-                    {{ tag.tag }}
-                    <span class="text-xs text-gray-500">({{ tag.count }})</span>
+                    <p class="text-sm text-gray-700 truncate">{{ memory.content | truncate(80) }}</p>
                 </a>
                 {% endfor %}
             </div>
             {% else %}
-            <p class="text-sm text-gray-500 text-center py-8">No tags yet</p>
+            <div class="px-6 py-8 text-center text-sm text-gray-500">No memories yet.</div>
             {% endif %}
         </div>
     </div>
 </div>
 
-<!-- Most Accessed (team mode only) -->
-{% if team_mode() %}
-<div class="bg-white rounded-xl border border-gray-200 shadow-sm mb-8">
-    <div class="px-6 py-4 border-b border-gray-100">
-        <h2 class="text-lg font-semibold text-gray-900">Most Accessed Memories</h2>
+{% if is_admin_or_owner %}
+<!-- Admin / Owner Operations -->
+<div class="grid grid-cols-1 xl:grid-cols-3 gap-6 mb-8">
+    <div class="xl:col-span-2 bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+        <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+            <div>
+                <h2 class="text-lg font-semibold text-gray-900">Admin attention queue</h2>
+                <p class="text-sm text-gray-500">Approvals and proposals that can block autonomous progress.</p>
+            </div>
+            <a href="/daemon/review" class="text-sm font-medium text-primary-600 hover:text-primary-700">Review queue →</a>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-3 divide-y md:divide-y-0 md:divide-x divide-gray-100">
+            <div class="p-5">
+                <p class="text-sm font-medium text-gray-500">Work approvals</p>
+                <p class="mt-2 text-3xl font-bold text-gray-900">{{ pending_approval_count }}</p>
+                {% if pending_approvals %}
+                <p class="mt-2 text-xs text-gray-500 truncate">Next: {{ pending_approvals[0].title }}</p>
+                {% else %}
+                <p class="mt-2 text-xs text-gray-500">No requests are waiting.</p>
+                {% endif %}
+            </div>
+            <div class="p-5">
+                <p class="text-sm font-medium text-gray-500">Definition proposals</p>
+                <p class="mt-2 text-3xl font-bold text-gray-900">{{ pending_proposals.total or 0 }}</p>
+                <p class="mt-2 text-xs text-gray-500">{{ pending_proposals.agents | length }} agents · {{ pending_proposals.skills | length }} skills · {{ pending_proposals.mcp_servers | length }} MCP</p>
+            </div>
+            <div class="p-5">
+                <p class="text-sm font-medium text-gray-500">Sandbox templates</p>
+                <p class="mt-2 text-3xl font-bold text-gray-900">{{ proposed_sandbox_templates | length }}</p>
+                <p class="mt-2 text-xs text-gray-500">Awaiting review before agents can use them</p>
+            </div>
+        </div>
     </div>
-    {% if most_accessed %}
-    <div class="overflow-x-auto">
-        <table class="w-full">
-            <thead>
-                <tr class="bg-gray-50">
-                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Memory ID</th>
-                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Access Count</th>
-                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Last Accessed</th>
-                </tr>
-            </thead>
-            <tbody class="divide-y divide-gray-100">
-                {% for item in most_accessed %}
-                <tr class="hover:bg-gray-50 transition-colors">
-                    <td class="px-6 py-4">
-                        <a href="/memories/{{ item.memory_id }}" class="text-sm font-mono text-primary-600 hover:text-primary-700">
-                            {{ item.memory_id | string | truncate(12) }}
-                        </a>
-                    </td>
-                    <td class="px-6 py-4">
-                        <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-primary-100 text-primary-800">
-                            {{ item.access_count }} views
-                        </span>
-                    </td>
-                    <td class="px-6 py-4 text-sm text-gray-500">{{ item.last_accessed | datetime }}</td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
+
+    <div class="bg-white rounded-xl border border-gray-200 shadow-sm">
+        <div class="px-6 py-4 border-b border-gray-100">
+            <h2 class="text-lg font-semibold text-gray-900">Org operations</h2>
+            <p class="text-sm text-gray-500">Admin-only health indicators.</p>
+        </div>
+        <div class="p-6 grid grid-cols-2 gap-4">
+            <a href="/settings/members" class="rounded-lg bg-gray-50 p-3 hover:bg-gray-100 transition-colors">
+                <p class="text-xs text-gray-500 uppercase tracking-wide">Users</p>
+                <p class="mt-1 text-xl font-bold text-gray-900">{{ admin_summary.active_users or 0 }}</p>
+            </a>
+            <a href="/schedules" class="rounded-lg bg-gray-50 p-3 hover:bg-gray-100 transition-colors">
+                <p class="text-xs text-gray-500 uppercase tracking-wide">Schedules</p>
+                <p class="mt-1 text-xl font-bold text-gray-900">{{ admin_summary.active_schedules or 0 }}</p>
+            </a>
+            <a href="/sandboxes" class="rounded-lg bg-gray-50 p-3 hover:bg-gray-100 transition-colors">
+                <p class="text-xs text-gray-500 uppercase tracking-wide">Live sandboxes</p>
+                <p class="mt-1 text-xl font-bold text-gray-900">{{ admin_summary.live_sandboxes or 0 }}</p>
+            </a>
+            <a href="/activity?status=failed" class="rounded-lg bg-gray-50 p-3 hover:bg-gray-100 transition-colors">
+                <p class="text-xs text-gray-500 uppercase tracking-wide">Failures 7d</p>
+                <p class="mt-1 text-xl font-bold {% if admin_summary.failed_tasks_7d %}text-red-600{% else %}text-gray-900{% endif %}">{{ admin_summary.failed_tasks_7d or 0 }}</p>
+            </a>
+        </div>
     </div>
-    {% else %}
-    <div class="px-6 py-12 text-center">
-        <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M2.036 12.322a1.012 1.012 0 010-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178z" />
-            <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-        </svg>
-        <p class="mt-4 text-sm text-gray-500">No access data yet</p>
-    </div>
-    {% endif %}
 </div>
 {% endif %}
 
-<!-- Quick Actions -->
-<div class="bg-gradient-to-r from-primary-600 to-primary-700 rounded-xl p-6 shadow-lg">
-    <h2 class="text-lg font-semibold text-white mb-4">Quick Actions</h2>
-    <div class="flex flex-wrap gap-3">
-        <a href="/memories/new" class="inline-flex items-center gap-2 px-4 py-2 bg-white text-primary-700 rounded-lg font-medium text-sm hover:bg-primary-50 transition-colors shadow-sm">
-            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
-            </svg>
-            New Memory
-        </a>
-        <a href="/memories" class="inline-flex items-center gap-2 px-4 py-2 bg-white/20 text-white rounded-lg font-medium text-sm hover:bg-white/30 transition-colors">
-            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
-            </svg>
-            Search Memories
-        </a>
-        {% if team_mode() %}
-        <a href="/audit" class="inline-flex items-center gap-2 px-4 py-2 bg-white/20 text-white rounded-lg font-medium text-sm hover:bg-white/30 transition-colors">
-            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
-            </svg>
-            View Audit Log
-        </a>
-        {% endif %}
-    </div>
-</div>
 {% endblock %}

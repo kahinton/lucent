@@ -1,5 +1,6 @@
 """Shared helpers for web routes — templates, CSRF, user context, form utilities."""
 
+import logging
 from datetime import datetime
 from pathlib import Path
 from uuid import UUID
@@ -25,11 +26,11 @@ from lucent.db import (
     UserRepository,
     get_pool,
 )
-from lucent.logging import get_logger
 from lucent.mode import is_team_mode
 from lucent.rbac import Role
 
-logger = get_logger("web.routes")
+logger = logging.getLogger(__name__)
+_csrf_logger = logging.getLogger(f"{__name__}.csrf")
 
 
 # Set up templates
@@ -253,9 +254,6 @@ async def _check_csrf(request: Request, form_token: str | None = None) -> None:
         form_token = str(form.get(CSRF_FIELD_NAME, ""))
 
     # Log for debugging
-    from lucent.logging import get_logger
-
-    _csrf_logger = get_logger("csrf")
     _csrf_logger.debug(
         "CSRF check: cookie=%s form=%s",
         "present" if cookie_token else "NONE",

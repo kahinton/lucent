@@ -6,6 +6,7 @@ Used by the daemon, MCP tools, and API to validate model selections.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 
 
@@ -24,11 +25,24 @@ class ModelInfo:
     notes: str = ""  # additional notes about the model
     tags: list[str] = field(default_factory=list)
     engine: str | None = None  # engine override: None=auto, "copilot", "langchain"
+    enabled: bool = True  # whether the model is available for use
+
+
+@dataclass(frozen=True)
+class ModelSelection:
+    """Result of model selection for a task."""
+
+    model_id: str
+    reason: str
+    source: str  # explicit, default, specialized, fallback
+    default_model_id: str | None = None
+    requested_category: str | None = None
+    alternatives: list[str] = field(default_factory=list)
 
 
 # ── Model Registry ────────────────────────────────────────────────────────
 # Source: https://docs.github.com/en/copilot/reference/ai-models/model-comparison
-# Last updated: 2026-03-12
+# Last updated: 2026-04-17
 
 MODELS: list[ModelInfo] = [
     # ── OpenAI ────────────────────────────────────────────────────────────
@@ -149,8 +163,21 @@ MODELS: list[ModelInfo] = [
         name="Claude Opus 4.6",
         category="reasoning",
         api_model_id="claude-opus-4-6-20260301",
-        notes="Anthropic's most powerful model. Improves on Claude Opus 4.5.",
+        notes="Previous Opus generation. Kept available for comparison and pinned tasks.",
         tags=["reasoning", "analysis", "premium"],
+    ),
+    ModelInfo(
+        id="claude-opus-4.7",
+        provider="anthropic",
+        name="Claude Opus 4.7",
+        category="reasoning",
+        api_model_id="claude-opus-4.7",
+        context_window=200000,
+        notes=(
+            "Anthropic's latest frontier model. "
+            "High-capability option for high-stakes reasoning and agentic work."
+        ),
+        tags=["reasoning", "frontier", "agentic", "analysis", "premium"],
     ),
     ModelInfo(
         id="claude-sonnet-4.0",
@@ -191,7 +218,7 @@ MODELS: list[ModelInfo] = [
         context_window=1000000,
         notes="Opus 4.6 with 1 million token context window.",
         tags=["reasoning", "frontier", "large-context"],
-    ),
+    ),  # Untested in Copilot SDK — validate availability separately
     # ── Google ────────────────────────────────────────────────────────────
     ModelInfo(
         id="gemini-2.5-pro",
@@ -229,6 +256,7 @@ MODELS: list[ModelInfo] = [
         api_model_id="gemini-3.1-pro",
         notes="Effective edit-then-test loops with high tool precision.",
         tags=["reasoning", "agentic", "tools"],
+        enabled=False,  # Copilot SDK returns "Model not available" (2026-04-18)
     ),
 ]
 
@@ -236,14 +264,47 @@ MODELS: list[ModelInfo] = [
 _MODEL_BY_ID: dict[str, ModelInfo] = {m.id: m for m in MODELS}
 _MODELS_BY_CATEGORY: dict[str, list[ModelInfo]] = {}
 _MODELS_BY_PROVIDER: dict[str, list[ModelInfo]] = {}
+_HARDCODED_ENABLED_IDS: set[str] = set()
 for _m in MODELS:
     _MODELS_BY_CATEGORY.setdefault(_m.category, []).append(_m)
     _MODELS_BY_PROVIDER.setdefault(_m.provider, []).append(_m)
+    if _m.enabled:
+        _HARDCODED_ENABLED_IDS.add(_m.id)
 
 # DB-sourced model cache (populated by load_models_from_db)
 _db_models: list[ModelInfo] | None = None
 _db_model_by_id: dict[str, ModelInfo] = {}
 _db_enabled_ids: set[str] = set()
+
+
+def _sync_runtime_model_registry(models: list[ModelInfo]) -> None:
+    """Sync DB-loaded models into the runtime LLM routing registry.
+
+    The DB model registry is the source of truth for admin-managed custom
+    models. Keep LangChain/Copilot routing state aligned whenever this cache is
+    loaded or refreshed so chat, API, and daemon processes can resolve
+    Ollama/custom models without a restart.
+    """
+    try:
+        from lucent.llm.langchain_engine import clear_runtime_model_registry, register_model
+
+        clear_runtime_model_registry()
+        for model in models:
+            if (
+                model.provider == "ollama"
+                or model.engine is not None
+                or model.provider not in {"anthropic", "openai", "google"}
+            ):
+                register_model(
+                    model.id,
+                    model.provider,
+                    model.api_model_id or model.id,
+                    engine=model.engine,
+                )
+    except Exception:
+        # Routing falls back to static maps/provider inference. Do not make
+        # model listing unavailable just because optional runtime imports fail.
+        return
 
 
 async def load_models_from_db(pool) -> list[ModelInfo]:
@@ -257,7 +318,7 @@ async def load_models_from_db(pool) -> list[ModelInfo]:
         from lucent.db.models import ModelRepository
 
         repo = ModelRepository(pool)
-        rows = (await repo.list_models())["items"]
+        rows = (await repo.list_models(limit=500))["items"]
         if not rows:
             return MODELS
 
@@ -287,16 +348,21 @@ async def load_models_from_db(pool) -> list[ModelInfo]:
         _db_model_by_id = by_id
         _db_enabled_ids = enabled_ids
         _MODEL_BY_ID = by_id
+        _sync_runtime_model_registry(loaded)
         return loaded
     except Exception:
         return MODELS
 
 
 def is_model_enabled(model_id: str) -> bool:
-    """Check if a model is enabled. Returns True if DB not loaded (permissive)."""
-    if _db_models is None:
-        return True  # DB not loaded yet, allow all
-    return model_id in _db_enabled_ids
+    """Check if a model is enabled.
+
+    When DB models are loaded, checks the DB enabled set.
+    Otherwise, checks the hardcoded model's ``enabled`` field.
+    """
+    if _db_models is not None:
+        return model_id in _db_enabled_ids
+    return model_id in _HARDCODED_ENABLED_IDS
 
 
 # ── Public API ────────────────────────────────────────────────────────────
@@ -315,8 +381,11 @@ def list_models(
     """List available models, optionally filtered by category or provider."""
     source = _db_models if _db_models is not None else MODELS
     models = source
-    if not include_disabled and _db_models is not None:
-        models = [m for m in models if m.id in _db_enabled_ids]
+    if not include_disabled:
+        if _db_models is not None:
+            models = [m for m in models if m.id in _db_enabled_ids]
+        else:
+            models = [m for m in models if m.enabled]
     if category:
         models = [m for m in models if m.category == category]
     if provider:
@@ -324,7 +393,243 @@ def list_models(
     return models
 
 
-def validate_model(model_id: str) -> str | None:
+def _available_models(models: list[ModelInfo] | None = None) -> list[ModelInfo]:
+    """Return models that are available for selection."""
+    if models is not None:
+        return list(models)
+    return list_models()
+
+
+def _first_model_id(models: list[ModelInfo], *, category: str | None = None) -> str | None:
+    for model in models:
+        if category is None or model.category == category:
+            return model.id
+    return None
+
+
+def get_default_model_id(
+    models: list[ModelInfo] | None = None,
+    *,
+    preferred_model: str | None = None,
+    require_tools: bool = False,
+) -> str:
+    """Return the default enabled model for general work.
+
+    Defaults are intentionally selected from currently enabled models. Prefer a
+    deployment/admin-selected default when it is enabled; otherwise prefer
+    general-purpose models before specialized/premium categories. This keeps
+    model choice opt-in and cost-conscious.
+    """
+    available = _available_models(models)
+    if require_tools:
+        available = [m for m in available if m.supports_tools]
+    if not available:
+        # No enabled DB models. Return a known general-purpose static model so
+        # downstream validation can emit the clearer "disabled/no models" error.
+        fallback_models = [m for m in MODELS if not require_tools or m.supports_tools]
+        return _first_model_id(fallback_models, category="general") or fallback_models[0].id
+
+    available_by_id = {m.id: m for m in available}
+    for candidate in (
+        preferred_model,
+        os.environ.get("LUCENT_DEFAULT_MODEL", "").strip() or None,
+    ):
+        if candidate and candidate in available_by_id:
+            return candidate
+
+    for category in ("general", "fast", "reasoning", "agentic", "research", "visual"):
+        model_id = _first_model_id(available, category=category)
+        if model_id:
+            return model_id
+    return available[0].id
+
+
+def _infer_task_category(
+    *,
+    agent_type: str | None = None,
+    title: str | None = None,
+    description: str | None = None,
+) -> tuple[str | None, str]:
+    """Infer a specialized category only when task signals justify it."""
+    agent = (agent_type or "").strip().lower()
+    text = f"{title or ''} {description or ''}".lower()
+
+    agentic_signals = (
+        "multi-file",
+        "repo-wide",
+        "large refactor",
+        "edit-test",
+        "implementation across",
+        "sustained",
+        "agentic",
+    )
+    reasoning_signals = (
+        "architecture",
+        "security",
+        "deep reasoning",
+        "root cause",
+        "complex",
+        "trade-off",
+        "strategy",
+        "reflection",
+        "synthesis",
+        "long context",
+        "cross-reference",
+        "investigate",
+    )
+    high_risk_memory_signals = (
+        "create_memory",
+        "update_memory",
+        "delete_memory",
+        "soft-delete",
+        "delete",
+        "consolidat",
+        "deduplicat",
+        "merge",
+        "migrat",
+        "retire",
+        "retirement",
+        "transfer",
+        "verify",
+        "vitality",
+        "forget",
+        "curate",
+    )
+
+    if agent == "memory" and any(signal in text for signal in high_risk_memory_signals):
+        return "reasoning", "memory task mutates or verifies durable state"
+
+    if agent in {"fast", "memory"}:
+        return "fast", "lightweight/memory work benefits from a faster cheaper model"
+
+    if agent == "code" and any(signal in text for signal in agentic_signals):
+        return "agentic", "code task has sustained multi-step execution signals"
+
+    if agent in {"research", "planning", "reflection", "review", "request-review"}:
+        if any(signal in text for signal in reasoning_signals):
+            return "reasoning", "task has explicit complex reasoning signals"
+
+    if any(signal in text for signal in reasoning_signals):
+        return "reasoning", "task description has explicit complex reasoning signals"
+
+    return None, "no clear reason to override the default model"
+
+
+def select_model_for_task(
+    *,
+    agent_type: str | None = None,
+    title: str | None = None,
+    description: str | None = None,
+    explicit_model: str | None = None,
+    preferred_default: str | None = None,
+    models: list[ModelInfo] | None = None,
+    require_vision: bool = False,
+    require_tools: bool = False,
+) -> ModelSelection:
+    """Choose an enabled model for a task using generic capabilities.
+
+    Rule of thumb: use the default model unless task metadata contains a clear
+    reason to choose a specialized category. This avoids hardcoding vendor/model
+    IDs into planners while still allowing cheap fast models and high-capability
+    models where they are justified.
+    """
+    all_available = _available_models(models)
+    available = all_available
+    if require_tools:
+        available = [m for m in available if m.supports_tools]
+    if require_vision:
+        vision_models = [m for m in available if m.supports_vision]
+        if vision_models:
+            available = vision_models
+
+    if explicit_model and any(m.id == explicit_model for m in available):
+        default_id = get_default_model_id(
+            available,
+            preferred_model=preferred_default,
+            require_tools=require_tools,
+        )
+        return ModelSelection(
+            model_id=explicit_model,
+            reason="explicit model was provided and is enabled",
+            source="explicit",
+            default_model_id=default_id,
+            alternatives=[m.id for m in available if m.id != explicit_model][:5],
+        )
+
+    default_id = get_default_model_id(
+        available if available else None,
+        preferred_model=preferred_default,
+        require_tools=require_tools,
+    )
+    if explicit_model and any(m.id == explicit_model for m in all_available):
+        missing = []
+        explicit_info = next(m for m in all_available if m.id == explicit_model)
+        if require_tools and not explicit_info.supports_tools:
+            missing.append("tool/function calling")
+        if require_vision and not explicit_info.supports_vision:
+            missing.append("vision")
+        if missing:
+            return ModelSelection(
+                model_id=default_id,
+                reason=(
+                    f"Explicit model '{explicit_model}' lacks required "
+                    f"capability: {', '.join(missing)}. Using default capable model."
+                ),
+                source="fallback",
+                default_model_id=default_id,
+                alternatives=[m.id for m in available if m.id != default_id][:5],
+            )
+
+    category, category_reason = _infer_task_category(
+        agent_type=agent_type,
+        title=title,
+        description=description,
+    )
+    default_model = next((m for m in available if m.id == default_id), None)
+
+    if not category or (default_model and default_model.category == category):
+        return ModelSelection(
+            model_id=default_id,
+            reason=f"Using default model: {category_reason}.",
+            source="default",
+            default_model_id=default_id,
+            requested_category=category,
+            alternatives=[m.id for m in available if m.id != default_id][:5],
+        )
+
+    candidates = [m for m in available if m.category == category]
+    if category == "reasoning" and not candidates:
+        candidates = [m for m in available if "reasoning" in m.tags]
+    if category == "agentic" and not candidates:
+        candidates = [m for m in available if "agentic" in m.tags or "coding" in m.tags]
+    if category == "fast" and not candidates:
+        candidates = [m for m in available if "fast" in m.tags or "lightweight" in m.tags]
+
+    if candidates:
+        selected = candidates[0]
+        return ModelSelection(
+            model_id=selected.id,
+            reason=f"Selected {category} model because {category_reason}.",
+            source="specialized",
+            default_model_id=default_id,
+            requested_category=category,
+            alternatives=[m.id for m in available if m.id != selected.id][:5],
+        )
+
+    return ModelSelection(
+        model_id=default_id,
+        reason=(
+            f"Using default model because no enabled {category!r} model matched; "
+            f"original signal: {category_reason}."
+        ),
+        source="fallback",
+        default_model_id=default_id,
+        requested_category=category,
+        alternatives=[m.id for m in available if m.id != default_id][:5],
+    )
+
+
+def validate_model(model_id: str, *, require_tools: bool = False) -> str | None:
     """Validate a model selection. Returns an error message, or None if valid.
 
     Checks that the model ID exists in the registry (DB-loaded or hardcoded)
@@ -340,6 +645,11 @@ def validate_model(model_id: str) -> str | None:
         if model_id in _db_model_by_id:
             if model_id not in _db_enabled_ids:
                 return f"Model '{model_id}' is disabled by admin. Choose an enabled model."
+            if require_tools and not _db_model_by_id[model_id].supports_tools:
+                return (
+                    f"Model '{model_id}' does not support tool/function calling. "
+                    "Daemon tasks require a tool-capable model."
+                )
             return None  # Known and enabled
         # Model not found in DB registry
         if strict:
@@ -353,10 +663,17 @@ def validate_model(model_id: str) -> str | None:
 
     # No DB loaded — check against hardcoded registry
     if model_id in _MODEL_BY_ID:
-        return None  # Known model
+        if not _MODEL_BY_ID[model_id].enabled:
+            return f"Model '{model_id}' is disabled. Choose an enabled model."
+        if require_tools and not _MODEL_BY_ID[model_id].supports_tools:
+            return (
+                f"Model '{model_id}' does not support tool/function calling. "
+                "Daemon tasks require a tool-capable model."
+            )
+        return None  # Known and enabled
 
     if strict:
-        available = sorted(_MODEL_BY_ID.keys())
+        available = sorted(_HARDCODED_ENABLED_IDS)
         return (
             f"Unknown model '{model_id}'. "
             f"Available models: {', '.join(available)}. "
@@ -368,21 +685,11 @@ def validate_model(model_id: str) -> str | None:
 def get_recommended_model(task_type: str) -> str:
     """Get a recommended model for a given task type.
 
-    This is a simple heuristic — the model-selection skill provides
-    more nuanced guidance for the cognitive loop.
+    This returns the dynamic selector's recommendation from currently enabled
+    models. It intentionally defaults to the deployment/admin default unless
+    the task type clearly maps to a specialized capability.
     """
-    recommendations = {
-        "code": "claude-sonnet-4.6",
-        "research": "gemini-3-pro",
-        "memory": "claude-haiku-4.5",
-        "reflection": "claude-opus-4.6",
-        "documentation": "claude-sonnet-4.6",
-        "planning": "claude-opus-4.6",
-        "review": "claude-sonnet-4.5",
-        "fast": "claude-haiku-4.5",
-        "agentic": "gpt-5.3-codex",
-    }
-    return recommendations.get(task_type, "claude-sonnet-4.6")
+    return select_model_for_task(agent_type=task_type).model_id
 
 
 def get_api_model_id(model_id: str) -> str:
@@ -413,4 +720,8 @@ def get_provider(model_id: str) -> str | None:
         return "openai"
     elif model_id.startswith("gemini"):
         return "google"
+    elif model_id.startswith("grok"):
+        return "xai"
+    elif model_id in {"goldeneye", "raptor-mini"}:
+        return "copilot"
     return None

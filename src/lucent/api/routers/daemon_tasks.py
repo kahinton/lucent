@@ -6,6 +6,7 @@ Under the hood, daemon tasks are stored as memories tagged with 'daemon-task'.
 Requires API key with 'daemon-tasks' scope (or full 'read'+'write' scopes).
 """
 
+import logging
 from datetime import datetime
 from typing import Any
 from uuid import UUID
@@ -21,9 +22,8 @@ from lucent.api.models import (
     SuccessResponse,
 )
 from lucent.db import MemoryRepository, get_pool
-from lucent.logging import get_logger
 
-logger = get_logger("api.daemon_tasks")
+logger = logging.getLogger(__name__)
 
 
 router = APIRouter()

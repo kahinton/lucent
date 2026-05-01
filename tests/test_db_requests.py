@@ -479,8 +479,9 @@ class TestTaskLifecycle:
 
 class TestReleaseStale:
     @pytest.mark.asyncio
-    async def test_releases_stale_tasks(self, repo, task, db_pool):
+    async def test_releases_stale_tasks(self, repo, task, db_pool, test_organization):
         tid = str(task["id"])
+        org_id = str(test_organization["id"])
         await repo.claim_task(tid, "daemon-1")
         # Manually backdate claimed_at
         async with db_pool.acquire() as conn:
@@ -488,15 +489,16 @@ class TestReleaseStale:
                 "UPDATE tasks SET claimed_at = NOW() - interval '60 minutes' WHERE id = $1",
                 task["id"],
             )
-        count = await repo.release_stale_tasks(stale_minutes=30)
+        count = await repo.release_stale_tasks(stale_minutes=30, org_id=org_id)
         assert count >= 1
         refreshed = await repo.get_task(tid)
         assert refreshed["status"] == "pending"
 
     @pytest.mark.asyncio
-    async def test_does_not_release_fresh_tasks(self, repo, task):
+    async def test_does_not_release_fresh_tasks(self, repo, task, test_organization):
+        org_id = str(test_organization["id"])
         await repo.claim_task(str(task["id"]), "daemon-1")
-        count = await repo.release_stale_tasks(stale_minutes=30)
+        count = await repo.release_stale_tasks(stale_minutes=30, org_id=org_id)
         assert count == 0
 
 
@@ -1117,12 +1119,15 @@ class TestListActiveWork:
         assert str(req["id"]) not in ids
 
     @pytest.mark.asyncio
-    async def test_excludes_failed_request(self, repo, req, test_organization):
+    async def test_includes_failed_request(self, repo, req, test_organization):
+        # Failed requests are still "active" from the planner's perspective —
+        # they need attention (edit/retry) and should block dedup so we don't
+        # silently spawn duplicate work for the same goal.
         org = str(test_organization["id"])
         await repo.update_request_status(str(req["id"]), "failed", org_id=org)
         result = await repo.list_active_work(org)
         ids = [str(r["id"]) for r in result["items"]]
-        assert str(req["id"]) not in ids
+        assert str(req["id"]) in ids
 
     @pytest.mark.asyncio
     async def test_excludes_cancelled_request(self, repo, req, test_organization):
@@ -1289,3 +1294,903 @@ class TestRequestDeduplication:
             memory_ids=[{"id": mem_id, "relation": "goal"}],
         )
         assert str(r1["id"]) == str(r2["id"])
+
+    async def test_failed_request_blocks_dedup(
+        self, repo, test_organization, db_pool
+    ):
+        """A failed request for a goal still blocks new requests for that goal.
+
+        Failed work is unfinished work — the planner should surface the
+        existing failed request (so the operator can edit/retry it) rather
+        than silently spawning a duplicate.
+        """
+        org_id = str(test_organization["id"])
+        async with db_pool.acquire() as conn:
+            mem = await conn.fetchrow(
+                """INSERT INTO memories (content, type, organization_id, username)
+                   VALUES ('failed-goal', 'goal', $1::uuid, 'test-user') RETURNING id""",
+                org_id,
+            )
+        mem_id = str(mem["id"])
+
+        r1 = await repo.create_request(
+            title="Original", org_id=org_id,
+            memory_ids=[{"id": mem_id, "relation": "goal"}],
+        )
+        await repo.update_request_status(str(r1["id"]), "failed", org_id=org_id)
+
+        # Second create_request should return the failed one, not create new
+        r2 = await repo.create_request(
+            title="Different Title", org_id=org_id,
+            memory_ids=[{"id": mem_id, "relation": "goal"}],
+        )
+        assert str(r2["id"]) == str(r1["id"])
+        assert r2["status"] == "failed"
+
+    async def test_cancelled_request_does_not_block_dedup(
+        self, repo, test_organization, db_pool
+    ):
+        """A cancelled request for a goal does NOT block new requests.
+
+        Cancellation is an explicit operator decision to abandon the work,
+        so the goal is free for a fresh attempt.
+        """
+        org_id = str(test_organization["id"])
+        async with db_pool.acquire() as conn:
+            mem = await conn.fetchrow(
+                """INSERT INTO memories (content, type, organization_id, username)
+                   VALUES ('cancelled-goal', 'goal', $1::uuid, 'test-user') RETURNING id""",
+                org_id,
+            )
+        mem_id = str(mem["id"])
+
+        r1 = await repo.create_request(
+            title="Original", org_id=org_id,
+            memory_ids=[{"id": mem_id, "relation": "goal"}],
+        )
+        await repo.update_request_status(str(r1["id"]), "cancelled", org_id=org_id)
+
+        r2 = await repo.create_request(
+            title="Fresh Attempt", org_id=org_id,
+            memory_ids=[{"id": mem_id, "relation": "goal"}],
+        )
+        assert str(r2["id"]) != str(r1["id"])
+
+    async def test_recently_completed_with_same_normalized_title_blocks_create(
+        self, repo, test_organization, db_pool
+    ):
+        """Replaced by structured-field dedup. The title-normalization
+        guard was removed when goal_id/goal_milestone_index became
+        first-class. Two cognitive requests targeting the same
+        (goal, milestone) are now caught by the structured dedup, and
+        the side effect of completing a request marks the milestone done
+        so it is no longer a planning target.
+        """
+        org_id = str(test_organization["id"])
+        async with db_pool.acquire() as conn:
+            mem = await conn.fetchrow(
+                """INSERT INTO memories
+                       (content, type, organization_id, username, metadata)
+                   VALUES ('structured-dedup-goal', 'goal', $1::uuid,
+                           'test-user', $2::jsonb)
+                   RETURNING id""",
+                org_id,
+                {
+                    "status": "active",
+                    "milestones": [{"description": "x", "status": "active"}],
+                },
+            )
+        mem_id = str(mem["id"])
+
+        r1 = await repo.create_request(
+            title="anything",
+            org_id=org_id, source="cognitive",
+            goal_id=mem_id, goal_milestone_index=1,
+        )
+        assert r1.get("status") != "skipped"
+
+        # Second create against the SAME (goal, milestone) while r1 is
+        # still open: dedup returns the existing request.
+        r2 = await repo.create_request(
+            title="anything else",
+            org_id=org_id, source="cognitive",
+            goal_id=mem_id, goal_milestone_index=1,
+        )
+        assert str(r2["id"]) == str(r1["id"])
+
+        # Complete r1 → milestone gets marked done as a side effect.
+        await repo.update_request_status(str(r1["id"]), "completed", org_id=org_id)
+
+        # Third attempt now refuses because the milestone is no longer active.
+        r3 = await repo.create_request(
+            title="post-completion attempt",
+            org_id=org_id, source="cognitive",
+            goal_id=mem_id, goal_milestone_index=1,
+        )
+        assert r3.get("status") == "skipped"
+        assert r3.get("reason") in ("milestone_not_active", "goal_completed")
+
+    async def test_recently_completed_with_different_title_allows_create(
+        self, repo, test_organization, db_pool
+    ):
+        """Same goal, recently completed request, but a DIFFERENT title
+        (e.g. moving from milestone 1 to milestone 2) is still allowed."""
+        org_id = str(test_organization["id"])
+        async with db_pool.acquire() as conn:
+            mem = await conn.fetchrow(
+                """INSERT INTO memories (content, type, organization_id, username)
+                   VALUES ('milestone-progression-goal', 'goal', $1::uuid, 'test-user')
+                   RETURNING id""",
+                org_id,
+            )
+        mem_id = str(mem["id"])
+
+        r1 = await repo.create_request(
+            title="M1: Survey current consolidation",
+            org_id=org_id, source="cognitive",
+            memory_ids=[{"id": mem_id, "relation": "goal"}],
+        )
+        await repo.update_request_status(str(r1["id"]), "completed", org_id=org_id)
+
+        r2 = await repo.create_request(
+            title="M2: Propose strategy candidates",
+            org_id=org_id, source="cognitive",
+            memory_ids=[{"id": mem_id, "relation": "goal"}],
+        )
+        assert str(r2["id"]) != str(r1["id"])
+        assert r2.get("status") != "skipped"
+
+    async def test_late_link_blocks_when_active_request_exists(
+        self, repo, test_organization, db_pool
+    ):
+        """When a request is created without memory_ids and then a goal link
+        is added later, the link itself must dedup against existing active
+        goal-linked requests. This is the structural backstop for the
+        REST-API and daemon-HTTP-client paths that don't pass memory_ids
+        at create time."""
+        org_id = str(test_organization["id"])
+        async with db_pool.acquire() as conn:
+            mem = await conn.fetchrow(
+                """INSERT INTO memories (content, type, organization_id, username)
+                   VALUES ('late-link-goal', 'goal', $1::uuid, 'test-user')
+                   RETURNING id""",
+                org_id,
+            )
+        mem_id = str(mem["id"])
+
+        # First request created WITH the goal — uses normal dedup path.
+        r1 = await repo.create_request(
+            title="Original work for the goal",
+            org_id=org_id, source="cognitive",
+            memory_ids=[{"id": mem_id, "relation": "goal"}],
+        )
+
+        # Second request created WITHOUT memory_ids (REST API style).
+        r2 = await repo.create_request(
+            title="Different title that bypassed dedup",
+            org_id=org_id, source="cognitive",
+        )
+
+        # Now try to link r2 to the same goal — must be refused.
+        result = await repo.link_request_memory(
+            str(r2["id"]), mem_id, "goal", org_id=org_id,
+        )
+        assert isinstance(result, dict)
+        assert result.get("duplicate_of") == str(r1["id"])
+        assert result.get("reason") == "active_request_for_goal"
+
+        # Verify no link was actually created
+        async with db_pool.acquire() as conn:
+            link_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM request_memories "
+                "WHERE request_id = $1::uuid AND memory_id = $2::uuid",
+                str(r2["id"]), mem_id,
+            )
+        assert link_count == 0
+
+    async def test_late_link_blocks_when_recent_completion_with_same_title(
+        self, repo, test_organization, db_pool
+    ):
+        """Late-link path also enforces normalized-title match against
+        recently completed requests for the same goal."""
+        org_id = str(test_organization["id"])
+        async with db_pool.acquire() as conn:
+            mem = await conn.fetchrow(
+                """INSERT INTO memories (content, type, organization_id, username)
+                   VALUES ('late-link-stale-goal', 'goal', $1::uuid, 'test-user')
+                   RETURNING id""",
+                org_id,
+            )
+        mem_id = str(mem["id"])
+
+        r1 = await repo.create_request(
+            title="Native forgetting M2: Propose strategy",
+            org_id=org_id, source="cognitive",
+            memory_ids=[{"id": mem_id, "relation": "goal"}],
+        )
+        await repo.update_request_status(str(r1["id"]), "completed", org_id=org_id)
+
+        r2 = await repo.create_request(
+            title="Native-forgetting M2 — propose strategy",
+            org_id=org_id, source="cognitive",
+        )
+        result = await repo.link_request_memory(
+            str(r2["id"]), mem_id, "goal", org_id=org_id,
+        )
+        assert isinstance(result, dict)
+        assert result.get("duplicate_of") == str(r1["id"])
+        assert result.get("reason") == "duplicate_of_recent_completion"
+
+    async def test_late_link_succeeds_when_no_dup(
+        self, repo, test_organization, db_pool
+    ):
+        """Sanity: late-link works fine when there's no duplicate."""
+        org_id = str(test_organization["id"])
+        async with db_pool.acquire() as conn:
+            mem = await conn.fetchrow(
+                """INSERT INTO memories (content, type, organization_id, username)
+                   VALUES ('late-link-clean-goal', 'goal', $1::uuid, 'test-user')
+                   RETURNING id""",
+                org_id,
+            )
+        mem_id = str(mem["id"])
+
+        r = await repo.create_request(
+            title="Standalone request", org_id=org_id, source="user",
+        )
+        result = await repo.link_request_memory(
+            str(r["id"]), mem_id, "goal", org_id=org_id,
+        )
+        assert result is not None
+        # On insert success the link row is returned; no duplicate_of key
+        assert "duplicate_of" not in (result or {})
+
+    async def test_late_link_dedup_can_be_disabled(
+        self, repo, test_organization, db_pool
+    ):
+        """`block_duplicates=False` lets internal callers opt out (e.g.
+        legacy migration code that needs raw inserts)."""
+        org_id = str(test_organization["id"])
+        async with db_pool.acquire() as conn:
+            mem = await conn.fetchrow(
+                """INSERT INTO memories (content, type, organization_id, username)
+                   VALUES ('opt-out-dedup', 'goal', $1::uuid, 'test-user')
+                   RETURNING id""",
+                org_id,
+            )
+        mem_id = str(mem["id"])
+
+        r1 = await repo.create_request(
+            title="First", org_id=org_id, source="cognitive",
+            memory_ids=[{"id": mem_id, "relation": "goal"}],
+        )
+        r2 = await repo.create_request(
+            title="Second", org_id=org_id, source="cognitive",
+        )
+        result = await repo.link_request_memory(
+            str(r2["id"]), mem_id, "goal", org_id=org_id,
+            block_duplicates=False,
+        )
+        # Without the guard, the link is just inserted.
+        assert result is not None
+        assert "duplicate_of" not in (result or {})
+        _ = r1  # used implicitly to set up the dup state
+
+
+class TestListPlanningTargets:
+    """The canonical 'what's plannable' tool. The planner should call this
+    instead of reasoning about goals + milestones by hand."""
+
+    async def _make_goal(
+        self, db_pool, org_id, *, status="active", milestones=None,
+        content="planning-target-test", user_id=None,
+    ):
+        meta = {"status": status, "milestones": milestones or []}
+        params = [content, org_id, meta]
+        user_clause = ""
+        if user_id:
+            params.append(user_id)
+            user_clause = ", user_id"
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f"""INSERT INTO memories
+                       (content, type, organization_id, username,
+                        metadata{user_clause})
+                   VALUES ($1, 'goal', $2::uuid, 'test-user', $3::jsonb
+                       {', $4::uuid' if user_id else ''})
+                   RETURNING id""",
+                *params,
+            )
+        return str(row["id"])
+
+    async def test_returns_active_goal_with_first_active_milestone(
+        self, repo, test_organization, db_pool
+    ):
+        org_id = str(test_organization["id"])
+        gid = await self._make_goal(db_pool, org_id, milestones=[
+            {"description": "Survey", "status": "completed"},
+            {"description": "Propose", "status": "completed"},
+            {"description": "Prototype", "status": "active"},
+            {"description": "Soak", "status": "active"},
+        ])
+        targets = await repo.list_planning_targets(org_id)
+        ids = [t["goal_id"] for t in targets]
+        assert gid in ids
+        target = next(t for t in targets if t["goal_id"] == gid)
+        assert target["next_milestone_index"] == 3
+        assert target["next_milestone_description"] == "Prototype"
+        assert "M3:" in target["suggested_title"]
+        assert target["active_milestone_indexes"] == [3, 4]
+        assert target["completed_milestone_count"] == 2
+
+    async def test_excludes_completed_goal(
+        self, repo, test_organization, db_pool
+    ):
+        org_id = str(test_organization["id"])
+        gid = await self._make_goal(db_pool, org_id, status="completed")
+        targets = await repo.list_planning_targets(org_id)
+        assert gid not in [t["goal_id"] for t in targets]
+
+    async def test_excludes_abandoned_goal(
+        self, repo, test_organization, db_pool
+    ):
+        org_id = str(test_organization["id"])
+        gid = await self._make_goal(db_pool, org_id, status="abandoned")
+        targets = await repo.list_planning_targets(org_id)
+        assert gid not in [t["goal_id"] for t in targets]
+
+    async def test_excludes_goal_with_no_active_milestones(
+        self, repo, test_organization, db_pool
+    ):
+        """metadata.status is still 'active' but every milestone is done.
+        These goals should NOT appear — they should be marked completed."""
+        org_id = str(test_organization["id"])
+        gid = await self._make_goal(db_pool, org_id, milestones=[
+            {"description": "a", "status": "completed"},
+            {"description": "b", "status": "abandoned"},
+        ])
+        targets = await repo.list_planning_targets(org_id)
+        assert gid not in [t["goal_id"] for t in targets]
+
+    async def test_excludes_goal_with_open_request(
+        self, repo, test_organization, db_pool
+    ):
+        """Goals already being worked on should not be re-listed."""
+        org_id = str(test_organization["id"])
+        gid = await self._make_goal(db_pool, org_id, milestones=[
+            {"description": "a", "status": "active"},
+        ])
+        r = await repo.create_request(
+            title="in flight", org_id=org_id, source="cognitive",
+            goal_id=gid, goal_milestone_index=1,
+        )
+        assert r.get("status") != "skipped"
+        targets = await repo.list_planning_targets(org_id)
+        assert gid not in [t["goal_id"] for t in targets]
+
+    async def test_includes_goal_after_request_completed(
+        self, repo, test_organization, db_pool
+    ):
+        """Once a request finishes, a goal with remaining active milestones
+        becomes plannable again."""
+        org_id = str(test_organization["id"])
+        gid = await self._make_goal(db_pool, org_id, milestones=[
+            {"description": "a", "status": "completed"},
+            {"description": "b", "status": "active"},
+        ])
+        r = await repo.create_request(
+            title="prior work", org_id=org_id, source="cognitive",
+            goal_id=gid, goal_milestone_index=2,
+        )
+        await repo.update_request_status(str(r["id"]), "completed", org_id=org_id)
+        targets = await repo.list_planning_targets(org_id)
+        ids = [t["goal_id"] for t in targets]
+        # Note: completing the request also marks milestone 2 done via the
+        # completion side effect, which marks the entire goal completed
+        # (since all milestones are now done). So gid should NOT be plannable.
+        assert gid not in ids
+
+    async def test_open_ended_goal_with_no_milestones_is_plannable(
+        self, repo, test_organization, db_pool
+    ):
+        """Goals without a milestones array can still be planned (they're
+        free-form). The planner picks its own title."""
+        org_id = str(test_organization["id"])
+        gid = await self._make_goal(db_pool, org_id, milestones=[])
+        targets = await repo.list_planning_targets(org_id)
+        ids = [t["goal_id"] for t in targets]
+        assert gid in ids
+        target = next(t for t in targets if t["goal_id"] == gid)
+        assert target["next_milestone_index"] is None
+        assert target["total_milestones"] == 0
+
+
+class TestStructuredGoalMilestoneFields:
+    """Tests for the new first-class goal_memory_id / goal_milestone_index
+    columns on requests. The structured path is the canonical way to
+    create goal-advancing requests; it replaces the old title-parsing +
+    memory_ids(relation='goal') approach."""
+
+    async def _make_goal(self, db_pool, org_id, *, status="active", milestones=None):
+        meta = {"status": status, "milestones": milestones or []}
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """INSERT INTO memories
+                       (content, type, organization_id, username, metadata)
+                   VALUES ('structured-fields-goal', 'goal', $1::uuid,
+                           'test-user', $2::jsonb)
+                   RETURNING id""",
+                org_id,
+                meta,
+            )
+        return str(row["id"])
+
+    async def test_create_with_goal_id_persists_columns(
+        self, repo, test_organization, db_pool
+    ):
+        org_id = str(test_organization["id"])
+        gid = await self._make_goal(db_pool, org_id, milestones=[
+            {"description": "a", "status": "active"},
+        ])
+        r = await repo.create_request(
+            title="structured create",
+            org_id=org_id, source="cognitive",
+            goal_id=gid, goal_milestone_index=1,
+        )
+        assert r.get("status") != "skipped"
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT goal_memory_id, goal_milestone_index FROM requests WHERE id=$1",
+                r["id"],
+            )
+        assert str(row["goal_memory_id"]) == gid
+        assert row["goal_milestone_index"] == 1
+
+    async def test_create_refuses_completed_goal(
+        self, repo, test_organization, db_pool
+    ):
+        org_id = str(test_organization["id"])
+        gid = await self._make_goal(db_pool, org_id, status="completed")
+        r = await repo.create_request(
+            title="x", org_id=org_id, source="cognitive",
+            goal_id=gid,
+        )
+        assert r.get("status") == "skipped"
+        assert r.get("reason") == "goal_completed"
+
+    async def test_create_refuses_nonactive_milestone(
+        self, repo, test_organization, db_pool
+    ):
+        org_id = str(test_organization["id"])
+        gid = await self._make_goal(db_pool, org_id, milestones=[
+            {"description": "a", "status": "completed"},
+            {"description": "b", "status": "active"},
+        ])
+        r = await repo.create_request(
+            title="x", org_id=org_id, source="cognitive",
+            goal_id=gid, goal_milestone_index=1,  # completed, not active
+        )
+        assert r.get("status") == "skipped"
+        assert r.get("reason") == "milestone_not_active"
+
+    async def test_create_refuses_out_of_range_milestone(
+        self, repo, test_organization, db_pool
+    ):
+        org_id = str(test_organization["id"])
+        gid = await self._make_goal(db_pool, org_id, milestones=[
+            {"description": "only-one", "status": "active"},
+        ])
+        r = await repo.create_request(
+            title="x", org_id=org_id, source="cognitive",
+            goal_id=gid, goal_milestone_index=5,
+        )
+        assert r.get("status") == "skipped"
+        assert r.get("reason") == "milestone_out_of_range"
+
+    async def test_create_refuses_milestone_required_when_missing(
+        self, repo, test_organization, db_pool
+    ):
+        """Goal has milestones but caller omitted goal_milestone_index."""
+        org_id = str(test_organization["id"])
+        gid = await self._make_goal(db_pool, org_id, milestones=[
+            {"description": "a", "status": "active"},
+        ])
+        r = await repo.create_request(
+            title="x", org_id=org_id, source="cognitive",
+            goal_id=gid,  # no milestone_index
+        )
+        assert r.get("status") == "skipped"
+        assert r.get("reason") == "milestone_required"
+
+    async def test_create_allows_open_ended_goal_without_milestone(
+        self, repo, test_organization, db_pool
+    ):
+        org_id = str(test_organization["id"])
+        gid = await self._make_goal(db_pool, org_id, milestones=[])
+        r = await repo.create_request(
+            title="open-ended work", org_id=org_id, source="cognitive",
+            goal_id=gid,
+        )
+        assert r.get("status") != "skipped"
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT goal_memory_id, goal_milestone_index FROM requests WHERE id=$1",
+                r["id"],
+            )
+        assert str(row["goal_memory_id"]) == gid
+        assert row["goal_milestone_index"] is None
+
+    async def test_create_refuses_unknown_goal(
+        self, repo, test_organization
+    ):
+        import uuid
+        org_id = str(test_organization["id"])
+        r = await repo.create_request(
+            title="x", org_id=org_id, source="cognitive",
+            goal_id=str(uuid.uuid4()),
+        )
+        assert r.get("status") == "skipped"
+        assert r.get("reason") == "goal_not_found"
+
+    async def test_structured_dedup_returns_existing_request(
+        self, repo, test_organization, db_pool
+    ):
+        """Two create calls against the same (goal, milestone) while the
+        first is open — second returns the existing row, not a new one."""
+        org_id = str(test_organization["id"])
+        gid = await self._make_goal(db_pool, org_id, milestones=[
+            {"description": "a", "status": "active"},
+        ])
+        r1 = await repo.create_request(
+            title="first", org_id=org_id, source="cognitive",
+            goal_id=gid, goal_milestone_index=1,
+        )
+        r2 = await repo.create_request(
+            title="second attempt, parallel cycle",
+            org_id=org_id, source="cognitive",
+            goal_id=gid, goal_milestone_index=1,
+        )
+        assert str(r1["id"]) == str(r2["id"])
+
+    async def test_milestone_requires_goal_id(self, repo, test_organization):
+        """Passing goal_milestone_index without goal_id is a ValueError."""
+        org_id = str(test_organization["id"])
+        with pytest.raises(ValueError):
+            await repo.create_request(
+                title="x", org_id=org_id,
+                goal_milestone_index=1,
+            )
+
+    async def test_mirrors_goal_into_request_memories(
+        self, repo, test_organization, db_pool
+    ):
+        """When goal_id is passed, a request_memories(relation='goal')
+        row is also inserted for UI compatibility."""
+        org_id = str(test_organization["id"])
+        gid = await self._make_goal(db_pool, org_id, milestones=[
+            {"description": "a", "status": "active"},
+        ])
+        r = await repo.create_request(
+            title="mirror test", org_id=org_id, source="cognitive",
+            goal_id=gid, goal_milestone_index=1,
+        )
+        async with db_pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT memory_id, relation FROM request_memories
+                   WHERE request_id=$1""",
+                r["id"],
+            )
+        assert len(rows) == 1
+        assert str(rows[0]["memory_id"]) == gid
+        assert rows[0]["relation"] == "goal"
+
+
+class TestMilestoneCompletionLoop:
+    """Completing a goal-advancing request automatically marks the
+    targeted milestone 'completed' on the goal memory. Closes the loop
+    so future planning cycles no longer see that milestone."""
+
+    async def _make_goal(self, db_pool, org_id, milestones):
+        meta = {"status": "active", "milestones": milestones}
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """INSERT INTO memories
+                       (content, type, organization_id, username, metadata)
+                   VALUES ('completion-loop-goal', 'goal', $1::uuid,
+                           'test-user', $2::jsonb)
+                   RETURNING id""",
+                org_id, meta,
+            )
+        return str(row["id"])
+
+    async def _fetch_metadata(self, db_pool, gid):
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT metadata FROM memories WHERE id=$1::uuid", gid
+            )
+        import json as _json
+        m = row["metadata"]
+        return _json.loads(m) if isinstance(m, str) else m
+
+    async def test_completing_request_marks_milestone_done(
+        self, repo, test_organization, db_pool
+    ):
+        org_id = str(test_organization["id"])
+        gid = await self._make_goal(db_pool, org_id, [
+            {"description": "a", "status": "active"},
+            {"description": "b", "status": "active"},
+        ])
+        r = await repo.create_request(
+            title="advance M1", org_id=org_id, source="cognitive",
+            goal_id=gid, goal_milestone_index=1,
+        )
+        await repo.update_request_status(str(r["id"]), "completed", org_id=org_id)
+        meta = await self._fetch_metadata(db_pool, gid)
+        assert meta["milestones"][0]["status"] == "completed"
+        assert "completed_at" in meta["milestones"][0]
+        # Milestone 2 unaffected.
+        assert meta["milestones"][1]["status"] == "active"
+        # Goal still active (not all milestones done).
+        assert meta.get("status") == "active"
+
+    async def test_completing_last_active_milestone_marks_goal_completed(
+        self, repo, test_organization, db_pool
+    ):
+        org_id = str(test_organization["id"])
+        gid = await self._make_goal(db_pool, org_id, [
+            {"description": "a", "status": "completed"},
+            {"description": "b", "status": "active"},
+        ])
+        r = await repo.create_request(
+            title="advance final M2", org_id=org_id, source="cognitive",
+            goal_id=gid, goal_milestone_index=2,
+        )
+        await repo.update_request_status(str(r["id"]), "completed", org_id=org_id)
+        meta = await self._fetch_metadata(db_pool, gid)
+        assert meta["milestones"][1]["status"] == "completed"
+        assert meta["status"] == "completed"
+
+    async def test_cancelled_request_does_not_mark_milestone(
+        self, repo, test_organization, db_pool
+    ):
+        """Only 'completed' status triggers the milestone update —
+        'cancelled' leaves the milestone alone so it stays plannable."""
+        org_id = str(test_organization["id"])
+        gid = await self._make_goal(db_pool, org_id, [
+            {"description": "a", "status": "active"},
+        ])
+        r = await repo.create_request(
+            title="x", org_id=org_id, source="cognitive",
+            goal_id=gid, goal_milestone_index=1,
+        )
+        await repo.update_request_status(str(r["id"]), "cancelled", org_id=org_id)
+        meta = await self._fetch_metadata(db_pool, gid)
+        assert meta["milestones"][0]["status"] == "active"
+
+    async def test_non_goal_request_completion_is_inert(
+        self, repo, test_organization
+    ):
+        """Completing a request with no goal_memory_id must not crash."""
+        org_id = str(test_organization["id"])
+        r = await repo.create_request(
+            title="no goal here", org_id=org_id, source="user",
+        )
+        res = await repo.update_request_status(
+            str(r["id"]), "completed", org_id=org_id
+        )
+        assert res is not None
+        assert res["status"] == "completed"
+
+
+class TestStartAfterGating:
+    """Milestones with a `start_after` future date are excluded from
+    planning targets and refused at create time."""
+
+    async def _make_goal(self, db_pool, org_id, milestones):
+        meta = {"status": "active", "milestones": milestones}
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """INSERT INTO memories
+                       (content, type, organization_id, username, metadata)
+                   VALUES ('start-after-goal', 'goal', $1::uuid,
+                           'test-user', $2::jsonb)
+                   RETURNING id""",
+                org_id, meta,
+            )
+        return str(row["id"])
+
+    async def test_planning_targets_skips_future_start_after(
+        self, repo, test_organization, db_pool
+    ):
+        from datetime import datetime, timedelta, timezone
+        future = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+        org_id = str(test_organization["id"])
+        gid = await self._make_goal(db_pool, org_id, [
+            {"description": "a", "status": "active", "start_after": future},
+        ])
+        targets = await repo.list_planning_targets(org_id)
+        assert gid not in [t["goal_id"] for t in targets]
+
+    async def test_planning_targets_includes_past_start_after(
+        self, repo, test_organization, db_pool
+    ):
+        from datetime import datetime, timedelta, timezone
+        past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+        org_id = str(test_organization["id"])
+        gid = await self._make_goal(db_pool, org_id, [
+            {"description": "a", "status": "active", "start_after": past},
+        ])
+        targets = await repo.list_planning_targets(org_id)
+        assert gid in [t["goal_id"] for t in targets]
+
+    async def test_create_refuses_future_start_after(
+        self, repo, test_organization, db_pool
+    ):
+        from datetime import datetime, timedelta, timezone
+        future = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+        org_id = str(test_organization["id"])
+        gid = await self._make_goal(db_pool, org_id, [
+            {"description": "a", "status": "active", "start_after": future},
+        ])
+        r = await repo.create_request(
+            title="too early", org_id=org_id, source="cognitive",
+            goal_id=gid, goal_milestone_index=1,
+        )
+        assert r.get("status") == "skipped"
+        assert r.get("reason") == "milestone_not_yet_active"
+
+    async def test_create_allows_date_only_past_start_after(
+        self, repo, test_organization, db_pool
+    ):
+        """start_after='2024-01-01' (date-only, in the past) should work."""
+        org_id = str(test_organization["id"])
+        gid = await self._make_goal(db_pool, org_id, [
+            {"description": "a", "status": "active",
+             "start_after": "2024-01-01"},
+        ])
+        r = await repo.create_request(
+            title="past date work", org_id=org_id, source="cognitive",
+            goal_id=gid, goal_milestone_index=1,
+        )
+        assert r.get("status") != "skipped"
+
+
+class TestUpdatePendingTask:
+    async def test_edit_all_fields_on_pending_task(
+        self, repo, req, task, test_organization
+    ):
+        org = str(test_organization["id"])
+        updated = await repo.update_pending_task(
+            str(task["id"]),
+            org,
+            title="Renamed task",
+            description="New body",
+            model="claude-opus-4.7",
+            agent_type="research",
+        )
+        assert updated is not None
+        assert updated["title"] == "Renamed task"
+        assert updated["description"] == "New body"
+        assert updated["model"] == "claude-opus-4.7"
+        assert updated["agent_type"] == "research"
+
+    async def test_partial_edit_only_changes_supplied_fields(
+        self, repo, req, task, test_organization
+    ):
+        org = str(test_organization["id"])
+        original_title = task["title"]
+        updated = await repo.update_pending_task(
+            str(task["id"]), org, model="claude-opus-4.7"
+        )
+        assert updated["title"] == original_title
+        assert updated["model"] == "claude-opus-4.7"
+
+    async def test_no_op_returns_current_task(
+        self, repo, req, task, test_organization
+    ):
+        org = str(test_organization["id"])
+        unchanged = await repo.update_pending_task(str(task["id"]), org)
+        assert unchanged is not None
+        assert unchanged["id"] == task["id"]
+
+    async def test_cannot_edit_running_task(
+        self, repo, req, task, test_organization
+    ):
+        org = str(test_organization["id"])
+        await repo.claim_task(str(task["id"]), instance_id="i1", org_id=org)
+        await repo.start_task(str(task["id"]), org_id=org, instance_id="i1")
+        result = await repo.update_pending_task(
+            str(task["id"]), org, title="Should not stick"
+        )
+        assert result is None
+
+    async def test_cannot_edit_claimed_task(
+        self, repo, req, task, test_organization
+    ):
+        org = str(test_organization["id"])
+        await repo.claim_task(str(task["id"]), instance_id="i1", org_id=org)
+        result = await repo.update_pending_task(
+            str(task["id"]), org, title="Should not stick"
+        )
+        assert result is None
+
+    async def test_cannot_edit_completed_task(
+        self, repo, req, task, test_organization
+    ):
+        org = str(test_organization["id"])
+        await repo.claim_task(str(task["id"]), instance_id="i1", org_id=org)
+        await repo.start_task(str(task["id"]), org_id=org, instance_id="i1")
+        await repo.complete_task(str(task["id"]), result="done", org_id=org, instance_id="i1")
+        result = await repo.update_pending_task(
+            str(task["id"]), org, title="Should not stick"
+        )
+        assert result is None
+
+    async def test_can_edit_failed_task(
+        self, repo, req, task, test_organization
+    ):
+        org = str(test_organization["id"])
+        await repo.claim_task(str(task["id"]), instance_id="i1", org_id=org)
+        await repo.start_task(str(task["id"]), org_id=org, instance_id="i1")
+        await repo.fail_task(str(task["id"]), error="boom", org_id=org, instance_id="i1")
+        updated = await repo.update_pending_task(
+            str(task["id"]), org, model="claude-opus-4.7", description="Try again with more detail"
+        )
+        assert updated is not None
+        assert updated["status"] == "failed"
+        assert updated["model"] == "claude-opus-4.7"
+        assert updated["description"] == "Try again with more detail"
+
+    async def test_org_isolation(
+        self, repo, req, task, test_organization, other_org
+    ):
+        # Edit must scope by organization_id
+        result = await repo.update_pending_task(
+            str(task["id"]), str(other_org["id"]), title="Bad"
+        )
+        assert result is None
+        fresh = await repo.get_task(str(task["id"]), org_id=str(test_organization["id"]))
+        assert fresh["title"] == task["title"]
+
+    async def test_clear_sandbox_template(
+        self, repo, req, task, test_organization, db_pool
+    ):
+        org = str(test_organization["id"])
+        # Stuff a fake sandbox_template_id directly so we can clear it
+        async with db_pool.acquire() as conn:
+            tpl_row = await conn.fetchrow(
+                """INSERT INTO sandbox_templates
+                   (organization_id, name, image, scope, status, created_by)
+                   VALUES ($1, 'test-tpl', 'alpine:latest', 'built-in', 'approved', NULL)
+                   ON CONFLICT (organization_id, name) DO UPDATE SET image = EXCLUDED.image
+                   RETURNING id""",
+                test_organization["id"],
+            )
+            tpl_id = tpl_row["id"]
+            await conn.execute(
+                "UPDATE tasks SET sandbox_template_id = $1 WHERE id = $2",
+                tpl_id, task["id"],
+            )
+
+        try:
+            cleared = await repo.update_pending_task(
+                str(task["id"]), org, clear_sandbox_template=True
+            )
+            assert cleared["sandbox_template_id"] is None
+        finally:
+            async with db_pool.acquire() as conn:
+                await conn.execute(
+                    "DELETE FROM sandbox_templates WHERE id = $1", tpl_id
+                )
+
+    async def test_edit_emits_task_event(
+        self, repo, req, task, test_organization, db_pool
+    ):
+        org = str(test_organization["id"])
+        await repo.update_pending_task(str(task["id"]), org, title="X")
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT event_type FROM task_events WHERE task_id = $1 AND event_type = 'edited'",
+                task["id"],
+            )
+        assert row is not None

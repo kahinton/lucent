@@ -1,5 +1,7 @@
 """Authentication routes — login, logout, setup."""
 
+import logging
+
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
@@ -18,7 +20,6 @@ from lucent.auth_providers import (
     validate_password_complexity,
 )
 from lucent.db import get_pool
-from lucent.logging import get_logger
 
 from ._shared import (
     _check_csrf,
@@ -27,7 +28,7 @@ from ._shared import (
     templates,
 )
 
-logger = get_logger("web.routes.auth")
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 

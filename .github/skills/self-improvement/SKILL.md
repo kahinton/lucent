@@ -43,21 +43,13 @@ If no pattern emerges, skip to Step 7 with outcome "no action needed."
 |---------|---------------|
 | Wrong default behavior | Agent definition — add or change an operating rule |
 | Skill instructions producing bad output | The specific SKILL.md — add a missing step or guardrail |
-| Missing guardrail in a procedure | Procedural memory — update steps or add prerequisites |
+| Missing guardrail in a reusable workflow | Skill — update steps, prerequisites, or pitfalls |
 | Domain-specific gap | Generate a new skill via capability-generation |
 | Recurring scope issue | Goal memory — create or update to track improvement |
 
 ## Step 4: Make the Change
 
 **Always read the target file before modifying it.** Understand what's there and why before changing anything.
-
-**For procedural memories:**
-```
-update_memory(
-  memory_id="<id>",
-  content="<existing content>\n\n**Guardrail**: <new rule based on pattern>"
-)
-```
 
 **For skill/agent files:**
 Find the minimal insertion point. Write a specific, actionable directive — not a vague principle. Make the smallest effective diff.

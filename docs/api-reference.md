@@ -89,7 +89,7 @@ POST /api/memories
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `type` | string | yes | `experience`, `technical`, `procedural`, or `goal` |
+| `type` | string | yes | `experience`, `technical`, or `goal` |
 | `content` | string | yes | Main content of the memory |
 | `username` | string | no | Defaults to authenticated user's display name |
 | `tags` | string[] | no | Categorization tags |
@@ -446,7 +446,7 @@ POST /api/requests/{request_id}/tasks
   "description": "Check auth.py for timing attacks",
   "agent_type": "security",
   "priority": "high",
-  "model": "claude-opus-4.6",
+  "model": "enabled-model-id",
   "sandbox_template_id": "uuid-of-template",
   "output_contract": {
     "json_schema": {

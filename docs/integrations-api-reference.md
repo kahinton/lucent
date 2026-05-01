@@ -4,6 +4,8 @@ REST API endpoints for managing platform integrations, user identity links, and 
 
 Admin endpoints require the `MANAGE_INTEGRATIONS` permission (admin or owner role). Pairing endpoints are available to any authenticated user.
 
+> For the conceptual model — workspace connections vs. personal connected accounts, feature flags, and setup profiles — see [Connections](connections.md). This document is the API surface; that document is the operator-facing guide.
+
 Interactive API docs are also available at `/api/docs` (Swagger UI) when the server is running.
 
 ---

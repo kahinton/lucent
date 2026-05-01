@@ -30,7 +30,7 @@ The test: **Would future-me benefit from knowing this in a different conversatio
 | System self-corrected (validation failure → retry) | `create_memory` documenting failed approach and what worked, tagged `self-correction` | `experience` | 6 |
 | User stated a preference | `update_memory` on their individual memory — add the preference | `individual` | 8 |
 | Hit milestone on a tracked goal | `update_memory` on the existing goal memory | `goal` | keep existing |
-| Discovered a working process | `create_memory` with exact steps that worked | `procedural` | 6-7 |
+| Discovered a working process | Update/create a skill for reusable workflow knowledge, or capture the outcome as `experience` if it is session-specific | `skill` or `experience` | 6-7 |
 | Completed significant work | `create_memory` summarizing what was built and learned | `experience` | 6-8 |
 
 ### Correction Tagging
@@ -110,9 +110,33 @@ Every memory should answer three questions:
 |------|---------|
 | `experience` | Things that happened — outcomes, debugging sessions, lessons |
 | `technical` | Code patterns, architecture, solutions, system behavior |
-| `procedural` | Processes that work — step-by-step recipes |
 | `goal` | Objectives tracked over time — status updates appended |
 | `individual` | Info about people — preferences, roles, working style |
+
+### Technical Memory Content Quality
+
+Technical memories are injected as working context for agents executing tasks. Write them as reference material, not changelogs.
+
+**Focus on WHY and HOW — not WHAT was done:**
+
+| Good (conventions/patterns) | Bad (changelog entries) |
+|---|---|
+| "Uses repository pattern with asyncpg pools" | "Added memory_scope column in migration 057" |
+| "All API endpoints require AuthenticatedUser" | "Implemented scoped API keys on April 10" |
+| "ACL: user_id = caller OR (org AND shared)" | "Fixed bug where search showed wrong results" |
+
+When creating or updating technical memories, distill the underlying convention — the thing a future developer needs to know to work correctly in this area. Strip specific dates, migration numbers, and "we did X" language unless it's a critical constraint.
+
+### Default Sharing by Type
+
+| Type | Default `shared` | Rationale |
+|------|------------------|----------|
+| `technical` | `true` (shared) | Org knowledge about code and systems |
+| `experience` | `false` (private) | Personal work log |
+| `goal` | respect caller | Working contract between user and Lucent |
+| `individual` | `false` (always private) | Contact info, preferences — never shared |
+
+Users can override these defaults for active memory types. Private technical memories can serve as personal "overlays" — your own techniques layered on top of shared org knowledge.
 
 ### Importance Scale
 

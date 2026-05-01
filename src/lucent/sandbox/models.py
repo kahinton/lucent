@@ -32,7 +32,8 @@ class SandboxConfig:
     repo_url: str | None = None
     branch: str | None = None
     git_credentials: str | None = None  # Token for private repos
-    git_credentials_ttl: int = 3600  # Seconds before credential is considered expired (0 = no expiry)
+    # Seconds before credential is considered expired (0 = no expiry)
+    git_credentials_ttl: int = 3600
 
     # Setup
     setup_commands: list[str] = field(default_factory=list)  # Run after container start
@@ -59,6 +60,7 @@ class SandboxConfig:
     task_id: str | None = None
     request_id: str | None = None
     organization_id: str | None = None
+    requesting_user_id: str | None = None
 
 
 @dataclass

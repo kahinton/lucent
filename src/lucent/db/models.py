@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -78,14 +79,19 @@ class ModelRepository:
         is_enabled: bool = True,
         org_id: str | None = None,
         engine: str | None = None,
+        discovery_source: str = "manual",
+        is_custom: bool = True,
+        discovery_metadata: dict | None = None,
     ) -> dict:
         now = datetime.now(timezone.utc)
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 """INSERT INTO models (id, provider, name, category, api_model_id,
                    context_window, supports_tools, supports_vision, notes, tags,
-                   is_enabled, organization_id, engine, created_at, updated_at)
-                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14)
+                   is_enabled, organization_id, engine, discovery_source, is_custom,
+                   discovery_metadata, created_at, updated_at)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
+                           $16::jsonb,$17,$17)
                    RETURNING *""",
                 model_id,
                 provider,
@@ -100,6 +106,9 @@ class ModelRepository:
                 is_enabled,
                 UUID(org_id) if org_id else None,
                 engine,
+                discovery_source,
+                is_custom,
+                json.dumps(discovery_metadata or {}),
                 now,
             )
         return dict(row)
@@ -108,7 +117,8 @@ class ModelRepository:
         allowed = {
             "provider", "name", "category", "api_model_id", "context_window",
             "supports_tools", "supports_vision", "notes", "tags", "is_enabled",
-            "engine",
+            "engine", "discovery_source", "is_custom", "last_discovered_at",
+            "discovery_metadata",
         }
         updates = {k: v for k, v in kwargs.items() if k in allowed}
         if not updates:
@@ -118,8 +128,12 @@ class ModelRepository:
         set_parts = []
         params = []
         for i, (key, val) in enumerate(updates.items(), start=1):
-            set_parts.append(f"{key} = ${i}")
-            params.append(val)
+            if key == "discovery_metadata":
+                set_parts.append(f"{key} = ${i}::jsonb")
+                params.append(json.dumps(val or {}))
+            else:
+                set_parts.append(f"{key} = ${i}")
+                params.append(val)
 
         params.append(model_id)
         query = f"UPDATE models SET {', '.join(set_parts)} WHERE id = ${len(params)} RETURNING *"
@@ -127,6 +141,145 @@ class ModelRepository:
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(query, *params)
         return dict(row) if row else None
+
+    async def sync_discovered_models(
+        self,
+        *,
+        provider: str,
+        models: list[dict],
+        org_id: str | None = None,
+        disable_missing: bool = False,
+    ) -> dict:
+        """Upsert provider-discovered models without clobbering manual rows.
+
+        Manual/custom rows (``discovery_source='manual'`` or ``is_custom``) keep
+        their human-authored provider/name/category/tags/enabled settings if a
+        provider later reports the same ID. We still update discovery metadata so
+        the UI can show that the custom model was seen in a provider catalog.
+        """
+        now = datetime.now(timezone.utc)
+        upserted = 0
+        discovered_ids = [m["model_id"] for m in models]
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                for m in models:
+                    await conn.fetchrow(
+                        """
+                        INSERT INTO models (
+                            id, provider, name, category, api_model_id,
+                            context_window, supports_tools, supports_vision,
+                            notes, tags, is_enabled, organization_id, engine,
+                            discovery_source, is_custom, last_discovered_at,
+                            discovery_metadata, created_at, updated_at
+                        ) VALUES (
+                            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,false,$11,$12,
+                            'provider',false,$13,$14::jsonb,$13,$13
+                        )
+                        ON CONFLICT (id) DO UPDATE SET
+                            provider = CASE
+                                WHEN models.discovery_source = 'manual' OR models.is_custom
+                                    THEN models.provider
+                                ELSE EXCLUDED.provider
+                            END,
+                            name = CASE
+                                WHEN models.discovery_source = 'manual' OR models.is_custom
+                                    THEN models.name
+                                ELSE EXCLUDED.name
+                            END,
+                            category = CASE
+                                WHEN models.discovery_source = 'manual' OR models.is_custom
+                                    THEN models.category
+                                ELSE EXCLUDED.category
+                            END,
+                            api_model_id = CASE
+                                WHEN models.discovery_source = 'manual' OR models.is_custom
+                                    THEN models.api_model_id
+                                ELSE EXCLUDED.api_model_id
+                            END,
+                            context_window = CASE
+                                WHEN models.discovery_source = 'manual' OR models.is_custom
+                                    THEN models.context_window
+                                ELSE EXCLUDED.context_window
+                            END,
+                            supports_tools = CASE
+                                WHEN models.discovery_source = 'manual' OR models.is_custom
+                                    THEN models.supports_tools
+                                ELSE EXCLUDED.supports_tools
+                            END,
+                            supports_vision = CASE
+                                WHEN models.discovery_source = 'manual' OR models.is_custom
+                                    THEN models.supports_vision
+                                ELSE EXCLUDED.supports_vision
+                            END,
+                            notes = CASE
+                                WHEN models.discovery_source = 'manual' OR models.is_custom
+                                    THEN models.notes
+                                ELSE EXCLUDED.notes
+                            END,
+                            tags = CASE
+                                WHEN models.discovery_source = 'manual' OR models.is_custom
+                                    THEN models.tags
+                                ELSE EXCLUDED.tags
+                            END,
+                            engine = CASE
+                                WHEN models.discovery_source = 'manual' OR models.is_custom
+                                    THEN models.engine
+                                ELSE EXCLUDED.engine
+                            END,
+                            discovery_source = CASE
+                                WHEN models.discovery_source = 'manual' OR models.is_custom
+                                    THEN models.discovery_source
+                                ELSE EXCLUDED.discovery_source
+                            END,
+                            is_custom = CASE
+                                WHEN models.discovery_source = 'manual' OR models.is_custom
+                                    THEN models.is_custom
+                                ELSE EXCLUDED.is_custom
+                            END,
+                            last_discovered_at = EXCLUDED.last_discovered_at,
+                            discovery_metadata = EXCLUDED.discovery_metadata,
+                            updated_at = EXCLUDED.updated_at
+                        RETURNING *
+                        """,
+                        m["model_id"],
+                        m["provider"],
+                        m["name"],
+                        m.get("category", "general"),
+                        m.get("api_model_id") or m["model_id"],
+                        int(m.get("context_window") or 0),
+                        bool(m.get("supports_tools", True)),
+                        bool(m.get("supports_vision", False)),
+                        m.get("notes", ""),
+                        m.get("tags") or [],
+                        UUID(org_id) if org_id else None,
+                        m.get("engine"),
+                        now,
+                        json.dumps(m.get("discovery_metadata") or {}),
+                    )
+                    upserted += 1
+
+                disabled_missing = 0
+                if disable_missing:
+                    rows = await conn.fetch(
+                        """
+                        UPDATE models
+                        SET is_enabled = false, updated_at = $1
+                        WHERE provider = $2
+                          AND discovery_source = 'provider'
+                          AND is_custom = false
+                          AND NOT (id = ANY($3::text[]))
+                        RETURNING id
+                        """,
+                        now,
+                        provider,
+                        discovered_ids,
+                    )
+                    disabled_missing = len(rows)
+
+        return {
+            "upserted": upserted,
+            "disabled_missing": disabled_missing if disable_missing else 0,
+        }
 
     async def toggle_model(self, model_id: str, enabled: bool) -> dict | None:
         return await self.update_model(model_id, is_enabled=enabled)

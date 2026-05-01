@@ -502,7 +502,11 @@ class TestSandboxPathValidationFixes:
 
     @pytest.mark.asyncio
     async def test_iptables_rejects_malformed_ip_from_allowlist(self):
-        """Malformed IP values must never appear in iptables destination rules."""
+        """Malformed IP values must never appear in iptables destination rules.
+
+        The allowlist must refuse to apply at all when no valid IPs resolve,
+        rather than silently installing a no-op policy that leaves egress open.
+        """
         from lucent.sandbox.docker_backend import DockerBackend
         from lucent.sandbox.models import ExecResult, SandboxConfig
 
@@ -511,15 +515,18 @@ class TestSandboxPathValidationFixes:
 
         async def fake_exec(_sid, command, **_kwargs):
             calls.append(command)
+            if "command -v iptables" in command:
+                return ExecResult(exit_code=0, stdout="", stderr="")
             if "getent" in command:
                 return ExecResult(exit_code=0, stdout="", stderr="")
             return ExecResult(exit_code=0, stdout="", stderr="")
 
         backend.exec = fake_exec
-        await backend._apply_network_allowlist(
-            "sb-test",
-            SandboxConfig(network_mode="allowlist", allowed_hosts=["1.2.3.4;echo pwned"]),
-        )
+        with pytest.raises(RuntimeError, match="no allowed_hosts could be resolved"):
+            await backend._apply_network_allowlist(
+                "sb-test",
+                SandboxConfig(network_mode="allowlist", allowed_hosts=["1.2.3.4;echo pwned"]),
+            )
 
         assert not any("1.2.3.4;echo pwned" in c for c in calls if "iptables -A OUTPUT -d" in c)
 

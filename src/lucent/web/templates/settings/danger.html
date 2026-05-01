@@ -1,0 +1,59 @@
+{% extends "settings_layout.html" %}
+{% set settings_section = "danger" %}
+{% set settings_title = "Danger Zone" %}
+{% set settings_subtitle = "Owner-only, irreversible actions." %}
+
+{% block settings_content %}
+<div class="bg-white rounded-xl border border-rose-200 shadow-sm overflow-hidden">
+    <div class="px-6 py-4 border-b border-rose-100 bg-rose-50">
+        <h3 class="text-base font-semibold text-rose-800">Sign out everywhere</h3>
+        <p class="mt-1 text-xs text-rose-700">Invalidates every active session for your account on all devices.</p>
+    </div>
+    <div class="p-6">
+        <form action="/settings/sessions/revoke-all" method="post" onsubmit="return confirm('Sign out of every device? You will need to log in again.');">
+            <button type="submit" class="px-4 py-2 bg-rose-600 text-white rounded-lg hover:bg-rose-700 text-sm font-medium">Sign out all sessions</button>
+        </form>
+    </div>
+</div>
+
+<div class="bg-white rounded-xl border border-rose-200 shadow-sm overflow-hidden">
+    <div class="px-6 py-4 border-b border-rose-100 bg-rose-50">
+        <h3 class="text-base font-semibold text-rose-800">Transfer ownership</h3>
+        <p class="mt-1 text-xs text-rose-700">Transfers the workspace owner role to another admin. You will be demoted to admin.</p>
+    </div>
+    <div class="p-6">
+        {% if eligible_owners %}
+        <form action="/settings/organization/transfer-ownership" method="post" class="flex items-end gap-3 max-w-xl"
+              onsubmit="return confirm('Transfer ownership of this workspace? This cannot be undone without the new owner\u2019s help.');">
+            <div class="flex-1">
+                <label class="block text-xs font-medium text-gray-500 uppercase tracking-wider mb-1">New owner</label>
+                <select name="new_owner_id" required class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                    {% for u in eligible_owners %}
+                    <option value="{{ u.id }}">{{ u.display_name or u.email }} — {{ u.email }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <button type="submit" class="px-4 py-2 bg-rose-600 text-white rounded-lg hover:bg-rose-700 text-sm font-medium whitespace-nowrap">Transfer ownership</button>
+        </form>
+        {% else %}
+        <p class="text-sm text-gray-500">No eligible admins found. Promote a member to admin first.</p>
+        {% endif %}
+    </div>
+</div>
+
+<div class="bg-white rounded-xl border border-rose-300 shadow-sm overflow-hidden">
+    <div class="px-6 py-4 border-b border-rose-200 bg-rose-100">
+        <h3 class="text-base font-semibold text-rose-900">Delete workspace</h3>
+        <p class="mt-1 text-xs text-rose-800">Permanently destroys this organization, all users, all memories, and all related data. There is no undo.</p>
+    </div>
+    <div class="p-6">
+        <form action="/settings/organization/delete" method="post" class="space-y-3 max-w-xl"
+              onsubmit="return confirm('Permanently delete this workspace? This cannot be undone.');">
+            <label class="block text-xs font-medium text-gray-700 mb-1">Type the workspace name <strong class="font-mono">{{ organization.name }}</strong> to confirm</label>
+            <input type="text" name="confirm_name" required pattern="{{ organization.name }}"
+                class="w-full px-3 py-2 border border-rose-300 rounded-lg text-sm focus:ring-2 focus:ring-rose-500">
+            <button type="submit" class="px-4 py-2 bg-rose-700 text-white rounded-lg hover:bg-rose-800 text-sm font-medium">I understand, delete this workspace</button>
+        </form>
+    </div>
+</div>
+{% endblock %}

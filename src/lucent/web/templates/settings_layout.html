@@ -1,0 +1,137 @@
+{# Settings layout — shared shell for all /settings/* pages.
+
+   Provides:
+   * Left-rail navigation grouped by audience (Account / Workspace / Admin / Owner)
+     with role-aware visibility.
+   * Page header with title + optional subtitle and action slot.
+   * `settings_content` block for the section body.
+
+   Pages must set:
+     {% set settings_section = "account" %}   # which nav item is active
+     {% set settings_title = "Account" %}
+     {% set settings_subtitle = "Profile, password, and personal info" %}
+   Optional:
+     {% block settings_actions %}<a ...>Action</a>{% endblock %}
+#}
+{% extends "base.html" %}
+
+{% block title %}{{ settings_title or 'Settings' }} — Lucent{% endblock %}
+
+{% block content_wrapper %}
+<div class="max-w-screen-2xl">
+{{ self.content() }}
+</div>
+{% endblock %}
+
+{% block content %}
+{% set role_value = (user.role.value if user.role.__class__.__name__ == 'Role' else user.role) %}
+{% set is_admin = role_value in ('admin', 'owner') %}
+{% set is_owner = role_value == 'owner' %}
+{% set tm = team_mode() %}
+
+<div class="mb-4">
+    <h1 class="text-xl font-semibold text-gray-900">Settings</h1>
+    <p class="text-xs text-gray-500">Manage your account, workspace, and {% if is_admin %}administration{% else %}preferences{% endif %}.</p>
+</div>
+
+<div class="flex flex-col lg:flex-row gap-6">
+    {# ---- Left rail nav ---- #}
+    <aside class="w-full lg:w-56 flex-shrink-0">
+        <nav class="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden divide-y divide-gray-100">
+            {# Account #}
+            <div class="px-3 py-2">
+                <p class="px-2 pt-1 pb-2 text-[10px] font-semibold uppercase tracking-wider text-gray-400">Account</p>
+                {% set _items = [
+                    ('account',    '/settings/account',    'Profile & Security'),
+                    ('api-keys',   '/settings/api-keys',   'API Keys'),
+                    ('api-access', '/settings/api-access', 'API Access'),
+                ] %}
+                {% for key, href, label in _items %}
+                <a href="{{ href }}" class="flex items-center justify-between px-3 py-2 rounded-lg text-sm transition-colors {% if settings_section == key %}bg-primary-50 text-primary-700 font-medium{% else %}text-gray-700 hover:bg-gray-50{% endif %}">
+                    <span>{{ label }}</span>
+                </a>
+                {% endfor %}
+            </div>
+
+            {# Workspace #}
+            <div class="px-3 py-2">
+                <p class="px-2 pt-1 pb-2 text-[10px] font-semibold uppercase tracking-wider text-gray-400">Workspace</p>
+                {% set _items = [
+                    ('connections', '/settings/connections', 'Connections'),
+                    ('secrets',     '/settings/secrets',     'Secrets'),
+                    ('groups',      '/settings/groups',      'Groups'),
+                ] %}
+                {% for key, href, label in _items %}
+                <a href="{{ href }}" class="flex items-center justify-between px-3 py-2 rounded-lg text-sm transition-colors {% if settings_section == key %}bg-primary-50 text-primary-700 font-medium{% else %}text-gray-700 hover:bg-gray-50{% endif %}">
+                    <span>{{ label }}</span>
+                </a>
+                {% endfor %}
+            </div>
+
+            {# Organization — visible to all, member view is read-only #}
+            <div class="px-3 py-2">
+                <p class="px-2 pt-1 pb-2 text-[10px] font-semibold uppercase tracking-wider text-gray-400">Organization</p>
+                <a href="/settings/organization" class="flex items-center justify-between px-3 py-2 rounded-lg text-sm transition-colors {% if settings_section == 'organization' %}bg-primary-50 text-primary-700 font-medium{% else %}text-gray-700 hover:bg-gray-50{% endif %}">
+                    <span>Overview</span>
+                </a>
+                {% if is_admin %}
+                <a href="/settings/users" class="flex items-center justify-between px-3 py-2 rounded-lg text-sm transition-colors {% if settings_section == 'members' %}bg-primary-50 text-primary-700 font-medium{% else %}text-gray-700 hover:bg-gray-50{% endif %}">
+                    <span>Members</span>
+                </a>
+                {% endif %}
+                {% if is_admin %}
+                <a href="/settings/models" class="flex items-center justify-between px-3 py-2 rounded-lg text-sm transition-colors {% if settings_section == 'models' %}bg-primary-50 text-primary-700 font-medium{% else %}text-gray-700 hover:bg-gray-50{% endif %}">
+                    <span>Models</span>
+                </a>
+                {% endif %}
+                {% if is_admin %}
+                <a href="/settings/audit" class="flex items-center justify-between px-3 py-2 rounded-lg text-sm transition-colors {% if settings_section == 'audit' %}bg-primary-50 text-primary-700 font-medium{% else %}text-gray-700 hover:bg-gray-50{% endif %}">
+                    <span>Audit Log</span>
+                </a>
+                {% endif %}
+            </div>
+
+            {# Owner zone #}
+            {% if is_owner %}
+            <div class="px-3 py-2">
+                <p class="px-2 pt-1 pb-2 text-[10px] font-semibold uppercase tracking-wider text-rose-500">Owner Controls</p>
+                <a href="/settings/danger" class="flex items-center justify-between px-3 py-2 rounded-lg text-sm transition-colors {% if settings_section == 'danger' %}bg-rose-50 text-rose-700 font-medium{% else %}text-gray-700 hover:bg-rose-50{% endif %}">
+                    <span>Danger Zone</span>
+                </a>
+            </div>
+            {% endif %}
+        </nav>
+    </aside>
+
+    {# ---- Main panel ---- #}
+    <section class="flex-1 min-w-0 space-y-6">
+        <div class="flex items-start justify-between gap-4">
+            <div>
+                <h2 class="text-xl font-semibold text-gray-900">{{ settings_title or 'Settings' }}</h2>
+                {% if settings_subtitle %}
+                <p class="mt-1 text-sm text-gray-500">{{ settings_subtitle }}</p>
+                {% endif %}
+            </div>
+            <div class="flex items-center gap-2">
+                {% block settings_actions %}{% endblock %}
+            </div>
+        </div>
+
+        {# Generic flash slots — pages can fill these #}
+        {% if error %}
+        <div class="bg-red-50 border border-red-200 rounded-xl p-4 flex items-center gap-3">
+            <svg class="w-5 h-5 text-red-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z"/></svg>
+            <p class="text-sm font-medium text-red-800">{{ error }}</p>
+        </div>
+        {% endif %}
+        {% if success %}
+        <div class="bg-green-50 border border-green-200 rounded-xl p-4 flex items-center gap-3">
+            <svg class="w-5 h-5 text-green-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+            <p class="text-sm font-medium text-green-800">{{ success }}</p>
+        </div>
+        {% endif %}
+
+        {% block settings_content %}{% endblock %}
+    </section>
+</div>
+{% endblock %}

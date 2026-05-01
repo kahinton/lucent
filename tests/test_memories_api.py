@@ -171,10 +171,10 @@ class TestCreateMemory:
         assert resp.status_code == 201
         assert resp.json()["type"] == "technical"
 
-    async def test_create_procedural(self, mem_client, mem_prefix):
+    async def test_create_retired_type_rejected(self, mem_client, mem_prefix):
         resp = await _create_memory(mem_client, mem_prefix, type="procedural")
-        assert resp.status_code == 201
-        assert resp.json()["type"] == "procedural"
+        assert resp.status_code == 400
+        assert "invalid memory type" in resp.json()["detail"].lower()
 
     async def test_create_goal(self, mem_client, mem_prefix):
         resp = await _create_memory(mem_client, mem_prefix, type="goal")
@@ -251,6 +251,61 @@ class TestGetMemory:
         resp = await mem_client.get("/api/memories/not-a-uuid")
         assert resp.status_code == 422
 
+    async def test_get_repo_tagged_memory_denied_when_acl_fails(
+        self, mem_client, db_pool, mem_user, mem_prefix, monkeypatch
+    ):
+        from lucent.db import MemoryRepository
+
+        repo = MemoryRepository(db_pool)
+        memory = await repo.create(
+            username=f"{mem_prefix}user",
+            type="technical",
+            content=f"{mem_prefix}Private repo memory",
+            tags=["acl", "private"],
+            metadata={"repo": "org/private-repo"},
+            user_id=mem_user["id"],
+            organization_id=mem_user["organization_id"],
+        )
+
+        async def _deny_access(self, user_id, repo_full_name):  # pragma: no cover - signature shim
+            return False
+
+        monkeypatch.setattr(
+            "lucent.integrations.github_repo_access_service.GitHubRepoAccessService.check_access",
+            _deny_access,
+        )
+
+        resp = await mem_client.get(f"/api/memories/{memory['id']}")
+        assert resp.status_code == 404
+
+    async def test_get_repo_tagged_memory_allowed_when_acl_passes(
+        self, mem_client, db_pool, mem_user, mem_prefix, monkeypatch
+    ):
+        from lucent.db import MemoryRepository
+
+        repo = MemoryRepository(db_pool)
+        memory = await repo.create(
+            username=f"{mem_prefix}user",
+            type="technical",
+            content=f"{mem_prefix}Org repo memory",
+            tags=["acl", "allowed"],
+            metadata={"repo": "org/shared-repo"},
+            user_id=mem_user["id"],
+            organization_id=mem_user["organization_id"],
+        )
+
+        async def _allow_access(self, user_id, repo_full_name):  # pragma: no cover - signature shim
+            return True
+
+        monkeypatch.setattr(
+            "lucent.integrations.github_repo_access_service.GitHubRepoAccessService.check_access",
+            _allow_access,
+        )
+
+        resp = await mem_client.get(f"/api/memories/{memory['id']}")
+        assert resp.status_code == 200
+        assert resp.json()["id"] == str(memory["id"])
+
 
 # ============================================================================
 # Update Memory
@@ -323,6 +378,36 @@ class TestUpdateMemory:
         # Should be 403 or 404 (not leaking existence)
         assert resp.status_code in (403, 404)
 
+    async def test_update_repo_tagged_memory_denied_when_acl_fails(
+        self, mem_client, db_pool, mem_user, mem_prefix, monkeypatch
+    ):
+        from lucent.db import MemoryRepository
+
+        repo = MemoryRepository(db_pool)
+        memory = await repo.create(
+            username=f"{mem_prefix}user",
+            type="technical",
+            content=f"{mem_prefix}Update blocked by ACL",
+            tags=["acl", "update"],
+            metadata={"repo": "org/private-repo"},
+            user_id=mem_user["id"],
+            organization_id=mem_user["organization_id"],
+        )
+
+        async def _deny_access(self, user_id, repo_full_name):  # pragma: no cover - signature shim
+            return False
+
+        monkeypatch.setattr(
+            "lucent.integrations.github_repo_access_service.GitHubRepoAccessService.check_access",
+            _deny_access,
+        )
+
+        resp = await mem_client.patch(
+            f"/api/memories/{memory['id']}",
+            json={"content": "should not be allowed"},
+        )
+        assert resp.status_code == 404
+
 
 # ============================================================================
 # Delete Memory
@@ -356,6 +441,33 @@ class TestDeleteMemory:
 
         resp = await mem_client_b.delete(f"/api/memories/{memory_id}")
         assert resp.status_code in (403, 404)
+
+    async def test_delete_repo_tagged_memory_denied_when_acl_fails(
+        self, mem_client, db_pool, mem_user, mem_prefix, monkeypatch
+    ):
+        from lucent.db import MemoryRepository
+
+        repo = MemoryRepository(db_pool)
+        memory = await repo.create(
+            username=f"{mem_prefix}user",
+            type="technical",
+            content=f"{mem_prefix}Delete blocked by ACL",
+            tags=["acl", "delete"],
+            metadata={"repo": "org/private-repo"},
+            user_id=mem_user["id"],
+            organization_id=mem_user["organization_id"],
+        )
+
+        async def _deny_access(self, user_id, repo_full_name):  # pragma: no cover - signature shim
+            return False
+
+        monkeypatch.setattr(
+            "lucent.integrations.github_repo_access_service.GitHubRepoAccessService.check_access",
+            _deny_access,
+        )
+
+        resp = await mem_client.delete(f"/api/memories/{memory['id']}")
+        assert resp.status_code == 404
 
 
 # ============================================================================

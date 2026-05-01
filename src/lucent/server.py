@@ -146,6 +146,9 @@ class MCPAuthMiddleware:
                             user_repo = UserRepository(pool)
                             user = await user_repo.get_by_id(key_info["user_id"])
                             if user:
+                                # Thread memory scope from API key into context dict
+                                user["memory_scope_user_id"] = key_info.get("memory_scope_user_id")
+                                user["memory_scope"] = key_info.get("memory_scope")
                                 set_current_user(user)
                                 set_current_api_key_id(key_info["id"])
 

@@ -13,6 +13,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY pyproject.toml README.md ./
 COPY src/ src/
 
+# Keep pip patched in development images as well as local virtualenvs.
+RUN python -m pip install --no-cache-dir --upgrade pip
+
 # Install in editable mode so volume-mounted source changes are live
 RUN pip install --no-cache-dir -e ".[dev]" 2>/dev/null || pip install --no-cache-dir -e .
 

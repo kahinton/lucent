@@ -525,7 +525,7 @@ class TestReleaseStaleTasks:
                    WHERE id = $1""",
                 task["id"],
             )
-        count = await repo.release_stale_tasks(stale_minutes=30)
+        count = await repo.release_stale_tasks(stale_minutes=30, org_id=org_id)
         assert count >= 1
         refreshed = await repo.get_task(str(task["id"]))
         assert refreshed["status"] == "pending"
@@ -536,7 +536,7 @@ class TestReleaseStaleTasks:
         task = await _make_task(repo, str(req["id"]), org_id)
         await repo.claim_task(str(task["id"]), "inst-1")
         # freshly claimed — should NOT be released
-        _count = await repo.release_stale_tasks(stale_minutes=30)
+        _count = await repo.release_stale_tasks(stale_minutes=30, org_id=org_id)
         refreshed = await repo.get_task(str(task["id"]))
         assert refreshed["status"] == "claimed"
 
@@ -552,7 +552,7 @@ class TestReleaseStaleTasks:
                    WHERE id = $1""",
                 task["id"],
             )
-        released = await repo.release_stale_tasks(stale_minutes=120)
+        released = await repo.release_stale_tasks(stale_minutes=120, org_id=org_id)
         assert released == 1
         refreshed = await repo.get_task(str(task["id"]))
         assert refreshed["status"] == "pending"
@@ -584,11 +584,35 @@ class TestReleaseStaleTasks:
                    WHERE id = $1""",
                 task["id"],
             )
-        released = await repo.release_stale_tasks(stale_minutes=120, instance_stale_seconds=60)
+        released = await repo.release_stale_tasks(
+            stale_minutes=120,
+            org_id=org_id,
+            instance_stale_seconds=60,
+        )
         assert released == 1
         refreshed = await repo.get_task(str(task["id"]))
         assert refreshed["status"] == "pending"
         assert refreshed["claimed_by"] is None
+
+    async def test_release_logs_reaper_event_with_claim_owner(self, repo, org_id, db_pool):
+        req = await _make_request(repo, org_id)
+        task = await _make_task(repo, str(req["id"]), org_id)
+        await repo.claim_task(str(task["id"]), "inst-reaper")
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                """UPDATE tasks
+                   SET claim_expires_at = NOW() - INTERVAL '1 minute'
+                   WHERE id = $1""",
+                task["id"],
+            )
+
+        released = await repo.release_stale_tasks(stale_minutes=30, org_id=org_id)
+        assert released == 1
+
+        events = await repo.list_task_events(str(task["id"]))
+        reaper_events = [e for e in events["items"] if e["event_type"] == "reaper"]
+        assert len(reaper_events) == 1
+        assert "Claim expired (was claimed by inst-reaper)" in (reaper_events[0]["detail"] or "")
 
 
 class TestDaemonInstanceRegistry:
