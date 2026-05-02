@@ -133,6 +133,9 @@ def test_chat_prompt_blocks_invented_security_protocols():
     assert "Do not invent Lucent security policies" in instructions
     assert "If tools are unavailable" in instructions
     assert "may quote or summarize" in instructions
+    assert "use `create_request` directly" in instructions
+    assert "Do not create a goal" in instructions
+    assert "Use `list_available_models`" in instructions
 
 
 def test_chat_mcp_config_uses_narrow_tool_allowlist():
@@ -142,5 +145,8 @@ def test_chat_mcp_config_uses_narrow_tool_allowlist():
     assert "get_current_user_context" in tools
     assert "search_memories" in tools
     assert "list_active_work" in tools
+    assert "create_request" in tools
+    assert "list_available_models" in tools
+    assert "create_task" not in tools
     assert "create_agent_definition" not in tools
     assert tools != ["*"]

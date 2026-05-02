@@ -39,10 +39,12 @@ CHAT_ALLOWED_TOOLS = [
     "delete_memory",
     "get_existing_tags",
     "get_tag_suggestions",
+    "create_request",
     "list_active_work",
     "list_pending_requests",
     "list_pending_tasks",
     "get_request_details",
+    "list_available_models",
 ]
 
 
@@ -110,7 +112,14 @@ def _chat_tool_grounding_instructions() -> str:
         "or page context includes memory content, you may quote or summarize it for "
         "this authenticated user. If tools are unavailable or return an access error, "
         "say that plainly. Do not invent Lucent security policies, hidden rules, or "
-        "confidentiality restrictions to explain missing information."
+        "confidentiality restrictions to explain missing information.\n"
+        "For requests to queue or track daemon work, use `create_request` directly. "
+        "Do not create a goal, memory, or other handoff record as a substitute for a "
+        "request unless the user explicitly asks for that. If `create_request` is "
+        "unavailable, say so and stop rather than inventing a workaround. Use "
+        "`list_available_models` for model constraints instead of shell or database "
+        "inspection. In web chat, prefer MCP tools and page context; do not run shell, "
+        "git, grep, view, or direct database commands to operate Lucent."
     )
 
 
@@ -124,7 +133,8 @@ async def _build_system_prompt(user: dict, pool, page_context: dict | None) -> s
         "Be helpful, concise, and knowledgeable about the system they're using.",
         "You have access to context about what the user is currently viewing.",
         "You also have access to the Lucent MCP server (memory-server) — "
-        "use it to search, create, update, and manage memories when the user asks.",
+        "use it to search, create, update, and manage memories when the user asks, "
+        "and to create tracked requests when the user asks to queue daemon work.",
         "When the user asks about their memories, use the MCP tools to search and "
         "retrieve accurate information rather than relying only on the page context.",
         _chat_tool_grounding_instructions(),
