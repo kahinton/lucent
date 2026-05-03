@@ -1127,7 +1127,10 @@ class RequestRepository:
         rejected_by: str,
         comment: str,
     ) -> dict | None:
-        """Reject a pending_approval request — enters rejection_processing for daemon feedback loop."""
+        """Reject a pending_approval request.
+
+        Rejected requests enter rejection_processing for the daemon feedback loop.
+        """
         now = datetime.now(timezone.utc)
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -1613,7 +1616,9 @@ class RequestRepository:
                 # free to write its own. The structured fields are what
                 # actually identify the work.
                 if next_idx is not None and next_desc:
-                    suggested_title = f"{short_title or 'Goal'} M{next_idx}: {next_desc[:80]}".strip()
+                    suggested_title = (
+                        f"{short_title or 'Goal'} M{next_idx}: {next_desc[:80]}"
+                    ).strip()
                 else:
                     suggested_title = short_title or "Goal"
 
@@ -1920,10 +1925,11 @@ class RequestRepository:
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(sql, *params)
         if row:
+            edited_fields = sorted(s.split(" = ")[0] for s in sets if "updated_at" not in s)
             await self.add_task_event(
                 task_id,
                 "edited",
-                f"Task edited: {', '.join(sorted(s.split(' = ')[0] for s in sets if 'updated_at' not in s))}",
+                f"Task edited: {', '.join(edited_fields)}",
             )
         return dict(row) if row else None
 
@@ -2434,6 +2440,78 @@ class RequestRepository:
                 f"Claim expired (was claimed by {claimed_by}), task requeued to pending",
             )
         return len(rows)
+
+    async def stale_task_reaper_has_work(
+        self,
+        stale_minutes: int = 30,
+        org_id: str | None = None,
+        instance_stale_seconds: int = DEFAULT_INSTANCE_STALE_SECONDS,
+    ) -> bool:
+        """True when at least one claimed/running task is stale enough to release."""
+        stale_seconds = max(60, int(stale_minutes * 60))
+        if org_id:
+            async with self.pool.acquire() as conn:
+                count = await conn.fetchval(
+                    """
+                    SELECT COUNT(*)
+                    FROM tasks t
+                    WHERE t.status IN ('claimed', 'running')
+                      AND t.organization_id = $2
+                      AND (
+                          t.claim_expires_at < NOW()
+                          OR (
+                              t.claimed_by IS NOT NULL
+                              AND EXISTS (
+                                  SELECT 1 FROM daemon_instances di
+                                  WHERE di.organization_id = t.organization_id
+                                    AND di.instance_id = t.claimed_by
+                                    AND (
+                                        di.status <> 'active'
+                                        OR di.last_seen_at < NOW() - make_interval(secs := $3)
+                                    )
+                              )
+                          )
+                          OR (
+                              t.claimed_at IS NOT NULL
+                              AND t.claimed_at < NOW() - make_interval(secs := $1)
+                          )
+                      )
+                    """,
+                    stale_seconds,
+                    UUID(org_id),
+                    instance_stale_seconds,
+                )
+        else:
+            async with self.pool.acquire() as conn:
+                count = await conn.fetchval(
+                    """
+                    SELECT COUNT(*)
+                    FROM tasks t
+                    WHERE t.status IN ('claimed', 'running')
+                      AND (
+                          t.claim_expires_at < NOW()
+                          OR (
+                              t.claimed_by IS NOT NULL
+                              AND EXISTS (
+                                  SELECT 1 FROM daemon_instances di
+                                  WHERE di.organization_id = t.organization_id
+                                    AND di.instance_id = t.claimed_by
+                                    AND (
+                                        di.status <> 'active'
+                                        OR di.last_seen_at < NOW() - make_interval(secs := $2)
+                                    )
+                              )
+                          )
+                          OR (
+                              t.claimed_at IS NOT NULL
+                              AND t.claimed_at < NOW() - make_interval(secs := $1)
+                          )
+                      )
+                    """,
+                    stale_seconds,
+                    instance_stale_seconds,
+                )
+        return int(count or 0) > 0
 
     # ── Task Events ───────────────────────────────────────────────────────
 

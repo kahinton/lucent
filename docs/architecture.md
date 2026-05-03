@@ -354,7 +354,7 @@ The daemon runs as a separate process that communicates with the Lucent server o
 |------|----------|---------|
 | **Cognitive** | 15 min | Perceive → Reason → Decide → Act cycle. Reads system state, reasons about goals, creates requests/tasks via MCP tools |
 | **Dispatch** | Event-driven | Claims pending tasks, resolves agent definitions, creates sandboxes, runs sub-agent LLM sessions, validates results |
-| **Scheduler** | 60s | Checks for due schedules (cron/interval/once), creates request+task pairs, advances schedule state |
+| **Scheduler** | 60s | Checks for due schedules (cron/interval/once), advances schedule state, and creates request+task pairs when eligible work exists |
 | **Autonomic** | ~2 hours | Background maintenance: memory cleanup, learning extraction, environment adaptation |
 
 The dispatch loop uses PostgreSQL `LISTEN/NOTIFY` for near-instant task pickup (with 60s polling fallback). Multiple daemon instances can run in parallel — task claims are atomic.
@@ -421,7 +421,35 @@ Create recurring or one-time tasks via MCP tools or the web UI:
 | `interval` | Repeat every N seconds (min 60) | Every 5 minutes |
 | `once` | Run once at a specific time | One-shot task |
 
-Schedules support timezone-aware cron (e.g., `US/Eastern`), max run limits, expiration dates, per-schedule model overrides, and sandbox template linking. When a schedule fires, it atomically creates a request + task that flows through the dispatch loop.
+Schedules support timezone-aware cron (e.g., `US/Eastern`), max run limits, expiration dates, per-schedule model overrides, and sandbox template linking. When a normal user schedule fires, it atomically creates a request + task that flows through the dispatch loop.
+
+### Built-in schedule pre-flight gates
+
+Built-in daemon schedules run schedule-specific eligibility checks before creating a request or task. If the check proves there is no work, the run is completed with a structured `schedule.skipped` event and no model-backed task is created.
+
+Operators should treat `schedule.skipped` with `candidate_count: 0` as a healthy no-op, not a failed run. Real failures use a failed schedule-run status or exception log.
+
+| Built-in schedule | Empty-work gate |
+|---|---|
+| Cognitive Planning | No open requests, pending approvals, due non-planning schedules, daemon messages/feedback/rejection lessons, proposed definitions/MCP servers, or planning targets. |
+| Memory Consolidation | No active shared technical memory needs required metadata and no duplicate normalized repo/directory/filename scope exists. |
+| Learning Extraction | No recent active result/feedback/rejection memory has learning-source tags without `lesson-extracted`. |
+| Experience Compression | No active non-protected experience memory was created before today. |
+| Memory Vitality Scoring | No non-forgotten memory has missing or stale vitality computation. |
+| Shadow Forget Scoring | Shadow forgetting is disabled, or every non-forgotten memory already has a fresh `gcp-v1` sidecar score. |
+| Stale Task Reaper | No claimed/running task has an expired claim, stale claim age, or stale/dead owning daemon instance. |
+| Request Decomposition Backfill | No old non-terminal pending/approved request remains without tasks after in-process and retry-backoff filtering. |
+
+Skip events are written as JSON to the service log and to `schedule_runs.result`:
+
+```json
+{
+  "event_type": "schedule.skipped",
+  "schedule_name": "Experience Compression",
+  "reason": "no_eligible_work",
+  "candidate_count": 0
+}
+```
 
 ## Sandboxes
 

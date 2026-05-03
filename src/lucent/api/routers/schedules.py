@@ -1,5 +1,6 @@
 """API router for scheduled tasks."""
 
+import json
 import logging
 from datetime import datetime
 
@@ -293,8 +294,6 @@ async def trigger_now(
     # Create a request from the schedule
     template = sched.get("task_template") or {}
     if isinstance(template, str):
-        import json
-
         try:
             template = json.loads(template)
         except (json.JSONDecodeError, TypeError):
@@ -324,6 +323,23 @@ async def trigger_now(
                 result=f"Skipped: active request {str(active_request)} already exists",
             )
             return {"schedule": sched, "skipped": True, "active_request": str(active_request)}
+
+        has_work = await sched_repo.built_in_schedule_has_work(
+            str(sched["title"]),
+            str(user.organization_id),
+            schedule_id=schedule_id,
+        )
+        if has_work is False:
+            skip_event = {
+                "event_type": "schedule.skipped",
+                "schedule_id": schedule_id,
+                "schedule_name": sched["title"],
+                "reason": "no_eligible_work",
+                "candidate_count": 0,
+            }
+            logger.info(json.dumps(skip_event, sort_keys=True))
+            await sched_repo.complete_run(str(run["id"]), result=json.dumps(skip_event))
+            return {"schedule": sched, "run": run, "skipped": True, "event": skip_event}
 
         req = await req_repo.create_request(
             title=f"[Scheduled] {sched['title']}",

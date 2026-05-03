@@ -203,6 +203,23 @@ docker volume inspect lucent_data
 
 ## Performance
 
+### Built-in schedule shows `schedule.skipped`
+
+`schedule.skipped` with `candidate_count: 0` means a built-in daemon schedule ran its pre-flight check and found no eligible work. This is a normal no-op, not a failure, and no request/task or model-backed session was created.
+
+Check recent skip reasons:
+
+```sql
+SELECT s.title, sr.completed_at, sr.result
+FROM schedule_runs sr
+JOIN schedules s ON s.id = sr.schedule_id
+WHERE sr.result::text LIKE '%"event_type": "schedule.skipped"%'
+ORDER BY sr.completed_at DESC
+LIMIT 20;
+```
+
+Investigate only if the run status is `failed`, the service log contains an exception for the schedule, or a schedule that should have eligible input keeps skipping with `candidate_count: 0`.
+
 ### Slow Search Queries
 
 Fuzzy search uses PostgreSQL's `pg_trgm` extension. If searches are slow:

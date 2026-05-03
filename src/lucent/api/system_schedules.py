@@ -7,6 +7,7 @@ execute when the daemon is unavailable.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 
 from lucent.db import get_pool
@@ -69,7 +70,8 @@ async def ensure_server_system_schedules() -> int:
             org_id=row["organization_id"],
             description=(
                 "Server-side stale-claim reaper. Releases expired task claims "
-                "without depending on daemon availability."
+                "without depending on daemon availability. Short-circuits with "
+                "schedule.skipped when there are no stale claims to release."
             ),
             agent_type="system",
             schedule_type="interval",
@@ -112,6 +114,25 @@ async def run_server_system_schedules_once() -> int:
             continue
 
         try:
+            if not await req_repo.stale_task_reaper_has_work(
+                stale_minutes=STALE_TASK_REAPER_STALE_MINUTES,
+                org_id=org_id,
+            ):
+                skip_event = {
+                    "event_type": "schedule.skipped",
+                    "schedule_id": schedule_id,
+                    "schedule_name": STALE_TASK_REAPER_TITLE,
+                    "reason": "no_stale_tasks",
+                    "candidate_count": 0,
+                }
+                await sched_repo.complete_run(
+                    str(run["id"]),
+                    result=json.dumps(skip_event),
+                )
+                logger.info(json.dumps(skip_event, sort_keys=True))
+                executed += 1
+                continue
+
             released = await req_repo.release_stale_tasks(
                 stale_minutes=STALE_TASK_REAPER_STALE_MINUTES,
                 org_id=org_id,

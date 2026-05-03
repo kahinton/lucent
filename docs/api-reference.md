@@ -672,7 +672,23 @@ Body: `{"enabled": true}` or `{"enabled": false}`.
 POST /api/schedules/{schedule_id}/trigger?force=false
 ```
 
-Fires the schedule immediately. Pass `force=true` to bypass the time guard (for manual "Run Now" actions). Returns the created request and run record.
+Fires the schedule immediately. Pass `force=true` to bypass the time guard (for manual "Run Now" actions). Returns the created request and run record when work is created.
+
+Built-in daemon schedules may instead return a healthy no-op when their pre-flight eligibility check finds no candidates:
+
+```json
+{
+  "skipped": true,
+  "event": {
+    "event_type": "schedule.skipped",
+    "schedule_name": "Memory Consolidation",
+    "reason": "no_eligible_work",
+    "candidate_count": 0
+  }
+}
+```
+
+This is distinct from a failed run: no request or task is created, and the skip event is stored in `schedule_runs.result`.
 
 ### Schedule Runs
 

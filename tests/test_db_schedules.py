@@ -3,7 +3,9 @@
 Covers: cron parsing, schedule CRUD, due schedules, run lifecycle, summary.
 """
 
+import json
 from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
@@ -20,6 +22,180 @@ async def _make_due(db_pool, schedule_id):
             past,
             schedule_id,
         )
+
+
+BUILT_IN_MODEL_BACKED_SCHEDULES = [
+    ("Experience Compression", "memory"),
+    ("Learning Extraction", "reflection"),
+    ("Memory Consolidation", "memory"),
+    ("Procedural Consolidation", "memory"),
+    ("Memory Vitality Scoring", "memory"),
+    ("Shadow Forget Scoring", "memory"),
+    ("Cognitive Planning", "planning"),
+]
+
+
+async def _count_requests_and_tasks(db_pool, org_id: str) -> tuple[int, int]:
+    async with db_pool.acquire() as conn:
+        request_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM requests WHERE organization_id = $1::uuid",
+            org_id,
+        )
+        task_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM tasks WHERE organization_id = $1::uuid",
+            org_id,
+        )
+    return int(request_count or 0), int(task_count or 0)
+
+
+async def _insert_agent_definition(db_pool, org_id: str, user_id: str, name: str) -> None:
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO agent_definitions (
+                name, description, content, status, scope,
+                organization_id, created_by, owner_user_id
+            )
+            VALUES (
+                $1, $2, $3, 'active', 'instance',
+                $4::uuid, $5::uuid, $5::uuid
+            )
+            ON CONFLICT (name, organization_id) DO UPDATE
+            SET status = 'active',
+                content = EXCLUDED.content,
+                updated_at = now()
+            """,
+            name,
+            f"test {name} agent",
+            f"{name} agent content",
+            org_id,
+            user_id,
+        )
+
+
+async def _insert_positive_candidate(
+    db_pool,
+    schedule_title: str,
+    org_id: str,
+    user_id: str,
+) -> None:
+    async with db_pool.acquire() as conn:
+        if schedule_title == "Experience Compression":
+            yesterday = datetime.now(timezone.utc) - timedelta(days=1)
+            await conn.execute(
+                """
+                INSERT INTO memories (
+                    username, type, content, tags, organization_id, user_id,
+                    created_at, updated_at
+                )
+                VALUES (
+                    'eligibility-test', 'experience', 'older experience',
+                    ARRAY[]::text[], $1::uuid, $2::uuid, $3, $3
+                )
+                """,
+                org_id,
+                user_id,
+                yesterday,
+            )
+        elif schedule_title == "Learning Extraction":
+            await conn.execute(
+                """
+                INSERT INTO memories (
+                    username, type, content, tags, organization_id, user_id
+                )
+                VALUES (
+                    'eligibility-test', 'experience', 'validated daemon result',
+                    ARRAY['daemon-result', 'validated']::text[], $1::uuid, $2::uuid
+                )
+                """,
+                org_id,
+                user_id,
+            )
+        elif schedule_title == "Memory Consolidation":
+            await conn.execute(
+                """
+                INSERT INTO memories (
+                    username, type, content, tags, metadata, shared,
+                    organization_id, user_id
+                )
+                VALUES (
+                    'eligibility-test', 'technical', 'technical memory missing metadata',
+                    ARRAY[]::text[], '{}'::jsonb, true, $1::uuid, $2::uuid
+                )
+                """,
+                org_id,
+                user_id,
+            )
+        elif schedule_title == "Procedural Consolidation":
+            await conn.execute(
+                """
+                INSERT INTO memories (
+                    username, type, content, tags, organization_id, user_id
+                )
+                VALUES (
+                    'eligibility-test', 'experience', 'procedure needs merge',
+                    ARRAY['needs-merge']::text[], $1::uuid, $2::uuid
+                )
+                """,
+                org_id,
+                user_id,
+            )
+        elif schedule_title == "Memory Vitality Scoring":
+            await conn.execute(
+                """
+                INSERT INTO memories (
+                    username, type, content, tags, organization_id, user_id,
+                    vitality_computed_at
+                )
+                VALUES (
+                    'eligibility-test', 'experience', 'needs vitality score',
+                    ARRAY[]::text[], $1::uuid, $2::uuid, NULL
+                )
+                """,
+                org_id,
+                user_id,
+            )
+        elif schedule_title == "Shadow Forget Scoring":
+            await conn.execute(
+                """
+                INSERT INTO memories (
+                    username, type, content, tags, organization_id, user_id
+                )
+                VALUES (
+                    'eligibility-test', 'experience', 'needs shadow score',
+                    ARRAY[]::text[], $1::uuid, $2::uuid
+                )
+                """,
+                org_id,
+                user_id,
+            )
+        elif schedule_title == "Cognitive Planning":
+            await conn.execute(
+                """
+                INSERT INTO memories (
+                    username, type, content, tags, metadata, organization_id, user_id
+                )
+                VALUES (
+                    'eligibility-test', 'goal', 'Active goal for planning',
+                    ARRAY[]::text[], '{"status": "active"}'::jsonb,
+                    $1::uuid, $2::uuid
+                )
+                """,
+                org_id,
+                user_id,
+            )
+        else:
+            raise AssertionError(f"Unhandled schedule title: {schedule_title}")
+
+
+async def _has_work(repo, schedule_title: str, org_id: str, schedule_id: str | None = None) -> bool:
+    result = await repo.built_in_schedule_has_work(
+        schedule_title,
+        org_id,
+        schedule_id=schedule_id,
+    )
+    assert result is not None
+    return result
 
 
 @pytest_asyncio.fixture
@@ -46,6 +222,39 @@ async def cleanup_schedules(db_pool, test_organization):
     yield
     org_id = test_organization["id"]
     async with db_pool.acquire() as conn:
+        req_ids = [
+            r["id"]
+            for r in await conn.fetch(
+                "SELECT id FROM requests WHERE organization_id = $1",
+                org_id,
+            )
+        ]
+        if req_ids:
+            task_ids = [
+                r["id"]
+                for r in await conn.fetch(
+                    "SELECT id FROM tasks WHERE request_id = ANY($1)",
+                    req_ids,
+                )
+            ]
+            if task_ids:
+                await conn.execute(
+                    "DELETE FROM task_memories WHERE task_id = ANY($1)",
+                    task_ids,
+                )
+                await conn.execute(
+                    "DELETE FROM task_events WHERE task_id = ANY($1)",
+                    task_ids,
+                )
+            await conn.execute("DELETE FROM tasks WHERE request_id = ANY($1)", req_ids)
+            await conn.execute(
+                "UPDATE schedule_runs SET request_id = NULL WHERE request_id = ANY($1)",
+                req_ids,
+            )
+            await conn.execute(
+                "DELETE FROM requests WHERE organization_id = $1",
+                org_id,
+            )
         # schedule_runs cascade from schedules
         await conn.execute("DELETE FROM schedules WHERE organization_id = $1", org_id)
 
@@ -1293,3 +1502,430 @@ class TestCrossOrgScheduleIsolation:
         other_ids = [str(s["id"]) for s in other_due]
         assert str(schedule["id"]) in own_ids
         assert str(schedule["id"]) not in other_ids
+
+
+class TestBuiltInScheduleEligibility:
+    async def test_empty_built_in_checks_report_no_work(self, repo, test_organization):
+        org_id = str(test_organization["id"])
+
+        assert await repo.experience_compression_has_work(org_id) is False
+        assert await repo.learning_extraction_has_work(org_id) is False
+        assert await repo.memory_consolidation_has_work(org_id) is False
+        assert await repo.procedural_consolidation_has_work(org_id) is False
+        assert await repo.memory_vitality_scoring_has_work(org_id) is False
+        assert await repo.shadow_forget_scoring_has_work(org_id) is False
+        assert await repo.cognitive_planning_has_work(org_id) is False
+
+    async def test_cognitive_planning_ignores_nonterminal_request_activity(
+        self,
+        repo,
+        db_pool,
+        test_organization,
+        test_user,
+    ):
+        """Dispatcher-visible work is not itself a reason to run planning.
+
+        Pending/in-progress requests and tasks are handled by decomposition and
+        dispatch paths. The cognitive schedule should only fire for concrete
+        planning signals such as plannable goals, approvals/reviews, proposals,
+        messages, feedback, or other due model-backed schedules.
+        """
+        org_id = str(test_organization["id"])
+        user_id = str(test_user["id"])
+        async with db_pool.acquire() as conn:
+            request_id = await conn.fetchval(
+                """
+                INSERT INTO requests (
+                    title, description, source, status, priority,
+                    organization_id, created_by, approval_status, approved_at
+                )
+                VALUES (
+                    'Already dispatched work', 'Work that dispatch handles',
+                    'user', 'in_progress', 'medium', $1::uuid, $2::uuid,
+                    'approved', now()
+                )
+                RETURNING id
+                """,
+                org_id,
+                user_id,
+            )
+            await conn.execute(
+                """
+                INSERT INTO tasks (
+                    request_id, title, description, agent_type, status,
+                    priority, organization_id, requesting_user_id
+                )
+                VALUES (
+                    $1::uuid, 'Running task', 'Dispatch should handle this',
+                    'code', 'running', 'medium', $2::uuid, $3::uuid
+                )
+                """,
+                str(request_id),
+                org_id,
+                user_id,
+            )
+
+        assert await repo.cognitive_planning_has_work(org_id) is False
+
+    @pytest.mark.parametrize("schedule_title,agent_type", BUILT_IN_MODEL_BACKED_SCHEDULES)
+    async def test_empty_built_in_trigger_skips_without_request_task_or_dispatch(
+        self,
+        repo,
+        db_pool,
+        test_user,
+        schedule_title,
+        agent_type,
+    ):
+        """Every empty model-backed built-in records a skip before request/task creation.
+
+        The daemon's model boundary is downstream of task creation; asserting that
+        the request/task creation boundary is not touched proves there is nothing
+        for the dispatcher to run.
+        """
+        from lucent.api.deps import CurrentUser
+        from lucent.api.routers.schedules import trigger_now
+        from lucent.db.requests import RequestRepository
+
+        org_id = str(test_user["organization_id"])
+        user_id = str(test_user["id"])
+        sched = await repo.create_schedule(
+            title=schedule_title,
+            org_id=org_id,
+            schedule_type="interval",
+            interval_seconds=3600,
+            description=f"test {schedule_title}",
+            agent_type=agent_type,
+            created_by=user_id,
+        )
+        user = CurrentUser(
+            id=test_user["id"],
+            organization_id=test_user["organization_id"],
+            role=test_user["role"],
+            email=test_user["email"],
+            display_name=test_user["display_name"],
+        )
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE memories
+                SET vitality_computed_at = now()
+                WHERE organization_id = $1::uuid
+                """,
+                org_id,
+            )
+
+        assert await _has_work(repo, schedule_title, org_id, str(sched["id"])) is False
+        before_requests, before_tasks = await _count_requests_and_tasks(db_pool, org_id)
+        with (
+            patch.object(
+                RequestRepository,
+                "create_request",
+                new=AsyncMock(side_effect=AssertionError("request creation attempted")),
+            ) as create_request,
+            patch.object(
+                RequestRepository,
+                "create_task",
+                new=AsyncMock(side_effect=AssertionError("task creation attempted")),
+            ) as create_task,
+        ):
+            result = await trigger_now(str(sched["id"]), user, force=True, pool=db_pool)
+
+        assert result["skipped"] is True
+        assert result["event"] == {
+            "event_type": "schedule.skipped",
+            "schedule_id": str(sched["id"]),
+            "schedule_name": schedule_title,
+            "reason": "no_eligible_work",
+            "candidate_count": 0,
+        }
+        assert create_request.await_count == 0
+        assert create_task.await_count == 0
+
+        after_requests, after_tasks = await _count_requests_and_tasks(db_pool, org_id)
+        assert (after_requests, after_tasks) == (before_requests, before_tasks)
+
+        async with db_pool.acquire() as conn:
+            run_result = await conn.fetchval(
+                "SELECT result FROM schedule_runs WHERE schedule_id = $1::uuid",
+                str(sched["id"]),
+            )
+        recorded = json.loads(run_result)
+        assert recorded["event_type"] == "schedule.skipped"
+        assert recorded["schedule_name"] == schedule_title
+        assert recorded["reason"] == "no_eligible_work"
+
+    @pytest.mark.parametrize("schedule_title,agent_type", BUILT_IN_MODEL_BACKED_SCHEDULES)
+    async def test_non_empty_built_in_trigger_proceeds_creating_request_and_task(
+        self,
+        repo,
+        db_pool,
+        test_user,
+        monkeypatch,
+        schedule_title,
+        agent_type,
+    ):
+        from lucent.api.deps import CurrentUser
+        from lucent.api.routers.schedules import trigger_now
+
+        org_id = str(test_user["organization_id"])
+        user_id = str(test_user["id"])
+        if schedule_title == "Shadow Forget Scoring":
+            monkeypatch.setenv("LUCENT_SHADOW_FORGET_ENABLED", "true")
+        await _insert_positive_candidate(db_pool, schedule_title, org_id, user_id)
+        await _insert_agent_definition(db_pool, org_id, user_id, agent_type)
+
+        sched = await repo.create_schedule(
+            title=schedule_title,
+            org_id=org_id,
+            schedule_type="interval",
+            interval_seconds=3600,
+            description=f"test {schedule_title}",
+            agent_type=agent_type,
+            created_by=user_id,
+        )
+        user = CurrentUser(
+            id=test_user["id"],
+            organization_id=test_user["organization_id"],
+            role=test_user["role"],
+            email=test_user["email"],
+            display_name=test_user["display_name"],
+        )
+
+        assert await _has_work(repo, schedule_title, org_id, str(sched["id"])) is True
+        before_requests, before_tasks = await _count_requests_and_tasks(db_pool, org_id)
+        result = await trigger_now(str(sched["id"]), user, force=True, pool=db_pool)
+
+        assert "request" in result
+        assert result.get("skipped") is not True
+        after_requests, after_tasks = await _count_requests_and_tasks(db_pool, org_id)
+        assert after_requests == before_requests + 1
+        assert after_tasks == before_tasks + 1
+
+        async with db_pool.acquire() as conn:
+            task_row = await conn.fetchrow(
+                """
+                SELECT t.agent_type, t.title, r.title AS request_title
+                FROM tasks t
+                JOIN requests r ON r.id = t.request_id
+                WHERE r.id = $1::uuid
+                """,
+                str(result["request"]["id"]),
+            )
+        assert task_row["agent_type"] == agent_type
+        assert task_row["title"] == schedule_title
+        assert task_row["request_title"] == f"[Scheduled] {schedule_title}"
+
+    async def test_shadow_forget_positive_requires_feature_flag(
+        self,
+        repo,
+        db_pool,
+        test_user,
+        monkeypatch,
+    ):
+        org_id = str(test_user["organization_id"])
+        user_id = str(test_user["id"])
+        await _insert_positive_candidate(db_pool, "Shadow Forget Scoring", org_id, user_id)
+
+        monkeypatch.delenv("LUCENT_SHADOW_FORGET_ENABLED", raising=False)
+        assert await repo.shadow_forget_scoring_has_work(org_id) is False
+
+        monkeypatch.setenv("LUCENT_SHADOW_FORGET_ENABLED", "true")
+        assert await repo.shadow_forget_scoring_has_work(org_id) is True
+
+    async def test_experience_compression_positive_candidate(self, repo, db_pool, test_user):
+        org_id = str(test_user["organization_id"])
+        yesterday = datetime.now(timezone.utc) - timedelta(days=1)
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO memories (
+                    username, type, content, tags, organization_id, user_id,
+                    created_at, updated_at
+                )
+                VALUES (
+                    'eligibility-test', 'experience', 'older experience',
+                    ARRAY[]::text[], $1::uuid, $2::uuid, $3, $3
+                )
+                """,
+                org_id,
+                str(test_user["id"]),
+                yesterday,
+            )
+
+        assert await repo.experience_compression_has_work(org_id) is True
+
+    async def test_learning_extraction_positive_candidate(self, repo, db_pool, test_user):
+        org_id = str(test_user["organization_id"])
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO memories (
+                    username, type, content, tags, organization_id, user_id
+                )
+                VALUES (
+                    'eligibility-test', 'experience', 'validated daemon result',
+                    ARRAY['daemon-result', 'validated']::text[], $1::uuid, $2::uuid
+                )
+                """,
+                org_id,
+                str(test_user["id"]),
+            )
+
+        assert await repo.learning_extraction_has_work(org_id) is True
+
+    async def test_memory_consolidation_positive_candidate(self, repo, db_pool, test_user):
+        org_id = str(test_user["organization_id"])
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO memories (
+                    username, type, content, tags, metadata, shared,
+                    organization_id, user_id
+                )
+                VALUES (
+                    'eligibility-test', 'technical', 'technical memory missing metadata',
+                    ARRAY[]::text[], '{}'::jsonb, true, $1::uuid, $2::uuid
+                )
+                """,
+                org_id,
+                str(test_user["id"]),
+            )
+
+        assert await repo.memory_consolidation_has_work(org_id) is True
+
+    async def test_empty_trigger_skips_without_creating_request(
+        self,
+        repo,
+        db_pool,
+        test_user,
+    ):
+        from lucent.api.deps import CurrentUser
+        from lucent.api.routers.schedules import trigger_now
+
+        sched = await repo.create_schedule(
+            title="Experience Compression",
+            org_id=str(test_user["organization_id"]),
+            schedule_type="interval",
+            interval_seconds=3600,
+            description="compress experiences",
+            agent_type="memory",
+            created_by=str(test_user["id"]),
+        )
+        user = CurrentUser(
+            id=test_user["id"],
+            organization_id=test_user["organization_id"],
+            role=test_user["role"],
+            email=test_user["email"],
+            display_name=test_user["display_name"],
+        )
+
+        result = await trigger_now(str(sched["id"]), user, force=True, pool=db_pool)
+
+        assert result["skipped"] is True
+        assert result["event"] == {
+            "event_type": "schedule.skipped",
+            "schedule_id": str(sched["id"]),
+            "schedule_name": "Experience Compression",
+            "reason": "no_eligible_work",
+            "candidate_count": 0,
+        }
+        async with db_pool.acquire() as conn:
+            request_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM requests WHERE organization_id = $1::uuid",
+                str(test_user["organization_id"]),
+            )
+            run_result = await conn.fetchval(
+                "SELECT result FROM schedule_runs WHERE schedule_id = $1::uuid",
+                str(sched["id"]),
+            )
+
+        assert request_count == 0
+        assert json.loads(run_result)["event_type"] == "schedule.skipped"
+
+    async def test_non_empty_trigger_proceeds_creating_request(
+        self,
+        repo,
+        db_pool,
+        test_user,
+    ):
+        from lucent.api.deps import CurrentUser
+        from lucent.api.routers.schedules import trigger_now
+
+        org_id = str(test_user["organization_id"])
+        user_id = str(test_user["id"])
+        yesterday = datetime.now(timezone.utc) - timedelta(days=1)
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO memories (
+                    username, type, content, tags, organization_id, user_id,
+                    created_at, updated_at
+                )
+                VALUES (
+                    'eligibility-test', 'experience', 'older experience to compress',
+                    ARRAY[]::text[], $1::uuid, $2::uuid, $3, $3
+                )
+                """,
+                org_id,
+                user_id,
+                yesterday,
+            )
+            await conn.execute(
+                """
+                INSERT INTO agent_definitions (
+                    name, description, content, status, scope,
+                    organization_id, created_by, owner_user_id
+                )
+                VALUES (
+                    'memory', 'test memory agent', 'agent content', 'active', 'instance',
+                    $1::uuid, $2::uuid, $2::uuid
+                )
+                """,
+                org_id,
+                user_id,
+            )
+
+        sched = await repo.create_schedule(
+            title="Experience Compression",
+            org_id=org_id,
+            schedule_type="interval",
+            interval_seconds=3600,
+            description="compress experiences",
+            agent_type="memory",
+            created_by=user_id,
+        )
+        user = CurrentUser(
+            id=test_user["id"],
+            organization_id=test_user["organization_id"],
+            role=test_user["role"],
+            email=test_user["email"],
+            display_name=test_user["display_name"],
+        )
+
+        result = await trigger_now(str(sched["id"]), user, force=True, pool=db_pool)
+
+        assert "request" in result
+        assert result.get("skipped") is not True
+        async with db_pool.acquire() as conn:
+            request_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM requests WHERE organization_id = $1::uuid",
+                org_id,
+            )
+            task_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM tasks WHERE organization_id = $1::uuid",
+                org_id,
+            )
+        assert request_count == 1
+        assert task_count == 1
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE schedule_runs
+                SET request_id = NULL
+                WHERE request_id IN (
+                    SELECT id FROM requests WHERE organization_id = $1::uuid
+                )
+                """,
+                org_id,
+            )
+            await conn.execute("DELETE FROM requests WHERE organization_id = $1::uuid", org_id)

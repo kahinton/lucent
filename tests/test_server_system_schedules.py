@@ -9,6 +9,8 @@ Validates that the stale-task reaper operates independently of the daemon proces
 6. Daemon skips the server-side schedule
 """
 
+from unittest.mock import AsyncMock, patch
+
 import pytest_asyncio
 
 from lucent.api.system_schedules import (
@@ -140,6 +142,71 @@ class TestScheduleSeeding:
                 STALE_TASK_REAPER_TITLE,
             )
         assert count == 1
+
+
+class TestServerSystemSchedulePreflight:
+    async def test_empty_reaper_fire_records_skip_without_release_or_requests(
+        self,
+        db_pool,
+        test_organization,
+    ):
+        """Integration-style empty fire through system_schedules + db/schedules.
+
+        The server-side schedule has no model boundary by design. The important
+        empty-path invariant is that it stops at the cheap eligibility check:
+        no release operation and no request/task creation occur.
+        """
+        org_id = str(test_organization["id"])
+        await ensure_server_system_schedules()
+        await _force_schedule_due(db_pool, test_organization["id"])
+
+        async with db_pool.acquire() as conn:
+            before_requests = await conn.fetchval(
+                "SELECT COUNT(*) FROM requests WHERE organization_id = $1::uuid",
+                org_id,
+            )
+            before_tasks = await conn.fetchval(
+                "SELECT COUNT(*) FROM tasks WHERE organization_id = $1::uuid",
+                org_id,
+            )
+
+        with patch.object(
+            RequestRepository,
+            "release_stale_tasks",
+            new=AsyncMock(side_effect=AssertionError("release attempted")),
+        ) as release_stale_tasks:
+            fired = await run_server_system_schedules_once()
+
+        assert fired >= 1
+        assert release_stale_tasks.await_count == 0
+
+        async with db_pool.acquire() as conn:
+            after_requests = await conn.fetchval(
+                "SELECT COUNT(*) FROM requests WHERE organization_id = $1::uuid",
+                org_id,
+            )
+            after_tasks = await conn.fetchval(
+                "SELECT COUNT(*) FROM tasks WHERE organization_id = $1::uuid",
+                org_id,
+            )
+            run_result = await conn.fetchval(
+                """
+                SELECT result
+                FROM schedule_runs sr
+                JOIN schedules s ON s.id = sr.schedule_id
+                WHERE s.organization_id = $1::uuid
+                  AND s.title = $2
+                ORDER BY sr.started_at DESC
+                LIMIT 1
+                """,
+                org_id,
+                STALE_TASK_REAPER_TITLE,
+            )
+
+        assert (after_requests, after_tasks) == (before_requests, before_tasks)
+        assert '"event_type": "schedule.skipped"' in run_result
+        assert '"schedule_name": "Stale Task Reaper"' in run_result
+        assert '"reason": "no_stale_tasks"' in run_result
 
 
 # ── Expired Claim Release ────────────────────────────────────────────────

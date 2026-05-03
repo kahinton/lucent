@@ -2580,7 +2580,9 @@ class LucentDaemon:
                         "title": "Cognitive Planning",
                         "description": (
                             "Autonomous planning cycle — perceive state, reason about priorities, "
-                            "create requests and tasks to drive work forward."
+                            "create requests and tasks to drive work forward. Short-circuits "
+                            "with schedule.skipped when cheap state probes find no actionable "
+                            "planning signals."
                         ),
                         "agent_type": "lucent",
                         "schedule_type": "interval",
@@ -2593,7 +2595,9 @@ class LucentDaemon:
                         "description": (
                             "Autonomic memory maintenance — merge duplicate technical memories, "
                             "enforce one-memory-per-scope hierarchy, run mandatory repo→directory→filename "
-                            "metadata normalization, then verify metadata compliance."
+                            "metadata normalization, then verify metadata compliance. Short-circuits "
+                            "with schedule.skipped when there are no normalization or duplicate "
+                            "candidates."
                         ),
                         "agent_type": "memory",
                         "schedule_type": "interval",
@@ -2605,7 +2609,9 @@ class LucentDaemon:
                         "title": "Learning Extraction",
                         "description": (
                             "Process recent work results and feedback into reusable lessons. "
-                            "Integrate knowledge into existing memories rather than creating standalone entries."
+                            "Integrate knowledge into existing memories rather than creating standalone entries. "
+                            "Short-circuits with schedule.skipped when there are no unextracted "
+                            "recent result or feedback memories."
                         ),
                         "agent_type": "reflection",
                         "schedule_type": "interval",
@@ -2616,7 +2622,9 @@ class LucentDaemon:
                     {
                         "title": "Experience Compression",
                         "description": (
-                            "Daily compression of granular experience memories into concise daily digests."
+                            "Daily compression of granular experience memories into concise daily digests. "
+                            "Short-circuits with schedule.skipped when there are no eligible "
+                            "experience memories before today."
                         ),
                         "agent_type": "memory",
                         "schedule_type": "cron",
@@ -2628,7 +2636,9 @@ class LucentDaemon:
                         "title": "Memory Vitality Scoring",
                         "description": (
                             "Compute and persist memory vitality scores and lifecycle stages "
-                            "for shadow-mode observability. No search behavior changes."
+                            "for shadow-mode observability. No search behavior changes. "
+                            "Short-circuits with schedule.skipped when no memories need missing "
+                            "or stale vitality computation."
                         ),
                         "agent_type": "memory",
                         "schedule_type": "interval",
@@ -2640,7 +2650,9 @@ class LucentDaemon:
                         "title": "Shadow Forget Scoring",
                         "description": (
                             "Run Candidate-A graph-centrality pruning as shadow-only scoring. "
-                            "Writes sidecar rows and emits comparison metrics only."
+                            "Writes sidecar rows and emits comparison metrics only. Short-circuits "
+                            "with schedule.skipped when shadow forgetting is disabled or no "
+                            "memories need fresh sidecar scores."
                         ),
                         "agent_type": "memory",
                         "schedule_type": "interval",
@@ -3143,6 +3155,13 @@ class LucentDaemon:
             "above request, then return your summary."
         )
 
+    def request_decomposition_backfill_has_work(
+        self,
+        candidates: list[dict[str, Any]],
+    ) -> bool:
+        """True when the periodic decomposition backfill has queued candidates."""
+        return bool(candidates)
+
     async def _backfill_pending_decomposition(
         self,
         *,
@@ -3208,7 +3227,19 @@ class LucentDaemon:
                 continue
             filtered.append(req)
         candidates = filtered
-        if not candidates:
+        if not self.request_decomposition_backfill_has_work(candidates):
+            log(
+                json.dumps(
+                    {
+                        "event_type": "schedule.skipped",
+                        "schedule_name": "Request Decomposition Backfill",
+                        "reason": "no_undecomposed_requests",
+                        "candidate_count": 0,
+                    },
+                    sort_keys=True,
+                ),
+                "INFO",
+            )
             return 0
 
         # Build the system message once — same context as a normal sub-agent.

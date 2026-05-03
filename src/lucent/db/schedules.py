@@ -467,6 +467,305 @@ class ScheduleRepository:
             )
             return [dict(r) for r in rows]
 
+    # ── Built-in schedule eligibility checks ───────────────────────────────
+
+    async def built_in_schedule_has_work(
+        self,
+        title: str,
+        org_id: str,
+        *,
+        schedule_id: str | None = None,
+    ) -> bool | None:
+        """Return whether a built-in schedule has actionable work.
+
+        ``None`` means the schedule is not a known model-backed built-in and
+        should proceed through the normal generic trigger path.
+        """
+        if title == "Experience Compression":
+            return await self.experience_compression_has_work(org_id)
+        if title == "Learning Extraction":
+            return await self.learning_extraction_has_work(org_id, schedule_id=schedule_id)
+        if title == "Memory Consolidation":
+            return await self.memory_consolidation_has_work(org_id)
+        if title == "Procedural Consolidation":
+            return await self.procedural_consolidation_has_work(org_id)
+        if title == "Memory Vitality Scoring":
+            return await self.memory_vitality_scoring_has_work(org_id)
+        if title == "Shadow Forget Scoring":
+            return await self.shadow_forget_scoring_has_work(org_id)
+        if title == "Cognitive Planning":
+            return await self.cognitive_planning_has_work(org_id, schedule_id=schedule_id)
+        return None
+
+    async def experience_compression_has_work(self, org_id: str) -> bool:
+        """True when there are compressible experience memories before today."""
+        async with self.pool.acquire() as conn:
+            count = await conn.fetchval(
+                """
+                SELECT COUNT(*)
+                FROM memories
+                WHERE organization_id = $1::uuid
+                  AND type = 'experience'
+                  AND deleted_at IS NULL
+                  AND COALESCE(lifecycle_stage, 'active') = 'active'
+                  AND created_at < date_trunc('day', now())
+                  AND NOT (
+                      COALESCE(tags, '{}'::text[])
+                      && ARRAY[
+                          'daily-digest', 'pinned', 'do_not_consolidate',
+                          'heartbeat', 'state', 'telemetry'
+                      ]::text[]
+                  )
+                """,
+                org_id,
+            )
+        return int(count or 0) > 0
+
+    async def learning_extraction_has_work(
+        self,
+        org_id: str,
+        *,
+        schedule_id: str | None = None,
+    ) -> bool:
+        """True when recent results/feedback/rejection lessons need extraction."""
+        async with self.pool.acquire() as conn:
+            count = await conn.fetchval(
+                """
+                WITH last_run AS (
+                    SELECT COALESCE(
+                        (
+                            SELECT max(completed_at)
+                            FROM schedule_runs
+                            WHERE schedule_id = $2::uuid
+                              AND status = 'completed'
+                              AND completed_at IS NOT NULL
+                        ),
+                        now() - interval '7 days'
+                    ) AS since
+                    WHERE $2::uuid IS NOT NULL
+                    UNION ALL
+                    SELECT now() - interval '7 days'
+                    WHERE $2::uuid IS NULL
+                )
+                SELECT COUNT(*)
+                FROM memories, last_run
+                WHERE organization_id = $1::uuid
+                  AND deleted_at IS NULL
+                  AND COALESCE(lifecycle_stage, 'active') = 'active'
+                  AND updated_at >= last_run.since
+                  AND (
+                      COALESCE(tags, '{}'::text[])
+                      && ARRAY[
+                          'daemon-result', 'rejection-lesson',
+                          'feedback-rejected', 'feedback-approved', 'validated'
+                      ]::text[]
+                  )
+                  AND NOT ('lesson-extracted' = ANY(COALESCE(tags, '{}'::text[])))
+                  AND NOT (
+                      COALESCE(tags, '{}'::text[])
+                      && ARRAY['heartbeat', 'state', 'telemetry']::text[]
+                  )
+                """,
+                org_id,
+                schedule_id,
+            )
+        return int(count or 0) > 0
+
+    async def memory_consolidation_has_work(self, org_id: str) -> bool:
+        """True when technical memories need metadata normalization or merge."""
+        async with self.pool.acquire() as conn:
+            count = await conn.fetchval(
+                """
+                WITH candidates AS (
+                    SELECT id,
+                           lower(nullif(metadata->>'repo', '')) AS repo,
+                           lower(nullif(metadata->>'directory', '')) AS directory,
+                           lower(nullif(metadata->>'filename', '')) AS filename,
+                           nullif(metadata->>'category', '') AS category
+                    FROM memories
+                    WHERE organization_id = $1::uuid
+                      AND type = 'technical'
+                      AND shared IS TRUE
+                      AND deleted_at IS NULL
+                      AND COALESCE(lifecycle_stage, 'active') = 'active'
+                      AND NOT (
+                          COALESCE(tags, '{}'::text[])
+                          && ARRAY[
+                              'pinned', 'do_not_consolidate', 'daily-digest',
+                              'maintenance', 'task-report', 'heartbeat',
+                              'state', 'telemetry'
+                          ]::text[]
+                      )
+                ),
+                normalization AS (
+                    SELECT COUNT(*) AS n
+                    FROM candidates
+                    WHERE repo IS NULL
+                       OR directory IS NULL
+                       OR filename IS NULL
+                       OR category IS NULL
+                ),
+                duplicates AS (
+                    SELECT COUNT(*) AS n
+                    FROM (
+                        SELECT repo, directory, filename
+                        FROM candidates
+                        WHERE repo IS NOT NULL
+                          AND directory IS NOT NULL
+                          AND filename IS NOT NULL
+                        GROUP BY repo, directory, filename
+                        HAVING COUNT(*) > 1
+                    ) dupes
+                )
+                SELECT (SELECT n FROM normalization) + (SELECT n FROM duplicates)
+                """,
+                org_id,
+            )
+        return int(count or 0) > 0
+
+    async def procedural_consolidation_has_work(self, org_id: str) -> bool:
+        """True when legacy procedural/skill entries need consolidation."""
+        async with self.pool.acquire() as conn:
+            count = await conn.fetchval(
+                """
+                WITH procedural_memories AS (
+                    SELECT id, lower(left(content, 160)) AS fingerprint
+                    FROM memories
+                    WHERE organization_id = $1::uuid
+                      AND deleted_at IS NULL
+                      AND COALESCE(lifecycle_stage, 'active') = 'active'
+                      AND (
+                          type = 'procedural'
+                          OR COALESCE(tags, '{}'::text[])
+                             && ARRAY[
+                                 'procedure', 'procedural', 'skill',
+                                 'daemon-task-procedure'
+                             ]::text[]
+                      )
+                      AND NOT (
+                          COALESCE(tags, '{}'::text[])
+                          && ARRAY['pinned', 'do_not_consolidate']::text[]
+                      )
+                ),
+                flagged_memories AS (
+                    SELECT COUNT(*) AS n
+                    FROM memories
+                    WHERE organization_id = $1::uuid
+                      AND deleted_at IS NULL
+                      AND COALESCE(lifecycle_stage, 'active') = 'active'
+                      AND COALESCE(tags, '{}'::text[])
+                          && ARRAY[
+                              'needs-merge', 'needs-archive',
+                              'needs-canonicalization'
+                          ]::text[]
+                ),
+                duplicate_memories AS (
+                    SELECT COUNT(*) AS n
+                    FROM (
+                        SELECT fingerprint
+                        FROM procedural_memories
+                        GROUP BY fingerprint
+                        HAVING COUNT(*) > 1
+                    ) dupes
+                ),
+                duplicate_skills AS (
+                    SELECT COUNT(*) AS n
+                    FROM (
+                        SELECT lower(name) AS name_key
+                        FROM skill_definitions
+                        WHERE organization_id = $1::uuid
+                          AND status NOT IN ('rejected', 'archived')
+                        GROUP BY lower(name)
+                        HAVING COUNT(*) > 1
+                    ) dupes
+                )
+                SELECT (SELECT n FROM flagged_memories)
+                     + (SELECT n FROM duplicate_memories)
+                     + (SELECT n FROM duplicate_skills)
+                """,
+                org_id,
+            )
+        return int(count or 0) > 0
+
+    async def memory_vitality_scoring_has_work(self, org_id: str) -> bool:
+        """True when a non-forgotten memory needs missing or stale vitality."""
+        async with self.pool.acquire() as conn:
+            count = await conn.fetchval(
+                """
+                SELECT COUNT(*)
+                FROM memories
+                WHERE organization_id = $1::uuid
+                  AND deleted_at IS NULL
+                  AND COALESCE(lifecycle_stage, 'active') != 'forgotten'
+                  AND (
+                      vitality_computed_at IS NULL
+                      OR vitality_computed_at < updated_at
+                      OR vitality_computed_at < now() - interval '6 hours'
+                  )
+                """,
+                org_id,
+            )
+        return int(count or 0) > 0
+
+    async def shadow_forget_scoring_has_work(self, org_id: str) -> bool:
+        """True when shadow forgetting is enabled and fresh sidecar scores are missing."""
+        from lucent.settings import shadow_forget_enabled
+
+        if not shadow_forget_enabled():
+            return False
+        async with self.pool.acquire() as conn:
+            count = await conn.fetchval(
+                """
+                SELECT COUNT(*)
+                FROM memories m
+                WHERE m.organization_id = $1::uuid
+                  AND m.deleted_at IS NULL
+                  AND COALESCE(m.lifecycle_stage, 'active') != 'forgotten'
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM memory_shadow_scores s
+                      WHERE s.memory_id = m.id
+                        AND s.strategy = 'gcp-v1'
+                        AND s.computed_at >= now() - interval '6 hours'
+                  )
+                """,
+                org_id,
+            )
+        return int(count or 0) > 0
+
+    async def cognitive_planning_has_work(
+        self,
+        org_id: str,
+        *,
+        schedule_id: str | None = None,
+    ) -> bool:
+        """True when cognitive fan-out has work it can actually process.
+
+        The scheduled cognitive task is dispatched through the daemon's
+        per-user goal/rejection fan-out path.  Dispatcher-visible requests,
+        reviews, proposed definitions, and generic feedback are handled by
+        other loops; counting them here creates empty Cognitive Planning
+        requests that immediately discover ``targets=0``.  Keep this predicate
+        aligned with ``LucentDaemon._run_cognitive_planning_fanout``.
+        """
+        async with self.pool.acquire() as conn:
+            signal_count = await conn.fetchval(
+                """
+                SELECT COUNT(*)
+                FROM requests
+                WHERE organization_id = $1::uuid
+                  AND status = 'rejection_processing'
+                """,
+                org_id,
+            )
+        if int(signal_count or 0) > 0:
+            return True
+
+        from lucent.db.requests import RequestRepository
+
+        targets = await RequestRepository(self.pool).list_planning_targets(org_id, limit=1)
+        return bool(targets)
+
     async def mark_schedule_run(
         self, schedule_id: str, request_id: str | None = None, *, force: bool = False
     ) -> dict | None:
