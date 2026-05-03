@@ -5,11 +5,158 @@ Each run creates a tracked request for full lineage.
 """
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from asyncpg import Pool
+
+_REPO_TAG_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+_REPO_IN_TEXT_RE = re.compile(r"\b([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)\b")
+_FILE_HEADING_RE = re.compile(r"(?im)^\s*#+\s*(?:File|Filename):\s*`?([^`\n]+?)`?\s*$")
+_DIRECTORY_HEADING_RE = re.compile(
+    r"(?im)^\s*#+\s*(?:Directory|Module):\s*`?([^`\n]+?)`?\s*$"
+)
+_REPOSITORY_HEADING_RE = re.compile(
+    r"(?im)^\s*#+\s*(?:Repository:\s*)?[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+[^\n]*(?:Repository|repo)\s+(?:Overview|architecture)"
+)
+_PATH_IN_TEXT_RE = re.compile(
+    r"`((?:\.github|daemon|deploy|docker|docs|examples|scripts|src|tests|migrations|app)/[^`\s,)]+)`"
+)
+_NON_CATEGORY_TAGS = {
+    "codebase",
+    "codebase-knowledge",
+    "daemon",
+    "lesson-extracted",
+    "needs-review",
+    "technical",
+    "validated",
+}
+
+
+def _clean_path(value: str | None) -> str | None:
+    if not value:
+        return None
+    cleaned = value.strip().strip("`'\" ")
+    cleaned = cleaned.removeprefix("./")
+    return cleaned or None
+
+
+def _looks_like_file_path(path: str | None) -> bool:
+    if not path:
+        return False
+    name = path.rstrip("/").rsplit("/", 1)[-1]
+    return "." in name and not path.endswith("/")
+
+
+def _parent_directory(filename: str) -> str | None:
+    if "/" not in filename:
+        return None
+    return filename.rsplit("/", 1)[0] + "/"
+
+
+def _normalize_directory(path: str | None) -> str | None:
+    cleaned = _clean_path(path)
+    if not cleaned:
+        return None
+    if _looks_like_file_path(cleaned):
+        return _parent_directory(cleaned)
+    return cleaned.rstrip("/") + "/"
+
+
+def _category_from(tags: list[str], metadata: dict[str, Any], directory: str | None) -> str:
+    existing = str(metadata.get("category") or "").strip()
+    if existing:
+        return existing
+    for tag in tags:
+        normalized = tag.strip().lower()
+        if (
+            normalized
+            and normalized not in _NON_CATEGORY_TAGS
+            and not _REPO_TAG_RE.match(normalized)
+        ):
+            return normalized[:64]
+    if directory:
+        top = directory.split("/", 1)[0]
+        return {
+            ".github": "workflow",
+            "daemon": "daemon",
+            "docs": "documentation",
+            "tests": "testing",
+            "src": "architecture",
+        }.get(top, top or "architecture")
+    return "architecture"
+
+
+def _derive_codebase_metadata(row: dict[str, Any]) -> dict[str, Any] | None:
+    """Derive repo/directory/filename/category for a technical memory.
+
+    Returns ``None`` when there is not enough evidence that this is codebase
+    knowledge. That keeps general technical lessons out of repo hierarchy
+    normalization instead of forcing guessed metadata onto them.
+    """
+    raw_metadata = row.get("metadata") or {}
+    if isinstance(raw_metadata, str):
+        try:
+            raw_metadata = json.loads(raw_metadata)
+        except json.JSONDecodeError:
+            raw_metadata = {}
+    metadata = dict(raw_metadata or {})
+    tags = [str(t) for t in (row.get("tags") or [])]
+    content = str(row.get("content") or "")
+
+    repo = str(metadata.get("repo") or "").strip() or None
+    if not repo:
+        repo = next((tag for tag in tags if _REPO_TAG_RE.match(tag)), None)
+    if not repo:
+        match = _REPO_IN_TEXT_RE.search(content[:1000])
+        repo = match.group(1) if match else None
+    if not repo:
+        return None
+
+    filename = _clean_path(str(metadata.get("filename") or "") or None)
+    directory = _normalize_directory(str(metadata.get("directory") or "") or None)
+    file_heading = None
+    file_match = _FILE_HEADING_RE.search(content[:1000])
+    if file_match:
+        file_heading = _clean_path(file_match.group(1))
+    directory_heading = None
+    directory_match = _DIRECTORY_HEADING_RE.search(content[:1000])
+    if directory_match:
+        directory_heading = _normalize_directory(directory_match.group(1))
+    repo_heading = bool(_REPOSITORY_HEADING_RE.search(content[:1000]))
+
+    if file_heading:
+        filename = file_heading
+        directory = _parent_directory(filename)
+    elif directory_heading:
+        filename = None
+        directory = directory_heading
+    elif repo_heading:
+        filename = None
+        directory = None
+
+    if not filename and not directory and not repo_heading:
+        match = _PATH_IN_TEXT_RE.search(content[:1200])
+        if match and _looks_like_file_path(match.group(1)):
+            filename = _clean_path(match.group(1))
+    if filename:
+        directory = _parent_directory(filename)
+    elif not directory and not repo_heading:
+        if directory_heading:
+            directory = directory_heading
+        else:
+            match = _PATH_IN_TEXT_RE.search(content[:1200])
+            if match:
+                directory = _normalize_directory(match.group(1))
+
+    normalized = dict(metadata)
+    normalized["repo"] = repo
+    normalized["directory"] = directory
+    normalized["filename"] = filename
+    normalized["category"] = _category_from(tags, metadata, directory)
+    return normalized
 
 ALLOWED_SCHEDULE_COLUMNS = frozenset(
     {
@@ -577,11 +724,7 @@ class ScheduleRepository:
             count = await conn.fetchval(
                 """
                 WITH candidates AS (
-                    SELECT id,
-                           lower(nullif(metadata->>'repo', '')) AS repo,
-                           lower(nullif(metadata->>'directory', '')) AS directory,
-                           lower(nullif(metadata->>'filename', '')) AS filename,
-                           nullif(metadata->>'category', '') AS category
+                    SELECT id, metadata
                     FROM memories
                     WHERE organization_id = $1::uuid
                       AND type = 'technical'
@@ -596,23 +739,35 @@ class ScheduleRepository:
                               'state', 'telemetry'
                           ]::text[]
                       )
+                      AND (
+                          nullif(metadata->>'repo', '') IS NOT NULL
+                          OR EXISTS (
+                              SELECT 1
+                              FROM unnest(COALESCE(tags, '{}'::text[])) tag
+                              WHERE tag ~ '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
+                          )
+                          OR content ~* '(^|\\n)\\s*#+\\s*(Repository|Directory|Module|File|Filename):'
+                          OR content ~ '`(\\.github|daemon|deploy|docker|docs|examples|scripts|src|tests|migrations|app)/'
+                      )
                 ),
                 normalization AS (
                     SELECT COUNT(*) AS n
                     FROM candidates
-                    WHERE repo IS NULL
-                       OR directory IS NULL
-                       OR filename IS NULL
-                       OR category IS NULL
+                    WHERE nullif(metadata->>'repo', '') IS NULL
+                       OR NOT (metadata ? 'directory')
+                       OR NOT (metadata ? 'filename')
+                       OR nullif(metadata->>'category', '') IS NULL
                 ),
                 duplicates AS (
                     SELECT COUNT(*) AS n
                     FROM (
-                        SELECT repo, directory, filename
+                        SELECT lower(metadata->>'repo') AS repo,
+                               lower(COALESCE(metadata->>'directory', '')) AS directory,
+                               lower(COALESCE(metadata->>'filename', '')) AS filename
                         FROM candidates
-                        WHERE repo IS NOT NULL
-                          AND directory IS NOT NULL
-                          AND filename IS NOT NULL
+                        WHERE nullif(metadata->>'repo', '') IS NOT NULL
+                          AND metadata ? 'directory'
+                          AND metadata ? 'filename'
                         GROUP BY repo, directory, filename
                         HAVING COUNT(*) > 1
                     ) dupes
@@ -622,6 +777,166 @@ class ScheduleRepository:
                 org_id,
             )
         return int(count or 0) > 0
+
+    async def run_memory_consolidation_metadata_normalization(
+        self,
+        org_id: str,
+        *,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        """Run deterministic metadata normalization for codebase technical memories.
+
+        This handles the high-signal, non-LLM part of Memory Consolidation:
+        making sure every codebase technical memory has explicit
+        ``repo``, ``directory``, ``filename``, and ``category`` metadata keys.
+        Semantic duplicate merging remains a separate concern.
+        """
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT id, content, tags, metadata
+                FROM memories
+                WHERE organization_id = $1::uuid
+                  AND type = 'technical'
+                  AND shared IS TRUE
+                  AND deleted_at IS NULL
+                  AND COALESCE(lifecycle_stage, 'active') = 'active'
+                  AND NOT (
+                      COALESCE(tags, '{}'::text[])
+                      && ARRAY[
+                          'pinned', 'do_not_consolidate', 'daily-digest',
+                          'maintenance', 'task-report', 'heartbeat',
+                          'state', 'telemetry'
+                      ]::text[]
+                  )
+                  AND (
+                      nullif(metadata->>'repo', '') IS NOT NULL
+                      OR EXISTS (
+                          SELECT 1
+                          FROM unnest(COALESCE(tags, '{}'::text[])) tag
+                          WHERE tag ~ '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
+                      )
+                      OR content ~* '(^|\\n)\\s*#+\\s*(Repository|Directory|Module|File|Filename):'
+                      OR content ~ '`(\\.github|daemon|deploy|docker|docs|examples|scripts|src|tests|migrations|app)/'
+                  )
+                ORDER BY updated_at DESC
+                LIMIT $2
+                """,
+                org_id,
+                limit,
+            )
+
+            planned = 0
+            executed = 0
+            skipped = 0
+            updated_ids: list[str] = []
+            for row in rows:
+                planned += 1
+                normalized = _derive_codebase_metadata(dict(row))
+                if not normalized:
+                    skipped += 1
+                    continue
+                if normalized == dict(row["metadata"] or {}):
+                    continue
+                updated = await conn.fetchval(
+                    """
+                    UPDATE memories
+                    SET metadata = $2::text::jsonb,
+                        updated_at = now(),
+                        version = version + 1
+                    WHERE id = $1::uuid
+                      AND deleted_at IS NULL
+                    RETURNING id::text
+                    """,
+                    str(row["id"]),
+                    json.dumps(normalized),
+                )
+                if updated:
+                    executed += 1
+                    updated_ids.append(str(updated))
+
+            remaining_normalization = await conn.fetchval(
+                """
+                WITH candidates AS (
+                    SELECT id, metadata
+                    FROM memories
+                    WHERE organization_id = $1::uuid
+                      AND type = 'technical'
+                      AND shared IS TRUE
+                      AND deleted_at IS NULL
+                      AND COALESCE(lifecycle_stage, 'active') = 'active'
+                      AND NOT (
+                          COALESCE(tags, '{}'::text[])
+                          && ARRAY[
+                              'pinned', 'do_not_consolidate', 'daily-digest',
+                              'maintenance', 'task-report', 'heartbeat',
+                              'state', 'telemetry'
+                          ]::text[]
+                      )
+                      AND (
+                          nullif(metadata->>'repo', '') IS NOT NULL
+                          OR EXISTS (
+                              SELECT 1
+                              FROM unnest(COALESCE(tags, '{}'::text[])) tag
+                              WHERE tag ~ '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
+                          )
+                          OR content ~* '(^|\\n)\\s*#+\\s*(Repository|Directory|Module|File|Filename):'
+                          OR content ~ '`(\\.github|daemon|deploy|docker|docs|examples|scripts|src|tests|migrations|app)/'
+                      )
+                )
+                SELECT COUNT(*)
+                FROM candidates
+                WHERE nullif(metadata->>'repo', '') IS NULL
+                   OR NOT (metadata ? 'directory')
+                   OR NOT (metadata ? 'filename')
+                   OR nullif(metadata->>'category', '') IS NULL
+                """,
+                org_id,
+            )
+            remaining_duplicate_groups = await conn.fetchval(
+                """
+                WITH candidates AS (
+                    SELECT metadata
+                    FROM memories
+                    WHERE organization_id = $1::uuid
+                      AND type = 'technical'
+                      AND shared IS TRUE
+                      AND deleted_at IS NULL
+                      AND COALESCE(lifecycle_stage, 'active') = 'active'
+                      AND nullif(metadata->>'repo', '') IS NOT NULL
+                      AND metadata ? 'directory'
+                      AND metadata ? 'filename'
+                      AND NOT (
+                          COALESCE(tags, '{}'::text[])
+                          && ARRAY[
+                              'pinned', 'do_not_consolidate', 'daily-digest',
+                              'maintenance', 'task-report', 'heartbeat',
+                              'state', 'telemetry'
+                          ]::text[]
+                      )
+                )
+                SELECT COUNT(*)
+                FROM (
+                    SELECT lower(metadata->>'repo') AS repo,
+                           lower(COALESCE(metadata->>'directory', '')) AS directory,
+                           lower(COALESCE(metadata->>'filename', '')) AS filename
+                    FROM candidates
+                    GROUP BY repo, directory, filename
+                    HAVING COUNT(*) > 1
+                ) dupes
+                """,
+                org_id,
+            )
+
+        return {
+            "event_type": "memory_consolidation.metadata_normalization",
+            "planned_operations": planned,
+            "executed_write_operations": executed,
+            "skipped_non_codebase": skipped,
+            "remaining_normalization_candidates": int(remaining_normalization or 0),
+            "remaining_duplicate_groups": int(remaining_duplicate_groups or 0),
+            "updated_memory_ids": updated_ids,
+        }
 
     async def procedural_consolidation_has_work(self, org_id: str) -> bool:
         """True when legacy procedural/skill entries need consolidation."""
