@@ -143,6 +143,7 @@ class TaskCreate(BaseModel):
     priority: str = Field(default="medium", pattern=r"^(low|medium|high|urgent)$")
     sequence_order: int = Field(default=0, ge=0)
     model: str | None = None
+    reasoning_effort: str | None = Field(default=None, max_length=64)
     sandbox_template_id: str | None = None  # Reference a saved sandbox template
     sandbox_config: dict | None = None  # Or inline sandbox config (template takes precedence)
     output_contract: dict | None = None  # Optional structured output contract (JSON Schema)
@@ -560,11 +561,16 @@ async def create_task(
 
     # Validate model against registry (matches MCP create_task behavior)
     if body.model:
-        from lucent.model_registry import validate_model
+        from lucent.model_registry import validate_model, validate_reasoning_effort
 
         error = validate_model(body.model, require_tools=True)
         if error:
             raise HTTPException(422, error)
+        effort_error = validate_reasoning_effort(body.model, body.reasoning_effort)
+        if effort_error:
+            raise HTTPException(422, effort_error)
+    elif body.reasoning_effort:
+        raise HTTPException(422, "reasoning_effort requires model")
 
     # Validate that agent_type or agent_definition_id resolves to an approved definition
     def_repo = DefinitionRepository(pool)
@@ -621,6 +627,7 @@ async def create_task(
             priority=body.priority,
             sequence_order=body.sequence_order,
             model=body.model,
+            reasoning_effort=body.reasoning_effort,
             sandbox_template_id=body.sandbox_template_id,
             sandbox_config=body.sandbox_config,
             requesting_user_id=str(req["created_by"]) if req.get("created_by") else None,
@@ -662,6 +669,7 @@ async def claim_task(
 
 class TaskModelBody(BaseModel):
     model: str
+    reasoning_effort: str | None = Field(default=None, max_length=64)
 
 
 @router.post("/tasks/{task_id}/model")
@@ -676,7 +684,18 @@ async def update_task_model(
     repo = RequestRepository(pool)
     task, req = await _get_task_and_request(repo, str(task_id), str(user.organization_id))
     _require_request_mutation(req, user)
+    from lucent.model_registry import validate_model, validate_reasoning_effort
+
+    error = validate_model(body.model, require_tools=True)
+    if error:
+        raise HTTPException(422, error)
+    effort_error = validate_reasoning_effort(body.model, body.reasoning_effort)
+    if effort_error:
+        raise HTTPException(422, effort_error)
+
     result = await repo.update_task_model(str(task_id), body.model)
+    if result:
+        result = await repo.update_task_reasoning_effort(str(task_id), body.reasoning_effort)
     if not result:
         raise HTTPException(404, "Task not found")
     return result
@@ -686,6 +705,7 @@ class TaskEditBody(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=512)
     description: str | None = None
     model: str | None = None
+    reasoning_effort: str | None = Field(default=None, max_length=64)
     agent_type: str | None = None
     sandbox_template_id: str | None = None
     clear_sandbox_template: bool = False
@@ -722,11 +742,16 @@ async def edit_pending_task(
         )
 
     if body.model:
-        from lucent.model_registry import validate_model
+        from lucent.model_registry import validate_model, validate_reasoning_effort
 
         error = validate_model(body.model, require_tools=True)
         if error:
             raise HTTPException(422, error)
+        effort_error = validate_reasoning_effort(body.model, body.reasoning_effort)
+        if effort_error:
+            raise HTTPException(422, effort_error)
+    elif body.reasoning_effort:
+        raise HTTPException(422, "reasoning_effort requires model")
 
     if body.agent_type:
         def_repo = DefinitionRepository(pool)
@@ -766,12 +791,17 @@ async def edit_pending_task(
             # Sandbox templates module optional in some deployments
             pass
 
+    next_reasoning_effort = (
+        body.reasoning_effort if body.model is None else (body.reasoning_effort or "")
+    )
+
     result = await repo.update_pending_task(
         str(task_id),
         org_id,
         title=body.title,
         description=body.description,
         model=body.model,
+        reasoning_effort=next_reasoning_effort,
         agent_type=body.agent_type,
         sandbox_template_id=body.sandbox_template_id if not body.clear_sandbox_template else None,
         clear_sandbox_template=body.clear_sandbox_template,

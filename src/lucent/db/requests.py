@@ -1355,6 +1355,7 @@ class RequestRepository:
         priority: str = "medium",
         sequence_order: int = 0,
         model: str | None = None,
+        reasoning_effort: str | None = None,
         sandbox_template_id: str | None = None,
         sandbox_config: dict | None = None,
         requesting_user_id: str | None = None,
@@ -1366,15 +1367,15 @@ class RequestRepository:
             row = await conn.fetchrow(
                 """INSERT INTO tasks
                    (request_id, parent_task_id, title, description, agent_type,
-                     agent_definition_id, priority, sequence_order, organization_id,
-                     model, sandbox_template_id, sandbox_config, requesting_user_id,
-                     output_contract)
+                    agent_definition_id, priority, sequence_order, organization_id,
+                    model, reasoning_effort, sandbox_template_id, sandbox_config,
+                    requesting_user_id, output_contract)
                    VALUES (
-                     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-                     COALESCE($13, (SELECT created_by FROM requests WHERE id = $1)),
-                     $14
-                    )
-                    RETURNING *""",
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+                    COALESCE($14, (SELECT created_by FROM requests WHERE id = $1)),
+                    $15
+                   )
+                   RETURNING *""",
                 UUID(request_id),
                 UUID(parent_task_id) if parent_task_id else None,
                 title,
@@ -1385,6 +1386,7 @@ class RequestRepository:
                 sequence_order,
                 UUID(org_id),
                 model,
+                reasoning_effort,
                 UUID(sandbox_template_id) if sandbox_template_id else None,
                 (json.dumps(sandbox_config) if isinstance(sandbox_config, dict)
                  else sandbox_config if isinstance(sandbox_config, str) and sandbox_config
@@ -1858,6 +1860,23 @@ class RequestRepository:
             )
         return dict(row) if row else None
 
+    async def update_task_reasoning_effort(
+        self,
+        task_id: str,
+        reasoning_effort: str | None,
+    ) -> dict | None:
+        """Write the resolved reasoning effort back to the task record."""
+        now = datetime.now(timezone.utc)
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """UPDATE tasks SET reasoning_effort = $1, updated_at = $2
+                   WHERE id = $3 RETURNING *""",
+                reasoning_effort,
+                now,
+                UUID(task_id),
+            )
+        return dict(row) if row else None
+
     # Statuses where the task is in flight or already finalized successfully.
     # Anything else (pending, planned, failed, cancelled, needs_review, etc.)
     # is safe to edit because the daemon won't be actively executing it.
@@ -1871,6 +1890,7 @@ class RequestRepository:
         title: str | None = None,
         description: str | None = None,
         model: str | None = None,
+        reasoning_effort: str | None = None,
         agent_type: str | None = None,
         sandbox_template_id: str | None = None,
         clear_sandbox_template: bool = False,
@@ -1896,6 +1916,9 @@ class RequestRepository:
         if model is not None:
             params.append(model)
             sets.append(f"model = ${len(params)}")
+        if reasoning_effort is not None:
+            params.append(reasoning_effort or None)
+            sets.append(f"reasoning_effort = ${len(params)}")
         if agent_type is not None:
             params.append(agent_type)
             sets.append(f"agent_type = ${len(params)}")

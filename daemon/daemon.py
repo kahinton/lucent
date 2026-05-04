@@ -1363,6 +1363,7 @@ class RequestAPI:
         priority: str = "medium",
         sequence_order: int = 0,
         model: str | None = None,
+        reasoning_effort: str | None = None,
         output_contract: dict | None = None,
     ) -> dict | None:
         body = {"title": title, "priority": priority, "sequence_order": sequence_order}
@@ -1372,6 +1373,8 @@ class RequestAPI:
             body["description"] = description
         if model:
             body["model"] = model
+        if reasoning_effort:
+            body["reasoning_effort"] = reasoning_effort
         if output_contract:
             body["output_contract"] = output_contract
         try:
@@ -1549,11 +1552,20 @@ class RequestAPI:
 
     @staticmethod
     async def update_task_model(task_id: str, model: str) -> dict | None:
+        return await RequestAPI.update_task_model_settings(task_id, model=model)
+
+    @staticmethod
+    async def update_task_model_settings(
+        task_id: str,
+        *,
+        model: str,
+        reasoning_effort: str | None = None,
+    ) -> dict | None:
         try:
             async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
                 resp = await client.post(
                     f"{API_BASE}/requests/tasks/{task_id}/model",
-                    json={"model": model},
+                    json={"model": model, "reasoning_effort": reasoning_effort},
                     headers=API_HEADERS,
                 )
                 if resp.status_code == 200:
@@ -3530,6 +3542,7 @@ class LucentDaemon:
         system_message: str,
         prompt: str,
         model: str | None = None,
+        reasoning_effort: str | None = None,
         mcp_config_override: dict | None = None,
     ) -> str | None:
         """Run a single Copilot session with the given system message and prompt.
@@ -3547,7 +3560,8 @@ class LucentDaemon:
             return None
 
         selected_model = _resolve_default_model(model)
-        log(f"Starting session: {name} (model: {selected_model})")
+        effort_label = f", reasoning_effort: {reasoning_effort}" if reasoning_effort else ""
+        log(f"Starting session: {name} (model: {selected_model}{effort_label})")
         start_time = time.time()
         status = "success"
 
@@ -3573,13 +3587,18 @@ class LucentDaemon:
         try:
             while True:
                 try:
+                    inner_kwargs = {
+                        "model": selected_model,
+                        "mcp_config_override": mcp_config_override,
+                    }
+                    if reasoning_effort:
+                        inner_kwargs["reasoning_effort"] = reasoning_effort
                     result = await asyncio.wait_for(
                         self._run_session_inner(
                             name,
                             system_message,
                             prompt,
-                            model=selected_model,
-                            mcp_config_override=mcp_config_override,
+                            **inner_kwargs,
                         ),
                         timeout=SESSION_TOTAL_TIMEOUT,
                     )
@@ -3651,6 +3670,7 @@ class LucentDaemon:
         system_message: str,
         prompt: str,
         model: str | None = None,
+        reasoning_effort: str | None = None,
         mcp_config_override: dict | None = None,
     ) -> str | None:
         """Inner session runner — uses the LLM engine abstraction.
@@ -3668,6 +3688,7 @@ class LucentDaemon:
                 system_message,
                 prompt,
                 selected_model,
+                reasoning_effort=reasoning_effort,
                 mcp_config_override=effective_mcp,
             )
         elif _COPILOT_SDK_AVAILABLE:
@@ -3676,6 +3697,7 @@ class LucentDaemon:
                 system_message,
                 prompt,
                 selected_model,
+                reasoning_effort=reasoning_effort,
                 mcp_config_override=mcp_config_override,
             )
         else:
@@ -3704,6 +3726,7 @@ class LucentDaemon:
         system_message: str,
         prompt: str,
         model: str,
+        reasoning_effort: str | None = None,
         mcp_config_override: dict | None = None,
     ) -> str | None:
         """Run session using the LLM engine abstraction layer."""
@@ -3765,6 +3788,7 @@ class LucentDaemon:
                 on_event=on_event,
                 timeout=SESSION_TOTAL_TIMEOUT,
                 idle_timeout=SESSION_IDLE_TIMEOUT,
+                reasoning_effort=reasoning_effort,
             )
 
             if result:
@@ -3783,6 +3807,7 @@ class LucentDaemon:
         system_message: str,
         prompt: str,
         model: str,
+        reasoning_effort: str | None = None,
         mcp_config_override: dict | None = None,
     ) -> str | None:
         """Legacy fallback: run session using CopilotClient directly."""
@@ -3806,6 +3831,7 @@ class LucentDaemon:
             session = await client.create_session(
                 on_permission_request=PermissionHandler.approve_all,
                 model=model,
+                reasoning_effort=reasoning_effort,
                 system_message=SystemMessageReplaceConfig(
                     mode="replace", content=system_message
                 ),
@@ -4204,6 +4230,7 @@ class LucentDaemon:
             task_id = str(task["id"])
             agent_type = task.get("agent_type", "code")
             task_model = task.get("model")  # per-task model override
+            task_reasoning_effort = task.get("reasoning_effort")
             title = task.get("title", "")
             description = task.get("description", title)
             selected_model, model_reason = _select_model_for_task(
@@ -4212,6 +4239,24 @@ class LucentDaemon:
                 description=description,
                 explicit_model=task_model,
             )
+            if task_reasoning_effort:
+                try:
+                    from lucent.model_registry import validate_reasoning_effort
+
+                    effort_error = validate_reasoning_effort(
+                        selected_model,
+                        task_reasoning_effort,
+                    )
+                except Exception as exc:
+                    effort_error = f"reasoning-effort validator unavailable: {exc}"
+                if effort_error:
+                    log(
+                        f"Task {task_id[:8]} reasoning_effort '{task_reasoning_effort}' "
+                        f"is invalid for model '{selected_model}': {effort_error}; "
+                        "using provider default",
+                        "WARN",
+                    )
+                    task_reasoning_effort = None
 
             # Claim it atomically
             claimed = await RequestAPI.claim_task(task_id, self.instance_id)
@@ -4219,11 +4264,18 @@ class LucentDaemon:
                 continue
 
             # Persist the resolved model before dispatch so it's recorded even if the task fails
-            await RequestAPI.update_task_model(task_id, selected_model)
+            await RequestAPI.update_task_model_settings(
+                task_id,
+                model=selected_model,
+                reasoning_effort=task_reasoning_effort,
+            )
 
+            effort_label = (
+                f" reasoning_effort={task_reasoning_effort}" if task_reasoning_effort else ""
+            )
             log(
                 f"Dispatching tracked task {task_id[:8]} to {agent_type} "
-                f"model={selected_model}: {title[:80]}...",
+                f"model={selected_model}{effort_label}: {title[:80]}...",
                 request_id=task_id,
                 user_id=str(task.get("requesting_user_id")) if task.get("requesting_user_id") else None,
             )
@@ -4621,6 +4673,7 @@ class LucentDaemon:
                     system_message,
                     f"Execute this task:\n\n{description}",
                     model=selected_model,
+                    reasoning_effort=task_reasoning_effort,
                     mcp_config_override=task_mcp_config,
                 )
             except ModelNotAvailableError as exc:

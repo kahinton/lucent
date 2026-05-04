@@ -358,6 +358,9 @@
                         <select id="chat-model-select" class="text-[10px] text-gray-400 bg-transparent border-none p-0 pr-4 -ml-0.5 cursor-pointer focus:ring-0 focus:outline-none appearance-none hover:text-gray-600 transition-colors" style="background-image: url(&quot;data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='%239ca3af'%3E%3Cpath fill-rule='evenodd' d='M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z'/%3E%3C/svg%3E&quot;); background-repeat: no-repeat; background-position: right 0 center; background-size: 12px;">
                             <option value="">Loading...</option>
                         </select>
+                        <select id="chat-reasoning-select" class="hidden text-[10px] text-purple-500 bg-transparent border-none p-0 pr-4 -ml-0.5 cursor-pointer focus:ring-0 focus:outline-none appearance-none hover:text-purple-700 transition-colors" title="Reasoning effort">
+                            <option value="">Reasoning: default</option>
+                        </select>
                     </div>
                 </div>
                 <div class="flex items-center gap-1">
@@ -418,7 +421,29 @@
         streaming: false,
         available: false,
         abortController: null,
+        modelsById: {},
     };
+
+    function updateChatReasoningOptions() {
+        const modelSelect = document.getElementById('chat-model-select');
+        const reasoningSelect = document.getElementById('chat-reasoning-select');
+        const model = chatState.modelsById[modelSelect.value];
+        const efforts = (model && model.reasoning_efforts) || [];
+        reasoningSelect.innerHTML = '<option value="">Reasoning: default</option>';
+        if (!efforts.length) {
+            reasoningSelect.classList.add('hidden');
+            reasoningSelect.value = '';
+            return;
+        }
+        for (const effort of efforts) {
+            const opt = document.createElement('option');
+            opt.value = effort;
+            opt.textContent = 'Reasoning: ' + effort;
+            reasoningSelect.appendChild(opt);
+        }
+        reasoningSelect.classList.remove('hidden');
+        reasoningSelect.value = '';
+    }
 
     // ─── Init ────────────────────────────────────────────────────
     (async function initChat() {
@@ -435,9 +460,11 @@
                     const modelsData = await modelsResp.json();
                     const select = document.getElementById('chat-model-select');
                     select.innerHTML = '';
+                    chatState.modelsById = {};
                     // Group by provider
                     const byProvider = {};
                     for (const m of modelsData.models) {
+                        chatState.modelsById[m.id] = m;
                         (byProvider[m.provider] = byProvider[m.provider] || []).push(m);
                     }
                     for (const [provider, models] of Object.entries(byProvider)) {
@@ -452,6 +479,8 @@
                         }
                         select.appendChild(group);
                     }
+                    select.addEventListener('change', updateChatReasoningOptions);
+                    updateChatReasoningOptions();
                     chatState.defaultModel = modelsData.default;
                 } catch(e) {
                     // Fallback: just show the default model
@@ -619,6 +648,7 @@
 
         try {
             const selectedModel = document.getElementById('chat-model-select').value;
+            const selectedReasoning = document.getElementById('chat-reasoning-select').value;
             const resp = await fetch('/api/chat/stream', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -626,6 +656,7 @@
                     messages: chatState.messages,
                     page_context: getPageContext(),
                     model: selectedModel || null,
+                    reasoning_effort: selectedReasoning || null,
                 }),
                 signal: chatState.abortController.signal,
             });

@@ -280,12 +280,19 @@
                             </div>
                             <div>
                                 <label class="block text-xs font-medium text-gray-600 mb-1">Model</label>
-                                <select name="model" class="w-full text-xs font-mono px-2 py-1.5 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-blue-500">
+                                <select name="model" class="js-task-model w-full text-xs font-mono px-2 py-1.5 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-blue-500">
                                     {% for m in available_models %}
-                                    <option value="{{ m.id }}" {% if m.id == task.model %}selected{% endif %}>{{ m.id }}</option>
+                                    <option value="{{ m.id }}" data-reasoning-efforts="{{ (m.reasoning_efforts or [])|join(',') }}" {% if m.id == task.model %}selected{% endif %}>{{ m.id }}</option>
                                     {% endfor %}
                                 </select>
                             </div>
+                        </div>
+                        <div>
+                            <label class="block text-xs font-medium text-gray-600 mb-1">Reasoning effort</label>
+                            <select name="reasoning_effort" data-current="{{ task.reasoning_effort or '' }}" class="js-task-reasoning w-full text-xs font-mono px-2 py-1.5 border border-purple-200 rounded-md focus:outline-none focus:ring-1 focus:ring-purple-500 bg-purple-50">
+                                <option value="">provider default</option>
+                            </select>
+                            <p class="mt-1 text-[10px] text-gray-500">Only shown when the selected model exposes selectable reasoning levels.</p>
                         </div>
                         <div>
                             <label class="block text-xs font-medium text-gray-600 mb-1">Sandbox template</label>
@@ -325,6 +332,9 @@
 
                             <dt class="text-gray-400">Model</dt>
                             <dd class="font-mono">{{ task.model or 'default' }}</dd>
+
+                            <dt class="text-gray-400">Reasoning</dt>
+                            <dd class="font-mono">{{ task.reasoning_effort or 'provider default' }}</dd>
 
                             <dt class="text-gray-400">Priority</dt>
                             <dd>{{ task.priority }}</dd>
@@ -739,6 +749,37 @@ document.querySelectorAll('.toggle-full-output').forEach(function(btn) {
         document.getElementById('result-full-' + taskId).style.display = 'block';
         this.style.display = 'none';
     });
+});
+
+function refreshTaskReasoning(modelSelect) {
+    const form = modelSelect.closest('form');
+    const reasoningSelect = form.querySelector('.js-task-reasoning');
+    const selected = modelSelect.options[modelSelect.selectedIndex];
+    const efforts = ((selected && selected.dataset.reasoningEfforts) || '').split(',').filter(Boolean);
+    const current = reasoningSelect.dataset.current || '';
+    reasoningSelect.innerHTML = '<option value="">provider default</option>';
+    if (!efforts.length) {
+        reasoningSelect.value = '';
+        reasoningSelect.disabled = false;
+        return;
+    }
+    for (const effort of efforts) {
+        const opt = document.createElement('option');
+        opt.value = effort;
+        opt.textContent = effort;
+        if (effort === current) opt.selected = true;
+        reasoningSelect.appendChild(opt);
+    }
+    reasoningSelect.disabled = false;
+}
+
+document.querySelectorAll('.js-task-model').forEach(function(select) {
+    select.addEventListener('change', function() {
+        const reasoningSelect = select.closest('form').querySelector('.js-task-reasoning');
+        reasoningSelect.dataset.current = '';
+        refreshTaskReasoning(select);
+    });
+    refreshTaskReasoning(select);
 });
 </script>
 {% endblock %}

@@ -24,6 +24,8 @@ class ModelInfo:
     supports_vision: bool = False  # whether the model supports image input
     notes: str = ""  # additional notes about the model
     tags: list[str] = field(default_factory=list)
+    # Selectable provider reasoning/thinking levels reported by provider metadata.
+    reasoning_efforts: list[str] = field(default_factory=list)
     engine: str | None = None  # engine override: None=auto, "copilot", "langchain"
     enabled: bool = True  # whether the model is available for use
 
@@ -337,6 +339,7 @@ async def load_models_from_db(pool) -> list[ModelInfo]:
                 supports_vision=r.get("supports_vision", False),
                 notes=r.get("notes", ""),
                 tags=list(r.get("tags") or []),
+                reasoning_efforts=list(r.get("reasoning_efforts") or []),
                 engine=r.get("engine"),
             )
             loaded.append(m)
@@ -636,8 +639,6 @@ def validate_model(model_id: str, *, require_tools: bool = False) -> str | None:
     and is enabled. In strict mode (default), unknown models are rejected.
     Set LUCENT_MODEL_VALIDATION=lenient to allow unrecognized model IDs.
     """
-    import os
-
     strict = os.environ.get("LUCENT_MODEL_VALIDATION", "strict").lower() != "lenient"
 
     # DB-loaded registry takes precedence when available
@@ -680,6 +681,34 @@ def validate_model(model_id: str, *, require_tools: bool = False) -> str | None:
             f"Use list_available_models to see all options."
         )
     return None  # Lenient: allow unknown
+
+
+def validate_reasoning_effort(
+    model_id: str,
+    reasoning_effort: str | None,
+) -> str | None:
+    """Validate a reasoning effort selection for a model.
+
+    Returns an error message, or None if valid. Empty/None means use the
+    provider default and is always accepted.
+    """
+    if not reasoning_effort:
+        return None
+    effort = reasoning_effort.strip().lower()
+
+    model = get_model(model_id)
+    if not model:
+        # Let validate_model provide the unknown-model error elsewhere.
+        return None
+    allowed = list(model.reasoning_efforts or [])
+    if not allowed:
+        return f"Model '{model_id}' does not expose selectable reasoning effort levels."
+    if effort not in allowed:
+        return (
+            f"Model '{model_id}' does not allow reasoning_effort '{effort}'. "
+            f"Allowed values: {', '.join(allowed)}."
+        )
+    return None
 
 
 def get_recommended_model(task_type: str) -> str:

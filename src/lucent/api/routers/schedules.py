@@ -63,6 +63,11 @@ class ScheduleCreate(BaseModel):
         max_length=64,
         description="LLM model override for tasks created by this schedule",
     )
+    reasoning_effort: str | None = Field(
+        default=None,
+        max_length=64,
+        description="Optional reasoning effort for models that expose selectable levels",
+    )
     task_template: dict | None = None
     sandbox_template_id: str | None = None  # Reference a saved sandbox template
     sandbox_config: dict | None = None  # Or inline sandbox config
@@ -84,6 +89,11 @@ class ScheduleUpdate(BaseModel):
         default=None,
         max_length=64,
         description="LLM model override for tasks created by this schedule",
+    )
+    reasoning_effort: str | None = Field(
+        default=None,
+        max_length=64,
+        description="Optional reasoning effort for models that expose selectable levels",
     )
     task_template: dict | None = None
     sandbox_template_id: str | None = None
@@ -108,6 +118,17 @@ async def create_schedule(
     body: ScheduleCreate, user: AuthenticatedUser, pool=Depends(get_pool)
 ):
     from lucent.db.schedules import ScheduleRepository
+    from lucent.model_registry import validate_model, validate_reasoning_effort
+
+    if body.model:
+        model_error = validate_model(body.model, require_tools=True)
+        if model_error:
+            raise HTTPException(422, model_error)
+        effort_error = validate_reasoning_effort(body.model, body.reasoning_effort)
+        if effort_error:
+            raise HTTPException(422, effort_error)
+    elif body.reasoning_effort:
+        raise HTTPException(422, "reasoning_effort requires model")
 
     repo = ScheduleRepository(pool)
     return await repo.create_schedule(
@@ -117,6 +138,7 @@ async def create_schedule(
         description=body.description,
         agent_type=body.agent_type,
         model=body.model,
+        reasoning_effort=body.reasoning_effort,
         task_template=body.task_template,
         sandbox_config=body.sandbox_config,
         sandbox_template_id=body.sandbox_template_id,
@@ -182,12 +204,27 @@ async def update_schedule(
 
     repo = ScheduleRepository(pool)
     fields = {k: v for k, v in body.model_dump(exclude_unset=True).items()}
+    if "model" in fields and "reasoning_effort" not in fields:
+        fields["reasoning_effort"] = None
     if "timezone" in fields:
         fields["timezone_str"] = fields.pop("timezone")
     sched = await repo.get_schedule(schedule_id, str(user.organization_id))
     if not sched:
         raise HTTPException(404, "Schedule not found")
     _require_schedule_access(sched, user)
+    effective_model = fields.get("model", sched.get("model"))
+    effective_effort = fields.get("reasoning_effort", sched.get("reasoning_effort"))
+    if effective_model:
+        from lucent.model_registry import validate_model, validate_reasoning_effort
+
+        model_error = validate_model(effective_model, require_tools=True)
+        if model_error:
+            raise HTTPException(422, model_error)
+        effort_error = validate_reasoning_effort(effective_model, effective_effort)
+        if effort_error:
+            raise HTTPException(422, effort_error)
+    elif effective_effort:
+        raise HTTPException(422, "reasoning_effort requires model")
     try:
         result = await repo.update_schedule(
             schedule_id, str(user.organization_id),
@@ -400,8 +437,9 @@ async def trigger_now(
 
         # Validate model against registry (workflow-audit/phase-4)
         task_model = sched.get("model")
+        task_reasoning_effort = sched.get("reasoning_effort")
         if task_model:
-            from lucent.model_registry import validate_model
+            from lucent.model_registry import validate_model, validate_reasoning_effort
 
             model_error = validate_model(task_model, require_tools=True)
             if model_error:
@@ -410,6 +448,17 @@ async def trigger_now(
                     schedule_id, task_model, model_error,
                 )
                 task_model = None
+                task_reasoning_effort = None
+            else:
+                effort_error = validate_reasoning_effort(task_model, task_reasoning_effort)
+                if effort_error:
+                    logger.warning(
+                        "Schedule %s has invalid reasoning_effort '%s': %s — clearing override",
+                        schedule_id, task_reasoning_effort, effort_error,
+                    )
+                    task_reasoning_effort = None
+        else:
+            task_reasoning_effort = None
 
         # Create the task — use prompt as description if set, else fall back to template/description
         task_description = prompt or template.get("description", sched.get("description", ""))
@@ -420,6 +469,7 @@ async def trigger_now(
             agent_type=agent_type,
             priority=sched.get("priority", "medium"),
             model=task_model,
+            reasoning_effort=task_reasoning_effort,
             sandbox_template_id=str(sched["sandbox_template_id"])
             if sched.get("sandbox_template_id")
             else None,

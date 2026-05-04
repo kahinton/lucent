@@ -12,6 +12,7 @@ hardcoding model IDs that may not be enabled in a deployment.
 ## When to Use
 
 - Creating a task via `create_task` and deciding whether to set the `model` field
+- Deciding whether to set `reasoning_effort` for models that expose selectable levels
 - Daemon dispatch deciding which model to assign to a sub-agent
 - Reviewing task failures that might be caused by model mismatch
 - Optimizing cost by avoiding premium models where the default is sufficient
@@ -49,8 +50,9 @@ Classify the task into one of these tiers:
 ### Step 2: Check Available Models and Default
 
 Call `list_available_models(agent_type="<type>")` to get the enabled model list,
-the configured `default_model`, and the selector's recommendation. Use the
-default unless task requirements clearly justify a specialized category.
+the configured `default_model`, the selector's recommendation, and any
+per-model `reasoning_efforts`. Use the default unless task requirements clearly
+justify a specialized category.
 
 ### Step 3: Consider Cost/Speed Tradeoff
 
@@ -63,6 +65,20 @@ Apply this decision rule:
 
 If rate limits are being hit, downgrade non-critical tasks one tier.
 
+### Step 3a: Choose Reasoning Effort Only When Needed
+
+Some models expose `reasoning_efforts` such as `minimal`, `low`, `medium`,
+`high`, `xhigh`, or `max`. Treat these as sub-capabilities of a selected model:
+
+- **Default:** omit `reasoning_effort`; let the provider choose.
+- **Simple/latency-sensitive:** use `minimal` or `low` only when the model lists it.
+- **Complex analysis:** use `high` only when extra depth is worth latency/cost.
+- **Exceptional cases:** use `xhigh`/`max` only for high-stakes architecture,
+  security, deep debugging, or failed prior attempts.
+
+Never set a reasoning effort that is not listed for the selected model. If a
+model has no `reasoning_efforts`, omit the field.
+
 ### Step 4: Select Model
 
 Pick the default model unless the task's requirements match a specialized
@@ -70,7 +86,13 @@ category. If overriding the default, note the reason in the task description or
 planning summary.
 
 ```text
-create_task(request_id=..., title=..., model="<selected-model only if needed>", ...)
+create_task(
+	request_id=...,
+	title=...,
+	model="<selected-model only if needed>",
+	reasoning_effort="<only if listed and justified>",
+	...,
+)
 ```
 
 ## Reference: Task Type → Category Mapping
@@ -130,6 +152,8 @@ The `select_model_for_task()` function in `src/lucent/model_registry.py` provide
 baseline recommendations. Override when:
 
 - A task failed with the default model and needs more reasoning power
+- A selected model exposes `reasoning_efforts` and the task clearly needs a lower
+	or higher reasoning budget than the provider default
 - Rate limits are being hit — downgrade non-critical tasks to cheaper models
 - A task specifically needs vision capabilities (check `supports_vision`)
 - The task involves extremely long input — prefer models with large context windows
@@ -140,5 +164,6 @@ baseline recommendations. Override when:
 - **Always using premium reasoning models** — Most tasks don't need them.
 - **Ignoring task failures** — If a model consistently fails on a task type, try a different one rather than retrying with the same model.
 - **Specifying a model without a reason** — Let the default selector handle standard tasks.
+- **Specifying reasoning effort without checking availability** — Effort levels are model-specific; use only values from `list_available_models()`.
 - **Chasing new models** — A model being newer doesn't make it better for your specific task. Stick with what works until you have evidence otherwise.
 

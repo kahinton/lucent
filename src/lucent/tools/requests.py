@@ -241,6 +241,8 @@ Args:
     agent_type: Name of an approved agent definition to handle this task
     model: LLM model to use for this task. If not set, the daemon
         picks a default. See list_available_models for options.
+    reasoning_effort: Optional reasoning/thinking level for models that expose
+        selectable levels. Must be one of the chosen model's allowed values.
     priority: 'low', 'medium', 'high', or 'urgent'
     sequence_order: Execution order (0-based, lower runs first)
     parent_task_id: Optional \u2014 ID of parent task for sub-tasks
@@ -262,6 +264,7 @@ if the agent type is not approved or the sandbox template is invalid."""
         description: str = "",
         agent_type: str = "code",
         model: str | None = None,
+        reasoning_effort: str | None = None,
         priority: str = "medium",
         sequence_order: int = 0,
         parent_task_id: str | None = None,
@@ -280,11 +283,16 @@ if the agent type is not approved or the sandbox template is invalid."""
 
         # Validate model against registry
         if model:
-            from lucent.model_registry import validate_model
+            from lucent.model_registry import validate_model, validate_reasoning_effort
 
             error = validate_model(model, require_tools=True)
             if error:
                 return json.dumps({"error": error})
+            effort_error = validate_reasoning_effort(model, reasoning_effort)
+            if effort_error:
+                return json.dumps({"error": effort_error})
+        elif reasoning_effort:
+            return json.dumps({"error": "reasoning_effort requires model"})
 
         # Validate agent_type resolves to an approved definition
         from lucent.db import get_pool
@@ -426,6 +434,7 @@ if the agent type is not approved or the sandbox template is invalid."""
                 sequence_order=sequence_order,
                 parent_task_id=parent_task_id,
                 model=model,
+                reasoning_effort=reasoning_effort,
                 sandbox_template_id=sandbox_template_id,
                 sandbox_config=sandbox_config,
                 requesting_user_id=str(requesting_user_id) if requesting_user_id else None,
@@ -440,6 +449,7 @@ if the agent type is not approved or the sandbox template is invalid."""
                 "status": task["status"],
                 "agent_type": task["agent_type"],
                 "model": task.get("model"),
+                "reasoning_effort": task.get("reasoning_effort"),
                 "sandbox_template_id": (
                     str(task["sandbox_template_id"])
                     if task.get("sandbox_template_id")
@@ -969,7 +979,9 @@ Returns: JSON list of {goal_id, goal_title, next_milestone_index,
 Use this to choose a model when creating tasks. Returns all available models
 with their categories, capabilities, provider info, and generic selection
 guidance. Default models should be used whenever there is no clear reason to
-pick a specialized model.
+pick a specialized model. Some models also expose selectable reasoning_efforts;
+use the provider default unless the task clearly benefits from lower latency or
+deeper reasoning.
 
 Args:
     category: Optional filter — one of: general, fast, reasoning, agentic, visual
@@ -994,7 +1006,10 @@ provided, the recommended model plus a selection reason."""
                 "specialized category such as fast, reasoning, agentic, or visual. "
                 "Daemon-dispatched tasks require tool-capable models, because "
                 "agents receive MCP tools for memory/request operations. Only "
-                "choose from enabled models in this list."
+                "choose from enabled models in this list. If a model includes "
+                "reasoning_efforts, omit reasoning_effort for provider default, "
+                "choose low/minimal for cheap simple work, and high/xhigh/max only "
+                "for hard analysis where extra latency and cost are justified."
             ),
             "models": [
                 {
@@ -1005,6 +1020,7 @@ provided, the recommended model plus a selection reason."""
                     "supports_tools": m.supports_tools,
                     "supports_vision": m.supports_vision,
                     "context_window": m.context_window,
+                    "reasoning_efforts": m.reasoning_efforts,
                     "notes": m.notes,
                     "tags": m.tags,
                 }

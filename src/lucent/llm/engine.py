@@ -63,6 +63,7 @@ class LLMEngine(ABC):
         prompt: str,
         mcp_config: dict | None = None,
         timeout: int = 300,
+        reasoning_effort: str | None = None,
     ) -> str | None:
         """Run a single LLM session and return the full response text.
 
@@ -74,6 +75,7 @@ class LLMEngine(ABC):
             prompt: User prompt text.
             mcp_config: MCP server configuration dict for tool access.
             timeout: Maximum seconds to wait for response.
+            reasoning_effort: Optional provider-specific reasoning/thinking level.
 
         Returns:
             The assistant's response text, or None on error.
@@ -89,6 +91,7 @@ class LLMEngine(ABC):
         on_event: Callable[[SessionEvent], None] | None = None,
         timeout: int = 600,
         idle_timeout: int = 300,
+        reasoning_effort: str | None = None,
     ) -> str | None:
         """Run an LLM session with event streaming.
 
@@ -107,7 +110,7 @@ class LLMEngine(ABC):
             idle_timeout: Seconds of inactivity before timing out. If the
                 agent is actively producing events, the session continues
                 indefinitely (up to `timeout`). Default 300s (5 min).
-            timeout: Maximum seconds to wait for completion.
+            reasoning_effort: Optional provider-specific reasoning/thinking level.
 
         Returns:
             The assistant's full response text, or None on error.

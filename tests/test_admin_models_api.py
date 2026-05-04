@@ -73,23 +73,42 @@ async def test_post_put_get_models_engine_roundtrip(models_client, mdl_prefix):
             "name": "Roundtrip",
             "category": "general",
             "engine": "copilot",
+            "reasoning_efforts": ["low", "high"],
         },
     )
     assert create.status_code == 201
     assert create.json()["engine"] == "copilot"
+    assert create.json()["reasoning_efforts"] == ["low", "high"]
 
     update = await models_client.put(
         f"/api/admin/models/{model_id}",
-        json={"engine": "copilot", "notes": "updated"},
+        json={"engine": "copilot", "notes": "updated", "reasoning_efforts": ["medium"]},
     )
     assert update.status_code == 200
     assert update.json()["engine"] == "copilot"
+    assert update.json()["reasoning_efforts"] == ["medium"]
 
     listed = await models_client.get("/api/admin/models")
     assert listed.status_code == 200
     items = listed.json()["items"]
     model = next(m for m in items if m["id"] == model_id)
     assert model["engine"] == "copilot"
+    assert model["reasoning_efforts"] == ["medium"]
+
+
+@pytest.mark.asyncio
+async def test_custom_reasoning_effort_values_are_allowed(models_client, mdl_prefix):
+    resp = await models_client.post(
+        "/api/admin/models",
+        json={
+            "model_id": f"{mdl_prefix}custom-effort",
+            "provider": "openai",
+            "name": "CustomEffort",
+            "reasoning_efforts": ["ultra"],
+        },
+    )
+    assert resp.status_code == 201
+    assert resp.json()["reasoning_efforts"] == ["ultra"]
 
 
 @pytest.mark.asyncio

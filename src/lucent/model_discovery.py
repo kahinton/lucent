@@ -36,6 +36,7 @@ class DiscoveredModel:
     supports_vision: bool = False
     notes: str = ""
     tags: list[str] = field(default_factory=list)
+    reasoning_efforts: list[str] = field(default_factory=list)
     engine: str | None = None
     discovery_metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -94,6 +95,92 @@ def _infer_tags(model_id: str, category: str, *, local: bool = False) -> list[st
     if any(x in lowered for x in ("vision", "llava")):
         tags.add("vision")
     return sorted(tags)
+
+
+_REASONING_EFFORT_METADATA_KEYS = {
+    "reasoningeffort",
+    "reasoningefforts",
+    "reasoningeffortlevels",
+    "supportedreasoningefforts",
+    "supportedreasoningeffortlevels",
+    "thinkinglevel",
+    "thinkinglevels",
+    "supportedthinkinglevels",
+    "effort",
+    "efforts",
+    "effortlevels",
+    "supportedefforts",
+    "supportedeffortlevels",
+}
+
+
+def _metadata_key_name(key: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", key.lower())
+
+
+def _normalize_discovered_reasoning_efforts(value: Any) -> list[str]:
+    """Normalize provider-reported reasoning levels without a Lucent enum.
+
+    Provider catalogs are not standardized. Some expose a direct list, some use
+    ``values``/``options`` wrappers, and some only expose a boolean capability.
+    Boolean support is intentionally ignored here: it tells us a knob exists, not
+    which exact values are accepted for the model.
+    """
+    values: list[str] = []
+
+    def add(raw: Any) -> None:
+        if raw is None or isinstance(raw, bool):
+            return
+        if isinstance(raw, str):
+            for part in raw.split(","):
+                effort = part.strip().lower()
+                if effort and effort not in values:
+                    values.append(effort)
+            return
+        if isinstance(raw, (list, tuple, set)):
+            for item in raw:
+                add(item)
+            return
+        if isinstance(raw, dict):
+            for candidate_key in (
+                "values",
+                "options",
+                "levels",
+                "supported_values",
+                "supportedValues",
+                "enum",
+            ):
+                if candidate_key in raw:
+                    add(raw[candidate_key])
+            return
+
+    add(value)
+    return values
+
+
+def _extract_reasoning_efforts_from_metadata(*metadata_objects: Any) -> list[str]:
+    """Extract selectable reasoning levels from provider-supplied metadata."""
+    efforts: list[str] = []
+
+    def merge(values: list[str]) -> None:
+        for effort in values:
+            if effort not in efforts:
+                efforts.append(effort)
+
+    def walk(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                normalized_key = _metadata_key_name(str(key))
+                if normalized_key in _REASONING_EFFORT_METADATA_KEYS:
+                    merge(_normalize_discovered_reasoning_efforts(nested))
+                walk(nested)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item)
+
+    for metadata in metadata_objects:
+        walk(metadata)
+    return efforts
 
 
 def _is_generation_model(model_id: str) -> bool:
@@ -346,6 +433,8 @@ class ModelDiscoveryService:
             if not model_id or not _is_generation_model(model_id):
                 continue
             category = _infer_category(model_id)
+            tags = _infer_tags(model_id, category)
+            reasoning_efforts = _extract_reasoning_efforts_from_metadata(row)
             models.append(
                 DiscoveredModel(
                     id=model_id,
@@ -359,7 +448,8 @@ class ModelDiscoveryService:
                         "Discovered from OpenAI model catalog. "
                         f"Owner: {row.get('owned_by', 'unknown')}"
                     ),
-                    tags=_infer_tags(model_id, category),
+                    tags=tags,
+                    reasoning_efforts=reasoning_efforts,
                     discovery_metadata=dict(row),
                 )
             )
@@ -391,8 +481,10 @@ class ModelDiscoveryService:
                     continue
                 name = str(row.get("display_name") or _display_name(model_id))
                 category = _infer_category(model_id, name)
+                tags = _infer_tags(model_id, category)
                 capabilities = row.get("capabilities") or {}
                 image_input = capabilities.get("image_input") or {}
+                reasoning_efforts = _extract_reasoning_efforts_from_metadata(row)
                 models.append(
                     DiscoveredModel(
                         id=model_id,
@@ -404,7 +496,8 @@ class ModelDiscoveryService:
                         supports_tools=True,
                         supports_vision=bool(image_input.get("supported")),
                         notes="Discovered from Anthropic model catalog.",
-                        tags=_infer_tags(model_id, category),
+                        tags=tags,
+                        reasoning_efforts=reasoning_efforts,
                         discovery_metadata=dict(row),
                     )
                 )
@@ -443,6 +536,8 @@ class ModelDiscoveryService:
                     continue
                 name = str(row.get("displayName") or _display_name(model_id))
                 category = _infer_category(model_id, name)
+                tags = _infer_tags(model_id, category)
+                reasoning_efforts = _extract_reasoning_efforts_from_metadata(row)
                 models.append(
                     DiscoveredModel(
                         id=model_id,
@@ -457,7 +552,8 @@ class ModelDiscoveryService:
                             row.get("description")
                             or "Discovered from Google Gemini model catalog."
                         ),
-                        tags=_infer_tags(model_id, category),
+                        tags=tags,
+                        reasoning_efforts=reasoning_efforts,
                         discovery_metadata=dict(row),
                     )
                 )
@@ -569,6 +665,8 @@ class ModelDiscoveryService:
             tags = _infer_tags(model_id, category)
             if supports.reasoning_effort:
                 tags.append("reasoning-effort")
+            tags = sorted(set(tags))
+            reasoning_efforts = _extract_reasoning_efforts_from_metadata(metadata)
             models.append(
                 DiscoveredModel(
                     id=model_id,
@@ -582,7 +680,8 @@ class ModelDiscoveryService:
                     supports_tools=True,
                     supports_vision=bool(supports.vision),
                     notes="Discovered from GitHub Copilot SDK model list.",
-                    tags=sorted(set(tags)),
+                    tags=tags,
+                    reasoning_efforts=reasoning_efforts,
                     engine="copilot",
                     discovery_metadata=metadata,
                 )

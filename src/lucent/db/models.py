@@ -9,6 +9,18 @@ from uuid import UUID
 import asyncpg
 
 
+def _jsonb_param(value):
+    """Normalize JSONB values, avoiding double-encoded JSON strings."""
+    if value in (None, ""):
+        return {}
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return value
+    return value
+
+
 class ModelRepository:
     """CRUD operations for the models table."""
 
@@ -76,6 +88,7 @@ class ModelRepository:
         supports_vision: bool = False,
         notes: str = "",
         tags: list[str] | None = None,
+        reasoning_efforts: list[str] | None = None,
         is_enabled: bool = True,
         org_id: str | None = None,
         engine: str | None = None,
@@ -88,10 +101,11 @@ class ModelRepository:
             row = await conn.fetchrow(
                 """INSERT INTO models (id, provider, name, category, api_model_id,
                    context_window, supports_tools, supports_vision, notes, tags,
-                   is_enabled, organization_id, engine, discovery_source, is_custom,
-                   discovery_metadata, created_at, updated_at)
+                   reasoning_efforts, is_enabled, organization_id, engine,
+                   discovery_source, is_custom, discovery_metadata, created_at,
+                   updated_at)
                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
-                           $16::jsonb,$17,$17)
+                       $16,$17::jsonb,$18,$18)
                    RETURNING *""",
                 model_id,
                 provider,
@@ -103,12 +117,13 @@ class ModelRepository:
                 supports_vision,
                 notes,
                 tags or [],
+                reasoning_efforts or [],
                 is_enabled,
                 UUID(org_id) if org_id else None,
                 engine,
                 discovery_source,
                 is_custom,
-                json.dumps(discovery_metadata or {}),
+                _jsonb_param(discovery_metadata),
                 now,
             )
         return dict(row)
@@ -117,8 +132,8 @@ class ModelRepository:
         allowed = {
             "provider", "name", "category", "api_model_id", "context_window",
             "supports_tools", "supports_vision", "notes", "tags", "is_enabled",
-            "engine", "discovery_source", "is_custom", "last_discovered_at",
-            "discovery_metadata",
+            "reasoning_efforts", "engine", "discovery_source", "is_custom",
+            "last_discovered_at", "discovery_metadata",
         }
         updates = {k: v for k, v in kwargs.items() if k in allowed}
         if not updates:
@@ -130,7 +145,7 @@ class ModelRepository:
         for i, (key, val) in enumerate(updates.items(), start=1):
             if key == "discovery_metadata":
                 set_parts.append(f"{key} = ${i}::jsonb")
-                params.append(json.dumps(val or {}))
+                params.append(_jsonb_param(val))
             else:
                 set_parts.append(f"{key} = ${i}")
                 params.append(val)
@@ -169,11 +184,11 @@ class ModelRepository:
                             id, provider, name, category, api_model_id,
                             context_window, supports_tools, supports_vision,
                             notes, tags, is_enabled, organization_id, engine,
-                            discovery_source, is_custom, last_discovered_at,
+                            reasoning_efforts, discovery_source, is_custom, last_discovered_at,
                             discovery_metadata, created_at, updated_at
                         ) VALUES (
                             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,false,$11,$12,
-                            'provider',false,$13,$14::jsonb,$13,$13
+                            $13,'provider',false,$14,$15::jsonb,$14,$14
                         )
                         ON CONFLICT (id) DO UPDATE SET
                             provider = CASE
@@ -226,6 +241,11 @@ class ModelRepository:
                                     THEN models.engine
                                 ELSE EXCLUDED.engine
                             END,
+                            reasoning_efforts = CASE
+                                WHEN models.discovery_source = 'manual' OR models.is_custom
+                                    THEN models.reasoning_efforts
+                                ELSE EXCLUDED.reasoning_efforts
+                            END,
                             discovery_source = CASE
                                 WHEN models.discovery_source = 'manual' OR models.is_custom
                                     THEN models.discovery_source
@@ -253,8 +273,9 @@ class ModelRepository:
                         m.get("tags") or [],
                         UUID(org_id) if org_id else None,
                         m.get("engine"),
+                        m.get("reasoning_efforts") or [],
                         now,
-                        json.dumps(m.get("discovery_metadata") or {}),
+                        _jsonb_param(m.get("discovery_metadata")),
                     )
                     upserted += 1
 

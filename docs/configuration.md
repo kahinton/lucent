@@ -63,6 +63,27 @@ For detailed secret storage configuration, see [Secret Storage](secret-storage.m
 | `OLLAMA_HOST` | `http://host.docker.internal:11434` | Ollama host URL for local models |
 | `GITHUB_TOKEN` | — | GitHub token for Copilot SDK authentication |
 
+### Model Reasoning Effort
+
+Admins can configure selectable reasoning/thinking levels per model in
+**Settings → Models**. Provider sync stores provider-reported levels as
+`reasoning_efforts` on the model registry record. Lucent does not maintain a
+global static enum of possible levels; if a provider catalog does not report
+exact selectable values for a model, Lucent leaves the list blank and uses the
+provider default.
+
+Runtime mappings:
+
+| Backend | Parameter sent |
+|---------|----------------|
+| GitHub Copilot SDK | `reasoning_effort` |
+| LangChain OpenAI | `reasoning_effort` |
+| LangChain Anthropic | `effort` |
+| LangChain Google GenAI | `thinking_level` |
+
+Leave `reasoning_effort` unset to use the provider default. Choose higher
+levels only for complex analysis where extra latency/cost is justified.
+
 ## Daemon Configuration
 
 | Variable | Default | Description |

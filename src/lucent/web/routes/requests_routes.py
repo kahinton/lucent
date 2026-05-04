@@ -272,7 +272,12 @@ async def request_detail(request: Request, request_id: str):
         from lucent.model_registry import list_models
 
         available_models = [
-            {"id": m.id, "name": m.name or m.id, "tags": list(m.tags or [])}
+            {
+                "id": m.id,
+                "name": m.name or m.id,
+                "tags": list(m.tags or []),
+                "reasoning_efforts": list(m.reasoning_efforts or []),
+            }
             for m in list_models(include_disabled=False)
         ]
         available_models.sort(key=lambda m: m["id"])
@@ -408,17 +413,23 @@ async def edit_task(request: Request, task_id: str):
     title = _val("title")
     description = _val("description")
     model = _val("model")
+    reasoning_effort = _val("reasoning_effort") or ""
     agent_type = _val("agent_type")
     sandbox_template_id = _val("sandbox_template_id")
     clear_sandbox = form.get("sandbox_template_id") == "__none__"
 
     # Validate model + agent against the allowed sets
     if model:
-        from lucent.model_registry import validate_model
+        from lucent.model_registry import validate_model, validate_reasoning_effort
 
         err = validate_model(model)
         if err:
             raise HTTPException(422, err)
+        effort_err = validate_reasoning_effort(model, reasoning_effort)
+        if effort_err:
+            raise HTTPException(422, effort_err)
+    elif reasoning_effort:
+        raise HTTPException(422, "reasoning_effort requires model")
 
     if agent_type:
         from lucent.db.definitions import DefinitionRepository
@@ -440,6 +451,7 @@ async def edit_task(request: Request, task_id: str):
         title=title,
         description=description,
         model=model,
+        reasoning_effort=reasoning_effort,
         agent_type=agent_type,
         sandbox_template_id=None if clear_sandbox else sandbox_template_id,
         clear_sandbox_template=clear_sandbox,

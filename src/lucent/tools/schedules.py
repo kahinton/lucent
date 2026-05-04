@@ -47,6 +47,7 @@ Args:
     description: Detailed description of the work
     agent_type: Which agent type should handle this ('code', 'research', 'memory', etc.)
     model: LLM model to use for scheduled tasks. If not set, the daemon picks a default.
+    reasoning_effort: Optional reasoning/thinking level for models that expose selectable levels.
     cron_expression: Cron expression (required if schedule_type is 'cron')
     interval_seconds: Seconds between runs (required if schedule_type is 'interval', min 60)
     priority: 'low', 'medium', 'high', or 'urgent'
@@ -61,6 +62,7 @@ Returns: JSON with the created schedule including its ID and next_run_at."""
         description: str = "",
         agent_type: str = "code",
         model: str | None = None,
+        reasoning_effort: str | None = None,
         cron_expression: str | None = None,
         interval_seconds: int | None = None,
         priority: str = "medium",
@@ -94,11 +96,16 @@ Returns: JSON with the created schedule including its ID and next_run_at."""
 
         # Validate model against registry
         if model:
-            from lucent.model_registry import validate_model
+            from lucent.model_registry import validate_model, validate_reasoning_effort
 
             error = validate_model(model)
             if error:
                 return json.dumps({"error": error})
+            effort_error = validate_reasoning_effort(model, reasoning_effort)
+            if effort_error:
+                return json.dumps({"error": effort_error})
+        elif reasoning_effort:
+            return json.dumps({"error": "reasoning_effort requires model"})
 
         repo = await _get_schedule_repository()
         sched = await repo.create_schedule(
@@ -108,6 +115,7 @@ Returns: JSON with the created schedule including its ID and next_run_at."""
             description=description,
             agent_type=agent_type,
             model=model,
+            reasoning_effort=reasoning_effort,
             cron_expression=cron_expression,
             interval_seconds=interval_seconds,
             priority=priority,

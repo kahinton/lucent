@@ -65,11 +65,13 @@ class ChatRequest(BaseModel):
     messages: list[ChatMessage]
     page_context: dict | None = None  # {url, title, type, data}
     model: str | None = None  # override the default chat model
+    reasoning_effort: str | None = Field(default=None, max_length=64)
 
 
 class ChatStreamRequest(BaseModel):
     messages: list[ChatMessage]
     model: str | None = None
+    reasoning_effort: str | None = Field(default=None, max_length=64)
     agent_id: str | None = None  # optional agent definition to use
 
 
@@ -245,12 +247,15 @@ async def chat_stream(
     user, pool = await _get_session_user(request)
 
     from lucent.llm import get_engine_for_model
-    from lucent.model_registry import validate_model
+    from lucent.model_registry import validate_model, validate_reasoning_effort
 
     selected_model = _resolve_chat_model(body.model)
     validation_error = validate_model(selected_model)
     if validation_error:
         raise HTTPException(status_code=400, detail=validation_error)
+    effort_error = validate_reasoning_effort(selected_model, body.reasoning_effort)
+    if effort_error:
+        raise HTTPException(status_code=400, detail=effort_error)
 
     engine = get_engine_for_model(selected_model)
 
@@ -287,6 +292,7 @@ async def chat_stream(
             prompt=prompt,
             mcp_config=mcp_config,
             timeout=CHAT_SESSION_TIMEOUT,
+            reasoning_effort=body.reasoning_effort,
         )
         error = None if result_text else "No response received"
     except Exception as e:
@@ -333,6 +339,7 @@ async def chat_models(request: Request):
                 "name": m.name,
                 "provider": m.provider,
                 "category": m.category,
+                "reasoning_efforts": m.reasoning_efforts,
             }
             for m in models
         ],
@@ -396,12 +403,15 @@ async def chat_stream_v2(
 
     from lucent.llm import get_engine_for_model
     from lucent.llm.engine import SessionEvent, SessionEventType
-    from lucent.model_registry import validate_model
+    from lucent.model_registry import validate_model, validate_reasoning_effort
 
     selected_model = _resolve_chat_model(body.model)
     validation_error = validate_model(selected_model)
     if validation_error:
         raise HTTPException(status_code=400, detail=validation_error)
+    effort_error = validate_reasoning_effort(selected_model, body.reasoning_effort)
+    if effort_error:
+        raise HTTPException(status_code=400, detail=effort_error)
 
     engine = get_engine_for_model(selected_model)
 
@@ -529,6 +539,7 @@ async def chat_stream_v2(
                 on_event=on_event,
                 timeout=CHAT_SESSION_TIMEOUT,
                 idle_timeout=CHAT_SESSION_TIMEOUT,
+                reasoning_effort=body.reasoning_effort,
             )
             # If we got no deltas from streaming, send the full result
             if result:

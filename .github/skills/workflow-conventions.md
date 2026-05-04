@@ -88,6 +88,11 @@ the work clearly needs a specialized capability:
 from enabled models. Do not use "preview" or "legacy" models for critical daemon
 workflows unless explicitly requested.
 
+If a listed model includes `reasoning_efforts`, omit `reasoning_effort` by
+default. Use `low`/`minimal` for simple latency-sensitive tasks and `high`,
+`xhigh`, or `max` only for complex, high-stakes analysis where the extra cost
+and latency are justified. Never set an effort not listed for the selected model.
+
 ## Anti-Patterns
 
 | Anti-Pattern | Why It Fails | What To Do Instead |

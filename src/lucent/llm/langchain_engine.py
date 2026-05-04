@@ -125,7 +125,11 @@ def _resolve_model(model_id: str) -> tuple[str, str]:
     return "", model_id
 
 
-def _get_chat_model(model_id: str, timeout: int = 300) -> Any:
+def _get_chat_model(
+    model_id: str,
+    timeout: int = 300,
+    reasoning_effort: str | None = None,
+) -> Any:
     """Create a LangChain chat model from a Lucent model ID."""
     try:
         from langchain.chat_models import init_chat_model
@@ -141,6 +145,14 @@ def _get_chat_model(model_id: str, timeout: int = 300) -> Any:
     kwargs: dict[str, Any] = {"timeout": timeout}
     if provider:
         kwargs["model_provider"] = provider
+
+    if reasoning_effort:
+        if provider == "openai":
+            kwargs["reasoning_effort"] = reasoning_effort
+        elif provider == "anthropic":
+            kwargs["effort"] = reasoning_effort
+        elif provider == "google_genai":
+            kwargs["thinking_level"] = reasoning_effort
 
     # Ollama: pass base_url from env so Docker containers can reach the host
     if provider == "ollama":
@@ -172,6 +184,7 @@ class LangChainEngine(LLMEngine):
         prompt: str,
         mcp_config: dict | None = None,
         timeout: int = 300,
+        reasoning_effort: str | None = None,
     ) -> str | None:
         """Run a blocking session (chat pattern)."""
         try:
@@ -181,6 +194,7 @@ class LangChainEngine(LLMEngine):
                 prompt=prompt,
                 mcp_config=mcp_config,
                 timeout=timeout,
+                reasoning_effort=reasoning_effort,
                 on_event=None,
             )
         except Exception as e:
@@ -196,6 +210,7 @@ class LangChainEngine(LLMEngine):
         on_event: Callable[[SessionEvent], None] | None = None,
         timeout: int = 3600,
         idle_timeout: int = 300,
+        reasoning_effort: str | None = None,
     ) -> str | None:
         """Run a streaming session with event callbacks (daemon pattern)."""
         try:
@@ -205,6 +220,7 @@ class LangChainEngine(LLMEngine):
                 prompt=prompt,
                 mcp_config=mcp_config,
                 timeout=timeout,
+                reasoning_effort=reasoning_effort,
                 on_event=on_event,
             )
         except Exception as e:
@@ -220,6 +236,7 @@ class LangChainEngine(LLMEngine):
         prompt: str,
         mcp_config: dict | None = None,
         timeout: int = 300,
+        reasoning_effort: str | None = None,
         on_event: Callable[[SessionEvent], None] | None = None,
     ) -> str | None:
         """Core implementation: run model with MCP tool loop.
@@ -234,7 +251,11 @@ class LangChainEngine(LLMEngine):
             ToolMessage,
         )
 
-        chat_model = _get_chat_model(model, timeout=timeout)
+        chat_model = _get_chat_model(
+            model,
+            timeout=timeout,
+            reasoning_effort=reasoning_effort,
+        )
 
         # Set up MCP tool bridge if config is provided
         bridge = None

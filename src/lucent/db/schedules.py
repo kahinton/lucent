@@ -165,6 +165,7 @@ ALLOWED_SCHEDULE_COLUMNS = frozenset(
         "enabled",
         "agent_type",
         "model",
+        "reasoning_effort",
         "prompt",
         "task_template",
         "sandbox_config",
@@ -396,6 +397,7 @@ class ScheduleRepository:
         description: str = "",
         agent_type: str = "code",
         model: str | None = None,
+        reasoning_effort: str | None = None,
         task_template: dict | None = None,
         sandbox_config: dict | None = None,
         sandbox_template_id: str | None = None,
@@ -423,12 +425,12 @@ class ScheduleRepository:
             row = await conn.fetchrow(
                 """INSERT INTO schedules
                    (title, organization_id, description, agent_type, model, task_template,
-                    sandbox_config, sandbox_template_id, schedule_type, cron_expression,
-                    interval_seconds, next_run_at, priority, timezone, max_runs,
-                    expires_at, created_by, prompt)
-                   VALUES ($1, $2::uuid, $3, $4, $5, $6::jsonb, $7::jsonb,
-                           $8::uuid, $9, $10, $11, $12, $13, $14, $15,
-                           $16, $17::uuid, $18)
+                    reasoning_effort, sandbox_config, sandbox_template_id, schedule_type,
+                    cron_expression, interval_seconds, next_run_at, priority, timezone,
+                    max_runs, expires_at, created_by, prompt)
+                   VALUES ($1, $2::uuid, $3, $4, $5, $6::jsonb, $7, $8::jsonb,
+                       $9::uuid, $10, $11, $12, $13, $14, $15, $16,
+                       $17, $18::uuid, $19)
                    RETURNING *""",
                 title,
                 org_id,
@@ -436,6 +438,7 @@ class ScheduleRepository:
                 agent_type,
                 model,
                 json.dumps(task_template or {}),
+                reasoning_effort,
                 json.dumps(sandbox_config) if isinstance(sandbox_config, dict)
                 else sandbox_config if isinstance(sandbox_config, str) and sandbox_config
                 else None,

@@ -179,12 +179,20 @@ class CopilotEngine(LLMEngine):
             config_kwargs["cli_path"] = cli_path
         return _CopilotClient(config=_SubprocessConfig(**config_kwargs))
 
-    def _make_session_kwargs(self, model: str, system_message: str, mcp_config: dict | None) -> dict:
+    def _make_session_kwargs(
+        self,
+        model: str,
+        system_message: str,
+        mcp_config: dict | None,
+        reasoning_effort: str | None = None,
+    ) -> dict:
         """Build create_session kwargs."""
         kwargs: dict[str, Any] = {
             "model": model,
             "mcp_servers": mcp_config or {},
         }
+        if reasoning_effort:
+            kwargs["reasoning_effort"] = reasoning_effort
         if _PermissionHandler is not None:
             kwargs["on_permission_request"] = _PermissionHandler.approve_all
         if _SystemMessageReplaceConfig is not None:
@@ -206,6 +214,7 @@ class CopilotEngine(LLMEngine):
         prompt: str,
         mcp_config: dict | None = None,
         timeout: int = 300,
+        reasoning_effort: str | None = None,
     ) -> str | None:
         """Run a blocking session using send_and_wait (chat pattern)."""
         if not _ensure_sdk():
@@ -219,7 +228,12 @@ class CopilotEngine(LLMEngine):
             client = self._make_client()
             await client.start()
 
-            session_kwargs = self._make_session_kwargs(model, system_message, mcp_config)
+            session_kwargs = self._make_session_kwargs(
+                model,
+                system_message,
+                mcp_config,
+                reasoning_effort=reasoning_effort,
+            )
             session = await client.create_session(**session_kwargs)
 
             response = await session.send_and_wait(
@@ -266,6 +280,7 @@ class CopilotEngine(LLMEngine):
         on_event: Callable[[SessionEvent], None] | None = None,
         timeout: int = 3600,
         idle_timeout: int = 300,
+        reasoning_effort: str | None = None,
     ) -> str | None:
         """Run a streaming session using send + event callbacks (daemon pattern).
 
@@ -284,7 +299,12 @@ class CopilotEngine(LLMEngine):
             client = self._make_client()
             await client.start()
 
-            session_kwargs = self._make_session_kwargs(model, system_message, mcp_config)
+            session_kwargs = self._make_session_kwargs(
+                model,
+                system_message,
+                mcp_config,
+                reasoning_effort=reasoning_effort,
+            )
             session = await client.create_session(**session_kwargs)
 
             response_parts: list[str] = []

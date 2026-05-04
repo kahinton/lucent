@@ -108,6 +108,18 @@ async def schedule_detail(
         )
     )["items"]
 
+    from lucent.model_registry import list_models
+
+    available_models = [
+        {
+            "id": m.id,
+            "name": m.name or m.id,
+            "reasoning_efforts": list(m.reasoning_efforts or []),
+        }
+        for m in list_models(include_disabled=False)
+    ]
+    available_models.sort(key=lambda m: m["id"])
+
     # Resolve sandbox template name if linked
     sandbox_template = None
     if sched.get("sandbox_template_id"):
@@ -128,6 +140,7 @@ async def schedule_detail(
             "user": user,
             "sched": sched,
             "active_agents": active_agents,
+            "available_models": available_models,
             "sandbox_template": sandbox_template,
             "run_page": page,
             "run_per_page": per_page,
@@ -237,6 +250,24 @@ async def schedule_edit(request: Request, schedule_id: str):
     model = form.get("model", "").strip() or None
     if model != (sched.get("model") or None):
         updates["model"] = model
+
+    reasoning_effort = form.get("reasoning_effort", "").strip() or None
+    if reasoning_effort != (sched.get("reasoning_effort") or None):
+        updates["reasoning_effort"] = reasoning_effort
+
+    effective_model = updates.get("model", sched.get("model"))
+    effective_effort = updates.get("reasoning_effort", sched.get("reasoning_effort"))
+    if effective_model:
+        from lucent.model_registry import validate_model, validate_reasoning_effort
+
+        model_error = validate_model(effective_model, require_tools=True)
+        if model_error:
+            raise HTTPException(422, model_error)
+        effort_error = validate_reasoning_effort(effective_model, effective_effort)
+        if effort_error:
+            raise HTTPException(422, effort_error)
+    elif effective_effort:
+        raise HTTPException(422, "reasoning_effort requires model")
 
     if updates:
         await repo.update_schedule(schedule_id, org_id, **updates)

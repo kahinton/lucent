@@ -107,6 +107,9 @@
     <div class="bg-white rounded-lg border border-gray-200 p-4">
         <p class="text-xs text-gray-500 uppercase tracking-wider">Model</p>
         <p class="text-sm font-semibold text-gray-900">{{ sched.model or 'default' }}</p>
+        {% if sched.reasoning_effort %}
+        <p class="text-xs text-purple-600 mt-1">reasoning: {{ sched.reasoning_effort }}</p>
+        {% endif %}
     </div>
     <div class="bg-white rounded-lg border border-gray-200 p-4">
         <p class="text-xs text-gray-500 uppercase tracking-wider">Next Run</p>
@@ -175,10 +178,25 @@
                 </div>
                 <div>
                     <label for="model" class="block text-sm font-medium text-gray-700 mb-1">Model</label>
-                    <input type="text" name="model" id="model" value="{{ sched.model or '' }}"
-                        placeholder="default"
-                        class="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none">
+                    <select name="model" id="model"
+                        class="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none bg-white">
+                        <option value="" data-reasoning-efforts="" {% if not sched.model %}selected{% endif %}>daemon default</option>
+                        {% for model in available_models %}
+                        <option value="{{ model.id }}" data-reasoning-efforts="{{ (model.reasoning_efforts or [])|join(',') }}" {% if model.id == sched.model %}selected{% endif %}>{{ model.name }} ({{ model.id }})</option>
+                        {% endfor %}
+                        {% if sched.model and sched.model not in available_models | map(attribute='id') | list %}
+                        <option value="{{ sched.model }}" selected>{{ sched.model }} (not found)</option>
+                        {% endif %}
+                    </select>
                     <p class="text-xs text-gray-400 mt-1">Leave blank for daemon default</p>
+                </div>
+                <div>
+                    <label for="reasoning_effort" class="block text-sm font-medium text-gray-700 mb-1">Reasoning</label>
+                    <select name="reasoning_effort" id="reasoning_effort" data-current="{{ sched.reasoning_effort or '' }}"
+                        class="w-full px-3 py-2 text-sm border border-purple-200 bg-purple-50 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-purple-500 outline-none">
+                        <option value="">provider default</option>
+                    </select>
+                    <p class="text-xs text-gray-400 mt-1">Shown when the model supports selectable effort.</p>
                 </div>
                 <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">Schedule Type</label>
@@ -270,6 +288,31 @@
         </div>
     </div>
 </form>
+
+<script nonce="{{ request.state.csp_nonce }}">
+function refreshScheduleReasoning() {
+    const modelSelect = document.getElementById('model');
+    const reasoningSelect = document.getElementById('reasoning_effort');
+    if (!modelSelect || !reasoningSelect) return;
+    const selected = modelSelect.options[modelSelect.selectedIndex];
+    const efforts = ((selected && selected.dataset.reasoningEfforts) || '').split(',').filter(Boolean);
+    const current = reasoningSelect.dataset.current || '';
+    reasoningSelect.innerHTML = '<option value="">provider default</option>';
+    for (const effort of efforts) {
+        const opt = document.createElement('option');
+        opt.value = effort;
+        opt.textContent = effort;
+        if (effort === current) opt.selected = true;
+        reasoningSelect.appendChild(opt);
+    }
+}
+document.getElementById('model')?.addEventListener('change', function() {
+    const reasoningSelect = document.getElementById('reasoning_effort');
+    reasoningSelect.dataset.current = '';
+    refreshScheduleReasoning();
+});
+refreshScheduleReasoning();
+</script>
 
 <!-- Run History -->
 <div class="bg-white rounded-lg border border-gray-200">
