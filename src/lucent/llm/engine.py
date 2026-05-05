@@ -64,6 +64,9 @@ class LLMEngine(ABC):
         mcp_config: dict | None = None,
         timeout: int = 300,
         reasoning_effort: str | None = None,
+        provider_session_id: str | None = None,
+        resume: bool = False,
+        message_history: list[dict[str, Any]] | None = None,
     ) -> str | None:
         """Run a single LLM session and return the full response text.
 
@@ -76,6 +79,9 @@ class LLMEngine(ABC):
             mcp_config: MCP server configuration dict for tool access.
             timeout: Maximum seconds to wait for response.
             reasoning_effort: Optional provider-specific reasoning/thinking level.
+            provider_session_id: Backend-native session identifier, if supported.
+            resume: Whether to resume an existing backend-native session.
+            message_history: Prior persisted messages for engines without native resume.
 
         Returns:
             The assistant's response text, or None on error.
@@ -92,6 +98,9 @@ class LLMEngine(ABC):
         timeout: int = 600,
         idle_timeout: int = 300,
         reasoning_effort: str | None = None,
+        provider_session_id: str | None = None,
+        resume: bool = False,
+        message_history: list[dict[str, Any]] | None = None,
     ) -> str | None:
         """Run an LLM session with event streaming.
 
@@ -111,6 +120,9 @@ class LLMEngine(ABC):
                 agent is actively producing events, the session continues
                 indefinitely (up to `timeout`). Default 300s (5 min).
             reasoning_effort: Optional provider-specific reasoning/thinking level.
+            provider_session_id: Backend-native session identifier, if supported.
+            resume: Whether to resume an existing backend-native session.
+            message_history: Prior persisted messages for engines without native resume.
 
         Returns:
             The assistant's full response text, or None on error.

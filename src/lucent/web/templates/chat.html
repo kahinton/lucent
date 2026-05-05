@@ -79,10 +79,57 @@
     main { padding: 0 !important; height: 100vh; }
     main > div { max-width: none !important; height: 100%; }
     
+    /* Chat shell keeps the conversation full-width; history overlays from the right. */
+    .chat-shell { height: 100%; min-height: 0; overflow: hidden; position: relative; }
+    .session-drawer-backdrop {
+        position: absolute;
+        inset: 0;
+        background: rgba(15, 23, 42, 0.08);
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.22s ease;
+        z-index: 20;
+    }
+    .session-drawer-backdrop.open {
+        opacity: 1;
+        pointer-events: auto;
+    }
+    .session-drawer {
+        position: absolute;
+        top: 0;
+        right: 0;
+        bottom: 0;
+        width: min(360px, calc(100vw - 2rem));
+        background: rgba(255, 255, 255, 0.96);
+        border-left: 1px solid #e5e7eb;
+        box-shadow: -20px 0 45px rgba(15, 23, 42, 0.12);
+        transform: translateX(100%);
+        transition: transform 0.24s cubic-bezier(0.16, 1, 0.3, 1);
+        z-index: 30;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        backdrop-filter: blur(14px);
+    }
+    .session-drawer.open {
+        transform: translateX(0);
+    }
+    .session-list {
+        overflow-y: auto;
+        min-height: 0;
+    }
+    .session-row.active {
+        background: #eef2ff;
+        color: #3730a3;
+        border-color: #c7d2fe;
+    }
+
     /* Chat container fills the viewport below the sidebar header */
     .chat-container {
         display: flex;
         flex-direction: column;
+        flex: 1;
+        min-width: 0;
         height: 100%;
         overflow: hidden;
     }
@@ -186,11 +233,15 @@
         .chat-input-field::placeholder { color: #64748b !important; }
         .config-select { background-color: #1a2233 !important; border-color: #334155 !important; color: #e2e8f0 !important; }
         .empty-state-text { color: #64748b !important; }
+        .session-drawer { background: rgba(13, 17, 23, 0.96) !important; border-color: #1e293b !important; }
+        .session-drawer-backdrop { background: rgba(2, 6, 23, 0.18) !important; }
+        .session-row.active { background: rgba(99, 102, 241, 0.18) !important; color: #c7d2fe !important; border-color: #3730a3 !important; }
     }
 </style>
 {% endblock %}
 
 {% block content %}
+<div class="chat-shell">
 <div class="chat-container empty-mode" id="chat-root">
     <!-- Messages area -->
     <div id="messages" class="messages-area">
@@ -253,7 +304,7 @@
                 </div>
             </form>
             <!-- Controls toolbar below input -->
-            <div class="flex items-center gap-3 mt-2 px-1">
+            <div class="relative flex items-center gap-3 mt-2 px-1">
                 <select id="agent-select" class="config-select text-xs rounded-lg border border-gray-200 bg-white px-2 py-1 text-gray-500 focus:border-primary-300 focus:ring-1 focus:ring-primary-100 focus:outline-none cursor-pointer">
                     <option value="">Lucent</option>
                 </select>
@@ -263,7 +314,15 @@
                 <select id="reasoning-select" class="config-select hidden text-xs rounded-lg border border-purple-200 bg-purple-50 px-2 py-1 text-purple-600 focus:border-purple-300 focus:ring-1 focus:ring-purple-100 focus:outline-none cursor-pointer" title="Reasoning effort">
                     <option value="">Reasoning: default</option>
                 </select>
-                <button class="ml-auto flex items-center gap-1 px-2 py-1 text-xs font-medium text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors" title="New conversation">
+                <div class="ml-auto flex items-center gap-2">
+                    <button type="button" id="session-menu-btn" class="flex items-center gap-1 px-2 py-1 text-xs font-medium text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors" title="Conversation history" aria-expanded="false">
+                        <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
+                        History
+                    </button>
+                </div>
+                <button type="button" id="new-conversation-btn" class="flex items-center gap-1 px-2 py-1 text-xs font-medium text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors" title="New conversation">
                     <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
                     </svg>
@@ -274,6 +333,22 @@
         </div>
     </div>
 </div>
+<div id="session-drawer-backdrop" class="session-drawer-backdrop" aria-hidden="true"></div>
+<aside id="session-drawer" class="session-drawer" aria-label="Conversation history" aria-hidden="true">
+    <div class="flex items-start justify-between gap-3 border-b border-gray-100 px-4 py-4">
+        <div>
+            <h2 class="text-sm font-semibold text-gray-900">Conversations</h2>
+            <p id="session-status" class="mt-0.5 text-xs text-gray-400">Loading…</p>
+        </div>
+        <button type="button" id="session-drawer-close" class="rounded-lg p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600 transition-colors" title="Close history">
+            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+            </svg>
+        </button>
+    </div>
+    <div id="session-list" class="session-list flex-1 p-3 space-y-1"></div>
+</aside>
+</div>
 
 <script nonce="{{ request.state.csp_nonce }}">
 // ═══════════════════════════════════════════════════════════════════
@@ -282,6 +357,8 @@
 
 const state = {
     messages: [],       // {role, content}
+    sessionId: {{ (session_id or '') | tojson }},
+    sessions: [],
     streaming: false,
     abortController: null,
     toolCalls: [],      // Current response's tool calls
@@ -309,6 +386,47 @@ function updateReasoningOptions() {
     }
     reasoningSelect.classList.remove('hidden');
     reasoningSelect.value = '';
+}
+
+function setSelectValueIfPresent(selectId, value) {
+    if (!value) return false;
+    const select = document.getElementById(selectId);
+    const stringValue = String(value);
+    const exists = Array.from(select.options).some(opt => opt.value === stringValue);
+    if (!exists) return false;
+    select.value = stringValue;
+    return true;
+}
+
+function addMissingModelOption(modelId) {
+    if (!modelId || state.modelsById[modelId]) return;
+    const select = document.getElementById('model-select');
+    const group = document.createElement('optgroup');
+    group.label = 'Previous session';
+    const opt = document.createElement('option');
+    opt.value = modelId;
+    opt.textContent = `${modelId} (previously used)`;
+    group.appendChild(opt);
+    select.appendChild(group);
+    state.modelsById[modelId] = { id: modelId, reasoning_efforts: [] };
+}
+
+function applySessionConfig(session) {
+    if (!session) return;
+    if (session.model) {
+        addMissingModelOption(session.model);
+        if (setSelectValueIfPresent('model-select', session.model)) {
+            updateReasoningOptions();
+        }
+    }
+    if (session.reasoning_effort) {
+        setSelectValueIfPresent('reasoning-select', session.reasoning_effort);
+    }
+    if (session.agent_definition_id) {
+        setSelectValueIfPresent('agent-select', session.agent_definition_id);
+    } else {
+        document.getElementById('agent-select').value = '';
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -363,8 +481,115 @@ function updateReasoningOptions() {
         // Agents not available — that's fine, default is good
     }
     
+    await loadSessions();
+    if (state.sessionId) {
+        await loadSession(state.sessionId);
+    }
+
     document.getElementById('chat-input').focus();
 })();
+
+// ═══════════════════════════════════════════════════════════════════
+// Session Persistence
+// ═══════════════════════════════════════════════════════════════════
+
+async function loadSessions() {
+    const status = document.getElementById('session-status');
+    try {
+        const resp = await fetch('/api/chat/sessions?kind=chat&limit=50');
+        if (!resp.ok) throw new Error('Unable to load sessions');
+        const data = await resp.json();
+        state.sessions = data.items || [];
+        renderSessionList();
+        status.textContent = state.sessions.length ? `${state.sessions.length} saved` : 'No saved conversations yet';
+    } catch(e) {
+        status.textContent = 'Sessions unavailable';
+    }
+}
+
+function renderSessionList() {
+    const list = document.getElementById('session-list');
+    if (!state.sessions.length) {
+        list.innerHTML = '<div class="rounded-xl border border-dashed border-gray-200 p-4 text-xs text-gray-400 text-center">Start a conversation and it will stay here.</div>';
+        return;
+    }
+    list.innerHTML = '';
+    for (const session of state.sessions) {
+        const row = document.createElement('button');
+        row.type = 'button';
+        row.dataset.sessionId = session.id;
+        row.className = 'session-row w-full text-left rounded-xl border border-transparent px-3 py-2.5 hover:bg-white hover:border-gray-200 transition-colors ' + (session.id === state.sessionId ? 'active' : '');
+        const title = session.title || 'Untitled conversation';
+        const meta = [session.model, session.linked_request_count ? `${session.linked_request_count} request${session.linked_request_count === 1 ? '' : 's'}` : null].filter(Boolean).join(' · ');
+        row.innerHTML = `
+            <div class="font-medium text-sm truncate">${escapeHtml(title)}</div>
+            <div class="mt-0.5 text-[11px] text-gray-400 truncate">${escapeHtml(meta || 'No messages yet')}</div>`;
+        list.appendChild(row);
+    }
+}
+
+async function createSession(firstMessage) {
+    const selectedModel = document.getElementById('model-select').value;
+    const selectedReasoning = document.getElementById('reasoning-select').value;
+    const selectedAgent = document.getElementById('agent-select').value;
+    const resp = await fetch('/api/chat/sessions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            kind: 'chat',
+            initial_message: firstMessage || null,
+            model: selectedModel || null,
+            reasoning_effort: selectedReasoning || null,
+            agent_id: selectedAgent || null,
+        }),
+    });
+    if (!resp.ok) throw new Error('Unable to create session');
+    const session = await resp.json();
+    state.sessionId = session.id;
+    history.replaceState(null, '', `/chat/${session.id}`);
+    await loadSessions();
+    return session.id;
+}
+
+async function ensureSession(firstMessage) {
+    if (state.sessionId) return state.sessionId;
+    return await createSession(firstMessage);
+}
+
+async function loadSession(sessionId) {
+    try {
+        const resp = await fetch(`/api/chat/sessions/${sessionId}`);
+        if (!resp.ok) throw new Error('Unable to load session');
+        const session = await resp.json();
+        state.sessionId = session.id;
+        history.replaceState(null, '', `/chat/${session.id}`);
+        applySessionConfig(session);
+        renderSessionMessages(session.messages || []);
+        await loadSessions();
+    } catch(e) {
+        console.error('Failed to load session:', e);
+    }
+}
+
+function renderSessionMessages(messages) {
+    const msgs = document.getElementById('messages');
+    msgs.innerHTML = '';
+    state.messages = [];
+    const visible = messages.filter(m => m.role === 'user' || m.role === 'assistant');
+    if (!visible.length) {
+        clearConversation({ keepSession: true });
+        return;
+    }
+    document.getElementById('chat-root').classList.remove('empty-mode');
+    for (const msg of visible) {
+        state.messages.push({ role: msg.role, content: msg.content || '' });
+        if (msg.role === 'user') appendUserMessage(msg.content || '');
+        else appendAssistantMessage(msg.content || '');
+    }
+    hideStatus();
+    updateButtons();
+    scrollToBottom();
+}
 
 // ═══════════════════════════════════════════════════════════════════
 // Message Sending
@@ -417,6 +642,8 @@ async function sendMessage(e) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 messages: state.messages,
+                session_id: state.sessionId,
+                surface: 'chat',
                 model: selectedModel || null,
                 reasoning_effort: selectedReasoning || null,
                 agent_id: selectedAgent || null,
@@ -457,6 +684,12 @@ async function sendMessage(e) {
                     const event = JSON.parse(line.slice(6));
                     
                     switch (event.type) {
+                        case 'session':
+                            state.sessionId = event.session_id;
+                            history.replaceState(null, '', `/chat/${event.session_id}`);
+                            loadSessions();
+                            break;
+
                         case 'text_delta':
                             gotDeltas = true;
                             state.streamedText += event.text;
@@ -546,6 +779,7 @@ async function sendMessage(e) {
     if (state.streamedText) {
         state.messages.push({ role: 'assistant', content: state.streamedText });
     }
+    if (state.sessionId) loadSessions();
     state.streaming = false;
     state.abortController = null;
     updateButtons();
@@ -602,6 +836,15 @@ function createAssistantMessage() {
     msgs.appendChild(div);
     scrollToBottom();
     return div;
+}
+
+function appendAssistantMessage(text) {
+    const assistantEl = createAssistantMessage();
+    const contentEl = assistantEl.querySelector('.assistant-content');
+    contentEl.classList.remove('streaming-cursor');
+    contentEl.innerHTML = renderMarkdown(text || '');
+    scrollToBottom();
+    return assistantEl;
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -761,10 +1004,14 @@ function toggleReasoning(btn) {
 // UI Helpers
 // ═══════════════════════════════════════════════════════════════════
 
-function clearConversation() {
+function clearConversation(options = {}) {
     state.messages = [];
     state.toolCalls = [];
     state.streamedText = '';
+    if (!options.keepSession) {
+        state.sessionId = '';
+        history.replaceState(null, '', '/chat');
+    }
     if (state.abortController) {
         state.abortController.abort();
         state.abortController = null;
@@ -801,6 +1048,19 @@ function clearConversation() {
     
     updateButtons();
     hideStatus();
+    renderSessionList();
+}
+
+function toggleSessionDrawer(forceOpen = null) {
+    const drawer = document.getElementById('session-drawer');
+    const backdrop = document.getElementById('session-drawer-backdrop');
+    const btn = document.getElementById('session-menu-btn');
+    const open = forceOpen === null ? !drawer.classList.contains('open') : forceOpen;
+    drawer.classList.toggle('open', open);
+    backdrop.classList.toggle('open', open);
+    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    drawer.setAttribute('aria-hidden', open ? 'false' : 'true');
+    if (open) loadSessions();
 }
 
 function updateButtons() {
@@ -924,6 +1184,8 @@ document.addEventListener('keydown', function(e) {
     // Escape to stop streaming
     if (e.key === 'Escape' && state.streaming) {
         stopStreaming();
+    } else if (e.key === 'Escape') {
+        toggleSessionDrawer(false);
     }
 });
 
@@ -972,8 +1234,30 @@ document.getElementById('stop-btn').addEventListener('click', function() {
 });
 
 // Clear/New conversation button
-document.querySelector('[title="New conversation"]').addEventListener('click', function() {
+document.getElementById('new-conversation-btn').addEventListener('click', function() {
     clearConversation();
+});
+
+document.getElementById('session-menu-btn').addEventListener('click', function(e) {
+    e.stopPropagation();
+    toggleSessionDrawer();
+});
+
+// Session drawer picker
+document.getElementById('session-list').addEventListener('click', function(e) {
+    const row = e.target.closest('[data-session-id]');
+    if (row && !state.streaming) {
+        loadSession(row.dataset.sessionId);
+        toggleSessionDrawer(false);
+    }
+});
+
+document.getElementById('session-drawer-close').addEventListener('click', function() {
+    toggleSessionDrawer(false);
+});
+
+document.getElementById('session-drawer-backdrop').addEventListener('click', function() {
+    toggleSessionDrawer(false);
 });
 </script>
 {% endblock %}

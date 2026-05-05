@@ -24,6 +24,7 @@ from lucent.db.audit import AuditRepository
 from lucent.db.definitions import DefinitionRepository
 from lucent.db.groups import GroupRepository
 from lucent.db.integrations import IntegrationRepository
+from lucent.db.llm_sessions import LLMSessionRepository
 from lucent.db.memory import MemoryRepository, VersionConflictError
 from lucent.db.models import ModelRepository
 from lucent.db.organization import OrganizationRepository
@@ -63,6 +64,7 @@ __all__ = [
     "DefinitionRepository",
     "GroupRepository",
     "IntegrationRepository",
+    "LLMSessionRepository",
     "UserRepository",
     "ApiKeyRepository",
     "OrganizationRepository",

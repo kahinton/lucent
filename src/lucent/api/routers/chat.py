@@ -8,7 +8,10 @@ Lucent MCP server for memory search, creation, and management.
 
 import json
 import os
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any
+from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -66,6 +69,8 @@ class ChatRequest(BaseModel):
     page_context: dict | None = None  # {url, title, type, data}
     model: str | None = None  # override the default chat model
     reasoning_effort: str | None = Field(default=None, max_length=64)
+    session_id: str | None = None
+    surface: str = Field(default="embedded_chat", pattern=r"^(chat|embedded_chat)$")
 
 
 class ChatStreamRequest(BaseModel):
@@ -73,6 +78,33 @@ class ChatStreamRequest(BaseModel):
     model: str | None = None
     reasoning_effort: str | None = Field(default=None, max_length=64)
     agent_id: str | None = None  # optional agent definition to use
+    session_id: str | None = None
+    surface: str = Field(default="chat", pattern=r"^(chat|embedded_chat)$")
+
+
+class CreateChatSession(BaseModel):
+    title: str | None = Field(default=None, max_length=256)
+    kind: str = Field(default="chat", pattern=r"^(chat|embedded_chat)$")
+    model: str | None = None
+    reasoning_effort: str | None = Field(default=None, max_length=64)
+    agent_id: str | None = None
+    initial_message: str | None = Field(default=None, max_length=1000)
+
+
+class UpdateChatSession(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=256)
+    status: str | None = Field(default=None, pattern=r"^(active|idle|archived|deleted)$")
+
+
+@dataclass
+class PersistentChatSession:
+    session_id: str | None
+    provider_session_id: str | None
+    provider_initialized: bool
+    turn_id: str
+    user_message_id: str | None
+    previous_messages: list[dict[str, Any]]
+    repo: Any | None
 
 
 async def _get_session_user(request: Request):
@@ -88,21 +120,189 @@ async def _get_session_user(request: Request):
     return user, pool
 
 
-def _build_mcp_config(session_token: str) -> dict:
+def _build_mcp_config(
+    session_token: str,
+    *,
+    llm_session_id: str | None = None,
+    llm_turn_id: str | None = None,
+    llm_message_id: str | None = None,
+) -> dict:
     """Build MCP server config using the user's session token.
 
     The MCPAuthMiddleware accepts session tokens via Bearer auth,
     so the user's own identity flows through to MCP operations.
     """
+    headers = {"Authorization": f"Bearer {session_token}"}
+    if llm_session_id:
+        headers["X-Lucent-LLM-Session-Id"] = llm_session_id
+    if llm_turn_id:
+        headers["X-Lucent-LLM-Turn-Id"] = llm_turn_id
+    if llm_message_id:
+        headers["X-Lucent-LLM-Message-Id"] = llm_message_id
+
     return {
         "memory-server": {
             "type": "http",
             "url": MCP_URL,
-            "headers": {"Authorization": f"Bearer {session_token}"},
+            "headers": headers,
             "tools": CHAT_ALLOWED_TOOLS,
         },
     }
 
+
+
+def _title_from_message(content: str | None) -> str | None:
+    if not content:
+        return None
+    first_line = " ".join(content.strip().splitlines()[0:1]).strip()
+    return first_line[:80] if first_line else None
+
+
+def _history_prompt(history: list[dict[str, Any]], last_message: str) -> str:
+    history_parts = []
+    for m in history:
+        role = m.get("role")
+        if role not in ("user", "assistant"):
+            continue
+        prefix = "User" if role == "user" else "Assistant"
+        history_parts.append(f"{prefix}: {m.get('content') or ''}")
+    if history_parts:
+        return "Previous conversation:\n" + "\n".join(history_parts) + f"\n\nUser: {last_message}"
+    return last_message
+
+
+def _message_history_for_engine(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
+    return [
+        {"role": str(m.get("role")), "content": str(m.get("content") or "")}
+        for m in messages
+        if m.get("role") in ("user", "assistant")
+    ]
+
+
+def _chat_message_to_dict(message: ChatMessage) -> dict[str, str]:
+    """Pydantic v1/v2 compatible ChatMessage serialization."""
+    return {"role": message.role, "content": message.content}
+
+
+def _event_raw(event) -> dict[str, Any]:
+    """Build a small JSON-safe raw event summary for persistence."""
+    return {
+        "type": event.type.value if hasattr(event.type, "value") else str(event.type),
+        "content": event.content,
+        "tool_name": event.tool_name,
+        "tool_input": event.tool_input,
+        "tool_output": event.tool_output,
+    }
+
+
+async def _prepare_persistent_chat_session(
+    *,
+    user: dict,
+    pool,
+    session_id: str | None,
+    kind: str,
+    engine_name: str,
+    model: str,
+    reasoning_effort: str | None,
+    agent_id: str | None = None,
+    last_message: str = "",
+) -> PersistentChatSession:
+    """Create/load a DB-backed chat session and persist the current user turn.
+
+    If persistence is unavailable and no explicit session_id was supplied,
+    the chat may continue ephemerally. An explicit session_id must resolve to
+    a real session so users do not accidentally talk in the wrong thread.
+    """
+    turn_id = str(uuid4())
+    try:
+        from lucent.db.llm_sessions import LLMSessionRepository
+
+        repo = LLMSessionRepository(pool)
+        org_id = str(user["organization_id"])
+        user_id = str(user["id"])
+        if session_id:
+            session = await repo.get_session(session_id, org_id, user_id=user_id)
+            if not session:
+                raise HTTPException(status_code=404, detail="Chat session not found")
+            await repo.update_session(
+                session_id,
+                org_id,
+                user_id=user_id,
+                engine=engine_name,
+                model=model,
+                reasoning_effort=reasoning_effort or "",
+                agent_definition_id=agent_id,
+                status="active",
+            )
+        else:
+            provider_session_id = str(uuid4()) if engine_name == "copilot" else None
+            session = await repo.create_session(
+                org_id=org_id,
+                user_id=user_id,
+                kind=kind,
+                title=_title_from_message(last_message),
+                engine=engine_name,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                agent_definition_id=agent_id,
+                provider_session_id=provider_session_id,
+            )
+            session_id = str(session["id"])
+
+        provider_session_id = session.get("provider_session_id")
+        if engine_name == "copilot" and not provider_session_id:
+            provider_session_id = str(uuid4())
+            session = await repo.update_session(
+                session_id,
+                org_id,
+                user_id=user_id,
+                provider_session_id=provider_session_id,
+            ) or session
+
+        previous_messages = await repo.list_messages(
+            session_id,
+            org_id,
+            roles={"user", "assistant"},
+            limit=200,
+        )
+
+        user_message_id = None
+        if last_message:
+            user_message = await repo.add_message(
+                session_id,
+                role="user",
+                content=last_message,
+                org_id=org_id,
+                turn_id=turn_id,
+                metadata={"surface": kind, "model": model, "agent_id": agent_id},
+            )
+            user_message_id = str(user_message["id"])
+
+        provider_metadata = session.get("provider_metadata") or {}
+        return PersistentChatSession(
+            session_id=session_id,
+            provider_session_id=provider_session_id,
+            provider_initialized=bool(provider_metadata.get("provider_initialized")),
+            turn_id=turn_id,
+            user_message_id=user_message_id,
+            previous_messages=previous_messages,
+            repo=repo,
+        )
+    except HTTPException:
+        raise
+    except Exception:
+        logger.warning("Chat persistence unavailable; continuing ephemerally", exc_info=True)
+        if session_id:
+            raise HTTPException(status_code=500, detail="Chat session persistence failed")
+        return PersistentChatSession(
+            session_id=None,
+            provider_session_id=None,
+            provider_initialized=False,
+            turn_id=turn_id,
+            user_message_id=None,
+            previous_messages=[],
+            repo=None,
+        )
 
 def _chat_tool_grounding_instructions() -> str:
     """Runtime instructions that keep chat answers grounded in actual tool results."""
@@ -238,6 +438,89 @@ async def _build_system_prompt(user: dict, pool, page_context: dict | None) -> s
     return "\n".join(parts)
 
 
+@router.get("/sessions")
+async def list_chat_sessions(
+    request: Request,
+    kind: str | None = None,
+    limit: int = 25,
+    offset: int = 0,
+    include_archived: bool = False,
+):
+    """List persisted chat sessions for the authenticated web user."""
+    user, pool = await _get_session_user(request)
+    from lucent.db.llm_sessions import LLMSessionRepository
+
+    repo = LLMSessionRepository(pool)
+    return await repo.list_sessions(
+        str(user["organization_id"]),
+        user_id=str(user["id"]),
+        kind=kind,
+        include_archived=include_archived,
+        limit=min(max(limit, 1), 100),
+        offset=max(offset, 0),
+    )
+
+
+@router.post("/sessions")
+async def create_chat_session(request: Request, body: CreateChatSession):
+    """Create a persisted chat session shell."""
+    user, pool = await _get_session_user(request)
+    from lucent.db.llm_sessions import LLMSessionRepository
+
+    repo = LLMSessionRepository(pool)
+    session = await repo.create_session(
+        org_id=str(user["organization_id"]),
+        user_id=str(user["id"]),
+        kind=body.kind,
+        title=body.title or _title_from_message(body.initial_message),
+        model=body.model,
+        reasoning_effort=body.reasoning_effort,
+        agent_definition_id=body.agent_id,
+    )
+    return session
+
+
+@router.get("/sessions/{session_id}")
+async def get_chat_session(request: Request, session_id: str):
+    """Load a persisted chat session with transcript and request links."""
+    user, pool = await _get_session_user(request)
+    from lucent.db.llm_sessions import LLMSessionRepository
+
+    repo = LLMSessionRepository(pool)
+    session = await repo.get_session_detail(
+        session_id,
+        str(user["organization_id"]),
+        user_id=str(user["id"]),
+        include_events=True,
+    )
+    if not session:
+        raise HTTPException(status_code=404, detail="Chat session not found")
+    return session
+
+
+@router.patch("/sessions/{session_id}")
+async def update_chat_session(
+    request: Request,
+    session_id: str,
+    body: UpdateChatSession,
+):
+    """Rename or archive a persisted chat session."""
+    user, pool = await _get_session_user(request)
+    from lucent.db.llm_sessions import LLMSessionRepository
+
+    repo = LLMSessionRepository(pool)
+    session = await repo.update_session(
+        session_id,
+        str(user["organization_id"]),
+        user_id=str(user["id"]),
+        title=body.title,
+        status=body.status,
+    )
+    if not session:
+        raise HTTPException(status_code=404, detail="Chat session not found")
+    return session
+
+
 @router.post("/stream")
 async def chat_stream(
     request: Request,
@@ -260,23 +543,44 @@ async def chat_stream(
     engine = get_engine_for_model(selected_model)
 
     system_prompt = await _build_system_prompt(user, pool, body.page_context)
-
-    # Build the conversation as a single prompt with history
-    history_parts = []
-    for m in body.messages[:-1]:  # All but the last message
-        prefix = "User" if m.role == "user" else "Assistant"
-        history_parts.append(f"{prefix}: {m.content}")
-
     last_message = body.messages[-1].content if body.messages else ""
+    chat_session = await _prepare_persistent_chat_session(
+        user=user,
+        pool=pool,
+        session_id=body.session_id,
+        kind=body.surface,
+        engine_name=engine.name,
+        model=selected_model,
+        reasoning_effort=body.reasoning_effort,
+        last_message=last_message,
+    )
 
-    if history_parts:
-        prompt = "Previous conversation:\n" + "\n".join(history_parts) + f"\n\nUser: {last_message}"
-    else:
-        prompt = last_message
+    fallback_history = [_chat_message_to_dict(m) for m in body.messages[:-1]]
+    persisted_history = chat_session.previous_messages or fallback_history
+    resume_provider = bool(
+        engine.name == "copilot"
+        and chat_session.provider_session_id
+        and chat_session.provider_initialized
+    )
+    prompt = last_message if resume_provider else _history_prompt(persisted_history, last_message)
+    message_history = (
+        _message_history_for_engine(chat_session.previous_messages)
+        if engine.name == "langchain" and chat_session.previous_messages
+        else None
+    )
 
     # Build MCP config using the user's session token
     session_token = request.cookies.get(SESSION_COOKIE_NAME)
-    mcp_config = _build_mcp_config(session_token) if session_token else {}
+    mcp_config = (
+        _build_mcp_config(
+            session_token,
+            llm_session_id=chat_session.session_id,
+            llm_turn_id=chat_session.turn_id,
+            llm_message_id=chat_session.user_message_id,
+        )
+        if session_token
+        else {}
+    )
     logger.info(
         "Chat session: engine=%s, model=%s, mcp=%s",
         engine.name,
@@ -293,8 +597,26 @@ async def chat_stream(
             mcp_config=mcp_config,
             timeout=CHAT_SESSION_TIMEOUT,
             reasoning_effort=body.reasoning_effort,
+            provider_session_id=chat_session.provider_session_id,
+            resume=resume_provider,
+            message_history=message_history,
         )
         error = None if result_text else "No response received"
+        if result_text and chat_session.repo and chat_session.session_id:
+            await chat_session.repo.add_message(
+                chat_session.session_id,
+                role="assistant",
+                content=result_text,
+                org_id=str(user["organization_id"]),
+                turn_id=chat_session.turn_id,
+                metadata={"model": selected_model, "engine": engine.name},
+            )
+            if engine.name == "copilot":
+                await chat_session.repo.mark_provider_initialized(
+                    chat_session.session_id,
+                    str(user["organization_id"]),
+                    provider_session_id=chat_session.provider_session_id,
+                )
     except Exception as e:
         logger.error("Chat session failed: %s", e)
         result_text = None
@@ -302,6 +624,9 @@ async def chat_stream(
 
     # Return SSE response
     async def generate():
+        if chat_session.session_id:
+            session_event = {"type": "session", "session_id": chat_session.session_id}
+            yield f"data: {json.dumps(session_event)}\n\n"
         if error:
             yield f"data: {json.dumps({'type': 'error', 'error': error})}\n\n"
         elif result_text:
@@ -460,20 +785,43 @@ async def chat_stream_v2(
 
     system_prompt = "\n\n".join(system_prompt_parts)
 
-    # Build conversation prompt with history
-    history_parts = []
-    for m in body.messages[:-1]:
-        prefix = "User" if m.role == "user" else "Assistant"
-        history_parts.append(f"{prefix}: {m.content}")
-
     last_message = body.messages[-1].content if body.messages else ""
-    if history_parts:
-        prompt = "Previous conversation:\n" + "\n".join(history_parts) + f"\n\nUser: {last_message}"
-    else:
-        prompt = last_message
+    chat_session = await _prepare_persistent_chat_session(
+        user=user,
+        pool=pool,
+        session_id=body.session_id,
+        kind=body.surface,
+        engine_name=engine.name,
+        model=selected_model,
+        reasoning_effort=body.reasoning_effort,
+        agent_id=body.agent_id,
+        last_message=last_message,
+    )
+    fallback_history = [_chat_message_to_dict(m) for m in body.messages[:-1]]
+    persisted_history = chat_session.previous_messages or fallback_history
+    resume_provider = bool(
+        engine.name == "copilot"
+        and chat_session.provider_session_id
+        and chat_session.provider_initialized
+    )
+    prompt = last_message if resume_provider else _history_prompt(persisted_history, last_message)
+    message_history = (
+        _message_history_for_engine(chat_session.previous_messages)
+        if engine.name == "langchain" and chat_session.previous_messages
+        else None
+    )
 
     session_token = request.cookies.get(SESSION_COOKIE_NAME)
-    mcp_config = _build_mcp_config(session_token) if session_token else {}
+    mcp_config = (
+        _build_mcp_config(
+            session_token,
+            llm_session_id=chat_session.session_id,
+            llm_turn_id=chat_session.turn_id,
+            llm_message_id=chat_session.user_message_id,
+        )
+        if session_token
+        else {}
+    )
 
     logger.info(
         "Chat v2 session: engine=%s, model=%s, agent=%s",
@@ -484,19 +832,46 @@ async def chat_stream_v2(
 
     # Use an asyncio.Queue to bridge callback events → SSE stream
     event_queue: asyncio.Queue[dict | None] = asyncio.Queue()
+    event_persist_tasks: list[asyncio.Task] = []
+    event_sequence = 0
+
+    def persist_event(payload: dict, event: SessionEvent) -> None:
+        """Persist a normalized session event without blocking SDK callbacks."""
+        nonlocal event_sequence
+        if not chat_session.repo or not chat_session.session_id:
+            return
+        event_sequence += 1
+        event_persist_tasks.append(asyncio.create_task(chat_session.repo.add_event(
+            chat_session.session_id,
+            org_id=str(user["organization_id"]),
+            turn_id=chat_session.turn_id,
+            message_id=chat_session.user_message_id,
+            sequence=event_sequence,
+            event_type=payload.get("type", event.type.value),
+            tool_name=payload.get("tool") or event.tool_name,
+            tool_input=event.tool_input or payload.get("input"),
+            tool_output=event.tool_output or payload.get("output"),
+            detail=payload.get("text") or payload.get("error"),
+            raw=_event_raw(event),
+            visible=payload.get("type") not in {"text_delta"},
+        )))
 
     def on_event(event: SessionEvent):
         """Push normalized events into the queue for SSE consumption."""
         if event.type == SessionEventType.MESSAGE_DELTA:
-            event_queue.put_nowait({
+            payload = {
                 "type": "text_delta",
                 "text": event.content or "",
-            })
+            }
+            event_queue.put_nowait(payload)
+            persist_event(payload, event)
         elif event.type == SessionEventType.MESSAGE:
-            event_queue.put_nowait({
+            payload = {
                 "type": "message",
                 "text": event.content or "",
-            })
+            }
+            event_queue.put_nowait(payload)
+            persist_event(payload, event)
         elif event.type == SessionEventType.TOOL_CALL:
             tool_input = event.content or ""
             if event.tool_input is not None:
@@ -504,27 +879,35 @@ async def chat_stream_v2(
                     tool_input = json.dumps(event.tool_input, default=str)
                 except Exception:
                     tool_input = str(event.tool_input)
-            event_queue.put_nowait({
+            payload = {
                 "type": "tool_call",
                 "tool": event.tool_name or "unknown",
                 "input": tool_input,
-            })
+            }
+            event_queue.put_nowait(payload)
+            persist_event(payload, event)
         elif event.type == SessionEventType.TOOL_RESULT:
-            event_queue.put_nowait({
+            payload = {
                 "type": "tool_result",
                 "tool": event.tool_name or "unknown",
                 "output": event.tool_output or event.content or "",
-            })
+            }
+            event_queue.put_nowait(payload)
+            persist_event(payload, event)
         elif event.type == SessionEventType.ERROR:
-            event_queue.put_nowait({
+            payload = {
                 "type": "error",
                 "error": event.content or "Unknown error",
-            })
+            }
+            event_queue.put_nowait(payload)
+            persist_event(payload, event)
         elif event.type == SessionEventType.OTHER and event.tool_name == "_reasoning":
-            event_queue.put_nowait({
+            payload = {
                 "type": "reasoning",
                 "text": event.content or "",
-            })
+            }
+            event_queue.put_nowait(payload)
+            persist_event(payload, event)
         elif event.type == SessionEventType.SESSION_IDLE:
             pass  # We'll handle done when the task completes
 
@@ -540,7 +923,25 @@ async def chat_stream_v2(
                 timeout=CHAT_SESSION_TIMEOUT,
                 idle_timeout=CHAT_SESSION_TIMEOUT,
                 reasoning_effort=body.reasoning_effort,
+                provider_session_id=chat_session.provider_session_id,
+                resume=resume_provider,
+                message_history=message_history,
             )
+            if result and chat_session.repo and chat_session.session_id:
+                await chat_session.repo.add_message(
+                    chat_session.session_id,
+                    role="assistant",
+                    content=result,
+                    org_id=str(user["organization_id"]),
+                    turn_id=chat_session.turn_id,
+                    metadata={"model": selected_model, "engine": engine.name},
+                )
+                if engine.name == "copilot":
+                    await chat_session.repo.mark_provider_initialized(
+                        chat_session.session_id,
+                        str(user["organization_id"]),
+                        provider_session_id=chat_session.provider_session_id,
+                    )
             # If we got no deltas from streaming, send the full result
             if result:
                 event_queue.put_nowait({
@@ -554,11 +955,16 @@ async def chat_stream_v2(
                 "error": str(e),
             })
         finally:
+            if event_persist_tasks:
+                await asyncio.gather(*event_persist_tasks, return_exceptions=True)
             event_queue.put_nowait(None)  # Sentinel: stream done
 
     async def generate():
         task = asyncio.create_task(run_llm())
         try:
+            if chat_session.session_id:
+                session_event = {"type": "session", "session_id": chat_session.session_id}
+                yield f"data: {json.dumps(session_event)}\n\n"
             while True:
                 event = await event_queue.get()
                 if event is None:

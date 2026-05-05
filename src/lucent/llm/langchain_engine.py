@@ -185,6 +185,9 @@ class LangChainEngine(LLMEngine):
         mcp_config: dict | None = None,
         timeout: int = 300,
         reasoning_effort: str | None = None,
+        provider_session_id: str | None = None,
+        resume: bool = False,
+        message_history: list[dict[str, Any]] | None = None,
     ) -> str | None:
         """Run a blocking session (chat pattern)."""
         try:
@@ -196,6 +199,7 @@ class LangChainEngine(LLMEngine):
                 timeout=timeout,
                 reasoning_effort=reasoning_effort,
                 on_event=None,
+                message_history=message_history,
             )
         except Exception as e:
             logger.error("LangChain session failed: %s", e)
@@ -211,6 +215,9 @@ class LangChainEngine(LLMEngine):
         timeout: int = 3600,
         idle_timeout: int = 300,
         reasoning_effort: str | None = None,
+        provider_session_id: str | None = None,
+        resume: bool = False,
+        message_history: list[dict[str, Any]] | None = None,
     ) -> str | None:
         """Run a streaming session with event callbacks (daemon pattern)."""
         try:
@@ -222,6 +229,7 @@ class LangChainEngine(LLMEngine):
                 timeout=timeout,
                 reasoning_effort=reasoning_effort,
                 on_event=on_event,
+                message_history=message_history,
             )
         except Exception as e:
             logger.error("LangChain streaming session failed: %s", e)
@@ -238,6 +246,7 @@ class LangChainEngine(LLMEngine):
         timeout: int = 300,
         reasoning_effort: str | None = None,
         on_event: Callable[[SessionEvent], None] | None = None,
+        message_history: list[dict[str, Any]] | None = None,
     ) -> str | None:
         """Core implementation: run model with MCP tool loop.
 
@@ -271,11 +280,18 @@ class LangChainEngine(LLMEngine):
             if tool_schemas:
                 model_with_tools = chat_model.bind_tools(tool_schemas)
 
-            # Build initial messages
-            messages: list = [
-                SystemMessage(content=system_message),
-                HumanMessage(content=prompt),
-            ]
+            # Build initial messages from Lucent's persisted transcript.
+            # LangChain providers do not expose a universal resumable session
+            # primitive, so Lucent is the source of truth for history.
+            messages: list = [SystemMessage(content=system_message)]
+            for persisted in message_history or []:
+                role = persisted.get("role")
+                content = persisted.get("content") or ""
+                if role == "user":
+                    messages.append(HumanMessage(content=content))
+                elif role == "assistant":
+                    messages.append(AIMessage(content=content))
+            messages.append(HumanMessage(content=prompt))
 
             # Tool-calling loop
             full_response_parts: list[str] = []

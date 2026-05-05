@@ -8,6 +8,7 @@ from uuid import UUID
 from mcp.server.fastmcp import FastMCP
 
 from lucent.db.requests import RequestRepository
+from lucent.llm.context import get_llm_context
 from lucent.tools.memories import _get_current_user_context
 
 logger = logging.getLogger(__name__)
@@ -203,6 +204,27 @@ returns status='skipped' with reason and a note explaining what to do."""
                     "before retrying.",
                 ),
             })
+
+        # If this MCP request was made by a persisted chat/LLM session, attach
+        # the created request back to that session. The IDs come from trusted
+        # HTTP headers injected by the chat server, not from model-authored
+        # tool arguments, so lineage cannot be hallucinated by the model.
+        llm_context = get_llm_context()
+        if llm_context.get("session_id") and req.get("id"):
+            try:
+                from lucent.db.llm_sessions import LLMSessionRepository
+
+                pool = await _get_pool()
+                session_repo = LLMSessionRepository(pool)
+                await session_repo.link_request(
+                    llm_context["session_id"],
+                    str(req["id"]),
+                    org_id=str(org_id),
+                    message_id=llm_context.get("message_id"),
+                    relation="created",
+                )
+            except Exception:
+                logger.debug("Failed to link request to LLM session", exc_info=True)
 
         result = {
             "id": str(req["id"]),

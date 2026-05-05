@@ -126,7 +126,8 @@ def resolve_copilot_cli_path() -> str | None:
 
 def _ensure_sdk() -> bool:
     """Lazily import the Copilot SDK. Returns True if available."""
-    global _CopilotClient, _PermissionHandler, _SubprocessConfig, _SystemMessageReplaceConfig, _sdk_available
+    global _CopilotClient, _PermissionHandler, _SubprocessConfig
+    global _SystemMessageReplaceConfig, _sdk_available
     if _sdk_available is not None:
         return _sdk_available
     try:
@@ -203,6 +204,36 @@ class CopilotEngine(LLMEngine):
             kwargs["system_message"] = system_message
         return kwargs
 
+    async def _open_session(
+        self,
+        client: Any,
+        session_kwargs: dict[str, Any],
+        *,
+        provider_session_id: str | None,
+        resume: bool,
+    ) -> Any:
+        """Create or resume a Copilot SDK session.
+
+        Lucent owns the durable session row; the Copilot SDK owns provider-side
+        history and artifacts. When resume fails (for example, the SDK session
+        was pruned from disk), fall back to creating a new provider session with
+        the same identifier so Lucent can continue from its DB transcript.
+        """
+        if provider_session_id and resume:
+            try:
+                return await client.resume_session(provider_session_id, **session_kwargs)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to resume Copilot session %s; creating a fresh session: %s",
+                    provider_session_id,
+                    exc,
+                )
+
+        create_kwargs = dict(session_kwargs)
+        if provider_session_id:
+            create_kwargs["session_id"] = provider_session_id
+        return await client.create_session(**create_kwargs)
+
     @property
     def name(self) -> str:
         return "copilot"
@@ -215,6 +246,9 @@ class CopilotEngine(LLMEngine):
         mcp_config: dict | None = None,
         timeout: int = 300,
         reasoning_effort: str | None = None,
+        provider_session_id: str | None = None,
+        resume: bool = False,
+        message_history: list[dict[str, Any]] | None = None,
     ) -> str | None:
         """Run a blocking session using send_and_wait (chat pattern)."""
         if not _ensure_sdk():
@@ -234,7 +268,12 @@ class CopilotEngine(LLMEngine):
                 mcp_config,
                 reasoning_effort=reasoning_effort,
             )
-            session = await client.create_session(**session_kwargs)
+            session = await self._open_session(
+                client,
+                session_kwargs,
+                provider_session_id=provider_session_id,
+                resume=resume,
+            )
 
             response = await session.send_and_wait(
                 prompt,
@@ -281,6 +320,9 @@ class CopilotEngine(LLMEngine):
         timeout: int = 3600,
         idle_timeout: int = 300,
         reasoning_effort: str | None = None,
+        provider_session_id: str | None = None,
+        resume: bool = False,
+        message_history: list[dict[str, Any]] | None = None,
     ) -> str | None:
         """Run a streaming session using send + event callbacks (daemon pattern).
 
@@ -305,7 +347,12 @@ class CopilotEngine(LLMEngine):
                 mcp_config,
                 reasoning_effort=reasoning_effort,
             )
-            session = await client.create_session(**session_kwargs)
+            session = await self._open_session(
+                client,
+                session_kwargs,
+                provider_session_id=provider_session_id,
+                resume=resume,
+            )
 
             response_parts: list[str] = []
             done = asyncio.Event()
@@ -359,7 +406,11 @@ class CopilotEngine(LLMEngine):
                     normalized = SessionEvent(
                         type=SessionEventType.TOOL_CALL,
                         tool_name=tool_name,
-                        content=tool_input if isinstance(tool_input, str) else str(tool_input or "")[:500],
+                        content=(
+                            tool_input
+                            if isinstance(tool_input, str)
+                            else str(tool_input or "")[:500]
+                        ),
                         raw=event,
                     )
                 elif etype == "tool.execution_complete":
@@ -466,7 +517,7 @@ class CopilotEngine(LLMEngine):
 
             # Cleanup session
             try:
-                await session.destroy()
+                await session.disconnect()
             except Exception:
                 logger.debug("Failed to destroy Copilot streaming session", exc_info=True)
 

@@ -150,3 +150,18 @@ def test_chat_mcp_config_uses_narrow_tool_allowlist():
     assert "create_task" not in tools
     assert "create_agent_definition" not in tools
     assert tools != ["*"]
+
+
+def test_chat_mcp_config_threads_llm_session_headers():
+    config = chat._build_mcp_config(
+        "session-token",
+        llm_session_id="session-id",
+        llm_turn_id="turn-id",
+        llm_message_id="message-id",
+    )
+    headers = config["memory-server"]["headers"]
+
+    assert headers["Authorization"] == "Bearer session-token"
+    assert headers["X-Lucent-LLM-Session-Id"] == "session-id"
+    assert headers["X-Lucent-LLM-Turn-Id"] == "turn-id"
+    assert headers["X-Lucent-LLM-Message-Id"] == "message-id"

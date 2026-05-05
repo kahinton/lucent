@@ -123,7 +123,10 @@ async def activity_list(
     # Count pending approvals for the badge (exclude cancelled)
     async with pool.acquire() as conn:
         pending_approval_count = await conn.fetchval(
-            "SELECT COUNT(*) FROM requests WHERE organization_id = $1 AND approval_status = 'pending_approval' AND status NOT IN ('cancelled', 'rejection_processing')",
+            """SELECT COUNT(*) FROM requests
+               WHERE organization_id = $1
+                 AND approval_status = 'pending_approval'
+                 AND status NOT IN ('cancelled', 'rejection_processing')""",
             user.organization_id,
         ) or 0
 
@@ -241,6 +244,72 @@ async def request_detail(request: Request, request_id: str):
         except Exception:
             goal_info = None
 
+    # Resolve chat/LLM sessions linked to this request. Prefer the canonical
+    # origin columns, but also fall back to llm_session_requests so older or
+    # partially-linked rows still show their conversation lineage.
+    origin_session: dict | None = None
+    origin_sessions: list[dict] = []
+    try:
+        from lucent.db.llm_sessions import LLMSessionRepository
+
+        session_repo = LLMSessionRepository(pool)
+        session_relations: dict[str, str] = {}
+        origin_session_id = req.get("origin_session_id")
+        if origin_session_id:
+            session_relations[str(origin_session_id)] = "origin"
+
+        async with pool.acquire() as conn:
+            linked_rows = await conn.fetch(
+                """SELECT session_id, relation
+                   FROM llm_session_requests
+                   WHERE request_id = $1
+                   ORDER BY created_at DESC""",
+                req["id"],
+            )
+        for row in linked_rows:
+            sid = str(row["session_id"])
+            session_relations.setdefault(sid, row["relation"] or "linked")
+
+        for session_id, relation in session_relations.items():
+            loaded_session = await session_repo.get_session_detail(
+                session_id,
+                str(user.organization_id),
+                include_events=True,
+            )
+            if not loaded_session:
+                continue
+            session_owner = loaded_session.get("user_id")
+            can_view_session = (
+                role_value in ("admin", "owner")
+                or str(session_owner) == str(user.id)
+            )
+            if not can_view_session:
+                continue
+            messages = loaded_session.get("messages") or []
+            events = loaded_session.get("events") or []
+            session_summary = {
+                "id": str(loaded_session["id"]),
+                "title": loaded_session.get("title") or "Chat conversation",
+                "kind": loaded_session.get("kind"),
+                "model": loaded_session.get("model"),
+                "reasoning_effort": loaded_session.get("reasoning_effort"),
+                "created_at": loaded_session.get("created_at"),
+                "relation": relation,
+                "messages": messages,
+                "events": events,
+                "message_count": len(messages),
+                "event_count": len(events),
+                "first_user_message": next(
+                    (m for m in messages if m.get("role") == "user"),
+                    None,
+                ),
+            }
+            origin_sessions.append(session_summary)
+        origin_session = origin_sessions[0] if origin_sessions else None
+    except Exception:
+        origin_sessions = []
+        origin_session = None
+
     # Get recent events for the activity feed
     recent_events = []
     for task in req.get("tasks", []):
@@ -321,6 +390,8 @@ async def request_detail(request: Request, request_id: str):
             "available_agents": available_agents,
             "available_sandbox_templates": available_sandbox_templates,
             "goal_info": goal_info,
+            "origin_session": origin_session,
+            "origin_sessions": origin_sessions,
             "can_review_request": _can_review_request(user),
             "csrf_token": request.cookies.get(CSRF_COOKIE_NAME, ""),
         },
@@ -400,7 +471,8 @@ async def edit_task(request: Request, task_id: str):
     if existing.get("status") in repo._NON_EDITABLE_TASK_STATUSES:
         raise HTTPException(
             409,
-            f"Task is in status '{existing.get('status')}' — tasks that are running or already completed cannot be edited.",
+            f"Task is in status '{existing.get('status')}' — tasks that are "
+            "running or already completed cannot be edited.",
         )
 
     def _val(name: str) -> str | None:
