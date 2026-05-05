@@ -2171,6 +2171,28 @@ async def load_accessible_mcp_servers_for_agent(
     return allowed
 
 
+async def load_accessible_hooks_for_agent(
+    *, org_id: str, requester_user_id: str, agent_id: str
+) -> list[dict]:
+    """Load active hooks granted to an agent and accessible to requester."""
+    try:
+        from lucent.db import get_pool
+        pool = await get_pool()
+    except Exception:
+        return []
+
+    from lucent.access_control import AccessControlService
+    from lucent.db.definitions import DefinitionRepository
+    repo = DefinitionRepository(pool)
+    hooks = await repo.get_agent_hooks(agent_id)
+    acl = AccessControlService(pool)
+    accessible_ids = set(await acl.list_accessible(requester_user_id, "hook", org_id))
+    return [
+        hook for hook in hooks
+        if str(hook["id"]) in accessible_ids and hook.get("status") == "active"
+    ]
+
+
 async def load_instance_skills_for_agent(agent_id: str) -> list[dict]:
     """Load skills granted to an instance agent."""
     try:
@@ -3544,6 +3566,7 @@ class LucentDaemon:
         model: str | None = None,
         reasoning_effort: str | None = None,
         mcp_config_override: dict | None = None,
+        hooks: list[dict] | None = None,
     ) -> str | None:
         """Run a single Copilot session with the given system message and prompt.
 
@@ -3591,6 +3614,8 @@ class LucentDaemon:
                         "model": selected_model,
                         "mcp_config_override": mcp_config_override,
                     }
+                    if hooks is not None:
+                        inner_kwargs["hooks"] = hooks
                     if reasoning_effort:
                         inner_kwargs["reasoning_effort"] = reasoning_effort
                     result = await asyncio.wait_for(
@@ -3672,6 +3697,7 @@ class LucentDaemon:
         model: str | None = None,
         reasoning_effort: str | None = None,
         mcp_config_override: dict | None = None,
+        hooks: list[dict] | None = None,
     ) -> str | None:
         """Inner session runner — uses the LLM engine abstraction.
 
@@ -3690,6 +3716,7 @@ class LucentDaemon:
                 selected_model,
                 reasoning_effort=reasoning_effort,
                 mcp_config_override=effective_mcp,
+                hooks=hooks,
             )
         elif _COPILOT_SDK_AVAILABLE:
             return await self._run_via_copilot_direct(
@@ -3728,6 +3755,7 @@ class LucentDaemon:
         model: str,
         reasoning_effort: str | None = None,
         mcp_config_override: dict | None = None,
+        hooks: list[dict] | None = None,
     ) -> str | None:
         """Run session using the LLM engine abstraction layer."""
         engine = get_engine_for_model(model) if _LLM_ENGINE_AVAILABLE else get_engine()
@@ -3789,6 +3817,7 @@ class LucentDaemon:
                 timeout=SESSION_TOTAL_TIMEOUT,
                 idle_timeout=SESSION_IDLE_TIMEOUT,
                 reasoning_effort=reasoning_effort,
+                hooks=hooks,
             )
 
             if result:
@@ -4413,6 +4442,11 @@ class LucentDaemon:
                     requester_user_id=requesting_user_id,
                     agent_id=str(agent_data["id"]),
                 )
+                hooks = await load_accessible_hooks_for_agent(
+                    org_id=org_id,
+                    requester_user_id=requesting_user_id,
+                    agent_id=str(agent_data["id"]),
+                )
             except AgentNotFoundError as exc:
                 log(f"Tracked task {task_id[:8]} failed: {exc}", "WARN")
                 await _fail_owned(task_id, str(exc))
@@ -4675,6 +4709,7 @@ class LucentDaemon:
                     model=selected_model,
                     reasoning_effort=task_reasoning_effort,
                     mcp_config_override=task_mcp_config,
+                    hooks=hooks,
                 )
             except ModelNotAvailableError as exc:
                 log(

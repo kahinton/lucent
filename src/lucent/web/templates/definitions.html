@@ -5,7 +5,7 @@
     <div class="flex items-center justify-between mb-2">
         <div>
             <h1 class="text-2xl font-bold text-gray-900">Agents & Skills</h1>
-            <p class="text-sm text-gray-500">Manage Lucent's capabilities — agents, skills, and MCP connections</p>
+            <p class="text-sm text-gray-500">Manage Lucent's capabilities — agents, skills, hooks, and MCP connections</p>
         </div>
     </div>
 </div>
@@ -13,6 +13,7 @@
     <nav class="flex gap-6">
         <a href="/definitions?tab=agents&per_page={{ per_page }}" class="py-2 px-1 border-b-2 text-sm font-medium {% if tab == 'agents' %}border-primary-500 text-primary-600{% else %}border-transparent text-gray-500 hover:text-gray-700{% endif %}">Agents {% if agents_total is defined %}({{ agents_total }}){% elif agents %}({{ agents|length }}){% endif %}</a>
         <a href="/definitions?tab=skills&per_page={{ per_page }}" class="py-2 px-1 border-b-2 text-sm font-medium {% if tab == 'skills' %}border-primary-500 text-primary-600{% else %}border-transparent text-gray-500 hover:text-gray-700{% endif %}">Skills {% if skills_total is defined %}({{ skills_total }}){% elif skills %}({{ skills|length }}){% endif %}</a>
+        <a href="/definitions?tab=hooks&per_page={{ per_page }}" class="py-2 px-1 border-b-2 text-sm font-medium {% if tab == 'hooks' %}border-primary-500 text-primary-600{% else %}border-transparent text-gray-500 hover:text-gray-700{% endif %}">Hooks {% if hooks_total is defined %}({{ hooks_total }}){% elif hooks %}({{ hooks|length }}){% endif %}</a>
         <a href="/definitions?tab=mcp&per_page={{ per_page }}" class="py-2 px-1 border-b-2 text-sm font-medium {% if tab == 'mcp' %}border-primary-500 text-primary-600{% else %}border-transparent text-gray-500 hover:text-gray-700{% endif %}">MCP Servers {% if mcp_total is defined %}({{ mcp_total }}){% elif mcp_servers %}({{ mcp_servers|length }}){% endif %}</a>
         {% if proposals and proposals.total > 0 %}
         <a href="/definitions?tab=proposals&per_page={{ per_page }}" class="py-2 px-1 border-b-2 text-sm font-medium {% if tab == 'proposals' %}border-primary-500 text-primary-600{% else %}border-transparent text-gray-500 hover:text-gray-700{% endif %}">Pending <span class="ml-1 bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full text-xs">{{ proposals.total }}</span></a>
@@ -67,6 +68,7 @@
                     {{ scope_badge(agent) }}
                     {{ owner_badge(agent) }}
                     {% if agent.skills %}<span class="text-xs text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded">{{ agent.skills|length }} skill{{ 's' if agent.skills|length != 1 }}</span>{% endif %}
+                    {% if agent.hooks %}<span class="text-xs text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded">{{ agent.hooks|length }} hook{{ 's' if agent.hooks|length != 1 }}</span>{% endif %}
                     {% if agent.mcp_servers %}<span class="text-xs text-purple-600 bg-purple-50 px-1.5 py-0.5 rounded">{{ agent.mcp_servers|length }} MCP</span>{% endif %}
                 </div>
                 {% if agent.description %}<p class="text-sm text-gray-500 mt-1 ml-6">{{ agent.description }}</p>{% endif %}
@@ -88,6 +90,20 @@
                 </div>
             </div>
             {% endif %}
+            {% if agent.hooks %}
+            <div class="mb-3">
+                <h4 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1.5">Hooks</h4>
+                <div class="space-y-1">
+                {% for hook in agent.hooks %}
+                <div class="flex items-center gap-2 text-sm">
+                    <svg class="w-3.5 h-3.5 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.325.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.49l1.296 2.247a1.125 1.125 0 01-.26 1.431l-1.003.827c-.293.24-.438.613-.431.992a7.723 7.723 0 010 .255c-.007.379.138.752.43.992l1.005.827c.424.35.534.955.26 1.43l-1.298 2.247a1.125 1.125 0 01-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.47 6.47 0 01-.22.128c-.331.183-.581.495-.644.869l-.213 1.281c-.09.543-.56.94-1.11.94h-2.594c-.55 0-1.019-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 01-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 01-1.369-.49l-1.297-2.247a1.125 1.125 0 01.26-1.431l1.004-.827c.292-.24.437-.613.43-.992a6.932 6.932 0 010-.255c.007-.379-.138-.752-.43-.992l-1.004-.827a1.125 1.125 0 01-.26-1.43l1.297-2.247a1.125 1.125 0 011.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.087.22-.128.332-.183.582-.495.644-.869l.214-1.28z"/><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+                    <a href="/definitions/hooks/{{ hook.id }}" class="text-gray-700 hover:text-emerald-600">{{ hook.name }}</a>
+                    <span class="text-xs text-gray-400 font-mono">{{ hook.action_type }}</span>
+                </div>
+                {% endfor %}
+                </div>
+            </div>
+            {% endif %}
             {% if agent.mcp_servers %}
             <div class="mb-3">
                 <h4 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1.5">MCP Servers</h4>
@@ -102,7 +118,7 @@
                 </div>
             </div>
             {% endif %}
-            {% if not agent.skills and not agent.mcp_servers %}<p class="text-sm text-gray-400 italic">No skills or MCP servers granted yet.</p>{% endif %}
+            {% if not agent.skills and not agent.hooks and not agent.mcp_servers %}<p class="text-sm text-gray-400 italic">No skills, hooks, or MCP servers granted yet.</p>{% endif %}
         </div>
     </details>
     {% else %}
@@ -183,6 +199,81 @@
                 </div>
             </div>
             <div class="p-6 border-t border-gray-200 flex justify-end gap-3"><button type="button" onclick="this.closest('.fixed').classList.add('hidden')" class="px-4 py-2 text-sm text-gray-600">Cancel</button><button type="submit" class="px-4 py-2 text-sm bg-primary-600 text-white rounded-md hover:bg-primary-700 font-medium">Create Skill</button></div>
+        </form>
+    </div>
+</div>
+
+{% elif tab == 'hooks' %}
+<div class="mb-4 rounded-lg border border-emerald-200 bg-emerald-50 p-4">
+    <div class="flex items-start gap-3">
+        <svg class="w-5 h-5 text-emerald-500 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.325.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.49l1.296 2.247a1.125 1.125 0 01-.26 1.431l-1.003.827c-.293.24-.438.613-.431.992a7.723 7.723 0 010 .255c-.007.379.138.752.43.992l1.005.827c.424.35.534.955.26 1.43l-1.298 2.247a1.125 1.125 0 01-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.47 6.47 0 01-.22.128c-.331.183-.581.495-.644.869l-.213 1.281c-.09.543-.56.94-1.11.94h-2.594c-.55 0-1.019-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 01-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 01-1.369-.49l-1.297-2.247a1.125 1.125 0 01.26-1.431l1.004-.827c.292-.24.437-.613.43-.992a6.932 6.932 0 010-.255c.007-.379-.138-.752-.43-.992l-1.004-.827a1.125 1.125 0 01-.26-1.43l1.297-2.247a1.125 1.125 0 011.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.087.22-.128.332-.183.582-.495.644-.869l.214-1.28z"/><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+        <div>
+            <h2 class="text-sm font-semibold text-emerald-900">Hooks are safe agent middleware</h2>
+            <p class="text-sm text-emerald-800 mt-1">They add approved context around model and tool lifecycle events. Command hooks can run approved shell commands/scripts out-of-process with timeout and output limits. The built-in memory hook is on by default for every agent, so agents can remember relevant repo knowledge when they touch files.</p>
+        </div>
+    </div>
+</div>
+<div class="mb-4 flex items-center justify-between">
+    {{ pagination_controls(base_url="/definitions", page=page, per_page=per_page, total_pages=total_pages, total_count=total_count, filter_params={"tab": "hooks"}, entity_name="hooks") }}
+    <button id="open-create-hook-modal" type="button" class="px-4 py-2 text-sm bg-primary-600 text-white rounded-md hover:bg-primary-700 font-medium">+ New Hook</button>
+</div>
+<div class="space-y-3">
+    {% for hook in hooks %}
+    <div class="bg-white rounded-lg border border-gray-200 p-4">
+        <div class="flex items-start justify-between gap-4">
+            <div class="flex-1 min-w-0">
+                <div class="flex items-center gap-2 flex-wrap">
+                    <a href="/definitions/hooks/{{ hook.id }}" class="font-medium text-gray-900 hover:text-primary-600">{{ hook.name }}</a>
+                    {{ status_badge(hook.status) }}
+                    {{ scope_badge(hook) }}
+                    {{ owner_badge(hook) }}
+                    {% if hook.name == 'file-memory-lookup' %}<span class="text-xs text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded font-medium">default on all agents</span>{% endif %}
+                    <span class="text-xs text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded font-mono">{{ hook.trigger_event }}</span>
+                    <span class="text-xs text-gray-500 bg-gray-50 px-1.5 py-0.5 rounded font-mono">{{ hook.action_type }}</span>
+                </div>
+                {% if hook.description %}<p class="text-sm text-gray-500 mt-1">{{ hook.description }}</p>{% endif %}
+                {% if hook.name == 'file-memory-lookup' %}
+                <div class="mt-3 grid gap-2 text-xs text-gray-600 sm:grid-cols-3">
+                    <div class="rounded-md bg-emerald-50 px-3 py-2"><span class="font-medium text-emerald-800">1. Notices files</span><br>Runs when an agent calls file/search/edit tools with paths.</div>
+                    <div class="rounded-md bg-emerald-50 px-3 py-2"><span class="font-medium text-emerald-800">2. Searches memory</span><br>Finds accessible memories related to those file paths.</div>
+                    <div class="rounded-md bg-emerald-50 px-3 py-2"><span class="font-medium text-emerald-800">3. Adds context</span><br>Appends relevant notes to the tool result the model sees.</div>
+                </div>
+                {% endif %}
+            </div>
+            {% if hook.status == 'proposed' %}{{ approval_buttons('hooks', hook.id) }}{% endif %}
+        </div>
+    </div>
+    {% else %}
+    <div class="bg-white rounded-lg border border-gray-200 p-8 text-center text-gray-500"><p>No hooks configured yet.</p></div>
+    {% endfor %}
+</div>
+{{ pagination_controls(base_url="/definitions", page=page, per_page=per_page, total_pages=total_pages, total_count=total_count, filter_params={"tab": "hooks"}, show_per_page=false, entity_name="hooks") }}
+<div id="create-hook-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+    <div class="bg-white rounded-lg shadow-xl w-full max-w-2xl mx-4 max-h-[90vh] overflow-y-auto">
+        <form method="POST" action="/definitions/hooks/create">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <div class="p-6 border-b border-gray-200"><div class="flex items-center justify-between"><h2 class="text-lg font-semibold text-gray-900">New Hook</h2><button type="button" class="create-hook-close text-gray-400 hover:text-gray-600 text-xl">&times;</button></div></div>
+            <div class="p-6 space-y-4">
+                <div class="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">Hooks start proposed and require approval. Command actions run as subprocesses with timeout/output limits and receive the hook event as JSON on stdin.</div>
+                <div class="grid grid-cols-2 gap-4">
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Name</label><input name="name" required class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm" placeholder="e.g. repo-memory-hook"></div>
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Trigger</label><select name="trigger_event" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"><option value="before_tool_call" selected>before_tool_call — before a tool runs</option><option value="after_tool_call">after_tool_call — after a tool returns</option><option value="before_model_call">before_model_call — before the model is called</option><option value="after_model_call">after_model_call — after the model responds</option></select></div>
+                </div>
+                <div><label class="block text-sm font-medium text-gray-700 mb-1">Description</label><input name="description" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm" placeholder="What context does this hook add?"></div>
+                <div><label class="block text-sm font-medium text-gray-700 mb-1">Action</label><select name="action_type" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"><option value="static_context">static_context — inject the content below</option><option value="memory_lookup">memory_lookup — search accessible memories</option><option value="command">command — run a shell command or script</option></select></div>
+                <div><label class="block text-sm font-medium text-gray-700 mb-1">Content</label><textarea name="content" rows="5" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono" placeholder="Static context to inject, or shell script body for command hooks."></textarea></div>
+                <div><label class="block text-sm font-medium text-gray-700 mb-1">Config (advanced JSON)</label><textarea name="config" rows="7" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono">{"tool_names": ["*"], "require_file_reference": false, "timeout_seconds": 10, "max_output_chars": 4000}</textarea><p class="text-xs text-gray-400 mt-1">Use <code>tool_names</code> to limit matching. For command hooks, either put a shell script in Content or set <code>command</code> to a string or argv list, e.g. <code>["python", "scripts/hook.py"]</code>.</p></div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Owner</label>
+                    <select name="owner_scope" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
+                        <option value="me" selected>Me</option>
+                        {% for group in owner_groups %}
+                        <option value="group:{{ group.id }}">{{ group.name }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+            </div>
+            <div class="p-6 border-t border-gray-200 flex justify-end gap-3"><button type="button" class="create-hook-close px-4 py-2 text-sm text-gray-600">Cancel</button><button type="submit" class="px-4 py-2 text-sm bg-primary-600 text-white rounded-md hover:bg-primary-700 font-medium">Create Hook</button></div>
         </form>
     </div>
 </div>
@@ -272,6 +363,14 @@
     {% endfor %}
 </div>
 {% endif %}
+{% if proposals.hooks %}
+<h3 class="text-sm font-semibold text-gray-700 mb-2">Hooks</h3>
+<div class="space-y-3 mb-6">
+    {% for hook in proposals.hooks %}
+    <div class="bg-amber-50/50 rounded-lg border border-amber-200 p-4"><div class="flex items-start justify-between gap-4"><div class="flex-1 min-w-0"><a href="/definitions/hooks/{{ hook.id }}" class="font-medium text-gray-900 hover:text-primary-600">{{ hook.name }}</a>{% if hook.description %}<p class="text-sm text-gray-600 mt-1">{{ hook.description }}</p>{% endif %}</div>{{ approval_buttons('hooks', hook.id) }}</div></div>
+    {% endfor %}
+</div>
+{% endif %}
 {% endif %}
 {% endif %}
 
@@ -341,6 +440,27 @@ Instructions here..." class="w-full px-3 py-2 border border-gray-300 rounded-lg 
 </div>
 
 <script nonce="{{ request.state.csp_nonce }}">
+(function() {
+    const modal = document.getElementById('create-hook-modal');
+    const openBtn = document.getElementById('open-create-hook-modal');
+    if (!modal || !openBtn) return;
+
+    function closeModal() {
+        modal.classList.add('hidden');
+    }
+
+    openBtn.addEventListener('click', () => modal.classList.remove('hidden'));
+    modal.querySelectorAll('.create-hook-close').forEach(btn => {
+        btn.addEventListener('click', closeModal);
+    });
+    modal.addEventListener('click', e => {
+        if (e.target === modal) closeModal();
+    });
+    document.addEventListener('keydown', e => {
+        if (e.key === 'Escape' && !modal.classList.contains('hidden')) closeModal();
+    });
+})();
+
 (function() {
     const modal = document.getElementById('import-modal');
     if (!modal) return;

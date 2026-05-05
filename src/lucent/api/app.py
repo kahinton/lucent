@@ -110,6 +110,10 @@ async def _sync_built_in_definitions():
                     logger.info(f"Synced {count} built-in agent definitions")
                 break
 
+        hook_count = await repo.sync_built_in_hooks(org_id)
+        if hook_count:
+            logger.info(f"Synced {hook_count} built-in hook definitions")
+
         # Sync sandbox templates from .github/sandbox-templates/
         from lucent.db.sandbox_template import SandboxTemplateRepository
 

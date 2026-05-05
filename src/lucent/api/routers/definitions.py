@@ -28,6 +28,14 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/definitions", tags=["definitions"])
 
+HookTriggerEvent = Literal[
+    "tool_call",
+    "before_model_call",
+    "after_model_call",
+    "before_tool_call",
+    "after_tool_call",
+]
+
 
 def _validate_user_definition_create(status_value: str, scope_value: str) -> None:
     if status_value != "proposed" or scope_value != "instance":
@@ -74,6 +82,26 @@ class CreateMCPServer(BaseModel):
     args: list[str] | None = None
     headers: dict | None = None
     env_vars: dict[str, str] | None = None
+
+
+class CreateHook(BaseModel):
+    name: str = Field(max_length=64)
+    description: str | None = None
+    trigger_event: HookTriggerEvent = "before_tool_call"
+    action_type: Literal["memory_lookup", "static_context", "command"]
+    content: str | None = None
+    config: dict | None = None
+    status: Literal["proposed", "active", "rejected"] = "proposed"
+    scope: Literal["instance", "built-in"] = "instance"
+
+
+class UpdateHook(BaseModel):
+    name: str | None = Field(default=None, max_length=64)
+    description: str | None = None
+    trigger_event: HookTriggerEvent | None = None
+    action_type: Literal["memory_lookup", "static_context", "command"] | None = None
+    content: str | None = None
+    config: dict | None = None
 
 
 class UpdateMCPServer(BaseModel):
@@ -296,6 +324,43 @@ async def revoke_mcp_from_agent(agent_id: str, server_id: str, user: AdminUser):
         raise HTTPException(404, "Agent not found")
     await repo.revoke_mcp_server(
         agent_id, server_id,
+        org_id=str(user.organization_id), user_id=str(user.id),
+    )
+    return {"status": "revoked"}
+
+
+@router.post("/agents/{agent_id}/hooks")
+async def grant_hook_to_agent(agent_id: str, body: GrantAccess, user: AdminUser):
+    pool = await get_pool()
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    org_id = str(user.organization_id)
+    if not await repo.get_agent(
+        agent_id, org_id, requester_user_id=str(user.id), requester_role=user.role.value
+    ):
+        raise HTTPException(404, "Agent not found")
+    hook = await repo.get_hook(
+        body.target_id, org_id, requester_user_id=str(user.id), requester_role=user.role.value
+    )
+    if not hook or hook.get("status") != "active":
+        raise HTTPException(404, "Active hook not found")
+    if not await repo.grant_hook(agent_id, body.target_id, org_id=org_id, user_id=str(user.id)):
+        raise HTTPException(400, "Failed to grant hook")
+    return {"status": "granted"}
+
+
+@router.delete("/agents/{agent_id}/hooks/{hook_id}")
+async def revoke_hook_from_agent(agent_id: str, hook_id: str, user: AdminUser):
+    pool = await get_pool()
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    if not await repo.get_agent(
+        agent_id,
+        str(user.organization_id),
+        requester_user_id=str(user.id),
+        requester_role=user.role.value,
+    ):
+        raise HTTPException(404, "Agent not found")
+    await repo.revoke_hook(
+        agent_id, hook_id,
         org_id=str(user.organization_id), user_id=str(user.id),
     )
     return {"status": "revoked"}
@@ -540,6 +605,128 @@ async def discover_mcp_server_tools(
         "discovered_at": discovered_at.isoformat() if discovered_at else None,
         "error": None,
     }
+
+
+# ── Hook Endpoints ───────────────────────────────────────────────────────
+
+
+@router.get("/hooks")
+async def list_hooks(
+    user: AuthenticatedUser,
+    status: Literal["proposed", "active", "rejected"] | None = None,
+    limit: int = 25,
+    offset: int = 0,
+):
+    pool = await get_pool()
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    return await repo.list_hooks(
+        str(user.organization_id),
+        status=status,
+        limit=min(limit, 200),
+        offset=offset,
+        requester_user_id=str(user.id),
+        requester_role=user.role.value,
+    )
+
+
+@router.post("/hooks", status_code=201)
+async def create_hook(body: CreateHook, user: AuthenticatedUser):
+    _validate_user_definition_create(body.status, body.scope)
+    pool = await get_pool()
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    content = body.content or ""
+    security_flags = scan_content_for_injection(content)
+    if body.description:
+        security_flags.extend(scan_content_for_injection(body.description))
+    result = await repo.create_hook(
+        name=body.name,
+        description=body.description or "",
+        trigger_event=body.trigger_event,
+        action_type=body.action_type,
+        content=content,
+        config=body.config or {},
+        org_id=str(user.organization_id),
+        created_by=str(user.id),
+        status=body.status,
+        scope=body.scope,
+        owner_user_id=str(user.id),
+    )
+    if security_flags:
+        logger.warning("Hook definition '%s' flagged: %s", body.name, security_flags)
+        result["security_warnings"] = security_flags
+    return result
+
+
+@router.get("/hooks/{hook_id}")
+async def get_hook(hook_id: str, user: AuthenticatedUser):
+    pool = await get_pool()
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    hook = await repo.get_hook(
+        hook_id,
+        str(user.organization_id),
+        requester_user_id=str(user.id),
+        requester_role=user.role.value,
+    )
+    if not hook:
+        raise HTTPException(404, "Hook not found")
+    return hook
+
+
+@router.patch("/hooks/{hook_id}")
+async def update_hook(hook_id: str, body: UpdateHook, user: AuthenticatedUser):
+    pool = await get_pool()
+    acl = AccessControlService(pool)
+    if not await acl.can_modify(str(user.id), "hook", hook_id, str(user.organization_id)):
+        raise HTTPException(404, "Hook not found")
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    updates = body.model_dump(exclude_none=True)
+    try:
+        result = await repo.update_hook(
+            hook_id,
+            str(user.organization_id),
+            requester_role=user.role.value,
+            **updates,
+        )
+    except BuiltInProtectionError as exc:
+        raise HTTPException(403, str(exc))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    if not result:
+        raise HTTPException(404, "Hook not found")
+    return result
+
+
+@router.post("/hooks/{hook_id}/approve")
+async def approve_hook(hook_id: str, user: AdminUser):
+    pool = await get_pool()
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    result = await repo.approve_hook(hook_id, str(user.organization_id), str(user.id))
+    if not result:
+        raise HTTPException(404, "Hook not found or not in proposed status")
+    return result
+
+
+@router.post("/hooks/{hook_id}/reject")
+async def reject_hook(hook_id: str, user: AdminUser):
+    pool = await get_pool()
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    result = await repo.reject_hook(hook_id, str(user.organization_id), str(user.id))
+    if not result:
+        raise HTTPException(404, "Hook not found or not in proposed status")
+    return result
+
+
+@router.delete("/hooks/{hook_id}", status_code=204)
+async def delete_hook(hook_id: str, user: AuthenticatedUser):
+    if user.role.value not in ("admin", "owner"):
+        raise HTTPException(403, "Forbidden: admin or owner role required")
+    pool = await get_pool()
+    acl = AccessControlService(pool)
+    if not await acl.can_modify(str(user.id), "hook", hook_id, str(user.organization_id)):
+        raise HTTPException(404, "Hook not found")
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    if not await repo.delete_hook(hook_id, str(user.organization_id)):
+        raise HTTPException(404, "Hook not found")
 
 
 # ── Pending Proposals ─────────────────────────────────────────────────────

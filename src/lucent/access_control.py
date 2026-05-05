@@ -15,6 +15,8 @@ RESOURCE_TABLE_MAP: dict[str, str] = {
     "mcp_server": "mcp_server_configs",
     "mcp_servers": "mcp_server_configs",
     "mcp": "mcp_server_configs",
+    "hook": "hook_definitions",
+    "hooks": "hook_definitions",
     "sandbox_template": "sandbox_templates",
     "sandbox_templates": "sandbox_templates",
     "secret": "secrets",
@@ -23,7 +25,8 @@ RESOURCE_TABLE_MAP: dict[str, str] = {
 
 # Tables that have a 'scope' column (supports built-in detection)
 _TABLES_WITH_SCOPE = {
-    "agent_definitions", "skill_definitions", "mcp_server_configs", "sandbox_templates",
+    "agent_definitions", "skill_definitions", "mcp_server_configs",
+    "hook_definitions", "sandbox_templates",
 }
 
 

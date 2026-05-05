@@ -11,9 +11,11 @@ For local models via Ollama, install: pip install lucent[ollama]
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any, Callable
 
 from lucent.llm.engine import LLMEngine, SessionEvent, SessionEventType
+from lucent.llm.hooks import HookManager, append_hook_context
 from lucent.logging import get_logger
 
 logger = get_logger("llm.langchain")
@@ -125,6 +127,46 @@ def _resolve_model(model_id: str) -> tuple[str, str]:
     return "", model_id
 
 
+def _schema_tool_name(schema: dict[str, Any]) -> str | None:
+    """Extract a tool name from an OpenAI/LangChain-style function schema."""
+    if not isinstance(schema, dict):
+        return None
+    function = schema.get("function")
+    if isinstance(function, dict):
+        name = function.get("name")
+        return str(name) if name else None
+    name = schema.get("name")
+    return str(name) if name else None
+
+
+def _messages_for_hooks(messages: list[Any]) -> list[dict[str, Any]]:
+    """Serialize LangChain messages into a hook-friendly JSON shape."""
+    out: list[dict[str, Any]] = []
+    for message in messages:
+        class_name = message.__class__.__name__.removesuffix("Message").lower()
+        role = {
+            "system": "system",
+            "human": "user",
+            "ai": "assistant",
+            "tool": "tool",
+        }.get(class_name, class_name or "message")
+        content = getattr(message, "content", "")
+        if not isinstance(content, str):
+            try:
+                content = json.dumps(content, default=str)
+            except TypeError:
+                content = str(content)
+        item: dict[str, Any] = {"role": role, "content": content}
+        tool_calls = getattr(message, "tool_calls", None)
+        if tool_calls:
+            item["tool_calls"] = tool_calls
+        tool_call_id = getattr(message, "tool_call_id", None)
+        if tool_call_id:
+            item["tool_call_id"] = tool_call_id
+        out.append(item)
+    return out
+
+
 def _get_chat_model(
     model_id: str,
     timeout: int = 300,
@@ -188,6 +230,7 @@ class LangChainEngine(LLMEngine):
         provider_session_id: str | None = None,
         resume: bool = False,
         message_history: list[dict[str, Any]] | None = None,
+        hooks: list[dict[str, Any]] | None = None,
     ) -> str | None:
         """Run a blocking session (chat pattern)."""
         try:
@@ -200,6 +243,7 @@ class LangChainEngine(LLMEngine):
                 reasoning_effort=reasoning_effort,
                 on_event=None,
                 message_history=message_history,
+                hooks=hooks,
             )
         except Exception as e:
             logger.error("LangChain session failed: %s", e)
@@ -218,6 +262,7 @@ class LangChainEngine(LLMEngine):
         provider_session_id: str | None = None,
         resume: bool = False,
         message_history: list[dict[str, Any]] | None = None,
+        hooks: list[dict[str, Any]] | None = None,
     ) -> str | None:
         """Run a streaming session with event callbacks (daemon pattern)."""
         try:
@@ -230,6 +275,7 @@ class LangChainEngine(LLMEngine):
                 reasoning_effort=reasoning_effort,
                 on_event=on_event,
                 message_history=message_history,
+                hooks=hooks,
             )
         except Exception as e:
             logger.error("LangChain streaming session failed: %s", e)
@@ -247,6 +293,7 @@ class LangChainEngine(LLMEngine):
         reasoning_effort: str | None = None,
         on_event: Callable[[SessionEvent], None] | None = None,
         message_history: list[dict[str, Any]] | None = None,
+        hooks: list[dict[str, Any]] | None = None,
     ) -> str | None:
         """Core implementation: run model with MCP tool loop.
 
@@ -266,13 +313,16 @@ class LangChainEngine(LLMEngine):
             reasoning_effort=reasoning_effort,
         )
 
-        # Set up MCP tool bridge if config is provided
-        bridge = None
+        # Set up MCP tool bridges if config is provided
+        bridges: list[Any] = []
+        tool_to_bridge: dict[str, Any] = {}
+        memory_bridge = None
         tool_schemas: list[dict] = []
         if mcp_config:
-            bridge = await self._create_bridge(mcp_config)
-            if bridge:
-                tool_schemas = await bridge.discover_tools()
+            bridges, tool_to_bridge, memory_bridge, tool_schemas = await self._create_bridges(
+                mcp_config
+            )
+        hook_manager = HookManager(hooks)
 
         try:
             # Bind tools to model if available
@@ -296,6 +346,31 @@ class LangChainEngine(LLMEngine):
             # Tool-calling loop
             full_response_parts: list[str] = []
             for _round in range(self.MAX_TOOL_ROUNDS):
+                before_model = await hook_manager.before_model_call(
+                    messages=_messages_for_hooks(messages),
+                )
+                if before_model.blocked:
+                    blocked_text = before_model.block_message or "Model call blocked by hook."
+                    full_response_parts.append(blocked_text)
+                    if on_event:
+                        on_event(
+                            SessionEvent(
+                                type=SessionEventType.OTHER,
+                                tool_name="_hook",
+                                content=blocked_text[:2000],
+                                raw={"hook_event": "before_model_call", "blocked": True},
+                            )
+                        )
+                    break
+                if before_model.injectable_executions:
+                    messages.append(
+                        SystemMessage(
+                            content=append_hook_context(
+                                "", before_model.injectable_executions,
+                            )
+                        )
+                    )
+
                 # Run model with timeout
                 ai_msg: AIMessage = await asyncio.wait_for(
                     model_with_tools.ainvoke(messages),
@@ -312,6 +387,17 @@ class LangChainEngine(LLMEngine):
                         if isinstance(block, dict) and block.get("type") == "text"
                     )
 
+                after_model = await hook_manager.after_model_call(
+                    messages=_messages_for_hooks([*messages, ai_msg]),
+                    model_text=text,
+                )
+                if after_model.blocked:
+                    text = after_model.block_message or "Model response blocked by hook."
+                elif after_model.modified_result is not None:
+                    text = after_model.modified_result
+                if after_model.injectable_executions:
+                    text = append_hook_context(text, after_model.injectable_executions)
+
                 if text:
                     full_response_parts.append(text)
                     if on_event:
@@ -323,7 +409,7 @@ class LangChainEngine(LLMEngine):
                         )
 
                 # Check for tool calls
-                if not ai_msg.tool_calls or not bridge:
+                if not ai_msg.tool_calls or not tool_to_bridge:
                     # No tool calls or no bridge — we're done
                     break
 
@@ -334,6 +420,11 @@ class LangChainEngine(LLMEngine):
                     tool_name = tool_call["name"]
                     tool_args = tool_call["args"]
                     tool_id = tool_call.get("id", "")
+                    bridge = tool_to_bridge.get(tool_name)
+                    if bridge is None:
+                        result = f"Error calling tool {tool_name}: tool is not available"
+                        messages.append(ToolMessage(content=result, tool_call_id=tool_id))
+                        continue
 
                     if on_event:
                         on_event(
@@ -344,9 +435,49 @@ class LangChainEngine(LLMEngine):
                             )
                         )
 
-                    result = await bridge.call_tool(tool_name, tool_args)
+                    before_tool = await hook_manager.before_tool_call(
+                        tool_name=tool_name,
+                        arguments=tool_args or {},
+                        memory_bridge=memory_bridge,
+                    )
+                    effective_args = before_tool.modified_arguments or tool_args
+                    if before_tool.blocked:
+                        result = before_tool.block_message or f"Tool {tool_name} blocked by hook."
+                        after_tool = None
+                    else:
+                        result = await bridge.call_tool(tool_name, effective_args)
+                        after_tool = await hook_manager.after_tool_call(
+                            tool_name=tool_name,
+                            arguments=effective_args or {},
+                            tool_result=result,
+                            memory_bridge=memory_bridge,
+                        )
+                        if after_tool.blocked:
+                            result = after_tool.block_message or result
+                        elif after_tool.modified_result is not None:
+                            result = after_tool.modified_result
+                    hook_context = before_tool.injectable_executions
+                    if after_tool is not None:
+                        hook_context = [*hook_context, *after_tool.injectable_executions]
+                    result_for_model = append_hook_context(result, hook_context)
 
                     if on_event:
+                        hook_events = list(before_tool.executions)
+                        if after_tool is not None:
+                            hook_events.extend(after_tool.executions)
+                        for hook_execution in hook_events:
+                            on_event(
+                                SessionEvent(
+                                    type=SessionEventType.OTHER,
+                                    tool_name="_hook",
+                                    content=hook_execution.text[:2000],
+                                    raw={
+                                        "hook": hook_execution.hook_name,
+                                        "decision": hook_execution.decision,
+                                        **hook_execution.metadata,
+                                    },
+                                )
+                            )
                         on_event(
                             SessionEvent(
                                 type=SessionEventType.TOOL_RESULT,
@@ -357,7 +488,7 @@ class LangChainEngine(LLMEngine):
 
                     messages.append(
                         ToolMessage(
-                            content=result,
+                            content=result_for_model,
                             tool_call_id=tool_id,
                         )
                     )
@@ -368,22 +499,49 @@ class LangChainEngine(LLMEngine):
             return "\n".join(full_response_parts) if full_response_parts else None
 
         finally:
-            if bridge:
+            for bridge in bridges:
                 await bridge.close()
 
-    async def _create_bridge(self, mcp_config: dict) -> Any:
-        """Create an MCPToolBridge from MCP config dict."""
+    async def _create_bridges(
+        self, mcp_config: dict
+    ) -> tuple[list[Any], dict[str, Any], Any | None, list[dict]]:
+        """Create MCPToolBridge instances and map discovered tools to bridges."""
         from lucent.llm.mcp_bridge import MCPToolBridge
 
+        bridges: list[Any] = []
+        tool_to_bridge: dict[str, Any] = {}
+        memory_bridge = None
+        tool_schemas: list[dict] = []
         # MCP config format: {"server-name": {"type": "http", "url": "...", "headers": {...}}}
-        for _server_name, server_conf in mcp_config.items():
+        for server_name, server_conf in mcp_config.items():
             if isinstance(server_conf, dict) and server_conf.get("url"):
-                return MCPToolBridge(
+                bridge = MCPToolBridge(
                     mcp_url=server_conf["url"],
                     headers=server_conf.get("headers"),
                     allowed_tools=server_conf.get("tools"),
                 )
-        return None
+                discovered = await bridge.discover_tools()
+                if not discovered:
+                    await bridge.close()
+                    continue
+                bridges.append(bridge)
+                if server_name == "memory-server" or any(
+                    _schema_tool_name(schema) in {"search_memories", "search_memories_full"}
+                    for schema in discovered
+                ):
+                    memory_bridge = bridge
+                for schema in discovered:
+                    tool_name = _schema_tool_name(schema)
+                    if not tool_name:
+                        continue
+                    if tool_name in tool_to_bridge:
+                        logger.warning(
+                            "Duplicate MCP tool name %s; keeping first bridge", tool_name
+                        )
+                        continue
+                    tool_to_bridge[tool_name] = bridge
+                    tool_schemas.append(schema)
+        return bridges, tool_to_bridge, memory_bridge, tool_schemas
 
     async def cleanup(self) -> None:
         """No persistent resources for LangChain engine."""

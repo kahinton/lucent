@@ -67,6 +67,7 @@ class LLMEngine(ABC):
         provider_session_id: str | None = None,
         resume: bool = False,
         message_history: list[dict[str, Any]] | None = None,
+        hooks: list[dict[str, Any]] | None = None,
     ) -> str | None:
         """Run a single LLM session and return the full response text.
 
@@ -82,6 +83,7 @@ class LLMEngine(ABC):
             provider_session_id: Backend-native session identifier, if supported.
             resume: Whether to resume an existing backend-native session.
             message_history: Prior persisted messages for engines without native resume.
+            hooks: Approved declarative hook definitions for runtime middleware.
 
         Returns:
             The assistant's response text, or None on error.
@@ -101,6 +103,7 @@ class LLMEngine(ABC):
         provider_session_id: str | None = None,
         resume: bool = False,
         message_history: list[dict[str, Any]] | None = None,
+        hooks: list[dict[str, Any]] | None = None,
     ) -> str | None:
         """Run an LLM session with event streaming.
 
@@ -123,6 +126,7 @@ class LLMEngine(ABC):
             provider_session_id: Backend-native session identifier, if supported.
             resume: Whether to resume an existing backend-native session.
             message_history: Prior persisted messages for engines without native resume.
+            hooks: Approved declarative hook definitions for runtime middleware.
 
         Returns:
             The assistant's full response text, or None on error.

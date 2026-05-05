@@ -29,6 +29,16 @@ BUILTIN_PROTECTION_MSG = (
     "Update the on-disk source file instead."
 )
 
+VALID_HOOK_TRIGGER_EVENTS = frozenset({
+    "tool_call",  # legacy alias for before_tool_call
+    "before_model_call",
+    "after_model_call",
+    "before_tool_call",
+    "after_tool_call",
+})
+VALID_HOOK_ACTION_TYPES = frozenset({"memory_lookup", "static_context", "command"})
+DEFAULT_AGENT_HOOK_NAMES = ("file-memory-lookup",)
+
 
 class BuiltInProtectionError(Exception):
     """Raised when a daemon tries to modify a built-in definition."""
@@ -47,6 +57,53 @@ class DefinitionRepository:
     @staticmethod
     def _role_value(role: str | None) -> str:
         return role or "member"
+
+    @staticmethod
+    def _execute_count(result: str) -> int:
+        try:
+            return int(result.rsplit(" ", 1)[-1])
+        except (ValueError, AttributeError):
+            return 0
+
+    @staticmethod
+    def _decode_json(value: Any, default: Any = None) -> Any:
+        if value is None:
+            return default
+        if isinstance(value, str):
+            try:
+                decoded = json.loads(value)
+                if isinstance(decoded, str):
+                    try:
+                        return json.loads(decoded)
+                    except (TypeError, ValueError):
+                        return decoded
+                return decoded
+            except (TypeError, ValueError):
+                return default
+        return value
+
+    @classmethod
+    def _normalize_hook_row(cls, row: Any | None) -> dict | None:
+        if not row:
+            return None
+        data = dict(row)
+        data["config"] = cls._decode_json(data.get("config"), {}) or {}
+        if "config_override" in data:
+            data["config_override"] = cls._decode_json(
+                data.get("config_override"), None
+            )
+        return data
+
+    @staticmethod
+    def _validate_hook_shape(trigger_event: str, action_type: str, config: dict | None) -> None:
+        if trigger_event not in VALID_HOOK_TRIGGER_EVENTS:
+            valid = ", ".join(sorted(VALID_HOOK_TRIGGER_EVENTS))
+            raise ValueError(f"Invalid trigger_event '{trigger_event}'. Must be one of: {valid}")
+        if action_type not in VALID_HOOK_ACTION_TYPES:
+            valid = ", ".join(sorted(VALID_HOOK_ACTION_TYPES))
+            raise ValueError(f"Invalid action_type '{action_type}'. Must be one of: {valid}")
+        if config is not None and not isinstance(config, dict):
+            raise ValueError("config must be a JSON object")
 
     async def _check_builtin_protection(
         self,
@@ -178,12 +235,15 @@ class DefinitionRepository:
         query = """
             SELECT a.*,
                 array_agg(DISTINCT s.name) FILTER (WHERE s.name IS NOT NULL) as skill_names,
-                array_agg(DISTINCT m.name) FILTER (WHERE m.name IS NOT NULL) as mcp_server_names
+                array_agg(DISTINCT m.name) FILTER (WHERE m.name IS NOT NULL) as mcp_server_names,
+                array_agg(DISTINCT h.name) FILTER (WHERE h.name IS NOT NULL) as hook_names
             FROM agent_definitions a
             LEFT JOIN agent_skills ags ON a.id = ags.agent_id
             LEFT JOIN skill_definitions s ON ags.skill_id = s.id
             LEFT JOIN agent_mcp_servers agm ON a.id = agm.agent_id
             LEFT JOIN mcp_server_configs m ON agm.mcp_server_id = m.id
+            LEFT JOIN agent_hooks ah ON a.id = ah.agent_id
+            LEFT JOIN hook_definitions h ON ah.hook_id = h.id
             WHERE a.id = $1 AND a.organization_id = $2
         """ + acl_sql + """
             GROUP BY a.id
@@ -223,6 +283,7 @@ class DefinitionRepository:
             DEFINITION_CREATE, org_id, "agent", str(result["id"]),
             user_id=created_by, notes=f"Created agent '{name}'",
         )
+        await self.grant_default_hooks_to_agent(str(result["id"]), org_id)
         return result
 
     async def update_agent(
@@ -548,6 +609,228 @@ class DefinitionRepository:
             )
         return dict(row) if row else None
 
+    # ── Hooks ─────────────────────────────────────────────────────────────
+
+    async def list_hooks(
+        self,
+        org_id: str,
+        status: str | None = None,
+        limit: int = 25,
+        offset: int = 0,
+        requester_user_id: str | None = None,
+        requester_role: str | None = None,
+    ) -> dict:
+        base = """
+            FROM hook_definitions
+            WHERE organization_id = $1
+        """
+        params: list[Any] = [org_id]
+        if requester_user_id:
+            params.extend([requester_user_id, self._role_value(requester_role)])
+            uid_idx = len(params) - 1
+            role_idx = len(params)
+            base += (
+                f" AND (scope = 'built-in' OR owner_user_id = ${uid_idx} "
+                "OR owner_group_id IN ("
+                f"SELECT group_id FROM user_groups WHERE user_id = ${uid_idx}"
+                ") "
+                f"OR ${role_idx} IN ('admin', 'owner'))"
+            )
+        if status:
+            params.append(status)
+            base += f" AND status = ${len(params)}"
+
+        count_query = f"SELECT COUNT(*) AS total {base}"
+        query = f"""
+            SELECT id, name, description, trigger_event, action_type, status, scope,
+                   created_by, approved_by, approved_at,
+                   owner_user_id, owner_group_id,
+                   created_at, updated_at
+            {base} ORDER BY name LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}
+        """
+        params_with_page = [*params, limit, offset]
+
+        async with self.pool.acquire() as conn:
+            count_row = await conn.fetchrow(count_query, *params)
+            total_count = count_row["total"] if count_row else 0
+            rows = await conn.fetch(query, *params_with_page)
+        return {
+            "items": [dict(r) for r in rows],
+            "total_count": total_count,
+            "offset": offset,
+            "limit": limit,
+            "has_more": offset + len(rows) < total_count,
+        }
+
+    async def get_hook(
+        self,
+        hook_id: str,
+        org_id: str,
+        requester_user_id: str | None = None,
+        requester_role: str | None = None,
+    ) -> dict | None:
+        acl_sql = ""
+        params: list[Any] = [hook_id, org_id]
+        if requester_user_id:
+            params.extend([requester_user_id, self._role_value(requester_role)])
+            acl_sql = (
+                " AND (scope = 'built-in' OR owner_user_id = $3 "
+                "OR owner_group_id IN (SELECT group_id FROM user_groups WHERE user_id = $3) "
+                "OR $4 IN ('admin', 'owner'))"
+            )
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM hook_definitions WHERE id = $1 AND organization_id = $2" + acl_sql,
+                *params,
+            )
+        return self._normalize_hook_row(row)
+
+    async def create_hook(
+        self,
+        name: str,
+        description: str,
+        trigger_event: str,
+        action_type: str,
+        config: dict | None,
+        org_id: str,
+        created_by: str,
+        content: str = "",
+        status: str = "proposed",
+        scope: str = "instance",
+        owner_user_id: str | None = None,
+        owner_group_id: str | None = None,
+    ) -> dict:
+        self._validate_hook_shape(trigger_event, action_type, config)
+        if owner_user_id is None and owner_group_id is None:
+            owner_user_id = created_by
+        query = """
+            INSERT INTO hook_definitions
+                (name, description, trigger_event, action_type, content, config,
+                 status, scope, created_by, organization_id, owner_user_id, owner_group_id)
+            VALUES ($1, $2, $3, $4, $5, $6::text::jsonb, $7, $8, $9, $10, $11, $12)
+            RETURNING *
+        """
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                query,
+                name,
+                description,
+                trigger_event,
+                action_type,
+                content,
+                json.dumps(config or {}),
+                status,
+                scope,
+                created_by,
+                org_id,
+                owner_user_id,
+                owner_group_id,
+            )
+        result = self._normalize_hook_row(row)
+        await self._audit(
+            DEFINITION_CREATE, org_id, "hook", str(result["id"]),
+            user_id=created_by, notes=f"Created hook '{name}'",
+        )
+        return result
+
+    async def update_hook(
+        self, hook_id: str, org_id: str, *, requester_role: str | None = None, **kwargs,
+    ) -> dict | None:
+        await self._check_builtin_protection(
+            "hook_definitions", hook_id, org_id, requester_role,
+        )
+        current = await self.get_hook(hook_id, org_id)
+        trigger_event = kwargs.get(
+            "trigger_event", current.get("trigger_event") if current else None
+        )
+        action_type = kwargs.get("action_type", current.get("action_type") if current else None)
+        config = kwargs.get("config", current.get("config") if current else None)
+        if trigger_event and action_type:
+            self._validate_hook_shape(trigger_event, action_type, config)
+
+        sets = []
+        params: list[Any] = []
+        for key in (
+            "name", "description", "trigger_event", "action_type", "content",
+            "status", "owner_user_id", "owner_group_id",
+        ):
+            if key in kwargs:
+                params.append(kwargs[key])
+                sets.append(f"{key} = ${len(params)}")
+        if "config" in kwargs:
+            params.append(json.dumps(kwargs["config"] or {}))
+            sets.append(f"config = ${len(params)}::text::jsonb")
+        if not sets:
+            return current
+        params.append(datetime.now(timezone.utc))
+        sets.append(f"updated_at = ${len(params)}")
+        params.append(hook_id)
+        params.append(org_id)
+        query = f"""
+            UPDATE hook_definitions SET {", ".join(sets)}
+            WHERE id = ${len(params) - 1} AND organization_id = ${len(params)}
+            RETURNING *
+        """
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(query, *params)
+        result = self._normalize_hook_row(row)
+        if result:
+            await self._audit(
+                DEFINITION_UPDATE, org_id, "hook", hook_id,
+                context={"updated_fields": [k for k in kwargs.keys()]},
+                notes=f"Updated hook '{hook_id}'",
+            )
+        return result
+
+    async def approve_hook(self, hook_id: str, org_id: str, approved_by: str) -> dict | None:
+        query = """
+            UPDATE hook_definitions
+            SET status = 'active', approved_by = $3, approved_at = NOW(), updated_at = NOW()
+            WHERE id = $1 AND organization_id = $2 AND status = 'proposed'
+            RETURNING *
+        """
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(query, hook_id, org_id, approved_by)
+        result = self._normalize_hook_row(row)
+        if result:
+            await self._audit(
+                DEFINITION_APPROVE, org_id, "hook", hook_id,
+                user_id=approved_by, notes=f"Approved hook '{hook_id}'",
+            )
+        return result
+
+    async def reject_hook(self, hook_id: str, org_id: str, approved_by: str) -> dict | None:
+        query = """
+            UPDATE hook_definitions
+            SET status = 'rejected', approved_by = $3, approved_at = NOW(), updated_at = NOW()
+            WHERE id = $1 AND organization_id = $2 AND status = 'proposed'
+            RETURNING *
+        """
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(query, hook_id, org_id, approved_by)
+        result = self._normalize_hook_row(row)
+        if result:
+            await self._audit(
+                DEFINITION_REJECT, org_id, "hook", hook_id,
+                user_id=approved_by, notes=f"Rejected hook '{hook_id}'",
+            )
+        return result
+
+    async def delete_hook(self, hook_id: str, org_id: str) -> bool:
+        async with self.pool.acquire() as conn:
+            result = await conn.execute(
+                "DELETE FROM hook_definitions WHERE id = $1 AND organization_id = $2",
+                hook_id,
+                org_id,
+            )
+        deleted = result == "DELETE 1"
+        if deleted:
+            await self._audit(
+                DEFINITION_DELETE, org_id, "hook", hook_id,
+                notes=f"Deleted hook '{hook_id}'",
+            )
+        return deleted
+
     async def create_mcp_server(
         self,
         name: str,
@@ -732,6 +1015,54 @@ class DefinitionRepository:
             )
         return revoked
 
+    async def grant_hook(
+        self, agent_id: str, hook_id: str,
+        org_id: str | None = None, user_id: str | None = None,
+        config_override: dict | None = None,
+    ) -> bool:
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    "INSERT INTO agent_hooks (agent_id, hook_id, config_override) "
+                    "VALUES ($1, $2, $3::text::jsonb) "
+                    "ON CONFLICT (agent_id, hook_id) DO UPDATE "
+                    "SET config_override = EXCLUDED.config_override",
+                    agent_id,
+                    hook_id,
+                    json.dumps(config_override) if config_override is not None else None,
+                )
+            if org_id:
+                await self._audit(
+                    DEFINITION_GRANT, org_id, "hook", hook_id,
+                    user_id=user_id,
+                    context={"agent_id": agent_id},
+                    notes=f"Granted hook '{hook_id}' to agent '{agent_id}'",
+                )
+            return True
+        except Exception:
+            logger.error("Failed to grant hook %s to agent %s", hook_id, agent_id, exc_info=True)
+            return False
+
+    async def revoke_hook(
+        self, agent_id: str, hook_id: str,
+        org_id: str | None = None, user_id: str | None = None,
+    ) -> bool:
+        async with self.pool.acquire() as conn:
+            result = await conn.execute(
+                "DELETE FROM agent_hooks WHERE agent_id = $1 AND hook_id = $2",
+                agent_id,
+                hook_id,
+            )
+        revoked = result == "DELETE 1"
+        if revoked and org_id:
+            await self._audit(
+                DEFINITION_REVOKE, org_id, "hook", hook_id,
+                user_id=user_id,
+                context={"agent_id": agent_id},
+                notes=f"Revoked hook '{hook_id}' from agent '{agent_id}'",
+            )
+        return revoked
+
     async def get_agent_skills(self, agent_id: str) -> list[dict]:
         query = """
             SELECT s.* FROM skill_definitions s
@@ -753,6 +1084,57 @@ class DefinitionRepository:
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(query, agent_id)
         return [dict(r) for r in rows]
+
+    async def get_agent_hooks(self, agent_id: str) -> list[dict]:
+        query = """
+            SELECT h.*, ah.config_override FROM hook_definitions h
+            JOIN agent_hooks ah ON h.id = ah.hook_id
+            WHERE ah.agent_id = $1 AND h.status = 'active'
+            ORDER BY h.name
+        """
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(query, agent_id)
+        return [self._normalize_hook_row(r) for r in rows]
+
+    async def grant_default_hooks_to_agent(self, agent_id: str, org_id: str) -> int:
+        """Grant built-in default hooks to one agent without overriding explicit config."""
+        async with self.pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                INSERT INTO agent_hooks (agent_id, hook_id)
+                SELECT $1, h.id
+                FROM hook_definitions h
+                WHERE h.organization_id = $2
+                    AND h.status = 'active'
+                    AND h.scope = 'built-in'
+                    AND h.name = ANY($3::text[])
+                ON CONFLICT DO NOTHING
+                """,
+                agent_id,
+                org_id,
+                list(DEFAULT_AGENT_HOOK_NAMES),
+            )
+        return self._execute_count(result)
+
+    async def grant_default_hooks_to_all_agents(self, org_id: str) -> int:
+        """Ensure every agent in an organization has the built-in default hooks."""
+        async with self.pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                INSERT INTO agent_hooks (agent_id, hook_id)
+                SELECT a.id, h.id
+                FROM agent_definitions a
+                JOIN hook_definitions h ON h.organization_id = a.organization_id
+                WHERE a.organization_id = $1
+                    AND h.status = 'active'
+                    AND h.scope = 'built-in'
+                    AND h.name = ANY($2::text[])
+                ON CONFLICT DO NOTHING
+                """,
+                org_id,
+                list(DEFAULT_AGENT_HOOK_NAMES),
+            )
+        return self._execute_count(result)
 
     async def update_mcp_tool_grants(
         self,
@@ -929,7 +1311,11 @@ class DefinitionRepository:
         if row is None:
             return None
         return {
-            "discovered_tools": json.loads(row["discovered_tools"]) if row["discovered_tools"] else None,
+            "discovered_tools": (
+                json.loads(row["discovered_tools"])
+                if row["discovered_tools"]
+                else None
+            ),
             "tools_discovered_at": row["tools_discovered_at"],
         }
 
@@ -1070,6 +1456,46 @@ class DefinitionRepository:
             "has_more": offset + len(rows) < total_count,
         }
 
+    async def list_hooks_accessible_by(
+        self, user_id: str, org_id: str,
+        status: str | None = "active",
+        limit: int = 100,
+        offset: int = 0,
+        requester_role: str | None = None,
+    ) -> dict:
+        """List hooks accessible to a user: owned, group-owned, or built-in."""
+        role = self._role_value(requester_role)
+        base = """
+            FROM hook_definitions
+            WHERE organization_id = $1
+            AND (
+                scope = 'built-in'
+                OR owner_user_id = $2
+                OR owner_group_id IN (SELECT group_id FROM user_groups WHERE user_id = $2)
+                OR $3 IN ('admin', 'owner')
+            )
+        """
+        params: list[Any] = [org_id, user_id, role]
+        if status:
+            params.append(status)
+            base += f" AND status = ${len(params)}"
+
+        count_query = f"SELECT COUNT(*) AS total {base}"
+        query = f"SELECT * {base} ORDER BY name LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}"
+        params_with_page = [*params, limit, offset]
+
+        async with self.pool.acquire() as conn:
+            count_row = await conn.fetchrow(count_query, *params)
+            total_count = count_row["total"] if count_row else 0
+            rows = await conn.fetch(query, *params_with_page)
+        return {
+            "items": [self._normalize_hook_row(r) for r in rows],
+            "total_count": total_count,
+            "offset": offset,
+            "limit": limit,
+            "has_more": offset + len(rows) < total_count,
+        }
+
     # ── Bulk/convenience ──────────────────────────────────────────────────
 
     async def get_pending_proposals(self, org_id: str) -> dict:
@@ -1077,11 +1503,13 @@ class DefinitionRepository:
         agents = (await self.list_agents(org_id, status="proposed"))["items"]
         skills = (await self.list_skills(org_id, status="proposed"))["items"]
         mcp_servers = (await self.list_mcp_servers(org_id, status="proposed"))["items"]
+        hooks = (await self.list_hooks(org_id, status="proposed"))["items"]
         return {
             "agents": agents,
             "skills": skills,
             "mcp_servers": mcp_servers,
-            "total": len(agents) + len(skills) + len(mcp_servers),
+            "hooks": hooks,
+            "total": len(agents) + len(skills) + len(mcp_servers) + len(hooks),
         }
 
     async def get_active_agent_with_grants(self, agent_name: str, org_id: str) -> dict | None:
@@ -1098,6 +1526,7 @@ class DefinitionRepository:
         agent_dict = dict(agent)
         agent_dict["skills"] = await self.get_agent_skills(str(agent["id"]))
         agent_dict["mcp_servers"] = await self.get_agent_mcp_servers(str(agent["id"]))
+        agent_dict["hooks"] = await self.get_agent_hooks(str(agent["id"]))
         return agent_dict
 
     async def list_agents_with_grants(
@@ -1117,6 +1546,7 @@ class DefinitionRepository:
         for agent in result["items"]:
             agent["skills"] = await self.get_agent_skills(str(agent["id"]))
             agent["mcp_servers"] = await self.get_agent_mcp_servers(str(agent["id"]))
+            agent["hooks"] = await self.get_agent_hooks(str(agent["id"]))
         return result
 
     async def sync_built_in_skills(self, org_id: str, skills_dir: str) -> int:
@@ -1282,3 +1712,55 @@ class DefinitionRepository:
                     )
             synced += 1
         return synced
+
+    async def sync_built_in_hooks(self, org_id: str) -> int:
+        """Ensure built-in hook definitions exist for an organization."""
+        builtins = [
+            {
+                "name": "file-memory-lookup",
+                "description": (
+                    "Looks up accessible memories for files referenced by tool calls "
+                    "and injects them into the model context."
+                ),
+                "trigger_event": "tool_call",
+                "action_type": "memory_lookup",
+                "content": "",
+                "config": {
+                    "tool_names": ["*"],
+                    "max_memories": 3,
+                    "memory_type": "technical",
+                    "include_archived": False,
+                },
+            }
+        ]
+        async with self.pool.acquire() as conn:
+            for hook in builtins:
+                await conn.execute(
+                    """
+                    INSERT INTO hook_definitions
+                        (name, description, trigger_event, action_type, content,
+                         config, status, scope, organization_id)
+                    VALUES ($1, $2, $3, $4, $5, $6::text::jsonb, 'active', 'built-in', $7)
+                    ON CONFLICT (name, organization_id) DO UPDATE
+                        SET description = EXCLUDED.description,
+                            trigger_event = EXCLUDED.trigger_event,
+                            action_type = EXCLUDED.action_type,
+                            content = EXCLUDED.content,
+                            config = EXCLUDED.config,
+                            status = 'active',
+                            scope = 'built-in',
+                            updated_at = NOW()
+                        WHERE hook_definitions.scope = 'built-in'
+                    """,
+                    hook["name"],
+                    hook["description"],
+                    hook["trigger_event"],
+                    hook["action_type"],
+                    hook["content"],
+                    json.dumps(hook["config"]),
+                    org_id,
+                )
+                grant_count = await self.grant_default_hooks_to_all_agents(org_id)
+                if grant_count:
+                    logger.info("Granted default hooks to %d agent(s)", grant_count)
+        return len(builtins)

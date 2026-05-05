@@ -73,9 +73,15 @@ async def cleanup_definitions(db_pool, test_organization):
             "(SELECT id FROM agent_definitions WHERE organization_id = $1)",
             org_id,
         )
+        await conn.execute(
+            "DELETE FROM agent_hooks WHERE agent_id IN "
+            "(SELECT id FROM agent_definitions WHERE organization_id = $1)",
+            org_id,
+        )
         await conn.execute("DELETE FROM agent_definitions WHERE organization_id = $1", org_id)
         await conn.execute("DELETE FROM skill_definitions WHERE organization_id = $1", org_id)
         await conn.execute("DELETE FROM mcp_server_configs WHERE organization_id = $1", org_id)
+        await conn.execute("DELETE FROM hook_definitions WHERE organization_id = $1", org_id)
 
 
 async def _call(mcp, tool_name: str, args: dict | None = None) -> dict | list:

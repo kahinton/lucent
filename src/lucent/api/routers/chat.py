@@ -438,6 +438,30 @@ async def _build_system_prompt(user: dict, pool, page_context: dict | None) -> s
     return "\n".join(parts)
 
 
+async def _load_agent_hooks(pool, agent_id: str | None) -> list[dict[str, Any]]:
+    """Load active hook definitions granted to an agent, if any."""
+    if not agent_id:
+        return []
+    try:
+        from lucent.db.definitions import DefinitionRepository
+
+        repo = DefinitionRepository(pool)
+        return await repo.get_agent_hooks(agent_id)
+    except Exception:
+        logger.debug("Failed to load agent hooks", exc_info=True)
+        return []
+
+
+def _hook_event_payload(event: Any) -> dict[str, Any]:
+    raw = event.raw if isinstance(event.raw, dict) else {}
+    return {
+        "type": "hook_context",
+        "hook": raw.get("hook") or "hook",
+        "text": event.content or "",
+        "metadata": {k: v for k, v in raw.items() if k != "hook"},
+    }
+
+
 @router.get("/sessions")
 async def list_chat_sessions(
     request: Request,
@@ -543,6 +567,7 @@ async def chat_stream(
     engine = get_engine_for_model(selected_model)
 
     system_prompt = await _build_system_prompt(user, pool, body.page_context)
+    agent_hooks = await _load_agent_hooks(pool, None)
     last_message = body.messages[-1].content if body.messages else ""
     chat_session = await _prepare_persistent_chat_session(
         user=user,
@@ -600,6 +625,7 @@ async def chat_stream(
             provider_session_id=chat_session.provider_session_id,
             resume=resume_provider,
             message_history=message_history,
+            hooks=agent_hooks,
         )
         error = None if result_text else "No response received"
         if result_text and chat_session.repo and chat_session.session_id:
@@ -784,6 +810,7 @@ async def chat_stream_v2(
         system_prompt_parts.append(_chat_tool_grounding_instructions())
 
     system_prompt = "\n\n".join(system_prompt_parts)
+    agent_hooks = await _load_agent_hooks(pool, body.agent_id)
 
     last_message = body.messages[-1].content if body.messages else ""
     chat_session = await _prepare_persistent_chat_session(
@@ -908,6 +935,10 @@ async def chat_stream_v2(
             }
             event_queue.put_nowait(payload)
             persist_event(payload, event)
+        elif event.type == SessionEventType.OTHER and event.tool_name == "_hook":
+            payload = _hook_event_payload(event)
+            event_queue.put_nowait(payload)
+            persist_event(payload, event)
         elif event.type == SessionEventType.SESSION_IDLE:
             pass  # We'll handle done when the task completes
 
@@ -926,6 +957,7 @@ async def chat_stream_v2(
                 provider_session_id=chat_session.provider_session_id,
                 resume=resume_provider,
                 message_history=message_history,
+                hooks=agent_hooks,
             )
             if result and chat_session.repo and chat_session.session_id:
                 await chat_session.repo.add_message(

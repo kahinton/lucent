@@ -716,7 +716,7 @@ Base path: `/api/definitions`
 |--------|------|-------------|
 | `POST` | `/agents` | Create an agent definition (status: `proposed`) |
 | `GET` | `/agents` | List agents (filter by `?status=active`) |
-| `GET` | `/agents/{id}` | Get agent with linked skills and MCP servers |
+| `GET` | `/agents/{id}` | Get agent with linked skills, MCP servers, and hooks |
 | `PATCH` | `/agents/{id}` | Update an agent definition |
 | `DELETE` | `/agents/{id}` | Delete an agent definition |
 | `POST` | `/agents/{id}/approve` | Approve a proposed agent |
@@ -744,17 +744,54 @@ Base path: `/api/definitions`
 | `POST` | `/mcp-servers/{id}/reject` | Reject a proposed MCP server |
 | `GET` | `/mcp-servers/{id}/tools` | Discover available tools (`?refresh=true` to force rediscovery) |
 
+### Hooks
+
+Hooks are approved agent middleware. They observe approved runtime events and can
+inject additional context, block tool/model execution, or rewrite tool args/results
+depending on the hook decision. Supported actions are `memory_lookup`,
+`static_context`, and `command`; supported trigger events are
+`before_model_call`, `after_model_call`, `before_tool_call`, `after_tool_call`,
+and legacy `tool_call` (an alias for `before_tool_call`).
+
+`command` hooks run a configured shell command or script out-of-process with
+timeout/output limits. Lucent passes the hook event as JSON on stdin, including
+`event`, `tool_name`, `arguments`, `tool_result`, `messages`, `model_text`, and
+extracted `file_refs` when available. Command hooks can set `config.command` to a
+shell string or argv list; if omitted, hook `content` is treated as the shell
+script body. Useful config keys include `tool_names`, `require_file_reference`,
+`timeout_seconds`, `max_output_chars`, `env`, `cwd`, and `pass_input`.
+
+Command stdout can be plain text, which is injected as context, or a JSON decision:
+
+```json
+{"action": "inject", "context": "extra model-visible context"}
+{"action": "block", "message": "do not run this tool"}
+{"action": "replace_args", "arguments": {"filePath": "safe/path.py"}}
+{"action": "replace_result", "result": "sanitized tool result"}
+{"action": "allow"}
+```
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/hooks` | Create a hook definition (status: `proposed`) |
+| `GET` | `/hooks` | List hooks (filter by `?status=active`) |
+| `GET` | `/hooks/{id}` | Get hook details |
+| `PATCH` | `/hooks/{id}` | Update a hook definition |
+| `DELETE` | `/hooks/{id}` | Delete a hook definition |
+| `POST` | `/hooks/{id}/approve` | Approve a proposed hook |
+| `POST` | `/hooks/{id}/reject` | Reject a proposed hook |
+
 ### Proposals
 
 ```
 GET /api/definitions/proposals
 ```
 
-Returns all pending proposals (agents, skills, and MCP servers awaiting approval) in a single response.
+Returns all pending proposals (agents, skills, MCP servers, and hooks awaiting approval) in a single response.
 
 ### Agent Access Grants
 
-Grant or revoke skills and MCP servers for agent definitions:
+Grant or revoke skills, MCP servers, and hooks for agent definitions:
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -762,6 +799,8 @@ Grant or revoke skills and MCP servers for agent definitions:
 | `DELETE` | `/agents/{id}/skills/{skill_id}` | Revoke a skill from an agent |
 | `POST` | `/agents/{id}/mcp-servers` | Grant an MCP server (body: `{"target_id": "server-uuid"}`) |
 | `DELETE` | `/agents/{id}/mcp-servers/{server_id}` | Revoke an MCP server from an agent |
+| `POST` | `/agents/{id}/hooks` | Grant a hook (body: `{"target_id": "hook-uuid"}`) |
+| `DELETE` | `/agents/{id}/hooks/{hook_id}` | Revoke a hook from an agent |
 
 ---
 

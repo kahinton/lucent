@@ -43,6 +43,18 @@ def _serialize(obj):
     return str(obj)
 
 
+def _parse_config(config: dict | str | None) -> dict:
+    if config is None:
+        return {}
+    if isinstance(config, dict):
+        return config
+    if isinstance(config, str):
+        data = json.loads(config or "{}")
+        if isinstance(data, dict):
+            return data
+    raise ValueError("config must be a JSON object")
+
+
 def register_definition_tools(mcp: FastMCP) -> None:
     """Register definition management tools with the MCP server."""
 
@@ -297,6 +309,67 @@ Returns: JSON with the created skill including its ID and status."""
         return json.dumps(skill, default=_serialize)
 
     @mcp.tool(
+        description="""Create a new hook definition.
+
+    Hooks start in 'proposed' status and must be approved by an admin before they
+    can be granted to agents. Supported action_type values:
+    - 'memory_lookup': look up accessible memories for matched tool calls
+    - 'static_context': inject fixed context when the matcher applies
+    - 'command': run an approved shell command/script out-of-process with timeout
+      and output limits; the hook event is passed as JSON on stdin
+
+Args:
+    name: Hook name (max 64 chars)
+    description: What the hook does
+    trigger_event: Event that triggers the hook. Supported values:
+        'before_model_call', 'after_model_call', 'before_tool_call',
+        'after_tool_call', and legacy alias 'tool_call'
+    action_type: 'memory_lookup', 'static_context', or 'command'
+    config: JSON object or JSON string with matcher/action settings
+    content: Optional text for static_context hooks, or shell script body for
+        command hooks when config.command is omitted
+
+Returns: JSON with the created hook including its ID and status."""
+    )
+    async def create_hook_definition(
+        name: str,
+        description: str = "",
+        trigger_event: str = "before_tool_call",
+        action_type: str = "static_context",
+        config: dict | str | None = None,
+        content: str = "",
+    ) -> str:
+        user_id, org_id, _, _, _ = await _get_current_user_context()
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+        if not user_id:
+            return json.dumps({"error": "No user context"})
+        if not name or len(name) > 64:
+            return json.dumps({"error": "name is required and must be <= 64 characters"})
+
+        try:
+            parsed_config = _parse_config(config)
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)})
+
+        repo = await _get_definition_repository()
+        try:
+            hook = await repo.create_hook(
+                name=name,
+                description=description,
+                trigger_event=trigger_event,
+                action_type=action_type,
+                content=content,
+                config=parsed_config,
+                org_id=str(org_id),
+                created_by=str(user_id),
+                owner_user_id=str(user_id),
+            )
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)})
+        return json.dumps(hook, default=_serialize)
+
+    @mcp.tool(
         description="""Grant a skill to an agent definition.
 
 Both the agent and skill must exist in the organization. Once granted,
@@ -549,6 +622,56 @@ Returns: JSON with status 'granted', or an error if not found."""
         return json.dumps({"status": "granted", "agent_id": agent_id, "server_id": definition_id})
 
     @mcp.tool(
+        description="""Grant a hook to an agent definition.
+
+Both the agent and hook must exist in the organization, and the hook must be
+active. Once granted, the hook participates in that agent's runtime composition
+alongside skills and MCP tools.
+
+Args:
+    agent_id: UUID of the agent definition
+    hook_id: UUID of the active hook definition to grant
+
+Returns: JSON with status 'granted', or an error if either is not found."""
+    )
+    async def grant_hook_to_agent(agent_id: str, hook_id: str) -> str:
+        user_id, org_id, role, _, _ = await _get_current_user_context()
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+        if not user_id:
+            return json.dumps({"error": "No user context"})
+        if role not in ("admin", "owner"):
+            return json.dumps(
+                {"error": "Forbidden: admin or owner role required", "code": 403}
+            )
+
+        repo = await _get_definition_repository()
+        agent = await repo.get_agent(
+            agent_id,
+            str(org_id),
+            requester_user_id=str(user_id),
+            requester_role=role,
+        )
+        if not agent:
+            return json.dumps({"error": "Agent not found"})
+
+        hook = await repo.get_hook(
+            hook_id,
+            str(org_id),
+            requester_user_id=str(user_id),
+            requester_role=role,
+        )
+        if not hook or hook.get("status") != "active":
+            return json.dumps({"error": "Active hook not found"})
+
+        success = await repo.grant_hook(
+            agent_id, hook_id, org_id=str(org_id), user_id=str(user_id)
+        )
+        if not success:
+            return json.dumps({"error": "Failed to grant hook"})
+        return json.dumps({"status": "granted", "agent_id": agent_id, "hook_id": hook_id})
+
+    @mcp.tool(
         description="""Revoke an MCP server from an agent definition.
 
 Args:
@@ -579,6 +702,39 @@ Returns: JSON with status 'revoked', or an error if not found."""
 
         await repo.revoke_mcp_server(agent_id, server_id, org_id=str(org_id), user_id=str(user_id))
         return json.dumps({"status": "revoked", "agent_id": agent_id, "server_id": server_id})
+
+    @mcp.tool(
+        description="""Revoke a hook from an agent definition.
+
+Args:
+    agent_id: UUID of the agent definition
+    hook_id: UUID of the hook to revoke
+
+Returns: JSON with status 'revoked', or an error if not found."""
+    )
+    async def revoke_hook_from_agent(agent_id: str, hook_id: str) -> str:
+        user_id, org_id, role, _, _ = await _get_current_user_context()
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+        if not user_id:
+            return json.dumps({"error": "No user context"})
+        if role not in ("admin", "owner"):
+            return json.dumps(
+                {"error": "Forbidden: admin or owner role required", "code": 403}
+            )
+
+        repo = await _get_definition_repository()
+        agent = await repo.get_agent(
+            agent_id,
+            str(org_id),
+            requester_user_id=str(user_id),
+            requester_role=role,
+        )
+        if not agent:
+            return json.dumps({"error": "Agent not found"})
+
+        await repo.revoke_hook(agent_id, hook_id, org_id=str(org_id), user_id=str(user_id))
+        return json.dumps({"status": "revoked", "agent_id": agent_id, "hook_id": hook_id})
 
     # ── Skill write tools ─────────────────────────────────────────────────
 
@@ -633,6 +789,56 @@ Returns: JSON with the updated skill, or an error if not found or not in propose
         return json.dumps(result, default=_serialize)
 
     @mcp.tool(
+        description="""Approve a hook definition (admin/owner only).
+
+Moves the hook from 'proposed' to 'active' status so it can be granted to agents.
+
+Args:
+    hook_id: UUID of the hook definition
+
+Returns: JSON with the updated hook, or an error if not found or not in proposed status."""
+    )
+    async def approve_hook_definition(hook_id: str) -> str:
+        user_id, org_id, user_role, _, _ = await _get_current_user_context()
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+        if not user_id:
+            return json.dumps({"error": "No user context"})
+        if user_role not in ("admin", "owner"):
+            return json.dumps({"error": "Admin or owner role required"})
+
+        repo = await _get_definition_repository()
+        result = await repo.approve_hook(hook_id, str(org_id), str(user_id))
+        if not result:
+            return json.dumps({"error": "Hook not found or not in proposed status"})
+        return json.dumps(result, default=_serialize)
+
+    @mcp.tool(
+        description="""Reject a hook definition (admin/owner only).
+
+Moves the hook from 'proposed' to 'rejected' status.
+
+Args:
+    hook_id: UUID of the hook definition
+
+Returns: JSON with the updated hook, or an error if not found or not in proposed status."""
+    )
+    async def reject_hook_definition(hook_id: str) -> str:
+        user_id, org_id, user_role, _, _ = await _get_current_user_context()
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+        if not user_id:
+            return json.dumps({"error": "No user context"})
+        if user_role not in ("admin", "owner"):
+            return json.dumps({"error": "Admin or owner role required"})
+
+        repo = await _get_definition_repository()
+        result = await repo.reject_hook(hook_id, str(org_id), str(user_id))
+        if not result:
+            return json.dumps({"error": "Hook not found or not in proposed status"})
+        return json.dumps(result, default=_serialize)
+
+    @mcp.tool(
         description="""Delete a skill definition.
 
 Args:
@@ -661,6 +867,36 @@ Returns: JSON with status 'deleted', or an error if not found."""
         if not success:
             return json.dumps({"error": "Skill not found"})
         return json.dumps({"status": "deleted", "skill_id": skill_id})
+
+    @mcp.tool(
+        description="""Delete a hook definition.
+
+Args:
+    hook_id: UUID of the hook definition
+
+Returns: JSON with status 'deleted', or an error if not found."""
+    )
+    async def delete_hook_definition(hook_id: str) -> str:
+        user_id, org_id, user_role, _, _ = await _get_current_user_context()
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+        if not user_id:
+            return json.dumps({"error": "No user context"})
+        if user_role not in ("admin", "owner"):
+            return json.dumps(
+                {"error": "Forbidden: admin or owner role required", "code": 403}
+            )
+
+        if not await _can_modify_definition(
+            str(user_id), str(org_id), "hook", hook_id,
+        ):
+            return json.dumps({"error": "Hook not found"})
+
+        repo = await _get_definition_repository()
+        success = await repo.delete_hook(hook_id, str(org_id))
+        if not success:
+            return json.dumps({"error": "Hook not found"})
+        return json.dumps({"status": "deleted", "hook_id": hook_id})
 
     # ── MCP Server tools ──────────────────────────────────────────────────
 
@@ -695,6 +931,64 @@ Returns: JSON with items array, total_count, and pagination info."""
             requester_role=role,
         )
         return json.dumps(result, default=_serialize)
+
+    @mcp.tool(
+        description="""List hook definitions in the organization.
+
+Hooks are declarative runtime middleware that can observe agent events such
+as tool calls and inject additional context. Filter by status to see proposed,
+active, or rejected hooks.
+
+Args:
+    status: Optional filter — 'proposed', 'active', or 'rejected'
+    limit: Max results to return (default 25, max 100)
+    offset: Pagination offset (default 0)
+
+Returns: JSON with items array, total_count, and pagination info."""
+    )
+    async def list_hook_definitions(
+        status: str | None = None,
+        limit: int = 25,
+        offset: int = 0,
+    ) -> str:
+        user_id, org_id, role, _, _ = await _get_current_user_context()
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+
+        repo = await _get_definition_repository()
+        result = await repo.list_hooks(
+            str(org_id),
+            status=status,
+            limit=min(limit, 100),
+            offset=offset,
+            requester_user_id=str(user_id) if user_id else None,
+            requester_role=role,
+        )
+        return json.dumps(result, default=_serialize)
+
+    @mcp.tool(
+        description="""Get full details of a hook definition by ID.
+
+Args:
+    hook_id: UUID of the hook definition
+
+Returns: JSON with the hook details, or an error if not found."""
+    )
+    async def get_hook_definition(hook_id: str) -> str:
+        user_id, org_id, role, _, _ = await _get_current_user_context()
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+
+        repo = await _get_definition_repository()
+        hook = await repo.get_hook(
+            hook_id,
+            str(org_id),
+            requester_user_id=str(user_id) if user_id else None,
+            requester_role=role,
+        )
+        if not hook:
+            return json.dumps({"error": "Hook not found"})
+        return json.dumps(hook, default=_serialize)
 
     @mcp.tool(
         description="""Create a new MCP server definition.

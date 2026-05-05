@@ -4,6 +4,7 @@ Tests the HTML-serving endpoints:
 - GET  /definitions                              (list with tabs)
 - GET  /definitions/agents/{id}                  (agent detail)
 - GET  /definitions/skills/{id}                  (skill detail)
+- GET  /definitions/hooks/{id}                   (hook detail)
 - GET  /definitions/mcp-servers/{id}             (MCP server detail)
 - POST /definitions/agents/create                (create agent)
 - POST /definitions/agents/{id}/update           (update agent)
@@ -15,6 +16,11 @@ Tests the HTML-serving endpoints:
 - POST /definitions/skills/{id}/delete           (delete skill)
 - POST /definitions/skills/{id}/approve          (approve skill)
 - POST /definitions/skills/{id}/reject           (reject skill)
+- POST /definitions/hooks/create                 (create hook)
+- POST /definitions/hooks/{id}/update            (update hook)
+- POST /definitions/hooks/{id}/delete            (delete hook)
+- POST /definitions/hooks/{id}/approve           (approve hook)
+- POST /definitions/hooks/{id}/reject            (reject hook)
 - POST /definitions/mcp-servers/create           (create MCP server)
 - POST /definitions/mcp-servers/{id}/update      (update MCP server)
 - POST /definitions/mcp-servers/{id}/delete      (delete MCP server)
@@ -24,6 +30,8 @@ Tests the HTML-serving endpoints:
 - POST /definitions/agents/{id}/revoke-skill/{s} (revoke skill)
 - POST /definitions/agents/{id}/grant-mcp        (grant MCP to agent)
 - POST /definitions/agents/{id}/revoke-mcp/{s}   (revoke MCP)
+- POST /definitions/agents/{id}/grant-hook       (grant hook to agent)
+- POST /definitions/agents/{id}/revoke-hook/{s}  (revoke hook)
 - POST /definitions/agents/{id}/mcp-tools/{s}    (update tool grants)
 
 Uses real DB sessions + CSRF tokens through the full ASGI stack.
@@ -71,6 +79,18 @@ async def web_prefix(db_pool):
             f"{prefix}%",
         )
         await conn.execute(
+            "DELETE FROM agent_hooks WHERE agent_id IN "
+            "(SELECT id FROM agent_definitions WHERE organization_id IN "
+            "(SELECT id FROM organizations WHERE name LIKE $1))",
+            f"{prefix}%",
+        )
+        await conn.execute(
+            "DELETE FROM agent_hooks WHERE hook_id IN "
+            "(SELECT id FROM hook_definitions WHERE organization_id IN "
+            "(SELECT id FROM organizations WHERE name LIKE $1))",
+            f"{prefix}%",
+        )
+        await conn.execute(
             "DELETE FROM agent_definitions WHERE organization_id IN "
             "(SELECT id FROM organizations WHERE name LIKE $1)",
             f"{prefix}%",
@@ -82,6 +102,11 @@ async def web_prefix(db_pool):
         )
         await conn.execute(
             "DELETE FROM mcp_server_configs WHERE organization_id IN "
+            "(SELECT id FROM organizations WHERE name LIKE $1)",
+            f"{prefix}%",
+        )
+        await conn.execute(
+            "DELETE FROM hook_definitions WHERE organization_id IN "
             "(SELECT id FROM organizations WHERE name LIKE $1)",
             f"{prefix}%",
         )
@@ -186,6 +211,23 @@ async def mcp_def(db_pool, web_user):
     )
 
 
+@pytest_asyncio.fixture
+async def hook_def(db_pool, web_user):
+    """Create a test hook definition."""
+    _user, org, _token = web_user
+    repo = DefinitionRepository(db_pool)
+    return await repo.create_hook(
+        name="Test Hook",
+        description="A test hook",
+        trigger_event="tool_call",
+        action_type="static_context",
+        content="Test hook context",
+        config={"tool_names": ["read_file"], "require_file_reference": True},
+        org_id=str(org["id"]),
+        created_by=str(_user["id"]),
+    )
+
+
 def _csrf_data(client: httpx.AsyncClient, extra: dict | None = None) -> dict:
     """Build form data dict with CSRF token included."""
     data = {CSRF_FIELD_NAME: client._csrf_token}  # type: ignore[attr-defined]
@@ -220,6 +262,34 @@ class TestDefinitionsList:
     async def test_list_tab_mcp(self, client, mcp_def):
         resp = await client.get("/definitions", params={"tab": "mcp"})
         assert resp.status_code == 200
+
+    async def test_list_tab_hooks(self, client, hook_def):
+        resp = await client.get("/definitions", params={"tab": "hooks"})
+        assert resp.status_code == 200
+        assert "Test Hook" in resp.text
+
+    async def test_hooks_tab_explains_builtin_memory_hook(self, client, db_pool, web_user):
+        _user, org, _token = web_user
+        repo = DefinitionRepository(db_pool)
+        await repo.sync_built_in_hooks(str(org["id"]))
+
+        resp = await client.get("/definitions", params={"tab": "hooks"})
+
+        assert resp.status_code == 200
+        assert "Hooks are safe agent middleware" in resp.text
+        assert "default on all agents" in resp.text
+        assert "Finds accessible memories related to those file paths" in resp.text
+        assert "command — run a shell command or script" in resp.text
+        assert "JSON on stdin" in resp.text
+        assert "before_model_call — before the model is called" in resp.text
+        assert "after_tool_call — after a tool returns" in resp.text
+
+    async def test_new_hook_button_uses_nonce_backed_script(self, client):
+        resp = await client.get("/definitions", params={"tab": "hooks"})
+
+        assert resp.status_code == 200
+        assert 'id="open-create-hook-modal"' in resp.text
+        assert "onclick=\"document.getElementById('create-hook-modal')" not in resp.text
 
     async def test_list_unauthenticated_redirects(self, db_pool):
         app = create_app()
@@ -287,6 +357,43 @@ class TestMcpServerDetail:
 
     async def test_detail_not_found(self, client):
         resp = await client.get(f"/definitions/mcp-servers/{uuid4()}")
+        assert resp.status_code == 404
+
+
+# ============================================================================
+# GET /definitions/hooks/{id} — hook detail
+# ============================================================================
+
+
+class TestHookDetail:
+    async def test_detail_returns_html(self, client, hook_def):
+        resp = await client.get(f"/definitions/hooks/{hook_def['id']}")
+        assert resp.status_code == 200
+        assert "text/html" in resp.headers["content-type"]
+
+    async def test_detail_contains_name_and_config(self, client, hook_def):
+        resp = await client.get(f"/definitions/hooks/{hook_def['id']}")
+        assert "Test Hook" in resp.text
+        assert "static_context" in resp.text
+        assert "read_file" in resp.text
+
+    async def test_builtin_memory_hook_detail_explains_behavior(self, client, db_pool, web_user):
+        _user, org, _token = web_user
+        repo = DefinitionRepository(db_pool)
+        await repo.sync_built_in_hooks(str(org["id"]))
+        result = await repo.list_hooks(str(org["id"]), status="active")
+        hook = next(h for h in result["items"] if h["name"] == "file-memory-lookup")
+
+        resp = await client.get(f"/definitions/hooks/{hook['id']}")
+
+        assert resp.status_code == 200
+        assert "Default memory hook" in resp.text
+        assert "Watches file-related tool calls" in resp.text
+        assert "Searches accessible memories" in resp.text
+        assert "custom approved command hooks can" in resp.text
+
+    async def test_detail_not_found(self, client):
+        resp = await client.get(f"/definitions/hooks/{uuid4()}")
         assert resp.status_code == 404
 
 
@@ -556,6 +663,147 @@ class TestSkillApproveReject:
 
 
 # ============================================================================
+# Hook CRUD
+# ============================================================================
+
+
+class TestHookCreate:
+    async def test_create_redirects(self, client):
+        resp = await client.post(
+            "/definitions/hooks/create",
+            data=_csrf_data(
+                client,
+                {
+                    "name": "Created Hook",
+                    "description": "Created via test",
+                    "trigger_event": "tool_call",
+                    "action_type": "static_context",
+                    "content": "Remember the test context.",
+                    "config": '{"tool_names": ["read_file"]}',
+                },
+            ),
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        assert "/definitions/hooks/" in resp.headers["location"]
+
+    async def test_create_persists_config(self, client, db_pool, web_user):
+        _user, org, _token = web_user
+        await client.post(
+            "/definitions/hooks/create",
+            data=_csrf_data(
+                client,
+                {
+                    "name": "Persisted Hook",
+                    "description": "Check persistence",
+                    "trigger_event": "tool_call",
+                    "action_type": "static_context",
+                    "content": "Persisted context",
+                    "config": '{"tool_names": ["edit_file"], "require_file_reference": true}',
+                },
+            ),
+        )
+        repo = DefinitionRepository(db_pool)
+        result = await repo.list_hooks(str(org["id"]))
+        hooks = result["items"]
+        hook_summary = next(h for h in hooks if h["name"] == "Persisted Hook")
+        hook = await repo.get_hook(str(hook_summary["id"]), str(org["id"]))
+        assert hook["config"]["tool_names"] == ["edit_file"]
+
+    async def test_create_no_csrf_fails(self, client):
+        resp = await client.post(
+            "/definitions/hooks/create",
+            data={"name": "No CSRF", "action_type": "static_context"},
+        )
+        assert resp.status_code in (403, 400)
+
+
+class TestHookUpdate:
+    async def test_update_redirects(self, client, hook_def):
+        resp = await client.post(
+            f"/definitions/hooks/{hook_def['id']}/update",
+            data=_csrf_data(
+                client,
+                {
+                    "name": "Updated Hook",
+                    "description": "Updated",
+                    "trigger_event": "tool_call",
+                    "action_type": "memory_lookup",
+                    "content": "",
+                    "config": '{"tool_names": ["read_file"], "max_memories": 2}',
+                },
+            ),
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+
+    async def test_update_persists(self, client, hook_def, db_pool, web_user):
+        _user, org, _token = web_user
+        await client.post(
+            f"/definitions/hooks/{hook_def['id']}/update",
+            data=_csrf_data(
+                client,
+                {
+                    "name": "Renamed Hook",
+                    "description": "New",
+                    "trigger_event": "tool_call",
+                    "action_type": "memory_lookup",
+                    "content": "",
+                    "config": '{"tool_names": ["grep_search"], "max_memories": 1}',
+                },
+            ),
+        )
+        repo = DefinitionRepository(db_pool)
+        hook = await repo.get_hook(str(hook_def["id"]), str(org["id"]))
+        assert hook["name"] == "Renamed Hook"
+        assert hook["action_type"] == "memory_lookup"
+        assert hook["config"]["tool_names"] == ["grep_search"]
+
+
+class TestHookDelete:
+    async def test_delete_redirects(self, client, hook_def):
+        resp = await client.post(
+            f"/definitions/hooks/{hook_def['id']}/delete",
+            data=_csrf_data(client),
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        assert "tab=hooks" in resp.headers["location"]
+
+    async def test_delete_removes(self, client, hook_def, db_pool, web_user):
+        _user, org, _token = web_user
+        await client.post(
+            f"/definitions/hooks/{hook_def['id']}/delete",
+            data=_csrf_data(client),
+        )
+        repo = DefinitionRepository(db_pool)
+        hook = await repo.get_hook(str(hook_def["id"]), str(org["id"]))
+        assert hook is None
+
+
+class TestHookApproveReject:
+    async def test_approve_changes_status(self, client, hook_def, db_pool, web_user):
+        _user, org, _token = web_user
+        await client.post(
+            f"/definitions/hooks/{hook_def['id']}/approve",
+            data=_csrf_data(client),
+        )
+        repo = DefinitionRepository(db_pool)
+        hook = await repo.get_hook(str(hook_def["id"]), str(org["id"]))
+        assert hook["status"] == "active"
+
+    async def test_reject_changes_status(self, client, hook_def, db_pool, web_user):
+        _user, org, _token = web_user
+        await client.post(
+            f"/definitions/hooks/{hook_def['id']}/reject",
+            data=_csrf_data(client),
+        )
+        repo = DefinitionRepository(db_pool)
+        hook = await repo.get_hook(str(hook_def["id"]), str(org["id"]))
+        assert hook["status"] == "rejected"
+
+
+# ============================================================================
 # MCP Server CRUD
 # ============================================================================
 
@@ -784,6 +1032,43 @@ class TestGrantManagement:
         server_ids = [str(s["id"]) for s in servers]
         assert str(mcp_def["id"]) not in server_ids
 
+    async def test_grant_hook_to_agent(self, client, agent_def, hook_def, db_pool, web_user):
+        # Approve the hook first — get_agent_hooks filters by status='active'
+        _user, org, _token = web_user
+        repo = DefinitionRepository(db_pool)
+        await repo.approve_hook(str(hook_def["id"]), str(org["id"]), str(_user["id"]))
+
+        resp = await client.post(
+            f"/definitions/agents/{agent_def['id']}/grant-hook",
+            data=_csrf_data(client, {"hook_id": str(hook_def["id"])}),
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        hooks = await repo.get_agent_hooks(str(agent_def["id"]))
+        hook_ids = [str(h["id"]) for h in hooks]
+        assert str(hook_def["id"]) in hook_ids
+
+    async def test_grant_hook_empty_id_skips(self, client, agent_def):
+        resp = await client.post(
+            f"/definitions/agents/{agent_def['id']}/grant-hook",
+            data=_csrf_data(client, {"hook_id": ""}),
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+
+    async def test_revoke_hook_from_agent(self, client, agent_def, hook_def, db_pool):
+        repo = DefinitionRepository(db_pool)
+        await repo.grant_hook(str(agent_def["id"]), str(hook_def["id"]))
+        resp = await client.post(
+            f"/definitions/agents/{agent_def['id']}/revoke-hook/{hook_def['id']}",
+            data=_csrf_data(client),
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        hooks = await repo.get_agent_hooks(str(agent_def["id"]))
+        hook_ids = [str(h["id"]) for h in hooks]
+        assert str(hook_def["id"]) not in hook_ids
+
     async def test_update_mcp_tools(self, client, agent_def, mcp_def, db_pool):
         repo = DefinitionRepository(db_pool)
         await repo.grant_mcp_server(str(agent_def["id"]), str(mcp_def["id"]))
@@ -898,6 +1183,23 @@ async def member_mcp_def(db_pool, member_user):
     )
 
 
+@pytest_asyncio.fixture
+async def member_hook_def(db_pool, member_user):
+    """Hook definition in the member user's org."""
+    _user, org, _token = member_user
+    repo = DefinitionRepository(db_pool)
+    return await repo.create_hook(
+        name="Member Test Hook",
+        description="Hook for member tests",
+        trigger_event="tool_call",
+        action_type="static_context",
+        content="Member context",
+        config={"tool_names": ["read_file"]},
+        org_id=str(org["id"]),
+        created_by=str(_user["id"]),
+    )
+
+
 class TestMemberRoleBlocked:
     """Member-role users must get 403 on all mutating definition endpoints."""
 
@@ -975,6 +1277,55 @@ class TestMemberRoleBlocked:
     async def test_member_cannot_reject_skill(self, member_client, member_skill_def):
         resp = await member_client.post(
             f"/definitions/skills/{member_skill_def['id']}/reject",
+            data=_csrf_data(member_client),
+        )
+        assert resp.status_code == 403
+
+    # --- Hook CRUD ---
+
+    async def test_member_cannot_create_hook(self, member_client):
+        resp = await member_client.post(
+            "/definitions/hooks/create",
+            data=_csrf_data(
+                member_client,
+                {"name": "X", "description": "X", "action_type": "static_context"},
+            ),
+        )
+        assert resp.status_code == 403
+
+    async def test_member_cannot_update_hook(self, member_client, member_hook_def):
+        resp = await member_client.post(
+            f"/definitions/hooks/{member_hook_def['id']}/update",
+            data=_csrf_data(
+                member_client,
+                {
+                    "name": "X",
+                    "description": "X",
+                    "trigger_event": "tool_call",
+                    "action_type": "static_context",
+                    "config": "{}",
+                },
+            ),
+        )
+        assert resp.status_code == 403
+
+    async def test_member_cannot_delete_hook(self, member_client, member_hook_def):
+        resp = await member_client.post(
+            f"/definitions/hooks/{member_hook_def['id']}/delete",
+            data=_csrf_data(member_client),
+        )
+        assert resp.status_code == 403
+
+    async def test_member_cannot_approve_hook(self, member_client, member_hook_def):
+        resp = await member_client.post(
+            f"/definitions/hooks/{member_hook_def['id']}/approve",
+            data=_csrf_data(member_client),
+        )
+        assert resp.status_code == 403
+
+    async def test_member_cannot_reject_hook(self, member_client, member_hook_def):
+        resp = await member_client.post(
+            f"/definitions/hooks/{member_hook_def['id']}/reject",
             data=_csrf_data(member_client),
         )
         assert resp.status_code == 403
@@ -1060,6 +1411,24 @@ class TestMemberRoleBlocked:
         )
         assert resp.status_code == 403
 
+    async def test_member_cannot_grant_hook(
+        self, member_client, member_agent_def, member_hook_def
+    ):
+        resp = await member_client.post(
+            f"/definitions/agents/{member_agent_def['id']}/grant-hook",
+            data=_csrf_data(member_client, {"hook_id": str(member_hook_def["id"])}),
+        )
+        assert resp.status_code == 403
+
+    async def test_member_cannot_revoke_hook(
+        self, member_client, member_agent_def, member_hook_def
+    ):
+        resp = await member_client.post(
+            f"/definitions/agents/{member_agent_def['id']}/revoke-hook/{member_hook_def['id']}",
+            data=_csrf_data(member_client),
+        )
+        assert resp.status_code == 403
+
     async def test_member_cannot_update_mcp_tools(
         self, member_client, member_agent_def, member_mcp_def
     ):
@@ -1085,4 +1454,8 @@ class TestMemberRoleBlocked:
 
     async def test_member_can_view_mcp_detail(self, member_client, member_mcp_def):
         resp = await member_client.get(f"/definitions/mcp-servers/{member_mcp_def['id']}")
+        assert resp.status_code == 200
+
+    async def test_member_can_view_hook_detail(self, member_client, member_hook_def):
+        resp = await member_client.get(f"/definitions/hooks/{member_hook_def['id']}")
         assert resp.status_code == 200

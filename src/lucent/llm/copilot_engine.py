@@ -249,6 +249,7 @@ class CopilotEngine(LLMEngine):
         provider_session_id: str | None = None,
         resume: bool = False,
         message_history: list[dict[str, Any]] | None = None,
+        hooks: list[dict[str, Any]] | None = None,
     ) -> str | None:
         """Run a blocking session using send_and_wait (chat pattern)."""
         if not _ensure_sdk():
@@ -323,6 +324,7 @@ class CopilotEngine(LLMEngine):
         provider_session_id: str | None = None,
         resume: bool = False,
         message_history: list[dict[str, Any]] | None = None,
+        hooks: list[dict[str, Any]] | None = None,
     ) -> str | None:
         """Run a streaming session using send + event callbacks (daemon pattern).
 
