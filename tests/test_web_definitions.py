@@ -250,6 +250,27 @@ class TestDefinitionsList:
     async def test_list_contains_agent_name(self, client, agent_def):
         resp = await client.get("/definitions")
         assert "Test Agent" in resp.text
+        assert "Me (" in resp.text
+        assert "⚠ Entire Organization — shared with everyone" in resp.text
+        assert "Entire Organization makes this definition readable and usable" in resp.text
+
+    async def test_list_shows_org_shared_owner_badge(self, client, db_pool, web_user):
+        _user, org, _token = web_user
+        repo = DefinitionRepository(db_pool)
+        await repo.create_agent(
+            name="Org Shared Agent",
+            description="Shared with everyone",
+            content="# Org Shared Agent",
+            org_id=str(org["id"]),
+            created_by=str(_user["id"]),
+            shared_with_org=True,
+        )
+
+        resp = await client.get("/definitions", params={"tab": "agents"})
+
+        assert resp.status_code == 200
+        assert "Org Shared Agent" in resp.text
+        assert "Shared with org" in resp.text
 
     async def test_list_tab_agents(self, client, agent_def):
         resp = await client.get("/definitions", params={"tab": "agents"})
@@ -314,6 +335,18 @@ class TestAgentDetail:
     async def test_detail_contains_name(self, client, agent_def):
         resp = await client.get(f"/definitions/agents/{agent_def['id']}")
         assert "Test Agent" in resp.text
+
+    async def test_detail_edit_modal_controls_are_csp_safe(self, client, agent_def):
+        resp = await client.get(f"/definitions/agents/{agent_def['id']}")
+
+        assert 'id="edit-definition-btn"' in resp.text
+        assert 'class="js-close-edit-modal' in resp.text
+        assert 'class="js-confirm-delete"' in resp.text
+        assert "Me (" in resp.text
+        assert "⚠ Entire Organization — shared with everyone" in resp.text
+        assert "Entire Organization makes this agent readable and usable" in resp.text
+        assert 'onclick="document.getElementById(\'edit-modal\')' not in resp.text
+        assert 'onsubmit="return confirm(\'Delete this agent?' not in resp.text
 
     async def test_detail_not_found(self, client):
         resp = await client.get(f"/definitions/agents/{uuid4()}")
@@ -438,6 +471,29 @@ class TestAgentCreate:
         names = [a["name"] for a in agents]
         assert "Persisted Agent" in names
 
+    async def test_create_can_share_with_org(self, client, db_pool, web_user):
+        _user, org, _token = web_user
+        resp = await client.post(
+            "/definitions/agents/create",
+            data=_csrf_data(
+                client,
+                {
+                    "name": "Org Owned Agent",
+                    "description": "Shared org owner",
+                    "content": "# Org Owned",
+                    "owner_scope": "org",
+                },
+            ),
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+
+        repo = DefinitionRepository(db_pool)
+        result = await repo.list_agents(str(org["id"]))
+        agent = next(a for a in result["items"] if a["name"] == "Org Owned Agent")
+        assert agent["owner_user_id"] is None
+        assert agent["owner_group_id"] is None
+
     async def test_create_no_csrf_fails(self, client):
         resp = await client.post(
             "/definitions/agents/create",
@@ -484,6 +540,25 @@ class TestAgentUpdate:
         repo = DefinitionRepository(db_pool)
         agent = await repo.get_agent(str(agent_def["id"]), str(org["id"]))
         assert agent["name"] == "Renamed Agent"
+
+    async def test_update_can_change_to_org_shared(self, client, agent_def, db_pool, web_user):
+        _user, org, _token = web_user
+        await client.post(
+            f"/definitions/agents/{agent_def['id']}/update",
+            data=_csrf_data(
+                client,
+                {
+                    "name": "Shared Agent",
+                    "description": "Now shared",
+                    "content": "# Shared",
+                    "owner_scope": "org",
+                },
+            ),
+        )
+        repo = DefinitionRepository(db_pool)
+        agent = await repo.get_agent(str(agent_def["id"]), str(org["id"]))
+        assert agent["owner_user_id"] is None
+        assert agent["owner_group_id"] is None
 
 
 # ============================================================================

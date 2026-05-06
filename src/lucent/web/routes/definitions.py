@@ -72,18 +72,21 @@ def _attach_owner_names(
 
 async def _resolve_owner_scope(
     form_data, user, pool
-) -> tuple[str | None, str | None]:
+) -> tuple[str | None, str | None, bool]:
     owner_scope = str(form_data.get("owner_scope", "me")).strip()
     if not owner_scope or owner_scope == "me":
-        return str(user.id), None
+        return str(user.id), None, False
+    if owner_scope == "org":
+        _require_admin_or_owner(user)
+        return None, None, True
     if owner_scope.startswith("group:"):
         group_id = owner_scope.replace("group:", "", 1).strip()
         user_groups = await _get_user_groups(pool, str(user.id), str(user.organization_id))
         allowed_group_ids = {str(group["id"]) for group in user_groups}
         if group_id not in allowed_group_ids:
             raise HTTPException(status_code=403, detail="Permission denied")
-        return None, group_id
-    return str(user.id), None
+        return None, group_id, False
+    return str(user.id), None, False
 
 
 def _require_admin_or_owner(user) -> None:
@@ -593,7 +596,9 @@ async def create_agent_web(request: Request):
 
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     org_id = str(user.organization_id)
-    owner_user_id, owner_group_id = await _resolve_owner_scope(form, user, pool)
+    owner_user_id, owner_group_id, shared_with_org = await _resolve_owner_scope(
+        form, user, pool
+    )
 
     agent = await repo.create_agent(
         name=str(form.get("name", "")).strip(),
@@ -603,6 +608,7 @@ async def create_agent_web(request: Request):
         created_by=str(user.id),
         owner_user_id=owner_user_id,
         owner_group_id=owner_group_id,
+        shared_with_org=shared_with_org,
     )
     return RedirectResponse(url=f"/definitions/agents/{agent['id']}", status_code=303)
 
@@ -622,7 +628,9 @@ async def update_agent_web(request: Request, agent_id: str):
     org_id = str(user.organization_id)
     owner_kwargs = {}
     if "owner_scope" in form:
-        owner_user_id, owner_group_id = await _resolve_owner_scope(form, user, pool)
+        owner_user_id, owner_group_id, _shared_with_org = await _resolve_owner_scope(
+            form, user, pool
+        )
         owner_kwargs = {"owner_user_id": owner_user_id, "owner_group_id": owner_group_id}
 
     await repo.update_agent(
@@ -664,7 +672,9 @@ async def create_skill_web(request: Request):
 
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     org_id = str(user.organization_id)
-    owner_user_id, owner_group_id = await _resolve_owner_scope(form, user, pool)
+    owner_user_id, owner_group_id, shared_with_org = await _resolve_owner_scope(
+        form, user, pool
+    )
 
     skill = await repo.create_skill(
         name=str(form.get("name", "")).strip(),
@@ -674,6 +684,7 @@ async def create_skill_web(request: Request):
         created_by=str(user.id),
         owner_user_id=owner_user_id,
         owner_group_id=owner_group_id,
+        shared_with_org=shared_with_org,
     )
     return RedirectResponse(url=f"/definitions/skills/{skill['id']}", status_code=303)
 
@@ -693,7 +704,9 @@ async def update_skill_web(request: Request, skill_id: str):
     org_id = str(user.organization_id)
     owner_kwargs = {}
     if "owner_scope" in form:
-        owner_user_id, owner_group_id = await _resolve_owner_scope(form, user, pool)
+        owner_user_id, owner_group_id, _shared_with_org = await _resolve_owner_scope(
+            form, user, pool
+        )
         owner_kwargs = {"owner_user_id": owner_user_id, "owner_group_id": owner_group_id}
 
     await repo.update_skill(
@@ -740,7 +753,9 @@ async def create_mcp_web(request: Request):
     args_raw = str(form.get("args", "")).strip()
     args = [a.strip() for a in args_raw.split("\n") if a.strip()] if args_raw else []
     env_vars = _parse_env_vars(str(form.get("env_vars", "")))
-    owner_user_id, owner_group_id = await _resolve_owner_scope(form, user, pool)
+    owner_user_id, owner_group_id, shared_with_org = await _resolve_owner_scope(
+        form, user, pool
+    )
 
     server = await repo.create_mcp_server(
         name=str(form.get("name", "")).strip(),
@@ -754,6 +769,7 @@ async def create_mcp_web(request: Request):
         env_vars=env_vars,
         owner_user_id=owner_user_id,
         owner_group_id=owner_group_id,
+        shared_with_org=shared_with_org,
     )
     return RedirectResponse(url=f"/definitions/mcp-servers/{server['id']}", status_code=303)
 
@@ -771,7 +787,9 @@ async def create_hook_web(request: Request):
 
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     org_id = str(user.organization_id)
-    owner_user_id, owner_group_id = await _resolve_owner_scope(form, user, pool)
+    owner_user_id, owner_group_id, shared_with_org = await _resolve_owner_scope(
+        form, user, pool
+    )
 
     hook = await repo.create_hook(
         name=str(form.get("name", "")).strip(),
@@ -787,6 +805,7 @@ async def create_hook_web(request: Request):
         created_by=str(user.id),
         owner_user_id=owner_user_id,
         owner_group_id=owner_group_id,
+        shared_with_org=shared_with_org,
     )
     return RedirectResponse(url=f"/definitions/hooks/{hook['id']}", status_code=303)
 
@@ -811,7 +830,9 @@ async def update_mcp_web(request: Request, server_id: str):
     env_vars = _parse_env_vars(str(form.get("env_vars", "")))
     owner_kwargs = {}
     if "owner_scope" in form:
-        owner_user_id, owner_group_id = await _resolve_owner_scope(form, user, pool)
+        owner_user_id, owner_group_id, _shared_with_org = await _resolve_owner_scope(
+            form, user, pool
+        )
         owner_kwargs = {"owner_user_id": owner_user_id, "owner_group_id": owner_group_id}
 
     await repo.update_mcp_server(
@@ -857,7 +878,9 @@ async def update_hook_web(request: Request, hook_id: str):
     org_id = str(user.organization_id)
     owner_kwargs = {}
     if "owner_scope" in form:
-        owner_user_id, owner_group_id = await _resolve_owner_scope(form, user, pool)
+        owner_user_id, owner_group_id, _shared_with_org = await _resolve_owner_scope(
+            form, user, pool
+        )
         owner_kwargs = {"owner_user_id": owner_user_id, "owner_group_id": owner_group_id}
 
     role_value = user.role if isinstance(user.role, str) else user.role.value

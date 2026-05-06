@@ -247,8 +247,9 @@ Use after create_request to break a request into individual tasks that agents wi
 Each task can be assigned to a specific agent type and will be dispatched in sequence_order.
 
 IMPORTANT: The agent_type must match an approved agent definition in /definitions.
-Tasks with unrecognized agent types will be rejected. Use list_available_agents or
-check /definitions to see which agents are available.
+Tasks with unrecognized or inaccessible agent types will be rejected. Use
+list_agent_definitions(status='active') or check /definitions to see which
+agents are available to the request owner.
 
 SANDBOX POLICY: Tasks that need a sandbox MUST reference an approved sandbox
 template via ``sandbox_template_id``. Inline ``sandbox_config`` is no longer

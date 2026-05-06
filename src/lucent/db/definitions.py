@@ -58,6 +58,35 @@ class DefinitionRepository:
     def _role_value(role: str | None) -> str:
         return role or "member"
 
+    async def _default_owner_user_id(
+        self,
+        *,
+        created_by: str | None,
+        org_id: str,
+        scope: str,
+        shared_with_org: bool = False,
+    ) -> str | None:
+        """Default ownership for new instance definitions.
+
+        Human-created definitions default to the creator. Daemon-created
+        instance definitions default to org-shared because the daemon is an
+        actor, not a useful capability owner in the UI/ACL model.
+        """
+        if scope == "built-in" or shared_with_org or not created_by:
+            return None
+        try:
+            async with self.pool.acquire() as conn:
+                role = await conn.fetchval(
+                    "SELECT role FROM users WHERE id = $1 AND organization_id = $2",
+                    UUID(created_by),
+                    UUID(org_id),
+                )
+        except Exception:
+            role = None
+        if role == "daemon":
+            return None
+        return created_by
+
     @staticmethod
     def _execute_count(result: str) -> int:
         try:
@@ -188,6 +217,8 @@ class DefinitionRepository:
                 "OR owner_group_id IN ("
                 f"SELECT group_id FROM user_groups WHERE user_id = ${uid_idx}"
                 ") "
+                "OR (scope = 'instance' AND owner_user_id IS NULL "
+                "AND owner_group_id IS NULL) "
                 f"OR ${role_idx} IN ('admin', 'owner'))"
             )
         if status:
@@ -230,6 +261,8 @@ class DefinitionRepository:
             acl_sql = (
                 " AND (a.scope = 'built-in' OR a.owner_user_id = $3 "
                 "OR a.owner_group_id IN (SELECT group_id FROM user_groups WHERE user_id = $3) "
+                "OR (a.scope = 'instance' AND a.owner_user_id IS NULL "
+                "AND a.owner_group_id IS NULL) "
                 "OR $4 IN ('admin', 'owner'))"
             )
         query = """
@@ -263,10 +296,16 @@ class DefinitionRepository:
         scope: str = "instance",
         owner_user_id: str | None = None,
         owner_group_id: str | None = None,
+        shared_with_org: bool = False,
     ) -> dict:
         # Default owner to creator when no explicit ownership is provided
         if owner_user_id is None and owner_group_id is None:
-            owner_user_id = created_by
+            owner_user_id = await self._default_owner_user_id(
+                created_by=created_by,
+                org_id=org_id,
+                scope=scope,
+                shared_with_org=shared_with_org,
+            )
         query = """
             INSERT INTO agent_definitions (name, description, content, status, scope,
                 created_by, organization_id, owner_user_id, owner_group_id)
@@ -400,6 +439,8 @@ class DefinitionRepository:
                 "OR owner_group_id IN ("
                 f"SELECT group_id FROM user_groups WHERE user_id = ${uid_idx}"
                 ") "
+                "OR (scope = 'instance' AND owner_user_id IS NULL "
+                "AND owner_group_id IS NULL) "
                 f"OR ${role_idx} IN ('admin', 'owner'))"
             )
         if status:
@@ -442,6 +483,8 @@ class DefinitionRepository:
             acl_sql = (
                 " AND (scope = 'built-in' OR owner_user_id = $3 "
                 "OR owner_group_id IN (SELECT group_id FROM user_groups WHERE user_id = $3) "
+                "OR (scope = 'instance' AND owner_user_id IS NULL "
+                "AND owner_group_id IS NULL) "
                 "OR $4 IN ('admin', 'owner'))"
             )
         async with self.pool.acquire() as conn:
@@ -462,10 +505,16 @@ class DefinitionRepository:
         scope: str = "instance",
         owner_user_id: str | None = None,
         owner_group_id: str | None = None,
+        shared_with_org: bool = False,
     ) -> dict:
         # Default owner to creator when no explicit ownership is provided
         if owner_user_id is None and owner_group_id is None:
-            owner_user_id = created_by
+            owner_user_id = await self._default_owner_user_id(
+                created_by=created_by,
+                org_id=org_id,
+                scope=scope,
+                shared_with_org=shared_with_org,
+            )
         query = """
             INSERT INTO skill_definitions (name, description, content, status, scope,
                 created_by, organization_id, owner_user_id, owner_group_id)
@@ -558,6 +607,8 @@ class DefinitionRepository:
                 "OR owner_group_id IN ("
                 f"SELECT group_id FROM user_groups WHERE user_id = ${uid_idx}"
                 ") "
+                "OR (scope = 'instance' AND owner_user_id IS NULL "
+                "AND owner_group_id IS NULL) "
                 f"OR ${role_idx} IN ('admin', 'owner'))"
             )
         if status:
@@ -600,6 +651,8 @@ class DefinitionRepository:
             acl_sql = (
                 " AND (scope = 'built-in' OR owner_user_id = $3 "
                 "OR owner_group_id IN (SELECT group_id FROM user_groups WHERE user_id = $3) "
+                "OR (scope = 'instance' AND owner_user_id IS NULL "
+                "AND owner_group_id IS NULL) "
                 "OR $4 IN ('admin', 'owner'))"
             )
         async with self.pool.acquire() as conn:
@@ -634,6 +687,8 @@ class DefinitionRepository:
                 "OR owner_group_id IN ("
                 f"SELECT group_id FROM user_groups WHERE user_id = ${uid_idx}"
                 ") "
+                "OR (scope = 'instance' AND owner_user_id IS NULL "
+                "AND owner_group_id IS NULL) "
                 f"OR ${role_idx} IN ('admin', 'owner'))"
             )
         if status:
@@ -676,6 +731,8 @@ class DefinitionRepository:
             acl_sql = (
                 " AND (scope = 'built-in' OR owner_user_id = $3 "
                 "OR owner_group_id IN (SELECT group_id FROM user_groups WHERE user_id = $3) "
+                "OR (scope = 'instance' AND owner_user_id IS NULL "
+                "AND owner_group_id IS NULL) "
                 "OR $4 IN ('admin', 'owner'))"
             )
         async with self.pool.acquire() as conn:
@@ -699,10 +756,16 @@ class DefinitionRepository:
         scope: str = "instance",
         owner_user_id: str | None = None,
         owner_group_id: str | None = None,
+        shared_with_org: bool = False,
     ) -> dict:
         self._validate_hook_shape(trigger_event, action_type, config)
         if owner_user_id is None and owner_group_id is None:
-            owner_user_id = created_by
+            owner_user_id = await self._default_owner_user_id(
+                created_by=created_by,
+                org_id=org_id,
+                scope=scope,
+                shared_with_org=shared_with_org,
+            )
         query = """
             INSERT INTO hook_definitions
                 (name, description, trigger_event, action_type, content, config,
@@ -846,10 +909,16 @@ class DefinitionRepository:
         status: str = "proposed",
         owner_user_id: str | None = None,
         owner_group_id: str | None = None,
+        shared_with_org: bool = False,
     ) -> dict:
         # Default owner to creator when no explicit ownership is provided
         if owner_user_id is None and owner_group_id is None:
-            owner_user_id = created_by
+            owner_user_id = await self._default_owner_user_id(
+                created_by=created_by,
+                org_id=org_id,
+                scope="instance",
+                shared_with_org=shared_with_org,
+            )
         query = """
             INSERT INTO mcp_server_configs (name, description, server_type, url,
                 command, args, headers, env_vars, status, created_by, organization_id,
@@ -1352,6 +1421,7 @@ class DefinitionRepository:
                 scope = 'built-in'
                 OR owner_user_id = $2
                 OR owner_group_id IN (SELECT group_id FROM user_groups WHERE user_id = $2)
+                OR (scope = 'instance' AND owner_user_id IS NULL AND owner_group_id IS NULL)
                 OR $3 IN ('admin', 'owner')
             )
         """
@@ -1392,6 +1462,7 @@ class DefinitionRepository:
                 scope = 'built-in'
                 OR owner_user_id = $2
                 OR owner_group_id IN (SELECT group_id FROM user_groups WHERE user_id = $2)
+                OR (scope = 'instance' AND owner_user_id IS NULL AND owner_group_id IS NULL)
                 OR $3 IN ('admin', 'owner')
             )
         """
@@ -1432,6 +1503,7 @@ class DefinitionRepository:
                 scope = 'built-in'
                 OR owner_user_id = $2
                 OR owner_group_id IN (SELECT group_id FROM user_groups WHERE user_id = $2)
+                OR (scope = 'instance' AND owner_user_id IS NULL AND owner_group_id IS NULL)
                 OR $3 IN ('admin', 'owner')
             )
         """
@@ -1472,6 +1544,7 @@ class DefinitionRepository:
                 scope = 'built-in'
                 OR owner_user_id = $2
                 OR owner_group_id IN (SELECT group_id FROM user_groups WHERE user_id = $2)
+                OR (scope = 'instance' AND owner_user_id IS NULL AND owner_group_id IS NULL)
                 OR $3 IN ('admin', 'owner')
             )
         """

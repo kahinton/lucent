@@ -3172,10 +3172,11 @@ class LucentDaemon:
             "specialized fast, reasoning, agentic, or visual model.\n"
             "2. Decide on a task breakdown — typically 1 to 5 tasks. Each task should "
             "have a clear, actionable title and a short description of what it does.\n"
-            "3. For each task, call create_task(request_id=..., title=..., "
-            "description=..., agent_type=..., sequence_order=..., model=<optional>). Use "
-            "agent_type values like 'research', 'code', or 'documentation' depending "
-            "on the work. Omit model for standard/default tasks; set model only when "
+            "3. Call list_agent_definitions(status='active') and choose only "
+            "agent_type names from agents visible to this request owner. For each task, "
+            "call create_task(request_id=..., title=..., description=..., "
+            "agent_type=..., sequence_order=..., model=<optional>). Omit model for "
+            "standard/default tasks; set model only when "
             "the available model list gives a concrete reason to specialize. Set "
             "sequence_order so dependent tasks come after their prerequisites (0 for "
             "the first batch, 1 for the next, etc.).\n"
@@ -3276,20 +3277,6 @@ class LucentDaemon:
             )
             return 0
 
-        # Build the system message once — same context as a normal sub-agent.
-        try:
-            system_message = await build_subagent_prompt(
-                "planning",
-                "Break a pending_approval request into a visible task list.",
-            )
-        except Exception:
-            # Fall back to a minimal system message if the planning agent
-            # definition isn't available — the per-request prompt is fully
-            # self-contained anyway.
-            system_message = (
-                "You are a focused planning sub-agent. Follow the user prompt exactly."
-            )
-
         attempted = 0
         for req in candidates:
             request_id = req.get("request_id", "")
@@ -3361,6 +3348,31 @@ class LucentDaemon:
                 terminal_after_session = False
                 errors: list[str] = []
                 try:
+                    planning_agent = await load_accessible_agent(
+                        org_id=org_id,
+                        requester_user_id=owner_user_id,
+                        agent_type="planning",
+                    )
+                    planning_skills = []
+                    if planning_agent:
+                        planning_skills = await load_accessible_skills_for_agent(
+                            org_id=org_id,
+                            requester_user_id=owner_user_id,
+                            agent_id=str(planning_agent["id"]),
+                        )
+                    try:
+                        system_message = await build_subagent_prompt(
+                            "planning",
+                            "Break a pending_approval request into a visible task list.",
+                            resolved_agent=planning_agent,
+                            resolved_skills=planning_skills,
+                        )
+                    except AgentNotFoundError:
+                        errors.append(
+                            "request owner has no accessible active planning agent"
+                        )
+                        continue
+
                     scoped_key = await _mint_scoped_api_key(
                         memory_scope="user",
                         memory_scope_user_id=owner_user_id,

@@ -55,6 +55,17 @@ def _parse_config(config: dict | str | None) -> dict:
     raise ValueError("config must be a JSON object")
 
 
+def _owner_args_for_context(
+    user_id: UUID,
+    user_role: str | None,
+    memory_scope: str | None,
+) -> dict:
+    """Return repository ownership kwargs for the current MCP auth context."""
+    if user_role == "daemon" and memory_scope != "user":
+        return {"shared_with_org": True}
+    return {"owner_user_id": str(user_id)}
+
+
 def register_definition_tools(mcp: FastMCP) -> None:
     """Register definition management tools with the MCP server."""
 
@@ -248,7 +259,7 @@ Returns: JSON with the created agent including its ID and status."""
         description: str = "",
         content: str = "",
     ) -> str:
-        user_id, org_id, user_role, _, _ = await _get_current_user_context()
+        user_id, org_id, user_role, memory_scope, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         if not user_id:
@@ -265,7 +276,7 @@ Returns: JSON with the created agent including its ID and status."""
             content=content,
             org_id=str(org_id),
             created_by=str(user_id),
-            owner_user_id=str(user_id),
+            **_owner_args_for_context(user_id, user_role, memory_scope),
         )
         return json.dumps(agent, default=_serialize)
 
@@ -287,7 +298,7 @@ Returns: JSON with the created skill including its ID and status."""
         description: str = "",
         content: str = "",
     ) -> str:
-        user_id, org_id, _, _, _ = await _get_current_user_context()
+        user_id, org_id, user_role, memory_scope, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         if not user_id:
@@ -304,7 +315,7 @@ Returns: JSON with the created skill including its ID and status."""
             content=content,
             org_id=str(org_id),
             created_by=str(user_id),
-            owner_user_id=str(user_id),
+            **_owner_args_for_context(user_id, user_role, memory_scope),
         )
         return json.dumps(skill, default=_serialize)
 
@@ -339,7 +350,7 @@ Returns: JSON with the created hook including its ID and status."""
         config: dict | str | None = None,
         content: str = "",
     ) -> str:
-        user_id, org_id, _, _, _ = await _get_current_user_context()
+        user_id, org_id, user_role, memory_scope, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         if not user_id:
@@ -363,7 +374,7 @@ Returns: JSON with the created hook including its ID and status."""
                 config=parsed_config,
                 org_id=str(org_id),
                 created_by=str(user_id),
-                owner_user_id=str(user_id),
+                **_owner_args_for_context(user_id, user_role, memory_scope),
             )
         except ValueError as exc:
             return json.dumps({"error": str(exc)})
@@ -1015,7 +1026,7 @@ Returns: JSON with the created server including its ID and status."""
         args: str | None = None,
         env_vars: str | None = None,
     ) -> str:
-        user_id, org_id, user_role, _, _ = await _get_current_user_context()
+        user_id, org_id, user_role, memory_scope, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         if not user_id:
@@ -1055,7 +1066,7 @@ Returns: JSON with the created server including its ID and status."""
             command=command,
             args=parsed_args,
             env_vars=parsed_env_vars,
-            owner_user_id=str(user_id),
+            **_owner_args_for_context(user_id, user_role, memory_scope),
         )
         return json.dumps(server, default=_serialize)
 

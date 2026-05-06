@@ -22,6 +22,8 @@
                     <span class="px-2.5 py-1 rounded text-sm bg-gray-100 text-gray-600">Owner: {{ definition.owner_user_name }}</span>
                     {% elif definition.owner_group_name %}
                     <span class="px-2.5 py-1 rounded text-sm bg-gray-100 text-gray-600">Owner: {{ definition.owner_group_name }}</span>
+                    {% else %}
+                    <span class="px-2.5 py-1 rounded text-sm bg-blue-50 text-blue-700">Shared with org</span>
                     {% endif %}
                 {% endif %}
             </div>
@@ -33,8 +35,8 @@
             <form method="POST" action="/definitions/{{ definition_type }}s/{{ definition.id }}/reject"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit" class="px-4 py-2 text-sm bg-red-50 text-red-700 rounded-md hover:bg-red-100 font-medium">Reject</button></form>
             {% endif %}
             {% if definition.scope != 'built-in' %}
-            <button onclick="document.getElementById('edit-modal').classList.remove('hidden')" class="px-4 py-2 text-sm bg-gray-100 text-gray-700 rounded-md hover:bg-gray-200 font-medium">Edit</button>
-            <form method="POST" action="/definitions/{{ definition_type }}s/{{ definition.id }}/delete" onsubmit="return confirm('Delete this {{ definition_type }}? This cannot be undone.')"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit" class="px-4 py-2 text-sm bg-red-50 text-red-700 rounded-md hover:bg-red-100 font-medium">Delete</button></form>
+            <button type="button" id="edit-definition-btn" class="px-4 py-2 text-sm bg-gray-100 text-gray-700 rounded-md hover:bg-gray-200 font-medium">Edit</button>
+            <form method="POST" action="/definitions/{{ definition_type }}s/{{ definition.id }}/delete" class="js-confirm-delete" data-confirm="Delete this {{ definition_type }}? This cannot be undone."><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit" class="px-4 py-2 text-sm bg-red-50 text-red-700 rounded-md hover:bg-red-100 font-medium">Delete</button></form>
             {% endif %}
         </div>
     </div>
@@ -329,7 +331,7 @@
 <div class="bg-white rounded-lg border border-gray-200 overflow-hidden">
     <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
         <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider">{% if definition_type == 'agent' %}Agent Definition{% elif definition_type == 'skill' %}Skill Content{% elif definition_type == 'hook' %}Hook Content{% else %}Content{% endif %}</h2>
-        <button onclick="toggleRaw()" class="text-xs text-gray-400 hover:text-gray-600 px-2 py-1 rounded border border-gray-200 hover:border-gray-300">Toggle raw</button>
+        <button type="button" id="toggle-raw-btn" class="text-xs text-gray-400 hover:text-gray-600 px-2 py-1 rounded border border-gray-200 hover:border-gray-300">Toggle raw</button>
     </div>
     <div id="content-rendered" class="p-6 prose prose-gray prose-sm max-w-none"></div>
     <div id="content-raw" class="p-6 hidden">
@@ -353,7 +355,7 @@
         <form method="POST" action="/definitions/mcp-servers/{{ definition.id }}/update">
         {% endif %}
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <div class="p-6 border-b border-gray-200"><div class="flex items-center justify-between"><h2 class="text-lg font-semibold text-gray-900">Edit {{ definition_type | replace('-', ' ') | title }}</h2><button type="button" onclick="this.closest('.fixed').classList.add('hidden')" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button></div></div>
+            <div class="p-6 border-b border-gray-200"><div class="flex items-center justify-between"><h2 class="text-lg font-semibold text-gray-900">Edit {{ definition_type | replace('-', ' ') | title }}</h2><button type="button" class="js-close-edit-modal text-gray-400 hover:text-gray-600 text-xl">&times;</button></div></div>
             <div class="p-6 space-y-4">
                 <div><label class="block text-sm font-medium text-gray-700 mb-1">Name</label><input name="name" value="{{ definition.name }}" required class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"></div>
                 <div><label class="block text-sm font-medium text-gray-700 mb-1">Description</label><input name="description" value="{{ definition.description or '' }}" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"></div>
@@ -377,14 +379,16 @@
                 <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">Owner</label>
                     <select name="owner_scope" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
-                        <option value="me" {% if definition.owner_user_id and not definition.owner_group_id %}selected{% endif %}>Me</option>
+                        <option value="me" {% if definition.owner_user_id and not definition.owner_group_id %}selected{% endif %}>Me ({{ user.display_name or user.email or 'you' }})</option>
+                        <option value="org" class="font-semibold text-amber-700" {% if not definition.owner_user_id and not definition.owner_group_id %}selected{% endif %}>⚠ Entire Organization — shared with everyone</option>
                         {% for group in owner_groups %}
                         <option value="group:{{ group.id }}" {% if definition.owner_group_id and definition.owner_group_id|string == group.id|string %}selected{% endif %}>{{ group.name }}</option>
                         {% endfor %}
                     </select>
+                    <p class="mt-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800"><span class="font-medium">Use care:</span> Entire Organization makes this {{ definition_type | replace('-', ' ') }} readable and usable by everyone in your organization.</p>
                 </div>
             </div>
-            <div class="p-6 border-t border-gray-200 flex justify-end gap-3"><button type="button" onclick="this.closest('.fixed').classList.add('hidden')" class="px-4 py-2 text-sm text-gray-600">Cancel</button><button type="submit" class="px-4 py-2 text-sm bg-primary-600 text-white rounded-md hover:bg-primary-700 font-medium">Save Changes</button></div>
+            <div class="p-6 border-t border-gray-200 flex justify-end gap-3"><button type="button" class="js-close-edit-modal px-4 py-2 text-sm text-gray-600">Cancel</button><button type="submit" class="px-4 py-2 text-sm bg-primary-600 text-white rounded-md hover:bg-primary-700 font-medium">Save Changes</button></div>
         </form>
     </div>
 </div>
@@ -401,6 +405,42 @@
         } else if (rendered && raw) {
             rendered.textContent = raw.textContent;
         }
+
+        var editModal = document.getElementById('edit-modal');
+        var editButton = document.getElementById('edit-definition-btn');
+        if (editModal && editButton) {
+            editButton.addEventListener('click', function() {
+                editModal.classList.remove('hidden');
+            });
+            editModal.querySelectorAll('.js-close-edit-modal').forEach(function(btn) {
+                btn.addEventListener('click', function() {
+                    editModal.classList.add('hidden');
+                });
+            });
+            editModal.addEventListener('click', function(evt) {
+                if (evt.target === editModal) {
+                    editModal.classList.add('hidden');
+                }
+            });
+            document.addEventListener('keydown', function(evt) {
+                if (evt.key === 'Escape') {
+                    editModal.classList.add('hidden');
+                }
+            });
+        }
+
+        var rawToggle = document.getElementById('toggle-raw-btn');
+        if (rawToggle) {
+            rawToggle.addEventListener('click', toggleRaw);
+        }
+
+        document.querySelectorAll('.js-confirm-delete').forEach(function(form) {
+            form.addEventListener('submit', function(evt) {
+                if (!confirm(form.dataset.confirm || 'Delete this definition?')) {
+                    evt.preventDefault();
+                }
+            });
+        });
     });
     var showingRaw = false;
     function toggleRaw() {
