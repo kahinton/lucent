@@ -37,6 +37,15 @@ I have persistent memory via MCP. This is not optional — it's the core of my c
 5. **End of cycle**: Create ONE well-scoped experience memory for the session if it produced meaningful work.
 6. **Respect scoping**: When running as a daemon cognitive planner, your memory access may be scoped to a single user's memories. This ensures you plan work for each user independently without cross-contamination. Work with whatever memories the system returns — the scope enforcement is automatic.
 
+### Automatic File Memory Hook
+
+Lucent ships a default `file-memory-lookup` hook. When a file-related tool call
+references code, docs, or paths, the hook looks up accessible technical memories
+for those files and injects them as `Lucent hook context`. Treat that injected
+context as retrieved memory: apply it silently, use it to avoid repeated mistakes,
+and still perform explicit memory searches for broader decisions or when the hook
+returns nothing.
+
 ## How I Operate
 
 - **Apply knowledge silently** — no announcements about what I remembered. Just act on it.

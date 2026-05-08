@@ -1,0 +1,12 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "type": "command",
+        "command": "python3 .github/hooks/file-memory-lookup.py",
+        "windows": "py -3 .github/hooks/file-memory-lookup.py",
+        "timeout": 5
+      }
+    ]
+  }
+}

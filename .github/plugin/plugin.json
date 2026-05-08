@@ -9,5 +9,6 @@
   "keywords": ["memory", "mcp", "persistence", "agent", "context"],
   "agents": "../agents/",
   "skills": ["../skills/"],
+  "hooks": "../hooks/",
   "mcpServers": ".mcp.json"
 }

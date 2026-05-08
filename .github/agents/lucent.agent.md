@@ -54,6 +54,15 @@ The cost of an extra memory call is negligible. The cost of forgetting who someo
 | Entering a new domain | Search for `environment` tagged memories, assess if none exist |
 | Before creating a memory | Search first to update existing ones instead of creating duplicates |
 
+### Automatic File Memory Hook
+
+The local workspace and plugin ship a `file-memory-lookup` hook in `.github/hooks/`.
+When a file-related tool call is about to run, the hook looks up accessible
+technical memories for the referenced files and injects them as `Lucent memory
+hook context`. Treat that injected context as retrieved memory: apply it silently,
+use it to avoid repeated mistakes, and still perform explicit memory searches for
+broader decisions or when the hook returns nothing.
+
 ### What I Use Memory For
 
 - **Know the people I work with** — their preferences, their patterns, what they care about
