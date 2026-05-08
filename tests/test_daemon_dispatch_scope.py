@@ -8,7 +8,6 @@ for auto-created post-completion review tasks.
 
 from daemon.daemon import (
     _ORG_SHARED_SCHEDULE_TITLES,
-    MEMORY_CONSOLIDATION_PROMPT,
     REQUEST_REVIEW_TASK_TITLE,
     _get_required_memory_scope,
     _task_requires_mcp_tool_usage,
@@ -28,24 +27,19 @@ class TestRequiredMemoryScope:
             is None
         )
 
-    def test_review_task_on_org_shared_schedule_inherits_org_shared(self):
-        # When the parent request IS an org-shared system maintenance task,
-        # the review of it must also operate on shared org memories — there's
-        # no single owning user whose private memories should be touched.
+    def test_review_task_on_retired_memory_consolidation_schedule_has_no_override(self):
+        # Technical memory consolidation is retired; there is no org-wide
+        # shared-memory override for its historical schedule title.
         assert (
             _get_required_memory_scope(
                 REQUEST_REVIEW_TASK_TITLE,
                 "[Scheduled] Memory Consolidation",
             )
-            == "org_shared_only"
+            is None
         )
 
-    def test_org_shared_schedule_returns_org_shared_only(self):
-        for title in _ORG_SHARED_SCHEDULE_TITLES:
-            assert (
-                _get_required_memory_scope("Some task", f"[Scheduled] {title}")
-                == "org_shared_only"
-            )
+    def test_no_org_shared_schedule_overrides_exist(self):
+        assert _ORG_SHARED_SCHEDULE_TITLES == frozenset()
 
     def test_per_user_schedule_returns_no_override(self):
         # Per-user schedules are no longer enumerated — they fall through
@@ -63,15 +57,6 @@ class TestRequiredMemoryScope:
     def test_arbitrary_user_request_returns_no_override(self):
         # A normal user-initiated request gets None → dispatcher uses 'user' scope.
         assert _get_required_memory_scope("Draft a memo", "Investigate widget bug") is None
-
-
-class TestMemoryConsolidationPrompt:
-    def test_prompt_requires_repo_overview_quality_and_blocks_run_logs(self):
-        assert "Desired Content Contract" in MEMORY_CONSOLIDATION_PROMPT
-        assert "Architecture map" in MEMORY_CONSOLIDATION_PROMPT
-        assert "background workers, services" in MEMORY_CONSOLIDATION_PROMPT
-        assert "NEVER create a memory maintenance log" in MEMORY_CONSOLIDATION_PROMPT
-        assert "heartbeat/state records" in MEMORY_CONSOLIDATION_PROMPT
 
 
 class TestRequiredToolUsage:

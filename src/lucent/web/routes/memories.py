@@ -10,6 +10,7 @@ from lucent.auth_providers import CSRF_COOKIE_NAME
 from lucent.db import (
     AccessRepository,
     AuditRepository,
+    DuplicateTechnicalMemoryError,
     MemoryRepository,
     UserRepository,
     get_pool,
@@ -79,6 +80,10 @@ def _prefer_repo_root_memory(current: dict | None, candidate: dict) -> dict:
     if _repo_root_memory_priority(candidate) > _repo_root_memory_priority(current):
         return candidate
     return current
+
+
+def _raise_duplicate_technical_memory(error: DuplicateTechnicalMemoryError) -> None:
+    raise HTTPException(status_code=409, detail=error.message)
 
 
 router = APIRouter()
@@ -312,16 +317,19 @@ async def memory_new_submit(
     )
 
     # Create memory
-    result = await repo.create(
-        username=username,
-        type=type,
-        content=content,
-        tags=tag_list if tag_list else None,
-        importance=importance,
-        metadata=metadata if metadata else None,
-        user_id=user.id,
-        organization_id=user.organization_id,
-    )
+    try:
+        result = await repo.create(
+            username=username,
+            type=type,
+            content=content,
+            tags=tag_list if tag_list else None,
+            importance=importance,
+            metadata=metadata if metadata else None,
+            user_id=user.id,
+            organization_id=user.organization_id,
+        )
+    except DuplicateTechnicalMemoryError as e:
+        _raise_duplicate_technical_memory(e)
 
     # Log creation
     await audit_repo.log(
@@ -540,6 +548,25 @@ async def memory_edit_submit(
         meta_preferences=meta_preferences,
     )
 
+    metadata = repo.normalize_metadata_for_storage(memory_type, metadata)
+    duplicate = await repo.find_duplicate_technical_file_memory(
+        metadata=metadata,
+        requesting_user_id=user.id,
+        requesting_org_id=user.organization_id,
+        memory_scope=getattr(user, "memory_scope", None),
+        exclude_id=memory_id,
+    )
+    if duplicate is not None:
+        scope = repo._technical_file_scope(metadata)
+        if scope is not None:
+            _raise_duplicate_technical_memory(
+                DuplicateTechnicalMemoryError(
+                    existing_memory=duplicate,
+                    repo=scope["repo"],
+                    filename=scope["filename"],
+                )
+            )
+
     # Update
     result = await repo.update(
         memory_id=memory_id,
@@ -610,6 +637,23 @@ async def memory_share(request: Request, memory_id: UUID):
         raise HTTPException(status_code=403, detail="You can only share your own memories")
 
     new_shared = not memory.get("shared", False)
+    if new_shared:
+        duplicate = await repo.find_duplicate_technical_file_memory(
+            metadata=memory.get("metadata"),
+            requesting_user_id=user.id,
+            requesting_org_id=user.organization_id,
+            exclude_id=memory_id,
+        )
+        if duplicate is not None:
+            scope = repo._technical_file_scope(memory.get("metadata"))
+            if scope is not None:
+                _raise_duplicate_technical_memory(
+                    DuplicateTechnicalMemoryError(
+                        existing_memory=duplicate,
+                        repo=scope["repo"],
+                        filename=scope["filename"],
+                    )
+                )
     await repo.set_shared(memory_id, user.id, new_shared)
 
     await audit_repo.log(

@@ -367,96 +367,6 @@ COMPRESSION_MINUTES = int(os.environ.get("LUCENT_COMPRESSION_MINUTES", "1440"))
 # These are the task descriptions used by the built-in system schedules.
 # The cognitive prompt is built dynamically from cognitive.md at startup.
 
-MEMORY_CONSOLIDATION_PROMPT = (
-    "Run a memory consolidation pass focused on TECHNICAL memories.\n\n"
-    "## Goal: One Technical Memory Per Scope\n\n"
-    "Technical memories must follow a strict hierarchy:\n"
-    "- **Repo-level**: One memory per repo (metadata.repo=<owner/repo>, metadata.directory=null, metadata.filename=null)\n"
-    "  Contains: general architecture, conventions, build/test commands, key patterns\n"
-    "- **Directory-level**: One memory per significant directory (metadata.repo=<owner/repo>, metadata.directory=<path/>, metadata.filename=null)\n"
-    "  Contains: what this directory does, key files, patterns specific to this area\n"
-    "- **File-level**: One memory per file that has enough knowledge to warrant it (metadata.repo=<owner/repo>, metadata.directory=<parent/dir/>, metadata.filename=<parent/dir/file.ext>)\n"
-    "  Contains: what this file does, key functions, gotchas, patterns\n\n"
-    "## Desired Content Contract\n\n"
-    "The hierarchy is a navigational knowledge base for future agents. It is NOT an audit log.\n"
-    "Repo-level memories should read like a compact contributor briefing with these sections when known:\n"
-    "- Architecture map: major subsystems and how requests/data flow between them\n"
-    "- Working conventions: how to run/build/test locally, including background workers, services, "
-    "and containerized dependencies when the repo uses them\n"
-    "- Important docs/runbooks: docs worth reading before changing the repo\n"
-    "- Do / don't: operational constraints, security boundaries, and common footguns\n"
-    "- Current decisions/invariants: durable design choices and why they exist\n"
-    "Directory-level memories should explain the directory's responsibility, boundaries, key files, "
-    "local patterns, and gotchas. File-level memories should explain responsibilities, important "
-    "symbols, invariants, and edit hazards.\n\n"
-    "## Determining the repo name\n\n"
-    "The repo name MUST be in owner/repo format (e.g. 'octocat/hello-world'). "
-    "To find the correct repo name, look at existing technical memories that already have metadata.repo set. "
-    "Use whatever value they already have — do NOT invent a new name or use the filesystem directory name. "
-    "If no existing memories have metadata.repo set, search for clues in memory content or tags.\n\n"
-    "## Process (Mandatory Phases)\n\n"
-    "1. Search for all technical memories (use search_memories with type='technical', limit=50).\n"
-    "   Also search with search_memories_full for broader coverage. Before planning writes, exclude "
-    "protected or non-knowledge records from the consolidation set: anything tagged 'pinned', "
-    "'do_not_consolidate', maintenance, or records that are plain task reports, heartbeat/state "
-    "records, telemetry, or other runtime bookkeeping rather than durable codebase knowledge.\n\n"
-    "2. For each in-scope memory, determine its correct scope:\n"
-    "   - If it's about a specific file -> file-level\n"
-    "   - If it's about a directory/module -> directory-level\n"
-    "   - If it's about the repo generally -> repo-level\n\n"
-    "3. **Merge duplicates**: If two memories belong to the same scope, merge them into one.\n"
-    "   Keep the best scope-fit memory as canonical: prefer durable overview/convention content "
-    "over audit reports, one-off research outputs, maintenance logs, or transient task summaries. "
-    "Then tie-break by higher vitality_score (missing=0.5), higher importance, then older created_at.\n"
-    "   Update the canonical memory with combined content, delete lower-vitality fragments.\n"
-    "   The surviving memory should be comprehensive but concise.\n\n"
-    "4. **MANDATORY METADATA NORMALIZATION PASS (separate from merge pass)**:\n"
-    "   Update EVERY in-scope technical codebase memory so it has these exact metadata fields:\n"
-    "   - metadata.repo (repository name in owner/repo format. Get this from existing memories — do NOT hardcode or guess)\n"
-    "   - metadata.directory (path within repo; directory path ending with '/', or null)\n"
-    "   - metadata.filename (specific file path within repo, or null. Must be null for directory-level memories)\n"
-    "   Scope mapping is strict and non-optional:\n"
-    "   - repo-level -> repo set, directory=null, filename=null\n"
-    "   - directory-level -> repo set, directory='path/within/repo/', filename=null\n"
-    "   - file-level -> repo set, directory='parent/dir/', filename='full/path/to/file.ext'\n"
-    "   Also set metadata.category to a short category like 'architecture', 'api', 'database', 'testing'.\n\n"
-    "5. **MANDATORY VERIFICATION PASS (after all updates/deletes)**:\n"
-    "   Re-read in-scope technical codebase memories and verify each one includes metadata.repo, metadata.directory, and metadata.filename\n"
-    "   with values consistent with its scope mapping above. If any memory is non-compliant, fix it in this run before finishing.\n\n"
-    "6. **Non-technical memories** (experience, goal, individual, etc.): Leave these alone.\n\n"
-    "7. Create a summary of what you changed, including verification counts and any corrected memory IDs.\n\n"
-    "## Important Rules\n"
-    "- NEVER create new memories. Only update existing ones or delete duplicates.\n"
-    "- The ONLY valid operations are: update_memory and delete_memory.\n"
-    "- NEVER create a memory maintenance log, run report, or audit-result memory. Put the run summary only in the task response.\n"
-    "- If you identify merge/update/delete operations, you MUST execute them in this run.\n"
-    "- Do not stop after planning. Planning without writes is an incomplete run.\n"
-    "- If two memories cover the same scope, update the better one and delete the other.\n"
-    "- The total memory count must go DOWN or stay the same, never up.\n"
-    "- Each scope should have AT MOST one technical memory.\n"
-    "- Do NOT treat metadata normalization as optional; it is a required pass every run.\n"
-    "- NEVER touch memories tagged 'pinned' or 'do_not_consolidate'.\n"
-    "- NEVER normalize heartbeat/state records, maintenance logs, run reports, or telemetry records into repo metadata. These are not codebase knowledge.\n"
-    "- Final output MUST include: 'Planned operations: <N>' and 'Executed write operations: <M>'.\n"
-    "- Content should be practical: what does a developer need to know to work here?\n\n"
-    "## Content Quality: Focus on WHY, not WHAT\n\n"
-    "Technical memories are used as working context for agents executing tasks. "
-    "They should describe conventions, patterns, design decisions, and constraints — "
-    "NOT be a changelog of what was done.\n\n"
-    "GOOD (why/how — useful for future work):\n"
-    "- 'Uses repository pattern with asyncpg connection pools'\n"
-    "- 'ACL enforcement: user_id = caller OR (org_id AND shared = true)'\n"
-    "- 'All API endpoints require AuthenticatedUser dependency for API key auth'\n"
-    "- 'Migrations are sequential numbered SQL files, applied on startup'\n\n"
-    "BAD (what — reads like a commit log, not useful as context):\n"
-    "- 'Added memory_scope_user_id column in migration 057'\n"
-    "- 'Fixed bug where get_accessible() failed under scoped keys'\n"
-    "- 'Implemented multi-engine LLM abstraction in March 2026'\n\n"
-    "When consolidating, strip out changelog-style entries and distill the "
-    "underlying conventions and patterns. A developer reading this memory should "
-    "understand HOW to work in this area, not WHAT was historically done."
-)
-
 LEARNING_EXTRACTION_PROMPT = (
     "Run the learning extraction pipeline. "
     "Core principle: INTEGRATE, don't accumulate. Lessons get folded into "
@@ -957,21 +867,17 @@ async def _mint_scoped_api_key(
 
 
 # Schedule titles that require org-shared-only processing.
-# These are system-wide maintenance tasks with no single owning user; they
-# operate only on shared org memories. All other tasks default to 'user'
-# scope tied to the request's creator.
-_ORG_SHARED_SCHEDULE_TITLES = frozenset({
-    "Memory Consolidation",
-})
+# Technical memory consolidation is retired; model-backed schedules now default
+# to per-user memory scope unless a future org-wide maintenance task is added.
+_ORG_SHARED_SCHEDULE_TITLES = frozenset()
 
 
 def _get_required_memory_scope(task_title: str, request_title: str) -> str | None:
     """Return an OVERRIDE memory scope for special system tasks.
 
     Returns:
-        - 'org_shared_only' for org-wide maintenance schedules (consolidation
-          etc.) that have no single owning user and must operate only on
-          shared org memories.
+                - 'org_shared_only' for org-wide maintenance schedules that have no
+                    single owning user and must operate only on shared org memories.
         - None for everything else, which means the dispatcher will use its
           default of 'user' scoped to the request's owning user. This is the
           security floor: every user-initiated task runs under the user's
@@ -2609,6 +2515,17 @@ class LucentDaemon:
                 user_id = str(user["id"])
                 org_id = str(user["organization_id"])
 
+                await conn.execute(
+                    """UPDATE schedules
+                       SET enabled = false,
+                           status = 'archived',
+                           updated_at = NOW()
+                       WHERE title = 'Memory Consolidation'
+                         AND organization_id = $1::uuid
+                         AND is_system = true""",
+                    org_id,
+                )
+
                 system_schedules = [
                     {
                         "title": "Cognitive Planning",
@@ -2623,21 +2540,6 @@ class LucentDaemon:
                         "interval_seconds": DAEMON_INTERVAL_MINUTES * 60,
                         "priority": "medium",
                         "prompt": self._build_cognitive_schedule_prompt(),
-                    },
-                    {
-                        "title": "Memory Consolidation",
-                        "description": (
-                            "Autonomic memory maintenance — merge duplicate technical memories, "
-                            "enforce one-memory-per-scope hierarchy, run mandatory repo→directory→filename "
-                            "metadata normalization, then verify metadata compliance. Short-circuits "
-                            "with schedule.skipped when there are no normalization or duplicate "
-                            "candidates."
-                        ),
-                        "agent_type": "memory",
-                        "schedule_type": "interval",
-                        "interval_seconds": AUTONOMIC_MINUTES * 60,
-                        "priority": "low",
-                        "prompt": MEMORY_CONSOLIDATION_PROMPT,
                     },
                     {
                         "title": "Learning Extraction",
@@ -4532,8 +4434,8 @@ class LucentDaemon:
             # by giving sub-agents org-wide read access. That's reverted.
             # Per-user scope is the security boundary; nothing exempts it.
             #
-            # Org-shared-only is reserved for system-level org maintenance
-            # (memory consolidation etc.) where there's no single owning user.
+            # Org-shared-only is reserved for future system-level org maintenance
+            # where there's no single owning user.
             _request_title = ""
             if request_id:
                 try:
@@ -5773,90 +5675,11 @@ class LucentDaemon:
 
     async def run_autonomic(self):
         """Run autonomic background task — memory maintenance."""
-        log("Running autonomic: memory maintenance")
-
-        try:
-            system_message = await build_subagent_prompt(
-                "memory",
-                (
-                    "Deep memory consolidation pass — build long-term "
-                    "knowledge by integrating recent observations into "
-                    "established understanding."
-                ),
-                ("This is an autonomic background task, not a cognitive decision."),
-            )
-        except AgentNotFoundError:
-            log("No approved 'memory' agent — skipping autonomic maintenance", "WARN")
-            return
-
-        # Create a request/task record via the HTTP API so it appears on Activity
-        task_id = None
-        try:
-            memory_model, _memory_model_reason = _select_model_for_task(
-                agent_type="memory",
-                title="Consolidate memories",
-                description=MEMORY_CONSOLIDATION_PROMPT,
-            )
-            request_record = await RequestAPI.create_request(
-                title="Memory consolidation",
-                description="Autonomic memory maintenance — consolidating fragments into long-term knowledge.",
-                source="daemon",
-                priority="low",
-            )
-            if request_record:
-                request_id = str(request_record["id"])
-                task_record = await RequestAPI.create_task(
-                    request_id=request_id,
-                    title="Consolidate memories",
-                    agent_type="memory",
-                    description=(
-                        "Enforce one-memory-per-scope hierarchy for technical memories. "
-                        "Run mandatory metadata normalization for metadata.repo, "
-                        "metadata.directory, metadata.filename, then verify compliance."
-                    ),
-                    model=memory_model,
-                )
-                if task_record:
-                    task_id = str(task_record["id"])
-                    await RequestAPI.claim_task(task_id, self.instance_id)
-                    try:
-                        await RequestAPI.start_task(task_id, instance_id=self.instance_id)
-                    except TypeError:
-                        await RequestAPI.start_task(task_id)
-        except Exception as e:
-            log(f"Failed to create request record for autonomic run: {e}", "WARN")
-            task_id = None
-
-        result = await self.run_session(
-            "autonomic-maintenance",
-            system_message,
-            MEMORY_CONSOLIDATION_PROMPT,
-            model=memory_model if task_id else None,
+        log(
+            "Technical memory consolidation is retired — duplicate file-scoped "
+            "technical memories are rejected at create/update time."
         )
-
-        # Update the request/task records with the outcome
-        if task_id:
-            try:
-                if result:
-                    try:
-                        await RequestAPI.complete_task(
-                            task_id,
-                            result[:4000],
-                            instance_id=self.instance_id,
-                        )
-                    except TypeError:
-                        await RequestAPI.complete_task(task_id, result[:4000])
-                else:
-                    try:
-                        await RequestAPI.fail_task(
-                            task_id,
-                            "No output from maintenance session",
-                            instance_id=self.instance_id,
-                        )
-                    except TypeError:
-                        await RequestAPI.fail_task(task_id, "No output from maintenance session")
-            except Exception as e:
-                log(f"Failed to update request record for autonomic run: {e}", "WARN")
+        return
 
     async def run_learning_extraction(self):
         """Run autonomic learning extraction — process recent results into reusable lessons.
@@ -6170,16 +5993,15 @@ class LucentDaemon:
             await conn.close()
 
     async def _autonomic_loop(self):
-        """Periodic maintenance: memory consolidation, learning extraction.
+        """Periodic maintenance: learning extraction and experience compression.
 
         Uses a timestamp file to track last run, surviving daemon restarts.
         """
         log(
-            f"Autonomic loop started (maintenance: {AUTONOMIC_MINUTES}m, "
-            f"learning: {LEARNING_MINUTES}m, compression: {COMPRESSION_MINUTES}m)"
+            f"Autonomic loop started (learning: {LEARNING_MINUTES}m, "
+            f"compression: {COMPRESSION_MINUTES}m)"
         )
 
-        ts_file = Path("/tmp/lucent_last_consolidation")
         learning_ts_file = Path("/tmp/lucent_last_learning")
         compression_ts_file = Path("/tmp/lucent_last_compression")
 
@@ -6198,12 +6020,6 @@ class LucentDaemon:
 
         while self.running:
             try:
-                # Memory consolidation
-                if _minutes_since(ts_file) >= AUTONOMIC_MINUTES:
-                    if await _verify_and_provision_key(self.instance_id):
-                        _touch(ts_file)
-                        await self.run_autonomic()
-
                 # Learning extraction
                 if _minutes_since(learning_ts_file) >= LEARNING_MINUTES:
                     if await _verify_and_provision_key(self.instance_id):

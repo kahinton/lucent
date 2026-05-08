@@ -25,7 +25,11 @@ from lucent.db.definitions import DefinitionRepository
 from lucent.db.groups import GroupRepository
 from lucent.db.integrations import IntegrationRepository
 from lucent.db.llm_sessions import LLMSessionRepository
-from lucent.db.memory import MemoryRepository, VersionConflictError
+from lucent.db.memory import (
+    DuplicateTechnicalMemoryError,
+    MemoryRepository,
+    VersionConflictError,
+)
 from lucent.db.models import ModelRepository
 from lucent.db.organization import OrganizationRepository
 from lucent.db.pool import close_db, get_pool, init_db
@@ -60,6 +64,7 @@ __all__ = [
     "close_db",
     # Repositories
     "MemoryRepository",
+    "DuplicateTechnicalMemoryError",
     "VersionConflictError",
     "DefinitionRepository",
     "GroupRepository",

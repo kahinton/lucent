@@ -378,28 +378,6 @@ async def trigger_now(
             await sched_repo.complete_run(str(run["id"]), result=json.dumps(skip_event))
             return {"schedule": sched, "run": run, "skipped": True, "event": skip_event}
 
-        if sched["title"] == "Memory Consolidation":
-            maintenance_result = await sched_repo.run_memory_consolidation_metadata_normalization(
-                str(user.organization_id)
-            )
-            if (
-                maintenance_result["executed_write_operations"] > 0
-                or (
-                    maintenance_result["remaining_normalization_candidates"] == 0
-                    and maintenance_result["remaining_duplicate_groups"] == 0
-                )
-            ):
-                await sched_repo.complete_run(
-                    str(run["id"]), result=json.dumps(maintenance_result)
-                )
-                logger.info(json.dumps(maintenance_result, sort_keys=True))
-                return {
-                    "schedule": sched,
-                    "run": run,
-                    "handled": True,
-                    "event": maintenance_result,
-                }
-
         req = await req_repo.create_request(
             title=f"[Scheduled] {sched['title']}",
             org_id=str(user.organization_id),

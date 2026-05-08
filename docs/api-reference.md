@@ -681,7 +681,7 @@ Built-in daemon schedules may instead return a healthy no-op when their pre-flig
   "skipped": true,
   "event": {
     "event_type": "schedule.skipped",
-    "schedule_name": "Memory Consolidation",
+    "schedule_name": "Experience Compression",
     "reason": "no_eligible_work",
     "candidate_count": 0
   }
@@ -689,6 +689,11 @@ Built-in daemon schedules may instead return a healthy no-op when their pre-flig
 ```
 
 This is distinct from a failed run: no request or task is created, and the skip event is stored in `schedule_runs.result`.
+
+`Memory Consolidation` is retired. Technical memory duplicate prevention now
+happens during memory create/update/share operations: file-scoped technical
+memories with the same `(repo, filename)` are rejected when an existing memory
+is already owned by the caller or shared in the caller's organization.
 
 ### Schedule Runs
 

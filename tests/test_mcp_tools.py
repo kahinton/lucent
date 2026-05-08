@@ -87,6 +87,45 @@ class TestCreateMemory:
         assert result["importance"] == 7
         assert result["version"] == 1
 
+    async def test_create_duplicate_technical_file_returns_update_instruction(
+        self, mcp_tools, auth_user, clean_test_data
+    ):
+        prefix = clean_test_data
+        first = await _call(
+            mcp_tools,
+            "create_memory",
+            {
+                "type": "technical",
+                "content": f"{prefix}Technical note for memory.py",
+                "tags": ["lucent", "database"],
+                "metadata": {
+                    "repo": "kahinton/lucent",
+                    "filename": "src/lucent/db/memory.py",
+                },
+            },
+        )
+        assert "id" in first
+
+        duplicate = await _call(
+            mcp_tools,
+            "create_memory",
+            {
+                "type": "technical",
+                "content": f"{prefix}Duplicate note for memory.py",
+                "tags": ["lucent", "database"],
+                "metadata": {
+                    "repo": "kahinton/lucent",
+                    "directory": "src/lucent/db/",
+                    "filename": "src/lucent/db/memory.py",
+                },
+            },
+        )
+
+        assert duplicate["error"]
+        assert first["id"] in duplicate["error"]
+        assert "Update that memory instead" in duplicate["error"]
+        assert "intelligently combine" in duplicate["error"]
+
     async def test_create_retired_type_rejected(
         self, mcp_tools, auth_user, clean_test_data
     ):

@@ -12,6 +12,7 @@ from lucent.auth import get_current_api_key_id, get_current_user
 from lucent.db import (
     AccessRepository,
     AuditRepository,
+    DuplicateTechnicalMemoryError,
     MemoryRepository,
     VersionConflictError,
     get_pool,
@@ -236,6 +237,14 @@ Args:
           last_interaction}
     shared: Whether the memory is visible to other users in the same organization. Default is false.
 
+Duplicate protection:
+    Technical memories with metadata.repo and metadata.filename are unique across
+    the caller's own memories plus shared org memories. If create_memory returns
+    a duplicate error, do NOT retry creation. Read/update the existing memory ID
+    and intelligently combine the new information with the existing content:
+    preserve durable facts, merge non-overlapping details, reconcile conflicts,
+    carry forward useful tags/references/metadata, and do not simply overwrite.
+
 Returns:
     JSON string with the created memory including its ID.
 """
@@ -375,6 +384,9 @@ Returns:
 
             return json.dumps(_serialize_memory(result), indent=2)
 
+        except DuplicateTechnicalMemoryError as e:
+            logger.info("create_memory duplicate technical file memory: %s", e.memory_id)
+            return _error_response(e.message)
         except ValueError as e:
             logger.warning("create_memory validation error: %s", e)
             return _error_response(str(e))
@@ -876,6 +888,26 @@ Returns:
             validated_metadata = metadata
             if metadata is not None:
                 validated_metadata = validate_metadata(old_memory["type"], metadata)
+                validated_metadata = repo.normalize_metadata_for_storage(
+                    old_memory["type"], validated_metadata
+                )
+                duplicate = await repo.find_duplicate_technical_file_memory(
+                    metadata=validated_metadata,
+                    requesting_user_id=user_id,
+                    requesting_org_id=org_id,
+                    memory_scope=memory_scope,
+                    exclude_id=uuid_id,
+                )
+                if duplicate is not None:
+                    scope = repo._technical_file_scope(validated_metadata)
+                    if scope is not None:
+                        return _error_response(
+                            DuplicateTechnicalMemoryError(
+                                existing_memory=duplicate,
+                                repo=scope["repo"],
+                                filename=scope["filename"],
+                            ).message
+                        )
 
             update_input = UpdateMemoryInput(
                 content=content,
@@ -1483,6 +1515,35 @@ Returns:
                     return _error_response("Authentication required to share memories")
 
                 repo = await _get_repository()
+
+                existing = await repo.get_accessible(
+                    UUID(memory_id),
+                    user_id,
+                    org_id,
+                    memory_scope=memory_scope,
+                )
+                if existing is None or existing.get("user_id") != user_id:
+                    return _error_response(
+                        "Memory not found or you are not the owner."
+                        " Only the owner can share a memory."
+                    )
+
+                duplicate = await repo.find_duplicate_technical_file_memory(
+                    metadata=existing.get("metadata"),
+                    requesting_user_id=user_id,
+                    requesting_org_id=org_id,
+                    exclude_id=UUID(memory_id),
+                )
+                if duplicate is not None:
+                    scope = repo._technical_file_scope(existing.get("metadata"))
+                    if scope is not None:
+                        return _error_response(
+                            DuplicateTechnicalMemoryError(
+                                existing_memory=duplicate,
+                                repo=scope["repo"],
+                                filename=scope["filename"],
+                            ).message
+                        )
 
                 result = await repo.set_shared(
                     memory_id=UUID(memory_id),

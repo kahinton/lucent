@@ -27,7 +27,6 @@ async def _make_due(db_pool, schedule_id):
 BUILT_IN_MODEL_BACKED_SCHEDULES = [
     ("Experience Compression", "memory"),
     ("Learning Extraction", "reflection"),
-    ("Memory Consolidation", "memory"),
     ("Procedural Consolidation", "memory"),
     ("Memory Vitality Scoring", "memory"),
     ("Shadow Forget Scoring", "memory"),
@@ -106,21 +105,6 @@ async def _insert_positive_candidate(
                 VALUES (
                     'eligibility-test', 'experience', 'validated daemon result',
                     ARRAY['daemon-result', 'validated']::text[], $1::uuid, $2::uuid
-                )
-                """,
-                org_id,
-                user_id,
-            )
-        elif schedule_title == "Memory Consolidation":
-            await conn.execute(
-                """
-                INSERT INTO memories (
-                    username, type, content, tags, metadata, shared,
-                    organization_id, user_id
-                )
-                VALUES (
-                    'eligibility-test', 'technical', '## Directory: src/lucent/db/\nTechnical memory missing metadata',
-                    ARRAY['kahinton/lucent']::text[], '{}'::jsonb, true, $1::uuid, $2::uuid
                 )
                 """,
                 org_id,
@@ -1510,11 +1494,11 @@ class TestBuiltInScheduleEligibility:
 
         assert await repo.experience_compression_has_work(org_id) is False
         assert await repo.learning_extraction_has_work(org_id) is False
-        assert await repo.memory_consolidation_has_work(org_id) is False
         assert await repo.procedural_consolidation_has_work(org_id) is False
         assert await repo.memory_vitality_scoring_has_work(org_id) is False
         assert await repo.shadow_forget_scoring_has_work(org_id) is False
         assert await repo.cognitive_planning_has_work(org_id) is False
+        assert await repo.built_in_schedule_has_work("Memory Consolidation", org_id) is False
 
     async def test_cognitive_planning_ignores_nonterminal_request_activity(
         self,
@@ -1695,16 +1679,6 @@ class TestBuiltInScheduleEligibility:
         before_requests, before_tasks = await _count_requests_and_tasks(db_pool, org_id)
         result = await trigger_now(str(sched["id"]), user, force=True, pool=db_pool)
 
-        if schedule_title == "Memory Consolidation":
-            assert result["handled"] is True
-            assert result["event"]["event_type"] == (
-                "memory_consolidation.metadata_normalization"
-            )
-            assert result["event"]["executed_write_operations"] == 1
-            after_requests, after_tasks = await _count_requests_and_tasks(db_pool, org_id)
-            assert (after_requests, after_tasks) == (before_requests, before_tasks)
-            return
-
         assert "request" in result
         assert result.get("skipped") is not True
         after_requests, after_tasks = await _count_requests_and_tasks(db_pool, org_id)
@@ -1783,69 +1757,37 @@ class TestBuiltInScheduleEligibility:
 
         assert await repo.learning_extraction_has_work(org_id) is True
 
-    async def test_memory_consolidation_positive_candidate(self, repo, db_pool, test_user):
+    async def test_memory_consolidation_schedule_is_retired(self, repo, db_pool, test_user):
+        from lucent.api.deps import CurrentUser
+        from lucent.api.routers.schedules import trigger_now
+
         org_id = str(test_user["organization_id"])
-        async with db_pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO memories (
-                    username, type, content, tags, metadata, shared,
-                    organization_id, user_id
-                )
-                VALUES (
-                    'eligibility-test', 'technical', '## Directory: src/lucent/db/\nTechnical memory missing metadata',
-                    ARRAY['kahinton/lucent']::text[], '{}'::jsonb, true, $1::uuid, $2::uuid
-                )
-                """,
-                org_id,
-                str(test_user["id"]),
-            )
+        user_id = str(test_user["id"])
+        sched = await repo.create_schedule(
+            title="Memory Consolidation",
+            org_id=org_id,
+            schedule_type="interval",
+            interval_seconds=3600,
+            description="retired technical memory consolidation",
+            agent_type="memory",
+            created_by=user_id,
+        )
+        user = CurrentUser(
+            id=test_user["id"],
+            organization_id=test_user["organization_id"],
+            role=test_user["role"],
+            email=test_user["email"],
+            display_name=test_user["display_name"],
+        )
 
-        assert await repo.memory_consolidation_has_work(org_id) is True
+        assert await repo.built_in_schedule_has_work("Memory Consolidation", org_id) is False
+        before_requests, before_tasks = await _count_requests_and_tasks(db_pool, org_id)
+        result = await trigger_now(str(sched["id"]), user, force=True, pool=db_pool)
 
-    async def test_memory_consolidation_metadata_normalization_executor(
-        self,
-        repo,
-        db_pool,
-        test_user,
-    ):
-        org_id = str(test_user["organization_id"])
-        async with db_pool.acquire() as conn:
-            memory_id = await conn.fetchval(
-                """
-                INSERT INTO memories (
-                    username, type, content, tags, metadata, shared,
-                    organization_id, user_id
-                )
-                VALUES (
-                    'eligibility-test', 'technical',
-                    '## Directory: src/lucent/db/\nDatabase layer conventions',
-                    ARRAY['kahinton/lucent', 'database']::text[],
-                    '{"repo": "kahinton/lucent", "directory": "src/lucent/db/"}'::jsonb,
-                    true, $1::uuid, $2::uuid
-                )
-                RETURNING id
-                """,
-                org_id,
-                str(test_user["id"]),
-            )
-
-        result = await repo.run_memory_consolidation_metadata_normalization(org_id)
-
-        assert result["planned_operations"] == 1
-        assert result["executed_write_operations"] == 1
-        assert result["remaining_normalization_candidates"] == 0
-        async with db_pool.acquire() as conn:
-            metadata = await conn.fetchval(
-                "SELECT metadata FROM memories WHERE id = $1::uuid",
-                str(memory_id),
-            )
-        assert metadata == {
-            "repo": "kahinton/lucent",
-            "directory": "src/lucent/db/",
-            "filename": None,
-            "category": "database",
-        }
+        assert result["skipped"] is True
+        assert result["event"]["reason"] == "no_eligible_work"
+        after_requests, after_tasks = await _count_requests_and_tasks(db_pool, org_id)
+        assert (after_requests, after_tasks) == (before_requests, before_tasks)
 
     async def test_empty_trigger_skips_without_creating_request(
         self,

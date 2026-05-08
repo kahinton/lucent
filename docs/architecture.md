@@ -432,13 +432,17 @@ Operators should treat `schedule.skipped` with `candidate_count: 0` as a healthy
 | Built-in schedule | Empty-work gate |
 |---|---|
 | Cognitive Planning | No open requests, pending approvals, due non-planning schedules, daemon messages/feedback/rejection lessons, proposed definitions/MCP servers, or planning targets. |
-| Memory Consolidation | No active shared technical memory needs required metadata and no duplicate normalized repo/directory/filename scope exists. |
 | Learning Extraction | No recent active result/feedback/rejection memory has learning-source tags without `lesson-extracted`. |
 | Experience Compression | No active non-protected experience memory was created before today. |
 | Memory Vitality Scoring | No non-forgotten memory has missing or stale vitality computation. |
 | Shadow Forget Scoring | Shadow forgetting is disabled, or every non-forgotten memory already has a fresh `gcp-v1` sidecar score. |
 | Stale Task Reaper | No claimed/running task has an expired claim, stale claim age, or stale/dead owning daemon instance. |
 | Request Decomposition Backfill | No old non-terminal pending/approved request remains without tasks after in-process and retry-backoff filtering. |
+
+Technical memory consolidation is retired. File-scoped technical memories are
+deduplicated up front at create/update/share time by `(repo, filename)` across
+the caller's own memories plus shared organization memories. Other users'
+private memories remain isolated and do not block creation.
 
 Skip events are written as JSON to the service log and to `schedule_runs.result`:
 

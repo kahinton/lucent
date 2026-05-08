@@ -17,7 +17,14 @@ from lucent.api.models import (
     TagSuggestion,
     TagSuggestionsResponse,
 )
-from lucent.db import AccessRepository, AuditRepository, MemoryRepository, UserRepository, get_pool
+from lucent.db import (
+    AccessRepository,
+    AuditRepository,
+    DuplicateTechnicalMemoryError,
+    MemoryRepository,
+    UserRepository,
+    get_pool,
+)
 from lucent.integrations.github_repo_access_service import GitHubRepoAccessService
 from lucent.logging import get_logger
 from lucent.models.validation import normalize_tags, validate_metadata
@@ -73,6 +80,13 @@ def _memory_to_response(memory: dict[str, Any]) -> MemoryResponse:
         shared=memory.get("shared", False),
         last_accessed_at=memory.get("last_accessed_at"),
         access_count=memory.get("access_count", 0),
+    )
+
+
+def _raise_duplicate_technical_memory(error: DuplicateTechnicalMemoryError) -> None:
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail=error.message,
     )
 
 
@@ -147,18 +161,21 @@ async def create_memory(
         if "suspicious_content" not in effective_tags:
             effective_tags.append("suspicious_content")
 
-    result = await repo.create(
-        username=username,
-        type=data.type,
-        content=data.content,
-        tags=effective_tags,
-        importance=data.importance,
-        related_memory_ids=data.related_memory_ids,
-        metadata=validated_metadata,
-        user_id=effective_user_id,
-        organization_id=user.organization_id,
-        shared=effective_shared,
-    )
+    try:
+        result = await repo.create(
+            username=username,
+            type=data.type,
+            content=data.content,
+            tags=effective_tags,
+            importance=data.importance,
+            related_memory_ids=data.related_memory_ids,
+            metadata=validated_metadata,
+            user_id=effective_user_id,
+            organization_id=user.organization_id,
+            shared=effective_shared,
+        )
+    except DuplicateTechnicalMemoryError as e:
+        _raise_duplicate_technical_memory(e)
 
     logger.info(
         "Memory created: id=%s, type=%s, user=%s",
@@ -371,6 +388,26 @@ async def update_memory(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=str(e),
             )
+        validated_metadata = repo.normalize_metadata_for_storage(
+            existing["type"], validated_metadata
+        )
+        duplicate = await repo.find_duplicate_technical_file_memory(
+            metadata=validated_metadata,
+            requesting_user_id=effective_user_id,
+            requesting_org_id=user.organization_id,
+            memory_scope=user.memory_scope,
+            exclude_id=memory_id,
+        )
+        if duplicate is not None:
+            scope = repo._technical_file_scope(validated_metadata)
+            if scope is not None:
+                _raise_duplicate_technical_memory(
+                    DuplicateTechnicalMemoryError(
+                        existing_memory=duplicate,
+                        repo=scope["repo"],
+                        filename=scope["filename"],
+                    )
+                )
 
     result = await repo.update(
         memory_id=memory_id,
@@ -524,9 +561,41 @@ async def share_memory(
     repo = MemoryRepository(pool)
     audit_repo = AuditRepository(pool)
 
+    effective_user_id = _effective_memory_user_id(user)
+    existing = await repo.get_accessible(
+        memory_id=memory_id,
+        user_id=effective_user_id,
+        organization_id=user.organization_id,
+        memory_scope=user.memory_scope,
+    )
+
+    if existing is None or existing.get("user_id") != effective_user_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Memory not found or you are not the owner",
+        )
+
+    duplicate = await repo.find_duplicate_technical_file_memory(
+        metadata=existing.get("metadata"),
+        requesting_user_id=effective_user_id,
+        requesting_org_id=user.organization_id,
+        memory_scope=None,
+        exclude_id=memory_id,
+    )
+    if duplicate is not None:
+        scope = repo._technical_file_scope(existing.get("metadata"))
+        if scope is not None:
+            _raise_duplicate_technical_memory(
+                DuplicateTechnicalMemoryError(
+                    existing_memory=duplicate,
+                    repo=scope["repo"],
+                    filename=scope["filename"],
+                )
+            )
+
     result = await repo.set_shared(
         memory_id=memory_id,
-        user_id=_effective_memory_user_id(user),
+        user_id=effective_user_id,
         shared=True,
     )
 

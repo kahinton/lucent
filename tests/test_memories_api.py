@@ -171,6 +171,132 @@ class TestCreateMemory:
         assert resp.status_code == 201
         assert resp.json()["type"] == "technical"
 
+    async def test_create_duplicate_technical_file_for_same_user_returns_update_guidance(
+        self, mem_client, mem_prefix
+    ):
+        metadata = {
+            "repo": "kahinton/lucent",
+            "filename": "src/lucent/db/memory.py",
+        }
+        first = await _create_memory(
+            mem_client,
+            mem_prefix,
+            type="technical",
+            content=f"{mem_prefix}First technical note",
+            metadata=metadata,
+        )
+        assert first.status_code == 201
+
+        duplicate = await _create_memory(
+            mem_client,
+            mem_prefix,
+            type="technical",
+            content=f"{mem_prefix}Duplicate technical note",
+            metadata={**metadata, "directory": "src/lucent/db/"},
+        )
+
+        assert duplicate.status_code == 409
+        detail = duplicate.json()["detail"]
+        assert first.json()["id"] in detail
+        assert "Update that memory instead" in detail
+        assert "intelligently combine" in detail
+
+    async def test_create_allows_each_user_private_technical_memory(
+        self, mem_client, mem_client_b, mem_prefix
+    ):
+        metadata = {
+            "repo": "kahinton/lucent",
+            "filename": "src/lucent/services/memory_access_service.py",
+        }
+        first = await _create_memory(
+            mem_client,
+            mem_prefix,
+            type="technical",
+            content=f"{mem_prefix}Private user A note",
+            metadata=metadata,
+            shared=False,
+        )
+        assert first.status_code == 201
+
+        second = await _create_memory(
+            mem_client_b,
+            mem_prefix,
+            type="technical",
+            content=f"{mem_prefix}Private user B note",
+            metadata=metadata,
+            shared=False,
+        )
+
+        assert second.status_code == 201
+        assert second.json()["id"] != first.json()["id"]
+
+    async def test_create_blocks_duplicate_of_shared_technical_memory(
+        self, mem_client, mem_client_b, mem_prefix
+    ):
+        metadata = {
+            "repo": "kahinton/lucent",
+            "filename": "src/lucent/api/routers/memories.py",
+        }
+        first = await _create_memory(
+            mem_client,
+            mem_prefix,
+            type="technical",
+            content=f"{mem_prefix}Shared technical note",
+            metadata=metadata,
+            shared=True,
+        )
+        assert first.status_code == 201
+
+        duplicate = await _create_memory(
+            mem_client_b,
+            mem_prefix,
+            type="technical",
+            content=f"{mem_prefix}User B duplicate note",
+            metadata=metadata,
+        )
+
+        assert duplicate.status_code == 409
+        assert first.json()["id"] in duplicate.json()["detail"]
+
+    async def test_update_metadata_to_duplicate_technical_file_is_rejected(
+        self, mem_client, mem_prefix
+    ):
+        first = await _create_memory(
+            mem_client,
+            mem_prefix,
+            type="technical",
+            content=f"{mem_prefix}First technical note",
+            metadata={
+                "repo": "kahinton/lucent",
+                "filename": "src/lucent/db/memory.py",
+            },
+        )
+        assert first.status_code == 201
+        second = await _create_memory(
+            mem_client,
+            mem_prefix,
+            type="technical",
+            content=f"{mem_prefix}Second technical note",
+            metadata={
+                "repo": "kahinton/lucent",
+                "filename": "src/lucent/db/schedules.py",
+            },
+        )
+        assert second.status_code == 201
+
+        duplicate_update = await mem_client.patch(
+            f"/api/memories/{second.json()['id']}",
+            json={
+                "metadata": {
+                    "repo": "kahinton/lucent",
+                    "filename": "src/lucent/db/memory.py",
+                }
+            },
+        )
+
+        assert duplicate_update.status_code == 409
+        assert first.json()["id"] in duplicate_update.json()["detail"]
+
     async def test_create_retired_type_rejected(self, mem_client, mem_prefix):
         resp = await _create_memory(mem_client, mem_prefix, type="procedural")
         assert resp.status_code == 400
