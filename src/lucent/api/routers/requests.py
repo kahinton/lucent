@@ -199,6 +199,21 @@ class MemoryLinkCreate(BaseModel):
     relation: str = Field(default="created", pattern=r"^(created|read|updated)$")
 
 
+class TaskOutputCreate(BaseModel):
+    output_type: str = Field(
+        default="link",
+        pattern=r"^(link|github_issue|github_pr|email|document|file|memory|deployment|artifact|other)$",
+    )
+    provider: str | None = Field(default=None, max_length=64)
+    title: str = Field(..., min_length=1, max_length=256)
+    description: str | None = None
+    url: str | None = None
+    external_id: str | None = None
+    mime_type: str | None = Field(default=None, max_length=128)
+    metadata: dict | None = None
+    is_primary: bool = False
+
+
 # ── Request endpoints ─────────────────────────────────────────────────────
 
 
@@ -848,6 +863,7 @@ class TaskCompleteBody(BaseModel):
         pattern=r"^(not_applicable|valid|invalid|extraction_failed|fallback_used|repair_succeeded)$",
     )
     validation_errors: list | None = None
+    outputs: list[TaskOutputCreate] | None = None
 
 
 @router.post("/tasks/{task_id}/complete")
@@ -888,6 +904,7 @@ async def complete_task(
             result_summary=body.result_summary,
             validation_status=body.validation_status,
             validation_errors=body.validation_errors,
+            outputs=[o.model_dump(exclude_none=True) for o in (body.outputs or [])],
         )
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
@@ -897,6 +914,29 @@ async def complete_task(
             "Task not found or not in a transitionable state (must be claimed/running)",
         )
     return task
+
+
+@router.post("/tasks/{task_id}/outputs")
+async def create_task_output(
+    task_id: UUID,
+    user: AuthenticatedUser,
+    body: TaskOutputCreate,
+    pool=Depends(get_pool),
+):
+    """Record a user-facing deliverable produced by a task."""
+    from lucent.db.requests import RequestRepository
+
+    repo = RequestRepository(pool)
+    await _require_task_mutation(repo, str(task_id), str(user.organization_id), user)
+    try:
+        return await repo.create_task_output(
+            task_id=str(task_id),
+            org_id=str(user.organization_id),
+            output=body.model_dump(exclude_none=True),
+            created_by=str(user.id),
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 class TaskFailBody(BaseModel):

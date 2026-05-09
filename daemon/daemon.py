@@ -5362,10 +5362,24 @@ class LucentDaemon:
             result = (t.get("result") or t.get("error") or "")[:1500]
             if not result:
                 result = "(no output)"
+            outputs = t.get("outputs") or []
+            if outputs:
+                output_lines = []
+                for output in outputs[:10]:
+                    output_lines.append(
+                        f"     - [{output.get('output_type', 'link')}] "
+                        f"{output.get('title', 'Untitled output')} "
+                        f"url={output.get('url') or 'n/a'} "
+                        f"external_id={output.get('external_id') or 'n/a'}"
+                    )
+                outputs_text = "\n   recorded outputs:\n" + "\n".join(output_lines)
+            else:
+                outputs_text = "\n   recorded outputs: (none)"
             task_summaries.append(
                 f"{idx}. [{status}] {title}\n"
                 f"   task_id: {tid}\n"
                 f"   output:\n{result}"
+                f"{outputs_text}"
             )
         if not task_summaries:
             task_summaries.append("No terminal tasks found.")
@@ -5439,6 +5453,20 @@ class LucentDaemon:
             f"{chr(10).join(task_summaries)}"
             f"{incomplete_note}"
             f"{memory_section}\n\n"
+            "=== OUTPUT ARTIFACT REVIEW ===\n"
+            "Each task may include a 'recorded outputs' list. These are the "
+            "user-visible deliverables shown in the Activity UI: GitHub PRs/issues, "
+            "emails, docs, files, deployments, memories, or generic artifacts.\n"
+            "Before approving, verify that every deliverable mentioned in task output "
+            "has a corresponding recorded output. Plain URLs in task results are "
+            "auto-extracted by Lucent, but non-URL deliverables such as sent emails, "
+            "created documents identified only by provider ID, or files stored in an "
+            "external system may require an explicit `record_task_output` call.\n"
+            "If a deliverable is missing and you have enough task_id/title/url or "
+            "external_id/provider information, call `record_task_output` before approving. "
+            "If you cannot identify the missing deliverable precisely, return "
+            "NEEDS_REWORK and ask the task agent to record the output.\n"
+            "=== END OUTPUT ARTIFACT REVIEW ===\n\n"
             "Return your decision in this exact machine-readable shape "
             "(emit it ONLY after completing all mandatory memory updates above):\n"
             "REQUEST_REVIEW_DECISION: APPROVED|NEEDS_REWORK\n"

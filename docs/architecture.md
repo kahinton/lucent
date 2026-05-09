@@ -383,6 +383,17 @@ Each task flows through: `pending` → `claimed` → `running` → `completed`/`
 
 Tasks can include **output contracts** — JSON Schema definitions that the daemon validates against before completing the task. Three failure modes are available: `fail`, `fallback`, or `retry_then_fallback`.
 
+Tasks can also produce first-class **outputs** stored in `task_outputs` and
+surfaced on the request detail page. Outputs are the user-facing deliverables
+of work: GitHub issues/PRs, sent emails, generated docs, files, deployments,
+memories, or generic artifacts from custom tools. `tasks.result` remains the
+narrative execution report; `task_outputs` is the structured “what can I open
+or use?” layer. Output types have built-in display affordances for known
+providers and a generic fallback for extension tooling. Agents should record
+outputs explicitly, but task completion also auto-extracts openable URLs from
+plain text results, and post-completion request review checks that any remaining
+deliverables are represented before approval.
+
 Requests support a **review workflow**: when `LUCENT_REQUIRE_APPROVAL=true`, completed requests transition to `review` status for human approval. Reviewers can approve (→ `completed`) or reject with feedback (→ `needs_rework`).
 
 ### Agent Definitions

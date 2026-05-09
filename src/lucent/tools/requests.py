@@ -683,6 +683,84 @@ Returns: JSON confirmation."""
         return json.dumps({"id": str(event["id"]), "event_type": event_type})
 
     @mcp.tool(
+        description="""Record a user-facing output/deliverable produced by a task.
+
+Use this whenever a task produces something the user can open, inspect, or act on:
+GitHub issues/PRs, sent emails, generated docs, files, deployments, memories,
+or generic links from custom tooling. These outputs are shown prominently on
+the request detail page instead of being buried inside raw task text.
+
+Known output_type values: link, github_issue, github_pr, email, document, file,
+memory, deployment, artifact, other. If output_type='link' and the URL is a
+GitHub issue/PR or mailto/document URL, Lucent will infer a more specific type.
+
+Args:
+    task_id: ID of the task that produced the output
+    title: Short human-readable label
+    url: Openable URL, if available
+    output_type: Output classification for icon/display
+    provider: Optional provider/integration name (github, gmail, google_docs, etc.)
+    description: Optional one-sentence explanation
+    external_id: Provider-native ID if no URL exists or as additional identity
+    mime_type: Optional MIME type for files/documents
+    metadata: Optional integration-specific metadata
+    is_primary: Mark this as a primary deliverable for the request
+
+Returns: JSON with the created output artifact."""
+    )
+    async def record_task_output(
+        task_id: str,
+        title: str,
+        url: str = "",
+        output_type: str = "link",
+        provider: str = "",
+        description: str = "",
+        external_id: str = "",
+        mime_type: str = "",
+        metadata: dict | None = None,
+        is_primary: bool = False,
+    ) -> str:
+        user_id, org_id, _, _, _ = await _get_current_user_context()
+        if not user_id:
+            return json.dumps({"error": "Authentication required"})
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+
+        repo = await _get_request_repository()
+        task = await repo.get_task(task_id, org_id=str(org_id))
+        if not task:
+            return json.dumps({"error": "Task not found"})
+
+        try:
+            output = await repo.create_task_output(
+                task_id=task_id,
+                org_id=str(org_id),
+                created_by=str(user_id),
+                output={
+                    "output_type": output_type,
+                    "provider": provider or None,
+                    "title": title,
+                    "description": description or None,
+                    "url": url or None,
+                    "external_id": external_id or None,
+                    "mime_type": mime_type or None,
+                    "metadata": metadata or {},
+                    "is_primary": is_primary,
+                },
+            )
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)})
+
+        def serialize(obj):
+            if hasattr(obj, "isoformat"):
+                return obj.isoformat()
+            if isinstance(obj, UUID):
+                return str(obj)
+            return str(obj)
+
+        return json.dumps(output, default=serialize)
+
+    @mcp.tool(
         description="""Link a memory to a tracked task \u2014 showing which
 memories were created, read, or updated during task execution.
 

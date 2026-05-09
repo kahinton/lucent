@@ -542,6 +542,33 @@ POST /api/requests/tasks/{task_id}/model
 
 **Complete** — Body: `{"result": "...", "result_structured": {...}}`. Marks as done.
 
+Completion may also include `outputs`, a list of user-facing deliverables:
+
+```json
+{
+  "result": "Opened a pull request and sent a summary email.",
+  "outputs": [
+    {
+      "title": "Implementation PR",
+      "url": "https://github.com/kahinton/lucent/pull/123",
+      "is_primary": true
+    },
+    {
+      "output_type": "email",
+      "provider": "gmail",
+      "title": "Summary email",
+      "external_id": "message-id-abc123"
+    }
+  ]
+}
+```
+
+Structured results can also expose `outputs` or `artifacts` arrays; validated
+task completion extracts those into the same artifact table. As a reliability
+backstop, Lucent also auto-extracts openable URLs from the plain text `result`
+and records them as outputs when the agent forgot to provide structured
+artifacts. Explicit outputs win when the same URL appears in both places.
+
 **Fail** — Body: `{"error": "..."}`. Marks as failed.
 
 **Release** — Releases a claimed task back to pending.
@@ -568,6 +595,32 @@ GET /api/requests/tasks/{task_id}/events
 ```
 
 Events are appended to the task timeline and visible on the Activity page.
+
+### Task Outputs
+
+```
+POST /api/requests/tasks/{task_id}/outputs
+```
+
+Records a deliverable after or during task execution. These outputs are shown
+prominently on the request detail page and grouped back to the producing task.
+Request review tasks verify that deliverables mentioned in task results are
+listed here; reviewers can call `record_task_output` for missing artifacts when
+they have enough information, or request rework when they do not.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `title` | string | yes | Human-readable label |
+| `output_type` | string | no | `link`, `github_issue`, `github_pr`, `email`, `document`, `file`, `memory`, `deployment`, `artifact`, `other` |
+| `provider` | string | no | Integration/source name such as `github`, `gmail`, `google_docs` |
+| `url` | string | no | Openable URL; GitHub issue/PR and document URLs are auto-classified |
+| `external_id` | string | no | Provider-native ID when there is no URL, or as additional identity |
+| `description` | string | no | Short explanation |
+| `mime_type` | string | no | MIME type for file/document artifacts |
+| `metadata` | object | no | Integration-specific metadata |
+| `is_primary` | boolean | no | Marks the output as a primary request deliverable |
+
+At least one of `url`, `external_id`, or `output_type: "other"` is required.
 
 ### Task Memory Links
 

@@ -9,6 +9,7 @@ import os
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import urlparse
 from uuid import UUID
 
 from asyncpg import Pool
@@ -44,6 +45,22 @@ MEMORY_LINK_LOCK_NAMESPACE = 0x4C4D454D  # "LMEM" — Lucent MEMory link
 # milestone state hasn't been updated.
 RECENT_COMPLETION_WINDOW_HOURS = 24
 
+VALID_TASK_OUTPUT_TYPES = {
+    "link",
+    "github_issue",
+    "github_pr",
+    "email",
+    "document",
+    "file",
+    "memory",
+    "deployment",
+    "artifact",
+    "other",
+}
+
+_OUTPUT_URL_RE = re.compile(r"(?P<url>https?://[^\s<>()\[\]{}\"']+|mailto:[^\s<>()\[\]{}\"']+)")
+_TRAILING_URL_PUNCTUATION = ".,;:!?)]}>'\""
+
 
 def _normalize_title_for_dedup(title: str | None) -> str:
     """Normalize a request title for duplicate detection.
@@ -72,6 +89,155 @@ def _coerce_metadata(metadata: Any) -> dict | None:
         except (TypeError, ValueError):
             return None
     return metadata if isinstance(metadata, dict) else None
+
+
+def _infer_output_type_from_url(url: str | None, fallback: str = "link") -> str:
+    """Infer a well-known output type from a URL when callers provide generic links."""
+    if not url:
+        return fallback if fallback in VALID_TASK_OUTPUT_TYPES else "link"
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return fallback if fallback in VALID_TASK_OUTPUT_TYPES else "link"
+
+    host = parsed.netloc.lower()
+    path = parsed.path.lower()
+    if host == "github.com" or host.endswith(".github.com"):
+        if "/pull/" in path:
+            return "github_pr"
+        if "/issues/" in path:
+            return "github_issue"
+    if parsed.scheme == "mailto":
+        return "email"
+    if "docs.google.com" in host or "notion.so" in host or path.endswith(('.md', '.pdf')):
+        return "document"
+    return fallback if fallback in VALID_TASK_OUTPUT_TYPES else "link"
+
+
+def _normalize_task_output(output: dict[str, Any]) -> dict[str, Any]:
+    """Normalize a task output artifact supplied by API/MCP/structured result."""
+    if not isinstance(output, dict):
+        raise ValueError("Each task output must be an object")
+
+    url = str(output.get("url") or "").strip() or None
+    external_id = str(output.get("external_id") or output.get("id") or "").strip() or None
+    output_type = str(output.get("output_type") or output.get("type") or "link").strip().lower()
+    output_type = _infer_output_type_from_url(url, output_type)
+    if output_type not in VALID_TASK_OUTPUT_TYPES:
+        raise ValueError(
+            f"Invalid output_type '{output_type}'. Must be one of: "
+            f"{', '.join(sorted(VALID_TASK_OUTPUT_TYPES))}"
+        )
+
+    title = str(output.get("title") or "").strip()
+    if not title:
+        if output_type == "github_pr":
+            title = "GitHub pull request"
+        elif output_type == "github_issue":
+            title = "GitHub issue"
+        elif output_type == "email":
+            title = "Email"
+        elif output_type == "document":
+            title = "Document"
+        elif url:
+            title = url
+        elif external_id:
+            title = external_id
+    if not title:
+        raise ValueError("Task output title is required")
+    if not url and not external_id and output_type != "other":
+        raise ValueError("Task output requires url or external_id")
+
+    metadata = output.get("metadata") or {}
+    if not isinstance(metadata, dict):
+        raise ValueError("Task output metadata must be an object")
+
+    return {
+        "output_type": output_type,
+        "provider": str(output.get("provider") or "").strip() or None,
+        "title": title[:256],
+        "description": str(output.get("description") or "").strip() or None,
+        "url": url,
+        "external_id": external_id,
+        "mime_type": str(output.get("mime_type") or "").strip() or None,
+        "metadata": metadata,
+        "is_primary": bool(output.get("is_primary", False)),
+    }
+
+
+def _extract_outputs_from_structured_result(result_structured: Any) -> list[dict[str, Any]]:
+    """Extract outputs/artifacts from validated structured task output when present."""
+    if not isinstance(result_structured, dict):
+        return []
+    raw = result_structured.get("outputs") or result_structured.get("artifacts") or []
+    if not isinstance(raw, list):
+        return []
+    return [_normalize_task_output(item) for item in raw]
+
+
+def _extract_outputs_from_text(result_text: str | None) -> list[dict[str, Any]]:
+    """Extract openable URLs from unstructured task output as artifact links.
+
+    This is a reliability backstop: agents should still call record_task_output
+    or return structured outputs, but links mentioned in the narrative result
+    should not be invisible to users if the agent forgets.
+    """
+    if not result_text:
+        return []
+
+    outputs: list[dict[str, Any]] = []
+    seen_urls: set[str] = set()
+    for match in _OUTPUT_URL_RE.finditer(result_text):
+        raw_url = match.group("url").rstrip(_TRAILING_URL_PUNCTUATION)
+        if not raw_url or raw_url in seen_urls:
+            continue
+        seen_urls.add(raw_url)
+
+        line_start = result_text.rfind("\n", 0, match.start()) + 1
+        line_end = result_text.find("\n", match.end())
+        if line_end == -1:
+            line_end = len(result_text)
+        line = result_text[line_start:line_end].strip()
+        title_prefix = line[: max(0, match.start() - line_start)].strip(" -*•:—–\t")
+        output_type = _infer_output_type_from_url(raw_url)
+        if title_prefix and len(title_prefix) <= 120:
+            title = title_prefix
+        elif output_type == "github_pr":
+            title = "GitHub pull request"
+        elif output_type == "github_issue":
+            title = "GitHub issue"
+        elif output_type == "email":
+            title = "Email"
+        elif output_type == "document":
+            title = "Document"
+        else:
+            title = raw_url
+
+        outputs.append(
+            _normalize_task_output(
+                {
+                    "output_type": output_type,
+                    "title": title,
+                    "url": raw_url,
+                    "metadata": {"auto_extracted": True, "source": "task_result"},
+                }
+            )
+        )
+    return outputs
+
+
+def _dedupe_task_outputs(outputs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Deduplicate normalized task outputs by URL/external identity."""
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for output in outputs:
+        key_value = output.get("url") or output.get("external_id") or output.get("title")
+        key = (output.get("output_type") or "link", str(key_value or "").lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(output)
+    return deduped
 
 
 def _next_active_milestone_index(metadata: dict | None) -> int | None:
@@ -1247,7 +1413,7 @@ class RequestRepository:
                 "validation_errors",
             )
 
-        # Batch-load events and memory links for ALL tasks (avoids N+1)
+        # Batch-load events, memory links, and outputs for ALL tasks (avoids N+1)
         task_ids = [task["id"] for task in req["tasks"]]
         if task_ids:
             async with self.pool.acquire() as conn:
@@ -1266,6 +1432,14 @@ class RequestRepository:
                     task_ids,
                     UUID(org_id),
                 )
+                output_rows = await conn.fetch(
+                    """SELECT * FROM task_outputs
+                       WHERE task_id = ANY($1)
+                         AND organization_id = $2
+                       ORDER BY is_primary DESC, created_at DESC""",
+                    task_ids,
+                    UUID(org_id),
+                )
 
             # Group by task_id
             events_by_task: dict[str, list[dict]] = {}
@@ -1280,14 +1454,26 @@ class RequestRepository:
                 tid = str(row["task_id"])
                 memories_by_task.setdefault(tid, []).append(dict(row))
 
+            outputs_by_task: dict[str, list[dict]] = {}
+            request_outputs: list[dict] = []
+            for row in output_rows:
+                tid = str(row["task_id"])
+                output = self._row_to_output_dict(row)
+                outputs_by_task.setdefault(tid, []).append(output)
+                request_outputs.append(output)
+
             for task in req["tasks"]:
                 tid = str(task["id"])
                 task["events"] = events_by_task.get(tid, [])
                 task["memories"] = memories_by_task.get(tid, [])
+                task["outputs"] = outputs_by_task.get(tid, [])
+            req["outputs"] = request_outputs
         else:
             for task in req["tasks"]:
                 task["events"] = []
                 task["memories"] = []
+                task["outputs"] = []
+            req["outputs"] = []
 
         # Load reviews for this request (batch, no N+1)
         async with self.pool.acquire() as conn:
@@ -1340,6 +1526,88 @@ class RequestRepository:
             "failed": statuses.count("failed"),
         }
         return req
+
+    def _row_to_output_dict(self, row) -> dict[str, Any]:
+        output = dict(row)
+        metadata = output.get("metadata") or {}
+        if isinstance(metadata, str):
+            try:
+                metadata = json.loads(metadata)
+            except (TypeError, ValueError):
+                metadata = {}
+        output["metadata"] = metadata
+        return output
+
+    async def create_task_output(
+        self,
+        *,
+        task_id: str,
+        org_id: str,
+        output: dict[str, Any],
+        created_by: str | None = None,
+    ) -> dict:
+        """Create a user-facing output artifact for a task."""
+        normalized = _normalize_task_output(output)
+        async with self.pool.acquire() as conn:
+            task = await conn.fetchrow(
+                """SELECT id, request_id, organization_id
+                   FROM tasks
+                   WHERE id = $1::uuid AND organization_id = $2::uuid""",
+                task_id,
+                org_id,
+            )
+            if not task:
+                raise ValueError("Task not found")
+
+            row = await conn.fetchrow(
+                """INSERT INTO task_outputs (
+                       task_id, request_id, organization_id, created_by,
+                       output_type, provider, title, description, url,
+                       external_id, mime_type, metadata, is_primary
+                   ) VALUES (
+                       $1::uuid, $2::uuid, $3::uuid, $4::uuid,
+                       $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13
+                   )
+                   RETURNING *""",
+                task_id,
+                str(task["request_id"]),
+                org_id,
+                created_by,
+                normalized["output_type"],
+                normalized["provider"],
+                normalized["title"],
+                normalized["description"],
+                normalized["url"],
+                normalized["external_id"],
+                normalized["mime_type"],
+                json.dumps(normalized["metadata"]),
+                normalized["is_primary"],
+            )
+        created = self._row_to_output_dict(row)
+        await self.add_task_event(
+            task_id,
+            "output_created",
+            f"Output recorded: {created['title']}",
+            metadata={
+                "output_id": str(created["id"]),
+                "output_type": created["output_type"],
+                "url": created.get("url"),
+            },
+            org_id=org_id,
+        )
+        return created
+
+    async def list_request_outputs(self, request_id: str, org_id: str) -> list[dict]:
+        """List all outputs for a request, newest/primary first."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT * FROM task_outputs
+                   WHERE request_id = $1::uuid AND organization_id = $2::uuid
+                   ORDER BY is_primary DESC, created_at DESC""",
+                request_id,
+                org_id,
+            )
+        return [self._row_to_output_dict(r) for r in rows]
 
     # ── Tasks ─────────────────────────────────────────────────────────────
 
@@ -2023,6 +2291,7 @@ class RequestRepository:
         result_summary: str | None = None,
         validation_status: str = "not_applicable",
         validation_errors: list | None = None,
+        outputs: list[dict[str, Any]] | None = None,
     ) -> dict | None:
         """Mark task as completed with result.
 
@@ -2034,6 +2303,12 @@ class RequestRepository:
             raise ValueError(
                 f"Invalid validation_status '{validation_status}'. Must be one of: {valid}"
             )
+        output_candidates: list[dict[str, Any]] = []
+        if outputs:
+            output_candidates.extend(_normalize_task_output(item) for item in outputs)
+        output_candidates.extend(_extract_outputs_from_structured_result(result_structured))
+        output_candidates.extend(_extract_outputs_from_text(result))
+        output_candidates = _dedupe_task_outputs(output_candidates)
         now = datetime.now(timezone.utc)
         if org_id:
             async with self.pool.acquire() as conn:
@@ -2125,6 +2400,21 @@ class RequestRepository:
                     )
         if row:
             task = dict(row)
+            created_outputs: list[dict] = []
+            for output in output_candidates:
+                created_outputs.append(
+                    await self.create_task_output(
+                        task_id=task_id,
+                        org_id=str(task["organization_id"]),
+                        output=output,
+                        created_by=(
+                            str(task["requesting_user_id"])
+                            if task.get("requesting_user_id")
+                            else None
+                        ),
+                    )
+                )
+            task["outputs"] = created_outputs
             await self.add_task_event(
                 task_id,
                 "completed",
