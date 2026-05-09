@@ -346,6 +346,40 @@ Lucent provides prompt templates (in `src/lucent/prompts/`) to help LLMs use the
 - **`get_memory_system_prompt_short()`**: Condensed version for limited prompt space
 - **`get_user_introduction_prompt()`**: Guidance for greeting users and personalizing interactions based on their individual memory
 
+## Chat Sessions and Experience Capture
+
+Lucent persists chat/embedded-chat sessions in `llm_sessions`, with transcript
+rows in `llm_messages`, tool/event lineage in `llm_session_events`, and request
+links in `llm_session_requests`. Chat-created requests carry origin pointers
+back to the session/message that created them.
+
+After assistant turns, Lucent runs a cheap deterministic session-significance
+check to decide whether to create or update an `experience` memory tagged
+`session-experience`. Capture is triggered by durable work signals such as
+linked requests, mutating tools, substantial multi-turn transcripts, or
+work-oriented session kinds. Trivial sessions — jokes, thanks, greetings, or
+simple status checks without work side effects — are skipped.
+
+When a session crosses the threshold, Lucent uses a skill-guided summarization
+model call by default to write the actual experience memory content. The
+`session-experience-capture` skill tells the summarizer to produce a narrative
+with `Session Summary`, `What Happened`, `Why It Matters`, and `Follow-up`
+sections. Operators can disable this extra model call with
+`LUCENT_SESSION_EXPERIENCE_SUMMARY_ENABLED=false`, in which case Lucent falls
+back to a deterministic summary assembled from session metadata and transcript
+previews. Lucent does not impose a fixed session-context character cap for this
+summary path; choose a summary model with an appropriate context window for your
+deployment.
+
+The auto-captured experience stores useful metadata alongside the narrative:
+`metadata.source = "llm_session"`, the `session_id`, linked request IDs,
+observed tool names, capture score, summary mode/model, and the reason it
+crossed the threshold. If a session continues, Lucent updates the existing
+session experience instead of creating duplicates. Linked request IDs also
+receive the experience memory as a `context` memory so the conversation can act
+as glue between the user discussion, requests, tasks, outputs, and later
+learning extraction.
+
 ## Autonomous Daemon
 
 The daemon runs as a separate process that communicates with the Lucent server over MCP. It operates four independent loops:

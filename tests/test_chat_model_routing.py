@@ -43,6 +43,44 @@ class _FakeStreamingEngine:
         return None
 
 
+class _FakeSummaryEngine:
+    def __init__(self, seen: dict):
+        self.seen = seen
+
+    async def run_session(self, **kwargs):
+        self.seen.update(kwargs)
+        return (
+            "## Session Summary\n\n"
+            "The session produced a useful narrative summary.\n\n"
+            "## What Happened\n\n"
+            "- The summarizer followed the capture skill.\n\n"
+            "## Why It Matters\n\n"
+            "The captured memory has real content.\n\n"
+            "## Follow-up\n\n"
+            "- None identified."
+        )
+
+
+class _FakeCaptureRepo:
+    def __init__(self):
+        self.updated_metadata = None
+        self.capture_called = False
+
+    async def evaluate_experience_capture(self, *_args, **_kwargs):
+        return {
+            "session": {"id": "session-id", "metadata": {}},
+            "evaluation": {"should_capture": True, "score": 4, "reasons": ["mutating_tools"]},
+        }
+
+    async def update_session(self, *_args, metadata=None, **_kwargs):
+        self.updated_metadata = metadata
+        return {"id": "session-id", "metadata": metadata or {}}
+
+    async def maybe_capture_experience(self, *_args, **_kwargs):
+        self.capture_called = True
+        raise AssertionError("maybe_capture_experience should not run")
+
+
 async def _fake_session_user(_request):
     return {
         "id": "user-id",
@@ -165,3 +203,101 @@ def test_chat_mcp_config_threads_llm_session_headers():
     assert headers["X-Lucent-LLM-Session-Id"] == "session-id"
     assert headers["X-Lucent-LLM-Turn-Id"] == "turn-id"
     assert headers["X-Lucent-LLM-Message-Id"] == "message-id"
+
+
+def test_session_experience_summary_defaults_and_context_not_capped():
+    assert chat.SESSION_EXPERIENCE_TIMEOUT == 180
+
+    long_content = "x" * 20000
+    formatted = chat._format_session_experience_context(
+        {
+            "id": "session-id",
+            "title": "Long session",
+            "kind": "chat",
+            "messages": [{"role": "user", "content": long_content}],
+            "events": [],
+            "requests": [],
+        },
+        {"score": 3, "reasons": ["substantial_transcript"]},
+    )
+
+    assert long_content in formatted
+    assert "[middle truncated" not in formatted
+
+
+@pytest.mark.asyncio
+async def test_session_experience_summary_uses_skill_and_no_tools(monkeypatch):
+    seen: dict = {}
+
+    monkeypatch.setattr(chat, "SESSION_EXPERIENCE_SUMMARY_ENABLED", True)
+    monkeypatch.setattr(chat, "SESSION_EXPERIENCE_MODEL", "summary-model")
+    monkeypatch.setattr("lucent.model_registry.validate_model", lambda _model: None)
+    monkeypatch.setattr(
+        "lucent.llm.get_engine_for_model",
+        lambda _model: _FakeSummaryEngine(seen),
+    )
+
+    content, model, error = await chat._summarize_session_experience(
+        session={
+            "id": "session-id",
+            "title": "Capture summary",
+            "kind": "chat",
+            "messages": [
+                {"role": "user", "content": "Please summarize this session."},
+                {"role": "assistant", "content": "I created a narrative summary."},
+            ],
+            "events": [],
+            "requests": [],
+        },
+        evaluation={"score": 3, "reasons": ["mutating_tools"]},
+    )
+
+    assert error is None
+    assert model == "summary-model"
+    assert content.startswith("## Session Summary")
+    assert "Session Experience Capture" in seen["system_message"]
+    assert seen["mcp_config"] == {}
+
+
+@pytest.mark.asyncio
+async def test_session_experience_summary_can_be_disabled(monkeypatch):
+    monkeypatch.setattr(chat, "SESSION_EXPERIENCE_SUMMARY_ENABLED", False)
+
+    content, model, error = await chat._summarize_session_experience(
+        session={"id": "session-id", "messages": [], "events": [], "requests": []},
+        evaluation={"score": 3, "reasons": ["mutating_tools"]},
+    )
+
+    assert content is None
+    assert model is None
+    assert error == "disabled"
+
+
+@pytest.mark.asyncio
+async def test_session_experience_model_can_skip_capture(monkeypatch):
+    repo = _FakeCaptureRepo()
+
+    async def no_experience_summary(**_kwargs):
+        return None, "summary-model", "no_experience_needed"
+
+    monkeypatch.setattr(chat, "_summarize_session_experience", no_experience_summary)
+
+    await chat._maybe_capture_session_experience(
+        user={"id": "user-id", "organization_id": "org-id"},
+        chat_session=chat.PersistentChatSession(
+            session_id="session-id",
+            provider_session_id=None,
+            provider_initialized=False,
+            turn_id="turn-id",
+            user_message_id="message-id",
+            previous_messages=[],
+            repo=repo,
+        ),
+    )
+
+    assert repo.capture_called is False
+    assert repo.updated_metadata["experience_capture"]["status"] == "skipped"
+    assert (
+        repo.updated_metadata["experience_capture"]["reason"]
+        == "model_no_experience_needed"
+    )

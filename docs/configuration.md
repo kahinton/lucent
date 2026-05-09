@@ -57,6 +57,9 @@ For detailed secret storage configuration, see [Secret Storage](secret-storage.m
 | `LUCENT_MODEL_VALIDATION` | `strict` | Model validation mode: `strict` rejects unknown models, `lenient` allows them |
 | `LUCENT_CHAT_MCP_URL` | `http://localhost:8766/mcp` | MCP URL for chat-initiated tool calls |
 | `LUCENT_CHAT_TIMEOUT` | `300` | Chat session timeout in seconds |
+| `LUCENT_SESSION_EXPERIENCE_SUMMARY_ENABLED` | `true` | Enable an extra skill-guided model call to write narrative experience memories for meaningful chat sessions |
+| `LUCENT_SESSION_EXPERIENCE_MODEL` | *(model registry default)* | Optional model override for session experience summaries |
+| `LUCENT_SESSION_EXPERIENCE_TIMEOUT` | `180` | Timeout in seconds for the session experience summary model call |
 | `ANTHROPIC_API_KEY` | — | Anthropic API key (only when `LUCENT_LLM_ENGINE=langchain`) |
 | `OPENAI_API_KEY` | — | OpenAI API key (only when `LUCENT_LLM_ENGINE=langchain`) |
 | `GOOGLE_API_KEY` | — | Google API key (only when `LUCENT_LLM_ENGINE=langchain`) |

@@ -10,6 +10,8 @@ import json
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -26,6 +28,12 @@ logger = get_logger("chat")
 router = APIRouter(prefix="/chat", tags=["chat"])
 
 CHAT_MODEL = os.environ.get("LUCENT_CHAT_MODEL", "").strip()
+SESSION_EXPERIENCE_SUMMARY_ENABLED = os.environ.get(
+    "LUCENT_SESSION_EXPERIENCE_SUMMARY_ENABLED",
+    "true",
+).strip().lower() not in {"0", "false", "no", "off"}
+SESSION_EXPERIENCE_MODEL = os.environ.get("LUCENT_SESSION_EXPERIENCE_MODEL", "").strip()
+SESSION_EXPERIENCE_TIMEOUT = int(os.environ.get("LUCENT_SESSION_EXPERIENCE_TIMEOUT", "180"))
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 # MCP server URL — localhost inside the container, configurable for external
 MCP_URL = os.environ.get("LUCENT_CHAT_MCP_URL", "http://localhost:8766/mcp")
@@ -195,6 +203,117 @@ def _event_raw(event) -> dict[str, Any]:
     }
 
 
+@lru_cache(maxsize=1)
+def _session_experience_skill_content() -> str:
+    skill_path = (
+        Path(__file__).resolve().parents[4]
+        / ".github"
+        / "skills"
+        / "session-experience-capture"
+        / "SKILL.md"
+    )
+    try:
+        return skill_path.read_text(encoding="utf-8")
+    except OSError:
+        return (
+            "# Session Experience Capture\n\n"
+            "Write a concise experience memory with Session Summary, What Happened, "
+            "Why It Matters, and Follow-up. Return NO_EXPERIENCE_NEEDED for trivial chats."
+        )
+
+
+def _format_session_experience_context(session: dict, evaluation: dict[str, Any]) -> str:
+    messages = session.get("messages") or []
+    events = session.get("events") or []
+    requests = session.get("requests") or []
+    lines = [
+        "## Session Metadata",
+        f"- Session ID: {session.get('id')}",
+        f"- Title: {session.get('title') or 'Untitled'}",
+        f"- Kind: {session.get('kind')}",
+        f"- Capture score: {evaluation.get('score')}",
+        f"- Capture reasons: {', '.join(evaluation.get('reasons') or []) or 'none'}",
+        "",
+        "## Linked Requests",
+    ]
+    if requests:
+        for req in requests[:20]:
+            lines.append(
+                f"- {req.get('request_title') or req.get('request_id')} "
+                f"(id={req.get('request_id')}, status={req.get('request_status')}, "
+                f"relation={req.get('relation')})"
+            )
+    else:
+        lines.append("- None")
+
+    lines.extend(["", "## Tool Events"])
+    visible_events = [e for e in events if e.get("tool_name") or e.get("event_type")]
+    if visible_events:
+        for event in visible_events[-60:]:
+            tool = event.get("tool_name") or event.get("event_type")
+            detail = event.get("detail") or ""
+            tool_input = event.get("tool_input")
+            tool_output = event.get("tool_output")
+            lines.append(f"- {tool}: {detail}".strip())
+            if tool_input is not None:
+                lines.append(f"  input: {str(tool_input)[:500]}")
+            if tool_output is not None:
+                lines.append(f"  output: {str(tool_output)[:500]}")
+    else:
+        lines.append("- None")
+
+    lines.extend(["", "## Transcript"])
+    for message in messages[-80:]:
+        role = str(message.get("role") or "unknown").upper()
+        content = str(message.get("content") or "")
+        lines.append(f"\n### {role}\n{content}")
+    return "\n".join(lines)
+
+
+async def _summarize_session_experience(
+    *,
+    session: dict,
+    evaluation: dict[str, Any],
+) -> tuple[str | None, str | None, str | None]:
+    """Return model-written experience content, model id, and error if any."""
+    if not SESSION_EXPERIENCE_SUMMARY_ENABLED:
+        return None, None, "disabled"
+    try:
+        from lucent.llm import get_engine_for_model
+        from lucent.model_registry import validate_model
+
+        model = _resolve_chat_model(SESSION_EXPERIENCE_MODEL or None)
+        validation_error = validate_model(model)
+        if validation_error:
+            return None, model, validation_error
+        engine = get_engine_for_model(model)
+        system_message = (
+            "You summarize meaningful Lucent sessions into durable experience memories.\n\n"
+            "Follow this skill exactly:\n\n"
+            f"{_session_experience_skill_content()}"
+        )
+        prompt = (
+            "Summarize this session into an experience memory. Use the skill's exact "
+            "memory content structure. If it is not worth capturing, return "
+            "NO_EXPERIENCE_NEEDED.\n\n"
+            f"{_format_session_experience_context(session, evaluation)}"
+        )
+        result = await engine.run_session(
+            model=model,
+            system_message=system_message,
+            prompt=prompt,
+            mcp_config={},
+            timeout=SESSION_EXPERIENCE_TIMEOUT,
+        )
+        content = (result or "").strip()
+        if not content or content == "NO_EXPERIENCE_NEEDED":
+            return None, model, "no_experience_needed"
+        return content, model, None
+    except Exception as exc:
+        logger.warning("Session experience model summary failed", exc_info=True)
+        return None, SESSION_EXPERIENCE_MODEL or None, str(exc)[:500]
+
+
 async def _prepare_persistent_chat_session(
     *,
     user: dict,
@@ -303,6 +422,73 @@ async def _prepare_persistent_chat_session(
             previous_messages=[],
             repo=None,
         )
+
+
+async def _maybe_capture_session_experience(
+    *,
+    user: dict,
+    chat_session: PersistentChatSession,
+) -> None:
+    """Best-effort automatic experience capture for meaningful chat sessions."""
+    if not chat_session.repo or not chat_session.session_id:
+        return
+    try:
+        capture_context = await chat_session.repo.evaluate_experience_capture(
+            chat_session.session_id,
+            str(user["organization_id"]),
+            user_id=str(user["id"]),
+        )
+        session = capture_context.get("session")
+        evaluation = capture_context.get("evaluation") or {}
+        summary_content = None
+        summary_model = None
+        summary_error = None
+        summary_mode = "deterministic"
+        if session and evaluation.get("should_capture"):
+            summary_content, summary_model, summary_error = await _summarize_session_experience(
+                session=session,
+                evaluation=evaluation,
+            )
+            if summary_error == "no_experience_needed":
+                raw_metadata = session.get("metadata")
+                metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
+                await chat_session.repo.update_session(
+                    chat_session.session_id,
+                    str(user["organization_id"]),
+                    user_id=str(user["id"]),
+                    metadata={
+                        **metadata,
+                        "experience_capture": {
+                            "status": "skipped",
+                            "reason": "model_no_experience_needed",
+                            "evaluated_at": datetime.now(timezone.utc).isoformat(),
+                            "score": evaluation.get("score"),
+                            "reasons": evaluation.get("reasons") or [],
+                            "summary_model": summary_model,
+                        },
+                    },
+                )
+                logger.debug("Session experience capture skipped by summary model")
+                return
+            if summary_content:
+                summary_mode = "model"
+            elif summary_error == "disabled":
+                summary_mode = "disabled"
+            else:
+                summary_mode = "deterministic_fallback"
+        result = await chat_session.repo.maybe_capture_experience(
+            chat_session.session_id,
+            str(user["organization_id"]),
+            user_id=str(user["id"]),
+            content_override=summary_content,
+            summary_mode=summary_mode,
+            summary_model=summary_model,
+            summary_error=summary_error,
+        )
+        logger.debug("Session experience capture result: %s", result)
+    except Exception:
+        logger.warning("Session experience capture failed", exc_info=True)
+
 
 def _chat_tool_grounding_instructions() -> str:
     """Runtime instructions that keep chat answers grounded in actual tool results."""
@@ -643,6 +829,7 @@ async def chat_stream(
                     str(user["organization_id"]),
                     provider_session_id=chat_session.provider_session_id,
                 )
+            await _maybe_capture_session_experience(user=user, chat_session=chat_session)
     except Exception as e:
         logger.error("Chat session failed: %s", e)
         result_text = None
@@ -989,6 +1176,7 @@ async def chat_stream_v2(
         finally:
             if event_persist_tasks:
                 await asyncio.gather(*event_persist_tasks, return_exceptions=True)
+            await _maybe_capture_session_experience(user=user, chat_session=chat_session)
             event_queue.put_nowait(None)  # Sentinel: stream done
 
     async def generate():
