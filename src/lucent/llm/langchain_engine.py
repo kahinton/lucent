@@ -231,6 +231,7 @@ class LangChainEngine(LLMEngine):
         resume: bool = False,
         message_history: list[dict[str, Any]] | None = None,
         hooks: list[dict[str, Any]] | None = None,
+        audit_context: dict[str, Any] | None = None,
     ) -> str | None:
         """Run a blocking session (chat pattern)."""
         try:
@@ -244,6 +245,7 @@ class LangChainEngine(LLMEngine):
                 on_event=None,
                 message_history=message_history,
                 hooks=hooks,
+                audit_context=audit_context,
             )
         except Exception as e:
             logger.error("LangChain session failed: %s", e)
@@ -263,6 +265,7 @@ class LangChainEngine(LLMEngine):
         resume: bool = False,
         message_history: list[dict[str, Any]] | None = None,
         hooks: list[dict[str, Any]] | None = None,
+        audit_context: dict[str, Any] | None = None,
     ) -> str | None:
         """Run a streaming session with event callbacks (daemon pattern)."""
         try:
@@ -276,6 +279,7 @@ class LangChainEngine(LLMEngine):
                 on_event=on_event,
                 message_history=message_history,
                 hooks=hooks,
+                audit_context=audit_context,
             )
         except Exception as e:
             logger.error("LangChain streaming session failed: %s", e)
@@ -294,6 +298,7 @@ class LangChainEngine(LLMEngine):
         on_event: Callable[[SessionEvent], None] | None = None,
         message_history: list[dict[str, Any]] | None = None,
         hooks: list[dict[str, Any]] | None = None,
+        audit_context: dict[str, Any] | None = None,
     ) -> str | None:
         """Core implementation: run model with MCP tool loop.
 
@@ -320,7 +325,13 @@ class LangChainEngine(LLMEngine):
         tool_schemas: list[dict] = []
         if mcp_config:
             bridges, tool_to_bridge, memory_bridge, tool_schemas = await self._create_bridges(
-                mcp_config
+                mcp_config,
+                audit_context={
+                    **(audit_context or {}),
+                    "model": model,
+                    "reasoning_effort": reasoning_effort,
+                    "engine": self.name,
+                },
             )
         hook_manager = HookManager(hooks)
 
@@ -503,7 +514,7 @@ class LangChainEngine(LLMEngine):
                 await bridge.close()
 
     async def _create_bridges(
-        self, mcp_config: dict
+        self, mcp_config: dict, audit_context: dict[str, Any] | None = None
     ) -> tuple[list[Any], dict[str, Any], Any | None, list[dict]]:
         """Create MCPToolBridge instances and map discovered tools to bridges."""
         from lucent.llm.mcp_bridge import MCPToolBridge
@@ -519,6 +530,7 @@ class LangChainEngine(LLMEngine):
                     mcp_url=server_conf["url"],
                     headers=server_conf.get("headers"),
                     allowed_tools=server_conf.get("tools"),
+                    audit_context={**(audit_context or {}), "mcp_server": server_name},
                 )
                 discovered = await bridge.discover_tools()
                 if not discovered:

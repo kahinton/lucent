@@ -49,12 +49,14 @@ class MCPToolBridge:
         *,
         allowed_tools: list[str] | None = None,
         skip_url_validation: bool = False,
+        audit_context: dict[str, Any] | None = None,
     ):
         if not skip_url_validation:
             validate_url(mcp_url, purpose="MCP bridge")
         self._mcp_url = mcp_url
         self._headers = headers or {}
         self._allowed_tools = set(allowed_tools or ["*"])
+        self._audit_context = audit_context or {}
         self._tools: list[dict[str, Any]] = []
         self._exit_stack: AsyncExitStack | None = None
         self._session: Any | None = None
@@ -155,11 +157,24 @@ class MCPToolBridge:
 
         try:
             if not self._is_tool_allowed(tool_name):
-                return f"Error calling tool {tool_name}: tool is not allowed in this session"
+                result_text = f"Error calling tool {tool_name}: tool is not allowed in this session"
+                await self._audit_tool_call(
+                    tool_name=tool_name,
+                    arguments=arguments or {},
+                    result_text=result_text,
+                    duration_ms=(time.monotonic() - start) * 1000,
+                )
+                return result_text
 
             session = await self._ensure_session()
             result = await session.call_tool(tool_name, arguments or {})
             result_text = _call_result_to_text(result)
+            await self._audit_tool_call(
+                tool_name=tool_name,
+                arguments=arguments or {},
+                result_text=result_text,
+                duration_ms=(time.monotonic() - start) * 1000,
+            )
 
             if is_memory_tool:
                 elapsed_ms = (time.monotonic() - start) * 1000
@@ -173,6 +188,13 @@ class MCPToolBridge:
 
             return result_text
         except Exception as e:
+            await self._audit_tool_call(
+                tool_name=tool_name,
+                arguments=arguments or {},
+                result_text=f"Error calling tool {tool_name}: {e}",
+                duration_ms=(time.monotonic() - start) * 1000,
+                exception=e,
+            )
             if is_memory_tool:
                 elapsed_ms = (time.monotonic() - start) * 1000
                 log_params = _summarize_memory_tool_params(tool_name, arguments)
@@ -185,6 +207,61 @@ class MCPToolBridge:
                 )
             logger.error("Error calling MCP tool %s", tool_name, exc_info=e)
             return f"Error calling tool {tool_name}: {e}"
+
+    async def _audit_tool_call(
+        self,
+        *,
+        tool_name: str,
+        arguments: dict[str, Any],
+        result_text: str,
+        duration_ms: float,
+        exception: Exception | None = None,
+    ) -> None:
+        """Best-effort operational audit logging for MCP tool execution."""
+        try:
+            from lucent.db import init_db
+            from lucent.db.tool_audit import ToolAuditRepository, classify_tool_result
+
+            context = dict(self._audit_context)
+            context.setdefault("source", "mcp_bridge")
+            context.setdefault("tool_namespace", "mcp")
+            if self._headers:
+                context.setdefault(
+                    "session_id",
+                    _header_value(self._headers, "X-Lucent-LLM-Session-Id"),
+                )
+                context.setdefault(
+                    "turn_id",
+                    _header_value(self._headers, "X-Lucent-LLM-Turn-Id"),
+                )
+                context.setdefault(
+                    "message_id",
+                    _header_value(self._headers, "X-Lucent-LLM-Message-Id"),
+                )
+
+            if exception is not None:
+                status = "failed"
+                failure_class = exception.__class__.__name__
+                error_message = str(exception)
+            else:
+                status, failure_class, error_message = classify_tool_result(result_text)
+
+            pool = await init_db()
+            repo = ToolAuditRepository(pool)
+            await repo.log_tool_call(
+                tool_name=tool_name,
+                status=status,
+                source=str(context.pop("source", "mcp_bridge")),
+                duration_ms=int(duration_ms),
+                input_payload=arguments or {},
+                output_payload=result_text,
+                failure_class=failure_class,
+                error_message=error_message,
+                context=context,
+                metadata={"mcp_url": self._mcp_url},
+            )
+        except Exception:
+            logger.debug("Failed to write tool call audit row", exc_info=True)
 
     async def close(self) -> None:
         """Close the HTTP client."""
@@ -213,6 +290,15 @@ def _normalize_tool(tool: Any) -> dict[str, Any]:
     if not data.get("inputSchema"):
         data["inputSchema"] = {"type": "object", "properties": {}}
     return data
+
+
+def _header_value(headers: dict[str, str], name: str) -> str | None:
+    """Fetch a header value case-insensitively from bridge config headers."""
+    wanted = name.lower()
+    for key, value in headers.items():
+        if str(key).lower() == wanted:
+            return str(value) if value else None
+    return None
 
 
 def _call_result_to_text(result: Any) -> str:

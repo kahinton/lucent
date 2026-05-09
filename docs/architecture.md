@@ -380,6 +380,33 @@ receive the experience memory as a `context` memory so the conversation can act
 as glue between the user discussion, requests, tasks, outputs, and later
 learning extraction.
 
+## Tool-Use Audit Log
+
+Lucent stores operational tool-call telemetry in `tool_call_audit_log`. This is
+explicitly **not memory content**: it is structured audit data used to understand
+patterns in tool success/failure across sessions, models, agents, skills, and
+requests. Learning memories can refer to insights derived from this data later,
+but raw audit rows remain in the audit table.
+
+The audit log records redacted/truncated previews of tool inputs and outputs,
+status (`success`, `failed`, or `blocked`), failure class/message, duration, and
+lineage fields when available:
+
+- organization/user/API key
+- LLM session, turn, message, and session event
+- request/task/schedule run
+- agent definition, agent type, and skill names
+- model, reasoning effort, engine, provider
+- MCP server/tool namespace/tool name
+
+Capture paths include the LangChain MCP bridge, where tool execution is
+programmatically observed for every MCP tool call, and normalized streaming
+tool-result events for Copilot-style sessions in chat/daemon execution. This
+catches allowed, blocked, exception-returning, and error-string tool calls even
+when the model later recovers. The design favors consistent structured rows over
+ad-hoc learning memories so future analysis can identify recurring failure
+patterns by tool, model, agent, skill, request type, or session context.
+
 ## Autonomous Daemon
 
 The daemon runs as a separate process that communicates with the Lucent server over MCP. It operates four independent loops:

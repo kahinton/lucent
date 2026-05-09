@@ -812,6 +812,17 @@ async def chat_stream(
             resume=resume_provider,
             message_history=message_history,
             hooks=agent_hooks,
+            audit_context={
+                "source": "chat.stream",
+                "organization_id": str(user["organization_id"]),
+                "user_id": str(user["id"]),
+                "session_id": chat_session.session_id,
+                "turn_id": chat_session.turn_id,
+                "message_id": chat_session.user_message_id,
+                "model": selected_model,
+                "reasoning_effort": body.reasoning_effort,
+                "engine": engine.name,
+            },
         )
         error = None if result_text else "No response received"
         if result_text and chat_session.repo and chat_session.session_id:
@@ -956,6 +967,7 @@ async def chat_stream_v2(
     # Build system prompt — optionally load agent definition
     system_prompt_parts = []
     agent_name = None
+    agent_skill_names: list[str] = []
 
     if body.agent_id:
         try:
@@ -973,6 +985,8 @@ async def chat_stream_v2(
                         str(skill["skill_id"]), str(user["organization_id"])
                     )
                     if skill_def:
+                        if skill_def.get("name"):
+                            agent_skill_names.append(str(skill_def["name"]))
                         system_prompt_parts.append(
                             f"\n## Skill: {skill_def.get('name', '')}\n"
                             f"{skill_def.get('content', '')}"
@@ -1048,6 +1062,7 @@ async def chat_stream_v2(
     event_queue: asyncio.Queue[dict | None] = asyncio.Queue()
     event_persist_tasks: list[asyncio.Task] = []
     event_sequence = 0
+    tool_call_inputs: dict[str, Any] = {}
 
     def persist_event(payload: dict, event: SessionEvent) -> None:
         """Persist a normalized session event without blocking SDK callbacks."""
@@ -1055,20 +1070,58 @@ async def chat_stream_v2(
         if not chat_session.repo or not chat_session.session_id:
             return
         event_sequence += 1
-        event_persist_tasks.append(asyncio.create_task(chat_session.repo.add_event(
-            chat_session.session_id,
-            org_id=str(user["organization_id"]),
-            turn_id=chat_session.turn_id,
-            message_id=chat_session.user_message_id,
-            sequence=event_sequence,
-            event_type=payload.get("type", event.type.value),
-            tool_name=payload.get("tool") or event.tool_name,
-            tool_input=event.tool_input or payload.get("input"),
-            tool_output=event.tool_output or payload.get("output"),
-            detail=payload.get("text") or payload.get("error"),
-            raw=_event_raw(event),
-            visible=payload.get("type") not in {"text_delta"},
-        )))
+        sequence = event_sequence
+
+        async def persist_and_audit() -> None:
+            row = await chat_session.repo.add_event(
+                chat_session.session_id,
+                org_id=str(user["organization_id"]),
+                turn_id=chat_session.turn_id,
+                message_id=chat_session.user_message_id,
+                sequence=sequence,
+                event_type=payload.get("type", event.type.value),
+                tool_name=payload.get("tool") or event.tool_name,
+                tool_input=event.tool_input or payload.get("input"),
+                tool_output=event.tool_output or payload.get("output"),
+                detail=payload.get("text") or payload.get("error"),
+                raw=_event_raw(event),
+                visible=payload.get("type") not in {"text_delta"},
+            )
+            if engine.name == "langchain" or payload.get("type") != "tool_result":
+                return
+            try:
+                from lucent.db.tool_audit import ToolAuditRepository, classify_tool_result
+
+                output = event.tool_output or payload.get("output") or ""
+                status, failure_class, error_message = classify_tool_result(output)
+                audit = ToolAuditRepository(pool)
+                tool_name = payload.get("tool") or event.tool_name or "unknown"
+                await audit.log_tool_call(
+                    tool_name=tool_name,
+                    status=status,
+                    source="chat.stream_v2.session_event",
+                    input_payload=tool_call_inputs.get(tool_name, {}),
+                    output_payload=output,
+                    failure_class=failure_class,
+                    error_message=error_message,
+                    context={
+                        "organization_id": str(user["organization_id"]),
+                        "user_id": str(user["id"]),
+                        "session_id": chat_session.session_id,
+                        "turn_id": chat_session.turn_id,
+                        "message_id": chat_session.user_message_id,
+                        "llm_event_id": str(row["id"]),
+                        "model": selected_model,
+                        "reasoning_effort": body.reasoning_effort,
+                        "engine": engine.name,
+                        "agent_definition_id": body.agent_id,
+                        "skill_names": agent_skill_names,
+                    },
+                )
+            except Exception:
+                logger.debug("Failed to audit chat tool event", exc_info=True)
+
+        event_persist_tasks.append(asyncio.create_task(persist_and_audit()))
 
     def on_event(event: SessionEvent):
         """Push normalized events into the queue for SSE consumption."""
@@ -1093,6 +1146,8 @@ async def chat_stream_v2(
                     tool_input = json.dumps(event.tool_input, default=str)
                 except Exception:
                     tool_input = str(event.tool_input)
+            if event.tool_name:
+                tool_call_inputs[event.tool_name] = event.tool_input or tool_input
             payload = {
                 "type": "tool_call",
                 "tool": event.tool_name or "unknown",
@@ -1145,6 +1200,19 @@ async def chat_stream_v2(
                 resume=resume_provider,
                 message_history=message_history,
                 hooks=agent_hooks,
+                audit_context={
+                    "source": "chat.stream_v2",
+                    "organization_id": str(user["organization_id"]),
+                    "user_id": str(user["id"]),
+                    "session_id": chat_session.session_id,
+                    "turn_id": chat_session.turn_id,
+                    "message_id": chat_session.user_message_id,
+                    "model": selected_model,
+                    "reasoning_effort": body.reasoning_effort,
+                    "engine": engine.name,
+                    "agent_definition_id": body.agent_id,
+                    "skill_names": agent_skill_names,
+                },
             )
             if result and chat_session.repo and chat_session.session_id:
                 await chat_session.repo.add_message(

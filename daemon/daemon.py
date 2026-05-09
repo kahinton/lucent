@@ -3481,6 +3481,7 @@ class LucentDaemon:
         reasoning_effort: str | None = None,
         mcp_config_override: dict | None = None,
         hooks: list[dict] | None = None,
+        audit_context: dict | None = None,
     ) -> str | None:
         """Run a single Copilot session with the given system message and prompt.
 
@@ -3530,6 +3531,8 @@ class LucentDaemon:
                     }
                     if hooks is not None:
                         inner_kwargs["hooks"] = hooks
+                    if audit_context is not None:
+                        inner_kwargs["audit_context"] = audit_context
                     if reasoning_effort:
                         inner_kwargs["reasoning_effort"] = reasoning_effort
                     result = await asyncio.wait_for(
@@ -3612,6 +3615,7 @@ class LucentDaemon:
         reasoning_effort: str | None = None,
         mcp_config_override: dict | None = None,
         hooks: list[dict] | None = None,
+        audit_context: dict | None = None,
     ) -> str | None:
         """Inner session runner — uses the LLM engine abstraction.
 
@@ -3631,6 +3635,7 @@ class LucentDaemon:
                 reasoning_effort=reasoning_effort,
                 mcp_config_override=effective_mcp,
                 hooks=hooks,
+                audit_context=audit_context,
             )
         elif _COPILOT_SDK_AVAILABLE:
             return await self._run_via_copilot_direct(
@@ -3670,6 +3675,7 @@ class LucentDaemon:
         reasoning_effort: str | None = None,
         mcp_config_override: dict | None = None,
         hooks: list[dict] | None = None,
+        audit_context: dict | None = None,
     ) -> str | None:
         """Run session using the LLM engine abstraction layer."""
         engine = get_engine_for_model(model) if _LLM_ENGINE_AVAILABLE else get_engine()
@@ -3679,8 +3685,35 @@ class LucentDaemon:
         # Initialize MCP memory-tool tracker for this session
         tracker: list[dict] = []
         self._session_mcp_trackers[name] = tracker
+        audit_tasks: list[asyncio.Task] = []
+        tool_call_inputs: dict[str, dict | str] = {}
 
         try:
+
+            async def audit_stream_tool_result(event: SessionEvent) -> None:
+                if getattr(engine, "name", "") == "langchain" or not event.tool_name:
+                    return
+                try:
+                    from lucent.db import init_db
+                    from lucent.db.tool_audit import ToolAuditRepository, classify_tool_result
+
+                    status, failure_class, error_message = classify_tool_result(
+                        event.tool_output
+                    )
+                    pool = await init_db()
+                    repo = ToolAuditRepository(pool)
+                    await repo.log_tool_call(
+                        tool_name=event.tool_name,
+                        status=status,
+                        source="daemon.session_event",
+                        input_payload=tool_call_inputs.get(event.tool_name, {}),
+                        output_payload=event.tool_output,
+                        failure_class=failure_class,
+                        error_message=error_message,
+                        context={**(audit_context or {}), "engine": getattr(engine, "name", "")},
+                    )
+                except Exception:
+                    log("Failed to audit daemon tool event", "DEBUG")
 
             def on_event(event: SessionEvent) -> None:
                 etype = event.type.value
@@ -3695,6 +3728,8 @@ class LucentDaemon:
                         )
                 elif event.type == SessionEventType.TOOL_CALL:
                     log(f"  [{name}] event: tool.call tool={event.tool_name}", "STREAM")
+                    if event.tool_name:
+                        tool_call_inputs[event.tool_name] = event.tool_input or event.content or {}
                     # Track memory-server tool calls for observability
                     if event.tool_name and event.tool_name in _MEMORY_TOOL_NAMES:
                         params_summary = _summarize_memory_tool_params(
@@ -3715,6 +3750,7 @@ class LucentDaemon:
                         f"  [{name}] event: tool.result tool={event.tool_name} output={output}",
                         "STREAM",
                     )
+                    audit_tasks.append(asyncio.create_task(audit_stream_tool_result(event)))
                     if self._is_mcp_auth_failure_message(event.tool_output):
                         raise AuthFailureDetectedError(
                             f"MCP auth failure on tool '{event.tool_name}' in session '{name}'"
@@ -3732,6 +3768,13 @@ class LucentDaemon:
                 idle_timeout=SESSION_IDLE_TIMEOUT,
                 reasoning_effort=reasoning_effort,
                 hooks=hooks,
+                audit_context={
+                    **(audit_context or {}),
+                    "source": (audit_context or {}).get("source", "daemon.session"),
+                    "model": model,
+                    "reasoning_effort": reasoning_effort,
+                    "engine": getattr(engine, "name", "unknown"),
+                },
             )
 
             if result:
@@ -3741,6 +3784,8 @@ class LucentDaemon:
                 log(f"Session '{name}' completed (no response)")
             return result
         finally:
+            if audit_tasks:
+                await asyncio.gather(*audit_tasks, return_exceptions=True)
             if session_id in self.active_sessions:
                 self.active_sessions.remove(session_id)
 
@@ -4624,6 +4669,18 @@ class LucentDaemon:
                     reasoning_effort=task_reasoning_effort,
                     mcp_config_override=task_mcp_config,
                     hooks=hooks,
+                    audit_context={
+                        "source": "daemon.task",
+                        "organization_id": org_id,
+                        "user_id": requesting_user_id,
+                        "request_id": request_id,
+                        "task_id": task_id,
+                        "agent_definition_id": str(agent_data["id"]),
+                        "agent_type": agent_type,
+                        "skill_names": [s.get("name") for s in skills if s.get("name")],
+                        "model": selected_model,
+                        "reasoning_effort": task_reasoning_effort,
+                    },
                 )
             except ModelNotAvailableError as exc:
                 log(

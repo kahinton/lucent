@@ -34,6 +34,7 @@ from lucent.db.models import ModelRepository
 from lucent.db.organization import OrganizationRepository
 from lucent.db.pool import close_db, get_pool, init_db
 from lucent.db.reviews import ReviewRepository
+from lucent.db.tool_audit import ToolAuditRepository
 
 # TypedDict definitions for repository return values
 from lucent.db.types import (
@@ -78,6 +79,7 @@ __all__ = [
     "AccessRepository",
     "ModelRepository",
     "ReviewRepository",
+    "ToolAuditRepository",
     # TypedDict definitions
     "MemoryRecord",
     "MemoryShadowScoreRecord",
