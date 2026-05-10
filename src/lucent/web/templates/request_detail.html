@@ -2,6 +2,31 @@
 
 {% block title %}{{ req.title }} - Lucent{% endblock %}
 
+{% block extra_head %}
+<style nonce="{{ request.state.csp_nonce }}">
+    .request-markdown h1 { font-size: 1.125rem; line-height: 1.5rem; font-weight: 700; color: rgb(17 24 39); margin: 1rem 0 0.5rem; }
+    .request-markdown h2 { font-size: 1rem; line-height: 1.5rem; font-weight: 700; color: rgb(17 24 39); margin: 0.875rem 0 0.375rem; }
+    .request-markdown h3, .request-markdown h4 { font-size: 0.875rem; line-height: 1.25rem; font-weight: 700; color: rgb(31 41 55); margin: 0.75rem 0 0.25rem; }
+    .request-markdown p { margin: 0.4rem 0; }
+    .request-markdown ul, .request-markdown ol { margin: 0.5rem 0 0.5rem 1.25rem; }
+    .request-markdown li { margin: 0.125rem 0; }
+    .request-markdown ul { list-style: disc; }
+    .request-markdown ol { list-style: decimal; }
+    .request-markdown pre { margin: 0.75rem 0; border-radius: 0.75rem; background: rgb(17 24 39); color: rgb(243 244 246); padding: 0.875rem; overflow-x: auto; font-size: 0.75rem; line-height: 1.35; }
+    .request-markdown code { border-radius: 0.375rem; background: rgb(243 244 246); color: rgb(79 70 229); padding: 0.125rem 0.35rem; font-size: 0.78em; font-weight: 600; }
+    .request-markdown pre code { background: transparent; color: inherit; padding: 0; font-weight: inherit; }
+    .request-markdown blockquote { margin: 0.75rem 0; border-left: 3px solid rgb(199 210 254); padding-left: 0.75rem; color: rgb(75 85 99); }
+    .request-markdown a { color: rgb(37 99 235); text-decoration: underline; text-decoration-color: rgb(147 197 253); }
+    .request-markdown hr { margin: 1rem 0; border: 0; border-top: 1px solid rgb(229 231 235); }
+    .request-markdown table { width: 100%; border-collapse: collapse; margin: 0.875rem 0; overflow: hidden; border-radius: 0.75rem; font-size: 0.8125rem; }
+    .request-markdown th { background: rgb(249 250 251); color: rgb(55 65 81); font-weight: 700; text-align: left; }
+    .request-markdown th, .request-markdown td { border: 1px solid rgb(229 231 235); padding: 0.5rem 0.625rem; vertical-align: top; }
+    .request-markdown tr:nth-child(even) td { background: rgb(249 250 251 / 0.55); }
+    .request-markdown th[data-align="center"], .request-markdown td[data-align="center"] { text-align: center; }
+    .request-markdown th[data-align="right"], .request-markdown td[data-align="right"] { text-align: right; }
+</style>
+{% endblock %}
+
 {% block content %}
 <!-- Header -->
 <div class="mb-6">
@@ -14,7 +39,7 @@
         <div>
             <h1 class="text-2xl font-bold text-gray-900">{{ req.title }}</h1>
             {% if req.description %}
-            <p class="text-sm text-gray-500 mt-1">{{ req.description }}</p>
+            <p class="text-sm text-gray-500 mt-1 max-w-3xl line-clamp-2">{{ req.description[:240] }}{% if req.description|length > 240 %}…{% endif %}</p>
             {% endif %}
             {% if goal_info %}
             <div class="mt-3 inline-flex items-start gap-2 bg-purple-50 border border-purple-200 rounded-lg px-3 py-2 text-sm">
@@ -142,6 +167,34 @@
 </div>
 {% endif %}
 
+{% macro markdown_block(content, classes='') %}
+<div class="js-markdown-block request-markdown {{ classes }}"><script type="application/json" nonce="{{ request.state.csp_nonce }}">{{ (content or '') | tojson }}</script></div>
+{% endmacro %}
+
+{% if req.description %}
+<div class="mb-6 rounded-xl border border-gray-200 bg-white shadow-sm">
+    <details class="group" {% if req.description|length <= 900 %}open{% endif %}>
+        <summary class="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 hover:bg-gray-50 rounded-xl">
+            <div>
+                <h2 class="text-sm font-semibold uppercase tracking-wider text-gray-500">Request Body</h2>
+                <p class="mt-0.5 text-xs text-gray-400">{{ req.description|length }} chars{% if req.description|length > 900 %} · collapsed by default{% endif %}</p>
+                {% if req.description|length > 900 %}
+                <p class="mt-1 max-w-2xl text-xs text-gray-500 group-open:hidden">{{ req.description[:220] }}…</p>
+                {% endif %}
+            </div>
+            <div class="flex items-center gap-2 text-xs font-medium text-primary-600">
+                <span class="group-open:hidden">Expand</span>
+                <span class="hidden group-open:inline">Collapse</span>
+                <svg class="h-4 w-4 transition-transform group-open:rotate-180" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" /></svg>
+            </div>
+        </summary>
+        <div class="border-t border-gray-100 px-4 py-3">
+            {{ markdown_block(req.description, 'max-h-[34rem] overflow-y-auto pr-2 text-sm text-gray-700') }}
+        </div>
+    </details>
+</div>
+{% endif %}
+
 <!-- Stats Bar -->
 {% if req.stats %}
 <div class="grid grid-cols-5 gap-3 mb-6">
@@ -203,8 +256,10 @@
                 <span class="px-1.5 py-0.5 rounded text-[10px] bg-gray-100 text-gray-500">{{ output.output_type | replace('_', ' ') }}</span>
                 {% if output.provider %}<span class="px-1.5 py-0.5 rounded text-[10px] bg-gray-50 text-gray-500">{{ output.provider }}</span>{% endif %}
             </div>
-            {% if output.description and not compact %}
-            <p class="mt-1 text-xs text-gray-500">{{ output.description }}</p>
+            {% if output.description %}
+            <div class="mt-2 {% if compact %}max-h-28 overflow-y-auto rounded-md bg-gray-50 px-2 py-1.5{% endif %}">
+                {{ markdown_block(output.description, 'text-xs text-gray-600') }}
+            </div>
             {% endif %}
             <div class="mt-1 flex items-center gap-2 text-[11px] text-gray-400 flex-wrap">
                 {% if output.external_id %}<span class="font-mono">{{ output.external_id }}</span>{% endif %}
@@ -579,14 +634,20 @@
                 <div>
                     <h4 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1">Output ({{ task.result | length }} chars)</h4>
                     {% if task.result | length > 2000 %}
-                    <div id="result-preview-{{ task.id }}" class="bg-gray-50 rounded p-2 text-sm text-gray-700 max-h-48 overflow-y-auto whitespace-pre-wrap font-mono text-xs">{{ task.result[:2000] }}<span class="text-gray-400">…</span></div>
+                    <div id="result-preview-{{ task.id }}" class="rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm text-gray-700 max-h-80 overflow-y-auto">
+                        {{ markdown_block(task.result[:3000] ~ '…', 'text-sm text-gray-700') }}
+                    </div>
                     <button class="mt-1 text-xs text-primary-600 hover:text-primary-800 font-medium toggle-full-output"
                             data-task-id="{{ task.id }}">
                         Show full output ({{ task.result | length }} chars)
                     </button>
-                    <div id="result-full-{{ task.id }}" class="bg-gray-50 rounded p-2 text-sm text-gray-700 max-h-[80vh] overflow-y-auto whitespace-pre-wrap font-mono text-xs" style="display:none;">{{ task.result }}</div>
+                    <div id="result-full-{{ task.id }}" class="rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm text-gray-700 max-h-[80vh] overflow-y-auto" style="display:none;">
+                        {{ markdown_block(task.result, 'text-sm text-gray-700') }}
+                    </div>
                     {% else %}
-                    <div class="bg-gray-50 rounded p-2 text-sm text-gray-700 max-h-48 overflow-y-auto whitespace-pre-wrap font-mono text-xs">{{ task.result }}</div>
+                    <div class="rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm text-gray-700 max-h-96 overflow-y-auto">
+                        {{ markdown_block(task.result, 'text-sm text-gray-700') }}
+                    </div>
                     {% endif %}
                 </div>
                 {% endif %}
@@ -685,12 +746,29 @@
 
     <!-- Right: Activity Feed (1 col) -->
     <div>
-        <h2 class="text-lg font-semibold text-gray-900 mb-3">Activity Feed</h2>
+        <div class="mb-3 flex items-center justify-between gap-3">
+            <div>
+                <h2 class="text-lg font-semibold text-gray-900">Activity Feed</h2>
+                {% if recent_events %}<p class="text-xs text-gray-400">Showing recent task events</p>{% endif %}
+            </div>
+            {% if recent_events %}<span class="rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-500">{{ recent_events|length }}</span>{% endif %}
+        </div>
+        {% if recent_events %}
+        <div class="mb-2 flex flex-wrap gap-1.5" data-activity-filters>
+            <button type="button" class="js-activity-filter rounded-md bg-gray-900 px-2 py-1 text-xs font-medium text-white" data-filter="all">All</button>
+            <button type="button" class="js-activity-filter rounded-md bg-gray-100 px-2 py-1 text-xs font-medium text-gray-600 hover:bg-gray-200" data-filter="important">Important</button>
+            <button type="button" class="js-activity-filter rounded-md bg-red-50 px-2 py-1 text-xs font-medium text-red-600 hover:bg-red-100" data-filter="failed">Failures</button>
+            <button type="button" class="js-activity-filter rounded-md bg-primary-50 px-2 py-1 text-xs font-medium text-primary-600 hover:bg-primary-100" data-filter="output">Outputs</button>
+            <button type="button" class="js-activity-filter rounded-md bg-emerald-50 px-2 py-1 text-xs font-medium text-emerald-600 hover:bg-emerald-100" data-filter="memory">Memories</button>
+        </div>
+        {% endif %}
         <div class="bg-white rounded-lg border border-gray-200 p-3 max-h-[calc(100vh-16rem)] overflow-y-auto">
             {% if recent_events %}
-            <div class="space-y-2">
+            <div class="space-y-2" id="activity-feed">
                 {% for event in recent_events %}
-                <div class="flex gap-2 text-xs border-b border-gray-50 pb-2 last:border-0">
+                {% set et = event.event_type or '' %}
+                {% set important = ('failed' in et) or ('completed' in et) or ('output' in et) or ('review' in et) or ('approval' in et) %}
+                <div class="js-activity-event flex gap-2 text-xs border-b border-gray-50 pb-2 last:border-0" data-event-type="{{ et }}" data-important="{{ '1' if important else '0' }}" data-index="{{ loop.index0 }}">
                     <!-- Event dot -->
                     <div class="mt-1 shrink-0">
                         <span class="block w-2 h-2 rounded-full
@@ -715,6 +793,10 @@
                     </div>
                 </div>
                 {% endfor %}
+            </div>
+            <div class="mt-3 flex items-center justify-between border-t border-gray-100 pt-3 text-xs text-gray-400">
+                <span id="activity-count-label"></span>
+                <button type="button" id="activity-show-more" class="hidden rounded-md bg-gray-100 px-2.5 py-1 font-medium text-gray-600 hover:bg-gray-200">Show more</button>
             </div>
             {% else %}
             <p class="text-sm text-gray-400 text-center py-4">No activity yet</p>
@@ -869,6 +951,183 @@
 
 {% block extra_scripts %}
 <script nonce="{{ request.state.csp_nonce }}">
+function escapeHtml(value) {
+    return String(value || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}
+
+function renderCodeBlock(lang, code) {
+    const label = lang ? `<span class="absolute right-3 top-2 text-[10px] font-sans text-gray-400">${escapeHtml(lang)}</span>` : '';
+    return `<div class="relative">${label}<pre><code>${escapeHtml((code || '').trim())}</code></pre></div>`;
+}
+
+function formatInlineMarkdown(line) {
+    let out = line;
+    out = out.replace(/`([^`]+)`/g, '<code>$1</code>');
+    out = out.replace(/\[([^\]]+)\]\(([^)]+)\)/g, function(_match, label, url) {
+        const safeUrl = String(url || '').trim();
+        if (/^(https?:\/\/|\/|#|mailto:)/i.test(safeUrl)) {
+            return `<a href="${escapeHtml(safeUrl)}" target="_blank" rel="noopener noreferrer">${label}</a>`;
+        }
+        return label;
+    });
+    out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    out = out.replace(/(^|\s)\*([^*]+)\*/g, '$1<em>$2</em>');
+    return out;
+}
+
+function isTableRow(line) {
+    const trimmed = String(line || '').trim();
+    if (!trimmed || !trimmed.includes('|')) return false;
+    if (/^@@CODE_BLOCK_\d+@@$/.test(trimmed)) return false;
+    return splitTableRow(trimmed).length >= 2;
+}
+
+function splitTableRow(line) {
+    let row = String(line || '').trim();
+    if (row.startsWith('|')) row = row.slice(1);
+    if (row.endsWith('|')) row = row.slice(0, -1);
+    return row.split('|').map((cell) => cell.trim());
+}
+
+function tableAlignments(separatorLine) {
+    const cells = splitTableRow(separatorLine);
+    if (!cells.length) return null;
+    const alignments = [];
+    for (const cell of cells) {
+        const normalized = cell.replace(/\s+/g, '');
+        if (!/^:?-{3,}:?$/.test(normalized)) return null;
+        if (normalized.startsWith(':') && normalized.endsWith(':')) {
+            alignments.push('center');
+        } else if (normalized.endsWith(':')) {
+            alignments.push('right');
+        } else {
+            alignments.push('left');
+        }
+    }
+    return alignments;
+}
+
+function renderMarkdownTable(headers, alignments, rows) {
+    const alignAttr = (idx) => {
+        const align = alignments[idx] || 'left';
+        return align === 'left' ? '' : ` data-align="${align}"`;
+    };
+    const headerHtml = headers.map((cell, idx) => `<th${alignAttr(idx)}>${formatInlineMarkdown(cell)}</th>`).join('');
+    const bodyHtml = rows.map(function(row) {
+        const cells = headers.map(function(_header, idx) {
+            return `<td${alignAttr(idx)}>${formatInlineMarkdown(row[idx] || '')}</td>`;
+        }).join('');
+        return `<tr>${cells}</tr>`;
+    }).join('');
+    return `<div class="overflow-x-auto"><table><thead><tr>${headerHtml}</tr></thead><tbody>${bodyHtml}</tbody></table></div>`;
+}
+
+function renderMarkdown(text) {
+    if (!text) return '';
+    const codeBlocks = [];
+    let working = String(text).replace(/\r\n/g, '\n');
+    working = working.replace(/```([^\n`]*)\n([\s\S]*?)```/g, function(_match, lang, code) {
+        const token = `@@CODE_BLOCK_${codeBlocks.length}@@`;
+        codeBlocks.push(renderCodeBlock(lang, code));
+        return `\n${token}\n`;
+    });
+    working = escapeHtml(working);
+
+    const lines = working.split('\n');
+    const html = [];
+    let inUl = false;
+    let inOl = false;
+    function closeLists() {
+        if (inUl) { html.push('</ul>'); inUl = false; }
+        if (inOl) { html.push('</ol>'); inOl = false; }
+    }
+
+    for (let i = 0; i < lines.length; i += 1) {
+        const line = lines[i];
+        const trimmed = line.trim();
+        if (!trimmed) {
+            closeLists();
+            continue;
+        }
+        const codeMatch = trimmed.match(/^@@CODE_BLOCK_(\d+)@@$/);
+        if (codeMatch) {
+            closeLists();
+            html.push(codeBlocks[Number(codeMatch[1])] || '');
+            continue;
+        }
+        if (isTableRow(trimmed) && i + 1 < lines.length) {
+            const alignments = tableAlignments(lines[i + 1].trim());
+            if (alignments) {
+                closeLists();
+                const headers = splitTableRow(trimmed);
+                const rows = [];
+                i += 2;
+                while (i < lines.length && isTableRow(lines[i])) {
+                    rows.push(splitTableRow(lines[i]));
+                    i += 1;
+                }
+                i -= 1;
+                html.push(renderMarkdownTable(headers, alignments, rows));
+                continue;
+            }
+        }
+        if (/^---+$/.test(trimmed)) {
+            closeLists();
+            html.push('<hr>');
+            continue;
+        }
+        const heading = trimmed.match(/^(#{1,4})\s+(.+)$/);
+        if (heading) {
+            closeLists();
+            const level = Math.min(heading[1].length, 4);
+            html.push(`<h${level}>${formatInlineMarkdown(heading[2])}</h${level}>`);
+            continue;
+        }
+        const quote = trimmed.match(/^&gt;\s?(.*)$/);
+        if (quote) {
+            closeLists();
+            html.push(`<blockquote>${formatInlineMarkdown(quote[1])}</blockquote>`);
+            continue;
+        }
+        const unordered = trimmed.match(/^[-*]\s+(.+)$/);
+        if (unordered) {
+            if (inOl) { html.push('</ol>'); inOl = false; }
+            if (!inUl) { html.push('<ul>'); inUl = true; }
+            html.push(`<li>${formatInlineMarkdown(unordered[1])}</li>`);
+            continue;
+        }
+        const ordered = trimmed.match(/^\d+\.\s+(.+)$/);
+        if (ordered) {
+            if (inUl) { html.push('</ul>'); inUl = false; }
+            if (!inOl) { html.push('<ol>'); inOl = true; }
+            html.push(`<li>${formatInlineMarkdown(ordered[1])}</li>`);
+            continue;
+        }
+        closeLists();
+        html.push(`<p>${formatInlineMarkdown(line)}</p>`);
+    }
+    closeLists();
+    return html.join('');
+}
+
+document.querySelectorAll('.js-markdown-block').forEach(function(block) {
+    const source = block.querySelector('script[type="application/json"]');
+    let text = '';
+    if (source) {
+        try {
+            text = JSON.parse(source.textContent || '""');
+        } catch (_err) {
+            text = source.textContent || '';
+        }
+    }
+    block.innerHTML = renderMarkdown(text);
+});
+
 document.querySelectorAll('.toggle-full-output').forEach(function(btn) {
     btn.addEventListener('click', function() {
         var taskId = this.getAttribute('data-task-id');
@@ -877,6 +1136,74 @@ document.querySelectorAll('.toggle-full-output').forEach(function(btn) {
         this.style.display = 'none';
     });
 });
+
+const activityEvents = Array.from(document.querySelectorAll('.js-activity-event'));
+const activityButtons = Array.from(document.querySelectorAll('.js-activity-filter'));
+const activityCountLabel = document.getElementById('activity-count-label');
+const activityShowMore = document.getElementById('activity-show-more');
+const activityState = { filter: 'all', visible: 20 };
+
+function activityMatches(card) {
+    const type = (card.dataset.eventType || '').toLowerCase();
+    if (activityState.filter === 'all') return true;
+    if (activityState.filter === 'important') return card.dataset.important === '1';
+    return type.includes(activityState.filter);
+}
+
+function setActivityButtonState() {
+    activityButtons.forEach(function(btn) {
+        const active = btn.dataset.filter === activityState.filter;
+        const base = 'js-activity-filter rounded-md px-2 py-1 text-xs font-medium';
+        const inactiveByFilter = {
+            failed: 'bg-red-50 text-red-600 hover:bg-red-100',
+            output: 'bg-primary-50 text-primary-600 hover:bg-primary-100',
+            memory: 'bg-emerald-50 text-emerald-600 hover:bg-emerald-100',
+            important: 'bg-gray-100 text-gray-600 hover:bg-gray-200',
+            all: 'bg-gray-100 text-gray-600 hover:bg-gray-200',
+        };
+        btn.className = active
+            ? `${base} bg-gray-900 text-white`
+            : `${base} ${inactiveByFilter[btn.dataset.filter] || inactiveByFilter.all}`;
+    });
+}
+
+function updateActivityFeed() {
+    if (!activityEvents.length) return;
+    const matches = activityEvents.filter(activityMatches);
+    let shown = 0;
+    activityEvents.forEach(function(card) {
+        if (activityMatches(card) && shown < activityState.visible) {
+            card.hidden = false;
+            shown += 1;
+        } else {
+            card.hidden = true;
+        }
+    });
+    if (activityCountLabel) {
+        activityCountLabel.textContent = matches.length
+            ? `Showing ${Math.min(shown, matches.length)} of ${matches.length}`
+            : 'No matching events';
+    }
+    if (activityShowMore) {
+        activityShowMore.classList.toggle('hidden', shown >= matches.length);
+    }
+    setActivityButtonState();
+}
+
+activityButtons.forEach(function(btn) {
+    btn.addEventListener('click', function() {
+        activityState.filter = btn.dataset.filter || 'all';
+        activityState.visible = 20;
+        updateActivityFeed();
+    });
+});
+if (activityShowMore) {
+    activityShowMore.addEventListener('click', function() {
+        activityState.visible += 20;
+        updateActivityFeed();
+    });
+}
+updateActivityFeed();
 
 function refreshTaskReasoning(modelSelect) {
     const form = modelSelect.closest('form');
