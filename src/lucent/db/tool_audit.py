@@ -215,6 +215,121 @@ class ToolAuditRepository:
             )
         return dict(row) if row else {}
 
+    async def analyze_failure_patterns(
+        self,
+        *,
+        org_id: str | UUID,
+        since_days: int = 7,
+        min_failures: int = 3,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        """Aggregate repeated tool failures into improvement candidates."""
+        since_days = max(1, min(int(since_days or 7), 90))
+        min_failures = max(2, min(int(min_failures or 3), 100))
+        limit = max(1, min(int(limit or 20), 100))
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT id, created_at, organization_id, user_id, session_id,
+                          request_id, task_id, agent_definition_id, agent_type,
+                          skill_names, model, reasoning_effort, engine, source,
+                          tool_name, mcp_server, status, failure_class,
+                          error_message, duration_ms, input_preview, output_preview,
+                          metadata
+                   FROM tool_call_audit_log
+                   WHERE organization_id = $1::uuid
+                     AND status IN ('failed', 'blocked')
+                     AND created_at >= NOW() - ($2::text || ' days')::interval
+                   ORDER BY created_at DESC
+                   LIMIT 2000""",
+                str(org_id),
+                str(since_days),
+            )
+
+        groups: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
+        for row in rows:
+            item = dict(row)
+            tool = str(item.get("tool_name") or "unknown")
+            failure = str(item.get("failure_class") or item.get("status") or "unknown")
+            agent_key = str(item.get("agent_definition_id") or item.get("agent_type") or "")
+            if agent_key:
+                groups.setdefault(("agent", agent_key, tool, failure), []).append(item)
+            for skill in item.get("skill_names") or []:
+                groups.setdefault(("skill", str(skill), tool, failure), []).append(item)
+            groups.setdefault(("tool", tool, tool, failure), []).append(item)
+
+        patterns: list[dict[str, Any]] = []
+        for (dimension, target, tool, failure), items in groups.items():
+            if len(items) < min_failures:
+                continue
+            models = sorted({str(i.get("model")) for i in items if i.get("model")})
+            agents = sorted({str(i.get("agent_type")) for i in items if i.get("agent_type")})
+            skills = sorted({s for i in items for s in (i.get("skill_names") or [])})
+            request_ids = sorted({str(i.get("request_id")) for i in items if i.get("request_id")})
+            task_ids = sorted({str(i.get("task_id")) for i in items if i.get("task_id")})
+            samples = [
+                {
+                    "id": str(i["id"]),
+                    "created_at": i["created_at"].isoformat(),
+                    "status": i.get("status"),
+                    "error_message": i.get("error_message"),
+                    "input_preview": i.get("input_preview"),
+                    "output_preview": i.get("output_preview"),
+                    "model": i.get("model"),
+                    "agent_type": i.get("agent_type"),
+                    "request_id": str(i["request_id"]) if i.get("request_id") else None,
+                    "task_id": str(i["task_id"]) if i.get("task_id") else None,
+                }
+                for i in items[:3]
+            ]
+            recommended_action = _recommended_action_for_pattern(
+                dimension=dimension,
+                tool_name=tool,
+                failure_class=failure,
+            )
+            patterns.append({
+                "pattern_key": "|".join([dimension, target, tool, failure]),
+                "dimension": dimension,
+                "target": target,
+                "tool_name": tool,
+                "failure_class": failure,
+                "failure_count": len(items),
+                "first_seen_at": min(i["created_at"] for i in items).isoformat(),
+                "last_seen_at": max(i["created_at"] for i in items).isoformat(),
+                "affected_models": models,
+                "affected_agents": agents,
+                "affected_skills": skills,
+                "sample_request_ids": request_ids[:10],
+                "sample_task_ids": task_ids[:10],
+                "sample_failures": samples,
+                "recommended_action": recommended_action,
+                "proposal_evidence": {
+                    "source": "tool_call_audit_log",
+                    "pattern_dimension": dimension,
+                    "pattern_target": target,
+                    "tool_name": tool,
+                    "failure_class": failure,
+                    "failure_count": len(items),
+                    "since_days": since_days,
+                    "sample_audit_ids": [str(i["id"]) for i in items[:10]],
+                    "affected_models": models,
+                    "affected_agents": agents,
+                    "affected_skills": skills,
+                    "sample_request_ids": request_ids[:10],
+                    "sample_task_ids": task_ids[:10],
+                },
+            })
+
+        patterns.sort(
+            key=lambda p: (p["failure_count"], len(p["sample_task_ids"])),
+            reverse=True,
+        )
+        return {
+            "since_days": since_days,
+            "min_failures": min_failures,
+            "total_failed_rows_scanned": len(rows),
+            "patterns": patterns[:limit],
+        }
+
 
 def classify_tool_result(result_text: str | None) -> tuple[str, str | None, str | None]:
     """Classify a tool result string into audit status/failure metadata."""
@@ -229,3 +344,26 @@ def classify_tool_result(result_text: str | None) -> tuple[str, str | None, str 
     if "tool is not allowed" in lower or "blocked by hook" in lower:
         return "blocked", "blocked", text[:_MAX_TEXT]
     return "success", None, None
+
+
+def _recommended_action_for_pattern(
+    *,
+    dimension: str,
+    tool_name: str,
+    failure_class: str,
+) -> str:
+    if dimension == "agent":
+        return (
+            f"Propose a focused skill or agent-definition update teaching the agent "
+            f"how to call `{tool_name}` successfully and how to recover from "
+            f"`{failure_class}` failures. Include this pattern evidence in the proposal."
+        )
+    if dimension == "skill":
+        return (
+            f"Propose an update/replacement skill that adds concrete `{tool_name}` usage "
+            f"steps, common `{failure_class}` pitfalls, and verification criteria."
+        )
+    return (
+        f"Investigate `{tool_name}` as a cross-agent tool reliability issue. Consider "
+        "a generic skill, hook, or tool/schema improvement with this evidence."
+    )

@@ -68,6 +68,35 @@ If any criterion fails:
 - "A list of technical facts is NOT a lesson."
 - "A lesson must prescribe a specific behavioral change."
 
+## Step 2.6: Tool Failure Pattern Review
+
+Tool-call audit data is operational telemetry, **not memory content**. Use it to
+find repeated failures and propose capability improvements, but do not store raw
+audit rows as memories.
+
+Run:
+
+```
+analyze_tool_failure_patterns(since_days=14, min_failures=3, limit=20)
+```
+
+For each returned pattern:
+
+1. Confirm it is repeated evidence, not a one-off failure.
+2. Classify the likely improvement target:
+  - **Agent**: one agent consistently misuses a tool or ignores required workflow.
+  - **Skill**: a loaded skill lacks concrete instructions for the failing tool/workflow.
+  - **Tool/hook**: many agents fail the same tool in the same way, suggesting generic guidance, validation, or a hook.
+3. Prefer proposing a focused skill when a reusable procedure would prevent the mistake.
+4. Call `propose_definition_improvement` with:
+  - `definition_type="skill"`, `"agent"`, or `"hook"`
+  - a concrete `proposal_reason`
+  - the pattern's `proposal_evidence`
+  - `recommended_agent_id` or `recommended_agent_type` when a skill should later be granted to an agent
+
+Do not approve your own proposal. The definition approval workflow is the human
+review gate.
+
 ## Step 3: Find the Memory to Update
 
 This is the critical step. For each non-routine experience:
@@ -112,6 +141,10 @@ Apply `lesson-extracted` **only** when Step 2.5 passed and the lesson includes b
 
 If a source was reviewed but is not a qualifying lesson (digest, status summary, technical KB, general docs), do not apply `lesson-extracted`.
 
+Tool-audit patterns are not source memories and should not receive memory tags.
+If a pattern produces a definition proposal, the proposal's `proposal_evidence`
+is the traceable source of why the change was suggested.
+
 ## Step 5: Clean Up
 
 After integration, check if any source experience memories are now fully redundant (their knowledge has been absorbed into a better-scoped memory). If so, delete them.
@@ -136,6 +169,8 @@ Skipped: J routine experiences
 - **Creating standalone "Lesson:" memories** — lessons should be integrated into the memory they're about, not floating independently
 - **Creating "Learning Extraction Run" summary memories** — the output goes to text, not to memory
 - **Extracting from a single occurrence** — wait for 2+ confirming instances before treating something as a pattern
+- **Storing raw audit data as memory** — audit rows belong in `tool_call_audit_log`; use definition proposals with evidence for improvements
+- **Proposing vague definition changes** — every audit-driven proposal must identify the repeated failure, target agent/skill/tool, and verification behavior
 - **Writing lessons too vaguely to be actionable** — "be careful with X" is not a lesson
 - **Not marking sources as `lesson-extracted`** — leads to re-processing loops
 - **Tagging digests/KBs as `lesson-extracted`** — this dilutes lesson quality metrics and breaks extraction audits

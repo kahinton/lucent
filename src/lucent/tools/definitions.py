@@ -55,6 +55,18 @@ def _parse_config(config: dict | str | None) -> dict:
     raise ValueError("config must be a JSON object")
 
 
+def _parse_json_object(value: dict | str | None) -> dict:
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        parsed = json.loads(value or "{}")
+        if isinstance(parsed, dict):
+            return parsed
+    raise ValueError("value must be a JSON object")
+
+
 def _owner_args_for_context(
     user_id: UUID,
     user_role: str | None,
@@ -258,6 +270,8 @@ Returns: JSON with the created agent including its ID and status."""
         name: str,
         description: str = "",
         content: str = "",
+        proposal_reason: str = "",
+        proposal_evidence: dict | str | None = None,
     ) -> str:
         user_id, org_id, user_role, memory_scope, _ = await _get_current_user_context()
         if not org_id:
@@ -270,12 +284,18 @@ Returns: JSON with the created agent including its ID and status."""
             return json.dumps({"error": "content is required"})
 
         repo = await _get_definition_repository()
+        try:
+            evidence = _parse_json_object(proposal_evidence)
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)})
         agent = await repo.create_agent(
             name=name,
             description=description,
             content=content,
             org_id=str(org_id),
             created_by=str(user_id),
+            proposal_reason=proposal_reason or None,
+            proposal_evidence=evidence,
             **_owner_args_for_context(user_id, user_role, memory_scope),
         )
         return json.dumps(agent, default=_serialize)
@@ -297,6 +317,8 @@ Returns: JSON with the created skill including its ID and status."""
         name: str,
         description: str = "",
         content: str = "",
+        proposal_reason: str = "",
+        proposal_evidence: dict | str | None = None,
     ) -> str:
         user_id, org_id, user_role, memory_scope, _ = await _get_current_user_context()
         if not org_id:
@@ -309,12 +331,18 @@ Returns: JSON with the created skill including its ID and status."""
             return json.dumps({"error": "content is required"})
 
         repo = await _get_definition_repository()
+        try:
+            evidence = _parse_json_object(proposal_evidence)
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)})
         skill = await repo.create_skill(
             name=name,
             description=description,
             content=content,
             org_id=str(org_id),
             created_by=str(user_id),
+            proposal_reason=proposal_reason or None,
+            proposal_evidence=evidence,
             **_owner_args_for_context(user_id, user_role, memory_scope),
         )
         return json.dumps(skill, default=_serialize)
@@ -349,6 +377,8 @@ Returns: JSON with the created hook including its ID and status."""
         action_type: str = "static_context",
         config: dict | str | None = None,
         content: str = "",
+        proposal_reason: str = "",
+        proposal_evidence: dict | str | None = None,
     ) -> str:
         user_id, org_id, user_role, memory_scope, _ = await _get_current_user_context()
         if not org_id:
@@ -360,6 +390,7 @@ Returns: JSON with the created hook including its ID and status."""
 
         try:
             parsed_config = _parse_config(config)
+            evidence = _parse_json_object(proposal_evidence)
         except ValueError as exc:
             return json.dumps({"error": str(exc)})
 
@@ -374,6 +405,8 @@ Returns: JSON with the created hook including its ID and status."""
                 config=parsed_config,
                 org_id=str(org_id),
                 created_by=str(user_id),
+                proposal_reason=proposal_reason or None,
+                proposal_evidence=evidence,
                 **_owner_args_for_context(user_id, user_role, memory_scope),
             )
         except ValueError as exc:
@@ -1025,6 +1058,8 @@ Returns: JSON with the created server including its ID and status."""
         command: str | None = None,
         args: str | None = None,
         env_vars: str | None = None,
+        proposal_reason: str = "",
+        proposal_evidence: dict | str | None = None,
     ) -> str:
         user_id, org_id, user_role, memory_scope, _ = await _get_current_user_context()
         if not org_id:
@@ -1054,6 +1089,10 @@ Returns: JSON with the created server including its ID and status."""
                 parsed_env_vars = json.loads(env_vars)
             except (json.JSONDecodeError, ValueError):
                 return json.dumps({"error": "env_vars must be a valid JSON object string"})
+        try:
+            evidence = _parse_json_object(proposal_evidence)
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)})
 
         repo = await _get_definition_repository()
         server = await repo.create_mcp_server(
@@ -1066,6 +1105,8 @@ Returns: JSON with the created server including its ID and status."""
             command=command,
             args=parsed_args,
             env_vars=parsed_env_vars,
+            proposal_reason=proposal_reason or None,
+            proposal_evidence=evidence,
             **_owner_args_for_context(user_id, user_role, memory_scope),
         )
         return json.dumps(server, default=_serialize)

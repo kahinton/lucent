@@ -52,6 +52,11 @@ from lucent.tools.definitions import register_definition_tools  # noqa: E402
 
 register_definition_tools(mcp)
 
+# Register tool-call audit analysis and definition-improvement proposal tools
+from lucent.tools.tool_audit import register_tool_audit_tools  # noqa: E402
+
+register_tool_audit_tools(mcp)
+
 # Get logger for this module
 logger = get_logger("server")
 

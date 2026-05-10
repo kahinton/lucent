@@ -407,6 +407,21 @@ when the model later recovers. The design favors consistent structured rows over
 ad-hoc learning memories so future analysis can identify recurring failure
 patterns by tool, model, agent, skill, request type, or session context.
 
+Learning extraction uses this audit stream as a second source of improvement
+signals. The scheduled learning task calls `analyze_tool_failure_patterns` and
+only acts on repeated failures (default threshold: 3). When a pattern is strong
+enough, it can call `propose_definition_improvement` to create a proposed
+agent, skill, or hook definition with `proposal_reason` and
+`proposal_evidence`. This keeps raw audit data out of memory while still giving
+reviewers a clear explanation of why a change is being suggested. A common path
+is: repeated failures by a code agent using a test tool → proposed focused skill
+with tool-specific instructions → human approval → grant that skill to the code
+agent.
+
+Definition proposal rows support `proposal_reason` and `proposal_evidence` for
+agents, skills, hooks, and MCP servers. The definitions proposal UI renders
+these fields so users can inspect the evidence before approval.
+
 ## Autonomous Daemon
 
 The daemon runs as a separate process that communicates with the Lucent server over MCP. It operates four independent loops:

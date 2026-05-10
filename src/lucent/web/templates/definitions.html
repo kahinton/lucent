@@ -48,6 +48,20 @@
 </div>
 {% endmacro %}
 
+{% macro proposal_evidence(item) %}
+{% if item.proposal_reason or item.proposal_evidence %}
+<div class="mt-3 rounded-md border border-amber-200 bg-white/70 p-3 text-sm">
+    {% if item.proposal_reason %}<p class="text-amber-900"><span class="font-semibold">Why:</span> {{ item.proposal_reason }}</p>{% endif %}
+    {% if item.proposal_evidence %}
+    <details class="mt-2">
+        <summary class="cursor-pointer text-xs font-medium text-amber-700 hover:text-amber-900">Evidence</summary>
+        <pre class="mt-2 max-h-56 overflow-auto whitespace-pre-wrap rounded bg-gray-950 p-3 text-xs text-gray-100">{{ item.proposal_evidence | tojson(indent=2) }}</pre>
+    </details>
+    {% endif %}
+</div>
+{% endif %}
+{% endmacro %}
+
 {% from "partials/pagination.html" import pagination_controls %}
 {% set personal_owner_label = user.display_name or user.email or 'you' %}
 
@@ -354,7 +368,7 @@
 <h3 class="text-sm font-semibold text-gray-700 mb-2">Agents</h3>
 <div class="space-y-3 mb-6">
     {% for agent in proposals.agents %}
-    <div class="bg-amber-50/50 rounded-lg border border-amber-200 p-4"><div class="flex items-start justify-between gap-4"><div class="flex-1 min-w-0"><a href="/definitions/agents/{{ agent.id }}" class="font-medium text-gray-900 hover:text-primary-600">{{ agent.name }}</a>{% if agent.description %}<p class="text-sm text-gray-600 mt-1">{{ agent.description }}</p>{% endif %}</div>{{ approval_buttons('agents', agent.id) }}</div></div>
+    <div class="bg-amber-50/50 rounded-lg border border-amber-200 p-4"><div class="flex items-start justify-between gap-4"><div class="flex-1 min-w-0"><a href="/definitions/agents/{{ agent.id }}" class="font-medium text-gray-900 hover:text-primary-600">{{ agent.name }}</a>{% if agent.description %}<p class="text-sm text-gray-600 mt-1">{{ agent.description }}</p>{% endif %}{{ proposal_evidence(agent) }}</div>{{ approval_buttons('agents', agent.id) }}</div></div>
     {% endfor %}
 </div>
 {% endif %}
@@ -362,7 +376,7 @@
 <h3 class="text-sm font-semibold text-gray-700 mb-2">Skills</h3>
 <div class="space-y-3 mb-6">
     {% for skill in proposals.skills %}
-    <div class="bg-amber-50/50 rounded-lg border border-amber-200 p-4"><div class="flex items-start justify-between gap-4"><div class="flex-1 min-w-0"><a href="/definitions/skills/{{ skill.id }}" class="font-medium text-gray-900 hover:text-primary-600">{{ skill.name }}</a>{% if skill.description %}<p class="text-sm text-gray-600 mt-1">{{ skill.description }}</p>{% endif %}</div>{{ approval_buttons('skills', skill.id) }}</div></div>
+    <div class="bg-amber-50/50 rounded-lg border border-amber-200 p-4"><div class="flex items-start justify-between gap-4"><div class="flex-1 min-w-0"><a href="/definitions/skills/{{ skill.id }}" class="font-medium text-gray-900 hover:text-primary-600">{{ skill.name }}</a>{% if skill.description %}<p class="text-sm text-gray-600 mt-1">{{ skill.description }}</p>{% endif %}{{ proposal_evidence(skill) }}</div>{{ approval_buttons('skills', skill.id) }}</div></div>
     {% endfor %}
 </div>
 {% endif %}
@@ -370,7 +384,7 @@
 <h3 class="text-sm font-semibold text-gray-700 mb-2">MCP Servers</h3>
 <div class="space-y-3 mb-6">
     {% for server in proposals.mcp_servers %}
-    <div class="bg-amber-50/50 rounded-lg border border-amber-200 p-4"><div class="flex items-start justify-between gap-4"><div class="flex-1 min-w-0"><a href="/definitions/mcp-servers/{{ server.id }}" class="font-medium text-gray-900 hover:text-primary-600">{{ server.name }}</a>{% if server.description %}<p class="text-sm text-gray-600 mt-1">{{ server.description }}</p>{% endif %}</div>{{ approval_buttons('mcp-servers', server.id) }}</div></div>
+    <div class="bg-amber-50/50 rounded-lg border border-amber-200 p-4"><div class="flex items-start justify-between gap-4"><div class="flex-1 min-w-0"><a href="/definitions/mcp-servers/{{ server.id }}" class="font-medium text-gray-900 hover:text-primary-600">{{ server.name }}</a>{% if server.description %}<p class="text-sm text-gray-600 mt-1">{{ server.description }}</p>{% endif %}{{ proposal_evidence(server) }}</div>{{ approval_buttons('mcp-servers', server.id) }}</div></div>
     {% endfor %}
 </div>
 {% endif %}
@@ -378,7 +392,7 @@
 <h3 class="text-sm font-semibold text-gray-700 mb-2">Hooks</h3>
 <div class="space-y-3 mb-6">
     {% for hook in proposals.hooks %}
-    <div class="bg-amber-50/50 rounded-lg border border-amber-200 p-4"><div class="flex items-start justify-between gap-4"><div class="flex-1 min-w-0"><a href="/definitions/hooks/{{ hook.id }}" class="font-medium text-gray-900 hover:text-primary-600">{{ hook.name }}</a>{% if hook.description %}<p class="text-sm text-gray-600 mt-1">{{ hook.description }}</p>{% endif %}</div>{{ approval_buttons('hooks', hook.id) }}</div></div>
+    <div class="bg-amber-50/50 rounded-lg border border-amber-200 p-4"><div class="flex items-start justify-between gap-4"><div class="flex-1 min-w-0"><a href="/definitions/hooks/{{ hook.id }}" class="font-medium text-gray-900 hover:text-primary-600">{{ hook.name }}</a>{% if hook.description %}<p class="text-sm text-gray-600 mt-1">{{ hook.description }}</p>{% endif %}{{ proposal_evidence(hook) }}</div>{{ approval_buttons('hooks', hook.id) }}</div></div>
     {% endfor %}
 </div>
 {% endif %}

@@ -135,6 +135,8 @@ _TASK_MEMORY_SERVER_TOOLS = sorted(
         "link_task_memory",
         "list_available_models",
         "log_task_event",
+        "analyze_tool_failure_patterns",
+        "propose_definition_improvement",
     }
 )
 
@@ -370,7 +372,8 @@ COMPRESSION_MINUTES = int(os.environ.get("LUCENT_COMPRESSION_MINUTES", "1440"))
 LEARNING_EXTRACTION_PROMPT = (
     "Run the learning extraction pipeline. "
     "Core principle: INTEGRATE, don't accumulate. Lessons get folded into "
-    "existing memories, not stored as standalone 'Lesson:' entries.\n\n"
+    "existing memories, not stored as standalone 'Lesson:' entries. "
+    "Tool-call audit data is operational telemetry, NOT memory content.\n\n"
     "1. Search for memories tagged 'daemon-result' "
     "or 'rejection-lesson' or 'feedback-rejected' "
     "or 'validated' that do "
@@ -384,11 +387,22 @@ LEARNING_EXTRACTION_PROMPT = (
     "4. Tag processed source memories with 'lesson-extracted'.\n"
     "5. Delete source experience memories that are now redundant "
     "(their knowledge has been absorbed).\n"
+    "6. Call analyze_tool_failure_patterns(since_days=14, min_failures=3). "
+    "For repeated tool failures, classify whether the likely fix belongs in an "
+    "agent definition, an existing/new skill, a hook, or the tool/server itself. "
+    "Do NOT create memories from raw audit rows.\n"
+    "7. When the pattern has enough evidence and a concrete improvement, call "
+    "propose_definition_improvement with proposal_reason and proposal_evidence. "
+    "Prefer proposing focused skills that can be granted to the affected agent; "
+    "use agent updates only when the behavior is core to that agent's identity. "
+    "The proposal must explain WHY the change is suggested so a human can review it.\n"
     "\n\nSTRICT RULES:\n"
     "- NEVER create standalone 'Lesson:' or 'Learning Extraction Run' memories.\n"
     "- NEVER create a new memory if an existing one covers the same scope - update it.\n"
     "- The total memory count must go DOWN or stay the same, never up.\n"
     "- Prefer update_memory and delete_memory. Only use create_memory for genuine gaps.\n"
+    "- NEVER store raw tool audit data as memories. Use definition proposals with evidence.\n"
+    "- NEVER propose a definition change from a single failure; require repeated evidence.\n"
     "- Skip runtime heartbeat or telemetry records if any legacy records are still present."
 )
 

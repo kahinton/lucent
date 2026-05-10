@@ -503,7 +503,7 @@ class ScheduleRepository:
     async def experience_compression_has_work(self, org_id: str) -> bool:
         """True when there are compressible experience memories before today."""
         async with self.pool.acquire() as conn:
-            count = await conn.fetchval(
+            memory_count = await conn.fetchval(
                 """
                 SELECT COUNT(*)
                 FROM memories
@@ -522,7 +522,7 @@ class ScheduleRepository:
                 """,
                 org_id,
             )
-        return int(count or 0) > 0
+        return int(memory_count or 0) > 0
 
     async def learning_extraction_has_work(
         self,
@@ -532,7 +532,7 @@ class ScheduleRepository:
     ) -> bool:
         """True when recent results/feedback/rejection lessons need extraction."""
         async with self.pool.acquire() as conn:
-            count = await conn.fetchval(
+            memory_count = await conn.fetchval(
                 """
                 WITH last_run AS (
                     SELECT COALESCE(
@@ -572,7 +572,42 @@ class ScheduleRepository:
                 org_id,
                 schedule_id,
             )
-        return int(count or 0) > 0
+            audit_pattern_count = await conn.fetchval(
+                """
+                WITH last_run AS (
+                    SELECT COALESCE(
+                        (
+                            SELECT max(completed_at)
+                            FROM schedule_runs
+                            WHERE schedule_id = $2::uuid
+                              AND status = 'completed'
+                              AND completed_at IS NOT NULL
+                        ),
+                        now() - interval '7 days'
+                    ) AS since
+                    WHERE $2::uuid IS NOT NULL
+                    UNION ALL
+                    SELECT now() - interval '7 days'
+                    WHERE $2::uuid IS NULL
+                ), grouped AS (
+                    SELECT tool_name,
+                           COALESCE(failure_class, status) AS failure_class,
+                           COALESCE(agent_definition_id::text, agent_type, '') AS agent_key,
+                           COUNT(*) AS failure_count
+                    FROM tool_call_audit_log, last_run
+                    WHERE organization_id = $1::uuid
+                      AND status IN ('failed', 'blocked')
+                      AND created_at >= last_run.since
+                    GROUP BY tool_name, COALESCE(failure_class, status),
+                             COALESCE(agent_definition_id::text, agent_type, '')
+                    HAVING COUNT(*) >= 3
+                )
+                SELECT COUNT(*) FROM grouped
+                """,
+                org_id,
+                schedule_id,
+            )
+        return int(memory_count or 0) > 0 or int(audit_pattern_count or 0) > 0
 
     async def procedural_consolidation_has_work(self, org_id: str) -> bool:
         """True when legacy procedural/skill entries need consolidation."""

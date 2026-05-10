@@ -112,11 +112,20 @@ class DefinitionRepository:
         return value
 
     @classmethod
+    def _normalize_definition_row(cls, row: Any | None) -> dict | None:
+        if not row:
+            return None
+        data = dict(row)
+        data["proposal_evidence"] = cls._decode_json(data.get("proposal_evidence"), {}) or {}
+        return data
+
+    @classmethod
     def _normalize_hook_row(cls, row: Any | None) -> dict | None:
         if not row:
             return None
         data = dict(row)
         data["config"] = cls._decode_json(data.get("config"), {}) or {}
+        data["proposal_evidence"] = cls._decode_json(data.get("proposal_evidence"), {}) or {}
         if "config_override" in data:
             data["config_override"] = cls._decode_json(
                 data.get("config_override"), None
@@ -230,6 +239,7 @@ class DefinitionRepository:
             SELECT id, name, description, status, scope,
                    created_by, approved_by, approved_at,
                    owner_user_id, owner_group_id,
+                     proposal_reason, proposal_evidence,
                    created_at, updated_at
             {base} ORDER BY name LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}
         """
@@ -240,7 +250,7 @@ class DefinitionRepository:
             total_count = count_row["total"] if count_row else 0
             rows = await conn.fetch(query, *params_with_page)
         return {
-            "items": [dict(r) for r in rows],
+            "items": [self._normalize_definition_row(r) for r in rows],
             "total_count": total_count,
             "offset": offset,
             "limit": limit,
@@ -283,7 +293,7 @@ class DefinitionRepository:
         """
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(query, *params)
-        return dict(row) if row else None
+        return self._normalize_definition_row(row)
 
     async def create_agent(
         self,
@@ -297,6 +307,8 @@ class DefinitionRepository:
         owner_user_id: str | None = None,
         owner_group_id: str | None = None,
         shared_with_org: bool = False,
+        proposal_reason: str | None = None,
+        proposal_evidence: dict | None = None,
     ) -> dict:
         # Default owner to creator when no explicit ownership is provided
         if owner_user_id is None and owner_group_id is None:
@@ -308,16 +320,18 @@ class DefinitionRepository:
             )
         query = """
             INSERT INTO agent_definitions (name, description, content, status, scope,
-                created_by, organization_id, owner_user_id, owner_group_id)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                created_by, organization_id, owner_user_id, owner_group_id,
+                proposal_reason, proposal_evidence)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
             RETURNING *
         """
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 query, name, description, content, status, scope, created_by, org_id,
-                owner_user_id, owner_group_id,
+                owner_user_id, owner_group_id, proposal_reason,
+                json.dumps(proposal_evidence or {}),
             )
-        result = dict(row)
+        result = self._normalize_definition_row(row)
         await self._audit(
             DEFINITION_CREATE, org_id, "agent", str(result["id"]),
             user_id=created_by, notes=f"Created agent '{name}'",
@@ -350,7 +364,7 @@ class DefinitionRepository:
         """
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(query, *params)
-        result = dict(row) if row else None
+        result = self._normalize_definition_row(row)
         if result:
             await self._audit(
                 DEFINITION_UPDATE, org_id, "agent", agent_id,
@@ -374,7 +388,7 @@ class DefinitionRepository:
         """
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(query, agent_id, org_id, approved_by)
-        result = dict(row) if row else None
+        result = self._normalize_definition_row(row)
         if result:
             await self._audit(
                 DEFINITION_APPROVE, org_id, "agent", agent_id,
@@ -391,7 +405,7 @@ class DefinitionRepository:
         """
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(query, agent_id, org_id, approved_by)
-        result = dict(row) if row else None
+        result = self._normalize_definition_row(row)
         if result:
             await self._audit(
                 DEFINITION_REJECT, org_id, "agent", agent_id,
@@ -451,7 +465,8 @@ class DefinitionRepository:
         query = f"""
             SELECT id, name, description, status, scope,
                    created_by, approved_by, approved_at,
-                   owner_user_id, owner_group_id,
+                                     owner_user_id, owner_group_id,
+                                     proposal_reason, proposal_evidence,
                    created_at, updated_at
             {base} ORDER BY name LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}
         """
@@ -462,7 +477,7 @@ class DefinitionRepository:
             total_count = count_row["total"] if count_row else 0
             rows = await conn.fetch(query, *params_with_page)
         return {
-            "items": [dict(r) for r in rows],
+            "items": [self._normalize_definition_row(r) for r in rows],
             "total_count": total_count,
             "offset": offset,
             "limit": limit,
@@ -492,7 +507,7 @@ class DefinitionRepository:
                 "SELECT * FROM skill_definitions WHERE id = $1 AND organization_id = $2" + acl_sql,
                 *params,
             )
-        return dict(row) if row else None
+        return self._normalize_definition_row(row)
 
     async def create_skill(
         self,
@@ -506,6 +521,8 @@ class DefinitionRepository:
         owner_user_id: str | None = None,
         owner_group_id: str | None = None,
         shared_with_org: bool = False,
+        proposal_reason: str | None = None,
+        proposal_evidence: dict | None = None,
     ) -> dict:
         # Default owner to creator when no explicit ownership is provided
         if owner_user_id is None and owner_group_id is None:
@@ -517,16 +534,18 @@ class DefinitionRepository:
             )
         query = """
             INSERT INTO skill_definitions (name, description, content, status, scope,
-                created_by, organization_id, owner_user_id, owner_group_id)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                created_by, organization_id, owner_user_id, owner_group_id,
+                proposal_reason, proposal_evidence)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
             RETURNING *
         """
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 query, name, description, content, status, scope, created_by, org_id,
-                owner_user_id, owner_group_id,
+                owner_user_id, owner_group_id, proposal_reason,
+                json.dumps(proposal_evidence or {}),
             )
-        result = dict(row)
+        result = self._normalize_definition_row(row)
         await self._audit(
             DEFINITION_CREATE, org_id, "skill", str(result["id"]),
             user_id=created_by, notes=f"Created skill '{name}'",
@@ -542,7 +561,7 @@ class DefinitionRepository:
         """
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(query, skill_id, org_id, approved_by)
-        result = dict(row) if row else None
+        result = self._normalize_definition_row(row)
         if result:
             await self._audit(
                 DEFINITION_APPROVE, org_id, "skill", skill_id,
@@ -559,7 +578,7 @@ class DefinitionRepository:
         """
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(query, skill_id, org_id, approved_by)
-        result = dict(row) if row else None
+        result = self._normalize_definition_row(row)
         if result:
             await self._audit(
                 DEFINITION_REJECT, org_id, "skill", skill_id,
@@ -620,6 +639,7 @@ class DefinitionRepository:
             SELECT id, name, description, server_type, url, status, scope,
                    created_by, approved_by, approved_at,
                    owner_user_id, owner_group_id,
+                     proposal_reason, proposal_evidence,
                    created_at, updated_at
             {base} ORDER BY name LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}
         """
@@ -630,7 +650,7 @@ class DefinitionRepository:
             total_count = count_row["total"] if count_row else 0
             rows = await conn.fetch(query, *params_with_page)
         return {
-            "items": [dict(r) for r in rows],
+            "items": [self._normalize_definition_row(r) for r in rows],
             "total_count": total_count,
             "offset": offset,
             "limit": limit,
@@ -660,7 +680,7 @@ class DefinitionRepository:
                 "SELECT * FROM mcp_server_configs WHERE id = $1 AND organization_id = $2" + acl_sql,
                 *params,
             )
-        return dict(row) if row else None
+        return self._normalize_definition_row(row)
 
     # ── Hooks ─────────────────────────────────────────────────────────────
 
@@ -700,6 +720,7 @@ class DefinitionRepository:
             SELECT id, name, description, trigger_event, action_type, status, scope,
                    created_by, approved_by, approved_at,
                    owner_user_id, owner_group_id,
+                     proposal_reason, proposal_evidence,
                    created_at, updated_at
             {base} ORDER BY name LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}
         """
@@ -710,7 +731,7 @@ class DefinitionRepository:
             total_count = count_row["total"] if count_row else 0
             rows = await conn.fetch(query, *params_with_page)
         return {
-            "items": [dict(r) for r in rows],
+            "items": [self._normalize_hook_row(r) for r in rows],
             "total_count": total_count,
             "offset": offset,
             "limit": limit,
@@ -757,6 +778,8 @@ class DefinitionRepository:
         owner_user_id: str | None = None,
         owner_group_id: str | None = None,
         shared_with_org: bool = False,
+        proposal_reason: str | None = None,
+        proposal_evidence: dict | None = None,
     ) -> dict:
         self._validate_hook_shape(trigger_event, action_type, config)
         if owner_user_id is None and owner_group_id is None:
@@ -769,8 +792,10 @@ class DefinitionRepository:
         query = """
             INSERT INTO hook_definitions
                 (name, description, trigger_event, action_type, content, config,
-                 status, scope, created_by, organization_id, owner_user_id, owner_group_id)
-            VALUES ($1, $2, $3, $4, $5, $6::text::jsonb, $7, $8, $9, $10, $11, $12)
+                 status, scope, created_by, organization_id, owner_user_id, owner_group_id,
+                 proposal_reason, proposal_evidence)
+            VALUES ($1, $2, $3, $4, $5, $6::text::jsonb, $7, $8, $9, $10, $11, $12,
+                    $13, $14::jsonb)
             RETURNING *
         """
         async with self.pool.acquire() as conn:
@@ -788,6 +813,8 @@ class DefinitionRepository:
                 org_id,
                 owner_user_id,
                 owner_group_id,
+                proposal_reason,
+                json.dumps(proposal_evidence or {}),
             )
         result = self._normalize_hook_row(row)
         await self._audit(
@@ -910,6 +937,8 @@ class DefinitionRepository:
         owner_user_id: str | None = None,
         owner_group_id: str | None = None,
         shared_with_org: bool = False,
+        proposal_reason: str | None = None,
+        proposal_evidence: dict | None = None,
     ) -> dict:
         # Default owner to creator when no explicit ownership is provided
         if owner_user_id is None and owner_group_id is None:
@@ -922,8 +951,8 @@ class DefinitionRepository:
         query = """
             INSERT INTO mcp_server_configs (name, description, server_type, url,
                 command, args, headers, env_vars, status, created_by, organization_id,
-                owner_user_id, owner_group_id)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                owner_user_id, owner_group_id, proposal_reason, proposal_evidence)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb)
             RETURNING *
         """
         async with self.pool.acquire() as conn:
@@ -942,8 +971,10 @@ class DefinitionRepository:
                 org_id,
                 owner_user_id,
                 owner_group_id,
+                proposal_reason,
+                json.dumps(proposal_evidence or {}),
             )
-        result = dict(row)
+        result = self._normalize_definition_row(row)
         await self._audit(
             DEFINITION_CREATE, org_id, "mcp_server", str(result["id"]),
             user_id=created_by, notes=f"Created MCP server '{name}'",
@@ -964,7 +995,7 @@ class DefinitionRepository:
         """
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(query, server_id, org_id, approved_by)
-        result = dict(row) if row else None
+        result = self._normalize_definition_row(row)
         if result:
             await self._audit(
                 DEFINITION_APPROVE, org_id, "mcp_server", server_id,
@@ -981,7 +1012,7 @@ class DefinitionRepository:
         """
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(query, server_id, org_id, approved_by)
-        result = dict(row) if row else None
+        result = self._normalize_definition_row(row)
         if result:
             await self._audit(
                 DEFINITION_REJECT, org_id, "mcp_server", server_id,
@@ -1258,7 +1289,7 @@ class DefinitionRepository:
         """
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(query, *params)
-        result = dict(row) if row else None
+        result = self._normalize_definition_row(row)
         if result:
             await self._audit(
                 DEFINITION_UPDATE, org_id, "skill", skill_id,
@@ -1303,7 +1334,7 @@ class DefinitionRepository:
         """
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(query, *params)
-        result = dict(row) if row else None
+        result = self._normalize_definition_row(row)
         if result:
             all_keys = (
                 "name", "description", "server_type", "url",
@@ -1354,7 +1385,7 @@ class DefinitionRepository:
                 server_id,
                 org_id,
             )
-        result = dict(row) if row else None
+        result = self._normalize_definition_row(row)
         if result:
             await self._audit(
                 DEFINITION_UPDATE, org_id, "mcp_server", server_id,
@@ -1439,7 +1470,7 @@ class DefinitionRepository:
             total_count = count_row["total"] if count_row else 0
             rows = await conn.fetch(query, *params_with_page)
         return {
-            "items": [dict(r) for r in rows],
+            "items": [self._normalize_definition_row(r) for r in rows],
             "total_count": total_count,
             "offset": offset,
             "limit": limit,
@@ -1480,7 +1511,7 @@ class DefinitionRepository:
             total_count = count_row["total"] if count_row else 0
             rows = await conn.fetch(query, *params_with_page)
         return {
-            "items": [dict(r) for r in rows],
+            "items": [self._normalize_definition_row(r) for r in rows],
             "total_count": total_count,
             "offset": offset,
             "limit": limit,
@@ -1521,7 +1552,7 @@ class DefinitionRepository:
             total_count = count_row["total"] if count_row else 0
             rows = await conn.fetch(query, *params_with_page)
         return {
-            "items": [dict(r) for r in rows],
+            "items": [self._normalize_definition_row(r) for r in rows],
             "total_count": total_count,
             "offset": offset,
             "limit": limit,

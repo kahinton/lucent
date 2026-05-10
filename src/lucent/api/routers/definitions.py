@@ -63,6 +63,8 @@ class CreateAgent(BaseModel):
     content: str
     status: Literal["proposed", "active", "rejected"] = "proposed"
     scope: Literal["instance", "built-in"] = "instance"
+    proposal_reason: str | None = None
+    proposal_evidence: dict | None = None
 
 
 class CreateSkill(BaseModel):
@@ -71,6 +73,8 @@ class CreateSkill(BaseModel):
     content: str
     status: Literal["proposed", "active", "rejected"] = "proposed"
     scope: Literal["instance", "built-in"] = "instance"
+    proposal_reason: str | None = None
+    proposal_evidence: dict | None = None
 
 
 class CreateMCPServer(BaseModel):
@@ -82,6 +86,8 @@ class CreateMCPServer(BaseModel):
     args: list[str] | None = None
     headers: dict | None = None
     env_vars: dict[str, str] | None = None
+    proposal_reason: str | None = None
+    proposal_evidence: dict | None = None
 
 
 class CreateHook(BaseModel):
@@ -93,6 +99,8 @@ class CreateHook(BaseModel):
     config: dict | None = None
     status: Literal["proposed", "active", "rejected"] = "proposed"
     scope: Literal["instance", "built-in"] = "instance"
+    proposal_reason: str | None = None
+    proposal_evidence: dict | None = None
 
 
 class UpdateHook(BaseModel):
@@ -175,6 +183,8 @@ async def create_agent(body: CreateAgent, user: AuthenticatedUser):
         status=body.status,
         scope=body.scope,
         owner_user_id=str(user.id),
+        proposal_reason=body.proposal_reason,
+        proposal_evidence=body.proposal_evidence,
     )
     security_flags = scan_content_for_injection(body.content or "")
     if body.description:
@@ -398,6 +408,8 @@ async def create_skill(body: CreateSkill, user: AuthenticatedUser):
         status=body.status,
         scope=body.scope,
         owner_user_id=str(user.id),
+        proposal_reason=body.proposal_reason,
+        proposal_evidence=body.proposal_evidence,
     )
     security_flags = scan_content_for_injection(body.content or "")
     if body.description:
@@ -496,6 +508,8 @@ async def create_mcp_server(body: CreateMCPServer, user: AuthenticatedUser):
         args=body.args,
         env_vars=body.env_vars,
         owner_user_id=str(user.id),
+        proposal_reason=body.proposal_reason,
+        proposal_evidence=body.proposal_evidence,
     )
 
 
@@ -650,6 +664,8 @@ async def create_hook(body: CreateHook, user: AuthenticatedUser):
         status=body.status,
         scope=body.scope,
         owner_user_id=str(user.id),
+        proposal_reason=body.proposal_reason,
+        proposal_evidence=body.proposal_evidence,
     )
     if security_flags:
         logger.warning("Hook definition '%s' flagged: %s", body.name, security_flags)
