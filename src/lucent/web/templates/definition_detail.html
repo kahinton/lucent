@@ -248,7 +248,8 @@
         <div><dt class="text-xs font-medium text-gray-400 uppercase">Server Type</dt><dd class="mt-1 text-sm text-gray-900 font-mono">{{ definition.server_type }}</dd></div>
         {% if definition.url %}<div><dt class="text-xs font-medium text-gray-400 uppercase">URL</dt><dd class="mt-1 text-sm text-gray-900 font-mono break-all">{{ definition.url }}</dd></div>{% endif %}
         {% if definition.command %}<div><dt class="text-xs font-medium text-gray-400 uppercase">Command</dt><dd class="mt-1 text-sm text-gray-900 font-mono">{{ definition.command }}</dd></div>{% endif %}
-        {% if definition.args %}<div><dt class="text-xs font-medium text-gray-400 uppercase">Args</dt><dd class="mt-1 text-sm text-gray-900 font-mono">{{ definition.args }}</dd></div>{% endif %}
+        {% if definition.args %}<div class="sm:col-span-2"><dt class="text-xs font-medium text-gray-400 uppercase">Args</dt><dd class="mt-1"><pre class="text-xs text-gray-700 bg-gray-50 rounded-md p-3 overflow-x-auto">{{ definition.args | tojson(indent=2) if definition.args is sequence and definition.args is not string else definition.args }}</pre></dd></div>{% endif %}
+        {% if definition.env_vars %}<div class="sm:col-span-2"><dt class="text-xs font-medium text-gray-400 uppercase">Environment</dt><dd class="mt-1"><pre class="text-xs text-gray-700 bg-gray-50 rounded-md p-3 overflow-x-auto">{{ definition.env_vars | tojson(indent=2) if definition.env_vars is mapping else definition.env_vars }}</pre></dd></div>{% endif %}
         {% if definition.headers %}
         <div class="sm:col-span-2"><dt class="text-xs font-medium text-gray-400 uppercase">Headers</dt><dd class="mt-1"><pre class="text-xs text-gray-700 bg-gray-50 rounded-md p-3 overflow-x-auto">{{ definition.headers | tojson(indent=2) if definition.headers is mapping else definition.headers }}</pre></dd></div>
         {% endif %}
@@ -259,8 +260,8 @@
     <div class="flex items-center justify-between mb-3">
         <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider">Discover Tools</h2>
         <div class="flex gap-2" id="discover-actions-top">
-            <button onclick="discoverTools(false)" id="discover-btn" class="px-4 py-2 text-sm bg-purple-50 text-purple-700 rounded-md hover:bg-purple-100 font-medium">Discover Tools</button>
-            <button onclick="discoverTools(true)" id="refresh-btn" class="hidden px-3 py-2 text-sm bg-gray-100 text-gray-700 rounded-md hover:bg-gray-200 font-medium">Refresh</button>
+            <button type="button" data-discover-tools="false" id="discover-btn" class="px-4 py-2 text-sm bg-purple-50 text-purple-700 rounded-md hover:bg-purple-100 font-medium">Discover Tools</button>
+            <button type="button" data-discover-tools="true" id="refresh-btn" class="hidden px-3 py-2 text-sm bg-gray-100 text-gray-700 rounded-md hover:bg-gray-200 font-medium">Refresh</button>
         </div>
     </div>
     <div id="discover-loading" class="hidden py-6 text-center">
@@ -270,16 +271,16 @@
     <div id="discover-error" class="hidden py-4">
         <div class="bg-red-50 border border-red-200 rounded-md p-4">
             <p class="text-sm text-red-700" id="discover-error-msg"></p>
-            <button onclick="discoverTools(true)" class="mt-2 px-3 py-1.5 text-sm bg-red-100 text-red-700 rounded-md hover:bg-red-200 font-medium">Retry</button>
+            <button type="button" data-discover-tools="true" class="mt-2 px-3 py-1.5 text-sm bg-red-100 text-red-700 rounded-md hover:bg-red-200 font-medium">Retry</button>
         </div>
     </div>
     <div id="discover-results" class="hidden">
         <div class="flex items-center justify-between mb-3">
             <span class="text-sm text-gray-500" id="discover-count"></span>
             <div class="flex gap-2">
-                <button onclick="selectAllTools()" class="text-xs text-purple-600 hover:text-purple-800 px-2 py-1 border border-purple-200 rounded hover:bg-purple-50">Select All</button>
-                <button onclick="clearAllTools()" class="text-xs text-gray-500 hover:text-gray-700 px-2 py-1 border border-gray-200 rounded hover:bg-gray-50">Clear All</button>
-                <button onclick="copySelectedTools()" id="copy-tools-btn" class="text-xs text-purple-600 hover:text-purple-800 px-2 py-1 border border-purple-200 rounded hover:bg-purple-50">Copy Selected</button>
+                <button type="button" data-select-all-discovered-tools class="text-xs text-purple-600 hover:text-purple-800 px-2 py-1 border border-purple-200 rounded hover:bg-purple-50">Select All</button>
+                <button type="button" data-clear-all-discovered-tools class="text-xs text-gray-500 hover:text-gray-700 px-2 py-1 border border-gray-200 rounded hover:bg-gray-50">Clear All</button>
+                <button type="button" data-copy-selected-tools id="copy-tools-btn" class="text-xs text-purple-600 hover:text-purple-800 px-2 py-1 border border-purple-200 rounded hover:bg-purple-50">Copy Selected</button>
             </div>
         </div>
         <div id="discover-tools-list" class="space-y-1 max-h-96 overflow-y-auto"></div>
@@ -361,11 +362,13 @@
                 <div><label class="block text-sm font-medium text-gray-700 mb-1">Description</label><input name="description" value="{{ definition.description or '' }}" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"></div>
                 {% if definition_type == 'mcp-server' %}
                 <div class="grid grid-cols-2 gap-4">
-                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Server Type</label><select name="server_type" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"><option value="http" {% if definition.server_type == 'http' %}selected{% endif %}>HTTP</option><option value="stdio" {% if definition.server_type == 'stdio' %}selected{% endif %}>stdio</option></select></div>
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Server Type</label><select name="server_type" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"><option value="http" {% if definition.server_type == 'http' %}selected{% endif %}>HTTP</option><option value="stdio" {% if definition.server_type == 'stdio' %}selected{% endif %}>stdio</option><option value="copilot_github" {% if definition.server_type == 'copilot_github' %}selected{% endif %}>Copilot bundled GitHub</option></select></div>
                     <div><label class="block text-sm font-medium text-gray-700 mb-1">URL</label><input name="url" value="{{ definition.url or '' }}" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono"></div>
                 </div>
                 <div><label class="block text-sm font-medium text-gray-700 mb-1">Command</label><input name="command" value="{{ definition.command or '' }}" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono"></div>
-                <div><label class="block text-sm font-medium text-gray-700 mb-1">Headers (JSON)</label><textarea name="headers" rows="3" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono">{{ definition.headers | tojson(indent=2) if definition.headers is mapping else (definition.headers or '{}') }}</textarea></div>
+                <div><label class="block text-sm font-medium text-gray-700 mb-1">Args <span class="text-xs text-gray-400 font-normal">(one per line)</span></label><textarea name="args" rows="6" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono" placeholder="run&#10;-i&#10;--rm">{{ definition.args_text or '' }}</textarea></div>
+                <div><label class="block text-sm font-medium text-gray-700 mb-1">Environment <span class="text-xs text-gray-400 font-normal">(KEY=VALUE per line)</span></label><textarea name="env_vars" rows="5" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono" placeholder="GITHUB_PERSONAL_ACCESS_TOKEN=credential://github/access_token">{{ definition.env_vars_text or '' }}</textarea></div>
+                <div><label class="block text-sm font-medium text-gray-700 mb-1">Headers (JSON)</label><textarea name="headers" rows="3" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono">{{ definition.headers_text or '{}' }}</textarea></div>
                 {% elif definition_type == 'hook' %}
                 <div class="grid grid-cols-2 gap-4">
                     <div><label class="block text-sm font-medium text-gray-700 mb-1">Trigger</label><select name="trigger_event" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"><option value="before_tool_call" {% if definition.trigger_event == 'before_tool_call' %}selected{% endif %}>before_tool_call — before a tool runs</option><option value="after_tool_call" {% if definition.trigger_event == 'after_tool_call' %}selected{% endif %}>after_tool_call — after a tool returns</option><option value="before_model_call" {% if definition.trigger_event == 'before_model_call' %}selected{% endif %}>before_model_call — before the model is called</option><option value="after_model_call" {% if definition.trigger_event == 'after_model_call' %}selected{% endif %}>after_model_call — after the model responds</option><option value="tool_call" {% if definition.trigger_event == 'tool_call' %}selected{% endif %}>tool_call — legacy before-tool alias</option></select></div>
@@ -637,6 +640,23 @@
             setTimeout(function() { btn.textContent = orig; }, 1500);
         });
     }
+
+    document.addEventListener('DOMContentLoaded', function() {
+        document.querySelectorAll('[data-discover-tools]').forEach(function(btn) {
+            btn.addEventListener('click', function() {
+                discoverTools(btn.dataset.discoverTools === 'true');
+            });
+        });
+        document.querySelectorAll('[data-select-all-discovered-tools]').forEach(function(btn) {
+            btn.addEventListener('click', selectAllTools);
+        });
+        document.querySelectorAll('[data-clear-all-discovered-tools]').forEach(function(btn) {
+            btn.addEventListener('click', clearAllTools);
+        });
+        document.querySelectorAll('[data-copy-selected-tools]').forEach(function(btn) {
+            btn.addEventListener('click', copySelectedTools);
+        });
+    });
 
     {% endif %}
 </script>

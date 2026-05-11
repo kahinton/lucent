@@ -186,6 +186,7 @@ class CopilotEngine(LLMEngine):
         system_message: str,
         mcp_config: dict | None,
         reasoning_effort: str | None = None,
+        enable_config_discovery: bool = False,
     ) -> dict:
         """Build create_session kwargs."""
         kwargs: dict[str, Any] = {
@@ -194,6 +195,8 @@ class CopilotEngine(LLMEngine):
         }
         if reasoning_effort:
             kwargs["reasoning_effort"] = reasoning_effort
+        if enable_config_discovery:
+            kwargs["enable_config_discovery"] = True
         if _PermissionHandler is not None:
             kwargs["on_permission_request"] = _PermissionHandler.approve_all
         if _SystemMessageReplaceConfig is not None:
@@ -251,6 +254,7 @@ class CopilotEngine(LLMEngine):
         message_history: list[dict[str, Any]] | None = None,
         hooks: list[dict[str, Any]] | None = None,
         audit_context: dict[str, Any] | None = None,
+        enable_config_discovery: bool = False,
     ) -> str | None:
         """Run a blocking session using send_and_wait (chat pattern)."""
         if not _ensure_sdk():
@@ -269,6 +273,7 @@ class CopilotEngine(LLMEngine):
                 system_message,
                 mcp_config,
                 reasoning_effort=reasoning_effort,
+                enable_config_discovery=enable_config_discovery,
             )
             session = await self._open_session(
                 client,
@@ -327,6 +332,7 @@ class CopilotEngine(LLMEngine):
         message_history: list[dict[str, Any]] | None = None,
         hooks: list[dict[str, Any]] | None = None,
         audit_context: dict[str, Any] | None = None,
+        enable_config_discovery: bool = False,
     ) -> str | None:
         """Run a streaming session using send + event callbacks (daemon pattern).
 
@@ -350,6 +356,7 @@ class CopilotEngine(LLMEngine):
                 system_message,
                 mcp_config,
                 reasoning_effort=reasoning_effort,
+                enable_config_discovery=enable_config_discovery,
             )
             session = await self._open_session(
                 client,

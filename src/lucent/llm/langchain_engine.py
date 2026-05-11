@@ -232,6 +232,7 @@ class LangChainEngine(LLMEngine):
         message_history: list[dict[str, Any]] | None = None,
         hooks: list[dict[str, Any]] | None = None,
         audit_context: dict[str, Any] | None = None,
+        enable_config_discovery: bool = False,
     ) -> str | None:
         """Run a blocking session (chat pattern)."""
         try:
@@ -266,6 +267,7 @@ class LangChainEngine(LLMEngine):
         message_history: list[dict[str, Any]] | None = None,
         hooks: list[dict[str, Any]] | None = None,
         audit_context: dict[str, Any] | None = None,
+        enable_config_discovery: bool = False,
     ) -> str | None:
         """Run a streaming session with event callbacks (daemon pattern)."""
         try:

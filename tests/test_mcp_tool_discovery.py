@@ -582,6 +582,32 @@ class TestWebRoutesAndUx:
         resp = await web_client.get(f"/definitions/mcp-servers/{mcpd_http_server['id']}")
         assert resp.status_code == 200
         assert "Discover Tools" in resp.text
+        assert 'value="copilot_github"' in resp.text
+
+    async def test_copilot_builtin_github_discovery_returns_known_tools(
+        self, web_client, mcpd_repo, mcpd_org_user
+    ):
+        org, user = mcpd_org_user
+        server = await mcpd_repo.create_mcp_server(
+            name=f"builtin-github-{uuid4()}",
+            description="Bundled GitHub MCP marker",
+            server_type="copilot_github",
+            url=None,
+            org_id=str(org["id"]),
+            created_by=str(user["id"]),
+            owner_user_id=str(user["id"]),
+        )
+
+        resp = await web_client.get(f"/definitions/mcp-servers/{server['id']}/discover-tools?refresh=true")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        names = {tool["name"] for tool in body["tools"]}
+        assert body["error"] is None
+        assert "github-mcp-server-get_file_contents" in names
+        assert "github-mcp-server-search_repositories" in names
+        assert "github-mcp-server-list_branches" in names
+        assert "github-mcp-server-create_repository" not in names
 
     async def test_agent_detail_page_renders_discovered_tools(
         self, web_client, mcpd_repo, mcpd_org_user, mcpd_http_server

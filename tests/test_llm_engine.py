@@ -83,6 +83,19 @@ class TestCopilotEngine:
         engine = CopilotEngine()
         await engine.cleanup()  # Should not raise
 
+    def test_enable_config_discovery_session_kwarg(self):
+        from lucent.llm.copilot_engine import CopilotEngine
+
+        engine = CopilotEngine()
+        kwargs = engine._make_session_kwargs(
+            "claude-opus-4.7",
+            "system",
+            {},
+            enable_config_discovery=True,
+        )
+
+        assert kwargs["enable_config_discovery"] is True
+
 
 class TestLangChainEngine:
     def test_name(self):
@@ -351,6 +364,30 @@ class TestModelRegistry:
         )
 
         assert selection.model_id == "deep-reasoner"
+        assert selection.source == "specialized"
+
+    def test_planning_selection_can_override_fast_default_for_complex_work(self, monkeypatch):
+        from lucent import model_registry
+        from lucent.model_registry import ModelInfo, select_model_for_task
+
+        models = [
+            ModelInfo(id="deep-reasoner", provider="x", name="Deep", category="reasoning"),
+            ModelInfo(id="cheap-fast", provider="x", name="Cheap", category="fast"),
+        ]
+        monkeypatch.setattr(model_registry, "_db_models", models)
+        monkeypatch.setattr(model_registry, "_db_enabled_ids", {m.id for m in models})
+        monkeypatch.setattr(model_registry, "_MODEL_BY_ID", {m.id: m for m in models})
+
+        selection = select_model_for_task(
+            agent_type="planning",
+            title="Build proof-of-concept business planning repo",
+            description="Create a multi-step strategy, synthesis, roadmap, and risk plan.",
+            require_tools=True,
+        )
+
+        assert selection.default_model_id == "cheap-fast"
+        assert selection.model_id == "deep-reasoner"
+        assert selection.requested_category == "reasoning"
         assert selection.source == "specialized"
 
     def test_task_selection_uses_fast_for_memory_when_available(self, monkeypatch):

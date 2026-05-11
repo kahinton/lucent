@@ -976,12 +976,20 @@ class TestMcpUpdate:
                     "description": "New",
                     "server_type": "http",
                     "url": "http://localhost:7777",
+                    "headers": '{"Authorization": "Bearer test"}',
+                    "args": "--stdio\n--verbose",
+                    "env_vars": "TOKEN=credential://github/access_token",
                 },
             ),
         )
         repo = DefinitionRepository(db_pool)
         server = await repo.get_mcp_server(str(mcp_def["id"]), str(org["id"]))
         assert server["name"] == "Renamed MCP"
+        assert server["server_type"] == "http"
+        assert server["url"] == "http://localhost:7777"
+        assert server["headers"] == {"Authorization": "Bearer test"}
+        assert server["args"] == ["--stdio", "--verbose"]
+        assert server["env_vars"] == {"TOKEN": "credential://github/access_token"}
 
 
 class TestMcpDelete:

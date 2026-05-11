@@ -116,6 +116,44 @@ def _parse_json_object(value: str, default: dict | None = None) -> dict:
     return parsed if isinstance(parsed, dict) else default
 
 
+def _json_text(value, default) -> str:
+    """Render a JSON-ish value as pretty text for edit forms."""
+    if value in (None, ""):
+        value = default
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return value
+    return json.dumps(value, indent=2) if isinstance(value, (dict, list)) else str(value)
+
+
+def _args_text(value) -> str:
+    if value in (None, ""):
+        return ""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return value
+    if isinstance(value, list):
+        return "\n".join(str(item) for item in value)
+    return str(value)
+
+
+def _env_vars_text(value) -> str:
+    if value in (None, ""):
+        return ""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return value
+    if isinstance(value, dict):
+        return "\n".join(f"{key}={val}" for key, val in value.items())
+    return str(value)
+
+
 # =============================================================================
 # Definitions Management
 # =============================================================================
@@ -357,6 +395,9 @@ async def mcp_server_detail_page(request: Request, server_id: str):
         raise HTTPException(status_code=404, detail="MCP server not found")
     user_map, group_map = await _resolve_owner_maps(pool, [server])
     server = _attach_owner_names([server], user_map, group_map)[0]
+    server["args_text"] = _args_text(server.get("args"))
+    server["headers_text"] = _json_text(server.get("headers"), {})
+    server["env_vars_text"] = _env_vars_text(server.get("env_vars"))
     user_groups = await _get_user_groups(pool, str(user.id), org_id)
 
     return templates.TemplateResponse(
@@ -757,15 +798,20 @@ async def create_mcp_web(request: Request):
         form, user, pool
     )
 
+    server_type = str(form.get("server_type", "stdio")).strip() or "stdio"
+    url = str(form.get("url", "")).strip() or None
+    headers = _parse_json_object(str(form.get("headers", "")), {})
+
     server = await repo.create_mcp_server(
         name=str(form.get("name", "")).strip(),
         org_id=org_id,
         description=str(form.get("description", "")).strip(),
-        server_type="stdio",
-        url=None,
+        server_type=server_type,
+        url=url,
         created_by=str(user.id),
         command=command,
         args=args,
+        headers=headers,
         env_vars=env_vars,
         owner_user_id=owner_user_id,
         owner_group_id=owner_group_id,
@@ -828,6 +874,9 @@ async def update_mcp_web(request: Request, server_id: str):
     args_raw = str(form.get("args", "")).strip()
     args = [a.strip() for a in args_raw.split("\n") if a.strip()] if args_raw else []
     env_vars = _parse_env_vars(str(form.get("env_vars", "")))
+    headers = _parse_json_object(str(form.get("headers", "")), {})
+    server_type = str(form.get("server_type", "stdio")).strip() or "stdio"
+    url = str(form.get("url", "")).strip() or None
     owner_kwargs = {}
     if "owner_scope" in form:
         owner_user_id, owner_group_id, _shared_with_org = await _resolve_owner_scope(
@@ -840,8 +889,11 @@ async def update_mcp_web(request: Request, server_id: str):
         org_id,
         name=str(form.get("name", "")).strip(),
         description=str(form.get("description", "")).strip(),
+        server_type=server_type,
+        url=url,
         command=command,
         args=args,
+        headers=headers,
         env_vars=env_vars,
         **owner_kwargs,
     )

@@ -117,6 +117,38 @@ _MEMORY_CAPTURE_TOOLS = frozenset({
     "update_memory",
 })
 
+_NON_OPERATIONAL_TOOL_NAMES = frozenset({
+    "report_intent",
+})
+
+
+def _normalize_tool_name(tool_name: str | None) -> str | None:
+    """Normalize Copilot SDK MCP tool names to Lucent tool names."""
+    if not tool_name:
+        return None
+    if tool_name.startswith("memory-server-"):
+        return tool_name[len("memory-server-"):]
+    return tool_name
+
+
+def _is_memory_server_tool(tool_name: str | None) -> bool:
+    """Return True for tools served by Lucent's memory-server MCP."""
+    normalized = _normalize_tool_name(tool_name)
+    return bool(
+        tool_name
+        and (
+            tool_name.startswith("memory-server-")
+            or normalized in _MEMORY_TOOL_NAMES
+            or normalized in _TASK_MEMORY_SERVER_TOOLS
+        )
+    )
+
+
+def _is_operational_tool_call(entry: dict) -> bool:
+    """Return True when a tool event represents real tool execution."""
+    tool = _normalize_tool_name(entry.get("tool") or entry.get("raw_tool"))
+    return bool(tool and tool not in _NON_OPERATIONAL_TOOL_NAMES)
+
 _TASK_MEMORY_SERVER_TOOLS = sorted(
     {
         "create_memory",
@@ -147,6 +179,7 @@ def _summarize_memory_tool_params(tool_name: str, arguments: dict) -> str:
     Extracts operationally meaningful fields for each tool type while
     omitting large content bodies. Designed for structured log lines.
     """
+    tool_name = _normalize_tool_name(tool_name) or tool_name
     parts: list[str] = []
 
     if tool_name in ("search_memories", "search_memories_full"):
@@ -213,7 +246,7 @@ def _build_mcp_tool_summary(tracker: list[dict]) -> str:
 
     tool_counts: dict[str, int] = {}
     for entry in tracker:
-        tool = entry["tool"]
+        tool = _normalize_tool_name(entry["tool"]) or entry["tool"]
         tool_counts[tool] = tool_counts.get(tool, 0) + 1
 
     search_count = sum(
@@ -1304,6 +1337,10 @@ class RequestAPI:
                 )
                 if resp.status_code in (200, 201):
                     return resp.json()
+                log(
+                    f"API create_task returned {resp.status_code}: {resp.text[:300]}",
+                    "WARN",
+                )
         except Exception as e:
             log(f"API create_task failed: {e}", "WARN")
         return None
@@ -2348,6 +2385,7 @@ class LucentDaemon:
 
         # MCP memory-tool usage tracking per session (for observability)
         self._session_mcp_trackers: dict[str, list[dict]] = {}
+        self._session_tool_trackers: dict[str, list[dict]] = {}
 
         # OTEL instrumentation — create tracer and metrics (no-ops when unavailable)
         self._init_telemetry_instruments()
@@ -3033,8 +3071,17 @@ class LucentDaemon:
                        r.target_paths,
                        r.priority,
                        r.source,
-                       r.approval_status
+                                             r.approval_status,
+                                             r.goal_memory_id::text AS goal_memory_id,
+                                             r.goal_milestone_index,
+                                             CASE
+                                                 WHEN r.goal_memory_id IS NOT NULL
+                                                            AND r.goal_milestone_index IS NOT NULL
+                                                 THEN gm.metadata->'milestones'->(r.goal_milestone_index - 1)->>'description'
+                                                 ELSE NULL
+                                             END AS goal_milestone_description
                 FROM requests r
+                                LEFT JOIN memories gm ON gm.id = r.goal_memory_id
                 WHERE r.organization_id = $1::uuid
                   AND r.approval_status IN (
                       'pending_approval', 'auto_approved', 'approved'
@@ -3066,12 +3113,25 @@ class LucentDaemon:
         target_repo = request.get("target_repo") or ""
         target_paths = request.get("target_paths") or []
         priority = request.get("priority") or "medium"
+        milestone_index = request.get("goal_milestone_index")
+        milestone_description = (request.get("goal_milestone_description") or "").strip()
 
         target_block = ""
         if target_repo:
             target_block += f"\n- target_repo: {target_repo}"
         if target_paths:
             target_block += f"\n- target_paths: {target_paths}"
+
+        milestone_block = ""
+        if milestone_index and milestone_description:
+            milestone_block = (
+                "\n\nSTRUCTURED GOAL SCOPE:\n"
+                f"This request advances ONLY goal milestone {milestone_index}: "
+                f"{milestone_description}\n"
+                "Create tasks only for this milestone. Do not decompose the whole goal, "
+                "do not create tasks for later milestones, and ignore any parent-goal "
+                "description sections that are unrelated to this milestone."
+            )
 
         return (
             "You are running a focused decomposition session. Your ONLY job is to "
@@ -3081,6 +3141,7 @@ class LucentDaemon:
             f"TITLE: {title}\n"
             f"PRIORITY: {priority}\n"
             f"{target_block}\n\n"
+            f"{milestone_block}\n\n"
             f"DESCRIPTION:\n{description}\n\n"
             "Procedure:\n"
             "1. Call list_available_models() once to see enabled models and the "
@@ -3105,6 +3166,191 @@ class LucentDaemon:
             "not start sub-agents. Just call create_task one or more times for the "
             "above request, then return your summary."
         )
+
+    @staticmethod
+    def _extract_suggested_breakdown_items(description: str) -> list[str]:
+        """Extract explicit numbered items from a request's suggested breakdown."""
+        lines = (description or "").splitlines()
+        start_idx: int | None = None
+        for idx, line in enumerate(lines):
+            if "suggested task breakdown" in line.strip().lower():
+                start_idx = idx + 1
+                break
+        if start_idx is None:
+            return []
+
+        items: list[str] = []
+        for line in lines[start_idx:]:
+            stripped = line.strip()
+            if not stripped:
+                if items:
+                    continue
+                continue
+            if items and re.match(r"^[A-Z][A-Za-z /-]{2,}:\s*$", stripped):
+                break
+            match = re.match(r"^\d+[.)]\s+(.+)$", stripped)
+            if match:
+                items.append(match.group(1).strip())
+        return items
+
+    @staticmethod
+    def _strip_suggested_breakdown_section(description: str) -> str:
+        """Remove a suggested full-goal numbered breakdown from request details."""
+        lines = (description or "").splitlines()
+        out: list[str] = []
+        skipping = False
+        for line in lines:
+            stripped = line.strip()
+            if "suggested task breakdown" in stripped.lower():
+                skipping = True
+                continue
+            if skipping:
+                if not stripped:
+                    continue
+                if re.match(r"^\d+[.)]\s+", stripped):
+                    continue
+                skipping = False
+            out.append(line)
+        return "\n".join(out).strip()
+
+    @staticmethod
+    def _fallback_agent_type_for_decomposition_item(item: str) -> str:
+        """Choose a conservative built-in agent type for deterministic fallback tasks."""
+        text = item.lower()
+        if any(token in text for token in ("repo", "repository", "readme", "docs", "file")):
+            return "code"
+        if any(
+            token in text
+            for token in (
+                "market",
+                "research",
+                "customer",
+                "competitor",
+                "pricing",
+                "formation",
+                "compliance",
+                "zoning",
+                "licensing",
+            )
+        ):
+            return "research"
+        return "planning"
+
+    @staticmethod
+    def _fallback_task_title(item: str) -> str:
+        """Turn a numbered breakdown item into a task title."""
+        title = re.split(r"\s+[—-]\s+|\.\s+", item.strip(), maxsplit=1)[0]
+        title = title.strip(" .:-") or item.strip()
+        return title[:120]
+
+    def _build_fallback_decomposition_tasks(self, request: dict[str, Any]) -> list[dict[str, Any]]:
+        """Build deterministic fallback task specs when the planner narrates only."""
+        description = request.get("description") or ""
+        milestone_index = request.get("goal_milestone_index")
+        milestone_description = (request.get("goal_milestone_description") or "").strip()
+        if milestone_index and milestone_description:
+            items = [milestone_description]
+        else:
+            items = self._extract_suggested_breakdown_items(description)
+        if not items:
+            return [
+                {
+                    "title": f"Plan and decompose: {request.get('title', 'Request')[:80]}",
+                    "description": (
+                        "The automated decomposition session returned a narrative response "
+                        "without creating tasks. Review the parent request, produce a visible "
+                        "task breakdown, and execute only planning/documentation-safe next steps."
+                    ),
+                    "agent_type": "planning",
+                    "sequence_order": 0,
+                }
+            ]
+
+        target_repo = request.get("target_repo") or ""
+        target_paths = request.get("target_paths") or []
+        raw_request_details = (request.get("description") or "").strip()
+        request_details = (
+            self._strip_suggested_breakdown_section(raw_request_details)
+            if milestone_index
+            else raw_request_details
+        )
+        target_context = ""
+        if target_repo or target_paths:
+            target_context = (
+                f"\n\nTarget repo: {target_repo or 'unspecified'}"
+                f"\nTarget paths: {target_paths or []}"
+            )
+        request_context = ""
+        if milestone_index and request_details:
+            request_context = f"\n\nMilestone-scoped request details:\n{request_details}"
+        boundary = (
+            "\n\nThis task was created by deterministic daemon fallback because "
+            "the planner session returned text instead of creating tasks. "
+            "Respect the parent request boundaries and avoid real-world business "
+            "filings, purchases, vendor/customer contact, or binding commitments."
+        )
+        return [
+            {
+                "title": self._fallback_task_title(item),
+                "description": (
+                    f"Fallback decomposition item: {item}"
+                    f"{target_context}{request_context}{boundary}"
+                ),
+                "agent_type": self._fallback_agent_type_for_decomposition_item(item),
+                "sequence_order": idx,
+            }
+            for idx, item in enumerate(items)
+        ]
+
+    async def _create_fallback_decomposition_tasks(
+        self,
+        request: dict[str, Any],
+        session_result: str | None,
+        tool_events: list[dict],
+    ) -> int:
+        """Create deterministic tasks when model-driven decomposition produces none."""
+        request_id = request.get("request_id", "")
+        if not request_id:
+            return 0
+        specs = self._build_fallback_decomposition_tasks(request)
+        created = 0
+        for spec in specs:
+            task = await RequestAPI.create_task(
+                request_id,
+                spec["title"],
+                agent_type=spec["agent_type"],
+                description=spec["description"],
+                priority=request.get("priority") or "medium",
+                sequence_order=spec["sequence_order"],
+            )
+            if not task and spec["agent_type"] != "planning":
+                task = await RequestAPI.create_task(
+                    request_id,
+                    spec["title"],
+                    agent_type="planning",
+                    description=spec["description"],
+                    priority=request.get("priority") or "medium",
+                    sequence_order=spec["sequence_order"],
+                )
+            if task:
+                created += 1
+
+        excerpt = _redact_secrets((session_result or "")[:2000])
+        log(
+            "Decomp backfill fallback "
+            + json.dumps(
+                {
+                    "request_id": request_id,
+                    "fallback_tasks_created": created,
+                    "planned_fallback_tasks": len(specs),
+                    "tool_calls": [e.get("tool") for e in tool_events],
+                    "response_excerpt": excerpt,
+                },
+                sort_keys=True,
+            ),
+            "WARN" if created == 0 else "INFO",
+        )
+        return created
 
     def request_decomposition_backfill_has_work(
         self,
@@ -3307,17 +3553,40 @@ class LucentDaemon:
                     }
 
                     prompt = self._build_decomposition_prompt(req)
+                    decomposition_model, decomposition_model_reason = _select_model_for_task(
+                        agent_type="planning",
+                        title=req.get("title"),
+                        description=req.get("description"),
+                    )
+                    log(
+                        f"Decomp backfill: request {request_id[:8]} model selection: "
+                        f"{decomposition_model} ({decomposition_model_reason})",
+                        "INFO",
+                    )
+                    session_name = f"decompose-{request_id[:8]}-{owner_user_id[:8]}"
 
                     session_result = await self.run_session(
-                        f"decompose-{request_id[:8]}-{owner_user_id[:8]}",
+                        session_name,
                         system_message,
                         prompt,
+                        model=decomposition_model,
                         mcp_config_override=scoped_mcp,
                     )
                     if not session_result:
                         errors.append("session produced no output")
 
                     tasks_created = await self._count_tasks_for_request(request_id)
+                    tool_events = self._session_tool_trackers.pop(session_name, [])
+                    if session_result and tasks_created == 0:
+                        fallback_created = await self._create_fallback_decomposition_tasks(
+                            req,
+                            session_result,
+                            tool_events,
+                        )
+                        if fallback_created > 0:
+                            tasks_created = await self._count_tasks_for_request(request_id)
+                        else:
+                            errors.append("session produced output but no tasks were created")
 
                     # Defensive post-session check: if the user cancelled or
                     # the request otherwise reached terminal state during the
@@ -3494,6 +3763,7 @@ class LucentDaemon:
         model: str | None = None,
         reasoning_effort: str | None = None,
         mcp_config_override: dict | None = None,
+        enable_config_discovery: bool = False,
         hooks: list[dict] | None = None,
         audit_context: dict | None = None,
     ) -> str | None:
@@ -3542,6 +3812,7 @@ class LucentDaemon:
                     inner_kwargs = {
                         "model": selected_model,
                         "mcp_config_override": mcp_config_override,
+                        "enable_config_discovery": enable_config_discovery,
                     }
                     if hooks is not None:
                         inner_kwargs["hooks"] = hooks
@@ -3628,6 +3899,7 @@ class LucentDaemon:
         model: str | None = None,
         reasoning_effort: str | None = None,
         mcp_config_override: dict | None = None,
+        enable_config_discovery: bool = False,
         hooks: list[dict] | None = None,
         audit_context: dict | None = None,
     ) -> str | None:
@@ -3648,6 +3920,7 @@ class LucentDaemon:
                 selected_model,
                 reasoning_effort=reasoning_effort,
                 mcp_config_override=effective_mcp,
+                enable_config_discovery=enable_config_discovery,
                 hooks=hooks,
                 audit_context=audit_context,
             )
@@ -3659,6 +3932,7 @@ class LucentDaemon:
                 selected_model,
                 reasoning_effort=reasoning_effort,
                 mcp_config_override=mcp_config_override,
+                enable_config_discovery=enable_config_discovery,
             )
         else:
             log("No LLM engine available — install lucent or github-copilot-sdk", "ERROR")
@@ -3688,6 +3962,7 @@ class LucentDaemon:
         model: str,
         reasoning_effort: str | None = None,
         mcp_config_override: dict | None = None,
+        enable_config_discovery: bool = False,
         hooks: list[dict] | None = None,
         audit_context: dict | None = None,
     ) -> str | None:
@@ -3699,6 +3974,8 @@ class LucentDaemon:
         # Initialize MCP memory-tool tracker for this session
         tracker: list[dict] = []
         self._session_mcp_trackers[name] = tracker
+        tool_tracker: list[dict] = []
+        self._session_tool_trackers[name] = tool_tracker
         audit_tasks: list[asyncio.Task] = []
         tool_call_inputs: dict[str, dict | str] = {}
 
@@ -3742,15 +4019,23 @@ class LucentDaemon:
                         )
                 elif event.type == SessionEventType.TOOL_CALL:
                     log(f"  [{name}] event: tool.call tool={event.tool_name}", "STREAM")
+                    normalized_tool = _normalize_tool_name(event.tool_name)
+                    tool_tracker.append({
+                        "tool": normalized_tool or event.tool_name,
+                        "raw_tool": event.tool_name,
+                        "input": event.tool_input or event.content or {},
+                        "timestamp": time.time(),
+                    })
                     if event.tool_name:
                         tool_call_inputs[event.tool_name] = event.tool_input or event.content or {}
                     # Track memory-server tool calls for observability
-                    if event.tool_name and event.tool_name in _MEMORY_TOOL_NAMES:
+                    if _is_memory_server_tool(event.tool_name):
                         params_summary = _summarize_memory_tool_params(
                             event.tool_name, event.tool_input or {}
                         )
                         tracker.append({
-                            "tool": event.tool_name,
+                            "tool": normalized_tool or event.tool_name,
+                            "raw_tool": event.tool_name,
                             "params": params_summary,
                             "timestamp": time.time(),
                         })
@@ -3789,6 +4074,7 @@ class LucentDaemon:
                     "reasoning_effort": reasoning_effort,
                     "engine": getattr(engine, "name", "unknown"),
                 },
+                enable_config_discovery=enable_config_discovery,
             )
 
             if result:
@@ -3811,6 +4097,7 @@ class LucentDaemon:
         model: str,
         reasoning_effort: str | None = None,
         mcp_config_override: dict | None = None,
+        enable_config_discovery: bool = False,
     ) -> str | None:
         """Legacy fallback: run session using CopilotClient directly."""
         client = None
@@ -3838,6 +4125,7 @@ class LucentDaemon:
                     mode="replace", content=system_message
                 ),
                 mcp_servers=mcp_config_override or MCP_CONFIG,
+                enable_config_discovery=enable_config_discovery,
             )
             self.active_sessions.append(session)
 
@@ -4091,6 +4379,23 @@ class LucentDaemon:
 
         if len(stripped) < 100:
             return False, f"output too short ({len(stripped)} chars)"
+
+        text_lower = stripped.lower()
+        blocking_indicators = [
+            "status: blocked",
+            "blocked — missing required tooling",
+            "blocked - missing required tooling",
+            "missing required tooling",
+            "cannot complete this task",
+            "i cannot complete this task",
+            "unable to complete this task",
+            "no github mcp tool is available",
+            "neither is exposed to this sub-agent",
+            "tooling is not available",
+            "permission response",
+        ]
+        if any(indicator in text_lower for indicator in blocking_indicators):
+            return False, "output reports task is blocked or missing required tooling"
 
         # For substantial output (1000+ chars), trust it — the agent did real work
         # even if it mentioned limitations along the way
@@ -4445,12 +4750,27 @@ class LucentDaemon:
 
             # Build requester-scoped MCP config for this task
             task_mcp_config = {}
+            task_enable_config_discovery = False
             if mcp_servers:
                 set_current_user({"id": requesting_user_id, "organization_id": org_id})
                 try:
                     provider = await get_secret_provider()
                     for server in mcp_servers:
-                        server_type = "http" if server.get("server_type", "http") == "http" else "stdio"
+                        raw_server_type = (server.get("server_type") or "http").lower()
+                        if raw_server_type in {
+                            "copilot_github",
+                            "copilot_builtin_github",
+                            "copilot-builtin-github",
+                            "github_builtin",
+                            "github-builtin",
+                        }:
+                            # Marker definition: approving and granting this MCP server
+                            # allows the Copilot runtime to expose its bundled GitHub
+                            # MCP tools via SDK config discovery. No external process
+                            # or token env vars are needed for this mode.
+                            task_enable_config_discovery = True
+                            continue
+                        server_type = "http" if raw_server_type == "http" else "stdio"
                         if server_type == "http":
                             conf = {
                                 "type": server_type,
@@ -4682,6 +5002,7 @@ class LucentDaemon:
                     model=selected_model,
                     reasoning_effort=task_reasoning_effort,
                     mcp_config_override=task_mcp_config,
+                    enable_config_discovery=task_enable_config_discovery,
                     hooks=hooks,
                     audit_context={
                         "source": "daemon.task",
@@ -4720,6 +5041,10 @@ class LucentDaemon:
             # Log MCP memory-tool usage summary as a queryable task event
             session_name = f"{agent_type}-{task_id[:8]}"
             mcp_tracker = self._session_mcp_trackers.pop(session_name, [])
+            tool_tracker = self._session_tool_trackers.pop(session_name, [])
+            operational_tool_tracker = [
+                entry for entry in tool_tracker if _is_operational_tool_call(entry)
+            ]
             mcp_summary = _build_mcp_tool_summary(mcp_tracker)
             log(f"Task {task_id[:8]} ({agent_type}): {mcp_summary}")
 
@@ -4733,6 +5058,11 @@ class LucentDaemon:
             tool_counts: dict[str, int] = {}
             for entry in mcp_tracker:
                 tool_counts[entry["tool"]] = tool_counts.get(entry["tool"], 0) + 1
+            validation_tool_counts: dict[str, int] = {}
+            for entry in operational_tool_tracker:
+                tool = _normalize_tool_name(entry.get("tool") or entry.get("raw_tool"))
+                if tool:
+                    validation_tool_counts[tool] = validation_tool_counts.get(tool, 0) + 1
             await RequestAPI.add_event(
                 task_id,
                 "mcp_tool_usage",
@@ -4742,6 +5072,7 @@ class LucentDaemon:
                     "search_calls": search_count,
                     "capture_calls": capture_count,
                     "tool_counts": tool_counts,
+                    "all_tool_counts": validation_tool_counts,
                     "calls": [
                         {"tool": e["tool"], "params": e["params"]}
                         for e in mcp_tracker
@@ -4781,9 +5112,12 @@ class LucentDaemon:
                 except Exception as e:
                     log(f"Sandbox cleanup failed for {sandbox_id[:12]}: {e}", "WARN")
 
-            if _task_requires_mcp_tool_usage(agent_type, title, description) and not mcp_tracker:
+            if (
+                _task_requires_mcp_tool_usage(agent_type, title, description)
+                and not operational_tool_tracker
+            ):
                 reason = (
-                    f"{agent_type} task completed without any MCP tool calls. "
+                    f"{agent_type} task completed without any operational tool calls. "
                     "Tool-dependent tasks must perform real tool operations, not "
                     "narrate intended changes."
                 )
@@ -4798,7 +5132,11 @@ class LucentDaemon:
                 continue
 
             # Validate
-            success, reason = self._validate_task_result(result, task=task, tool_counts=tool_counts)
+            success, reason = self._validate_task_result(
+                result,
+                task=task,
+                tool_counts=validation_tool_counts,
+            )
 
             if success:
                 output_contract = task.get("output_contract")

@@ -69,6 +69,7 @@ class LLMEngine(ABC):
         message_history: list[dict[str, Any]] | None = None,
         hooks: list[dict[str, Any]] | None = None,
         audit_context: dict[str, Any] | None = None,
+        enable_config_discovery: bool = False,
     ) -> str | None:
         """Run a single LLM session and return the full response text.
 
@@ -86,6 +87,8 @@ class LLMEngine(ABC):
             message_history: Prior persisted messages for engines without native resume.
             hooks: Approved declarative hook definitions for runtime middleware.
             audit_context: Optional structured context for tool-call audit rows.
+            enable_config_discovery: Whether the backend should discover its
+                configured/bundled tools for this session.
 
         Returns:
             The assistant's response text, or None on error.
@@ -107,6 +110,7 @@ class LLMEngine(ABC):
         message_history: list[dict[str, Any]] | None = None,
         hooks: list[dict[str, Any]] | None = None,
         audit_context: dict[str, Any] | None = None,
+        enable_config_discovery: bool = False,
     ) -> str | None:
         """Run an LLM session with event streaming.
 
@@ -131,6 +135,8 @@ class LLMEngine(ABC):
             message_history: Prior persisted messages for engines without native resume.
             hooks: Approved declarative hook definitions for runtime middleware.
             audit_context: Optional structured context for tool-call audit rows.
+            enable_config_discovery: Whether the backend should discover its
+                configured/bundled tools for this session.
 
         Returns:
             The assistant's full response text, or None on error.

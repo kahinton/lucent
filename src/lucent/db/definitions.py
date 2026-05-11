@@ -120,6 +120,22 @@ class DefinitionRepository:
         return data
 
     @classmethod
+    def _normalize_mcp_row(cls, row: Any | None) -> dict | None:
+        data = cls._normalize_definition_row(row)
+        if not data:
+            return None
+        for key, default in (
+            ("headers", {}),
+            ("env_vars", {}),
+            ("args", []),
+            ("discovered_tools", None),
+            ("allowed_tools", None),
+        ):
+            if key in data:
+                data[key] = cls._decode_json(data.get(key), default)
+        return data
+
+    @classmethod
     def _normalize_hook_row(cls, row: Any | None) -> dict | None:
         if not row:
             return None
@@ -650,7 +666,7 @@ class DefinitionRepository:
             total_count = count_row["total"] if count_row else 0
             rows = await conn.fetch(query, *params_with_page)
         return {
-            "items": [self._normalize_definition_row(r) for r in rows],
+            "items": [self._normalize_mcp_row(r) for r in rows],
             "total_count": total_count,
             "offset": offset,
             "limit": limit,
@@ -680,7 +696,7 @@ class DefinitionRepository:
                 "SELECT * FROM mcp_server_configs WHERE id = $1 AND organization_id = $2" + acl_sql,
                 *params,
             )
-        return self._normalize_definition_row(row)
+        return self._normalize_mcp_row(row)
 
     # ── Hooks ─────────────────────────────────────────────────────────────
 
@@ -974,7 +990,7 @@ class DefinitionRepository:
                 proposal_reason,
                 json.dumps(proposal_evidence or {}),
             )
-        result = self._normalize_definition_row(row)
+        result = self._normalize_mcp_row(row)
         await self._audit(
             DEFINITION_CREATE, org_id, "mcp_server", str(result["id"]),
             user_id=created_by, notes=f"Created MCP server '{name}'",
@@ -995,7 +1011,7 @@ class DefinitionRepository:
         """
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(query, server_id, org_id, approved_by)
-        result = self._normalize_definition_row(row)
+        result = self._normalize_mcp_row(row)
         if result:
             await self._audit(
                 DEFINITION_APPROVE, org_id, "mcp_server", server_id,
@@ -1012,7 +1028,7 @@ class DefinitionRepository:
         """
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(query, server_id, org_id, approved_by)
-        result = self._normalize_definition_row(row)
+        result = self._normalize_mcp_row(row)
         if result:
             await self._audit(
                 DEFINITION_REJECT, org_id, "mcp_server", server_id,
@@ -1172,7 +1188,7 @@ class DefinitionRepository:
         """
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(query, agent_id)
-        return [dict(r) for r in rows]
+        return [self._normalize_definition_row(r) for r in rows]
 
     async def get_agent_mcp_servers(self, agent_id: str) -> list[dict]:
         query = """
@@ -1183,7 +1199,7 @@ class DefinitionRepository:
         """
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(query, agent_id)
-        return [dict(r) for r in rows]
+        return [self._normalize_mcp_row(r) for r in rows]
 
     async def get_agent_hooks(self, agent_id: str) -> list[dict]:
         query = """
@@ -1334,7 +1350,7 @@ class DefinitionRepository:
         """
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(query, *params)
-        result = self._normalize_definition_row(row)
+        result = self._normalize_mcp_row(row)
         if result:
             all_keys = (
                 "name", "description", "server_type", "url",
@@ -1381,11 +1397,11 @@ class DefinitionRepository:
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 query,
-                json.dumps(tools_list),
+                tools_list,
                 server_id,
                 org_id,
             )
-        result = self._normalize_definition_row(row)
+        result = self._normalize_mcp_row(row)
         if result:
             await self._audit(
                 DEFINITION_UPDATE, org_id, "mcp_server", server_id,
@@ -1411,11 +1427,7 @@ class DefinitionRepository:
         if row is None:
             return None
         return {
-            "discovered_tools": (
-                json.loads(row["discovered_tools"])
-                if row["discovered_tools"]
-                else None
-            ),
+            "discovered_tools": self._decode_json(row["discovered_tools"], None),
             "tools_discovered_at": row["tools_discovered_at"],
         }
 
