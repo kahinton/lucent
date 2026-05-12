@@ -589,6 +589,8 @@ class TestDirectTargetRequestCreation:
             "next_milestone_index": 2,
             "next_milestone_description": "Second milestone",
             "suggested_title": f"{prefix}M2 direct fanout request",
+            "target_repo": "kahinton/example-planning-repo",
+            "target_paths": ["docs/m2.md"],
         }
 
         daemon = LucentDaemon()
@@ -617,7 +619,8 @@ class TestDirectTargetRequestCreation:
         async with db_pool.acquire() as conn:
             row = await conn.fetchrow(
                 """SELECT created_by, source, approval_status,
-                          goal_memory_id, goal_milestone_index
+                          goal_memory_id, goal_milestone_index,
+                          target_repo, target_paths
                    FROM requests WHERE title = $1""",
                 target["suggested_title"],
             )
@@ -627,6 +630,8 @@ class TestDirectTargetRequestCreation:
         assert row["approval_status"] == APPROVAL_PENDING
         assert str(row["goal_memory_id"]) == str(goal["id"])
         assert row["goal_milestone_index"] == 2
+        assert row["target_repo"] == "kahinton/example-planning-repo"
+        assert row["target_paths"] == ["docs/m2.md"]
 
 
 # ============================================================================

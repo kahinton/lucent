@@ -359,3 +359,60 @@ class TestReviewOutputGuidance:
         assert "Implementation PR" in description
         assert "OUTPUT ARTIFACT REVIEW" in description
         assert "record_task_output" in description
+
+    @pytest.mark.asyncio
+    async def test_review_task_prompt_keeps_large_task_outputs(self, monkeypatch):
+        from daemon.daemon import LucentDaemon
+
+        captured: dict = {}
+        long_result = "START\n" + ("substantive review context\n" * 500) + "END_SENTINEL"
+
+        async def fake_get_request_memories(_request_id):
+            return []
+
+        async def fake_create_task(**kwargs):
+            captured.update(kwargs)
+            return {"id": "review-task-id", **kwargs}
+
+        monkeypatch.setattr(
+            "daemon.daemon.RequestAPI.get_request_memories",
+            fake_get_request_memories,
+        )
+        monkeypatch.setattr("daemon.daemon.RequestAPI.create_task", fake_create_task)
+
+        daemon = LucentDaemon()
+
+        async def fake_find_review_agent_type(_org_id, _requesting_user_id):
+            return "request-review", "primary"
+
+        monkeypatch.setattr(daemon, "_find_review_agent_type", fake_find_review_agent_type)
+
+        await daemon._create_request_review_task(
+            "11111111-1111-1111-1111-111111111111",
+            {
+                "id": "11111111-1111-1111-1111-111111111111",
+                "title": "Review large outputs",
+                "description": "Make sure review sees the actual task body",
+                "organization_id": "22222222-2222-2222-2222-222222222222",
+                "created_by": "33333333-3333-3333-3333-333333333333",
+                "priority": "medium",
+                "target_repo": "kahinton/detroit-vertical-harvest",
+                "target_paths": ["docs/market-research.md"],
+                "tasks": [
+                    {
+                        "id": "44444444-4444-4444-4444-444444444444",
+                        "status": "completed",
+                        "title": "Write long deliverable",
+                        "result": long_result,
+                        "outputs": [],
+                    }
+                ],
+            },
+        )
+
+        description = captured["description"]
+        assert "target_repo: kahinton/detroit-vertical-harvest" in description
+        assert "Durable persistence is mandatory" in description
+        assert "START" in description
+        assert "END_SENTINEL" in description
+        assert "truncated" not in description.lower()

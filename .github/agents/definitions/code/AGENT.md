@@ -84,6 +84,14 @@ Follow the **memory-capture** skill to save what you learned:
 link_task_memory(task_id, memory_id, "created")
 ```
 
+For repo-backed tasks, durable output is mandatory. If the task names a target
+repository or asks for files/docs/code to be produced there, make real file
+changes in that repository and publish them through the approved path (commit,
+push/PR, or sandbox output mode). Report exact changed paths and commit/PR URL,
+and call `record_task_output` when available. If write/push credentials or tools
+are missing, return `BLOCKED` with the missing capability; do not claim success
+with only an in-chat patch or memory.
+
 ## Decision Framework
 
 1. **If the task says to change X, change only X.** Even if you see other problems nearby.

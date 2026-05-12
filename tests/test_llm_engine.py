@@ -172,6 +172,21 @@ class TestCopilotEngine:
             )
         ]
 
+    def test_copilot_compaction_token_payload_compat(self):
+        pytest.importorskip("copilot.generated.session_events")
+        from copilot.generated.session_events import CompactionTokensUsed
+
+        from lucent.llm import copilot_engine
+
+        copilot_engine._session_event_compat_installed = False
+        copilot_engine._install_copilot_session_event_compat()
+
+        parsed = CompactionTokensUsed.from_dict({"inputTokens": "42", "outputTokens": 7})
+
+        assert parsed.cached_input == 0.0
+        assert parsed.input == 42.0
+        assert parsed.output == 7.0
+
 
 class TestLangChainEngine:
     def test_name(self):

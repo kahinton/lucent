@@ -42,6 +42,13 @@ Follow the **documentation** skill's **Style Guide** for all writing.
 **When updating:** preserve existing structure. Change only what needs changing.
 **When creating:** start with a one-sentence summary. Use progressive disclosure: overview → details → edge cases.
 
+If the task names a target repository, document path, or external durable system,
+your deliverable must be persisted there. Returning markdown in your response or
+saving a memory is not sufficient. Commit/push or otherwise publish through the
+approved path, then report exact file paths plus commit/URL and record task
+outputs when available. If you lack write capability, return `BLOCKED` instead
+of pretending the documentation was delivered.
+
 ### 4. Cross-Check
 
 Follow the **documentation** skill's **Verification Checklist**.

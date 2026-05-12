@@ -512,6 +512,46 @@ REQUEST_REVIEW_FALLBACK_AGENT_TYPE = os.environ.get("LUCENT_REQUEST_REVIEW_FALLB
 REQUEST_REVIEW_MODEL = os.environ.get("LUCENT_REQUEST_REVIEW_MODEL", "").strip()
 REQUEST_REVIEW_TASK_TITLE = "Post-completion review"
 
+
+def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
+    """Read a positive integer environment value with a safe fallback."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        log(f"Invalid {name}={raw!r}; using default {default}", "WARN")
+        return default
+    return max(value, minimum)
+
+
+# Context budgets are intentionally high. Modern daemon models can handle large
+# review inputs, and premature truncation caused reviewers to miss missing
+# durable artifacts. These limits are character budgets (roughly 4 chars/token)
+# and should only cut content when approaching practical model/context limits.
+TASK_CONTEXT_CHAR_BUDGET = _env_int("LUCENT_TASK_CONTEXT_CHAR_BUDGET", 180_000)
+TASK_CONTEXT_ITEM_CHAR_BUDGET = _env_int("LUCENT_TASK_CONTEXT_ITEM_CHAR_BUDGET", 120_000)
+REQUEST_REVIEW_CONTEXT_CHAR_BUDGET = _env_int(
+    "LUCENT_REQUEST_REVIEW_CONTEXT_CHAR_BUDGET",
+    360_000,
+)
+REQUEST_REVIEW_TASK_RESULT_CHAR_BUDGET = _env_int(
+    "LUCENT_REQUEST_REVIEW_TASK_RESULT_CHAR_BUDGET",
+    180_000,
+)
+
+
+def _truncate_for_context(text: str, limit: int, *, label: str = "content") -> str:
+    """Trim text only when it exceeds a large context budget."""
+    if len(text) <= limit:
+        return text
+    marker = (
+        f"\n\n[... {label} truncated at {limit:,} characters because the "
+        "aggregate prompt context is approaching the configured model budget ...]"
+    )
+    return text[: max(0, limit - len(marker))] + marker
+
 # Git operations: daemon can commit (but never push without ALLOW_GIT_PUSH)
 _git_commit_val = os.environ.get("LUCENT_ALLOW_GIT_COMMIT", "false")
 ALLOW_GIT_COMMIT = _git_commit_val.lower() in ("true", "1", "yes")
@@ -1665,6 +1705,17 @@ class RequestAPI:
             return "", ""
 
         request_desc = data.get("description", "")
+        target_repo = data.get("target_repo") or ""
+        target_paths = data.get("target_paths") or []
+        if target_repo or target_paths:
+            request_desc = (
+                f"{request_desc}\n\n"
+                "--- TARGET PERSISTENCE SCOPE ---\n"
+                f"target_repo: {target_repo or 'unspecified'}\n"
+                f"target_paths: {target_paths or []}\n"
+                "Repo-backed deliverables must be persisted as concrete file changes "
+                "and reported with paths plus commit/URL."
+            ).strip()
         review_feedback = (data.get("review_feedback") or "").strip()
         if review_feedback:
             request_desc = (
@@ -1675,10 +1726,13 @@ class RequestAPI:
             ).strip()
         tasks = data.get("tasks", [])
 
-        # Collect results from completed sibling tasks
+        # Collect results from completed sibling tasks. Do not aggressively
+        # summarize here: downstream and review agents often need the full
+        # artifact body to verify consistency and persistence. Only truncate
+        # when the aggregate context approaches the configured model budget.
         sibling_parts = []
         total_len = 0
-        max_context = 30000  # keep total under ~30KB to avoid blowing context windows
+        max_context = TASK_CONTEXT_CHAR_BUDGET
 
         for t in tasks:
             if t.get("status") != "completed":
@@ -1697,8 +1751,11 @@ class RequestAPI:
             validation_status = t.get("validation_status", "not_applicable")
             if result_structured and validation_status in ("valid", "repair_succeeded"):
                 structured_json = json.dumps(result_structured, indent=2)
-                if len(structured_json) > 6000:
-                    structured_json = structured_json[:6000] + "\n... truncated ..."
+                structured_json = _truncate_for_context(
+                    structured_json,
+                    TASK_CONTEXT_ITEM_CHAR_BUDGET,
+                    label="structured output",
+                )
                 parts.append(f"\n### Structured Output\n```json\n{structured_json}\n```")
                 summary = t.get("result_summary")
                 if summary:
@@ -1708,13 +1765,29 @@ class RequestAPI:
                 result_text = t.get("result") or ""
                 if not result_text:
                     continue
-                if len(result_text) > 8000:
-                    result_text = result_text[:8000] + "\n[... truncated ...]"
+                result_text = _truncate_for_context(
+                    result_text,
+                    TASK_CONTEXT_ITEM_CHAR_BUDGET,
+                    label="task result",
+                )
                 parts.append(f"\n{result_text}")
 
             sibling_text = "\n".join(parts)
             if total_len + len(sibling_text) > max_context:
-                sibling_parts.append("[Additional completed task results omitted for space]")
+                remaining = max_context - total_len
+                if remaining > 10_000:
+                    sibling_parts.append(
+                        _truncate_for_context(
+                            sibling_text,
+                            remaining,
+                            label="completed sibling task results",
+                        )
+                    )
+                sibling_parts.append(
+                    "[Additional completed task results omitted because the "
+                    f"aggregate context exceeded {max_context:,} characters. "
+                    "Use get_request_details/search/full artifacts if needed.]"
+                )
                 break
             sibling_parts.append(sibling_text)
             total_len += len(sibling_text)
@@ -2339,13 +2412,27 @@ After completing work, save what you learned:
 Always output your findings and results as text. Do not rely solely on saving
 to memory — the dispatch system validates your text output.
 
+--- DURABLE DELIVERABLES ---
+If the task/request asks for repository files, documentation, reports, plans,
+code, or any other user-facing artifact in a durable location, the task is NOT
+complete until that artifact is persisted to the named durable system. For a
+`target_repo`, that means concrete repository file changes (and a commit/push or
+other approved publication path) plus exact paths/URLs/commit SHAs in your final
+output. Saving a memory or returning markdown in chat is useful context, but it
+does not satisfy a repo-backed deliverable by itself.
+
+If you do not have the tool, credential, sandbox, or permission needed to persist
+the artifact, say BLOCKED clearly and explain the missing capability. Do not
+present narrative-only work as completed. When available, call `record_task_output`
+for every durable artifact so the Activity UI can show what was produced.
+
 --- GUARDRAILS ---
 - {
         "Git commit is ALLOWED — commit meaningful changes with clear messages"
         if ALLOW_GIT_COMMIT
         else "DO NOT run git commit"
     }
-- {"Git push is ALLOWED" if ALLOW_GIT_PUSH else "DO NOT run git push"}
+- {"Git push is ALLOWED only when this task explicitly requires remote repository persistence and the target repo/branch is verified" if ALLOW_GIT_PUSH else "DO NOT run git push"}
 - DO NOT take irreversible actions without approval
 - Tag all memories with 'daemon' so activity is visible
 - When creating memories that need human review or approval, also tag with 'needs-review'
@@ -2940,15 +3027,31 @@ class LucentDaemon:
         milestone_description = (
             target.get("next_milestone_description") or ""
         ).strip() or "Advance the next active milestone."
+        target_repo = (target.get("target_repo") or "").strip()
+        target_paths = target.get("target_paths") or []
+        target_block = ""
+        if target_repo:
+            target_block += f"\nTarget repository: {target_repo}"
+        if target_paths:
+            target_block += f"\nTarget paths: {target_paths}"
 
-        return (
+        header = (
             f"Advance milestone {milestone_index} for goal: {goal_title}\n\n"
             f"Milestone scope:\n{milestone_description}\n\n"
+        )
+        if target_block:
+            header += f"{target_block}\n\n"
+
+        return header + (
             "This request was created deterministically by the daemon cognitive "
             "planner from the server-side planning-targets list. The target "
             "was already filtered as active, unblocked, and without open work.\n\n"
             "Expected outcome:\n"
             "- Produce the deliverable described by the milestone.\n"
+            "- If a target repository is provided, persist user-facing deliverables "
+            "to that repository as concrete file changes and report the paths and "
+            "commit/URL. Memory-only or chat-only outputs do not satisfy repo-backed "
+            "milestones.\n"
             "- Keep any project-specific boundaries from the parent goal intact.\n"
             "- Record sources, assumptions, and open questions in the output.\n"
         )
@@ -3001,6 +3104,8 @@ class LucentDaemon:
             force_pending_approval=True,
             goal_id=goal_id,
             goal_milestone_index=int(milestone_index),
+            target_repo=(target.get("target_repo") or None),
+            target_paths=(target.get("target_paths") or None),
         )
 
         if req.get("status") == "skipped":
@@ -3270,6 +3375,11 @@ class LucentDaemon:
             "the available model list gives a concrete reason to specialize. Set "
             "sequence_order so dependent tasks come after their prerequisites (0 for "
             "the first batch, 1 for the next, etc.).\n"
+            "   If the request has target_repo or asks for docs/files/reports that belong "
+            "in a repository, every relevant task description MUST name the exact target "
+            "repo/path(s), require durable file persistence, require reporting paths plus "
+            "commit/URL, and require record_task_output when possible. Memory-only or "
+            "chat-only deliverables must be treated as incomplete.\n"
             "4. DO NOT create the request — it already exists. DO NOT call any "
             "approval, status update, or rejection tools. Your output is a short "
             "summary of how many tasks you created and why this breakdown.\n"
@@ -3402,12 +3512,20 @@ class LucentDaemon:
             "Respect the parent request boundaries and avoid real-world business "
             "filings, purchases, vendor/customer contact, or binding commitments."
         )
+        persistence = ""
+        if target_repo:
+            persistence = (
+                "\n\nDurable output requirement: persist the milestone deliverable "
+                f"as concrete file changes in target repo {target_repo}; report "
+                "the changed paths and commit/URL. Memory-only or chat-only output "
+                "does not complete this fallback task."
+            )
         return [
             {
                 "title": self._fallback_task_title(item),
                 "description": (
                     f"Fallback decomposition item: {item}"
-                    f"{target_context}{request_context}{boundary}"
+                    f"{target_context}{request_context}{boundary}{persistence}"
                 ),
                 "agent_type": self._fallback_agent_type_for_decomposition_item(item),
                 "sequence_order": idx,
@@ -5888,11 +6006,18 @@ class LucentDaemon:
         non_review_tasks = [t for t in tasks if not self._is_request_review_task(t)]
         done_tasks = [t for t in non_review_tasks if t.get("status") in ("completed", "failed", "cancelled")]
         task_summaries = []
+        task_summary_chars = 0
+        review_context_budget = REQUEST_REVIEW_CONTEXT_CHAR_BUDGET
         for idx, t in enumerate(done_tasks, 1):
             tid = str(t.get("id", ""))
             status = t.get("status", "unknown")
             title = t.get("title", "Untitled")
-            result = (t.get("result") or t.get("error") or "")[:1500]
+            result_source = t.get("result") or t.get("error") or ""
+            result = _truncate_for_context(
+                result_source,
+                REQUEST_REVIEW_TASK_RESULT_CHAR_BUDGET,
+                label="review task result",
+            )
             if not result:
                 result = "(no output)"
             outputs = t.get("outputs") or []
@@ -5908,12 +6033,31 @@ class LucentDaemon:
                 outputs_text = "\n   recorded outputs:\n" + "\n".join(output_lines)
             else:
                 outputs_text = "\n   recorded outputs: (none)"
-            task_summaries.append(
+            summary_text = (
                 f"{idx}. [{status}] {title}\n"
                 f"   task_id: {tid}\n"
                 f"   output:\n{result}"
                 f"{outputs_text}"
             )
+            if task_summary_chars + len(summary_text) > review_context_budget:
+                remaining = review_context_budget - task_summary_chars
+                if remaining > 10_000:
+                    task_summaries.append(
+                        _truncate_for_context(
+                            summary_text,
+                            remaining,
+                            label="request review task summaries",
+                        )
+                    )
+                task_summaries.append(
+                    "[Additional task outcomes omitted because request review "
+                    f"context exceeded {review_context_budget:,} characters. "
+                    "Reviewers should fetch full task details before approving if "
+                    "the omitted work affects the decision.]"
+                )
+                break
+            task_summaries.append(summary_text)
+            task_summary_chars += len(summary_text)
         if not task_summaries:
             task_summaries.append("No terminal tasks found.")
 
@@ -5925,6 +6069,19 @@ class LucentDaemon:
             incomplete_note = (
                 "\n\nNOTE: dependency_policy is permissive and some tasks are incomplete/failed. "
                 "Account for this in your review and require rework if needed."
+            )
+
+        target_repo = request_data.get("target_repo") or ""
+        target_paths = request_data.get("target_paths") or []
+        target_section = ""
+        if target_repo or target_paths:
+            target_section = (
+                "\n\nTarget persistence scope:\n"
+                f"- target_repo: {target_repo or 'unspecified'}\n"
+                f"- target_paths: {target_paths or []}\n"
+                "If this request produced docs/files/reports intended for the target "
+                "repository, do not approve unless the task outputs show actual durable "
+                "repo changes (paths plus commit/URL or equivalent recorded artifact)."
             )
 
         # Fetch linked memories so the review task can update them
@@ -5982,6 +6139,7 @@ class LucentDaemon:
             "request goals AND propagating those outcomes into linked memories.\n\n"
             f"Original request title: {request_data.get('title', '')}\n"
             f"Original request description:\n{request_data.get('description', '')}\n\n"
+            f"{target_section}\n\n"
             "Task outcomes:\n"
             f"{chr(10).join(task_summaries)}"
             f"{incomplete_note}"
@@ -5990,6 +6148,11 @@ class LucentDaemon:
             "Each task may include a 'recorded outputs' list. These are the "
             "user-visible deliverables shown in the Activity UI: GitHub PRs/issues, "
             "emails, docs, files, deployments, memories, or generic artifacts.\n"
+            "Durable persistence is mandatory for external artifacts: if the request "
+            "asked for repository documentation/files or named a target_repo, narrative "
+            "markdown in the task result is insufficient. Require concrete changed file "
+            "paths and a commit/URL (or an explicit BLOCKED result explaining missing "
+            "write capability).\n"
             "Before approving, verify that every deliverable mentioned in task output "
             "has a corresponding recorded output. Plain URLs in task results are "
             "auto-extracted by Lucent, but non-URL deliverables such as sent emails, "

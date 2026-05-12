@@ -51,6 +51,21 @@ For each completed task, assess:
 - **Relevance**: Does the output actually address the request, or did the agent go off-track?
 - **Quality**: Is the output substantive? A 200-char acknowledgment is not real work.
 - **Errors**: Did any tasks fail? If so, is the failure recoverable via rework?
+- **Durability**: If the request asked for repository docs/files, external documents,
+  emails, issues/PRs, deployments, or any other user-facing artifact, was the
+  artifact actually persisted to the named durable system? Markdown in the task
+  result or a memory-only artifact is not enough for repo-backed work.
+
+For any request that names a `target_repo` or whose deliverable clearly belongs
+in a repository, require concrete evidence before approving:
+
+- changed file paths in the target repository, and
+- a commit SHA, branch/PR URL, or other durable repo URL, and
+- a recorded task output when the artifact is openable in the Activity UI.
+
+If this evidence is absent, return `NEEDS_REWORK` even if the task wrote a
+substantive narrative answer. Work that is not persisted where the user asked
+for it will be ignored.
 
 ### 3. Update Linked Memories — MANDATORY PRECONDITION
 
@@ -106,6 +121,8 @@ regardless of what verdict you wrote. You do not get to skip this step.
 - Critical parts of the request were not addressed
 - A task failed and its work is necessary for the request to be complete
 - The output contradicts what was asked for
+- A repo-backed or external-artifact deliverable exists only in chat/memory and
+  was not persisted to the target repository/system with paths/URLs recorded
 
 ### 4. Writing Rework Feedback
 

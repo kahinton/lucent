@@ -1783,6 +1783,8 @@ class RequestRepository:
               "next_milestone_description": str | None,
               "next_milestone_start_after": str | None,
               "suggested_title": str,
+                            "target_repo": str | None,
+                            "target_paths": list[str],
               "total_milestones": int,
               "active_milestone_indexes": list[int],
               "completed_milestone_count": int,
@@ -1892,6 +1894,22 @@ class RequestRepository:
                 else:
                     suggested_title = short_title or "Goal"
 
+                target_repo = None
+                target_paths: list[str] = []
+                if metadata:
+                    raw_repo = (
+                        metadata.get("target_repo")
+                        or metadata.get("repo")
+                        or metadata.get("repository")
+                    )
+                    if isinstance(raw_repo, str) and raw_repo.strip():
+                        target_repo = raw_repo.strip()
+                    raw_paths = metadata.get("target_paths") or metadata.get("paths") or []
+                    if isinstance(raw_paths, str) and raw_paths.strip():
+                        target_paths = [raw_paths.strip()]
+                    elif isinstance(raw_paths, list):
+                        target_paths = [str(p).strip() for p in raw_paths if str(p).strip()]
+
                 targets.append({
                     "goal_id": str(row["id"]),
                     "goal_title": short_title,
@@ -1899,6 +1917,8 @@ class RequestRepository:
                     "next_milestone_description": next_desc,
                     "next_milestone_start_after": next_start_after,
                     "suggested_title": suggested_title,
+                    "target_repo": target_repo,
+                    "target_paths": target_paths,
                     "total_milestones": summary["total"],
                     "active_milestone_indexes": summary["active_indexes"],
                     "completed_milestone_count": summary["completed_count"],

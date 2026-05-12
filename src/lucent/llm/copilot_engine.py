@@ -34,6 +34,7 @@ _sdk_available: bool | None = None
 _UNRESOLVED = object()
 _cli_path_cache: str | None | object = _UNRESOLVED
 _permission_compat_installed = False
+_session_event_compat_installed = False
 
 
 def _value(value: Any) -> str:
@@ -137,6 +138,77 @@ def _install_copilot_permission_compat() -> None:
 
     session_cls._execute_permission_and_respond = _patched_execute_permission_and_respond
     _permission_compat_installed = True
+
+
+def _install_copilot_session_event_compat() -> None:
+    """Tolerate newer Copilot CLI event payloads with older SDK schemas.
+
+    VS Code-managed Copilot CLI builds can add fields or evolve event field
+    shapes before the Python SDK's generated dataclasses are regenerated. A
+    recent example is `compactionTokensUsed`, which may arrive without all of
+    the `cachedInput`/`input`/`output` fields the bundled schema marks as
+    required. The SDK decodes notifications in an asyncio callback before
+    Lucent sees the event; an AssertionError there can kill daemon sessions.
+    Patch only that narrow decoder to preserve the rest of the SDK behavior.
+    """
+    global _session_event_compat_installed
+    if _session_event_compat_installed:
+        return
+    try:
+        import copilot.generated.session_events as _events_mod
+    except Exception:
+        return
+
+    compaction_cls = getattr(_events_mod, "CompactionTokensUsed", None)
+    if compaction_cls is None:
+        _session_event_compat_installed = True
+        return
+
+    original = getattr(compaction_cls, "_lucent_original_from_dict", None)
+    if original is None:
+        original = compaction_cls.from_dict
+        setattr(compaction_cls, "_lucent_original_from_dict", original)
+
+    def _num(obj: Any, *names: str) -> float:
+        if not isinstance(obj, dict):
+            return 0.0
+        for name in names:
+            value = obj.get(name)
+            if isinstance(value, bool) or value is None:
+                continue
+            if isinstance(value, (int, float)):
+                return float(value)
+            if isinstance(value, str):
+                try:
+                    return float(value)
+                except ValueError:
+                    continue
+        return 0.0
+
+    @staticmethod
+    def _patched_compaction_tokens_from_dict(obj: Any):
+        try:
+            return original(obj)
+        except Exception:
+            if isinstance(obj, bool) or obj is None:
+                raise
+            if isinstance(obj, (int, float)):
+                return compaction_cls(0.0, float(obj), 0.0)
+            if isinstance(obj, str):
+                try:
+                    return compaction_cls(0.0, float(obj), 0.0)
+                except ValueError:
+                    raise
+            if isinstance(obj, dict):
+                return compaction_cls(
+                    _num(obj, "cachedInput", "cached_input", "cached", "cacheReadTokens"),
+                    _num(obj, "input", "inputTokens", "tokens", "total", "totalTokens"),
+                    _num(obj, "output", "outputTokens"),
+                )
+            raise
+
+    compaction_cls.from_dict = _patched_compaction_tokens_from_dict
+    _session_event_compat_installed = True
 
 
 def resolve_copilot_cli_path() -> str | None:
@@ -259,6 +331,7 @@ def _ensure_sdk() -> bool:
             except ImportError:
                 _SystemMessageReplaceConfig = None
         _install_copilot_permission_compat()
+        _install_copilot_session_event_compat()
         _sdk_available = True
     except ImportError:
         _sdk_available = False

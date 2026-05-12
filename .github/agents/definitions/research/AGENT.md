@@ -109,6 +109,13 @@ When a correction is identified during work, create an experience memory capturi
 link_task_memory(task_id, memory_id, "created")
 ```
 
+If the task asks for research to be placed in a repository, planning package,
+external document, or other durable artifact store, memory capture is not enough.
+Persist the research into the named durable location, report exact paths plus
+commit/URL, and record task outputs when available. If no write-capable tool or
+credential is available, state `BLOCKED` clearly; do not present chat-only
+research as a completed repo deliverable.
+
 ## Decision Framework
 
 - If sources contradict each other, then reconcile by source hierarchy and recency; report both positions and explicitly justify which one drives the recommendation.

@@ -49,6 +49,14 @@ Every request that involves code work MUST set `target_repo` in owner/repo forma
 
 Without `target_repo`, the working agent starts with no codebase context and must discover conventions through manual memory searches — which is slow and unreliable.
 
+For any deliverable that must live in a repository (docs, reports, planning
+packages, code, generated files), the task description must make persistence an
+explicit success criterion: name the target repo/path, require actual file
+changes through an approved commit/push/PR/sandbox-output path, require exact
+paths plus commit/URL in the final response, and require `record_task_output`
+when an openable artifact exists. Memory-only or chat-only output is incomplete
+for repo-backed work.
+
 ## Writing Descriptions That Work
 
 The description is the sub-agent's **entire understanding of what to do** (combined with its agent definition). Write it as instructions for a competent engineer who has never seen the codebase.
