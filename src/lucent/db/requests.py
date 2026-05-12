@@ -2431,6 +2431,7 @@ class RequestRepository:
         error: str,
         org_id: str | None = None,
         instance_id: str | None = None,
+        result: str | None = None,
     ) -> dict | None:
         """Mark task as failed.
 
@@ -2443,6 +2444,11 @@ class RequestRepository:
                 if instance_id:
                     row = await conn.fetchrow(
                         """UPDATE tasks SET status = 'failed', error = $2,
+                           result = COALESCE($6, result),
+                           result_summary = CASE
+                               WHEN $6::text IS NULL THEN result_summary
+                               ELSE left($6::text, 500)
+                           END,
                            completed_at = $3, updated_at = $3
                            WHERE id = $1 AND status IN ('claimed', 'running')
                            AND organization_id = $4
@@ -2453,10 +2459,16 @@ class RequestRepository:
                         now,
                         UUID(org_id),
                         instance_id,
+                        result,
                     )
                 else:
                     row = await conn.fetchrow(
                         """UPDATE tasks SET status = 'failed', error = $2,
+                           result = COALESCE($5, result),
+                           result_summary = CASE
+                               WHEN $5::text IS NULL THEN result_summary
+                               ELSE left($5::text, 500)
+                           END,
                            completed_at = $3, updated_at = $3
                            WHERE id = $1 AND status IN ('claimed', 'running')
                            AND organization_id = $4
@@ -2465,12 +2477,18 @@ class RequestRepository:
                         error,
                         now,
                         UUID(org_id),
+                        result,
                     )
         else:
             async with self.pool.acquire() as conn:
                 if instance_id:
                     row = await conn.fetchrow(
                         """UPDATE tasks SET status = 'failed', error = $2,
+                           result = COALESCE($5, result),
+                           result_summary = CASE
+                               WHEN $5::text IS NULL THEN result_summary
+                               ELSE left($5::text, 500)
+                           END,
                            completed_at = $3, updated_at = $3
                            WHERE id = $1 AND status IN ('claimed', 'running')
                            AND claimed_by = $4
@@ -2479,20 +2497,32 @@ class RequestRepository:
                         error,
                         now,
                         instance_id,
+                        result,
                     )
                 else:
                     row = await conn.fetchrow(
                         """UPDATE tasks SET status = 'failed', error = $2,
+                           result = COALESCE($4, result),
+                           result_summary = CASE
+                               WHEN $4::text IS NULL THEN result_summary
+                               ELSE left($4::text, 500)
+                           END,
                            completed_at = $3, updated_at = $3
                            WHERE id = $1 AND status IN ('claimed', 'running')
                            RETURNING *""",
                         UUID(task_id),
                         error,
                         now,
+                        result,
                     )
         if row:
             task = dict(row)
-            await self.add_task_event(task_id, "failed", f"Failed: {error[:200]}")
+            await self.add_task_event(
+                task_id,
+                "failed",
+                f"Failed: {error[:200]}",
+                {"rejected_output_chars": len(result or "")},
+            )
             await self._check_request_completion(str(task["request_id"]))
             return task
         return None

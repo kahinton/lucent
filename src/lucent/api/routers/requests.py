@@ -941,6 +941,7 @@ async def create_task_output(
 
 class TaskFailBody(BaseModel):
     error: str = ""
+    result: str | None = None
     instance_id: str | None = Field(default=None, min_length=1, max_length=128)
 
 
@@ -960,6 +961,7 @@ async def fail_task(
         body.error,
         org_id=str(user.organization_id),
         instance_id=body.instance_id,
+        result=body.result,
     )
     if not task:
         raise HTTPException(

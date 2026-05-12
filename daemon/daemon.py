@@ -1579,12 +1579,20 @@ class RequestAPI:
         return None
 
     @staticmethod
-    async def fail_task(task_id: str, error: str, instance_id: str | None = None) -> dict | None:
+    async def fail_task(
+        task_id: str,
+        error: str,
+        instance_id: str | None = None,
+        result: str | None = None,
+    ) -> dict | None:
         try:
+            body = {"error": error[:10000], "instance_id": instance_id}
+            if result is not None:
+                body["result"] = result[:200000]
             async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
                 resp = await client.post(
                     f"{API_BASE}/requests/tasks/{task_id}/fail",
-                    json={"error": error[:10000], "instance_id": instance_id},
+                    json=body,
                     headers=API_HEADERS,
                 )
                 if resp.status_code == 200:
@@ -2925,6 +2933,91 @@ class LucentDaemon:
         finally:
             await conn.close()
 
+    def _build_cognitive_request_description(self, target: dict[str, Any]) -> str:
+        """Build a deterministic request description for a planning target."""
+        goal_title = (target.get("goal_title") or "").strip() or "Untitled goal"
+        milestone_index = target.get("next_milestone_index")
+        milestone_description = (
+            target.get("next_milestone_description") or ""
+        ).strip() or "Advance the next active milestone."
+
+        return (
+            f"Advance milestone {milestone_index} for goal: {goal_title}\n\n"
+            f"Milestone scope:\n{milestone_description}\n\n"
+            "This request was created deterministically by the daemon cognitive "
+            "planner from the server-side planning-targets list. The target "
+            "was already filtered as active, unblocked, and without open work.\n\n"
+            "Expected outcome:\n"
+            "- Produce the deliverable described by the milestone.\n"
+            "- Keep any project-specific boundaries from the parent goal intact.\n"
+            "- Record sources, assumptions, and open questions in the output.\n"
+        )
+
+    async def _create_cognitive_request_for_target(
+        self,
+        *,
+        org_id: str,
+        user_id: str,
+        target: dict[str, Any],
+    ) -> tuple[str, dict[str, Any]]:
+        """Create one cognitive request for a pre-filtered planning target.
+
+        The planning-targets endpoint is authoritative: it has already selected
+        the next active milestone and filtered out in-flight work. Creating the
+        request here avoids relying on a model-side mutating MCP call, which can
+        be blocked by Copilot permission protocol changes before the Lucent MCP
+        server ever sees the request.
+        """
+        from lucent.db import init_db
+        from lucent.db.requests import RequestRepository
+
+        goal_id = str(target.get("goal_id") or "").strip()
+        milestone_index = target.get("next_milestone_index")
+        if not goal_id or milestone_index is None:
+            return (
+                "skipped",
+                {
+                    "status": "skipped",
+                    "reason": "missing_target_fields",
+                    "detail": "Planning target lacked goal_id or next_milestone_index.",
+                },
+            )
+
+        title = (
+            target.get("suggested_title")
+            or f"{target.get('goal_title') or 'Goal'} M{milestone_index}"
+        ).strip()
+        description = self._build_cognitive_request_description(target)
+
+        pool = await init_db()
+        repo = RequestRepository(pool)
+        req = await repo.create_request(
+            title=title,
+            org_id=org_id,
+            description=description,
+            source="cognitive",
+            priority="medium",
+            created_by=user_id,
+            force_pending_approval=True,
+            goal_id=goal_id,
+            goal_milestone_index=int(milestone_index),
+        )
+
+        if req.get("status") == "skipped":
+            return "skipped", req
+
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute("SELECT pg_notify('request_ready', $1)", str(req["id"]))
+        except Exception as notify_err:
+            log(
+                "cognitive direct request notify failed "
+                f"for {str(req.get('id', ''))[:8]}: {notify_err}",
+                "WARN",
+            )
+
+        return "created", req
+
     async def _run_cognitive_planning_fanout(
         self,
         *,
@@ -2984,26 +3077,46 @@ class LucentDaemon:
                     )
                     continue
 
-                prompt = self._build_user_scoped_cognitive_prompt(
-                    targets=targets
-                )
-
-                scoped_mcp = dict(mcp_config_base)
-                scoped_mcp["memory-server"] = {
-                    "type": "http",
-                    "url": MCP_URL,
-                    "headers": {"Authorization": f"Bearer {scoped_key}"},
-                    "tools": ["*"],
-                }
-
-                session_result = await self.run_session(
-                    f"cognitive-plan-{task_id[:8]}-{user_id[:8]}",
-                    system_message,
-                    prompt,
-                    mcp_config_override=scoped_mcp,
-                )
-                if not session_result:
-                    errors.append("planner session produced no output")
+                # Create requests directly from authoritative planning targets.
+                # The prior implementation asked the LLM to call the mutating
+                # MCP create_request/create_task tools. With newer Copilot CLI
+                # builds those mutating MCP calls can fail at the permission
+                # layer with "unexpected user permission response" before the
+                # Lucent MCP server sees the call, causing the planner to loop
+                # forever with targets_count>0 and requests_created=0.
+                for target in targets:
+                    try:
+                        outcome, req = await self._create_cognitive_request_for_target(
+                            org_id=org_id,
+                            user_id=user_id,
+                            target=target,
+                        )
+                        log(
+                            "cognitive_planning_target_request "
+                            + json.dumps(
+                                {
+                                    "user_id": user_id,
+                                    "goal_id": target.get("goal_id"),
+                                    "goal_milestone_index": target.get(
+                                        "next_milestone_index"
+                                    ),
+                                    "outcome": outcome,
+                                    "request_id": str(req.get("id", "")) or None,
+                                    "status": req.get("status"),
+                                    "reason": req.get("reason"),
+                                },
+                                sort_keys=True,
+                                default=str,
+                            )
+                        )
+                    except Exception as target_err:
+                        errors.append(str(target_err))
+                        log(
+                            "Cognitive planning target create failed "
+                            f"for user {user_id[:8]} goal "
+                            f"{str(target.get('goal_id', ''))[:8]}: {target_err}",
+                            "WARN",
+                        )
                 requests_created = await self._count_user_cognitive_requests_since(
                     org_id=org_id,
                     user_id=user_id,
@@ -4502,9 +4615,14 @@ class LucentDaemon:
                 # Backwards-compatible for tests that monkeypatch old signatures.
                 return await RequestAPI.start_task(task_id)
 
-        async def _fail_owned(task_id: str, error: str):
+        async def _fail_owned(task_id: str, error: str, result: str | None = None):
             try:
-                return await RequestAPI.fail_task(task_id, error, instance_id=self.instance_id)
+                return await RequestAPI.fail_task(
+                    task_id,
+                    error,
+                    instance_id=self.instance_id,
+                    result=result,
+                )
             except TypeError:
                 return await RequestAPI.fail_task(task_id, error)
 
@@ -5128,7 +5246,7 @@ class LucentDaemon:
                     reason,
                     {"agent_type": agent_type, "model": selected_model},
                 )
-                await _fail_owned(task_id, reason)
+                await _fail_owned(task_id, reason, result=result)
                 continue
 
             # Validate
@@ -5221,7 +5339,13 @@ class LucentDaemon:
                             1, attributes={"status": "manual_review", "agent_type": agent_type}
                         )
                 else:
-                    await _fail_owned(task_id, reason)
+                    await RequestAPI.add_event(
+                        task_id,
+                        "validation_failed",
+                        reason,
+                        {"result_excerpt": (result or "")[:2000]},
+                    )
+                    await _fail_owned(task_id, reason, result=result)
                     log(f"Tracked task {task_id[:8]} failed: {reason}", "WARN")
                     if self._tracer:
                         self._tasks_completed_total.add(

@@ -7,6 +7,7 @@ from mcp.server.fastmcp import FastMCP
 
 from lucent.db import get_pool
 from lucent.db.definitions import BuiltInProtectionError, DefinitionRepository
+from lucent.tools.annotations import READ_ONLY
 from lucent.tools.memories import _get_current_user_context
 from lucent.url_validation import SSRFError, validate_url
 
@@ -84,6 +85,7 @@ def register_definition_tools(mcp: FastMCP) -> None:
     # ── Read-only tools ──────────────────────────────────────────────────
 
     @mcp.tool(
+        annotations=READ_ONLY,
         description="""List agent definitions in the organization.
 
 Filter by status to see only proposed, active, or rejected agents.
@@ -117,6 +119,7 @@ Returns: JSON with items array, total_count, and pagination info."""
         return json.dumps(result, default=_serialize)
 
     @mcp.tool(
+        annotations=READ_ONLY,
         description="""Get full details of an agent definition by ID.
 
 Returns the agent with its content, granted skill names, and MCP server names.

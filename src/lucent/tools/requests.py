@@ -9,6 +9,7 @@ from mcp.server.fastmcp import FastMCP
 
 from lucent.db.requests import RequestRepository
 from lucent.llm.context import get_llm_context
+from lucent.tools.annotations import CREATE_ONLY, READ_ONLY
 from lucent.tools.memories import _get_current_user_context
 
 logger = logging.getLogger(__name__)
@@ -77,6 +78,7 @@ def register_request_tools(mcp: FastMCP) -> None:
     """Register request tracking tools with the MCP server."""
 
     @mcp.tool(
+        annotations=CREATE_ONLY,
         description="""Create a tracked request \u2014 a top-level work item
 that will be broken into tasks.
 
@@ -241,6 +243,7 @@ returns status='skipped' with reason and a note explaining what to do."""
         return json.dumps(result)
 
     @mcp.tool(
+        annotations=CREATE_ONLY,
         description="""Create a task within a tracked request.
 
 Use after create_request to break a request into individual tasks that agents will execute.
@@ -1005,6 +1008,7 @@ Use this during cognitive cycles to discover new work."""
         return json.dumps(requests, default=serialize)
 
     @mcp.tool(
+        annotations=READ_ONLY,
         description="""List all active (non-completed) work \
 — requests and their task status summaries.
 
@@ -1031,6 +1035,7 @@ new requests. This prevents duplicate work items."""
         return json.dumps(work, default=serialize)
 
     @mcp.tool(
+        annotations=READ_ONLY,
         description="""List goals that have actual plannable work right now.
 
 This is the canonical "what should the planner work on" view. It applies all
@@ -1075,6 +1080,7 @@ Returns: JSON list of {goal_id, goal_title, next_milestone_index,
         return json.dumps(targets)
 
     @mcp.tool(
+        annotations=READ_ONLY,
         description="""List available LLM models for task assignment.
 
 Use this to choose a model when creating tasks. Returns all available models

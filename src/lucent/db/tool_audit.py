@@ -337,8 +337,12 @@ def classify_tool_result(result_text: str | None) -> tuple[str, str | None, str 
         return "success", None, None
     text = str(result_text)
     lower = text.lower()
-    if lower.startswith("error calling tool"):
+    if lower.startswith("error calling tool") or lower.startswith("error:"):
         return "failed", "tool_error", text[:_MAX_TEXT]
+    if "unexpected user permission response" in lower:
+        return "failed", "permission_protocol_error", text[:_MAX_TEXT]
+    if "failed to fetch" in lower or "typeerror: fetch failed" in lower:
+        return "failed", "fetch_error", text[:_MAX_TEXT]
     if "unauthorized" in lower or "status_code=401" in lower or "http 401" in lower:
         return "failed", "auth_error", text[:_MAX_TEXT]
     if "tool is not allowed" in lower or "blocked by hook" in lower:

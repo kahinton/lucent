@@ -30,6 +30,7 @@ from lucent.models.memory import (
 from lucent.models.validation import normalize_tags, validate_metadata
 from lucent.security import scan_content_for_injection
 from lucent.services.memory_access_service import MemoryAccessService
+from lucent.tools.annotations import CREATE_ONLY, MUTATING, READ_ONLY
 
 logger = get_logger("tools.memories")
 CREATABLE_MEMORY_TYPES = {MemoryType.EXPERIENCE, MemoryType.TECHNICAL, MemoryType.GOAL}
@@ -249,7 +250,7 @@ Returns:
     JSON string with the created memory including its ID.
 """
 
-    @mcp.tool(description=create_memory_description)
+    @mcp.tool(description=create_memory_description, annotations=CREATE_ONLY)
     async def create_memory(
         type: str,
         content: str,
@@ -394,7 +395,7 @@ Returns:
             logger.error("create_memory failed", exc_info=e)
             return _error_response(f"Failed to create memory: {e}")
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     async def get_memory(memory_id: str) -> str:
         """Retrieve a memory by its ID.
 
@@ -455,7 +456,7 @@ Returns:
             logger.error("get_memory failed: id=%s", memory_id, exc_info=e)
             return _error_response(f"Failed to retrieve memory: {e}")
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     async def get_memories(memory_ids: list[str]) -> str:
         """Retrieve multiple memories by their IDs in a single call.
 
@@ -545,7 +546,7 @@ Returns:
             logger.error("get_memories failed", exc_info=e)
             return _error_response(f"Failed to retrieve memories: {str(e)}")
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     async def get_current_user_context() -> str:
         """Get the current authenticated user's context and their individual memory.
 
@@ -596,7 +597,7 @@ Returns:
             logger.error("get_current_user_context failed", exc_info=e)
             return _error_response(f"Failed to get user context: {str(e)}")
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     async def search_memories(
         query: str | None = None,
         username: str | None = None,
@@ -731,7 +732,7 @@ Returns:
             logger.error("search_memories failed", exc_info=e)
             return _error_response(f"Search failed: {str(e)}")
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     async def search_memories_full(
         query: str,
         username: str | None = None,
@@ -832,7 +833,7 @@ Returns:
             logger.error("search_memories_full failed", exc_info=e)
             return _error_response(f"Full search failed: {str(e)}")
 
-    @mcp.tool()
+    @mcp.tool(annotations=MUTATING)
     async def update_memory(
         memory_id: str,
         content: str | None = None,
@@ -1126,7 +1127,7 @@ Returns:
         """
         return await _toggle_pin(memory_id, pin=False)
 
-    @mcp.tool()
+    @mcp.tool(annotations=MUTATING)
     async def delete_memory(memory_id: str) -> str:
         """Delete a memory (soft delete - can be recovered).
 
@@ -1215,7 +1216,7 @@ Returns:
             logger.error("delete_memory failed: id=%s", memory_id, exc_info=e)
             return _error_response(f"Failed to delete memory: {str(e)}")
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     async def get_existing_tags(
         username: str | None = None,
         type: str | None = None,

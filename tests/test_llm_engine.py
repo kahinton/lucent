@@ -96,6 +96,82 @@ class TestCopilotEngine:
 
         assert kwargs["enable_config_discovery"] is True
 
+    def test_mutable_mcp_permission_uses_legacy_compat(self):
+        from lucent.llm.copilot_engine import _should_use_legacy_permission_response
+
+        class Request:
+            kind = "mcp"
+            read_only = False
+
+        class Result:
+            kind = "approved"
+
+        assert _should_use_legacy_permission_response(Request(), Result()) is True
+
+    def test_read_only_mcp_permission_uses_legacy_compat(self):
+        from lucent.llm.copilot_engine import _should_use_legacy_permission_response
+
+        class Request:
+            kind = "mcp"
+            read_only = True
+
+        class Result:
+            kind = "approved"
+
+        assert _should_use_legacy_permission_response(Request(), Result()) is True
+
+    def test_bash_permission_uses_legacy_compat(self):
+        from lucent.llm.copilot_engine import _should_use_legacy_permission_response
+
+        class Request:
+            kind = "tool"
+            tool_name = "bash"
+
+        class Result:
+            kind = "approved"
+
+        assert _should_use_legacy_permission_response(Request(), Result()) is True
+
+    @pytest.mark.asyncio
+    async def test_legacy_mcp_permission_payload_shape(self):
+        from lucent.llm.copilot_engine import _send_legacy_permission_response
+
+        calls = []
+
+        class Client:
+            async def request(self, method, payload):
+                calls.append((method, payload))
+                return {"success": True}
+
+        class Permissions:
+            _client = Client()
+
+        class Rpc:
+            permissions = Permissions()
+
+        class Session:
+            session_id = "session-123"
+            rpc = Rpc()
+
+        class Result:
+            kind = "approved"
+            feedback = None
+            message = None
+            path = None
+
+        await _send_legacy_permission_response(Session(), "perm-123", Result())
+
+        assert calls == [
+            (
+                "session.permissions.handlePendingPermissionRequest",
+                {
+                    "requestId": "perm-123",
+                    "result": {"kind": "approve-once"},
+                    "sessionId": "session-123",
+                },
+            )
+        ]
+
 
 class TestLangChainEngine:
     def test_name(self):
