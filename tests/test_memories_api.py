@@ -144,6 +144,8 @@ async def _create_memory(client, prefix, **overrides):
         "importance": 5,
     }
     payload.update(overrides)
+    if payload.get("type") == "technical" and not payload.get("metadata"):
+        payload["metadata"] = {"category": "api-test"}
     resp = await client.post("/api/memories", json=payload)
     return resp
 

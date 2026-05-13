@@ -27,7 +27,11 @@ from lucent.db import (
 )
 from lucent.integrations.github_repo_access_service import GitHubRepoAccessService
 from lucent.logging import get_logger
-from lucent.models.validation import normalize_tags, validate_metadata
+from lucent.models.validation import (
+    normalize_tags,
+    validate_memory_content_quality,
+    validate_metadata,
+)
 from lucent.rbac import Permission, Role
 from lucent.security import scan_content_for_injection
 from lucent.services.memory_access_service import MemoryAccessService
@@ -150,6 +154,19 @@ async def create_memory(
     # Normalize tags: replace prohibited tags, auto-tag daemon content
     effective_tags = normalize_tags(data.tags, is_daemon=is_daemon)
 
+    try:
+        validate_memory_content_quality(
+            data.type,
+            data.content,
+            metadata=validated_metadata,
+            tags=effective_tags,
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        ) from e
+
     # Scan content for prompt injection patterns (defense-in-depth)
     injection_matches = scan_content_for_injection(data.content)
     if injection_matches:
@@ -176,6 +193,11 @@ async def create_memory(
         )
     except DuplicateTechnicalMemoryError as e:
         _raise_duplicate_technical_memory(e)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        ) from e
 
     logger.info(
         "Memory created: id=%s, type=%s, user=%s",
@@ -408,6 +430,19 @@ async def update_memory(
                         filename=scope["filename"],
                     )
                 )
+
+    try:
+        validate_memory_content_quality(
+            existing["type"],
+            data.content if data.content is not None else existing["content"],
+            metadata=validated_metadata if data.metadata is not None else existing.get("metadata"),
+            tags=data.tags if data.tags is not None else existing.get("tags"),
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        ) from e
 
     result = await repo.update(
         memory_id=memory_id,

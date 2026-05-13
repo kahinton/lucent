@@ -17,6 +17,7 @@ from lucent.db import (
 )
 from lucent.integrations.github_repo_access_service import GitHubRepoAccessService
 from lucent.mode import is_team_mode
+from lucent.models.validation import normalize_tags, validate_memory_content_quality
 from lucent.rbac import Role
 from lucent.services.memory_access_service import MemoryAccessService
 
@@ -270,7 +271,7 @@ async def memory_new_submit(
     username = user.display_name or "unknown"
 
     # Parse tags
-    tag_list = [t.strip().lower() for t in tags.split(",") if t.strip()]
+    tag_list = normalize_tags([t for t in tags.split(",") if t.strip()])
 
     # Individual memories cannot be created via web interface
     # - they are auto-created when users join
@@ -318,6 +319,12 @@ async def memory_new_submit(
 
     # Create memory
     try:
+        validate_memory_content_quality(
+            type,
+            content,
+            metadata=metadata,
+            tags=tag_list,
+        )
         result = await repo.create(
             username=username,
             type=type,
@@ -330,6 +337,8 @@ async def memory_new_submit(
         )
     except DuplicateTechnicalMemoryError as e:
         _raise_duplicate_technical_memory(e)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
     # Log creation
     await audit_repo.log(
@@ -509,7 +518,7 @@ async def memory_edit_submit(
         raise HTTPException(status_code=403, detail="You can only edit your own memories")
 
     # Parse tags
-    tag_list = [t.strip().lower() for t in tags.split(",") if t.strip()]
+    tag_list = normalize_tags([t for t in tags.split(",") if t.strip()])
 
     # Build type-specific metadata based on the memory's type
     memory_type = existing.get("type")
@@ -566,6 +575,16 @@ async def memory_edit_submit(
                     filename=scope["filename"],
                 )
             )
+
+    try:
+        validate_memory_content_quality(
+            memory_type,
+            content,
+            metadata=metadata,
+            tags=tag_list,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
     # Update
     result = await repo.update(
@@ -841,6 +860,8 @@ async def knowledge_tree(request: Request):
         FROM memories
         WHERE deleted_at IS NULL
           AND type = 'technical'
+                    AND COALESCE(lifecycle_stage, 'active') = 'active'
+                    AND NOT ('superseded' = ANY(tags))
           AND metadata->>'repo' IS NOT NULL
           AND (user_id = $1 OR (organization_id = $2 AND shared = true))
         ORDER BY metadata->>'repo', metadata->>'directory' NULLS FIRST, metadata->>'filename' NULLS FIRST

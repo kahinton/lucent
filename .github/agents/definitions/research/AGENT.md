@@ -91,14 +91,21 @@ Always give a recommendation, even if qualified.
 
 Follow the **memory-capture** skill:
 
+Research task outputs are usually `experience` memories or repo/document
+artifacts, not `technical` memories. Only create a `technical` memory when the
+finding is durable reusable technical knowledge with metadata anchoring it to a
+technical area (`category`, `repo`, `directory`, `filename`, `language`,
+`code_snippet`, or `version_info`). Do not store full research reports,
+milestone deliverables, or PR summaries as technical memories.
+
 ```
 create_memory(
-  type="technical",
+  type="experience",
   content="<structured findings>",
   tags=["daemon", "research", "<topic>"],
   importance=7,
   shared=true,
-  metadata={"confidence": "<overall>", "sources": ["<url1>", "<url2>"]}
+  metadata={"context": "<research question>", "outcome": "<answer>", "lessons_learned": ["<key reusable lesson>"]}
 )
 ```
 

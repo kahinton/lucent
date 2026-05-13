@@ -27,7 +27,11 @@ from lucent.models.memory import (
     SearchMemoriesInput,
     UpdateMemoryInput,
 )
-from lucent.models.validation import normalize_tags, validate_metadata
+from lucent.models.validation import (
+    normalize_tags,
+    validate_memory_content_quality,
+    validate_metadata,
+)
 from lucent.security import scan_content_for_injection
 from lucent.services.memory_access_service import MemoryAccessService
 from lucent.tools.annotations import CREATE_ONLY, MUTATING, READ_ONLY
@@ -246,6 +250,15 @@ Duplicate protection:
     preserve durable facts, merge non-overlapping details, reconcile conflicts,
     carry forward useful tags/references/metadata, and do not simply overwrite.
 
+Technical memory quality rules:
+    Technical memories are injected as future working context. They must be
+    concise reference material about durable system/code/domain behavior, not
+    task reports, milestone deliverables, research dumps, PR summaries, or
+    changelog entries. Include technical metadata anchoring the memory to at
+    least one of: category, repo, directory, filename, language, code_snippet,
+    or version_info. Use type="experience" for task outcomes/research notes and
+    persist full deliverables to the target repo/docs plus task outputs.
+
 Returns:
     JSON string with the created memory including its ID.
 """
@@ -302,6 +315,13 @@ Returns:
 
             # Normalize tags: replace prohibited tags, auto-tag daemon content
             effective_tags = normalize_tags(tags, is_daemon=is_daemon)
+
+            validate_memory_content_quality(
+                memory_type,
+                content,
+                metadata=validated_metadata,
+                tags=effective_tags,
+            )
 
             # Scan content for prompt injection patterns (defense-in-depth)
             injection_matches = scan_content_for_injection(content)
@@ -909,6 +929,13 @@ Returns:
                                 filename=scope["filename"],
                             ).message
                         )
+
+            validate_memory_content_quality(
+                old_memory["type"],
+                content if content is not None else old_memory["content"],
+                metadata=validated_metadata if metadata is not None else old_memory.get("metadata"),
+                tags=tags if tags is not None else old_memory.get("tags"),
+            )
 
             update_input = UpdateMemoryInput(
                 content=content,
@@ -1693,7 +1720,11 @@ Returns:
                 memory_tags.extend(tags)
 
             # Build metadata
-            metadata: dict[str, Any] = {"submitted_by": str(user_id), "source": "mcp"}
+            metadata: dict[str, Any] = {
+                "category": "daemon-task",
+                "submitted_by": str(user_id),
+                "source": "mcp",
+            }
             if context:
                 metadata["context"] = context
 

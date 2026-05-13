@@ -12,7 +12,11 @@ from lucent.api.deps import CurrentUser, get_current_user
 from lucent.db import OrganizationRepository, UserRepository
 from lucent.db.requests import RequestRepository
 from lucent.model_registry import ModelInfo
-from lucent.models.validation import PROHIBITED_TAG_MAP, normalize_tags
+from lucent.models.validation import (
+    PROHIBITED_TAG_MAP,
+    normalize_tags,
+    validate_memory_content_quality,
+)
 
 
 @pytest_asyncio.fixture
@@ -197,9 +201,56 @@ class TestTagNormalization:
         tags = ["needs-review", "feedback-approved", "daemon", "custom"]
         assert normalize_tags(tags) == tags
 
+    def test_normalizes_tag_shape_and_milestones(self):
+        tags = [" M5 ", "pending_review", "Go To Market", "m05"]
+        assert normalize_tags(tags) == ["milestone-5", "needs-review", "go-to-market"]
+
     @pytest.mark.parametrize("prohibited,canonical", PROHIBITED_TAG_MAP.items())
     def test_all_prohibited_tag_map_entries_are_handled(self, prohibited, canonical):
         assert normalize_tags([prohibited]) == [canonical]
+
+    def test_technical_memory_requires_metadata_anchor(self):
+        with pytest.raises(ValueError, match="metadata.category"):
+            validate_memory_content_quality(
+                "technical",
+                "Uses repository pattern with asyncpg pools.",
+                metadata={},
+                tags=["daemon"],
+            )
+
+    def test_technical_memory_treats_non_dict_metadata_as_unanchored(self):
+        with pytest.raises(ValueError, match="metadata.category"):
+            validate_memory_content_quality(
+                "technical",
+                "Uses repository pattern with asyncpg pools.",
+                metadata="legacy bad metadata",  # type: ignore[arg-type]
+                tags=["daemon"],
+            )
+
+    def test_technical_memory_accepts_legacy_json_string_metadata(self):
+        validate_memory_content_quality(
+            "technical",
+            "Uses repository pattern with asyncpg pools.",
+            metadata='{"category": "architecture"}',  # type: ignore[arg-type]
+            tags=["daemon"],
+        )
+
+    def test_technical_memory_rejects_task_report_shape(self):
+        with pytest.raises(ValueError, match="task report"):
+            validate_memory_content_quality(
+                "technical",
+                "Done.\n\n## Deliverables\n\n- Branch: docs/example\n- Commit SHA: abc123",
+                metadata={"category": "architecture"},
+                tags=["daemon", "needs-review"],
+            )
+
+    def test_experience_memory_allows_task_report_shape(self):
+        validate_memory_content_quality(
+            "experience",
+            "Done.\n\n## Deliverables\n\n- Branch: docs/example\n- Commit SHA: abc123",
+            metadata={},
+            tags=["daemon", "needs-review"],
+        )
 
 
 class TestStatusTransitionGuards:
@@ -498,6 +549,7 @@ class TestReviewQueueVisibility:
                 "type": "technical",
                 "content": f"{wf_prefix}needs review content",
                 "tags": ["awaiting-approval"],
+                "metadata": {"category": "workflow-test"},
                 "shared": False,
             },
         )
@@ -1103,6 +1155,7 @@ class TestFeedbackProcessing:
                 "type": "technical",
                 "content": f"{wf_prefix}audit findings",
                 "tags": ["needs-review"],
+                "metadata": {"category": "audit"},
             },
         )
         assert created.status_code == 201

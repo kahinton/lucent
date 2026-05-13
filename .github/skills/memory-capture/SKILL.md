@@ -117,6 +117,15 @@ Every memory should answer three questions:
 
 Technical memories are injected as working context for agents executing tasks. Write them as reference material, not changelogs.
 
+Because the old cleanup/consolidation job is retired, quality is enforced at
+creation time. A `technical` memory must be concise and include metadata that
+anchors it to a technical area (`category`, `repo`, `directory`, `filename`,
+`language`, `code_snippet`, or `version_info`). If you are saving a task result,
+research finding, milestone deliverable, PR summary, review outcome, or session
+narrative, use `experience` or persist the artifact to the target repo/docs and
+record a task output — do **not** label it `technical` just because it contains
+technical-looking details.
+
 **Focus on WHY and HOW — not WHAT was done:**
 
 | Good (conventions/patterns) | Bad (changelog entries) |

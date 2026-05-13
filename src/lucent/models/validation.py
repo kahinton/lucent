@@ -1,5 +1,7 @@
-"""Validation utilities for memory metadata."""
+"""Validation utilities for memory metadata, tags, and content quality."""
 
+import json
+import re
 from typing import Any, get_args, get_origin
 
 from pydantic import ValidationError
@@ -268,6 +270,52 @@ PROHIBITED_TAG_MAP: dict[str, str] = {
     "user-approved": "feedback-approved",
 }
 
+TECHNICAL_MEMORY_MAX_CONTENT_CHARS = 12_000
+TECHNICAL_MEMORY_ANCHOR_FIELDS = (
+    "category",
+    "repo",
+    "directory",
+    "filename",
+    "language",
+    "code_snippet",
+    "version_info",
+)
+TECHNICAL_MEMORY_TASK_REPORT_MARKERS = (
+    "## deliverables",
+    "**deliverable**",
+    "**deliverables**",
+    "branch:",
+    "commit sha:",
+    "pr:",
+    "pr link:",
+    "pr creation link:",
+    "task complete",
+    "done.",
+)
+
+
+def _normalize_tag_text(tag: str) -> str:
+    """Normalize a user/model supplied tag to canonical lowercase kebab-case."""
+    normalized = re.sub(r"[\s_]+", "-", str(tag).strip().lower())
+    normalized = re.sub(r"-+", "-", normalized).strip("-")
+    milestone_match = re.fullmatch(r"(?:m|milestone-)(\d+)", normalized)
+    if milestone_match:
+        return f"milestone-{int(milestone_match.group(1))}"
+    return normalized
+
+
+def _coerce_metadata_dict(metadata: dict[str, Any] | None) -> dict[str, Any]:
+    """Return metadata as a dict, tolerating legacy JSON-string rows."""
+    if isinstance(metadata, dict):
+        return metadata
+    if isinstance(metadata, str):
+        try:
+            parsed = json.loads(metadata)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
 
 def normalize_tags(tags: list[str] | None, *, is_daemon: bool = False) -> list[str]:
     """Normalize memory tags: replace prohibited tags and auto-tag daemon content.
@@ -284,8 +332,11 @@ def normalize_tags(tags: list[str] | None, *, is_daemon: bool = False) -> list[s
 
     normalized: list[str] = []
     for tag in tags:
-        replacement = PROHIBITED_TAG_MAP.get(tag)
-        normalized.append(replacement if replacement else tag)
+        cleaned = _normalize_tag_text(tag)
+        if not cleaned:
+            continue
+        replacement = PROHIBITED_TAG_MAP.get(cleaned)
+        normalized.append(replacement if replacement else cleaned)
 
     # Daemon-created content must carry the 'daemon' tag for discoverability
     if is_daemon and "daemon" not in normalized:
@@ -299,3 +350,74 @@ def normalize_tags(tags: list[str] | None, *, is_daemon: bool = False) -> list[s
             seen.add(tag)
             deduped.append(tag)
     return deduped
+
+
+def validate_memory_content_quality(
+    memory_type: str | MemoryType,
+    content: str,
+    *,
+    metadata: dict[str, Any] | None = None,
+    tags: list[str] | None = None,
+) -> None:
+    """Validate memory content quality rules that require context beyond metadata.
+
+    The cleanup/consolidation job is intentionally retired, so memory quality has
+    to be protected at write time. Today only technical memories need strict
+    shape checks because they are injected as operational context for future
+    agents; experience/goal memories can be narrative and longer-lived logs.
+
+    Raises:
+        ValueError: If the content is unsuitable for the requested memory type.
+    """
+    type_str = memory_type.value if isinstance(memory_type, MemoryType) else memory_type.lower()
+    if type_str != MemoryType.TECHNICAL.value:
+        return
+
+    _validate_technical_memory_quality(content, metadata=metadata, tags=tags)
+
+
+def _validate_technical_memory_quality(
+    content: str,
+    *,
+    metadata: dict[str, Any] | None,
+    tags: list[str] | None,
+) -> None:
+    stripped = (content or "").strip()
+    if not stripped:
+        raise ValueError("Technical memory content cannot be empty.")
+
+    normalized_metadata = _coerce_metadata_dict(metadata)
+    has_anchor = any(
+        bool(str(normalized_metadata.get(field) or "").strip())
+        for field in TECHNICAL_MEMORY_ANCHOR_FIELDS
+    )
+    if not has_anchor:
+        raise ValueError(
+            "Technical memories must include metadata that anchors the knowledge "
+            "to a technical area: at least one of metadata.category, repo, "
+            "directory, filename, language, code_snippet, or version_info. "
+            "Use type='experience' for task outcomes, research notes, reviews, "
+            "or session narratives."
+        )
+
+    if len(stripped) > TECHNICAL_MEMORY_MAX_CONTENT_CHARS:
+        raise ValueError(
+            "Technical memories must be concise reference notes, not full "
+            f"deliverables. Limit is {TECHNICAL_MEMORY_MAX_CONTENT_CHARS} "
+            "characters. Persist long artifacts to the target repo/docs and "
+            "record them as task outputs, or summarize the lesson as an "
+            "experience memory."
+        )
+
+    preview = stripped[:2_000].lower()
+    marker_count = sum(1 for marker in TECHNICAL_MEMORY_TASK_REPORT_MARKERS if marker in preview)
+    lifecycle_tags = set(normalize_tags(tags or []))
+    if marker_count >= 2 or (
+        marker_count >= 1 and lifecycle_tags & {"daemon", "needs-review", "review-outcome"}
+    ):
+        raise ValueError(
+            "This looks like a task report, PR summary, or deliverable index, "
+            "not reusable technical knowledge. Store it as an experience memory "
+            "or task output; reserve technical memories for durable system "
+            "behavior, architecture, code patterns, constraints, and runbook facts."
+        )

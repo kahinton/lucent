@@ -90,7 +90,7 @@ Follow the **memory-capture** skill to record what was built:
 
 ```
 create_memory(
-  type="technical",
+  type="experience",
   content="## Definition Created: <name>\n\n**Type**: <agent|skill|both>\n**Scope**: <built-in|instance>\n**Purpose**: <what gap it fills>\n**Skills granted**: <list>\n**Design rationale**: <why key decisions were made>\n**Quality notes**: <what could be improved in future iterations>",
   tags=["daemon", "definition-engineering", "<domain>"],
   importance=7,
