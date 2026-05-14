@@ -79,6 +79,22 @@ def _owner_args_for_context(
     return {"owner_user_id": str(user_id)}
 
 
+def _requires_unscoped_human(memory_scope: str | None) -> str | None:
+    """Return an error message when a scoped agent context tries to activate access.
+
+    Scoped API keys are used by daemon-dispatched agents. They may create
+    proposed definitions and follow-up requests, but they must not hot-patch
+    active definitions, approve proposals, or grant themselves runtime powers.
+    """
+    if memory_scope is None:
+        return None
+    return (
+        "Human approval required: scoped agent contexts may create proposals "
+        "or follow-up requests, but cannot update active definitions, approve "
+        "definitions, or grant skills/hooks/MCP servers."
+    )
+
+
 def register_definition_tools(mcp: FastMCP) -> None:
     """Register definition management tools with the MCP server."""
 
@@ -432,11 +448,13 @@ Returns: JSON with status 'granted', or an error if either is not found."""
         agent_id: str,
         skill_id: str,
     ) -> str:
-        user_id, org_id, role, _, _ = await _get_current_user_context()
+        user_id, org_id, role, memory_scope, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         if not user_id:
             return json.dumps({"error": "No user context"})
+        if scoped_error := _requires_unscoped_human(memory_scope):
+            return json.dumps({"error": scoped_error, "code": 403})
         if role not in ("admin", "owner"):
             return json.dumps(
                 {"error": "Forbidden: admin or owner role required", "code": 403}
@@ -490,11 +508,13 @@ Returns: JSON with the updated agent, or an error if not found."""
         description: str | None = None,
         content: str | None = None,
     ) -> str:
-        user_id, org_id, user_role, _, _ = await _get_current_user_context()
+        user_id, org_id, user_role, memory_scope, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         if not user_id:
             return json.dumps({"error": "No user context"})
+        if scoped_error := _requires_unscoped_human(memory_scope):
+            return json.dumps({"error": scoped_error, "code": 403})
 
         if not await _can_modify_definition(
             str(user_id), str(org_id), "agent", agent_id,
@@ -521,6 +541,60 @@ Returns: JSON with the updated agent, or an error if not found."""
         return json.dumps(result, default=_serialize)
 
     @mcp.tool(
+        description="""Update a skill definition's name, description, or content.
+
+Use this when learning extraction or self-improvement finds a concrete flaw in
+an existing instance skill. Built-in skills are protected: the tool returns a
+403-style error and the caller should create a follow-up request for an owner to
+edit the on-disk source file.
+
+Args:
+    skill_id: UUID of the skill definition
+    name: New name (optional, max 64 chars)
+    description: New description (optional)
+    content: New content (optional, markdown prompt)
+
+Returns: JSON with the updated skill, or an error if not found/protected."""
+    )
+    async def update_skill_definition(
+        skill_id: str,
+        name: str | None = None,
+        description: str | None = None,
+        content: str | None = None,
+    ) -> str:
+        user_id, org_id, user_role, memory_scope, _ = await _get_current_user_context()
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+        if not user_id:
+            return json.dumps({"error": "No user context"})
+        if scoped_error := _requires_unscoped_human(memory_scope):
+            return json.dumps({"error": scoped_error, "code": 403})
+
+        if not await _can_modify_definition(
+            str(user_id), str(org_id), "skill", skill_id,
+        ):
+            return json.dumps({"error": "Skill not found"})
+
+        kwargs = {}
+        if name is not None:
+            kwargs["name"] = name
+        if description is not None:
+            kwargs["description"] = description
+        if content is not None:
+            kwargs["content"] = content
+
+        repo = await _get_definition_repository()
+        try:
+            result = await repo.update_skill(
+                skill_id, str(org_id), requester_role=user_role, **kwargs,
+            )
+        except BuiltInProtectionError as exc:
+            return json.dumps({"error": str(exc), "code": 403})
+        if not result:
+            return json.dumps({"error": "Skill not found"})
+        return json.dumps(result, default=_serialize)
+
+    @mcp.tool(
         description="""Approve an agent definition (admin/owner only).
 
 Moves the agent from 'proposed' to 'active' status, making it available for dispatch.
@@ -531,11 +605,13 @@ Args:
 Returns: JSON with the updated agent, or an error if not found or not in proposed status."""
     )
     async def approve_agent_definition(agent_id: str) -> str:
-        user_id, org_id, user_role, _, _ = await _get_current_user_context()
+        user_id, org_id, user_role, memory_scope, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         if not user_id:
             return json.dumps({"error": "No user context"})
+        if scoped_error := _requires_unscoped_human(memory_scope):
+            return json.dumps({"error": scoped_error, "code": 403})
         if user_role not in ("admin", "owner"):
             return json.dumps({"error": "Admin or owner role required"})
 
@@ -556,11 +632,13 @@ Args:
 Returns: JSON with the updated agent, or an error if not found or not in proposed status."""
     )
     async def reject_agent_definition(agent_id: str) -> str:
-        user_id, org_id, user_role, _, _ = await _get_current_user_context()
+        user_id, org_id, user_role, memory_scope, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         if not user_id:
             return json.dumps({"error": "No user context"})
+        if scoped_error := _requires_unscoped_human(memory_scope):
+            return json.dumps({"error": scoped_error, "code": 403})
         if user_role not in ("admin", "owner"):
             return json.dumps({"error": "Admin or owner role required"})
 
@@ -579,11 +657,13 @@ Args:
 Returns: JSON with status 'deleted', or an error if not found."""
     )
     async def delete_agent_definition(agent_id: str) -> str:
-        user_id, org_id, user_role, _, _ = await _get_current_user_context()
+        user_id, org_id, user_role, memory_scope, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         if not user_id:
             return json.dumps({"error": "No user context"})
+        if scoped_error := _requires_unscoped_human(memory_scope):
+            return json.dumps({"error": scoped_error, "code": 403})
         if user_role not in ("admin", "owner"):
             return json.dumps(
                 {"error": "Forbidden: admin or owner role required", "code": 403}
@@ -610,11 +690,13 @@ Args:
 Returns: JSON with status 'revoked', or an error if not found."""
     )
     async def revoke_skill_from_agent(agent_id: str, skill_id: str) -> str:
-        user_id, org_id, role, _, _ = await _get_current_user_context()
+        user_id, org_id, role, memory_scope, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         if not user_id:
             return json.dumps({"error": "No user context"})
+        if scoped_error := _requires_unscoped_human(memory_scope):
+            return json.dumps({"error": scoped_error, "code": 403})
         if role not in ("admin", "owner"):
             return json.dumps(
                 {"error": "Forbidden: admin or owner role required", "code": 403}
@@ -642,11 +724,13 @@ Args:
 Returns: JSON with status 'granted', or an error if not found."""
     )
     async def grant_mcp_server_to_agent(agent_id: str, definition_id: str) -> str:
-        user_id, org_id, role, _, _ = await _get_current_user_context()
+        user_id, org_id, role, memory_scope, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         if not user_id:
             return json.dumps({"error": "No user context"})
+        if scoped_error := _requires_unscoped_human(memory_scope):
+            return json.dumps({"error": scoped_error, "code": 403})
         if role not in ("admin", "owner"):
             return json.dumps(
                 {"error": "Forbidden: admin or owner role required", "code": 403}
@@ -682,11 +766,13 @@ Args:
 Returns: JSON with status 'granted', or an error if either is not found."""
     )
     async def grant_hook_to_agent(agent_id: str, hook_id: str) -> str:
-        user_id, org_id, role, _, _ = await _get_current_user_context()
+        user_id, org_id, role, memory_scope, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         if not user_id:
             return json.dumps({"error": "No user context"})
+        if scoped_error := _requires_unscoped_human(memory_scope):
+            return json.dumps({"error": scoped_error, "code": 403})
         if role not in ("admin", "owner"):
             return json.dumps(
                 {"error": "Forbidden: admin or owner role required", "code": 403}
@@ -728,11 +814,13 @@ Args:
 Returns: JSON with status 'revoked', or an error if not found."""
     )
     async def revoke_mcp_server_from_agent(agent_id: str, server_id: str) -> str:
-        user_id, org_id, role, _, _ = await _get_current_user_context()
+        user_id, org_id, role, memory_scope, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         if not user_id:
             return json.dumps({"error": "No user context"})
+        if scoped_error := _requires_unscoped_human(memory_scope):
+            return json.dumps({"error": scoped_error, "code": 403})
         if role not in ("admin", "owner"):
             return json.dumps(
                 {"error": "Forbidden: admin or owner role required", "code": 403}
@@ -760,11 +848,13 @@ Args:
 Returns: JSON with status 'revoked', or an error if not found."""
     )
     async def revoke_hook_from_agent(agent_id: str, hook_id: str) -> str:
-        user_id, org_id, role, _, _ = await _get_current_user_context()
+        user_id, org_id, role, memory_scope, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         if not user_id:
             return json.dumps({"error": "No user context"})
+        if scoped_error := _requires_unscoped_human(memory_scope):
+            return json.dumps({"error": scoped_error, "code": 403})
         if role not in ("admin", "owner"):
             return json.dumps(
                 {"error": "Forbidden: admin or owner role required", "code": 403}
@@ -796,11 +886,13 @@ Args:
 Returns: JSON with the updated skill, or an error if not found or not in proposed status."""
     )
     async def approve_skill_definition(skill_id: str) -> str:
-        user_id, org_id, user_role, _, _ = await _get_current_user_context()
+        user_id, org_id, user_role, memory_scope, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         if not user_id:
             return json.dumps({"error": "No user context"})
+        if scoped_error := _requires_unscoped_human(memory_scope):
+            return json.dumps({"error": scoped_error, "code": 403})
         if user_role not in ("admin", "owner"):
             return json.dumps({"error": "Admin or owner role required"})
 
@@ -821,11 +913,13 @@ Args:
 Returns: JSON with the updated skill, or an error if not found or not in proposed status."""
     )
     async def reject_skill_definition(skill_id: str) -> str:
-        user_id, org_id, user_role, _, _ = await _get_current_user_context()
+        user_id, org_id, user_role, memory_scope, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         if not user_id:
             return json.dumps({"error": "No user context"})
+        if scoped_error := _requires_unscoped_human(memory_scope):
+            return json.dumps({"error": scoped_error, "code": 403})
         if user_role not in ("admin", "owner"):
             return json.dumps({"error": "Admin or owner role required"})
 
@@ -846,11 +940,13 @@ Args:
 Returns: JSON with the updated hook, or an error if not found or not in proposed status."""
     )
     async def approve_hook_definition(hook_id: str) -> str:
-        user_id, org_id, user_role, _, _ = await _get_current_user_context()
+        user_id, org_id, user_role, memory_scope, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         if not user_id:
             return json.dumps({"error": "No user context"})
+        if scoped_error := _requires_unscoped_human(memory_scope):
+            return json.dumps({"error": scoped_error, "code": 403})
         if user_role not in ("admin", "owner"):
             return json.dumps({"error": "Admin or owner role required"})
 
@@ -871,11 +967,13 @@ Args:
 Returns: JSON with the updated hook, or an error if not found or not in proposed status."""
     )
     async def reject_hook_definition(hook_id: str) -> str:
-        user_id, org_id, user_role, _, _ = await _get_current_user_context()
+        user_id, org_id, user_role, memory_scope, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         if not user_id:
             return json.dumps({"error": "No user context"})
+        if scoped_error := _requires_unscoped_human(memory_scope):
+            return json.dumps({"error": scoped_error, "code": 403})
         if user_role not in ("admin", "owner"):
             return json.dumps({"error": "Admin or owner role required"})
 
@@ -894,11 +992,13 @@ Args:
 Returns: JSON with status 'deleted', or an error if not found."""
     )
     async def delete_skill_definition(skill_id: str) -> str:
-        user_id, org_id, user_role, _, _ = await _get_current_user_context()
+        user_id, org_id, user_role, memory_scope, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         if not user_id:
             return json.dumps({"error": "No user context"})
+        if scoped_error := _requires_unscoped_human(memory_scope):
+            return json.dumps({"error": scoped_error, "code": 403})
         if user_role not in ("admin", "owner"):
             return json.dumps(
                 {"error": "Forbidden: admin or owner role required", "code": 403}
@@ -924,11 +1024,13 @@ Args:
 Returns: JSON with status 'deleted', or an error if not found."""
     )
     async def delete_hook_definition(hook_id: str) -> str:
-        user_id, org_id, user_role, _, _ = await _get_current_user_context()
+        user_id, org_id, user_role, memory_scope, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         if not user_id:
             return json.dumps({"error": "No user context"})
+        if scoped_error := _requires_unscoped_human(memory_scope):
+            return json.dumps({"error": scoped_error, "code": 403})
         if user_role not in ("admin", "owner"):
             return json.dumps(
                 {"error": "Forbidden: admin or owner role required", "code": 403}
@@ -1135,11 +1237,13 @@ Returns: JSON with the updated server, or an error if not found."""
         server_type: str | None = None,
         command: str | None = None,
     ) -> str:
-        user_id, org_id, user_role, _, _ = await _get_current_user_context()
+        user_id, org_id, user_role, memory_scope, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         if not user_id:
             return json.dumps({"error": "No user context"})
+        if scoped_error := _requires_unscoped_human(memory_scope):
+            return json.dumps({"error": scoped_error, "code": 403})
 
         repo = await _get_definition_repository()
         existing = await repo.get_mcp_server(
@@ -1200,11 +1304,13 @@ Args:
 Returns: JSON with the updated server, or an error if not found or not in proposed status."""
     )
     async def approve_mcp_server_definition(server_id: str) -> str:
-        user_id, org_id, user_role, _, _ = await _get_current_user_context()
+        user_id, org_id, user_role, memory_scope, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         if not user_id:
             return json.dumps({"error": "No user context"})
+        if scoped_error := _requires_unscoped_human(memory_scope):
+            return json.dumps({"error": scoped_error, "code": 403})
         if user_role not in ("admin", "owner"):
             return json.dumps({"error": "Admin or owner role required"})
 
@@ -1225,11 +1331,13 @@ Args:
 Returns: JSON with the updated server, or an error if not found or not in proposed status."""
     )
     async def reject_mcp_server_definition(server_id: str) -> str:
-        user_id, org_id, user_role, _, _ = await _get_current_user_context()
+        user_id, org_id, user_role, memory_scope, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         if not user_id:
             return json.dumps({"error": "No user context"})
+        if scoped_error := _requires_unscoped_human(memory_scope):
+            return json.dumps({"error": scoped_error, "code": 403})
         if user_role not in ("admin", "owner"):
             return json.dumps({"error": "Admin or owner role required"})
 

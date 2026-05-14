@@ -149,7 +149,7 @@ def _is_operational_tool_call(entry: dict) -> bool:
     tool = _normalize_tool_name(entry.get("tool") or entry.get("raw_tool"))
     return bool(tool and tool not in _NON_OPERATIONAL_TOOL_NAMES)
 
-_TASK_MEMORY_SERVER_TOOLS = sorted(
+_BASE_TASK_MEMORY_SERVER_TOOLS = sorted(
     {
         "create_memory",
         "get_current_user_context",
@@ -171,6 +171,84 @@ _TASK_MEMORY_SERVER_TOOLS = sorted(
         "propose_definition_improvement",
     }
 )
+
+_DEFINITION_ACTIVATION_TOOLS = sorted(
+    {
+        "list_agent_definitions",
+        "get_agent_definition",
+        "list_skill_definitions",
+        "get_skill_definition",
+        "list_proposals",
+        "create_agent_definition",
+        "create_skill_definition",
+        "create_hook_definition",
+        "list_hook_definitions",
+        "get_hook_definition",
+        "list_mcp_server_definitions",
+        "create_mcp_server_definition",
+    }
+)
+
+_WORK_ACTIVATION_TOOLS = sorted(
+    {
+        "create_request",
+        "create_task",
+        "list_sandbox_templates",
+        "propose_sandbox_template",
+    }
+)
+
+_CAPABILITY_ACTIVATION_AGENT_TYPES = frozenset(
+    {"assessment", "definition-engineer", "lucent", "planning", "reflection"}
+)
+
+_TASK_MEMORY_SERVER_TOOLS = sorted(
+    set(_BASE_TASK_MEMORY_SERVER_TOOLS)
+    | set(_DEFINITION_ACTIVATION_TOOLS)
+    | set(_WORK_ACTIVATION_TOOLS)
+)
+
+
+def _memory_server_tools_for_task(
+    agent_type: str | None,
+    title: str | None = None,
+    request_title: str | None = None,
+    description: str | None = None,
+) -> list[str]:
+    """Return memory-server tools exposed to a dispatched task.
+
+    Most task agents only need memory/search/task-event tools. Agents whose
+    purpose is learning, reflection, planning, or capability generation need
+    mutating definition/request tools so they can activate system changes
+    instead of merely recording lessons in memory.
+    """
+    normalized_agent = (agent_type or "").strip().lower()
+    text = "\n".join(part or "" for part in (title, request_title, description)).lower()
+    tools = set(_BASE_TASK_MEMORY_SERVER_TOOLS)
+
+    capability_task = (
+        normalized_agent in _CAPABILITY_ACTIVATION_AGENT_TYPES
+        or "learning extraction" in text
+        or "self-improvement" in text
+        or "definition" in text
+        or ("agent" in text and "skill" in text)
+        or "capability" in text
+    )
+    if capability_task:
+        tools.update(_DEFINITION_ACTIVATION_TOOLS)
+
+    work_planning_task = (
+        normalized_agent in _CAPABILITY_ACTIVATION_AGENT_TYPES
+        or "learning extraction" in text
+        or "create request" in text
+        or "create task" in text
+        or ("plan" in text and "task" in text)
+        or "capability" in text
+    )
+    if work_planning_task:
+        tools.update(_WORK_ACTIVATION_TOOLS)
+
+    return sorted(tools)
 
 
 def _summarize_memory_tool_params(tool_name: str, arguments: dict) -> str:
@@ -406,7 +484,11 @@ LEARNING_EXTRACTION_PROMPT = (
     "Run the learning extraction pipeline. "
     "Core principle: INTEGRATE, don't accumulate. Lessons get folded into "
     "existing memories, not stored as standalone 'Lesson:' entries. "
-    "Tool-call audit data is operational telemetry, NOT memory content.\n\n"
+    "Tool-call audit data is operational telemetry, NOT memory content. "
+    "Learning must activate behavior changes through human-reviewed channels: create "
+    "proposed agents/skills/hooks when capability is missing, and create follow-up "
+    "requests for grants, built-in changes, or source-code changes. Memory updates "
+    "are supporting evidence, not the final product.\n\n"
     "1. Search for memories tagged 'daemon-result' "
     "or 'rejection-lesson' or 'feedback-rejected' "
     "or 'validated' that do "
@@ -429,6 +511,10 @@ LEARNING_EXTRACTION_PROMPT = (
     "Prefer proposing focused skills that can be granted to the affected agent; "
     "use agent updates only when the behavior is core to that agent's identity. "
     "The proposal must explain WHY the change is suggested so a human can review it.\n"
+    "8. When the right change is clear, create a human-reviewed activation artifact: "
+    "create a proposed skill/agent/hook, or create a request that asks an owner to "
+    "approve/grant/update the relevant definition or source file. Do not stop at a "
+    "memory note when a system change is needed, and do not grant yourself access.\n"
     "\n\nSTRICT RULES:\n"
     "- NEVER create standalone 'Lesson:' or 'Learning Extraction Run' memories.\n"
     "- NEVER create a new memory if an existing one covers the same scope - update it.\n"
@@ -436,6 +522,9 @@ LEARNING_EXTRACTION_PROMPT = (
     "- Prefer update_memory and delete_memory. Only use create_memory for genuine gaps.\n"
     "- NEVER store raw tool audit data as memories. Use definition proposals with evidence.\n"
     "- NEVER propose a definition change from a single failure; require repeated evidence.\n"
+    "- NEVER treat capability requests as documentation-only work; create a proposed "
+    "agent/skill/hook or a concrete request/task for human-reviewed activation.\n"
+    "- NEVER grant yourself access to skills, hooks, MCP servers, or other runtime powers.\n"
     "- Skip runtime heartbeat or telemetry records if any legacy records are still present."
 )
 
@@ -2665,7 +2754,7 @@ class LucentDaemon:
                 await conn.execute(
                     """UPDATE schedules
                        SET enabled = false,
-                           status = 'archived',
+                           status = 'completed',
                            updated_at = NOW()
                        WHERE title = 'Memory Consolidation'
                          AND organization_id = $1::uuid
@@ -5086,7 +5175,12 @@ class LucentDaemon:
                         "type": "http",
                         "url": MCP_URL,
                         "headers": {"Authorization": f"Bearer {_scoped_key}"},
-                        "tools": _TASK_MEMORY_SERVER_TOOLS,
+                        "tools": _memory_server_tools_for_task(
+                            agent_type,
+                            title,
+                            _request_title,
+                            description,
+                        ),
                     }
                     log(f"Task {task_id[:8]} using {_scope_type} scoped key"
                         f" (user: {_scope_user[:8] if _scope_user else 'shared'})")
@@ -6435,7 +6529,11 @@ class LucentDaemon:
             (
                 "Run the learning extraction pipeline from the learning-extraction skill. "
                 "Core principle: INTEGRATE, don't accumulate. Lessons get folded into "
-                "existing memories, not stored as standalone 'Lesson:' entries.\n\n"
+                "existing memories, not stored as standalone 'Lesson:' entries. "
+                "If the lesson reveals missing capability or bad behavior, create a "
+                "human-reviewed activation artifact: a proposed agent/skill/hook or a "
+                "follow-up request for grants, definition updates, or built-in/source-code "
+                "changes.\n\n"
                 "1. Search for memories tagged 'daemon-result' "
                 "or 'rejection-lesson' or 'feedback-rejected' "
                 "or 'validated' that do "
@@ -6450,12 +6548,18 @@ class LucentDaemon:
                 "4. Tag processed source memories with 'lesson-extracted'.\n"
                 "5. Delete source experience memories that are now redundant "
                 "(their knowledge has been absorbed).\n"
+                "6. Review repeated tool failures with analyze_tool_failure_patterns. "
+                "For confirmed patterns, use proposal/request tools to queue the smallest "
+                "concrete improvement for human review; do not merely summarize the issue.\n"
                 "\n\nSTRICT RULES:\n"
                 "- NEVER create standalone 'Lesson:' or 'Learning Extraction Run' memories.\n"
                 "- NEVER create a new memory if an existing one covers the same scope — update it.\n"
                 "- The total memory count must go DOWN or stay the same, never up.\n"
                 "- Prefer update_memory and delete_memory. Only use create_memory for genuine gaps.\n"
-                "- Skip runtime heartbeat or telemetry records if any legacy records are still present."
+                "- Skip runtime heartbeat or telemetry records if any legacy records are still present.\n"
+                "- NEVER treat capability requests as documentation-only work; create the "
+                "needed proposed role/skill/hook or request when evidence supports it.\n"
+                "- NEVER grant yourself access to skills, hooks, MCP servers, or other runtime powers."
             ),
         )
 

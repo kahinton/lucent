@@ -51,6 +51,16 @@ If no pattern emerges, skip to Step 7 with outcome "no action needed."
 
 **Always read the target file before modifying it.** Understand what's there and why before changing anything.
 
+**Activate the change in the system.** A self-improvement run that only writes a memory is incomplete when the root cause is an agent, skill, hook, request, or capability gap.
+
+Use the smallest concrete action available:
+- Create a proposed replacement or follow-up request when an existing instance definition should change.
+- `create_skill_definition`, `create_agent_definition`, or `create_hook_definition` for missing capabilities.
+- `create_request` when an active agent lacks an active skill/hook/server so a human can review and grant it.
+- `create_request` when the required change is a built-in source-file edit, schedule/source-code change, or protected object.
+
+Do not approve your own proposals or grant yourself runtime access. Human review is required before any definition update or runtime grant changes what an agent can use.
+
 **For skill/agent files:**
 Find the minimal insertion point. Write a specific, actionable directive — not a vague principle. Make the smallest effective diff.
 
@@ -132,3 +142,4 @@ Finding: <why no change needed>
 - Don't over-engineer changes for edge cases because a targeted one-line fix that addresses the root cause is always better than a sweeping rewrite that introduces new failure modes.
 - Don't modify definitions during active task execution because changes to agent behavior mid-task create inconsistencies between what was planned and what executes.
 - Don't write improvement instructions that are too vague to act on because a directive like "be better at memory" changes nothing — every instruction must be specific enough to change observable behavior.
+- Don't stop at creating a self-improvement memory when the evidence calls for a runtime/system capability change — create a proposed definition or concrete human-review request.

@@ -33,6 +33,8 @@ search_memories(query="<related past plans>", tags=["planning"], limit=5)
 
 Check for active work that already addresses this goal. **Do not create a duplicate request.** If work exists, assess whether it needs additional tasks.
 
+Check whether the requested work requires a role, skill, hook, sandbox template, or tool capability that does not exist. If so, plan capability activation explicitly; do not bury the missing role in a prose plan.
+
 ### 2. Decompose into Tasks
 
 Follow the **daemon-task-authoring** skill for detailed guidance on writing effective task descriptions. Key aspects:
@@ -126,8 +128,8 @@ the repo declares.
 Record the plan in the request/task tree and task events. Do **not** create
 memory entries just to log plans. If planning reveals a durable technical
 decision, update the relevant technical memory; if it reveals a reusable
-planning workflow, propose or update a skill through the built-in skill
-workflow.
+planning workflow, create/update a skill or create a follow-up request through
+the definition workflow.
 
 ## Decision Framework
 
@@ -137,6 +139,7 @@ workflow.
 - If dependency mapping produces a cycle, then break it by inserting a prerequisite discovery/decoupling task and block dependent execution until that task resolves the cycle.
 - If existing work overlaps this goal, then extend the existing request instead of creating a parallel duplicate workflow.
 - If a goal is too large for single-session tasks, then decompose into phased tasks with explicit handoff criteria between phases.
+- If the goal requires roles/capabilities that do not exist, then create proposed definitions or a capability-generation request before planning dependent execution tasks.
 
 ## Boundaries
 

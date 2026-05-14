@@ -115,23 +115,35 @@ description: <when to use this skill>
 - Tool calls use the exact MCP tool names and parameters
 - Anti-patterns address real failure modes, not theoretical concerns
 
-## Step 5: Submit for Review
+## Step 5: Submit for Review and Activation
 
-Create new definitions via the REST API with `status="draft"`:
+Create concrete definition objects; do not stop at a document describing what
+should exist. Use the MCP tools when available:
 
-```bash
-curl -X POST http://localhost:<port>/api/definitions/agents \
-  -H "Content-Type: application/json" \
-  -d '{"name": "<name>", "description": "<desc>", "content": "<markdown>", "skill_names": ["<skills>"], "status": "draft"}'
+```
+list_agent_definitions(status="active")
+list_skill_definitions(status="active")
+create_skill_definition(name="<skill>", description="<trigger>", content="<SKILL.md>", proposal_reason="...", proposal_evidence={...})
+create_agent_definition(name="<agent>", description="<purpose>", content="<AGENT.md>", proposal_reason="...", proposal_evidence={...})
 ```
 
-Draft definitions require human approval before they become active. Tag the summary for review:
+Definitions start as proposed and require approval before runtime use. Create a
+follow-up `create_request` that names the proposed definition IDs and asks an
+owner/admin to approve them and grant any active skills/hooks/servers. Do not
+grant yourself access to runtime powers.
+
+If the needed capability belongs in a built-in definition, create a follow-up
+request targeted at `kahinton/lucent` and the specific `.github/agents/` or
+`.github/skills/` path. Built-in source files are authoritative; a DB-only change
+will not persist.
+
+Record the result as an audit trail only after definitions/requests exist:
 
 ```
 create_memory(
-  type="technical",
-  content="## Capability Generation: <domain>\n\n**Created agents**: <list>\n**Created skills**: <list>\n**Based on assessment**: <assessment memory ID>\n**Rationale**: <why each was needed>",
-  tags=["daemon", "environment", "adaptation", "needs-review"],
+  type="experience",
+  content="## Capability Activation: <domain>\n\n**Created/proposed agents**: <ids>\n**Created/proposed skills**: <ids>\n**Follow-up request**: <id if needed>\n**Based on assessment**: <assessment memory ID>\n**Rationale**: <why each was needed>",
+  tags=["daemon", "environment", "adaptation", "capability-activation"],
   importance=7,
   shared=true
 )
@@ -140,7 +152,8 @@ create_memory(
 ## Anti-Patterns
 
 - Don't generate capabilities without a gap analysis because you'll create redundant or irrelevant definitions that clutter the system.
-- Don't submit definitions directly as `active` because unreviewed definitions can introduce unstable or incorrect agent behavior — always use `draft`.
+- Don't submit definitions directly as `active` because unreviewed definitions can introduce unstable or incorrect agent behavior — create proposed definitions and route them for approval.
 - Don't skip checking for naming conflicts before creating because duplicate names cause ambiguity and may silently shadow existing definitions.
 - Don't generate capabilities the domain doesn't need just because templates exist — template availability is not justification for creation.
 - Don't create agents without defining their matching skills because a capable agent with no procedural knowledge produces inconsistent, unpredictable results.
+- Don't write a capability-generation report without creating definitions or a follow-up request — documentation alone does not increase what the system can do.

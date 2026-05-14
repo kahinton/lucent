@@ -10,6 +10,7 @@ from daemon.daemon import (
     _ORG_SHARED_SCHEDULE_TITLES,
     REQUEST_REVIEW_TASK_TITLE,
     _get_required_memory_scope,
+    _memory_server_tools_for_task,
     _task_requires_mcp_tool_usage,
 )
 
@@ -88,3 +89,37 @@ class TestRequiredToolUsage:
 
     def test_plain_research_task_does_not_require_mcp_tool_usage(self):
         assert _task_requires_mcp_tool_usage("research", "Summarize sibling results") is False
+
+
+class TestMemoryServerToolSelection:
+    def test_learning_extraction_gets_definition_activation_tools(self):
+        tools = set(
+            _memory_server_tools_for_task(
+                "reflection",
+                "Learning Extraction",
+                "[Scheduled] Learning Extraction",
+                "Run the learning extraction pipeline",
+            )
+        )
+        assert "analyze_tool_failure_patterns" in tools
+        assert "create_skill_definition" in tools
+        assert "create_agent_definition" in tools
+        assert "create_request" in tools
+        assert "update_skill_definition" not in tools
+        assert "update_agent_definition" not in tools
+        assert "grant_skill_to_agent" not in tools
+        assert "grant_hook_to_agent" not in tools
+
+    def test_definition_engineer_gets_capability_tools(self):
+        tools = set(_memory_server_tools_for_task("definition-engineer", "Define roles"))
+        assert "create_skill_definition" in tools
+        assert "create_agent_definition" in tools
+        assert "create_request" in tools
+        assert "grant_skill_to_agent" not in tools
+        assert "grant_hook_to_agent" not in tools
+
+    def test_plain_research_keeps_small_tool_surface(self):
+        tools = set(_memory_server_tools_for_task("research", "Summarize market data"))
+        assert "search_memories" in tools
+        assert "create_skill_definition" not in tools
+        assert "create_request" not in tools

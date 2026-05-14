@@ -11,6 +11,8 @@ Transforms raw experience into integrated knowledge. Lessons don't exist as stan
 
 **Integrate, don't accumulate.** A lesson about consolidation timing should update the memory about the consolidation system. A lesson about RBAC should update the memory about the RBAC module. If there's no existing memory to update, that's a knowledge gap — fill it with one well-scoped memory, not a floating "lesson."
 
+**Activate, don't merely record.** If the lesson says an agent, skill, hook, request, schedule, or tool behavior must change, the extraction is incomplete until a system object changes or a concrete follow-up request exists. Memory updates preserve context; they are not the deliverable for capability or behavior changes.
+
 **Tag discipline is mandatory.** The `lesson-extracted` tag is reserved for structured procedural lessons that prescribe a specific behavioral change. Do **not** apply `lesson-extracted` to technical knowledge bases, daily digests, status summaries, or general documentation.
 
 ## Triggers
@@ -88,14 +90,44 @@ For each returned pattern:
   - **Skill**: a loaded skill lacks concrete instructions for the failing tool/workflow.
   - **Tool/hook**: many agents fail the same tool in the same way, suggesting generic guidance, validation, or a hook.
 3. Prefer proposing a focused skill when a reusable procedure would prevent the mistake.
-4. Call `propose_definition_improvement` with:
+4. Queue the smallest concrete human-reviewed change that your tools permit:
+  - For an existing instance skill/agent, create a proposed replacement or create a follow-up request that asks a human to review and apply the update.
+  - Create a proposed skill/agent/hook with `create_skill_definition`, `create_agent_definition`, or `create_hook_definition` when the capability does not exist.
+  - When the missing link is a runtime binding, create a follow-up request that asks a human to grant the active skill/hook/server to the affected agent after review.
+  - Create a `create_request` follow-up when the change belongs in a built-in on-disk definition, source code, or a protected object your tools cannot mutate.
+5. Call `propose_definition_improvement` with:
   - `definition_type="skill"`, `"agent"`, or `"hook"`
   - a concrete `proposal_reason`
   - the pattern's `proposal_evidence`
   - `recommended_agent_id` or `recommended_agent_type` when a skill should later be granted to an agent
 
 Do not approve your own proposal. The definition approval workflow is the human
-review gate.
+review gate. A proposal by itself is evidence for review, not an activated
+runtime change; pair it with a proposed definition or follow-up request unless blocked.
+
+## Step 2.7: Capability Activation Gate (Required)
+
+Before marking any source as processed, answer this question:
+
+> Does this lesson imply the system should be able to do something differently next time?
+
+If **yes**, take one of these actions before continuing:
+
+| Needed change | Required action |
+|---|---|
+| Existing instance skill is incomplete | `get_skill_definition`, draft revised content, then create a proposed replacement or follow-up request for human review |
+| Existing instance agent has wrong behavior | `get_agent_definition`, draft revised content, then create a proposed replacement or follow-up request for human review |
+| Missing reusable workflow | `create_skill_definition` with evidence-backed `proposal_reason` and `proposal_evidence` |
+| Missing role/agent | Create needed skills first, then `create_agent_definition`; include `skill_names` in frontmatter |
+| Existing active agent lacks an active skill | `create_request` asking a human to review and grant the skill |
+| Built-in definition/source file must change | `create_request` targeted at `kahinton/lucent` and the relevant `.github/` or source path |
+| Missing work item to exercise the new capability | `create_request` and, where appropriate, `create_task` |
+
+If no action is possible because of permissions or missing tooling, log that
+blocker with `log_task_event` and create a follow-up request. Do not silently
+fall back to a memory note.
+
+Never grant yourself access to skills, hooks, MCP servers, or other runtime powers. Never approve your own proposals. Human review is the activation boundary.
 
 ## Step 3: Find the Memory to Update
 
@@ -110,9 +142,9 @@ Look for:
 - Skills about the relevant workflow or process
 - Any memory whose scope covers this lesson's domain
 
-**If a matching memory exists**: Update it with the new knowledge using `update_memory`. Append the insight to the existing content — don't rewrite the whole thing, just add what's new.
+**If a matching memory exists**: Update it with the new knowledge using `update_memory` only after the Capability Activation Gate is satisfied. Append the insight to the existing content — don't rewrite the whole thing, just add what's new.
 
-**If no matching memory exists**: This reveals a genuine knowledge gap. Create ONE technical or experience memory scoped to the right level (file, module, system, or work session). Include the lesson as part of its content, not as a standalone "Lesson:" entry. If the gap is a reusable workflow, update/create a skill through the built-in skill workflow.
+**If no matching memory exists**: This reveals a genuine knowledge gap. Create ONE technical or experience memory scoped to the right level (file, module, system, or work session). Include the lesson as part of its content, not as a standalone "Lesson:" entry. If the gap is a reusable workflow or role, update/create the corresponding skill/agent/request first; the memory is only the context trail.
 
 **For correction-tagged memories**: When integrating a correction, note the correction source in the updated memory. User corrections (tagged `correction`): note "Corrected by user feedback" with date. Self-corrections (tagged `self-correction`): note "Self-corrected" with date. This creates traceable lineage from correction event to knowledge update.
 
@@ -168,6 +200,7 @@ Skipped: J routine experiences
 
 - **Creating standalone "Lesson:" memories** — lessons should be integrated into the memory they're about, not floating independently
 - **Creating "Learning Extraction Run" summary memories** — the output goes to text, not to memory
+- **Stopping at memory updates for capability gaps** — if the lesson says a role, skill, hook, request, or tool must change, make or request that change
 - **Extracting from a single occurrence** — wait for 2+ confirming instances before treating something as a pattern
 - **Storing raw audit data as memory** — audit rows belong in `tool_call_audit_log`; use definition proposals with evidence for improvements
 - **Proposing vague definition changes** — every audit-driven proposal must identify the repeated failure, target agent/skill/tool, and verification behavior

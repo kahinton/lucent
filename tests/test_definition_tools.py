@@ -3,6 +3,7 @@
 Covers: list_agent_definitions, get_agent_definition, list_skill_definitions,
 get_skill_definition, list_proposals, create_agent_definition,
 create_skill_definition, grant_skill_to_agent, update_agent_definition,
+update_skill_definition,
 approve_agent_definition, reject_agent_definition, delete_agent_definition,
 revoke_skill_from_agent, grant_mcp_server_to_agent, revoke_mcp_server_from_agent,
 approve_skill_definition, reject_skill_definition, delete_skill_definition,
@@ -88,6 +89,21 @@ async def _call(mcp, tool_name: str, args: dict | None = None) -> dict | list:
     """Call an MCP tool and parse the JSON response."""
     result = await mcp._tool_manager.call_tool(tool_name, args or {})
     return json.loads(result)
+
+
+def _set_scoped_admin(auth_user) -> None:
+    """Simulate a daemon-dispatched agent with a scoped key for an admin user."""
+    set_current_user(
+        {
+            "id": auth_user["id"],
+            "organization_id": auth_user["organization_id"],
+            "role": "admin",
+            "display_name": "Scoped Test User",
+            "email": "scoped@test.com",
+            "memory_scope": "user",
+            "memory_scope_user_id": auth_user["id"],
+        }
+    )
 
 
 # ============================================================================
@@ -438,6 +454,34 @@ class TestGrantSkillToAgent:
         )
         assert "error" in result
 
+    @pytest.mark.asyncio
+    async def test_scoped_agent_context_cannot_grant_skill(self, mcp, auth_user, repo):
+        agent = await repo.create_agent(
+            name="scoped-grantee-agent",
+            description="",
+            content="# Agent",
+            org_id=str(auth_user["organization_id"]),
+            created_by=str(auth_user["id"]),
+            owner_user_id=str(auth_user["id"]),
+        )
+        skill = await repo.create_skill(
+            name="scoped-granted-skill",
+            description="",
+            content="# Skill",
+            org_id=str(auth_user["organization_id"]),
+            created_by=str(auth_user["id"]),
+            owner_user_id=str(auth_user["id"]),
+        )
+        _set_scoped_admin(auth_user)
+        result = await _call(
+            mcp,
+            "grant_skill_to_agent",
+            {"agent_id": str(agent["id"]), "skill_id": str(skill["id"])},
+        )
+        assert result["code"] == 403
+        assert "Human approval required" in result["error"]
+        assert await repo.get_agent_skills(str(agent["id"])) == []
+
 
 # ============================================================================
 # update_agent_definition
@@ -481,6 +525,131 @@ class TestUpdateAgentDefinition:
             {"agent_id": "00000000-0000-0000-0000-000000000000", "content": "# x"},
         )
         assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_scoped_agent_context_cannot_update_agent(self, mcp, auth_user, repo):
+        agent = await repo.create_agent(
+            name="scoped-update-agent",
+            description="Original",
+            content="# Original",
+            org_id=str(auth_user["organization_id"]),
+            created_by=str(auth_user["id"]),
+            owner_user_id=str(auth_user["id"]),
+        )
+        _set_scoped_admin(auth_user)
+        result = await _call(
+            mcp,
+            "update_agent_definition",
+            {"agent_id": str(agent["id"]), "content": "# Hot patch"},
+        )
+        assert result["code"] == 403
+        assert "Human approval required" in result["error"]
+        fetched = await repo.get_agent(str(agent["id"]), str(auth_user["organization_id"]))
+        assert fetched["content"] == "# Original"
+
+
+# ============================================================================
+# update_skill_definition
+# ============================================================================
+
+
+class TestUpdateSkillDefinition:
+    @pytest.mark.asyncio
+    async def test_update_succeeds(self, mcp, auth_user, repo):
+        skill = await repo.create_skill(
+            name="update-skill",
+            description="Original",
+            content="# Original",
+            org_id=str(auth_user["organization_id"]),
+            created_by=str(auth_user["id"]),
+            owner_user_id=str(auth_user["id"]),
+        )
+        result = await _call(
+            mcp,
+            "update_skill_definition",
+            {"skill_id": str(skill["id"]), "description": "Updated", "content": "# Updated"},
+        )
+        assert result["description"] == "Updated"
+        assert result["content"] == "# Updated"
+
+    @pytest.mark.asyncio
+    async def test_update_not_found(self, mcp, auth_user):
+        result = await _call(
+            mcp,
+            "update_skill_definition",
+            {"skill_id": "00000000-0000-0000-0000-000000000000", "content": "# x"},
+        )
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_no_auth_returns_error(self, mcp):
+        set_current_user(None)
+        result = await _call(
+            mcp,
+            "update_skill_definition",
+            {"skill_id": "00000000-0000-0000-0000-000000000000", "content": "# x"},
+        )
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_scoped_agent_context_cannot_update_skill(self, mcp, auth_user, repo):
+        skill = await repo.create_skill(
+            name="scoped-update-skill",
+            description="Original",
+            content="# Original",
+            org_id=str(auth_user["organization_id"]),
+            created_by=str(auth_user["id"]),
+            owner_user_id=str(auth_user["id"]),
+        )
+        _set_scoped_admin(auth_user)
+        result = await _call(
+            mcp,
+            "update_skill_definition",
+            {"skill_id": str(skill["id"]), "content": "# Hot patch"},
+        )
+        assert result["code"] == 403
+        assert "Human approval required" in result["error"]
+        fetched = await repo.get_skill(str(skill["id"]), str(auth_user["organization_id"]))
+        assert fetched["content"] == "# Original"
+
+
+# ============================================================================
+# grant_hook_to_agent
+# ============================================================================
+
+
+class TestGrantHookToAgent:
+    @pytest.mark.asyncio
+    async def test_scoped_agent_context_cannot_grant_hook(self, mcp, auth_user, repo):
+        agent = await repo.create_agent(
+            name="scoped-hook-agent",
+            description="",
+            content="# Agent",
+            org_id=str(auth_user["organization_id"]),
+            created_by=str(auth_user["id"]),
+            owner_user_id=str(auth_user["id"]),
+        )
+        hook = await repo.create_hook(
+            name="scoped-hook",
+            description="Inject context",
+            trigger_event="before_tool_call",
+            action_type="static_context",
+            content="Context",
+            config={},
+            org_id=str(auth_user["organization_id"]),
+            created_by=str(auth_user["id"]),
+            status="active",
+            owner_user_id=str(auth_user["id"]),
+        )
+        _set_scoped_admin(auth_user)
+        result = await _call(
+            mcp,
+            "grant_hook_to_agent",
+            {"agent_id": str(agent["id"]), "hook_id": str(hook["id"])},
+        )
+        assert result["code"] == 403
+        assert "Human approval required" in result["error"]
+        assert await repo.get_agent_hooks(str(agent["id"])) == []
 
 
 # ============================================================================
@@ -540,6 +709,24 @@ class TestApproveAgentDefinition:
             {"agent_id": "00000000-0000-0000-0000-000000000000"},
         )
         assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_scoped_agent_context_cannot_approve_agent(self, mcp, auth_user, repo):
+        agent = await repo.create_agent(
+            name="scoped-approve-agent",
+            description="",
+            content="# Agent",
+            org_id=str(auth_user["organization_id"]),
+            created_by=str(auth_user["id"]),
+            owner_user_id=str(auth_user["id"]),
+            status="proposed",
+        )
+        _set_scoped_admin(auth_user)
+        result = await _call(mcp, "approve_agent_definition", {"agent_id": str(agent["id"])})
+        assert result["code"] == 403
+        assert "Human approval required" in result["error"]
+        fetched = await repo.get_agent(str(agent["id"]), str(auth_user["organization_id"]))
+        assert fetched["status"] == "proposed"
 
 
 # ============================================================================
@@ -849,6 +1036,24 @@ class TestApproveSkillDefinition:
             {"skill_id": "00000000-0000-0000-0000-000000000000"},
         )
         assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_scoped_agent_context_cannot_approve_skill(self, mcp, auth_user, repo):
+        skill = await repo.create_skill(
+            name="scoped-approve-skill",
+            description="",
+            content="# Skill",
+            org_id=str(auth_user["organization_id"]),
+            created_by=str(auth_user["id"]),
+            owner_user_id=str(auth_user["id"]),
+            status="proposed",
+        )
+        _set_scoped_admin(auth_user)
+        result = await _call(mcp, "approve_skill_definition", {"skill_id": str(skill["id"])})
+        assert result["code"] == 403
+        assert "Human approval required" in result["error"]
+        fetched = await repo.get_skill(str(skill["id"]), str(auth_user["organization_id"]))
+        assert fetched["status"] == "proposed"
 
 
 # ============================================================================
