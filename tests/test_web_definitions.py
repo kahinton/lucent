@@ -248,11 +248,30 @@ class TestDefinitionsList:
         assert "text/html" in resp.headers["content-type"]
 
     async def test_list_contains_agent_name(self, client, agent_def):
-        resp = await client.get("/definitions")
+        resp = await client.get("/definitions", params={"tab": "agents"})
         assert "Test Agent" in resp.text
+        assert "Agent Composer" in resp.text
+        assert "Agents (" in resp.text
         assert "Me (" in resp.text
         assert "⚠ Entire Organization — shared with everyone" in resp.text
         assert "Entire Organization makes this definition readable and usable" in resp.text
+
+    async def test_default_list_opens_agent_wizard_tab(self, client, agent_def):
+        resp = await client.get("/definitions")
+
+        assert resp.status_code == 200
+        assert "Agent Composer" in resp.text
+        assert "Agent Wizard" in resp.text
+        assert "Build agents by conversation" in resp.text
+        assert "lg:grid-cols" not in resp.text
+        assert "Test Agent" not in resp.text
+
+    async def test_agent_wizard_alias_opens_composer_tab(self, client, agent_def):
+        resp = await client.get("/definitions", params={"tab": "agent-wizard"})
+
+        assert resp.status_code == 200
+        assert "Agent Wizard Chat" in resp.text
+        assert "Test Agent" not in resp.text
 
     async def test_list_shows_org_shared_owner_badge(self, client, db_pool, web_user):
         _user, org, _token = web_user
@@ -275,6 +294,36 @@ class TestDefinitionsList:
     async def test_list_tab_agents(self, client, agent_def):
         resp = await client.get("/definitions", params={"tab": "agents"})
         assert resp.status_code == 200
+
+    async def test_agent_composer_chat_uses_definition_engineer(self, client, db_pool, web_user):
+        _user, org, _token = web_user
+        repo = DefinitionRepository(db_pool)
+        definition_engineer = await repo.create_agent(
+            name="definition-engineer",
+            description="Definition composer",
+            content="# Definition Engineer",
+            org_id=str(org["id"]),
+            created_by=str(_user["id"]),
+            status="active",
+        )
+
+        resp = await client.get("/definitions", params={"tab": "composer"})
+
+        assert resp.status_code == 200
+        assert "Agent Wizard Chat" in resp.text
+        assert "Starter prompts" in resp.text
+        assert "Definition Engineer Chat" not in resp.text
+        assert "definition-engineer" not in resp.text
+        assert f'data-agent-id="{definition_engineer["id"]}"' in resp.text
+        assert "Created proposals appear in the Pending tab" in resp.text
+
+    async def test_new_agent_button_uses_nonce_backed_script(self, client):
+        resp = await client.get("/definitions", params={"tab": "agents"})
+
+        assert resp.status_code == 200
+        assert 'id="open-create-agent-modal"' in resp.text
+        assert 'class="create-agent-close' in resp.text
+        assert "onclick=\"document.getElementById('create-agent-modal')" not in resp.text
 
     async def test_list_tab_skills(self, client, skill_def):
         resp = await client.get("/definitions", params={"tab": "skills"})

@@ -57,6 +57,17 @@ CHAT_ALLOWED_TOOLS = [
     "get_request_details",
     "list_available_models",
 ]
+DEFINITION_COMPOSER_TOOLS = [
+    "list_agent_definitions",
+    "get_agent_definition",
+    "list_skill_definitions",
+    "get_skill_definition",
+    "list_mcp_server_definitions",
+    "list_hook_definitions",
+    "list_proposals",
+    "create_agent_definition",
+    "create_skill_definition",
+]
 
 
 def _resolve_chat_model(override: str | None = None) -> str:
@@ -65,6 +76,26 @@ def _resolve_chat_model(override: str | None = None) -> str:
     if override:
         return override
     return get_default_model_id(preferred_model=(CHAT_MODEL or None))
+
+
+def _chat_allowed_tools_for_agent(
+    agent_name: str | None = None,
+    skill_names: list[str] | None = None,
+) -> list[str]:
+    """Return the MCP tool allow-list for a chat session.
+
+    General chat stays intentionally narrow.  Definition tools are added only
+    when the selected chat agent is the built-in definition composer role (or an
+    equivalent agent explicitly granted the definition-engineering skill).
+    """
+    tools = list(CHAT_ALLOWED_TOOLS)
+    normalized_agent = (agent_name or "").strip().lower()
+    normalized_skills = {name.strip().lower() for name in (skill_names or [])}
+    if normalized_agent == "definition-engineer" or "definition-engineering" in normalized_skills:
+        for tool in DEFINITION_COMPOSER_TOOLS:
+            if tool not in tools:
+                tools.append(tool)
+    return tools
 
 
 class ChatMessage(BaseModel):
@@ -134,6 +165,7 @@ def _build_mcp_config(
     llm_session_id: str | None = None,
     llm_turn_id: str | None = None,
     llm_message_id: str | None = None,
+    tools: list[str] | None = None,
 ) -> dict:
     """Build MCP server config using the user's session token.
 
@@ -153,7 +185,7 @@ def _build_mcp_config(
             "type": "http",
             "url": MCP_URL,
             "headers": headers,
-            "tools": CHAT_ALLOWED_TOOLS,
+            "tools": list(tools or CHAT_ALLOWED_TOOLS),
         },
     }
 
@@ -1009,6 +1041,18 @@ async def chat_stream_v2(
 
     if body.agent_id and agent_name:
         system_prompt_parts.append(_chat_tool_grounding_instructions())
+        if agent_name == "definition-engineer":
+            system_prompt_parts.append(
+                "## Web Agent Composer context\n"
+                "You are running inside the Agent Composer web page, helping a human "
+                "create agents and skills conversationally. There is no daemon task_id "
+                "in this session, so do not call or ask for `log_task_event`. When the "
+                "user wants a new capability, ask concise clarifying questions only when "
+                "needed, then use `create_skill_definition` and `create_agent_definition` "
+                "to create proposed definitions. Do not approve or grant definitions from "
+                "chat; tell the user to review proposals in the Pending tab. Keep language "
+                "plain and avoid assuming the user knows prompt-engineering terminology."
+            )
 
     system_prompt = "\n\n".join(system_prompt_parts)
     agent_hooks = await _load_agent_hooks(pool, body.agent_id)
@@ -1040,12 +1084,14 @@ async def chat_stream_v2(
     )
 
     session_token = request.cookies.get(SESSION_COOKIE_NAME)
+    allowed_tools = _chat_allowed_tools_for_agent(agent_name, agent_skill_names)
     mcp_config = (
         _build_mcp_config(
             session_token,
             llm_session_id=chat_session.session_id,
             llm_turn_id=chat_session.turn_id,
             llm_message_id=chat_session.user_message_id,
+            tools=allowed_tools,
         )
         if session_token
         else {}

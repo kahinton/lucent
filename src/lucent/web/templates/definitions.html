@@ -1,16 +1,17 @@
 {% extends "base.html" %}
-{% block title %}Agents & Skills - Lucent{% endblock %}
+{% block title %}Agent Composer - Lucent{% endblock %}
 {% block content %}
 <div class="mb-8">
     <div class="flex items-center justify-between mb-2">
         <div>
-            <h1 class="text-2xl font-bold text-gray-900">Agents & Skills</h1>
-            <p class="text-sm text-gray-500">Manage Lucent's capabilities — agents, skills, hooks, and MCP connections</p>
+            <h1 class="text-2xl font-bold text-gray-900">Agent Composer</h1>
+            <p class="text-sm text-gray-500">Create agents with guided help, then manage their skills, hooks, and MCP connections</p>
         </div>
     </div>
 </div>
 <div class="border-b border-gray-200 mb-6">
     <nav class="flex gap-6">
+        <a href="/definitions?tab=composer&per_page={{ per_page }}" class="py-2 px-1 border-b-2 text-sm font-medium {% if tab == 'composer' %}border-primary-500 text-primary-600{% else %}border-transparent text-gray-500 hover:text-gray-700{% endif %}">Agent Wizard</a>
         <a href="/definitions?tab=agents&per_page={{ per_page }}" class="py-2 px-1 border-b-2 text-sm font-medium {% if tab == 'agents' %}border-primary-500 text-primary-600{% else %}border-transparent text-gray-500 hover:text-gray-700{% endif %}">Agents {% if agents_total is defined %}({{ agents_total }}){% elif agents %}({{ agents|length }}){% endif %}</a>
         <a href="/definitions?tab=skills&per_page={{ per_page }}" class="py-2 px-1 border-b-2 text-sm font-medium {% if tab == 'skills' %}border-primary-500 text-primary-600{% else %}border-transparent text-gray-500 hover:text-gray-700{% endif %}">Skills {% if skills_total is defined %}({{ skills_total }}){% elif skills %}({{ skills|length }}){% endif %}</a>
         <a href="/definitions?tab=hooks&per_page={{ per_page }}" class="py-2 px-1 border-b-2 text-sm font-medium {% if tab == 'hooks' %}border-primary-500 text-primary-600{% else %}border-transparent text-gray-500 hover:text-gray-700{% endif %}">Hooks {% if hooks_total is defined %}({{ hooks_total }}){% elif hooks %}({{ hooks|length }}){% endif %}</a>
@@ -65,12 +66,81 @@
 {% from "partials/pagination.html" import pagination_controls %}
 {% set personal_owner_label = user.display_name or user.email or 'you' %}
 
-{% if tab == 'agents' %}
+{% if tab == 'composer' %}
+<div class="mb-6 space-y-4">
+    <section class="rounded-xl border border-primary-200 bg-primary-50/70 px-4 py-3">
+        <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div class="flex items-start gap-3">
+                <div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary-600 text-white">
+                    <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.847.814a4.5 4.5 0 0 0-3.09 3.09ZM18.259 8.715 18 9.75l-.259-1.035a3.375 3.375 0 0 0-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 0 0 2.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 0 0 2.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 0 0-2.456 2.456Z" /></svg>
+                </div>
+                <div>
+                    <h2 class="text-base font-semibold text-primary-950">Build agents by conversation</h2>
+                    <p class="mt-0.5 text-sm text-primary-900">Describe the job. The Agent Wizard drafts the right skills and proposed agent definition for review.</p>
+                </div>
+            </div>
+            <div class="flex flex-wrap gap-2 text-xs text-primary-800">
+                <span class="rounded-full bg-white/80 px-2.5 py-1 ring-1 ring-primary-100">1. Describe role</span>
+                <span class="rounded-full bg-white/80 px-2.5 py-1 ring-1 ring-primary-100">2. Wizard composes</span>
+                <span class="rounded-full bg-white/80 px-2.5 py-1 ring-1 ring-primary-100">3. Review safely</span>
+            </div>
+        </div>
+    </section>
+    <section id="agent-composer-chat" data-agent-id="{{ definition_engineer_agent.id if definition_engineer_agent else '' }}" class="flex min-h-[620px] flex-col overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
+        <div class="border-b border-gray-100 px-4 py-3">
+            <div class="flex items-center justify-between gap-3">
+                <div>
+                    <h2 class="text-sm font-semibold text-gray-900">Agent Wizard Chat</h2>
+                    <p class="text-xs text-gray-500">Guided assistant for creating proposed agents and skills without writing prompts by hand.</p>
+                </div>
+                <span id="agent-composer-status" class="shrink-0 rounded-full bg-gray-100 px-2 py-1 text-[11px] font-medium text-gray-500">Ready</span>
+            </div>
+        </div>
+        {% if definition_engineer_agent %}
+        <div id="agent-composer-messages" class="flex-1 space-y-3 overflow-y-auto bg-gray-50/60 p-4">
+            <div class="flex gap-2.5">
+                <div class="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary-100 text-primary-700">
+                    <svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.847.814a4.5 4.5 0 0 0-3.09 3.09Z" /></svg>
+                </div>
+                <div class="max-w-[85%] rounded-2xl rounded-tl-sm bg-white px-3.5 py-2.5 text-sm text-gray-700 shadow-sm ring-1 ring-gray-100">What kind of agent should we create? Describe the job, the tools it should use, and any safety boundaries. I’ll keep new definitions in review until you approve them.</div>
+            </div>
+        </div>
+        <div class="border-t border-gray-100 bg-white px-4 py-3">
+            <div class="mb-2 text-[11px] font-semibold uppercase tracking-wide text-gray-400">Starter prompts</div>
+            <div class="flex flex-wrap gap-2">
+                <button type="button" data-agent-composer-prompt="I need an agent that can review customer support tickets, identify priority, and suggest replies." class="rounded-full border border-primary-200 bg-primary-50 px-3 py-1.5 text-xs font-medium text-primary-700 hover:bg-primary-100">Support triage agent</button>
+                <button type="button" data-agent-composer-prompt="Help me turn an existing workflow into an agent. Ask me what you need to know, then propose the agent and any skills it needs." class="rounded-full border border-primary-200 bg-primary-50 px-3 py-1.5 text-xs font-medium text-primary-700 hover:bg-primary-100">Turn workflow into agent</button>
+                <button type="button" data-agent-composer-prompt="Review the current agent definitions and tell me whether a new agent is needed or an existing agent should get a new skill." class="rounded-full border border-primary-200 bg-primary-50 px-3 py-1.5 text-xs font-medium text-primary-700 hover:bg-primary-100">Improve what exists</button>
+            </div>
+        </div>
+        <form id="agent-composer-form" class="border-t border-gray-100 bg-white p-3">
+            <label for="agent-composer-input" class="sr-only">Message the Agent Wizard</label>
+            <div class="flex items-end gap-2 rounded-xl border border-gray-200 bg-gray-50 px-3 py-2 focus-within:border-primary-300 focus-within:bg-white focus-within:ring-2 focus-within:ring-primary-100">
+                <textarea id="agent-composer-input" rows="2" placeholder="Describe the agent you want to create…" class="min-h-[44px] flex-1 resize-none border-0 bg-transparent text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-0"></textarea>
+                <button id="agent-composer-send" type="submit" disabled class="rounded-lg bg-primary-600 px-3 py-2 text-sm font-medium text-white hover:bg-primary-700 disabled:cursor-not-allowed disabled:bg-gray-300">Send</button>
+            </div>
+            <div class="mt-2 flex items-center justify-between gap-3 text-[11px] text-gray-400">
+                <span>Created proposals appear in the Pending tab for approval.</span>
+                <button id="agent-composer-reset" type="button" class="font-medium text-gray-500 hover:text-gray-700">Reset chat</button>
+            </div>
+        </form>
+        {% else %}
+        <div class="flex flex-1 items-center justify-center bg-gray-50 p-6 text-center">
+            <div>
+                <p class="text-sm font-medium text-gray-700">Agent Wizard is not active yet.</p>
+                <p class="mt-1 text-sm text-gray-500">Restart or sync built-in definitions so the wizard can create agent and skill proposals.</p>
+            </div>
+        </div>
+        {% endif %}
+    </section>
+</div>
+
+{% elif tab == 'agents' %}
 <div class="mb-4 flex items-center justify-between">
     {{ pagination_controls(base_url="/definitions", page=page, per_page=per_page, total_pages=total_pages, total_count=total_count, filter_params={"tab": "agents"}, entity_name="agents") }}
     <div class="flex gap-2">
     <button id="open-import-btn-agents" class="inline-flex items-center gap-1.5 px-4 py-2 text-sm bg-primary-50 border border-primary-200 text-primary-700 rounded-md hover:bg-primary-100 hover:border-primary-300 font-medium transition-colors"><svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="4" r="2"/><path d="M12 6v4"/><path d="M7 14l5 6 5-6"/><path d="M4 14c0-2 1.5-4 4-5"/><path d="M20 14c0-2-1.5-4-4-5"/><path d="M4 14h16"/><path d="M6 18h12"/><path d="M8 22h8"/></svg>Import</button>
-    <button onclick="document.getElementById('create-agent-modal').classList.remove('hidden')" class="px-4 py-2 text-sm bg-primary-600 text-white rounded-md hover:bg-primary-700 font-medium">+ New Agent</button>
+    <button id="open-create-agent-modal" type="button" class="px-4 py-2 text-sm bg-primary-600 text-white rounded-md hover:bg-primary-700 font-medium">+ New Agent</button>
     </div>
 </div>
 <div class="space-y-3">
@@ -147,7 +217,7 @@
     <div class="bg-white rounded-lg shadow-xl w-full max-w-2xl mx-4 max-h-[90vh] overflow-y-auto">
         <form method="POST" action="/definitions/agents/create">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <div class="p-6 border-b border-gray-200"><div class="flex items-center justify-between"><h2 class="text-lg font-semibold text-gray-900">New Agent</h2><button type="button" onclick="this.closest('.fixed').classList.add('hidden')" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button></div></div>
+            <div class="p-6 border-b border-gray-200"><div class="flex items-center justify-between"><h2 class="text-lg font-semibold text-gray-900">New Agent</h2><button type="button" class="create-agent-close text-gray-400 hover:text-gray-600 text-xl">&times;</button></div></div>
             <div class="p-6 space-y-4">
                 <div><label class="block text-sm font-medium text-gray-700 mb-1">Name</label><input name="name" required class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm" placeholder="e.g. my-agent"></div>
                 <div><label class="block text-sm font-medium text-gray-700 mb-1">Description</label><input name="description" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm" placeholder="Brief description"></div>
@@ -164,7 +234,7 @@
                     <p class="mt-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800"><span class="font-medium">Use care:</span> Entire Organization makes this definition readable and usable by everyone in your organization.</p>
                 </div>
             </div>
-            <div class="p-6 border-t border-gray-200 flex justify-end gap-3"><button type="button" onclick="this.closest('.fixed').classList.add('hidden')" class="px-4 py-2 text-sm text-gray-600">Cancel</button><button type="submit" class="px-4 py-2 text-sm bg-primary-600 text-white rounded-md hover:bg-primary-700 font-medium">Create Agent</button></div>
+            <div class="p-6 border-t border-gray-200 flex justify-end gap-3"><button type="button" class="create-agent-close px-4 py-2 text-sm text-gray-600">Cancel</button><button type="submit" class="px-4 py-2 text-sm bg-primary-600 text-white rounded-md hover:bg-primary-700 font-medium">Create Agent</button></div>
         </form>
     </div>
 </div>
@@ -465,6 +535,258 @@ Instructions here..." class="w-full px-3 py-2 border border-gray-300 rounded-lg 
 </div>
 
 <script nonce="{{ request.state.csp_nonce }}">
+(function() {
+    const root = document.getElementById('agent-composer-chat');
+    if (!root) return;
+
+    const agentId = root.dataset.agentId || '';
+    const form = document.getElementById('agent-composer-form');
+    const input = document.getElementById('agent-composer-input');
+    const sendBtn = document.getElementById('agent-composer-send');
+    const messagesEl = document.getElementById('agent-composer-messages');
+    const resetBtn = document.getElementById('agent-composer-reset');
+    const statusEl = document.getElementById('agent-composer-status');
+    const initialMessagesHtml = messagesEl ? messagesEl.innerHTML : '';
+    const state = {
+        messages: [],
+        sessionId: null,
+        streaming: false,
+        abortController: null,
+    };
+
+    function setStatus(text, tone) {
+        if (!statusEl) return;
+        statusEl.textContent = text;
+        const palette = tone === 'error'
+            ? 'bg-red-100 text-red-700'
+            : tone === 'active'
+                ? 'bg-primary-100 text-primary-700'
+                : tone === 'success'
+                    ? 'bg-green-100 text-green-700'
+                    : 'bg-gray-100 text-gray-500';
+        statusEl.className = 'shrink-0 rounded-full px-2 py-1 text-[11px] font-medium ' + palette;
+    }
+
+    function scrollMessages() {
+        if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    function updateSendButton() {
+        if (!sendBtn || !input) return;
+        sendBtn.disabled = state.streaming || !input.value.trim() || !agentId;
+    }
+
+    function bubbleClasses(role) {
+        if (role === 'user') {
+            return 'max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-tr-sm bg-primary-600 px-3.5 py-2.5 text-sm text-white shadow-sm';
+        }
+        return 'max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-tl-sm bg-white px-3.5 py-2.5 text-sm text-gray-700 shadow-sm ring-1 ring-gray-100';
+    }
+
+    function appendMessage(role, text) {
+        if (!messagesEl) return null;
+        const row = document.createElement('div');
+        row.className = role === 'user' ? 'flex justify-end' : 'flex gap-2.5';
+
+        if (role !== 'user') {
+            const avatar = document.createElement('div');
+            avatar.className = 'mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary-100 text-primary-700';
+            avatar.innerHTML = '<svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.847.814a4.5 4.5 0 0 0-3.09 3.09Z" /></svg>';
+            row.appendChild(avatar);
+        }
+
+        const bubble = document.createElement('div');
+        bubble.className = bubbleClasses(role);
+        bubble.textContent = text;
+        row.appendChild(bubble);
+        messagesEl.appendChild(row);
+        scrollMessages();
+        return bubble;
+    }
+
+    function appendToolNote(text) {
+        if (!messagesEl) return;
+        const note = document.createElement('div');
+        note.className = 'mx-10 rounded-full bg-white px-3 py-1 text-center text-[11px] text-gray-500 ring-1 ring-gray-100';
+        note.textContent = text;
+        messagesEl.appendChild(note);
+        scrollMessages();
+    }
+
+    function shortToolName(tool) {
+        return String(tool || 'tool').replace(/^memory-server-/, '').replace(/^mcp_memory-server_/, '');
+    }
+
+    function resetComposerChat() {
+        if (state.abortController) {
+            state.abortController.abort();
+            state.abortController = null;
+        }
+        state.messages = [];
+        state.sessionId = null;
+        state.streaming = false;
+        if (messagesEl) messagesEl.innerHTML = initialMessagesHtml;
+        if (input) {
+            input.value = '';
+            input.style.height = 'auto';
+        }
+        setStatus(agentId ? 'Ready' : 'Unavailable');
+        updateSendButton();
+    }
+
+    async function sendComposerMessage(e) {
+        e.preventDefault();
+        if (!input || !agentId || state.streaming) return;
+        const text = input.value.trim();
+        if (!text) return;
+
+        state.messages.push({ role: 'user', content: text });
+        appendMessage('user', text);
+        input.value = '';
+        input.style.height = 'auto';
+        state.streaming = true;
+        state.abortController = new AbortController();
+        updateSendButton();
+        setStatus('Thinking…', 'active');
+
+        const assistantBubble = appendMessage('assistant', '');
+        let assistantText = '';
+        let gotDeltas = false;
+
+        try {
+            const resp = await fetch('/api/chat/stream-v2', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    messages: state.messages,
+                    session_id: state.sessionId,
+                    surface: 'embedded_chat',
+                    agent_id: agentId,
+                }),
+                signal: state.abortController.signal,
+            });
+
+            if (!resp.ok || !resp.body) {
+                const errText = await resp.text().catch(() => resp.statusText);
+                throw new Error(errText || 'Chat request failed');
+            }
+
+            const reader = resp.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop() || '';
+                for (const line of lines) {
+                    if (!line.startsWith('data: ')) continue;
+                    let event;
+                    try {
+                        event = JSON.parse(line.slice(6));
+                    } catch (_err) {
+                        continue;
+                    }
+                    if (event.type === 'session') {
+                        state.sessionId = event.session_id;
+                    } else if (event.type === 'text_delta') {
+                        gotDeltas = true;
+                        assistantText += event.text || '';
+                        if (assistantBubble) assistantBubble.textContent = assistantText;
+                        setStatus('Writing…', 'active');
+                        scrollMessages();
+                    } else if (event.type === 'message') {
+                        if (!gotDeltas) assistantText = event.text || '';
+                        if (assistantBubble) assistantBubble.textContent = assistantText;
+                        scrollMessages();
+                    } else if (event.type === 'tool_call') {
+                        setStatus('Using ' + shortToolName(event.tool) + '…', 'active');
+                        appendToolNote('Using ' + shortToolName(event.tool) + '…');
+                    } else if (event.type === 'tool_result') {
+                        const tool = shortToolName(event.tool);
+                        if (tool === 'create_agent_definition' || tool === 'create_skill_definition') {
+                            appendToolNote('Created a proposed definition. Review it in Pending.');
+                        }
+                        setStatus('Thinking…', 'active');
+                    } else if (event.type === 'error') {
+                        throw new Error(event.error || 'The composer hit an error');
+                    }
+                }
+            }
+
+            if (!assistantText.trim()) {
+                assistantText = 'No response came back. Try again, or check the chat/model configuration.';
+                if (assistantBubble) assistantBubble.textContent = assistantText;
+            }
+            state.messages.push({ role: 'assistant', content: assistantText });
+            setStatus('Ready', 'success');
+        } catch (err) {
+            if (err.name !== 'AbortError') {
+                const message = 'Composer error: ' + (err.message || 'unknown error');
+                if (assistantBubble) assistantBubble.textContent = message;
+                setStatus('Error', 'error');
+            }
+        } finally {
+            state.streaming = false;
+            state.abortController = null;
+            updateSendButton();
+        }
+    }
+
+    document.querySelectorAll('[data-agent-composer-prompt]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            if (!input || state.streaming) return;
+            input.value = btn.dataset.agentComposerPrompt || '';
+            input.style.height = 'auto';
+            input.style.height = Math.min(input.scrollHeight, 140) + 'px';
+            input.focus();
+            updateSendButton();
+        });
+    });
+
+    if (!agentId) {
+        setStatus('Unavailable', 'error');
+    }
+    if (form) form.addEventListener('submit', sendComposerMessage);
+    if (resetBtn) resetBtn.addEventListener('click', resetComposerChat);
+    if (input) {
+        input.addEventListener('input', () => {
+            input.style.height = 'auto';
+            input.style.height = Math.min(input.scrollHeight, 140) + 'px';
+            updateSendButton();
+        });
+        input.addEventListener('keydown', e => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                if (form) form.requestSubmit();
+            }
+        });
+    }
+    updateSendButton();
+})();
+
+(function() {
+    const modal = document.getElementById('create-agent-modal');
+    const openBtn = document.getElementById('open-create-agent-modal');
+    if (!modal || !openBtn) return;
+
+    function closeModal() {
+        modal.classList.add('hidden');
+    }
+
+    openBtn.addEventListener('click', () => modal.classList.remove('hidden'));
+    modal.querySelectorAll('.create-agent-close').forEach(btn => {
+        btn.addEventListener('click', closeModal);
+    });
+    modal.addEventListener('click', e => {
+        if (e.target === modal) closeModal();
+    });
+    document.addEventListener('keydown', e => {
+        if (e.key === 'Escape' && !modal.classList.contains('hidden')) closeModal();
+    });
+})();
+
 (function() {
     const modal = document.getElementById('create-hook-modal');
     const openBtn = document.getElementById('open-create-hook-modal');

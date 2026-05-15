@@ -190,6 +190,18 @@ def test_chat_mcp_config_uses_narrow_tool_allowlist():
     assert tools != ["*"]
 
 
+def test_definition_engineer_chat_gets_definition_proposal_tools():
+    tools = chat._chat_allowed_tools_for_agent("definition-engineer", [])
+
+    assert "create_agent_definition" in tools
+    assert "create_skill_definition" in tools
+    assert "list_agent_definitions" in tools
+    assert "list_proposals" in tools
+    assert "approve_agent_definition" not in tools
+    assert "grant_skill_to_agent" not in tools
+    assert tools != ["*"]
+
+
 def test_chat_mcp_config_threads_llm_session_headers():
     config = chat._build_mcp_config(
         "session-token",

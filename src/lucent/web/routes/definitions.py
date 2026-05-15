@@ -70,6 +70,21 @@ def _attach_owner_names(
     return enriched
 
 
+async def _find_agent_composer_agent(repo, org_id: str, user, role_value: str) -> dict | None:
+    """Return the active definition-engineer agent if this user can access it."""
+    result = await repo.list_agents(
+        org_id,
+        status="active",
+        limit=1000,
+        requester_user_id=str(user.id),
+        requester_role=role_value,
+    )
+    for agent in result.get("items", []):
+        if agent and agent.get("name") == "definition-engineer":
+            return agent
+    return None
+
+
 async def _resolve_owner_scope(
     form_data, user, pool
 ) -> tuple[str | None, str | None, bool]:
@@ -162,7 +177,7 @@ def _env_vars_text(value) -> str:
 @router.get("/definitions", response_class=HTMLResponse)
 async def definitions_page(
     request: Request,
-    tab: str = "agents",
+    tab: str = "composer",
     page: int = 1,
     per_page: int = 25,
 ):
@@ -175,6 +190,8 @@ async def definitions_page(
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     org_id = str(user.organization_id)
     role_value = user.role if isinstance(user.role, str) else user.role.value
+    if tab in {"agent-composer", "agent_composer", "wizard", "agent-wizard", "agent_wizard"}:
+        tab = "composer"
 
     page = max(1, page)
     per_page = per_page if per_page in ALLOWED_PER_PAGE else 25
@@ -210,6 +227,9 @@ async def definitions_page(
         requester_role=role_value,
     )
     proposals = await repo.get_pending_proposals(org_id)
+    definition_engineer_agent = await _find_agent_composer_agent(
+        repo, org_id, user, role_value,
+    )
     all_items = [
         *agents_result["items"],
         *skills_result["items"],
@@ -224,7 +244,9 @@ async def definitions_page(
     hooks = _attach_owner_names(hooks_result["items"], user_map, group_map)
 
     # Determine total_count and total_pages based on active tab
-    if tab == "agents":
+    if tab == "composer":
+        total_count = 0
+    elif tab == "agents":
         total_count = agents_result["total_count"]
     elif tab == "skills":
         total_count = skills_result["total_count"]
@@ -250,6 +272,7 @@ async def definitions_page(
             "mcp_servers": mcp_servers,
             "hooks": hooks,
             "proposals": proposals,
+            "definition_engineer_agent": definition_engineer_agent,
             "owner_groups": user_groups,
             "agents_total": agents_result["total_count"],
             "skills_total": skills_result["total_count"],
