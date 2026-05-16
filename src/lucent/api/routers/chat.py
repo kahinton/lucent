@@ -1051,7 +1051,15 @@ async def chat_stream_v2(
                 "needed, then use `create_skill_definition` and `create_agent_definition` "
                 "to create proposed definitions. Do not approve or grant definitions from "
                 "chat; tell the user to review proposals in the Pending tab. Keep language "
-                "plain and avoid assuming the user knows prompt-engineering terminology."
+                "plain and avoid assuming the user knows prompt-engineering terminology.\n"
+                "Lucent supports three lightweight agent kinds inside the existing definition "
+                "framework: `functional` agents primarily perform a job or workflow; `persona` "
+                "agents primarily provide a consistent stance, voice, relationship, or judgment "
+                "style; `hybrid` agents combine both. Persona agents are still real agent "
+                "definitions: give them clear boundaries, escalation rules, and any skills/tools "
+                "they need. When creating an agent, include `proposal_evidence` with "
+                "at least `agent_kind` (`functional`, `persona`, or `hybrid`) and "
+                "a short `agent_kind_reason`."
             )
 
     system_prompt = "\n\n".join(system_prompt_parts)

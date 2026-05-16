@@ -311,7 +311,12 @@ class TestDefinitionsList:
 
         assert resp.status_code == 200
         assert "Agent Wizard Chat" in resp.text
+        assert "Choose a starting point" in resp.text
+        assert "Functional agent" in resp.text
+        assert "Persona agent" in resp.text
+        assert "Hybrid agent" in resp.text
         assert "Starter prompts" in resp.text
+        assert "Calm mentor persona" in resp.text
         assert "Definition Engineer Chat" not in resp.text
         assert "definition-engineer" not in resp.text
         assert f'data-agent-id="{definition_engineer["id"]}"' in resp.text
@@ -323,6 +328,8 @@ class TestDefinitionsList:
         assert resp.status_code == 200
         assert 'id="open-create-agent-modal"' in resp.text
         assert 'class="create-agent-close' in resp.text
+        assert 'name="agent_kind"' in resp.text
+        assert "Persona — provides a consistent voice" in resp.text
         assert "onclick=\"document.getElementById('create-agent-modal')" not in resp.text
 
     async def test_list_tab_skills(self, client, skill_def):
@@ -517,8 +524,35 @@ class TestAgentCreate:
         repo = DefinitionRepository(db_pool)
         result = await repo.list_agents(str(org["id"]))
         agents = result["items"] if isinstance(result, dict) else result
-        names = [a["name"] for a in agents]
-        assert "Persisted Agent" in names
+        persisted = next(a for a in agents if a["name"] == "Persisted Agent")
+        assert persisted["proposal_evidence"]["agent_kind"] == "functional"
+
+    async def test_create_persists_persona_kind(self, client, db_pool, web_user):
+        _user, org, _token = web_user
+        await client.post(
+            "/definitions/agents/create",
+            data=_csrf_data(
+                client,
+                {
+                    "name": "Kind Tagged Agent",
+                    "description": "Check agent kind",
+                    "agent_kind": "persona",
+                    "content": "# Kind Tagged Agent",
+                },
+            ),
+        )
+        repo = DefinitionRepository(db_pool)
+        result = await repo.list_agents(str(org["id"]))
+        agent = next(a for a in result["items"] if a["name"] == "Kind Tagged Agent")
+
+        assert agent["proposal_evidence"]["agent_kind"] == "persona"
+
+        list_resp = await client.get("/definitions", params={"tab": "agents"})
+        assert "Kind Tagged Agent" in list_resp.text
+        assert 'bg-pink-50 text-pink-700">persona' in list_resp.text
+
+        detail_resp = await client.get(f"/definitions/agents/{agent['id']}")
+        assert 'bg-pink-50 text-pink-700">persona' in detail_resp.text
 
     async def test_create_can_share_with_org(self, client, db_pool, web_user):
         _user, org, _token = web_user

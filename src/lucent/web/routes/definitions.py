@@ -19,6 +19,7 @@ logger = get_logger("web.routes.definitions")
 router = APIRouter()
 
 ALLOWED_PER_PAGE = {10, 25, 50, 100}
+VALID_AGENT_KINDS = {"functional", "persona", "hybrid"}
 
 
 async def _get_user_groups(pool, user_id: str, org_id: str) -> list[dict]:
@@ -68,6 +69,18 @@ def _attach_owner_names(
         d["owner_group_name"] = group_map.get(owner_group_id) if owner_group_id else None
         enriched.append(d)
     return enriched
+
+
+def _normalize_agent_kind(value) -> str:
+    kind = str(value or "functional").strip().lower()
+    return kind if kind in VALID_AGENT_KINDS else "functional"
+
+
+def _agent_kind_evidence(kind: str, source: str) -> dict[str, str]:
+    return {
+        "agent_kind": _normalize_agent_kind(kind),
+        "classification_source": source,
+    }
 
 
 async def _find_agent_composer_agent(repo, org_id: str, user, role_value: str) -> dict | None:
@@ -673,6 +686,7 @@ async def create_agent_web(request: Request):
         owner_user_id=owner_user_id,
         owner_group_id=owner_group_id,
         shared_with_org=shared_with_org,
+        proposal_evidence=_agent_kind_evidence(form.get("agent_kind"), "web_form"),
     )
     return RedirectResponse(url=f"/definitions/agents/{agent['id']}", status_code=303)
 

@@ -42,6 +42,17 @@
 {% endif %}
 {% endmacro %}
 
+{% macro agent_kind_badge(item) %}
+{% set kind = item.proposal_evidence.agent_kind if item.proposal_evidence and item.proposal_evidence.agent_kind else None %}
+{% if kind == 'persona' %}
+    <span class="px-2 py-0.5 rounded text-xs bg-pink-50 text-pink-700">persona</span>
+{% elif kind == 'hybrid' %}
+    <span class="px-2 py-0.5 rounded text-xs bg-violet-50 text-violet-700">hybrid</span>
+{% elif kind == 'functional' %}
+    <span class="px-2 py-0.5 rounded text-xs bg-slate-100 text-slate-600">functional</span>
+{% endif %}
+{% endmacro %}
+
 {% macro approval_buttons(type, id) %}
 <div class="flex gap-2 shrink-0">
     <form method="POST" action="/definitions/{{ type }}/{{ id }}/approve"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit" class="px-3 py-1.5 text-sm bg-green-50 text-green-700 rounded-md hover:bg-green-100 font-medium">Approve</button></form>
@@ -106,9 +117,27 @@
             </div>
         </div>
         <div class="border-t border-gray-100 bg-white px-4 py-3">
+            <div class="mb-2 text-[11px] font-semibold uppercase tracking-wide text-gray-400">Choose a starting point</div>
+            <div class="grid gap-2 md:grid-cols-3">
+                <button type="button" data-agent-composer-prompt="Create a functional agent that can take a concrete work request, use the right skills and tools, and return a verified result. Ask me what workflow or job it should handle." class="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-left hover:border-slate-300 hover:bg-slate-100">
+                    <span class="block text-sm font-semibold text-slate-800">Functional agent</span>
+                    <span class="mt-0.5 block text-xs text-slate-500">Does a job or workflow.</span>
+                </button>
+                <button type="button" data-agent-composer-prompt="Create a persona agent. Help me define its stance, voice, relationship to the user, boundaries, and when it should use tools or escalate to a functional agent." class="rounded-lg border border-pink-200 bg-pink-50 px-3 py-2 text-left hover:border-pink-300 hover:bg-pink-100">
+                    <span class="block text-sm font-semibold text-pink-800">Persona agent</span>
+                    <span class="mt-0.5 block text-xs text-pink-600">Provides a consistent voice or stance.</span>
+                </button>
+                <button type="button" data-agent-composer-prompt="Create a hybrid agent that has a clear persona but also performs a specific workflow. Help me keep the persona guidance separate from the functional execution steps." class="rounded-lg border border-violet-200 bg-violet-50 px-3 py-2 text-left hover:border-violet-300 hover:bg-violet-100">
+                    <span class="block text-sm font-semibold text-violet-800">Hybrid agent</span>
+                    <span class="mt-0.5 block text-xs text-violet-600">Combines style with real work.</span>
+                </button>
+            </div>
+        </div>
+        <div class="border-t border-gray-100 bg-white px-4 py-3">
             <div class="mb-2 text-[11px] font-semibold uppercase tracking-wide text-gray-400">Starter prompts</div>
             <div class="flex flex-wrap gap-2">
                 <button type="button" data-agent-composer-prompt="I need an agent that can review customer support tickets, identify priority, and suggest replies." class="rounded-full border border-primary-200 bg-primary-50 px-3 py-1.5 text-xs font-medium text-primary-700 hover:bg-primary-100">Support triage agent</button>
+                <button type="button" data-agent-composer-prompt="I want a calm mentor persona that helps me think through hard decisions, asks good questions, and does not take over execution unless I explicitly ask." class="rounded-full border border-pink-200 bg-pink-50 px-3 py-1.5 text-xs font-medium text-pink-700 hover:bg-pink-100">Calm mentor persona</button>
                 <button type="button" data-agent-composer-prompt="Help me turn an existing workflow into an agent. Ask me what you need to know, then propose the agent and any skills it needs." class="rounded-full border border-primary-200 bg-primary-50 px-3 py-1.5 text-xs font-medium text-primary-700 hover:bg-primary-100">Turn workflow into agent</button>
                 <button type="button" data-agent-composer-prompt="Review the current agent definitions and tell me whether a new agent is needed or an existing agent should get a new skill." class="rounded-full border border-primary-200 bg-primary-50 px-3 py-1.5 text-xs font-medium text-primary-700 hover:bg-primary-100">Improve what exists</button>
             </div>
@@ -153,6 +182,7 @@
                     <a href="/definitions/agents/{{ agent.id }}" class="font-medium text-gray-900 hover:text-primary-600">{{ agent.name }}</a>
                     {{ status_badge(agent.status) }}
                     {{ scope_badge(agent) }}
+                    {{ agent_kind_badge(agent) }}
                     {{ owner_badge(agent) }}
                     {% if agent.skills %}<span class="text-xs text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded">{{ agent.skills|length }} skill{{ 's' if agent.skills|length != 1 }}</span>{% endif %}
                     {% if agent.hooks %}<span class="text-xs text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded">{{ agent.hooks|length }} hook{{ 's' if agent.hooks|length != 1 }}</span>{% endif %}
@@ -221,6 +251,15 @@
             <div class="p-6 space-y-4">
                 <div><label class="block text-sm font-medium text-gray-700 mb-1">Name</label><input name="name" required class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm" placeholder="e.g. my-agent"></div>
                 <div><label class="block text-sm font-medium text-gray-700 mb-1">Description</label><input name="description" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm" placeholder="Brief description"></div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Agent kind</label>
+                    <select name="agent_kind" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
+                        <option value="functional" selected>Functional — performs a job or workflow</option>
+                        <option value="persona">Persona — provides a consistent voice, stance, or relationship</option>
+                        <option value="hybrid">Hybrid — persona plus concrete workflow execution</option>
+                    </select>
+                    <p class="mt-1 text-xs text-gray-500">This is lightweight metadata for discovery and review; all kinds still use normal agent definitions, skills, hooks, and MCP grants.</p>
+                </div>
                 <div><label class="block text-sm font-medium text-gray-700 mb-1">Content (Markdown)</label><textarea name="content" rows="10" required class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono" placeholder="# Agent Name"></textarea></div>
                 <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">Owner</label>
