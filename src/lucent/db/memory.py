@@ -16,6 +16,7 @@ import asyncpg
 from asyncpg import Pool
 
 from lucent.metrics import metrics
+from lucent.models.repo_names import normalize_repository_full_name
 from lucent.settings import (
     search_exclude_archived_enabled,
     search_vitality_boost_alpha,
@@ -302,7 +303,7 @@ class MemoryRepository:
         if memory_type != "technical":
             return normalized
 
-        repo = cls._clean_repo(normalized.get("repo"))
+        repo = cls._clean_repo(normalized.get("repo"), strict=True)
         filename = cls._clean_path(normalized.get("filename"))
         directory = cls._normalize_directory(normalized.get("directory"))
 
@@ -401,11 +402,18 @@ class MemoryRepository:
         return {"repo": repo.lower(), "filename": filename.lower()}
 
     @staticmethod
-    def _clean_repo(value: Any) -> str | None:
+    def _clean_repo(value: Any, *, strict: bool = False) -> str | None:
         if not isinstance(value, str):
             return None
         cleaned = value.strip().strip("`'\" ")
-        return cleaned or None
+        if not cleaned:
+            return None
+        try:
+            return normalize_repository_full_name(cleaned)
+        except ValueError:
+            if strict:
+                raise
+            return None
 
     @staticmethod
     def _clean_path(value: Any) -> str | None:

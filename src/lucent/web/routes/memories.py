@@ -557,24 +557,27 @@ async def memory_edit_submit(
         meta_preferences=meta_preferences,
     )
 
-    metadata = repo.normalize_metadata_for_storage(memory_type, metadata)
-    duplicate = await repo.find_duplicate_technical_file_memory(
-        metadata=metadata,
-        requesting_user_id=user.id,
-        requesting_org_id=user.organization_id,
-        memory_scope=getattr(user, "memory_scope", None),
-        exclude_id=memory_id,
-    )
-    if duplicate is not None:
-        scope = repo._technical_file_scope(metadata)
-        if scope is not None:
-            _raise_duplicate_technical_memory(
-                DuplicateTechnicalMemoryError(
-                    existing_memory=duplicate,
-                    repo=scope["repo"],
-                    filename=scope["filename"],
+    try:
+        metadata = repo.normalize_metadata_for_storage(memory_type, metadata)
+        duplicate = await repo.find_duplicate_technical_file_memory(
+            metadata=metadata,
+            requesting_user_id=user.id,
+            requesting_org_id=user.organization_id,
+            memory_scope=getattr(user, "memory_scope", None),
+            exclude_id=memory_id,
+        )
+        if duplicate is not None:
+            scope = repo._technical_file_scope(metadata)
+            if scope is not None:
+                _raise_duplicate_technical_memory(
+                    DuplicateTechnicalMemoryError(
+                        existing_memory=duplicate,
+                        repo=scope["repo"],
+                        filename=scope["filename"],
+                    )
                 )
-            )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
     try:
         validate_memory_content_quality(
@@ -864,7 +867,9 @@ async def knowledge_tree(request: Request):
                     AND NOT ('superseded' = ANY(tags))
           AND metadata->>'repo' IS NOT NULL
           AND (user_id = $1 OR (organization_id = $2 AND shared = true))
-        ORDER BY metadata->>'repo', metadata->>'directory' NULLS FIRST, metadata->>'filename' NULLS FIRST
+                ORDER BY metadata->>'repo',
+                                 metadata->>'directory' NULLS FIRST,
+                                 metadata->>'filename' NULLS FIRST
     """
     async with pool.acquire() as conn:
         rows = await conn.fetch(query, str(user.id), str(user.organization_id))
@@ -913,7 +918,13 @@ async def knowledge_tree(request: Request):
         filename = r["filename"]
 
         if repo_name not in tree:
-            tree[repo_name] = {"memory": None, "dirs": {}, "root_files": [], "file_count": 0, "total": 0}
+            tree[repo_name] = {
+                "memory": None,
+                "dirs": {},
+                "root_files": [],
+                "file_count": 0,
+                "total": 0,
+            }
 
         node = tree[repo_name]
         node["total"] += 1
@@ -994,7 +1005,10 @@ async def search_github_repos(request: Request, q: str = ""):
         token = os.environ.get("GITHUB_TOKEN", "")
 
     if not token:
-        return JSONResponse({"error": "No GitHub token available. Connect GitHub on the Connections page."}, status_code=400)
+        return JSONResponse(
+            {"error": "No GitHub token available. Connect GitHub on the Connections page."},
+            status_code=400,
+        )
 
     import httpx
     try:
@@ -1030,7 +1044,7 @@ async def search_github_repos(request: Request, q: str = ""):
 @router.post("/knowledge/scan-repo")
 async def scan_repo(request: Request):
     """Create a request to scan a GitHub repo and build knowledge tree memories.
-    
+
     Only creates the request — the daemon's cognitive planner will decompose
     it into tasks with proper agent assignment, model selection, and sandbox config.
     """
@@ -1075,7 +1089,8 @@ async def scan_repo(request: Request):
             f"https://github.com/{repo_full_name}.git, one agent session that produces "
             f"all memories in one pass. Do not split this into multiple tasks; double "
             f"cloning wastes time and sandbox resources.\n\n"
-            f"In that single session, the agent should create technical memories at three levels:\n\n"
+            f"In that single session, the agent should create technical memories "
+            f"at three levels:\n\n"
             f"1. **Directory-level memories** — For each significant directory, document "
             f"what it's for, key patterns, conventions, and how it relates to other parts. "
             f"Set metadata: repo='{repo_full_name}', directory='path/', filename=null\n\n"
@@ -1107,5 +1122,8 @@ async def scan_repo(request: Request):
     return JSONResponse({
         "status": "scanning",
         "request_id": str(req["id"]),
-        "message": f"Knowledge scan requested for {repo_full_name}. The daemon will plan and execute the tasks.",
+        "message": (
+            f"Knowledge scan requested for {repo_full_name}. "
+            "The daemon will plan and execute the tasks."
+        ),
     })

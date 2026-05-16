@@ -325,10 +325,20 @@ class TestCreateMemory:
             mem_client,
             mem_prefix,
             type="technical",
-            metadata={"repo": "test-repo", "language": "python"},
+            metadata={"repo": "example/test-repo", "language": "python"},
         )
         assert resp.status_code == 201
-        assert resp.json()["metadata"]["repo"] == "test-repo"
+        assert resp.json()["metadata"]["repo"] == "example/test-repo"
+
+    async def test_create_rejects_bare_repo_metadata(self, mem_client, mem_prefix):
+        resp = await _create_memory(
+            mem_client,
+            mem_prefix,
+            type="technical",
+            metadata={"repo": "test-repo", "language": "python"},
+        )
+        assert resp.status_code == 400
+        assert "owner/repo" in resp.json()["detail"]
 
     async def test_create_defaults_username(self, mem_client, mem_prefix):
         """If username is not provided, should default to user's display name."""

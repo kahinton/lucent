@@ -181,13 +181,31 @@ class TestCreateMemory:
                 "type": "technical",
                 "content": f"{prefix} Technical memory with metadata",
                 "username": f"{prefix}user",
-                "metadata": {"language": "python", "repo": "lucent"},
+                "metadata": {"language": "python", "repo": "kahinton/lucent"},
             },
         )
 
         assert "id" in result
         assert result["type"] == "technical"
         assert result["metadata"]["language"] == "python"
+
+    async def test_create_technical_memory_bare_repo_rejected(
+        self, mcp_tools, auth_user, clean_test_data
+    ):
+        """Bare project names must not create orphan Knowledge Tree repo roots."""
+        prefix = clean_test_data
+        result = await _call(
+            mcp_tools,
+            "create_memory",
+            {
+                "type": "technical",
+                "content": f"{prefix} Technical memory with malformed repo",
+                "metadata": {"language": "python", "repo": "lucent"},
+            },
+        )
+
+        assert "error" in result
+        assert "owner/repo" in result["error"]
 
     async def test_create_technical_memory_without_anchor_rejected(
         self, mcp_tools, auth_user, clean_test_data

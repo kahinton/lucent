@@ -410,9 +410,15 @@ async def update_memory(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=str(e),
             )
-        validated_metadata = repo.normalize_metadata_for_storage(
-            existing["type"], validated_metadata
-        )
+        try:
+            validated_metadata = repo.normalize_metadata_for_storage(
+                existing["type"], validated_metadata
+            )
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(e),
+            ) from e
         duplicate = await repo.find_duplicate_technical_file_memory(
             metadata=validated_metadata,
             requesting_user_id=effective_user_id,
