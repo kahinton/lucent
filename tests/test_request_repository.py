@@ -169,6 +169,48 @@ class TestListRequests:
         results = await repo.list_requests(org_id, status="completed", source="daemon")
         assert any(r["title"] == "Daemon done" for r in results["items"])
 
+    async def test_list_includes_activity_card_summaries(self, repo, org_id, user_id):
+        req = await _make_request(repo, org_id, title="Activity summary")
+        task = await _make_task(repo, str(req["id"]), org_id, model="claude-sonnet-4")
+        await repo.claim_task(str(task["id"]), "summary-inst", org_id=org_id)
+        await repo.create_task_output(
+            task_id=str(task["id"]),
+            org_id=org_id,
+            output={
+                "title": "Summary PR",
+                "url": "https://github.com/kahinton/lucent/pull/123",
+            },
+            created_by=user_id,
+        )
+
+        results = await repo.list_requests(org_id, viewer_user_id=user_id)
+        item = next(r for r in results["items"] if r["id"] == req["id"])
+
+        assert item["task_count"] == 1
+        assert item["tasks_running"] == 1
+        assert item["tasks_completed"] == 0
+        assert item["tasks_failed"] == 0
+        assert item["models_used"] == ["claude-sonnet-4"]
+        assert item["output_count"] == 1
+        assert item["is_unviewed_completion"] is False
+
+    async def test_completed_request_unviewed_until_detail_marked(self, repo, org_id, user_id):
+        req = await _make_request(repo, org_id, title="Unread completion")
+        await repo.update_request_status(str(req["id"]), "completed", org_id)
+
+        before = await repo.list_requests(org_id, status="completed", viewer_user_id=user_id)
+        before_item = next(r for r in before["items"] if r["id"] == req["id"])
+        assert before_item["is_unviewed_completion"] is True
+        assert before_item["last_viewed_at"] is None
+
+        viewed = await repo.mark_request_viewed(str(req["id"]), org_id, user_id)
+        assert viewed is not None
+
+        after = await repo.list_requests(org_id, status="completed", viewer_user_id=user_id)
+        after_item = next(r for r in after["items"] if r["id"] == req["id"])
+        assert after_item["is_unviewed_completion"] is False
+        assert after_item["last_viewed_at"] is not None
+
 
 class TestUpdateRequestStatus:
     async def test_update_to_in_progress(self, repo, org_id):

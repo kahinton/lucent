@@ -885,6 +885,30 @@ class RequestRepository:
             )
         return dict(row) if row else None
 
+    async def mark_request_viewed(
+        self,
+        request_id: str,
+        org_id: str,
+        user_id: str,
+    ) -> dict | None:
+        """Record that a user opened a request detail page."""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """INSERT INTO request_views (
+                       request_id, user_id, organization_id, first_viewed_at, last_viewed_at
+                   )
+                   SELECT r.id, $3::uuid, r.organization_id, NOW(), NOW()
+                   FROM requests r
+                   WHERE r.id = $1::uuid AND r.organization_id = $2::uuid
+                   ON CONFLICT (request_id, user_id)
+                   DO UPDATE SET last_viewed_at = EXCLUDED.last_viewed_at
+                   RETURNING *""",
+                request_id,
+                org_id,
+                user_id,
+            )
+        return dict(row) if row else None
+
     async def list_requests(
         self,
         org_id: str,
@@ -893,34 +917,96 @@ class RequestRepository:
         limit: int = 25,
         offset: int = 0,
         exclude_status: str | None = None,
+        viewer_user_id: str | None = None,
     ) -> dict:
-        base = "FROM requests WHERE organization_id = $1"
+        base = "FROM requests r WHERE r.organization_id = $1"
         params: list[Any] = [UUID(org_id)]
         if status:
             params.append(status)
-            base += f" AND status = ${len(params)}"
+            base += f" AND r.status = ${len(params)}"
         elif exclude_status:
             excluded = [s.strip() for s in exclude_status.split(",") if s.strip()]
             if excluded:
                 placeholders = ", ".join(f"${len(params) + i + 1}" for i in range(len(excluded)))
                 params.extend(excluded)
-                base += f" AND status NOT IN ({placeholders})"
+                base += f" AND r.status NOT IN ({placeholders})"
         if source:
             sources = [s.strip() for s in source.split(",") if s.strip()]
             if len(sources) == 1:
                 params.append(sources[0])
-                base += f" AND source = ${len(params)}"
+                base += f" AND r.source = ${len(params)}"
             else:
                 placeholders = ", ".join(f"${len(params) + i + 1}" for i in range(len(sources)))
                 params.extend(sources)
-                base += f" AND source IN ({placeholders})"
+                base += f" AND r.source IN ({placeholders})"
 
         count_query = f"SELECT COUNT(*) AS total {base}"
+        query_params = list(params)
+        if viewer_user_id:
+            query_params.append(UUID(viewer_user_id))
+            view_join = (
+                "LEFT JOIN request_views rv "
+                f"ON rv.request_id = r.id AND rv.user_id = ${len(query_params)}"
+            )
+            last_viewed_expr = "rv.last_viewed_at"
+        else:
+            view_join = ""
+            last_viewed_expr = "NULL::timestamptz"
+
         query = (
-            f"SELECT * {base} ORDER BY created_at DESC "
-            f"LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}"
+            "SELECT r.*, "
+            "COALESCE(task_stats.task_count, 0)::int AS task_count, "
+            "COALESCE(task_stats.tasks_completed, 0)::int AS tasks_completed, "
+            "COALESCE(task_stats.tasks_running, 0)::int AS tasks_running, "
+            "COALESCE(task_stats.tasks_failed, 0)::int AS tasks_failed, "
+            "COALESCE(task_stats.models_used, ARRAY[]::text[]) AS models_used, "
+            "COALESCE(output_stats.output_count, 0)::int AS output_count, "
+            f"{last_viewed_expr} AS last_viewed_at, "
+            "(r.status IN ('completed', 'failed') "
+            " AND r.completed_at IS NOT NULL "
+            f" AND ({last_viewed_expr} IS NULL OR {last_viewed_expr} < r.completed_at)"
+            ") AS is_unviewed_completion "
+            "FROM requests r "
+            "LEFT JOIN LATERAL ("
+            "  SELECT COUNT(*) AS task_count, "
+            "         COUNT(*) FILTER (WHERE t.status = 'completed') AS tasks_completed, "
+            "         COUNT(*) FILTER (WHERE t.status IN ('claimed', 'running')) AS tasks_running, "
+            "         COUNT(*) FILTER (WHERE t.status = 'failed') AS tasks_failed, "
+            "         COALESCE(ARRAY_AGG(DISTINCT t.model ORDER BY t.model) "
+            "                  FILTER (WHERE t.model IS NOT NULL), ARRAY[]::text[]) AS models_used "
+            "  FROM tasks t WHERE t.request_id = r.id"
+            ") task_stats ON TRUE "
+            "LEFT JOIN LATERAL ("
+            "  SELECT COUNT(*) AS output_count "
+            "  FROM task_outputs o WHERE o.request_id = r.id"
+            ") output_stats ON TRUE "
+            f"{view_join} "
+            f"WHERE r.organization_id = $1"
         )
-        params_with_page = [*params, limit, offset]
+        # Re-apply dynamic filters after the joins so the list can use summary
+        # fields in its ordering while the count query stays compact.
+        where_suffix = base.removeprefix("FROM requests r WHERE r.organization_id = $1")
+        query += where_suffix
+        query += (
+            " ORDER BY "
+            "CASE "
+            "  WHEN r.approval_status = 'pending_approval' "
+            "       AND r.status NOT IN ('cancelled', 'rejection_processing') THEN 0 "
+            "  WHEN COALESCE(task_stats.tasks_running, 0) > 0 THEN 1 "
+            "  ELSE 2 "
+            "END, "
+            "CASE "
+            "  WHEN (r.approval_status = 'pending_approval' "
+            "        AND r.status NOT IN ('cancelled', 'rejection_processing')) "
+            "       OR COALESCE(task_stats.tasks_running, 0) > 0 "
+            "  THEN CASE r.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 "
+            "                       WHEN 'medium' THEN 2 ELSE 3 END "
+            "  ELSE 0 "
+            "END, "
+            "COALESCE(r.updated_at, r.created_at) DESC, r.created_at DESC "
+            f"LIMIT ${len(query_params) + 1} OFFSET ${len(query_params) + 2}"
+        )
+        params_with_page = [*query_params, limit, offset]
 
         async with self.pool.acquire() as conn:
             count_row = await conn.fetchrow(count_query, *params)

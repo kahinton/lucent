@@ -67,6 +67,14 @@ async def _record_rejection_lesson(pool, *, user, req: dict, request_id: str, co
     )
 
 
+def _needs_prework_approval(req: dict) -> bool:
+    """Return whether a request is waiting at the pre-work approval gate."""
+    return (
+        req.get("approval_status") == "pending_approval"
+        and req.get("status") not in ("cancelled", "rejection_processing")
+    )
+
+
 # =============================================================================
 # Request Tracking
 # =============================================================================
@@ -101,7 +109,7 @@ async def activity_list(
     exclude_status = None if status else "cancelled"
     requests_result = await repo.list_requests(
         org_id, status=status, source=source, limit=per_page, offset=offset,
-        exclude_status=exclude_status,
+        exclude_status=exclude_status, viewer_user_id=str(user.id),
     )
     requests_data = requests_result["items"]
     total_count = requests_result["total_count"]
@@ -110,15 +118,15 @@ async def activity_list(
 
     summary = await repo.get_active_summary(org_id)
 
-    # Load task counts for each request
-    for req in requests_data:
-        tasks = (await repo.list_tasks(str(req["id"])))["items"]
-        statuses = [t["status"] for t in tasks]
-        req["task_count"] = len(tasks)
-        req["tasks_completed"] = sum(1 for s in statuses if s == "completed")
-        req["tasks_running"] = sum(1 for s in statuses if s in ("claimed", "running"))
-        req["tasks_failed"] = sum(1 for s in statuses if s == "failed")
-        req["models_used"] = sorted({t["model"] for t in tasks if t.get("model")})
+    approval_requests = [req for req in requests_data if _needs_prework_approval(req)]
+    running_requests = [
+        req for req in requests_data
+        if not _needs_prework_approval(req) and req.get("tasks_running", 0) > 0
+    ]
+    other_requests = [
+        req for req in requests_data
+        if not _needs_prework_approval(req) and req.get("tasks_running", 0) <= 0
+    ]
 
     # Count pending approvals for the badge (exclude cancelled)
     async with pool.acquire() as conn:
@@ -132,11 +140,15 @@ async def activity_list(
 
     template_ctx = {
         "user": user,
-        "requests": requests_data,
+        "requests": other_requests,
+        "approval_requests": approval_requests,
+        "running_requests": running_requests,
+        "displayed_request_count": len(requests_data),
         "summary": summary,
         "filter_status": status,
         "filter_source": source,
         "pending_approval_count": pending_approval_count,
+        "can_review_request": _can_review_request(user),
         "page": page,
         "per_page": per_page,
         "total_pages": total_pages,
@@ -179,6 +191,8 @@ async def request_detail(request: Request, request_id: str):
     req = await repo.get_request_with_tasks(request_id, str(user.organization_id))
     if not req:
         raise HTTPException(404, "Request not found")
+
+    await repo.mark_request_viewed(request_id, str(user.organization_id), str(user.id))
 
     from lucent.db.memory import MemoryRepository
     from lucent.integrations.github_repo_access_service import GitHubRepoAccessService

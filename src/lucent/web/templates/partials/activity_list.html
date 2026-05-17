@@ -1,15 +1,202 @@
 <!-- Activity list partial — used for HTMX pagination updates -->
-{% set start_item = (page - 1) * per_page + 1 %}
+{% set approval_requests = approval_requests if approval_requests is defined else [] %}
+{% set running_requests = running_requests if running_requests is defined else [] %}
+{% set requests = requests if requests is defined else [] %}
+{% set displayed_request_count = displayed_request_count if displayed_request_count is defined else (approval_requests|length + running_requests|length + requests|length) %}
+{% set start_item = (page - 1) * per_page + 1 if total_count else 0 %}
 {% set end_item = [page * per_page, total_count] | min %}
+{% set has_activity = approval_requests or running_requests or requests %}
 
-{% if requests %}
-<div class="mb-3 flex items-center justify-between text-sm text-gray-500">
+{% macro status_badge(req) %}
+<span class="px-2 py-0.5 rounded text-xs
+    {% if req.status == 'completed' %}bg-green-100 text-green-700
+    {% elif req.status == 'in_progress' %}bg-blue-100 text-blue-700
+    {% elif req.status == 'pending' %}bg-amber-100 text-amber-700
+    {% elif req.status == 'planned' %}bg-purple-100 text-purple-700
+    {% elif req.status == 'failed' %}bg-red-100 text-red-700
+    {% elif req.status == 'rejection_processing' %}bg-orange-100 text-orange-700
+    {% else %}bg-gray-100 text-gray-600{% endif %}">
+    {{ req.status | replace('_', ' ') }}
+</span>
+{% endmacro %}
+
+{% macro priority_badge(req) %}
+{% if req.priority != 'medium' %}
+<span class="px-2 py-0.5 rounded text-xs
+    {% if req.priority == 'urgent' %}bg-red-100 text-red-700
+    {% elif req.priority == 'high' %}bg-orange-100 text-orange-700
+    {% else %}bg-gray-100 text-gray-500{% endif %}">
+    {{ req.priority }}
+</span>
+{% endif %}
+{% endmacro %}
+
+{% macro source_badge(req) %}
+{% if req.source in ('cognitive', 'daemon') %}
+<span class="px-2 py-0.5 rounded text-xs bg-primary-50 text-primary-600 flex items-center gap-1" title="Created by Lucent">
+    <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
+    </svg>
+    Lucent
+</span>
+{% elif req.source == 'schedule' %}
+<span class="px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-600">System</span>
+{% else %}
+<span class="px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-600">You</span>
+{% endif %}
+{% endmacro %}
+
+{% macro output_badge(req) %}
+{% set output_count = req.output_count | default(0) %}
+{% if req.status in ('completed', 'failed', 'review') or output_count > 0 %}
+<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium {% if output_count > 0 %}bg-primary-50 text-primary-700{% else %}bg-gray-100 text-gray-500{% endif %}" title="Recorded task outputs">
+    <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 6H5.25A2.25 2.25 0 003 8.25v10.5A2.25 2.25 0 005.25 21h10.5A2.25 2.25 0 0018 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" />
+    </svg>
+    {{ output_count }} output{% if output_count != 1 %}s{% endif %}
+</span>
+{% endif %}
+{% endmacro %}
+
+{% macro task_progress(req, align='end') %}
+{% set task_count = req.task_count | default(0) %}
+{% set tasks_completed = req.tasks_completed | default(0) %}
+{% set tasks_running = req.tasks_running | default(0) %}
+{% set tasks_failed = req.tasks_failed | default(0) %}
+{% if task_count > 0 %}
+<div class="flex items-center gap-1.5 text-xs text-gray-500 mb-1 {% if align == 'end' %}justify-end{% endif %}">
+    <span>{{ tasks_completed }}/{{ task_count }} tasks</span>
+    {% if tasks_running > 0 %}
+    <span class="inline-flex items-center gap-1 text-blue-600">
+        <span class="w-2 h-2 bg-blue-400 rounded-full animate-pulse" title="Running"></span>
+        {{ tasks_running }} running
+    </span>
+    {% endif %}
+    {% if tasks_failed > 0 %}
+    <span class="text-red-500">{{ tasks_failed }} failed</span>
+    {% endif %}
+</div>
+<div class="w-full h-1.5 bg-gray-200 rounded-full overflow-hidden">
+    {% set pct = (tasks_completed / task_count * 100) | int %}
+    <div class="h-full rounded-full {% if tasks_failed > 0 %}bg-red-400{% elif tasks_running > 0 %}bg-blue-400{% else %}bg-green-400{% endif %}" style="width: {{ pct }}%"></div>
+</div>
+{% else %}
+<span class="text-xs text-gray-400">No tasks yet</span>
+{% endif %}
+{% endmacro %}
+
+{% macro request_card(req, lane='default') %}
+{% set is_unviewed_completion = req.is_unviewed_completion | default(false) %}
+<a href="/activity/{{ req.id }}" class="block rounded-xl border p-4 shadow-sm transition-all hover:shadow-md
+    {% if is_unviewed_completion %}border-emerald-300 bg-emerald-50/60 ring-2 ring-emerald-100 hover:border-emerald-400
+    {% elif lane == 'running' %}border-blue-200 bg-white hover:border-blue-300
+    {% else %}border-gray-200 bg-white hover:border-gray-300{% endif %}">
+    <div class="flex items-start justify-between gap-4">
+        <div class="flex-1 min-w-0">
+            <div class="flex items-center gap-2 flex-wrap">
+                <span class="font-medium text-gray-900">{{ req.title }}</span>
+                {{ status_badge(req) }}
+                {% if is_unviewed_completion %}
+                <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-xs font-semibold">
+                    <span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+                    Finished since last viewed
+                </span>
+                {% endif %}
+                {% if req.approval_status == 'rejected' %}
+                <span class="px-2 py-0.5 rounded text-xs bg-red-200 text-red-800 font-medium">rejected</span>
+                {% endif %}
+                {{ priority_badge(req) }}
+                {{ source_badge(req) }}
+                {{ output_badge(req) }}
+            </div>
+            {% if req.description %}
+            <p class="text-sm text-gray-500 mt-1 line-clamp-2">{{ req.description[:180] }}</p>
+            {% endif %}
+        </div>
+        <div class="text-right shrink-0 w-52">
+            {{ task_progress(req) }}
+            <p class="text-xs text-gray-400 mt-1">{{ req.updated_at.strftime('%Y-%m-%d %H:%M') if req.updated_at else req.created_at.strftime('%Y-%m-%d %H:%M') if req.created_at }}</p>
+        </div>
+    </div>
+</a>
+{% endmacro %}
+
+{% macro approval_card(req) %}
+{% set task_count = req.task_count | default(0) %}
+<div id="review-card-{{ req.id }}" class="rounded-xl border border-amber-300 bg-white p-4 shadow-sm transition-all duration-300">
+    <div class="flex items-start justify-between gap-4">
+        <div class="flex-1 min-w-0">
+            <div class="flex items-center gap-2 flex-wrap">
+                <span class="font-semibold text-gray-900">{{ req.title }}</span>
+                <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-800">
+                    <span class="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
+                    Needs approval
+                </span>
+                {{ priority_badge(req) }}
+                {{ source_badge(req) }}
+            </div>
+            {% if req.description %}
+            <p class="mt-2 text-sm text-gray-600 line-clamp-3">{{ req.description[:260] }}</p>
+            {% endif %}
+            <div class="mt-3 flex items-center gap-3 text-xs text-gray-400 flex-wrap">
+                <span>{{ task_count }} task{% if task_count != 1 %}s{% endif %}</span>
+                <span>Created {{ req.created_at.strftime('%Y-%m-%d %H:%M') if req.created_at }}</span>
+                <a href="/activity/{{ req.id }}" class="text-primary-600 hover:text-primary-700 font-medium">Open details →</a>
+            </div>
+        </div>
+        <div id="review-actions-{{ req.id }}" class="shrink-0 w-full max-w-sm border-l border-amber-100 pl-4">
+            {% if can_review_request %}
+            <p class="mb-2 text-xs text-amber-700">Approve to let Lucent start this work, or reject with feedback so it can re-plan.</p>
+            <div class="flex items-center gap-2">
+                <button type="button"
+                        hx-post="/daemon/review/{{ req.id }}/action"
+                        hx-vals='{"action": "approve"}'
+                        hx-target="#review-actions-{{ req.id }}"
+                        hx-swap="innerHTML"
+                        class="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-100 text-emerald-700 text-sm font-medium rounded-lg hover:bg-emerald-200 transition-colors">
+                    <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+                    </svg>
+                    Approve
+                </button>
+                <button type="button"
+                        data-action="show-reject"
+                        class="inline-flex items-center gap-1.5 px-3 py-1.5 bg-red-100 text-red-700 text-sm font-medium rounded-lg hover:bg-red-200 transition-colors">
+                    <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                    Reject
+                </button>
+            </div>
+            <div class="reject-form hidden mt-3">
+                <form hx-post="/daemon/review/{{ req.id }}/action"
+                      hx-target="#review-actions-{{ req.id }}"
+                      hx-swap="innerHTML"
+                      class="flex gap-2">
+                    <input type="hidden" name="action" value="reject">
+                    <input type="text" name="comment" placeholder="Why reject this?" required
+                           class="min-w-0 flex-1 px-3 py-2 text-sm border border-red-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-red-500 outline-none bg-red-50">
+                    <button type="submit" class="px-3 py-2 bg-red-600 text-white text-sm font-medium rounded-lg hover:bg-red-700 transition-colors">Reject</button>
+                    <button type="button" data-action="cancel-reject" class="px-3 py-2 bg-gray-100 text-gray-600 text-sm font-medium rounded-lg hover:bg-gray-200 transition-colors">Cancel</button>
+                </form>
+            </div>
+            {% else %}
+            <div class="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                Admin or owner approval is required.
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+{% endmacro %}
+
+{% if has_activity %}
+<div class="mb-4 flex items-center justify-between text-sm text-gray-500">
     <span>Showing <span class="font-medium text-gray-900">{{ start_item }}–{{ end_item }}</span> of <span class="font-medium text-gray-900">{{ total_count }}</span> requests</span>
     <div class="flex items-center gap-2">
         <label for="per-page-select" class="text-xs text-gray-500">Per page:</label>
         <select id="per-page-select"
-                class="px-2 py-1 border border-gray-300 rounded text-xs bg-white focus:ring-1 focus:ring-primary-500 outline-none"
-                onchange="updatePerPage(this.value)">
+                class="js-per-page-select px-2 py-1 border border-gray-300 rounded text-xs bg-white focus:ring-1 focus:ring-primary-500 outline-none">
             {% for size in [10, 25, 50, 100] %}
             <option value="{{ size }}" {% if per_page == size %}selected{% endif %}>{{ size }}</option>
             {% endfor %}
@@ -17,83 +204,60 @@
     </div>
 </div>
 
-<div class="space-y-3">
-    {% for req in requests %}
-    <a href="/activity/{{ req.id }}" class="block bg-white rounded-lg border border-gray-200 p-4 hover:border-gray-300 transition-colors">
-        <div class="flex items-start justify-between gap-4">
-            <div class="flex-1 min-w-0">
-                <div class="flex items-center gap-2 flex-wrap">
-                    <span class="font-medium text-gray-900">{{ req.title }}</span>
-                    <!-- Status badge -->
-                    <span class="px-2 py-0.5 rounded text-xs
-                        {% if req.status == 'completed' %}bg-green-100 text-green-700
-                        {% elif req.status == 'in_progress' %}bg-blue-100 text-blue-700
-                        {% elif req.status == 'pending' %}bg-amber-100 text-amber-700
-                        {% elif req.status == 'planned' %}bg-purple-100 text-purple-700
-                        {% elif req.status == 'failed' %}bg-red-100 text-red-700
-                        {% elif req.status == 'rejection_processing' %}bg-orange-100 text-orange-700
-                        {% else %}bg-gray-100 text-gray-600{% endif %}">
-                        {{ req.status | replace('_', ' ') }}
-                    </span>
-                    <!-- Approval badge -->
-                    {% if req.approval_status == 'pending_approval' %}
-                    <span class="px-2 py-0.5 rounded text-xs bg-amber-200 text-amber-800 font-medium">
-                        needs approval
-                    </span>
-                    {% elif req.approval_status == 'rejected' %}
-                    <span class="px-2 py-0.5 rounded text-xs bg-red-200 text-red-800 font-medium">
-                        rejected
-                    </span>
-                    {% endif %}
-                    <!-- Priority badge -->
-                    {% if req.priority != 'medium' %}
-                    <span class="px-2 py-0.5 rounded text-xs
-                        {% if req.priority == 'urgent' %}bg-red-100 text-red-700
-                        {% elif req.priority == 'high' %}bg-orange-100 text-orange-700
-                        {% else %}bg-gray-100 text-gray-500{% endif %}">
-                        {{ req.priority }}
-                    </span>
-                    {% endif %}
-                    <!-- Source indicator -->
-                    {% if req.source in ('cognitive', 'daemon') %}
-                    <span class="px-2 py-0.5 rounded text-xs bg-primary-50 text-primary-600 flex items-center gap-1" title="Created by Lucent">
-                        <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
-                        </svg>
-                        Lucent
-                    </span>
-                    {% endif %}
-                </div>
-                {% if req.description %}
-                <p class="text-sm text-gray-500 mt-1 truncate">{{ req.description[:150] }}</p>
-                {% endif %}
+{% if approval_requests %}
+<section class="mb-6" aria-labelledby="activity-approvals-heading">
+    <div class="mb-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
+        <div class="flex items-center justify-between gap-3">
+            <div>
+                <h2 id="activity-approvals-heading" class="text-sm font-semibold text-amber-950">Needs approval</h2>
+                <p class="mt-0.5 text-sm text-amber-800">Review autonomous work before it starts. Approved items leave this lane and move into active work.</p>
             </div>
-            <div class="text-right shrink-0 w-48">
-                <!-- Task progress -->
-                {% if req.task_count > 0 %}
-                <div class="flex items-center gap-1.5 text-xs text-gray-500 mb-1 justify-end">
-                    <span>{{ req.tasks_completed }}/{{ req.task_count }} tasks</span>
-                    {% if req.tasks_running > 0 %}
-                    <span class="w-2 h-2 bg-blue-400 rounded-full animate-pulse" title="Running"></span>
-                    {% endif %}
-                    {% if req.tasks_failed > 0 %}
-                    <span class="text-red-500">{{ req.tasks_failed }} failed</span>
-                    {% endif %}
-                </div>
-                <!-- Progress bar -->
-                <div class="w-full h-1.5 bg-gray-200 rounded-full overflow-hidden">
-                    {% set pct = (req.tasks_completed / req.task_count * 100) | int %}
-                    <div class="h-full rounded-full {% if req.tasks_failed > 0 %}bg-red-400{% else %}bg-green-400{% endif %}" style="width: {{ pct }}%"></div>
-                </div>
-                {% else %}
-                <span class="text-xs text-gray-400">No tasks yet</span>
-                {% endif %}
-                <p class="text-xs text-gray-400 mt-1">{{ req.created_at.strftime('%Y-%m-%d %H:%M') if req.created_at }}</p>
-            </div>
+            <span class="rounded-full bg-amber-100 px-2.5 py-1 text-xs font-semibold text-amber-800">{{ approval_requests|length }}</span>
         </div>
-    </a>
-    {% endfor %}
-</div>
+    </div>
+    <div class="space-y-3">
+        {% for req in approval_requests %}
+        {{ approval_card(req) }}
+        {% endfor %}
+    </div>
+</section>
+{% endif %}
+
+{% if running_requests %}
+<section class="mb-6" aria-labelledby="activity-running-heading">
+    <div class="mb-3 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3">
+        <div class="flex items-center justify-between gap-3">
+            <div>
+                <h2 id="activity-running-heading" class="text-sm font-semibold text-blue-950">Running now</h2>
+                <p class="mt-0.5 text-sm text-blue-800">These requests have tasks currently claimed or running, so they get a lane between approval gates and finished work.</p>
+            </div>
+            <span class="rounded-full bg-blue-100 px-2.5 py-1 text-xs font-semibold text-blue-800">{{ running_requests|length }}</span>
+        </div>
+    </div>
+    <div class="space-y-3">
+        {% for req in running_requests %}
+        {{ request_card(req, 'running') }}
+        {% endfor %}
+    </div>
+</section>
+{% endif %}
+
+{% if requests %}
+<section aria-labelledby="activity-recent-heading">
+    <div class="mb-3 flex items-center justify-between gap-3">
+        <div>
+            <h2 id="activity-recent-heading" class="text-sm font-semibold text-gray-900">{% if approval_requests or running_requests %}Recent and finished work{% else %}All activity{% endif %}</h2>
+            <p class="mt-0.5 text-sm text-gray-500">Completed cards show recorded output counts. Items finished since you last opened them are highlighted.</p>
+        </div>
+        <span class="rounded-full bg-gray-100 px-2.5 py-1 text-xs font-medium text-gray-600">{{ requests|length }}</span>
+    </div>
+    <div class="space-y-3">
+        {% for req in requests %}
+        {{ request_card(req) }}
+        {% endfor %}
+    </div>
+</section>
+{% endif %}
 
 <!-- Pagination Controls -->
 {% if total_pages > 1 %}
