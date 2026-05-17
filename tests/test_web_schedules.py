@@ -157,6 +157,57 @@ class TestSchedulesList:
             assert resp.status_code == 303
             assert "/login" in resp.headers.get("location", "")
 
+    async def test_workflows_alias_contains_schedule_title(self, client, schedule):
+        resp = await client.get("/workflows")
+        assert resp.status_code == 200
+        assert "Workflows" in resp.text
+        assert "Web Test Schedule" in resp.text
+
+
+class TestWorkflowWizard:
+    async def test_new_workflow_wizard_returns_html(self, client):
+        resp = await client.get("/workflows/new")
+        assert resp.status_code == 200
+        assert "Workflow Wizard" in resp.text
+        assert "Incoming webhook" in resp.text
+
+    async def test_wizard_creates_webhook_workflow(self, client, db_pool, web_user):
+        _user, org, _token = web_user
+        resp = await client.post(
+            "/workflows/new",
+            data=_csrf_data(
+                client,
+                {
+                    "title": "Webhook wizard test",
+                    "description": "Created by the workflow wizard",
+                    "trigger_type": "webhook",
+                    "webhook_secret": "wizard-secret",
+                    "request_title": "{event_summary} webhook",
+                    "action_title": "Handle webhook",
+                    "action_prompt": "Process the webhook payload and record outputs.",
+                    "action_agent_type": "code",
+                    "review_instructions": "Confirm outputs are recorded.",
+                },
+            ),
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        assert "/workflows/" in resp.headers.get("location", "")
+
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """SELECT title, trigger_type, schedule_type, actions, review_instructions,
+                          webhook_secret_hash
+                   FROM schedules
+                   WHERE organization_id = $1 AND title = 'Webhook wizard test'""",
+                org["id"],
+            )
+        assert row is not None
+        assert row["trigger_type"] == "webhook"
+        assert row["schedule_type"] == "webhook"
+        assert row["webhook_secret_hash"]
+        assert "Confirm outputs" in row["review_instructions"]
+
 
 # ============================================================================
 # GET /schedules/{id} — detail
@@ -177,6 +228,12 @@ class TestScheduleDetail:
         fake_id = str(uuid4())
         resp = await client.get(f"/schedules/{fake_id}")
         assert resp.status_code == 404
+
+    async def test_workflow_detail_alias_shows_flow(self, client, schedule):
+        resp = await client.get(f"/workflows/{schedule['id']}")
+        assert resp.status_code == 200
+        assert "Workflow flow" in resp.text
+        assert "Actions" in resp.text
 
 
 # ============================================================================

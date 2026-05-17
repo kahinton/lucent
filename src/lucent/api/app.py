@@ -561,6 +561,7 @@ def create_app() -> FastAPI:
     from lucent.api.routers import schedules as schedules_router
 
     app.include_router(schedules_router.router, prefix="/api", tags=["Schedules"])
+    app.include_router(schedules_router.workflow_router, prefix="/api", tags=["Workflows"])
 
     # Include chat router
     from lucent.api.routers import chat as chat_router

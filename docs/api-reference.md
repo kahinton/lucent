@@ -633,101 +633,137 @@ Link memories to tasks for lineage tracking. POST body: `{"memory_id": "uuid", "
 
 ---
 
-## Schedules
+## Workflows and Schedules
 
-Base path: `/api/schedules`
+Base paths:
 
-### Create Schedule
+- New workflow API: `/api/workflows`
+- Compatibility schedule API: `/api/schedules`
+
+Workflows are stored in the existing `schedules` table so critical built-in
+daemon schedules keep their IDs, run history, and scheduler behavior. A
+workflow adds `trigger_type`, `request_template`, ordered `actions`, and
+`review_instructions` on top of the legacy schedule fields.
+
+### Create Workflow
 
 ```
-POST /api/schedules
+POST /api/workflows
 ```
 
 ```json
 {
-  "title": "Daily weather check",
-  "description": "Fetch weather and recommend outfit",
+  "title": "Weekly dependency review",
+  "description": "Scan project dependencies and report actionable updates",
+  "trigger_type": "schedule",
   "schedule_type": "cron",
-  "cron_expression": "30 5 * * *",
+  "cron_expression": "0 9 * * 1",
   "timezone": "US/Eastern",
-  "agent_type": "weather-advisor",
-  "priority": "low",
-  "description": "Fetch weather for West Bloomfield, MI and recommend outfit",
-  "sandbox_template_id": "uuid-of-template"
+  "priority": "medium",
+  "request_template": {
+    "title_prefix": "[Scheduled]",
+    "title": "{workflow_title}",
+    "description": "Run {workflow_title} and record durable outputs.",
+    "dependency_policy": "strict"
+  },
+  "actions": [
+    {
+      "action_type": "task",
+      "title": "Audit dependency changes",
+      "description": "Check outdated packages and create a concise report.",
+      "agent_type": "code",
+      "sequence_order": 0
+    }
+  ],
+  "review_instructions": "Do not approve unless the report is recorded as a task output."
 }
 ```
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `title` | string | yes | Schedule name |
-| `schedule_type` | string | yes | `once`, `interval`, or `cron` |
+| `title` | string | yes | Workflow name |
+| `trigger_type` | string | no | `schedule`, `manual`, `webhook`, or `integration_event` |
+| `schedule_type` | string | schedule only | `once`, `interval`, or `cron` for time-based workflows |
 | `cron_expression` | string | cron only | 5-field cron (min hour dom month dow) |
 | `interval_seconds` | int | interval only | Repeat interval (minimum 60) |
 | `timezone` | string | no | IANA timezone (default: `UTC`) |
-| `agent_type` | string | no | Agent for task dispatch |
-| `model` | string | no | LLM model override |
-| `sandbox_template_id` | UUID | no | Sandbox template for each run |
-| `sandbox_config` | object | no | Inline sandbox config (template takes precedence) |
-| `task_template` | object | no | Reusable task template |
+| `request_template` | object | no | Request title/description/dependency template per run |
+| `actions` | array | no | Ordered task action templates. Empty creates one legacy-style task. |
+| `review_instructions` | string | no | Reviewer checklist appended to generated request descriptions |
+| `webhook_secret` | string | webhook only | Shared secret; Lucent stores only its hash |
 | `priority` | string | no | `low`, `medium`, `high`, `urgent` |
-| `max_runs` | int | no | Stop after N runs (≥ 1) |
-| `expires_at` | datetime | no | Schedule expiration time |
+| `max_runs` | int | schedule only | Stop after N scheduled runs (≥ 1) |
+| `expires_at` | datetime | schedule only | Schedule expiration time |
 
-### List Schedules
+Task action objects support `agent_type`, `agent_definition_id`, `model`,
+`reasoning_effort`, `sandbox_template_id`, `sandbox_config`,
+`output_contract`, and the compatibility alias `output_schema`.
 
-```
-GET /api/schedules?status=active&enabled=true
-```
+Built-in maintenance workflows may use `action_type: "server_function"` instead
+of `action_type: "task"`. These run inside Lucent itself, do not dispatch an
+agent, and record their result directly on `schedule_runs.result` without
+creating a request.
 
-### Schedule Summary
-
-```
-GET /api/schedules/summary
-```
-
-Returns aggregate stats for schedules (counts by status).
-
-### Get Due Schedules
+### Webhook Workflow
 
 ```
-GET /api/schedules/due
+POST /api/workflows/{workflow_id}/webhook
 ```
 
-Returns schedules where `next_run_at <= now()` and `status = 'active'` and `enabled = true`.
+Webhook workflow calls are unauthenticated by API key/session. The workflow's
+shared secret is the authentication mechanism. Send it in one of these places:
 
-### Get Schedule Details
+- `X-Lucent-Workflow-Token: <secret>`
+- `Authorization: Bearer <secret>`
+- `?token=<secret>`
 
-```
-GET /api/schedules/{schedule_id}
-```
+Example:
 
-Returns the schedule with its run history.
-
-### Update Schedule
-
-```
-PUT /api/schedules/{schedule_id}
-```
-
-All fields from Create Schedule are accepted (all optional). Only provided fields are updated.
-
-### Toggle Schedule
-
-```
-POST /api/schedules/{schedule_id}/toggle
+```bash
+curl -X POST \
+  -H 'Content-Type: application/json' \
+  -H 'X-Lucent-Workflow-Token: your-secret' \
+  -H 'X-Event-Type: issue.opened' \
+  -d '{"number": 123, "action": "opened"}' \
+  https://your-lucent-host/api/workflows/{workflow_id}/webhook
 ```
 
-Body: `{"enabled": true}` or `{"enabled": false}`.
+The payload and non-sensitive headers are appended to the generated request and
+task descriptions as trigger context. Webhook workflows are not returned by the
+daemon's due-schedule polling endpoint.
 
-### Trigger Schedule
+### Workflow List, Summary, Details, and Trigger
 
-```
-POST /api/schedules/{schedule_id}/trigger?force=false
-```
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/workflows?status=active&enabled=true&trigger_type=webhook` | List workflows |
+| `GET` | `/api/workflows/summary` | Aggregate workflow counts by status and trigger type |
+| `GET` | `/api/workflows/{workflow_id}` | Workflow detail with run history |
+| `POST` | `/api/workflows/{workflow_id}/trigger?force=true` | Manual run; records a run without advancing time schedule state |
 
-Fires the schedule immediately. Pass `force=true` to bypass the time guard (for manual "Run Now" actions). Returns the created request and run record when work is created.
+### Compatibility Schedule API
 
-Built-in daemon schedules may instead return a healthy no-op when their pre-flight eligibility check finds no candidates:
+The legacy `/api/schedules` endpoints remain available for built-ins and older
+clients. They now create/read the same workflow-capable rows.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/schedules` | Create a legacy schedule or workflow-capable schedule row |
+| `GET` | `/api/schedules?status=active&enabled=true` | List schedule rows |
+| `GET` | `/api/schedules/summary` | Aggregate schedule/workflow stats |
+| `GET` | `/api/schedules/due` | Time-based workflows due for daemon polling |
+| `GET` | `/api/schedules/{schedule_id}` | Schedule/workflow detail with run history |
+| `PUT` | `/api/schedules/{schedule_id}` | Update schedule/workflow fields |
+| `POST` | `/api/schedules/{schedule_id}/toggle` | Enable or disable a workflow |
+| `POST` | `/api/schedules/{schedule_id}/trigger?force=false` | Time-based trigger path with due-time guard |
+| `GET` | `/api/schedules/{schedule_id}/runs` | Run history |
+| `DELETE` | `/api/schedules/{schedule_id}` | Delete non-system workflow |
+
+`GET /api/schedules/due` returns only rows with `trigger_type = 'schedule'`,
+`next_run_at <= now()`, `status = 'active'`, and `enabled = true`.
+
+Built-in daemon schedules may return a healthy no-op when their pre-flight
+eligibility check finds no candidates:
 
 ```json
 {
@@ -747,20 +783,6 @@ This is distinct from a failed run: no request or task is created, and the skip 
 happens during memory create/update/share operations: file-scoped technical
 memories with the same `(repo, filename)` are rejected when an existing memory
 is already owned by the caller or shared in the caller's organization.
-
-### Schedule Runs
-
-```
-GET /api/schedules/{schedule_id}/runs
-```
-
-Returns the execution history for a schedule.
-
-### Delete Schedule
-
-```
-DELETE /api/schedules/{schedule_id}
-```
 
 ---
 

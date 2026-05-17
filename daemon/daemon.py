@@ -2838,6 +2838,32 @@ class LucentDaemon:
                 created = 0
                 updated = 0
                 for sched in system_schedules:
+                    workflow_action = {
+                        "action_type": "task",
+                        "title": sched["title"],
+                        "description": sched["prompt"],
+                        "agent_type": sched["agent_type"],
+                        "priority": sched["priority"],
+                        "sequence_order": 0,
+                    }
+                    trigger_config = {
+                        "schedule_type": sched["schedule_type"],
+                        "timezone": "UTC",
+                    }
+                    if sched.get("interval_seconds"):
+                        trigger_config["interval_seconds"] = sched["interval_seconds"]
+                    if sched.get("cron_expression"):
+                        trigger_config["cron_expression"] = sched["cron_expression"]
+                    request_template = {
+                        "title_prefix": "[Scheduled]",
+                        "title": sched["title"],
+                        "description": sched["description"],
+                        "dependency_policy": "strict",
+                    }
+                    review_instructions = (
+                        "Review the generated request and recorded task outputs "
+                        "before approval."
+                    )
                     existing = await conn.fetchrow(
                         """SELECT id FROM schedules
                            WHERE title = $1 AND organization_id = $2::uuid AND is_system = true""",
@@ -2858,6 +2884,11 @@ class LucentDaemon:
                                    cron_expression = $7,
                                    priority = $8,
                                    prompt = $9,
+                                   trigger_type = 'schedule',
+                                   trigger_config = ($10::text)::jsonb,
+                                   request_template = ($11::text)::jsonb,
+                                   actions = ($12::text)::jsonb,
+                                   review_instructions = $13,
                                    updated_at = NOW()
                                WHERE id = $1::uuid AND organization_id = $2::uuid
                                  AND is_system = true""",
@@ -2870,6 +2901,10 @@ class LucentDaemon:
                             sched.get("cron_expression"),
                             sched["priority"],
                             sched["prompt"],
+                            json.dumps(trigger_config),
+                            json.dumps(request_template),
+                            json.dumps([workflow_action]),
+                            review_instructions,
                         )
                         updated += 1
                         continue
@@ -2889,8 +2924,11 @@ class LucentDaemon:
                         """INSERT INTO schedules
                            (title, organization_id, description, agent_type, schedule_type,
                             interval_seconds, cron_expression, next_run_at, priority, prompt,
-                            created_by, is_system, enabled)
-                           VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10, $11::uuid, true, true)""",
+                            created_by, is_system, enabled, trigger_type, trigger_config,
+                            request_template, actions, review_instructions)
+                           VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10,
+                               $11::uuid, true, true, 'schedule', ($12::text)::jsonb,
+                               ($13::text)::jsonb, ($14::text)::jsonb, $15)""",
                         sched["title"],
                         org_id,
                         sched["description"],
@@ -2902,6 +2940,10 @@ class LucentDaemon:
                         sched["priority"],
                         sched["prompt"],
                         user_id,
+                        json.dumps(trigger_config),
+                        json.dumps(request_template),
+                        json.dumps([workflow_action]),
+                        review_instructions,
                     )
                     created += 1
 

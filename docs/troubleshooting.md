@@ -440,20 +440,20 @@ If you moved the Lucent server and forgot to bring the `LUCENT_CREDENTIAL_KEY`:
 
 ---
 
-## Schedule Issues
+## Workflow and Schedule Issues
 
-### Schedule Fires Multiple Times
+### Time-Based Workflow Fires Multiple Times
 
 This was fixed by using the time guard (`next_run_at > now`) in the trigger endpoint. If you see duplicate runs:
 
 1. Check that the server container is running the latest code
-2. Verify the schedule's `next_run_at` advances correctly after each run:
+2. Verify the workflow's `next_run_at` advances correctly after each run:
 
 ```sql
 SELECT next_run_at, last_run_at, run_count FROM schedules WHERE id = 'your-schedule-id';
 ```
 
-### Schedule Never Fires
+### Time-Based Workflow Never Fires
 
 Check these conditions:
 
@@ -461,6 +461,16 @@ Check these conditions:
 - `next_run_at` is in the past (for the scheduler to pick it up)
 - The daemon is running with the `scheduler` role enabled
 - The server is reachable from the daemon (check daemon logs for `Failed to trigger schedule`)
+
+Webhook and manual workflows are not picked up by `next_run_at` polling. Trigger
+webhooks with `POST /api/workflows/{workflow_id}/webhook` and a valid
+`X-Lucent-Workflow-Token`, Bearer token, or `?token=` shared secret.
+
+### Workflow Webhook Returns 401
+
+Generic workflow webhooks use the workflow's shared secret instead of API-key
+or session authentication. Confirm the token was supplied in one supported
+location and that the workflow was created with `trigger_type = 'webhook'`.
 
 ### Cron Timezone Issues
 

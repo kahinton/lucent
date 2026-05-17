@@ -9,6 +9,7 @@ Validates that the stale-task reaper operates independently of the daemon proces
 6. Daemon skips the server-side schedule
 """
 
+import json
 from unittest.mock import AsyncMock, patch
 
 import pytest_asyncio
@@ -109,8 +110,9 @@ class TestScheduleSeeding:
 
         async with db_pool.acquire() as conn:
             row = await conn.fetchrow(
-                """SELECT title, schedule_type, interval_seconds,
-                          is_system, enabled, agent_type
+                                """SELECT title, schedule_type, interval_seconds,
+                                                    is_system, enabled, agent_type, actions, prompt,
+                                                    trigger_config
                    FROM schedules
                    WHERE organization_id = $1
                      AND title = $2
@@ -125,7 +127,17 @@ class TestScheduleSeeding:
         assert 60 <= int(row["interval_seconds"]) <= 300  # reasonable range
         assert row["is_system"] is True
         assert row["enabled"] is True
-        assert row["agent_type"] == "system"
+        assert row["agent_type"] == "lucent"
+        assert row["prompt"] == ""
+        actions = row["actions"]
+        if isinstance(actions, str):
+            actions = json.loads(actions)
+        assert actions[0]["action_type"] == "server_function"
+        assert actions[0]["function"] == "release_stale_tasks"
+        trigger_config = row["trigger_config"]
+        if isinstance(trigger_config, str):
+            trigger_config = json.loads(trigger_config)
+        assert trigger_config["execution_mode"] == "server_side"
 
     async def test_seeding_is_idempotent(self, db_pool, test_organization):
         """Calling ensure twice should not create duplicate schedules."""

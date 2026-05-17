@@ -5,7 +5,7 @@ import os
 
 from mcp.server.fastmcp import FastMCP
 
-from lucent.db.schedules import ScheduleRepository
+from lucent.db.schedules import ScheduleRepository, webhook_secret_hash
 from lucent.tools.memories import _get_current_user_context
 
 
@@ -213,3 +213,124 @@ Returns: JSON with the schedule details and its run history."""
             {k: str(v) if hasattr(v, "hex") else str(v) for k, v in result.items()},
             default=str,
         )
+
+    @mcp.tool(
+        description="""Create a workflow with a typed trigger and ordered task actions.
+
+Workflows are the broader replacement for schedules. A workflow has:
+- trigger_type: 'schedule', 'manual', 'webhook', or 'integration_event'
+- request_template: request title/description/dependency fields used per run
+- actions: ordered task action objects run through the normal task framework
+- review_instructions: checklist included for post-completion request review
+
+For webhook workflows, provide webhook_secret. Lucent stores only a hash;
+external callers send the secret as X-Lucent-Workflow-Token, Bearer token, or
+?token= when POSTing /api/workflows/{id}/webhook."""
+    )
+    async def create_workflow(
+        title: str,
+        trigger_type: str = "schedule",
+        description: str = "",
+        schedule_type: str | None = None,
+        cron_expression: str | None = None,
+        interval_seconds: int | None = None,
+        priority: str = "medium",
+        actions_json: str | None = None,
+        request_template_json: str | None = None,
+        review_instructions: str = "",
+        webhook_secret: str | None = None,
+    ) -> str:
+        user_id, org_id, _, _, _ = await _get_current_user_context()
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+        if trigger_type not in ("schedule", "manual", "webhook", "integration_event"):
+            return json.dumps(
+                {"error": "trigger_type must be schedule, manual, webhook, or integration_event"}
+            )
+        if trigger_type == "webhook" and not webhook_secret:
+            return json.dumps({"error": "webhook_secret is required for webhook workflows"})
+        if priority not in ("low", "medium", "high", "urgent"):
+            return json.dumps({"error": "priority must be 'low', 'medium', 'high', or 'urgent'"})
+
+        if not schedule_type:
+            schedule_type = "interval" if trigger_type == "schedule" else trigger_type
+        if trigger_type == "schedule":
+            if schedule_type not in ("once", "interval", "cron"):
+                return json.dumps(
+                    {"error": "schedule workflows require schedule_type once, interval, or cron"}
+                )
+            if schedule_type == "cron" and not cron_expression:
+                return json.dumps({"error": "cron_expression is required for cron workflows"})
+            if schedule_type == "interval" and (not interval_seconds or interval_seconds < 60):
+                return json.dumps(
+                    {"error": "interval_seconds must be >= 60 for interval workflows"}
+                )
+
+        try:
+            actions = json.loads(actions_json) if actions_json else None
+            request_template = json.loads(request_template_json) if request_template_json else None
+        except json.JSONDecodeError as exc:
+            return json.dumps({"error": f"Invalid JSON: {exc.msg}"})
+        if actions is not None and not isinstance(actions, list):
+            return json.dumps({"error": "actions_json must be a JSON array"})
+        if request_template is not None and not isinstance(request_template, dict):
+            return json.dumps({"error": "request_template_json must be a JSON object"})
+
+        repo = await _get_schedule_repository()
+        workflow = await repo.create_schedule(
+            title=title,
+            org_id=str(org_id),
+            schedule_type=schedule_type,
+            description=description,
+            agent_type=(actions[0].get("agent_type", "code") if actions else "code"),
+            cron_expression=cron_expression,
+            interval_seconds=interval_seconds,
+            priority=priority,
+            created_by=str(user_id) if user_id else None,
+            trigger_type=trigger_type,
+            actions=actions,
+            request_template=request_template,
+            review_instructions=review_instructions,
+            webhook_secret_hash=webhook_secret_hash(webhook_secret),
+        )
+        return json.dumps(
+            {k: str(v) if hasattr(v, "hex") else str(v) for k, v in workflow.items()},
+            default=str,
+        )
+
+    @mcp.tool(
+        description=(
+            "List workflows, optionally filtered by status, enabled state, or trigger type."
+        )
+    )
+    async def list_workflows(
+        status: str | None = None,
+        enabled_only: bool = False,
+        trigger_type: str | None = None,
+    ) -> str:
+        user_id, org_id, _, _, _ = await _get_current_user_context()
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+        repo = await _get_schedule_repository()
+        result = await repo.list_schedules(
+            str(org_id),
+            status=status,
+            enabled=True if enabled_only else None,
+        )
+        items = result["items"]
+        if trigger_type:
+            items = [i for i in items if (i.get("trigger_type") or "schedule") == trigger_type]
+        serialized_items = [
+            {k: str(v) if hasattr(v, "hex") else str(v) for k, v in s.items()}
+            for s in items
+        ]
+        return json.dumps(
+            {"items": serialized_items, "total_count": len(serialized_items), "has_more": False},
+            default=str,
+        )
+
+    @mcp.tool(
+        description="""Get workflow details and run history by workflow UUID."""
+    )
+    async def get_workflow_details(workflow_id: str) -> str:
+        return await get_schedule_details(workflow_id)

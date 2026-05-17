@@ -218,11 +218,11 @@
                         Agent Composer
                     </a>
                     
-                    <a href="/schedules" class="flex items-center gap-3 px-3 py-2.5 text-sm font-medium rounded-lg transition-colors {% if '/schedules' in request.url.path %}bg-primary-50 text-primary-700{% else %}text-gray-700 hover:bg-gray-50{% endif %}">
-                        <svg class="w-5 h-5 {% if '/schedules' in request.url.path %}text-primary-600{% else %}text-gray-400{% endif %}" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                    <a href="/workflows" class="flex items-center gap-3 px-3 py-2.5 text-sm font-medium rounded-lg transition-colors {% if '/workflows' in request.url.path or '/schedules' in request.url.path %}bg-primary-50 text-primary-700{% else %}text-gray-700 hover:bg-gray-50{% endif %}">
+                        <svg class="w-5 h-5 {% if '/workflows' in request.url.path or '/schedules' in request.url.path %}text-primary-600{% else %}text-gray-400{% endif %}" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
                             <path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />
                         </svg>
-                        Schedules
+                        Workflows
                     </a>
                     
                     {% if team_mode() %}
@@ -373,7 +373,7 @@
                         <svg class="w-3.5 h-3.5 text-primary-600" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.455 2.456L21.75 6l-1.036.259a3.375 3.375 0 00-2.455 2.456z" /></svg>
                     </div>
                     <div class="text-sm text-gray-600 leading-relaxed">
-                        <p>Hey! I can see what you're looking at and answer questions about it. Ask me anything about your memories, schedules, requests, or the system.</p>
+                        <p>Hey! I can see what you're looking at and answer questions about it. Ask me anything about your memories, workflows, requests, or the system.</p>
                     </div>
                 </div>
             </div>
@@ -511,11 +511,14 @@
         } else if (url.startsWith('/memories/')) {
             ctx.type = 'memory_detail';
             ctx.data.memory_id = url.split('/memories/')[1];
-        } else if (url === '/schedules') {
-            ctx.type = 'schedules_list';
+        } else if (url === '/workflows' || url === '/schedules') {
+            ctx.type = 'workflows_list';
         } else if (url.startsWith('/schedules/')) {
-            ctx.type = 'schedule_detail';
+            ctx.type = 'workflow_detail';
             ctx.data.schedule_id = url.split('/schedules/')[1];
+        } else if (url.startsWith('/workflows/')) {
+            ctx.type = 'workflow_detail';
+            ctx.data.workflow_id = url.split('/workflows/')[1];
         } else if (url === '/requests') {
             ctx.type = 'requests_list';
         } else if (url.startsWith('/requests/')) {

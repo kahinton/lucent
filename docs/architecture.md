@@ -222,14 +222,17 @@ Every memory update is versioned. Use `get_memory_versions` to browse history an
 | `link_task_memory` | Link a memory to a task (created/read/updated) |
 | `link_request_memory` | Link a memory to a request (goal/context/reference) |
 
-### Schedule Tools
+### Workflow Tools
 
 | Tool | Purpose |
 |------|---------|
-| `create_schedule` | Create a cron, interval, or one-time schedule |
-| `list_schedules` | List schedules with optional status filter |
-| `get_schedule_details` | Get schedule config, run history, and next run time |
-| `toggle_schedule` | Enable or disable a schedule |
+| `create_workflow` | Create a schedule, manual, webhook, or integration-event workflow |
+| `list_workflows` | List workflows with optional status, enabled, and trigger filters |
+| `get_workflow_details` | Get workflow config and run history |
+| `create_schedule` | Compatibility alias for cron, interval, or one-time schedule rows |
+| `list_schedules` | Compatibility schedule list |
+| `get_schedule_details` | Compatibility schedule detail and run history |
+| `toggle_schedule` | Enable or disable a schedule/workflow row |
 
 ### Definition Tools
 
@@ -498,25 +501,43 @@ daemon/
     └── skills/         # Skill definition templates (.md.j2)
 ```
 
-## Schedules
+## Workflows
 
-Create recurring or one-time tasks via MCP tools or the web UI:
+Workflows are the evolved schedule system. They still use the existing
+`schedules` and `schedule_runs` tables for compatibility, but add a broader
+trigger/action model:
 
-| Type | Description | Example |
-|------|-------------|---------|
-| `cron` | Standard cron expression (5 fields) | `30 5 * * *` = daily at 5:30 AM |
-| `interval` | Repeat every N seconds (min 60) | Every 5 minutes |
-| `once` | Run once at a specific time | One-shot task |
+| Trigger | Description | Example |
+|---------|-------------|---------|
+| `schedule` | Time-based run using legacy `once`, `interval`, or `cron` fields | `0 9 * * 1` weekly cron |
+| `webhook` | External POST to `/api/workflows/{id}/webhook` with a shared secret | GitHub/Jira/custom webhook |
+| `manual` | User clicks **Run now** from the web UI or calls the workflow trigger API | Ad-hoc report |
+| `integration_event` | Stored provider/event filter for connection-driven routing | `pull_request.opened` |
 
-Schedules support timezone-aware cron (e.g., `US/Eastern`), max run limits, expiration dates, per-schedule model overrides, and sandbox template linking. When a normal user schedule fires, it atomically creates a request + task that flows through the dispatch loop.
+Every workflow run creates a request from `request_template`, then creates one
+or more ordered task actions inside the request/task framework. Task outputs are
+recorded through the same `task_outputs` table used by normal requests. The
+workflow's `review_instructions` are appended to the request description so the
+post-completion reviewer validates the correct success criteria.
 
-### Built-in schedule pre-flight gates
+Exception: some built-in maintenance workflows use a `server_function` action.
+These execute directly in the API process and write their outcome to
+`schedule_runs.result`; they do not create requests, tasks, or model-backed
+reviews. `Stale Task Reaper` uses this mode so expired task claims can be
+released even when the daemon is unavailable.
 
-Built-in daemon schedules run schedule-specific eligibility checks before creating a request or task. If the check proves there is no work, the run is completed with a structured `schedule.skipped` event and no model-backed task is created.
+Time-based workflows keep timezone-aware cron, interval, once, max-run,
+expiration, model override, and sandbox-template behavior. Existing critical
+built-in schedules are migrated in place; their IDs and run history are not
+changed.
+
+### Built-in workflow pre-flight gates
+
+Built-in daemon workflows run schedule-specific eligibility checks before creating a request or task. If the check proves there is no work, the run is completed with a structured `schedule.skipped` event and no model-backed task is created.
 
 Operators should treat `schedule.skipped` with `candidate_count: 0` as a healthy no-op, not a failed run. Real failures use a failed schedule-run status or exception log.
 
-| Built-in schedule | Empty-work gate |
+| Built-in workflow | Empty-work gate |
 |---|---|
 | Cognitive Planning | No open requests, pending approvals, due non-planning schedules, daemon messages/feedback/rejection lessons, proposed definitions/MCP servers, or planning targets. |
 | Learning Extraction | No recent active result/feedback/rejection memory has learning-source tags without `lesson-extracted`. |
