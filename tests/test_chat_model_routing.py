@@ -5,6 +5,7 @@ from fastapi import HTTPException
 
 from lucent.api.routers import chat
 from lucent.auth_providers import SESSION_COOKIE_NAME
+from lucent.llm import copilot_engine
 
 
 class _FakeRequest:
@@ -200,6 +201,35 @@ def test_definition_engineer_chat_gets_definition_proposal_tools():
     assert "approve_agent_definition" not in tools
     assert "grant_skill_to_agent" not in tools
     assert tools != ["*"]
+
+
+def test_workflow_composer_chat_gets_workflow_tools_only():
+    tools = chat._chat_allowed_tools_for_agent("workflow-composer", [])
+
+    assert "create_workflow" in tools
+    assert "list_workflows" in tools
+    assert "get_workflow_details" in tools
+    assert "list_available_models" in tools
+    assert "list_agent_definitions" in tools
+    assert "create_agent_definition" not in tools
+    assert "create_task" not in tools
+    assert tools != ["*"]
+
+
+def test_copilot_restricted_session_excludes_built_in_tools():
+    engine = copilot_engine.CopilotEngine()
+
+    kwargs = engine._make_session_kwargs(
+        model="test-model",
+        system_message="system",
+        mcp_config={"memory-server": {"tools": ["create_workflow"]}},
+        approve_permissions=False,
+    )
+
+    assert "bash" in kwargs["excluded_tools"]
+    assert "view" in kwargs["excluded_tools"]
+    assert "available_tools" not in kwargs
+    assert kwargs["mcp_servers"]["memory-server"]["tools"] == ["create_workflow"]
 
 
 def test_chat_mcp_config_threads_llm_session_headers():

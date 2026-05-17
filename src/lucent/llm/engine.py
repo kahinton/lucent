@@ -70,6 +70,7 @@ class LLMEngine(ABC):
         hooks: list[dict[str, Any]] | None = None,
         audit_context: dict[str, Any] | None = None,
         enable_config_discovery: bool = False,
+        approve_permissions: bool = True,
     ) -> str | None:
         """Run a single LLM session and return the full response text.
 
@@ -89,6 +90,9 @@ class LLMEngine(ABC):
             audit_context: Optional structured context for tool-call audit rows.
             enable_config_discovery: Whether the backend should discover its
                 configured/bundled tools for this session.
+            approve_permissions: Whether provider-native built-in tools should
+                be permissioned for execution. Web chat sets this false so only
+                configured MCP tools are available.
 
         Returns:
             The assistant's response text, or None on error.
@@ -111,6 +115,7 @@ class LLMEngine(ABC):
         hooks: list[dict[str, Any]] | None = None,
         audit_context: dict[str, Any] | None = None,
         enable_config_discovery: bool = False,
+        approve_permissions: bool = True,
     ) -> str | None:
         """Run an LLM session with event streaming.
 
@@ -137,6 +142,9 @@ class LLMEngine(ABC):
             audit_context: Optional structured context for tool-call audit rows.
             enable_config_discovery: Whether the backend should discover its
                 configured/bundled tools for this session.
+            approve_permissions: Whether provider-native built-in tools should
+                be permissioned for execution. Web chat sets this false so only
+                configured MCP tools are available.
 
         Returns:
             The assistant's full response text, or None on error.

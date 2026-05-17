@@ -23,6 +23,87 @@
     </div>
 </div>
 
+<section id="workflow-composer-chat" data-agent-id="{{ workflow_composer_agent.id if workflow_composer_agent else '' }}" class="mb-6 flex min-h-[560px] flex-col overflow-hidden rounded-xl border border-primary-200 bg-white shadow-sm">
+    <div class="border-b border-primary-100 bg-primary-50/70 px-5 py-4">
+        <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <div class="flex items-start gap-3">
+                <div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary-600 text-white">
+                    <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.847.814a4.5 4.5 0 0 0-3.09 3.09Z" /></svg>
+                </div>
+                <div>
+                    <h2 class="text-base font-semibold text-primary-950">Build workflows by conversation</h2>
+                    <p class="mt-0.5 text-sm text-primary-900">Describe the automation. The Workflow Assistant drafts the trigger, request, actions, and review checklist, then can create it when you confirm.</p>
+                </div>
+            </div>
+            <span id="workflow-composer-status" class="shrink-0 self-start rounded-full bg-gray-100 px-2 py-1 text-[11px] font-medium text-gray-500">Ready</span>
+        </div>
+    </div>
+    {% if workflow_composer_agent %}
+    <div id="workflow-composer-messages" class="flex-1 space-y-3 overflow-y-auto bg-gray-50/60 p-4">
+        <div class="flex gap-2.5">
+            <div class="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary-100 text-primary-700">
+                <svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09Z" /></svg>
+            </div>
+            <div class="max-w-[85%] rounded-2xl rounded-tl-sm bg-white px-3.5 py-2.5 text-sm text-gray-700 shadow-sm ring-1 ring-gray-100">What workflow should we automate? Tell me the trigger, what should happen, and what proof you want reviewers to see. I’ll draft first and only create it after you confirm.</div>
+        </div>
+    </div>
+    <div class="border-t border-gray-100 bg-white px-4 py-3">
+        <div class="mb-2 text-[11px] font-semibold uppercase tracking-wide text-gray-400">Choose a starting point</div>
+        <div class="grid gap-2 md:grid-cols-4">
+            <button type="button" data-workflow-composer-prompt="Help me design a scheduled workflow. Ask me what should run, how often, and what outputs/review checklist it needs before creating anything." class="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-left hover:border-blue-300 hover:bg-blue-100">
+                <span class="block text-sm font-semibold text-blue-800">Scheduled</span>
+                <span class="mt-0.5 block text-xs text-blue-600">Runs by time or interval.</span>
+            </button>
+            <button type="button" data-workflow-composer-prompt="Help me design a webhook workflow. Ask for the external event, payload context, shared secret plan, actions, and review checklist before creating it." class="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-left hover:border-emerald-300 hover:bg-emerald-100">
+                <span class="block text-sm font-semibold text-emerald-800">Webhook</span>
+                <span class="mt-0.5 block text-xs text-emerald-600">Triggered by external POST.</span>
+            </button>
+            <button type="button" data-workflow-composer-prompt="Help me design a manual workflow that I can run from the workflow detail page. Draft the request, actions, and review criteria." class="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-left hover:border-slate-300 hover:bg-slate-100">
+                <span class="block text-sm font-semibold text-slate-800">Manual</span>
+                <span class="mt-0.5 block text-xs text-slate-500">Run on demand.</span>
+            </button>
+            <button type="button" data-workflow-composer-prompt="Help me design a connection-event workflow for a provider event like GitHub, Slack, or Jira. Identify what can be stored now and what integration routing still needs follow-up." class="rounded-lg border border-violet-200 bg-violet-50 px-3 py-2 text-left hover:border-violet-300 hover:bg-violet-100">
+                <span class="block text-sm font-semibold text-violet-800">Connection event</span>
+                <span class="mt-0.5 block text-xs text-violet-600">Provider event filter.</span>
+            </button>
+        </div>
+    </div>
+    <div class="border-t border-gray-100 bg-white px-4 py-3">
+        <div class="mb-2 text-[11px] font-semibold uppercase tracking-wide text-gray-400">Starter prompts</div>
+        <div class="flex flex-wrap gap-2">
+            <button type="button" data-workflow-composer-prompt="Draft a weekly dependency review workflow for a repository. It should inspect outdated packages, identify risky updates, and record a report output for review. Do not create it until I confirm." class="rounded-full border border-primary-200 bg-primary-50 px-3 py-1.5 text-xs font-medium text-primary-700 hover:bg-primary-100">Weekly dependency review</button>
+            <button type="button" data-workflow-composer-prompt="Draft a webhook workflow for incoming GitHub pull_request.opened events. It should triage the PR, identify risky areas, and create review notes. Ask me for any missing values and do not create it yet." class="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-medium text-emerald-700 hover:bg-emerald-100">PR opened webhook</button>
+            <button type="button" data-workflow-composer-prompt="Draft a manual release-readiness workflow that checks tests, docs, changelog, and deployment notes, then records links to evidence. Do not create it until I confirm." class="rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100">Release readiness</button>
+            <button type="button" data-workflow-composer-prompt="List similar existing workflows first, then help me decide whether I should create a new workflow or adjust an existing one." class="rounded-full border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50">Check duplicates first</button>
+        </div>
+    </div>
+    <form id="workflow-composer-form" class="border-t border-gray-100 bg-white p-3">
+        <label for="workflow-composer-input" class="sr-only">Message the Workflow Assistant</label>
+        <div class="flex items-end gap-2 rounded-xl border border-gray-200 bg-gray-50 px-3 py-2 focus-within:border-primary-300 focus-within:bg-white focus-within:ring-2 focus-within:ring-primary-100">
+            <textarea id="workflow-composer-input" rows="2" placeholder="Describe the workflow you want to automate…" class="min-h-[44px] flex-1 resize-none border-0 bg-transparent text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-0"></textarea>
+            <button id="workflow-composer-send" type="submit" disabled class="rounded-lg bg-primary-600 px-3 py-2 text-sm font-medium text-white hover:bg-primary-700 disabled:cursor-not-allowed disabled:bg-gray-300">Send</button>
+        </div>
+        <div class="mt-2 flex items-center justify-between gap-3 text-[11px] text-gray-400">
+            <span>Ask for a draft first; say “create it” when you want an active workflow.</span>
+            <button id="workflow-composer-reset" type="button" class="font-medium text-gray-500 hover:text-gray-700">Reset chat</button>
+        </div>
+    </form>
+    {% else %}
+    <div class="flex flex-1 items-center justify-center bg-gray-50 p-6 text-center">
+        <div>
+            <p class="text-sm font-medium text-gray-700">Workflow Assistant is not active yet.</p>
+            <p class="mt-1 text-sm text-gray-500">Restart or sync built-in definitions so the assistant can design and create workflows.</p>
+        </div>
+    </div>
+    {% endif %}
+</section>
+
+<div class="mb-4 flex items-center gap-3">
+    <div class="h-px flex-1 bg-gray-200"></div>
+    <span class="text-xs font-semibold uppercase tracking-wide text-gray-400">Or build manually</span>
+    <div class="h-px flex-1 bg-gray-200"></div>
+</div>
+
 <form method="POST" action="/workflows/new" class="space-y-6" id="workflow-form">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
 
@@ -234,6 +315,258 @@
 </form>
 
 <script nonce="{{ request.state.csp_nonce }}">
+(function() {
+    const root = document.getElementById('workflow-composer-chat');
+    if (!root) return;
+
+    const agentId = root.dataset.agentId || '';
+    const form = document.getElementById('workflow-composer-form');
+    const input = document.getElementById('workflow-composer-input');
+    const sendBtn = document.getElementById('workflow-composer-send');
+    const messagesEl = document.getElementById('workflow-composer-messages');
+    const resetBtn = document.getElementById('workflow-composer-reset');
+    const statusEl = document.getElementById('workflow-composer-status');
+    const initialMessagesHtml = messagesEl ? messagesEl.innerHTML : '';
+    const state = {
+        messages: [],
+        sessionId: null,
+        streaming: false,
+        abortController: null,
+    };
+
+    function setStatus(text, tone) {
+        if (!statusEl) return;
+        statusEl.textContent = text;
+        const palette = tone === 'error'
+            ? 'bg-red-100 text-red-700'
+            : tone === 'active'
+                ? 'bg-primary-100 text-primary-700'
+                : tone === 'success'
+                    ? 'bg-green-100 text-green-700'
+                    : 'bg-gray-100 text-gray-500';
+        statusEl.className = 'shrink-0 self-start rounded-full px-2 py-1 text-[11px] font-medium ' + palette;
+    }
+
+    function scrollMessages() {
+        if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    function updateSendButton() {
+        if (!sendBtn || !input) return;
+        sendBtn.disabled = state.streaming || !input.value.trim() || !agentId;
+    }
+
+    function bubbleClasses(role) {
+        if (role === 'user') {
+            return 'max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-tr-sm bg-primary-600 px-3.5 py-2.5 text-sm text-white shadow-sm';
+        }
+        return 'max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-tl-sm bg-white px-3.5 py-2.5 text-sm text-gray-700 shadow-sm ring-1 ring-gray-100';
+    }
+
+    function appendMessage(role, text) {
+        if (!messagesEl) return null;
+        const row = document.createElement('div');
+        row.className = role === 'user' ? 'flex justify-end' : 'flex gap-2.5';
+
+        if (role !== 'user') {
+            const avatar = document.createElement('div');
+            avatar.className = 'mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary-100 text-primary-700';
+            avatar.innerHTML = '<svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09Z" /></svg>';
+            row.appendChild(avatar);
+        }
+
+        const bubble = document.createElement('div');
+        bubble.className = bubbleClasses(role);
+        bubble.textContent = text;
+        row.appendChild(bubble);
+        messagesEl.appendChild(row);
+        scrollMessages();
+        return bubble;
+    }
+
+    function appendToolNote(text) {
+        if (!messagesEl) return;
+        const note = document.createElement('div');
+        note.className = 'mx-10 rounded-full bg-white px-3 py-1 text-center text-[11px] text-gray-500 ring-1 ring-gray-100';
+        note.textContent = text;
+        messagesEl.appendChild(note);
+        scrollMessages();
+    }
+
+    function shortToolName(tool) {
+        return String(tool || 'tool').replace(/^memory-server-/, '').replace(/^mcp_memory-server_/, '');
+    }
+
+    function resetComposerChat() {
+        if (state.abortController) {
+            state.abortController.abort();
+            state.abortController = null;
+        }
+        state.messages = [];
+        state.sessionId = null;
+        state.streaming = false;
+        if (messagesEl) messagesEl.innerHTML = initialMessagesHtml;
+        if (input) {
+            input.value = '';
+            input.style.height = 'auto';
+        }
+        setStatus(agentId ? 'Ready' : 'Unavailable');
+        updateSendButton();
+    }
+
+    function toolResultNote(tool, output) {
+        const name = shortToolName(tool);
+        if (name === 'create_workflow') {
+            let label = 'Created workflow. Open the Workflows list to review and test it.';
+            const rawOutput = String(output || '');
+            const lowerOutput = rawOutput.toLowerCase();
+            if (lowerOutput.includes('permission denied') || lowerOutput.includes('error')) {
+                label = 'create_workflow returned an error: ' + rawOutput.slice(0, 180);
+                return label;
+            }
+            try {
+                const parsed = JSON.parse(rawOutput || '{}');
+                if (parsed && parsed.error) {
+                    label = 'create_workflow returned an error: ' + parsed.error;
+                } else if (parsed && parsed.id) {
+                    label = 'Created workflow ' + String(parsed.id).slice(0, 8) + '. Open it from the Workflows list.';
+                }
+            } catch (_err) {
+                // Keep generic label.
+            }
+            return label;
+        }
+        if (name === 'list_workflows') return 'Checked existing workflows.';
+        if (name === 'get_workflow_details') return 'Loaded workflow details.';
+        return 'Finished ' + name + '.';
+    }
+
+    async function sendComposerMessage(e) {
+        e.preventDefault();
+        if (!input || !agentId || state.streaming) return;
+        const text = input.value.trim();
+        if (!text) return;
+
+        state.messages.push({ role: 'user', content: text });
+        appendMessage('user', text);
+        input.value = '';
+        input.style.height = 'auto';
+        state.streaming = true;
+        state.abortController = new AbortController();
+        updateSendButton();
+        setStatus('Thinking…', 'active');
+
+        const assistantBubble = appendMessage('assistant', '');
+        let assistantText = '';
+        let gotDeltas = false;
+
+        try {
+            const resp = await fetch('/api/chat/stream-v2', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    messages: state.messages,
+                    session_id: state.sessionId,
+                    surface: 'embedded_chat',
+                    agent_id: agentId,
+                }),
+                signal: state.abortController.signal,
+            });
+
+            if (!resp.ok || !resp.body) {
+                const errText = await resp.text().catch(() => resp.statusText);
+                throw new Error(errText || 'Chat request failed');
+            }
+
+            const reader = resp.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop() || '';
+                for (const line of lines) {
+                    if (!line.startsWith('data: ')) continue;
+                    let event;
+                    try {
+                        event = JSON.parse(line.slice(6));
+                    } catch (_err) {
+                        continue;
+                    }
+                    if (event.type === 'session') {
+                        state.sessionId = event.session_id;
+                    } else if (event.type === 'text_delta') {
+                        gotDeltas = true;
+                        assistantText += event.text || '';
+                        if (assistantBubble) assistantBubble.textContent = assistantText;
+                        setStatus('Writing…', 'active');
+                        scrollMessages();
+                    } else if (event.type === 'message') {
+                        if (!gotDeltas) assistantText = event.text || '';
+                        if (assistantBubble) assistantBubble.textContent = assistantText;
+                        scrollMessages();
+                    } else if (event.type === 'tool_call') {
+                        setStatus('Using ' + shortToolName(event.tool) + '…', 'active');
+                        appendToolNote('Using ' + shortToolName(event.tool) + '…');
+                    } else if (event.type === 'tool_result') {
+                        appendToolNote(toolResultNote(event.tool, event.output));
+                        setStatus('Thinking…', 'active');
+                    } else if (event.type === 'error') {
+                        throw new Error(event.error || 'The workflow assistant hit an error');
+                    }
+                }
+            }
+
+            if (!assistantText.trim()) {
+                assistantText = 'No response came back. Try again, or check the chat/model configuration.';
+                if (assistantBubble) assistantBubble.textContent = assistantText;
+            }
+            state.messages.push({ role: 'assistant', content: assistantText });
+            setStatus('Ready', 'success');
+        } catch (err) {
+            if (err.name !== 'AbortError') {
+                const message = 'Workflow Assistant error: ' + (err.message || 'unknown error');
+                if (assistantBubble) assistantBubble.textContent = message;
+                setStatus('Error', 'error');
+            }
+        } finally {
+            state.streaming = false;
+            state.abortController = null;
+            updateSendButton();
+        }
+    }
+
+    document.querySelectorAll('[data-workflow-composer-prompt]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            if (!input || state.streaming) return;
+            input.value = btn.dataset.workflowComposerPrompt || '';
+            input.style.height = 'auto';
+            input.style.height = Math.min(input.scrollHeight, 160) + 'px';
+            input.focus();
+            updateSendButton();
+        });
+    });
+
+    if (form) form.addEventListener('submit', sendComposerMessage);
+    if (resetBtn) resetBtn.addEventListener('click', resetComposerChat);
+    if (input) {
+        input.addEventListener('input', () => {
+            input.style.height = 'auto';
+            input.style.height = Math.min(input.scrollHeight, 160) + 'px';
+            updateSendButton();
+        });
+        input.addEventListener('keydown', e => {
+            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                form?.requestSubmit();
+            }
+        });
+    }
+    setStatus(agentId ? 'Ready' : 'Unavailable');
+    updateSendButton();
+})();
+
 (function() {
     const triggerCards = document.querySelectorAll('[data-trigger-card]');
     const scheduleSettings = document.getElementById('schedule-settings');

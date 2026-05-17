@@ -8,6 +8,20 @@ from mcp.server.fastmcp import FastMCP
 from lucent.db.schedules import ScheduleRepository, webhook_secret_hash
 from lucent.tools.memories import _get_current_user_context
 
+FALLBACK_WORKFLOW_AGENT_TYPES = {
+    "assessment",
+    "code",
+    "documentation",
+    "lucent",
+    "memory",
+    "planning",
+    "reflection",
+    "request-review",
+    "research",
+    "sandbox",
+    "sandbox-orchestrator",
+}
+
 
 async def _get_schedule_repository() -> ScheduleRepository:
     from lucent.db import init_db
@@ -21,6 +35,11 @@ async def _get_schedule_repository() -> ScheduleRepository:
 
 def register_schedule_tools(mcp: FastMCP) -> None:
     """Register schedule management tools with the MCP server."""
+
+    def _jsonable_schedule_value(value):
+        if hasattr(value, "hex"):
+            return str(value)
+        return value
 
     def _can_manage_schedule(schedule: dict, user_id: str | None, user_role: str | None) -> bool:
         if user_role in ("admin", "owner", "daemon"):
@@ -69,7 +88,7 @@ Returns: JSON with the created schedule including its ID and next_run_at."""
         max_runs: int | None = None,
         sandbox_template_id: str | None = None,
     ) -> str:
-        user_id, org_id, _, _, _ = await _get_current_user_context()
+        user_id, org_id, user_role, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
 
@@ -140,7 +159,7 @@ Returns: JSON array of schedules."""
         status: str | None = None,
         enabled_only: bool = False,
     ) -> str:
-        user_id, org_id, _, _, _ = await _get_current_user_context()
+        user_id, org_id, user_role, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
 
@@ -235,12 +254,12 @@ external callers send the secret as X-Lucent-Workflow-Token, Bearer token, or
         cron_expression: str | None = None,
         interval_seconds: int | None = None,
         priority: str = "medium",
-        actions_json: str | None = None,
-        request_template_json: str | None = None,
+        actions_json: str | list | None = None,
+        request_template_json: str | dict | None = None,
         review_instructions: str = "",
         webhook_secret: str | None = None,
     ) -> str:
-        user_id, org_id, _, _, _ = await _get_current_user_context()
+        user_id, org_id, user_role, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         if trigger_type not in ("schedule", "manual", "webhook", "integration_event"):
@@ -267,8 +286,16 @@ external callers send the secret as X-Lucent-Workflow-Token, Bearer token, or
                 )
 
         try:
-            actions = json.loads(actions_json) if actions_json else None
-            request_template = json.loads(request_template_json) if request_template_json else None
+            actions = (
+                json.loads(actions_json)
+                if isinstance(actions_json, str) and actions_json.strip()
+                else actions_json
+            )
+            request_template = (
+                json.loads(request_template_json)
+                if isinstance(request_template_json, str) and request_template_json.strip()
+                else request_template_json
+            )
         except json.JSONDecodeError as exc:
             return json.dumps({"error": f"Invalid JSON: {exc.msg}"})
         if actions is not None and not isinstance(actions, list):
@@ -277,6 +304,64 @@ external callers send the secret as X-Lucent-Workflow-Token, Bearer token, or
             return json.dumps({"error": "request_template_json must be a JSON object"})
 
         repo = await _get_schedule_repository()
+        if actions:
+            normalized_actions = []
+            for idx, action in enumerate(actions):
+                if not isinstance(action, dict):
+                    return json.dumps({"error": f"actions_json[{idx}] must be an object"})
+                action = dict(action)
+                if "action_type" not in action and "type" in action:
+                    action["action_type"] = action.pop("type")
+                if "description" not in action:
+                    if "instructions" in action:
+                        action["description"] = action.pop("instructions")
+                    elif "prompt" in action:
+                        action["description"] = action.pop("prompt")
+                action.setdefault("action_type", "task")
+                action.setdefault("sequence_order", idx)
+                if action.get("action_type", "task") == "server_function":
+                    return json.dumps(
+                        {"error": "server_function actions are reserved for built-in workflows"}
+                    )
+                normalized_actions.append(action)
+            actions = normalized_actions
+            try:
+                from lucent.db.definitions import DefinitionRepository
+
+                def_repo = DefinitionRepository(repo.pool)
+                active = await def_repo.list_agents(
+                    str(org_id),
+                    status="active",
+                    limit=1000,
+                    requester_user_id=str(user_id) if user_id else None,
+                    requester_role=user_role,
+                )
+                active_names = {str(agent.get("name")) for agent in active.get("items", [])}
+            except Exception as exc:
+                return json.dumps(
+                    {
+                        "error": "Could not validate workflow action agent types",
+                        "detail": str(exc)[:300],
+                    }
+                )
+            if not active_names:
+                active_names = set(FALLBACK_WORKFLOW_AGENT_TYPES)
+            if active_names:
+                invalid = sorted(
+                    {
+                        str(action.get("agent_type") or "code")
+                        for action in actions
+                        if str(action.get("agent_type") or "code") not in active_names
+                    }
+                )
+                if invalid:
+                    return json.dumps(
+                        {
+                            "error": "Unknown workflow action agent_type",
+                            "invalid_agent_types": invalid,
+                            "active_agent_types": sorted(active_names),
+                        }
+                    )
         workflow = await repo.create_schedule(
             title=title,
             org_id=str(org_id),
@@ -294,7 +379,7 @@ external callers send the secret as X-Lucent-Workflow-Token, Bearer token, or
             webhook_secret_hash=webhook_secret_hash(webhook_secret),
         )
         return json.dumps(
-            {k: str(v) if hasattr(v, "hex") else str(v) for k, v in workflow.items()},
+            {k: _jsonable_schedule_value(v) for k, v in workflow.items()},
             default=str,
         )
 

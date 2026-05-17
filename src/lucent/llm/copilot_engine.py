@@ -20,6 +20,16 @@ from lucent.logging import get_logger
 
 logger = get_logger("llm.copilot")
 
+RESTRICTED_WEB_CHAT_EXCLUDED_TOOLS = [
+    "bash",
+    "grep",
+    "view",
+    "str_replace_editor",
+    "create_file",
+    "edit_file",
+    "run_in_terminal",
+]
+
 # Lazy import — only loaded when this engine is actually used
 _CopilotClient: Any = None
 _PermissionHandler: Any = None
@@ -118,7 +128,9 @@ def _install_copilot_permission_compat() -> None:
         original = session_cls._execute_permission_and_respond
         setattr(session_cls, "_lucent_original_execute_permission_and_respond", original)
 
-    async def _patched_execute_permission_and_respond(self, request_id, permission_request, handler):
+    async def _patched_execute_permission_and_respond(
+        self, request_id, permission_request, handler
+    ):
         try:
             result = handler(permission_request, {"session_id": self.session_id})
             if inspect.isawaitable(result):
@@ -366,6 +378,7 @@ class CopilotEngine(LLMEngine):
         mcp_config: dict | None,
         reasoning_effort: str | None = None,
         enable_config_discovery: bool = False,
+        approve_permissions: bool = True,
     ) -> dict:
         """Build create_session kwargs."""
         kwargs: dict[str, Any] = {
@@ -376,6 +389,11 @@ class CopilotEngine(LLMEngine):
             kwargs["reasoning_effort"] = reasoning_effort
         if enable_config_discovery:
             kwargs["enable_config_discovery"] = True
+        if not approve_permissions:
+            # Web chat should use only explicitly configured MCP tools.  The
+            # Copilot SDK's excluded_tools list disables provider-native tools
+            # such as bash/view without suppressing configured MCP tools.
+            kwargs["excluded_tools"] = list(RESTRICTED_WEB_CHAT_EXCLUDED_TOOLS)
         if _PermissionHandler is not None:
             kwargs["on_permission_request"] = _PermissionHandler.approve_all
         if _SystemMessageReplaceConfig is not None:
@@ -434,6 +452,7 @@ class CopilotEngine(LLMEngine):
         hooks: list[dict[str, Any]] | None = None,
         audit_context: dict[str, Any] | None = None,
         enable_config_discovery: bool = False,
+        approve_permissions: bool = True,
     ) -> str | None:
         """Run a blocking session using send_and_wait (chat pattern)."""
         if not _ensure_sdk():
@@ -453,6 +472,7 @@ class CopilotEngine(LLMEngine):
                 mcp_config,
                 reasoning_effort=reasoning_effort,
                 enable_config_discovery=enable_config_discovery,
+                approve_permissions=approve_permissions,
             )
             session = await self._open_session(
                 client,
@@ -512,6 +532,7 @@ class CopilotEngine(LLMEngine):
         hooks: list[dict[str, Any]] | None = None,
         audit_context: dict[str, Any] | None = None,
         enable_config_discovery: bool = False,
+        approve_permissions: bool = True,
     ) -> str | None:
         """Run a streaming session using send + event callbacks (daemon pattern).
 
@@ -536,6 +557,7 @@ class CopilotEngine(LLMEngine):
                 mcp_config,
                 reasoning_effort=reasoning_effort,
                 enable_config_discovery=enable_config_discovery,
+                approve_permissions=approve_permissions,
             )
             session = await self._open_session(
                 client,

@@ -68,6 +68,14 @@ DEFINITION_COMPOSER_TOOLS = [
     "create_agent_definition",
     "create_skill_definition",
 ]
+WORKFLOW_COMPOSER_TOOLS = [
+    "list_workflows",
+    "get_workflow_details",
+    "create_workflow",
+    "list_agent_definitions",
+    "list_skill_definitions",
+    "list_available_models",
+]
 
 
 def _resolve_chat_model(override: str | None = None) -> str:
@@ -84,15 +92,19 @@ def _chat_allowed_tools_for_agent(
 ) -> list[str]:
     """Return the MCP tool allow-list for a chat session.
 
-    General chat stays intentionally narrow.  Definition tools are added only
-    when the selected chat agent is the built-in definition composer role (or an
-    equivalent agent explicitly granted the definition-engineering skill).
+    General chat stays intentionally narrow. Specialized composer tools are
+    added only when the selected chat agent is an approved composer role (or an
+    equivalent agent explicitly granted the corresponding skill).
     """
     tools = list(CHAT_ALLOWED_TOOLS)
     normalized_agent = (agent_name or "").strip().lower()
     normalized_skills = {name.strip().lower() for name in (skill_names or [])}
     if normalized_agent == "definition-engineer" or "definition-engineering" in normalized_skills:
         for tool in DEFINITION_COMPOSER_TOOLS:
+            if tool not in tools:
+                tools.append(tool)
+    if normalized_agent == "workflow-composer" or "workflow-design" in normalized_skills:
+        for tool in WORKFLOW_COMPOSER_TOOLS:
             if tool not in tools:
                 tools.append(tool)
     return tools
@@ -844,6 +856,7 @@ async def chat_stream(
             resume=resume_provider,
             message_history=message_history,
             hooks=agent_hooks,
+            approve_permissions=False,
             audit_context={
                 "source": "chat.stream",
                 "organization_id": str(user["organization_id"]),
@@ -1061,6 +1074,24 @@ async def chat_stream_v2(
                 "at least `agent_kind` (`functional`, `persona`, or `hybrid`) and "
                 "a short `agent_kind_reason`."
             )
+        elif agent_name == "workflow-composer":
+            system_prompt_parts.append(
+                "## Web Workflow Wizard context\n"
+                "You are running inside the Workflow Wizard web page, helping a human "
+                "turn an automation idea into a Lucent workflow. There is no daemon "
+                "task_id in this session, so do not call or ask for `log_task_event`. "
+                "Use `list_workflows` to avoid duplicates, `list_available_models` only "
+                "when model choice matters, and `list_agent_definitions(status=\"active\")` "
+                "before naming action agents. Use `create_workflow` only after the user "
+                "explicitly asks you to create the workflow or confirms your draft. Never "
+                "invent agent types such as `general-purpose`; if an agent name is not in "
+                "the active-agent list, do not include it in the draft or create call. "
+                "Prefer drafting trigger, request template, ordered actions, and review "
+                "criteria before creating. Keep explanations plain-language and reflect "
+                "the UI model: schedule/manual/webhook/integration-event trigger, "
+                "request, actions, outputs, review. Do not invent server_function "
+                "actions; those are source-defined built-in maintenance workflows."
+            )
 
     system_prompt = "\n\n".join(system_prompt_parts)
     agent_hooks = await _load_agent_hooks(pool, body.agent_id)
@@ -1254,6 +1285,7 @@ async def chat_stream_v2(
                 resume=resume_provider,
                 message_history=message_history,
                 hooks=agent_hooks,
+                approve_permissions=False,
                 audit_context={
                     "source": "chat.stream_v2",
                     "organization_id": str(user["organization_id"]),

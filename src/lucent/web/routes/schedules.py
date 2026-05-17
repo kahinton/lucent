@@ -118,6 +118,10 @@ async def _workflow_form_options(pool, user) -> dict[str, Any]:
             limit=500,
         )
     )["items"]
+    workflow_composer_agent = next(
+        (agent for agent in active_agents if agent.get("name") == "workflow-composer"),
+        None,
+    )
     available_models = [
         {
             "id": m.id,
@@ -127,7 +131,11 @@ async def _workflow_form_options(pool, user) -> dict[str, Any]:
         for m in list_models(include_disabled=False)
     ]
     available_models.sort(key=lambda m: m["id"])
-    return {"active_agents": active_agents, "available_models": available_models}
+    return {
+        "active_agents": active_agents,
+        "available_models": available_models,
+        "workflow_composer_agent": workflow_composer_agent,
+    }
 
 
 @router.get("/workflows/new", response_class=HTMLResponse)

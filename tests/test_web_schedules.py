@@ -24,6 +24,7 @@ from lucent.auth_providers import (
     create_session,
 )
 from lucent.db import OrganizationRepository, UserRepository
+from lucent.db.definitions import DefinitionRepository
 from lucent.db.schedules import ScheduleRepository
 
 # ============================================================================
@@ -58,6 +59,28 @@ async def web_prefix(db_pool):
         await conn.execute(
             "DELETE FROM api_keys WHERE user_id IN "
             "(SELECT id FROM users WHERE external_id LIKE $1)",
+            f"{prefix}%",
+        )
+        await conn.execute(
+            """DELETE FROM agent_skills
+               WHERE agent_id IN (
+                   SELECT id FROM agent_definitions
+                   WHERE organization_id IN (SELECT id FROM organizations WHERE name LIKE $1)
+               )
+               OR skill_id IN (
+                   SELECT id FROM skill_definitions
+                   WHERE organization_id IN (SELECT id FROM organizations WHERE name LIKE $1)
+               )""",
+            f"{prefix}%",
+        )
+        await conn.execute(
+            "DELETE FROM agent_definitions WHERE organization_id IN "
+            "(SELECT id FROM organizations WHERE name LIKE $1)",
+            f"{prefix}%",
+        )
+        await conn.execute(
+            "DELETE FROM skill_definitions WHERE organization_id IN "
+            "(SELECT id FROM organizations WHERE name LIKE $1)",
             f"{prefix}%",
         )
         await conn.execute("DELETE FROM users WHERE external_id LIKE $1", f"{prefix}%")
@@ -169,7 +192,30 @@ class TestWorkflowWizard:
         resp = await client.get("/workflows/new")
         assert resp.status_code == 200
         assert "Workflow Wizard" in resp.text
+        assert "Build workflows by conversation" in resp.text
         assert "Incoming webhook" in resp.text
+
+    async def test_workflow_assistant_uses_workflow_composer(self, client, db_pool, web_user):
+        user, org, _token = web_user
+        repo = DefinitionRepository(db_pool)
+        workflow_composer = await repo.create_agent(
+            name="workflow-composer",
+            description="Workflow composer",
+            content="# Workflow Composer",
+            org_id=str(org["id"]),
+            created_by=str(user["id"]),
+            status="active",
+        )
+
+        resp = await client.get("/workflows/new")
+
+        assert resp.status_code == 200
+        assert "Workflow Assistant" in resp.text
+        assert "Choose a starting point" in resp.text
+        assert "Weekly dependency review" in resp.text
+        assert "Webhook" in resp.text
+        assert f'data-agent-id="{workflow_composer["id"]}"' in resp.text
+        assert "Ask for a draft first" in resp.text
 
     async def test_wizard_creates_webhook_workflow(self, client, db_pool, web_user):
         _user, org, _token = web_user
