@@ -17,6 +17,7 @@ from lucent.auth_providers import (
 )
 from lucent.db import OrganizationRepository, UserRepository
 from lucent.db.user_interactions import UserInteractionRepository
+from lucent.api.routers.schedules import _workflow_interaction_references
 
 
 @pytest_asyncio.fixture
@@ -104,6 +105,25 @@ def _csrf_data(client: httpx.AsyncClient, extra: dict | None = None) -> dict:
     if extra:
         data.update(extra)
     return data
+
+
+def test_workflow_interaction_references_use_activity_request_links():
+    workflow_id = str(uuid4())
+    run_id = str(uuid4())
+    request_id = str(uuid4())
+
+    refs = _workflow_interaction_references(
+        action={"references": []},
+        sched={"id": workflow_id, "title": "Weekly digest"},
+        run={"id": run_id},
+        req={"id": request_id, "title": "Weekly digest activity"},
+    )
+
+    refs_by_type = {ref["reference_type"]: ref for ref in refs}
+    assert refs_by_type["workflow"]["url"] == f"/workflows/{workflow_id}"
+    assert refs_by_type["request"]["url"] == f"/activity/{request_id}"
+    assert refs_by_type["schedule_run"].get("url") is None
+    assert refs_by_type["schedule_run"]["metadata"]["request_id"] == request_id
 
 
 @pytest.mark.asyncio
@@ -242,6 +262,17 @@ async def test_inbox_web_list_detail_and_reply(web_client, db_pool, interaction_
         references=[
             {
                 "reference_type": "url",
+                "label": "Inbox self-link",
+                "url": f"http://localhost:8767/inbox/{uuid4()}",
+            },
+            {
+                "reference_type": "schedule_run",
+                "label": "Workflow run should not show as a duplicate user link",
+                "reference_id": str(uuid4()),
+                "url": "/workflows/00000000-0000-0000-0000-000000000000",
+            },
+            {
+                "reference_type": "url",
                 "label": "Candidate A",
                 "url": "https://example.test/a",
             }
@@ -257,8 +288,11 @@ async def test_inbox_web_list_detail_and_reply(web_client, db_pool, interaction_
     assert detail_resp.status_code == 200
     assert "Pick A or B." in detail_resp.text
     assert "Candidate A" in detail_resp.text
+    assert "Inbox self-link" not in detail_resp.text
+    assert "Workflow run should not show" not in detail_resp.text
     assert "Continue with Lucent" in detail_resp.text
-    assert "Context Lucent brought" in detail_resp.text
+    assert "Related context" in detail_resp.text
+    assert "Context Lucent brought" not in detail_resp.text
     assert "Metadata" not in detail_resp.text
     assert "Dedupe key" not in detail_resp.text
     assert "Details" not in detail_resp.text
@@ -376,8 +410,9 @@ async def test_workflow_user_interaction_action_triggers_inbox_item(
     assert detail["status"] == "waiting_on_user"
     assert detail["source"] == "workflow"
     assert detail["interaction_type"] == "decision"
-    assert {ref["reference_type"] for ref in detail["references"]} >= {
-        "workflow",
-        "schedule_run",
-        "url",
-    }
+    refs_by_type = {ref["reference_type"]: ref for ref in detail["references"]}
+    assert set(refs_by_type) >= {"workflow", "schedule_run", "url"}
+    assert refs_by_type["workflow"]["url"] == f"/workflows/{workflow['id']}"
+    assert refs_by_type["schedule_run"]["url"] is None
+    assert refs_by_type["schedule_run"]["metadata"]["workflow_id"] == workflow["id"]
+    assert refs_by_type["schedule_run"]["metadata"]["request_id"] is None

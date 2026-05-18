@@ -326,9 +326,12 @@ def _workflow_interaction_references(
             {
                 "reference_type": "schedule_run",
                 "reference_id": str(run["id"]),
-                "label": f"Workflow run for {sched.get('title') or 'workflow'}",
-                "url": f"/workflows/{workflow_id}" if workflow_id else None,
-                "metadata": {"workflow_id": workflow_id},
+                "label": f"Run record for {sched.get('title') or 'workflow'}",
+                "metadata": {
+                    "workflow_id": workflow_id,
+                    "request_id": str(req["id"]) if req and req.get("id") else None,
+                    "description": "Internal workflow run record used by Lucent for grounding.",
+                },
             }
         )
     if req and req.get("id"):

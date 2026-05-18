@@ -1,6 +1,7 @@
 """Web routes for the Lucent Inbox user-interaction surface."""
 
 from math import ceil
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -14,6 +15,67 @@ from ._shared import _check_csrf, get_user_context, templates
 router = APIRouter()
 
 ALLOWED_PER_PAGE = {10, 25, 50}
+
+
+def _reference_url(ref: dict) -> str:
+    if ref.get("url"):
+        return str(ref["url"])
+    ref_type = ref.get("reference_type")
+    ref_id = ref.get("reference_id")
+    if ref_type == "request" and ref_id:
+        return f"/activity/{ref_id}"
+    if ref_type == "memory" and ref_id:
+        return f"/memories/{ref_id}"
+    if ref_type == "workflow" and ref_id:
+        return f"/workflows/{ref_id}"
+    if ref_type == "llm_session" and ref_id:
+        return f"/chat/{ref_id}"
+    return ""
+
+
+def _is_inbox_reference(ref: dict) -> bool:
+    url = str(ref.get("url") or "").strip()
+    if not url:
+        return False
+    parsed = urlparse(url)
+    path = parsed.path or url
+    normalized_path = path.rstrip("/") or "/"
+    return normalized_path == "/inbox" or normalized_path.startswith("/inbox/")
+
+
+def _display_references(interaction: dict) -> list[dict]:
+    """Return references useful to humans on the Inbox detail page.
+
+    Raw references still stay attached to the interaction for daemon/chat
+    grounding. This filters out operational run IDs and self-links that are
+    useful to Lucent but distracting or misleading to people.
+    """
+    visible: list[dict] = []
+    seen_destinations: set[str] = set()
+    for ref in interaction.get("references") or []:
+        ref_type = ref.get("reference_type")
+        if ref_type == "schedule_run":
+            continue
+        if _is_inbox_reference(ref):
+            continue
+        destination = _reference_url(ref).strip()
+        dedupe_key = destination or f"{ref_type}:{ref.get('reference_id') or ref.get('label')}"
+        if dedupe_key in seen_destinations:
+            continue
+        seen_destinations.add(dedupe_key)
+        visible.append(ref)
+
+    order = {
+        "workflow": 0,
+        "request": 1,
+        "task": 2,
+        "task_output": 3,
+        "memory": 4,
+        "llm_session": 5,
+        "url": 6,
+        "other": 7,
+    }
+    return sorted(visible, key=lambda r: order.get(r.get("reference_type"), 99))
 
 
 async def _get_or_create_interaction_chat_session(pool, user, interaction: dict) -> dict:
@@ -173,6 +235,7 @@ async def inbox_detail(request: Request, interaction_id: str):
         {
             "user": user,
             "interaction": interaction,
+            "display_references": _display_references(interaction),
             "interaction_chat_session": chat_session,
             "csrf_token": request.cookies.get(CSRF_COOKIE_NAME, ""),
         },
