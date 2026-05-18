@@ -66,6 +66,12 @@ class BuiltinSecretProvider(SecretProvider):
         conditions = ["organization_id = $1"]
         params: list = [UUID(scope.organization_id)]
         idx = 2
+        if scope.system_managed:
+            conditions.append("system_managed = true")
+            conditions.append("owner_user_id IS NULL")
+            conditions.append("owner_group_id IS NULL")
+        else:
+            conditions.append("system_managed = false")
         if scope.owner_user_id:
             conditions.append(f"owner_user_id = ${idx}")
             params.append(UUID(scope.owner_user_id))
@@ -105,12 +111,14 @@ class BuiltinSecretProvider(SecretProvider):
                 if result == "UPDATE 0":
                     await conn.execute(
                         "INSERT INTO secrets (key, encrypted_value, owner_user_id, "
-                        "owner_group_id, organization_id) VALUES ($1, $2, $3, $4, $5)",
+                        "owner_group_id, organization_id, system_managed) "
+                        "VALUES ($1, $2, $3, $4, $5, $6)",
                         key,
                         encrypted,
                         owner_user,
                         owner_group,
                         org_id,
+                        scope.system_managed,
                     )
 
     async def delete(self, key: str, scope: SecretScope) -> bool:

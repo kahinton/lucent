@@ -274,6 +274,20 @@ async def test_inbox_web_list_detail_and_reply(web_client, db_pool, interaction_
     assert updated["status"] == "responded"
     assert updated["messages"][-1]["body"] == "Use source A."
 
+    unread = await repo.create_interaction(
+        org_id=interaction_user["organization_id"],
+        user_id=interaction_user["id"],
+        created_by=interaction_user["id"],
+        title="Workflow output ready",
+        body="This is an informational handoff.",
+        interaction_type="workflow_output",
+        requires_response=False,
+    )
+    unread_detail = await web_client.get(f"/inbox/{unread['id']}")
+    assert unread_detail.status_code == 200
+    assert "Workflow output ready" in unread_detail.text
+    assert "Lucent messages needing attention" not in unread_detail.text
+
 
 @pytest.mark.asyncio
 async def test_workflow_user_interaction_action_triggers_inbox_item(

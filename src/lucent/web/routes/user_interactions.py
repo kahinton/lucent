@@ -103,6 +103,10 @@ async def inbox_detail(request: Request, interaction_id: str):
         org_id=str(user.organization_id),
         user_id=str(user.id),
     )
+    request.state.user_interaction_count = await repo.count_attention_needed(
+        org_id=str(user.organization_id),
+        user_id=str(user.id),
+    )
 
     return templates.TemplateResponse(
         request,

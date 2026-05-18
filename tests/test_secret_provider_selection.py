@@ -108,6 +108,24 @@ class TestProviderSelection:
         with pytest.raises(ValueError, match="valid http"):
             validate_provider_env("transit")
 
+    def test_transit_accepts_token_file(self, monkeypatch, tmp_path):
+        token_file = tmp_path / "vault-token"
+        token_file.write_text("token-from-file")
+        monkeypatch.setenv("LUCENT_SECRET_PROVIDER", "transit")
+        monkeypatch.setenv("VAULT_ADDR", "http://openbao:8200")
+        monkeypatch.delenv("VAULT_TOKEN", raising=False)
+        monkeypatch.setenv("VAULT_TOKEN_FILE", str(token_file))
+
+        validate_provider_env("transit")
+
+    def test_vault_requires_token_or_token_file(self, monkeypatch):
+        monkeypatch.setenv("VAULT_ADDR", "http://openbao:8200")
+        monkeypatch.delenv("VAULT_TOKEN", raising=False)
+        monkeypatch.delenv("VAULT_TOKEN_FILE", raising=False)
+
+        with pytest.raises(ValueError, match="VAULT_TOKEN or VAULT_TOKEN_FILE"):
+            validate_provider_env("vault")
+
 
 class TestSecretEnvResolution:
     @pytest.mark.asyncio

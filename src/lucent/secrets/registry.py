@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
@@ -104,7 +105,9 @@ def validate_provider_env(provider_name: str) -> None:
             )
         return
     if provider_name == "vault":
-        missing = [k for k in ("VAULT_ADDR", "VAULT_TOKEN") if not os.environ.get(k)]
+        missing = ["VAULT_ADDR"] if not os.environ.get("VAULT_ADDR") else []
+        if not _get_vault_token():
+            missing.append("VAULT_TOKEN or VAULT_TOKEN_FILE")
         if missing:
             raise ValueError(
                 f"LUCENT_SECRET_PROVIDER=vault requires env vars: {', '.join(missing)}"
@@ -112,7 +115,9 @@ def validate_provider_env(provider_name: str) -> None:
         _validate_vault_addr()
         return
     if provider_name == "transit":
-        missing = [k for k in ("VAULT_ADDR", "VAULT_TOKEN") if not os.environ.get(k)]
+        missing = ["VAULT_ADDR"] if not os.environ.get("VAULT_ADDR") else []
+        if not _get_vault_token():
+            missing.append("VAULT_TOKEN or VAULT_TOKEN_FILE")
         if missing:
             raise ValueError(
                 f"LUCENT_SECRET_PROVIDER=transit requires env vars: {', '.join(missing)}"
@@ -131,6 +136,25 @@ def _validate_vault_addr() -> None:
         )
 
 
+def _get_vault_token() -> str:
+    """Return Vault/OpenBao token from env or VAULT_TOKEN_FILE.
+
+    Docker local development writes the root token to a shared file. Reading
+    from that file avoids copying secret material into process environment.
+    """
+    token = os.environ.get("VAULT_TOKEN", "")
+    if token:
+        return token
+    token_file = os.environ.get("VAULT_TOKEN_FILE", "")
+    if not token_file:
+        return ""
+    try:
+        return Path(token_file).read_text().strip()
+    except OSError:
+        logger.info("VAULT_TOKEN_FILE is set but could not be read")
+        return ""
+
+
 async def detect_provider(pool) -> str:
     """Auto-detect the best available secret provider.
 
@@ -138,9 +162,9 @@ async def detect_provider(pool) -> str:
     Returns provider name: ``"transit"``, ``"vault"``, or ``"builtin"``.
     """
     vault_addr = os.environ.get("VAULT_ADDR", "").rstrip("/")
-    vault_token = os.environ.get("VAULT_TOKEN", "")
+    vault_token = _get_vault_token()
     if not vault_addr or not vault_token:
-        logger.info("Auto-detect: VAULT_ADDR or VAULT_TOKEN not set, using builtin")
+        logger.info("Auto-detect: VAULT_ADDR or Vault token not set, using builtin")
         return "builtin"
 
     headers = {"X-Vault-Token": vault_token}
@@ -189,12 +213,15 @@ async def initialize_secret_provider(pool) -> SecretProvider:
     if provider_name == "builtin":
         provider: SecretProvider = BuiltinSecretProvider(pool)
     elif provider_name == "vault":
-        provider = VaultSecretProvider()
+        provider = VaultSecretProvider(
+            vault_addr=os.environ["VAULT_ADDR"],
+            vault_token=_get_vault_token(),
+        )
     elif provider_name == "transit":
         provider = TransitSecretProvider(
             pool,
             vault_addr=os.environ["VAULT_ADDR"],
-            vault_token=os.environ["VAULT_TOKEN"],
+            vault_token=_get_vault_token(),
         )
     else:
         # Should not reach here — get_selected_provider_name rejects

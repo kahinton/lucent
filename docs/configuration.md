@@ -25,7 +25,7 @@ Lucent is configured entirely through environment variables. Copy `.env.example`
 | `LUCENT_AUTH_PROVIDER` | `basic` | Auth backend (`basic` or `api_key`) |
 | `LUCENT_SESSION_TTL_HOURS` | `24` | Web session cookie lifetime in hours |
 | `LUCENT_SECURE_COOKIES` | `true` | Cookie `Secure` flag. Set to `false` for local HTTP development without HTTPS |
-| `LUCENT_SIGNING_SECRET` | *(random)* | HMAC key for signing session cookies. Auto-generated if not set; set explicitly for multi-instance deployments |
+| `LUCENT_SIGNING_SECRET` | *(secret storage)* | Optional override for the cookie/impersonation HMAC key. By default Lucent creates and reloads a system-managed secret via the configured secret provider (OpenBao Transit in local compose). |
 
 ## Networking & Security
 
@@ -40,11 +40,12 @@ Lucent is configured entirely through environment variables. Copy `.env.example`
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LUCENT_SECRET_PROVIDER` | `builtin` | Secret storage backend (`builtin`, `transit`, `vault`, `aws`, or `azure`) |
+| `LUCENT_SECRET_PROVIDER` | `auto` | Secret storage backend (`auto`, `builtin`, `transit`, `vault`, `aws`, or `azure`) |
 | `LUCENT_SECRET_KEY` | *(required for builtin)* | Fernet encryption key for the builtin provider |
 | `LUCENT_CREDENTIAL_KEY` | *(none)* | Fernet key for encrypting integration credentials (Slack/Discord tokens). Separate from `LUCENT_SECRET_KEY` |
 | `VAULT_ADDR` | `http://openbao:8200` | OpenBao/Vault server address |
-| `VAULT_TOKEN` | `root` | OpenBao/Vault authentication token |
+| `VAULT_TOKEN_FILE` | `/shared/vault-token` in Docker | Preferred local OpenBao token source; avoids putting the token in process env |
+| `VAULT_TOKEN` | *(none)* | OpenBao/Vault authentication token override when a token file is not available |
 
 For detailed secret storage configuration, see [Secret Storage](secret-storage.md).
 

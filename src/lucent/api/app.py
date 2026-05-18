@@ -168,8 +168,8 @@ def _check_security_defaults() -> None:
     In team mode (multi-user), insecure defaults are treated as errors
     logged at CRITICAL level. In personal mode they produce warnings.
 
-    Also warns when critical secrets (like LUCENT_SIGNING_SECRET) are
-    not explicitly configured.
+    Also notes when critical secrets will be managed by the configured secret
+    provider instead of process environment variables.
     """
     import os
 
@@ -181,9 +181,14 @@ def _check_security_defaults() -> None:
         if current == insecure_value:
             issues.append(var)
 
-    # Check for missing critical secrets that default to random values
-    required_secrets = ["LUCENT_SIGNING_SECRET"]
-    missing: list[str] = [v for v in required_secrets if not os.environ.get(v)]
+    secret_provider_configured = bool(
+        os.environ.get("VAULT_TOKEN")
+        or os.environ.get("VAULT_TOKEN_FILE")
+        or os.environ.get("LUCENT_SECRET_KEY")
+    )
+    missing: list[str] = []
+    if not os.environ.get("LUCENT_SIGNING_SECRET") and not secret_provider_configured:
+        missing.append("LUCENT_SIGNING_SECRET or configured secret provider")
 
     if issues:
         msg = (
@@ -198,10 +203,9 @@ def _check_security_defaults() -> None:
 
     if missing:
         msg = (
-            "SECURITY: The following secrets are not set and will use "
-            "ephemeral random values that do not persist across restarts: %s. "
-            "Set them explicitly for production. "
-            "Generate with: openssl rand -base64 32"
+            "SECURITY: The following secrets are not set and no secret provider "
+            "bootstrap appears configured; ephemeral random values may be used: %s. "
+            "Configure OpenBao/Transit or set explicit production overrides."
         )
         if mode == "team":
             logger.critical(msg, ", ".join(missing))
@@ -232,6 +236,9 @@ async def lifespan(app: FastAPI):
 
         _secret_pool = await _get_pool_for_secrets()
         await initialize_secret_provider(_secret_pool)
+        from lucent.auth_providers import initialize_signing_secret
+
+        await initialize_signing_secret(_secret_pool)
 
     # Load model registry from database
     try:
