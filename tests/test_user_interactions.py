@@ -283,6 +283,8 @@ async def test_inbox_web_list_detail_and_reply(web_client, db_pool, interaction_
     assert list_resp.status_code == 200
     assert "Which source should I use?" in list_resp.text
     assert "Reply needed" in list_resp.text
+    assert "Questions, decisions, and updates from Lucent." in list_resp.text
+    assert "Waiting for your answer before Lucent continues." in list_resp.text
 
     detail_resp = await web_client.get(f"/inbox/{interaction['id']}")
     assert detail_resp.status_code == 200
@@ -292,6 +294,10 @@ async def test_inbox_web_list_detail_and_reply(web_client, db_pool, interaction_
     assert "Workflow run should not show" not in detail_resp.text
     assert "Continue with Lucent" in detail_resp.text
     assert "Related context" in detail_resp.text
+    assert "Reply here, ask a follow-up question" in detail_resp.text
+    assert "Lucent can see this Inbox message" in detail_resp.text
+    assert "Question from Lucent" in detail_resp.text
+    assert "live session grounded" not in detail_resp.text
     assert "Context Lucent brought" not in detail_resp.text
     assert "Metadata" not in detail_resp.text
     assert "Dedupe key" not in detail_resp.text

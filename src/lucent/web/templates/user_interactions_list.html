@@ -2,6 +2,10 @@
 
 {% block title %}Inbox - Lucent{% endblock %}
 
+{% macro type_label(item) %}
+{% if item.interaction_type == 'clarification' %}Question{% elif item.interaction_type == 'workflow_output' %}Workflow update{% elif item.interaction_type == 'review' %}Review{% elif item.interaction_type == 'decision' %}Decision{% elif item.interaction_type == 'handoff' %}Handoff{% else %}Message{% endif %}
+{% endmacro %}
+
 {% macro type_badge(item) %}
 <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium
     {% if item.interaction_type == 'clarification' %}bg-amber-100 text-amber-800
@@ -10,8 +14,12 @@
     {% elif item.interaction_type == 'decision' %}bg-orange-100 text-orange-700
     {% elif item.interaction_type == 'handoff' %}bg-emerald-100 text-emerald-700
     {% else %}bg-gray-100 text-gray-600{% endif %}">
-    {{ item.interaction_type | replace('_', ' ') }}
+    {{ type_label(item) | trim }}
 </span>
+{% endmacro %}
+
+{% macro status_label(item) %}
+{% if item.status == 'waiting_on_user' %}Waiting for you{% elif item.status == 'responded' %}Reply sent{% elif item.status == 'resolved' %}Done{% elif item.status == 'dismissed' %}Dismissed{% else %}Open{% endif %}
 {% endmacro %}
 
 {% macro status_badge(item) %}
@@ -21,7 +29,7 @@
     {% elif item.status == 'resolved' %}bg-green-100 text-green-700
     {% elif item.status == 'dismissed' %}bg-gray-100 text-gray-500
     {% else %}bg-blue-100 text-blue-700{% endif %}">
-    {{ item.status | replace('_', ' ') }}
+    {{ status_label(item) | trim }}
 </span>
 {% endmacro %}
 
@@ -31,7 +39,7 @@
     {% if item.priority == 'urgent' %}bg-red-100 text-red-700
     {% elif item.priority == 'high' %}bg-orange-100 text-orange-700
     {% else %}bg-gray-100 text-gray-500{% endif %}">
-    {{ item.priority }}
+    {% if item.priority == 'urgent' %}Urgent{% elif item.priority == 'high' %}High priority{% else %}{{ item.priority | capitalize }}{% endif %}
 </span>
 {% endif %}
 {% endmacro %}
@@ -64,8 +72,6 @@
             <div class="mt-3 flex flex-wrap items-center gap-2 text-xs text-gray-400">
                 <span>{{ item.source | capitalize }}</span>
                 <span>{{ item.message_count }} message{% if item.message_count != 1 %}s{% endif %}</span>
-                {% if item.reference_count %}<span>{{ item.reference_count }} context link{% if item.reference_count != 1 %}s{% endif %}</span>{% endif %}
-                {% if item.dedupe_key %}<span title="Producer dedupe key" class="font-mono">deduped</span>{% endif %}
             </div>
         </div>
         <div class="shrink-0 text-right text-xs text-gray-400">
@@ -87,12 +93,12 @@
             </div>
             <div>
                 <h1 class="text-2xl font-bold text-gray-900">Inbox</h1>
-                <p class="text-sm text-gray-500">Messages and clarification requests Lucent sends before or between work.</p>
+                <p class="text-sm text-gray-500">Questions, decisions, and updates from Lucent.</p>
             </div>
         </div>
         {% if attention_count > 0 %}
         <div class="rounded-xl border border-primary-200 bg-primary-50 px-4 py-3 text-sm text-primary-800">
-            <span class="font-semibold">{{ attention_count }}</span> item{% if attention_count != 1 %}s{% endif %} need attention.
+            <span class="font-semibold">{{ attention_count }}</span> item{% if attention_count != 1 %}s need{% else %} needs{% endif %} your attention.
         </div>
         {% endif %}
     </div>
@@ -102,17 +108,17 @@
     <div class="rounded-xl border border-amber-200 bg-amber-50 p-4">
         <p class="text-xs font-semibold uppercase tracking-wider text-amber-700">Reply needed</p>
         <p class="mt-2 text-3xl font-bold text-amber-900">{{ needs_response|length }}</p>
-        <p class="mt-1 text-sm text-amber-800">Lucent is intentionally paused until you answer.</p>
+        <p class="mt-1 text-sm text-amber-800">Waiting for your answer before Lucent continues.</p>
     </div>
     <div class="rounded-xl border border-primary-200 bg-primary-50 p-4">
         <p class="text-xs font-semibold uppercase tracking-wider text-primary-600">New from Lucent</p>
         <p class="mt-2 text-3xl font-bold text-primary-800">{{ unread|length }}</p>
-        <p class="mt-1 text-sm text-primary-700">Updates or handoffs you have not opened yet.</p>
+        <p class="mt-1 text-sm text-primary-700">Updates you have not opened yet.</p>
     </div>
     <div class="rounded-xl border border-gray-200 bg-white p-4">
         <p class="text-xs font-semibold uppercase tracking-wider text-gray-500">Showing</p>
         <p class="mt-2 text-3xl font-bold text-gray-900">{{ total_count }}</p>
-        <p class="mt-1 text-sm text-gray-500">Filtered inbox items.</p>
+        <p class="mt-1 text-sm text-gray-500">Items in this view.</p>
     </div>
 </div>
 
@@ -128,7 +134,7 @@
 <section class="mb-6" aria-labelledby="needs-response-heading">
     <div class="mb-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
         <h2 id="needs-response-heading" class="text-sm font-semibold text-amber-950">Waiting on you</h2>
-        <p class="mt-0.5 text-sm text-amber-800">These are the useful kind of interruption: Lucent needs your decision before continuing.</p>
+        <p class="mt-0.5 text-sm text-amber-800">Lucent needs an answer or decision before moving on.</p>
     </div>
     <div class="space-y-3">
         {% for item in needs_response %}{{ interaction_card(item, 'needs-response') }}{% endfor %}
@@ -140,7 +146,7 @@
 <section class="mb-6" aria-labelledby="unread-heading">
     <div class="mb-3 rounded-xl border border-primary-200 bg-primary-50 px-4 py-3">
         <h2 id="unread-heading" class="text-sm font-semibold text-primary-950">New from Lucent</h2>
-        <p class="mt-0.5 text-sm text-primary-800">Updates with attached context, without forcing a whole tracked request.</p>
+        <p class="mt-0.5 text-sm text-primary-800">Updates you can read or discuss right here.</p>
     </div>
     <div class="space-y-3">
         {% for item in unread %}{{ interaction_card(item, 'unread') }}{% endfor %}
@@ -153,7 +159,7 @@
     <div class="mb-3 flex items-center justify-between gap-3">
         <div>
             <h2 id="other-heading" class="text-sm font-semibold text-gray-900">{% if needs_response or unread %}Other inbox items{% else %}Inbox items{% endif %}</h2>
-            <p class="mt-0.5 text-sm text-gray-500">Resolved and dismissed items stay out of the active view unless filtered back in.</p>
+            <p class="mt-0.5 text-sm text-gray-500">Use the filters above to see older or finished items.</p>
         </div>
         <span class="rounded-full bg-gray-100 px-2.5 py-1 text-xs font-medium text-gray-600">{{ other|length }}</span>
     </div>
@@ -169,7 +175,7 @@
         <path stroke-linecap="round" stroke-linejoin="round" d="M21.75 6.75v10.5A2.25 2.25 0 0119.5 19.5h-15a2.25 2.25 0 01-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25" />
     </svg>
     <h2 class="mt-3 text-lg font-semibold text-gray-900">No inbox items</h2>
-    <p class="mt-1 text-sm text-gray-500">When Lucent needs clarification or has context-rich updates, they’ll appear here instead of getting buried in raw task logs.</p>
+    <p class="mt-1 text-sm text-gray-500">When Lucent has a question or update for you, it will appear here.</p>
 </div>
 {% endif %}
 
