@@ -643,6 +643,39 @@ async def _build_system_prompt(user: dict, pool, page_context: dict | None) -> s
                         parts.append(f"- Tasks: {len(tasks)}")
                         for t in tasks[:5]:
                             parts.append(f"  - [{t.get('status')}] {t.get('title', '?')}")
+
+            elif page_type == "user_interaction_detail" and page_data.get("interaction_id") and org_id:
+                from lucent.db.user_interactions import UserInteractionRepository
+
+                repo = UserInteractionRepository(pool)
+                interaction = await repo.get_interaction(
+                    page_data["interaction_id"],
+                    org_id,
+                    user_id=str(user["id"]),
+                )
+                if interaction:
+                    parts.append("\n## Inbox Interaction Being Viewed")
+                    parts.append(f"- Title: {interaction.get('title')}")
+                    parts.append(f"- Type: {interaction.get('interaction_type')}")
+                    parts.append(f"- Status: {interaction.get('status')}")
+                    parts.append(f"- Requires response: {interaction.get('requires_response')}")
+                    if interaction.get("response_prompt"):
+                        parts.append(f"- Response prompt: {interaction.get('response_prompt')}")
+                    refs = interaction.get("references") or []
+                    if refs:
+                        parts.append("- Attached context:")
+                        for ref in refs[:10]:
+                            label = ref.get("label") or ref.get("reference_id") or ref.get("url")
+                            parts.append(
+                                f"  - {ref.get('reference_type')}: {label}"
+                            )
+                    messages = interaction.get("messages") or []
+                    if messages:
+                        parts.append("- Thread:")
+                        for msg in messages[-10:]:
+                            sender = msg.get("sender_type", "unknown")
+                            content = str(msg.get("body") or "")[:1000]
+                            parts.append(f"  - {sender}: {content}")
         except Exception:
             logger.debug("Failed to load request context for chat", exc_info=True)
 
@@ -1087,9 +1120,12 @@ async def chat_stream_v2(
                 "invent agent types such as `general-purpose`; if an agent name is not in "
                 "the active-agent list, do not include it in the draft or create call. "
                 "Prefer drafting trigger, request template, ordered actions, and review "
-                "criteria before creating. Keep explanations plain-language and reflect "
+                "criteria before creating. For actions, use `task` when work should run "
+                "through the daemon queue, and `user_interaction` when the workflow's "
+                "output should be a context-rich Inbox message or clarification for the "
+                "user. Keep explanations plain-language and reflect "
                 "the UI model: schedule/manual/webhook/integration-event trigger, "
-                "request, actions, outputs, review. Do not invent server_function "
+                "request, actions, Inbox handoffs, outputs, review. Do not invent server_function "
                 "actions; those are source-defined built-in maintenance workflows."
             )
 

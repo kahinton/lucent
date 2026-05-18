@@ -111,11 +111,16 @@
 
 <!-- Workflow Flow -->
 {% set trigger_type = sched.trigger_type or 'schedule' %}
+{% set task_actions = sched.actions | selectattr('action_type', 'equalto', 'task') | list if sched.actions else [] %}
+{% set inbox_actions = sched.interaction_actions if sched.interaction_actions is defined else [] %}
+{% set inbox_only_workflow = inbox_actions and not task_actions and not sched.is_server_workflow %}
 <div class="mb-6 rounded-xl border border-gray-200 bg-white shadow-sm">
     <div class="border-b border-gray-100 px-5 py-4">
         <h2 class="text-lg font-semibold text-gray-900">Workflow flow</h2>
         {% if sched.is_server_workflow %}
         <p class="mt-1 text-sm text-gray-500">This built-in server workflow follows: trigger → API function → schedule run result. It does not create a request or dispatch an agent.</p>
+        {% elif inbox_only_workflow %}
+        <p class="mt-1 text-sm text-gray-500">Every run follows: trigger → Inbox message with attached context → user reads or replies. It does not create request/task work unless a later reply asks Lucent to continue.</p>
         {% else %}
         <p class="mt-1 text-sm text-gray-500">Every run follows the same path: trigger → request → task actions → recorded outputs → reviewer decision.</p>
         {% endif %}
@@ -141,6 +146,9 @@
             {% if sched.is_server_workflow %}
             <p class="mt-2 text-sm font-semibold text-indigo-950">No request created</p>
             <p class="mt-1 text-xs text-indigo-700">This server function writes directly to schedule run history.</p>
+            {% elif inbox_only_workflow %}
+            <p class="mt-2 text-sm font-semibold text-indigo-950">No request created</p>
+            <p class="mt-1 text-xs text-indigo-700">The workflow sends information to the user's Inbox instead of opening Activity work.</p>
             {% else %}
             <p class="mt-2 text-sm font-semibold text-indigo-950">{{ (sched.request_template.title_prefix if sched.request_template else '[Workflow]') }} {{ (sched.request_template.title if sched.request_template else sched.title) }}</p>
             <p class="mt-1 text-xs text-indigo-700">Runs through Activity with lineage and approvals.</p>
@@ -151,16 +159,22 @@
             {% if sched.is_server_workflow %}
             <p class="mt-2 text-sm font-semibold text-violet-950">Server function</p>
             <p class="mt-1 text-xs text-violet-700">Executed in the API process; no agent dispatch.</p>
+            {% elif inbox_only_workflow %}
+            <p class="mt-2 text-sm font-semibold text-violet-950">{{ inbox_actions|length }} Inbox action{{ 's' if inbox_actions|length != 1 }}</p>
+            <p class="mt-1 text-xs text-violet-700">Creates user-facing messages with durable references.</p>
             {% else %}
             <p class="mt-2 text-sm font-semibold text-violet-950">{{ sched.actions|length if sched.actions else 1 }} task action{{ 's' if ((sched.actions|length) if sched.actions else 1) != 1 }}</p>
             <p class="mt-1 text-xs text-violet-700">Created in order inside the request framework.</p>
             {% endif %}
         </div>
         <div class="rounded-lg border border-emerald-100 bg-emerald-50 p-4">
-            <p class="text-xs font-semibold uppercase tracking-wide text-emerald-700">{% if sched.is_server_workflow %}Result{% else %}Outputs{% endif %}</p>
+            <p class="text-xs font-semibold uppercase tracking-wide text-emerald-700">{% if sched.is_server_workflow %}Result{% elif inbox_only_workflow %}Inbox{% else %}Outputs{% endif %}</p>
             {% if sched.is_server_workflow %}
             <p class="mt-2 text-sm font-semibold text-emerald-950">schedule_runs.result</p>
             <p class="mt-1 text-xs text-emerald-700">Release counts or skip reasons are recorded directly in run history.</p>
+            {% elif inbox_only_workflow %}
+            <p class="mt-2 text-sm font-semibold text-emerald-950">User interaction</p>
+            <p class="mt-1 text-xs text-emerald-700">Appears in Inbox with thread, metadata, and context links.</p>
             {% else %}
             <p class="mt-2 text-sm font-semibold text-emerald-950">Structured artifacts</p>
             <p class="mt-1 text-xs text-emerald-700">Tasks can record links, PRs, files, docs, memories, deployments, and more.</p>
@@ -171,6 +185,9 @@
             {% if sched.is_server_workflow %}
             <p class="mt-2 text-sm font-semibold text-amber-950">No model review</p>
             <p class="mt-1 text-xs text-amber-700">Operators validate by inspecting run history and task claim state.</p>
+            {% elif inbox_only_workflow %}
+            <p class="mt-2 text-sm font-semibold text-amber-950">Human response optional</p>
+            <p class="mt-1 text-xs text-amber-700">If the Inbox action asks a question, Lucent can wait for and resume from the reply.</p>
             {% else %}
             <p class="mt-2 text-sm font-semibold text-amber-950">Checklist enforced</p>
             <p class="mt-1 text-xs text-amber-700">The post-completion reviewer sees this workflow’s success criteria.</p>
@@ -185,6 +202,8 @@
         <h2 class="text-lg font-semibold text-gray-900">Actions</h2>
         {% if sched.is_server_workflow %}
         <p class="mt-1 text-sm text-gray-500">This source-defined action runs inside Lucent itself rather than through the request/task dispatcher.</p>
+        {% elif inbox_only_workflow %}
+        <p class="mt-1 text-sm text-gray-500">Each action sends a user-facing Inbox item with durable context instead of dispatching task work.</p>
         {% else %}
         <p class="mt-1 text-sm text-gray-500">Each action becomes a task when the workflow fires.</p>
         {% endif %}
@@ -198,6 +217,10 @@
                 {% if action.action_type == 'server_function' %}
                 <span class="rounded bg-indigo-50 px-2 py-0.5 text-xs text-indigo-700">server function</span>
                 {% if action.function %}<span class="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-600">{{ action.function }}</span>{% endif %}
+                {% elif action.action_type == 'user_interaction' %}
+                <span class="rounded bg-emerald-50 px-2 py-0.5 text-xs text-emerald-700">Inbox</span>
+                <span class="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-600">{{ action.interaction_type or 'message' }}</span>
+                {% if action.requires_response %}<span class="rounded bg-amber-50 px-2 py-0.5 text-xs text-amber-700">waits for reply</span>{% endif %}
                 {% else %}
                 <span class="rounded bg-blue-50 px-2 py-0.5 text-xs text-blue-700">{{ action.agent_type or sched.agent_type }}</span>
                 {% if action.model %}<span class="rounded bg-purple-50 px-2 py-0.5 text-xs text-purple-700">{{ action.model }}</span>{% endif %}

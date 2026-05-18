@@ -27,12 +27,26 @@ def _annotate_workflow_execution(sched: dict[str, Any]) -> None:
         for action in actions
         if isinstance(action, dict) and action.get("action_type") == "server_function"
     ]
+    interaction_actions = [
+        action
+        for action in actions
+        if isinstance(action, dict) and action.get("action_type") == "user_interaction"
+    ]
+    task_actions = [
+        action
+        for action in actions
+        if isinstance(action, dict) and action.get("action_type", "task") == "task"
+    ]
     sched["server_actions"] = server_actions
+    sched["interaction_actions"] = interaction_actions
     sched["is_server_workflow"] = bool(server_actions)
     if server_actions:
         action = server_actions[0]
         sched["executor_label"] = "Server function"
         sched["executor_detail"] = action.get("function") or "api_process"
+    elif interaction_actions and not task_actions:
+        sched["executor_label"] = "Inbox"
+        sched["executor_detail"] = f"{len(interaction_actions)} user interaction action(s)"
     else:
         sched["executor_label"] = "Agent"
         sched["executor_detail"] = sched.get("agent_type") or "default"

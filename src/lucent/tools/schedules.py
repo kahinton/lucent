@@ -234,12 +234,13 @@ Returns: JSON with the schedule details and its run history."""
         )
 
     @mcp.tool(
-        description="""Create a workflow with a typed trigger and ordered task actions.
+        description="""Create a workflow with a typed trigger and ordered actions.
 
 Workflows are the broader replacement for schedules. A workflow has:
 - trigger_type: 'schedule', 'manual', 'webhook', or 'integration_event'
 - request_template: request title/description/dependency fields used per run
-- actions: ordered task action objects run through the normal task framework
+- actions: ordered action objects. action_type='task' creates daemon task work;
+    action_type='user_interaction' sends a context-rich Inbox item to the user.
 - review_instructions: checklist included for post-completion request review
 
 For webhook workflows, provide webhook_secret. Lucent stores only a hash;
@@ -351,7 +352,8 @@ external callers send the secret as X-Lucent-Workflow-Token, Bearer token, or
                     {
                         str(action.get("agent_type") or "code")
                         for action in actions
-                        if str(action.get("agent_type") or "code") not in active_names
+                        if action.get("action_type", "task") == "task"
+                        and str(action.get("agent_type") or "code") not in active_names
                     }
                 )
                 if invalid:

@@ -28,8 +28,6 @@ async def _get_request_repository() -> RequestRepository:
 
 async def _get_pool():
     """Get the database connection pool."""
-    from lucent.db import init_db
-
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
         raise RuntimeError("DATABASE_URL environment variable is required")
@@ -762,6 +760,171 @@ Returns: JSON with the created output artifact."""
             return str(obj)
 
         return json.dumps(output, default=serialize)
+
+    @mcp.tool(
+        annotations=CREATE_ONLY,
+        description="""Send a proactive, context-rich message to a user.
+
+Use this instead of creating a request when Lucent needs to ask a clarification,
+hand off workflow output, or provide information that does not itself require
+daemon task execution. If requires_response=true, the item appears in the user's
+Inbox as "Reply needed" and the daemon should wait for the user response before
+continuing dependent work. Use dedupe_key for recurring cycle-generated
+questions so Lucent does not send duplicates while an earlier item is open."""
+    )
+    async def send_user_interaction(
+        title: str,
+        body: str,
+        interaction_type: str = "message",
+        requires_response: bool = False,
+        response_prompt: str = "",
+        priority: str = "medium",
+        references: list[dict] | None = None,
+        metadata: dict | None = None,
+        dedupe_key: str = "",
+        user_id: str = "",
+        source: str = "daemon",
+    ) -> str:
+        current_user_id, org_id, user_role, memory_scope, memory_scope_user_id = (
+            await _get_current_user_context()
+        )
+        if not current_user_id:
+            return json.dumps({"error": "Authentication required"})
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+        target_user_id = user_id or str(current_user_id)
+        if memory_scope == "user" and memory_scope_user_id is not None:
+            if target_user_id and str(target_user_id) != str(memory_scope_user_id):
+                return json.dumps({"error": "API key is scoped to a different user"})
+            target_user_id = str(memory_scope_user_id)
+        elif user_id and user_role not in ("admin", "owner", "daemon"):
+            if str(user_id) != str(current_user_id):
+                return json.dumps({"error": "Only admins/owners can target another user"})
+
+        from lucent.db.user_interactions import UserInteractionRepository
+
+        pool = await _get_pool()
+        repo = UserInteractionRepository(pool)
+        try:
+            interaction = await repo.create_interaction(
+                org_id=str(org_id),
+                user_id=target_user_id,
+                created_by=str(current_user_id),
+                title=title,
+                body=body,
+                source=source,
+                interaction_type=interaction_type,
+                priority=priority,
+                requires_response=requires_response,
+                response_prompt=response_prompt or None,
+                metadata=metadata or {},
+                references=references or [],
+                dedupe_key=dedupe_key or None,
+            )
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)})
+
+        return json.dumps(
+            {
+                "id": str(interaction["id"]),
+                "title": interaction["title"],
+                "status": interaction["status"],
+                "interaction_type": interaction["interaction_type"],
+                "requires_response": interaction["requires_response"],
+                "deduplicated": bool(interaction.get("deduplicated")),
+                "url": f"/inbox/{interaction['id']}",
+                "reference_count": interaction.get("reference_count", 0),
+                "message_count": interaction.get("message_count", 0),
+            },
+            default=str,
+        )
+
+    @mcp.tool(
+        annotations=READ_ONLY,
+        description="""List user Inbox interactions visible to the current/effective user.
+
+Use this during daemon follow-up to find user replies to clarification
+requests. By default it returns open/waiting/responded items and hides
+resolved/dismissed history unless include_resolved=true."""
+    )
+    async def list_user_interactions(
+        status: str = "",
+        include_resolved: bool = False,
+        limit: int = 25,
+    ) -> str:
+        user_id, org_id, _, _, _ = await _get_current_user_context()
+        if not user_id:
+            return json.dumps({"error": "Authentication required"})
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+        from lucent.db.user_interactions import UserInteractionRepository
+
+        pool = await _get_pool()
+        repo = UserInteractionRepository(pool)
+        try:
+            result = await repo.list_interactions(
+                org_id=str(org_id),
+                user_id=str(user_id),
+                status=status or None,
+                include_resolved=include_resolved,
+                limit=min(max(limit, 1), 100),
+            )
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)})
+        return json.dumps(result, default=str)
+
+    @mcp.tool(
+        annotations=READ_ONLY,
+        description="""Get one user Inbox interaction with full thread and references.
+
+Use this after list_user_interactions shows a responded item. The returned
+messages and references are the durable context needed to resume work."""
+    )
+    async def get_user_interaction(interaction_id: str) -> str:
+        user_id, org_id, _, _, _ = await _get_current_user_context()
+        if not user_id:
+            return json.dumps({"error": "Authentication required"})
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+        from lucent.db.user_interactions import UserInteractionRepository
+
+        pool = await _get_pool()
+        repo = UserInteractionRepository(pool)
+        detail = await repo.get_interaction(
+            interaction_id,
+            str(org_id),
+            user_id=str(user_id),
+        )
+        if not detail:
+            return json.dumps({"error": "Interaction not found"})
+        return json.dumps(detail, default=str)
+
+    @mcp.tool(
+        description="""Resolve a user Inbox interaction after processing the response.
+
+Use this when the daemon has consumed the user's reply and resumed or closed
+the dependent work. It removes the item from the active Inbox while preserving
+the thread and references for audit/context."""
+    )
+    async def resolve_user_interaction(interaction_id: str, note: str = "") -> str:
+        user_id, org_id, _, _, _ = await _get_current_user_context()
+        if not user_id:
+            return json.dumps({"error": "Authentication required"})
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+        from lucent.db.user_interactions import UserInteractionRepository
+
+        pool = await _get_pool()
+        repo = UserInteractionRepository(pool)
+        detail = await repo.resolve_interaction(
+            interaction_id=interaction_id,
+            org_id=str(org_id),
+            user_id=str(user_id),
+            note=note or None,
+        )
+        if not detail:
+            return json.dumps({"error": "Interaction not found"})
+        return json.dumps(detail, default=str)
 
     @mcp.tool(
         description="""Link a memory to a tracked task \u2014 showing which

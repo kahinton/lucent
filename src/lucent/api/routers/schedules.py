@@ -136,7 +136,7 @@ class ScheduleToggle(BaseModel):
 
 
 class WorkflowAction(BaseModel):
-    action_type: str = Field(default="task", pattern=r"^task$")
+    action_type: str = Field(default="task", pattern=r"^(task|user_interaction)$")
     title: str = Field(..., min_length=1, max_length=256)
     description: str | None = None
     prompt: str | None = None
@@ -150,6 +150,15 @@ class WorkflowAction(BaseModel):
     sandbox_config: dict | None = None
     output_contract: dict | None = None
     output_schema: dict | None = None
+    interaction_type: str | None = Field(
+        default=None,
+        pattern=r"^(message|clarification|review|decision|workflow_output|handoff)$",
+    )
+    requires_response: bool | None = None
+    response_prompt: str | None = None
+    metadata: dict | None = None
+    references: list[dict] | None = None
+    dedupe_key: str | None = Field(default=None, max_length=512)
 
 
 class WorkflowCreate(BaseModel):
@@ -290,6 +299,122 @@ def _workflow_allows_concurrent(sched: dict) -> bool:
     return trigger_type in {"webhook", "manual", "integration_event"}
 
 
+def _workflow_interaction_references(
+    *,
+    action: dict,
+    sched: dict,
+    run: dict | None = None,
+    req: dict | None = None,
+) -> list[dict]:
+    """Build references that let a workflow Inbox item recover its context."""
+    refs = []
+    raw_refs = action.get("references") or []
+    if isinstance(raw_refs, list):
+        refs.extend(ref for ref in raw_refs if isinstance(ref, dict))
+    workflow_id = str(sched.get("id") or "")
+    if workflow_id:
+        refs.append(
+            {
+                "reference_type": "workflow",
+                "reference_id": workflow_id,
+                "label": sched.get("title") or "Workflow",
+                "url": f"/workflows/{workflow_id}",
+            }
+        )
+    if run and run.get("id"):
+        refs.append(
+            {
+                "reference_type": "schedule_run",
+                "reference_id": str(run["id"]),
+                "label": f"Workflow run for {sched.get('title') or 'workflow'}",
+                "url": f"/workflows/{workflow_id}" if workflow_id else None,
+                "metadata": {"workflow_id": workflow_id},
+            }
+        )
+    if req and req.get("id"):
+        refs.append(
+            {
+                "reference_type": "request",
+                "reference_id": str(req["id"]),
+                "label": req.get("title") or "Workflow request",
+                "url": f"/activity/{req['id']}",
+            }
+        )
+    return refs
+
+
+async def _create_workflow_interaction(
+    *,
+    pool,
+    sched: dict,
+    run: dict | None,
+    action: dict,
+    org_id: str,
+    owner_user_id: str,
+    req: dict | None = None,
+    trigger_context: dict | None = None,
+) -> dict:
+    from lucent.db.user_interactions import UserInteractionRepository
+
+    repo = UserInteractionRepository(pool)
+    requires_response = bool(action.get("requires_response", False))
+    interaction_type = (
+        action.get("interaction_type")
+        or ("clarification" if requires_response else "workflow_output")
+    )
+    values = {
+        "workflow_title": str(sched.get("title") or "Workflow"),
+        "trigger_type": str(sched.get("trigger_type") or "schedule"),
+        "event_summary": _trigger_summary(trigger_context),
+    }
+    title = _render_template_text(
+        str(action.get("title") or sched.get("title") or "Workflow update"),
+        values,
+    )
+    body = _render_template_text(
+        str(
+            action.get("body")
+            or action.get("description")
+            or action.get("prompt")
+            or sched.get("description")
+            or "Workflow produced an update for review."
+        ),
+        values,
+    )
+    trigger_section = _format_trigger_context(trigger_context)
+    if trigger_section and action.get("include_trigger_context", True):
+        body = f"{body}{trigger_section}"
+    metadata = action.get("metadata") if isinstance(action.get("metadata"), dict) else {}
+    metadata = {
+        **metadata,
+        "workflow_id": str(sched.get("id")),
+        "workflow_title": sched.get("title"),
+        "workflow_run_id": str(run.get("id")) if run and run.get("id") else None,
+        "request_id": str(req.get("id")) if req and req.get("id") else None,
+        "trigger_summary": _trigger_summary(trigger_context),
+    }
+    return await repo.create_interaction(
+        org_id=org_id,
+        user_id=owner_user_id,
+        created_by=owner_user_id,
+        title=title,
+        body=body,
+        source="workflow",
+        interaction_type=interaction_type,
+        priority=action.get("priority") or sched.get("priority") or "medium",
+        requires_response=requires_response,
+        response_prompt=action.get("response_prompt"),
+        metadata=metadata,
+        references=_workflow_interaction_references(
+            action=action,
+            sched=sched,
+            run=run,
+            req=req,
+        ),
+        dedupe_key=action.get("dedupe_key") or None,
+    )
+
+
 async def _trigger_schedule_execution(
     schedule_id: str,
     user: AuthenticatedUser | None,
@@ -339,6 +464,10 @@ async def _trigger_schedule_execution(
             advance_schedule=advance_schedule,
         )
         return result or {"schedule": sched, "workflow": sched, "already_fired": True}
+    task_actions = [a for a in actions if a.get("action_type", "task") == "task"]
+    interaction_actions = [
+        a for a in actions if a.get("action_type") == "user_interaction"
+    ]
 
     run = await sched_repo.mark_schedule_run(
         schedule_id,
@@ -354,7 +483,7 @@ async def _trigger_schedule_execution(
     )
 
     try:
-        if not _workflow_allows_concurrent(sched):
+        if task_actions and not _workflow_allows_concurrent(sched):
             async with pool.acquire() as conn:
                 active_request = await conn.fetchval(
                     """SELECT id FROM requests
@@ -405,121 +534,142 @@ async def _trigger_schedule_execution(
                     "event": skip_event,
                 }
 
-        req = await req_repo.create_request(
-            title=request_title,
-            org_id=org_id,
-            description=request_description,
-            source=REQUEST_SOURCE_SCHEDULE,
-            priority=sched.get("priority", "medium"),
-            created_by=owner_user_id,
-            dependency_policy=dependency_policy,
-        )
-
-        from lucent.db.definitions import DefinitionRepository
-
-        def_repo = DefinitionRepository(pool)
-        agents = (
-            await def_repo.list_agents(
-                org_id,
-                status="active",
-                limit=500,
-                requester_user_id=owner_user_id,
-                requester_role=owner_role,
-            )
-        )["items"]
-        active_names = {a["name"] for a in agents}
-        trigger_section = _format_trigger_context(trigger_context)
-
+        req = None
         created_tasks = []
-        for idx, action in enumerate(actions):
-            if action.get("action_type", "task") != "task":
-                continue
-            agent_type = action.get("agent_type") or sched.get("agent_type") or "code"
-            if agent_type and agent_type not in active_names:
-                logger.warning(
-                    "Workflow %s action %s references unknown agent_type '%s' — "
-                    "falling back to 'code'",
-                    schedule_id, idx, agent_type,
-                )
-                agent_type = "code"
-            if agent_type and agent_type not in active_names:
-                raise RuntimeError(
-                    f"Workflow action references agent_type '{action.get('agent_type')}', "
-                    "but neither it nor fallback agent 'code' is approved/accessible "
-                    "for the workflow owner."
-                )
-
-            task_model = action.get("model") if "model" in action else sched.get("model")
-            task_reasoning_effort = (
-                action.get("reasoning_effort")
-                if "reasoning_effort" in action
-                else sched.get("reasoning_effort")
-            )
-            if task_model:
-                from lucent.model_registry import validate_model, validate_reasoning_effort
-
-                model_error = validate_model(task_model, require_tools=True)
-                if model_error:
-                    logger.warning(
-                        "Workflow %s action has invalid model '%s': %s — clearing override",
-                        schedule_id, task_model, model_error,
-                    )
-                    task_model = None
-                    task_reasoning_effort = None
-                else:
-                    effort_error = validate_reasoning_effort(task_model, task_reasoning_effort)
-                    if effort_error:
-                        logger.warning(
-                            "Workflow %s action has invalid reasoning_effort '%s': %s — "
-                            "clearing override",
-                            schedule_id, task_reasoning_effort, effort_error,
-                        )
-                        task_reasoning_effort = None
-            else:
-                task_reasoning_effort = None
-
-            output_contract = action.get("output_contract")
-            if action.get("output_schema") and not output_contract:
-                output_contract = {
-                    "json_schema": action["output_schema"],
-                    "on_failure": "fallback",
-                    "max_retries": 1,
-                }
-            task_description = (
-                action.get("description")
-                or action.get("prompt")
-                or sched.get("prompt")
-                or sched.get("description")
-                or "Run this workflow action and record any user-visible outputs."
-            )
-            if trigger_section:
-                task_description = f"{task_description}{trigger_section}"
-            sandbox_template_id = (
-                str(action.get("sandbox_template_id") or sched.get("sandbox_template_id") or "")
-                or None
-            )
-            task = await req_repo.create_task(
-                request_id=str(req["id"]),
-                title=action.get("title") or sched["title"],
-                description=task_description,
-                agent_type=agent_type,
-                agent_definition_id=action.get("agent_definition_id"),
-                priority=action.get("priority") or sched.get("priority", "medium"),
-                sequence_order=int(action.get("sequence_order", idx) or idx),
-                model=task_model,
-                reasoning_effort=task_reasoning_effort,
-                sandbox_template_id=sandbox_template_id,
-                sandbox_config=action.get("sandbox_config") or sched.get("sandbox_config"),
+        if task_actions:
+            req = await req_repo.create_request(
+                title=request_title,
                 org_id=org_id,
-                requesting_user_id=owner_user_id,
-                output_contract=output_contract,
+                description=request_description,
+                source=REQUEST_SOURCE_SCHEDULE,
+                priority=sched.get("priority", "medium"),
+                created_by=owner_user_id,
+                dependency_policy=dependency_policy,
             )
-            created_tasks.append(task)
 
-        if not created_tasks:
-            raise RuntimeError("Workflow did not create any task actions")
+            from lucent.db.definitions import DefinitionRepository
 
-        await sched_repo.link_run_to_request(str(run["id"]), str(req["id"]))
+            def_repo = DefinitionRepository(pool)
+            agents = (
+                await def_repo.list_agents(
+                    org_id,
+                    status="active",
+                    limit=500,
+                    requester_user_id=owner_user_id,
+                    requester_role=owner_role,
+                )
+            )["items"]
+            active_names = {a["name"] for a in agents}
+            trigger_section = _format_trigger_context(trigger_context)
+
+            for idx, action in enumerate(task_actions):
+                agent_type = action.get("agent_type") or sched.get("agent_type") or "code"
+                if agent_type and agent_type not in active_names:
+                    logger.warning(
+                        "Workflow %s action %s references unknown agent_type '%s' — "
+                        "falling back to 'code'",
+                        schedule_id, idx, agent_type,
+                    )
+                    agent_type = "code"
+                if agent_type and agent_type not in active_names:
+                    raise RuntimeError(
+                        f"Workflow action references agent_type '{action.get('agent_type')}', "
+                        "but neither it nor fallback agent 'code' is approved/accessible "
+                        "for the workflow owner."
+                    )
+
+                task_model = action.get("model") if "model" in action else sched.get("model")
+                task_reasoning_effort = (
+                    action.get("reasoning_effort")
+                    if "reasoning_effort" in action
+                    else sched.get("reasoning_effort")
+                )
+                if task_model:
+                    from lucent.model_registry import validate_model, validate_reasoning_effort
+
+                    model_error = validate_model(task_model, require_tools=True)
+                    if model_error:
+                        logger.warning(
+                            "Workflow %s action has invalid model '%s': %s — clearing override",
+                            schedule_id, task_model, model_error,
+                        )
+                        task_model = None
+                        task_reasoning_effort = None
+                    else:
+                        effort_error = validate_reasoning_effort(task_model, task_reasoning_effort)
+                        if effort_error:
+                            logger.warning(
+                                "Workflow %s action has invalid reasoning_effort '%s': %s — "
+                                "clearing override",
+                                schedule_id, task_reasoning_effort, effort_error,
+                            )
+                            task_reasoning_effort = None
+                else:
+                    task_reasoning_effort = None
+
+                output_contract = action.get("output_contract")
+                if action.get("output_schema") and not output_contract:
+                    output_contract = {
+                        "json_schema": action["output_schema"],
+                        "on_failure": "fallback",
+                        "max_retries": 1,
+                    }
+                task_description = (
+                    action.get("description")
+                    or action.get("prompt")
+                    or sched.get("prompt")
+                    or sched.get("description")
+                    or "Run this workflow action and record any user-visible outputs."
+                )
+                if trigger_section:
+                    task_description = f"{task_description}{trigger_section}"
+                sandbox_template_id = (
+                    str(action.get("sandbox_template_id") or sched.get("sandbox_template_id") or "")
+                    or None
+                )
+                task = await req_repo.create_task(
+                    request_id=str(req["id"]),
+                    title=action.get("title") or sched["title"],
+                    description=task_description,
+                    agent_type=agent_type,
+                    agent_definition_id=action.get("agent_definition_id"),
+                    priority=action.get("priority") or sched.get("priority", "medium"),
+                    sequence_order=int(action.get("sequence_order", idx) or idx),
+                    model=task_model,
+                    reasoning_effort=task_reasoning_effort,
+                    sandbox_template_id=sandbox_template_id,
+                    sandbox_config=action.get("sandbox_config") or sched.get("sandbox_config"),
+                    org_id=org_id,
+                    requesting_user_id=owner_user_id,
+                    output_contract=output_contract,
+                )
+                created_tasks.append(task)
+
+            await sched_repo.link_run_to_request(str(run["id"]), str(req["id"]))
+
+        created_interactions = []
+        for action in interaction_actions:
+            created_interactions.append(
+                await _create_workflow_interaction(
+                    pool=pool,
+                    sched=sched,
+                    run=run,
+                    action=action,
+                    org_id=org_id,
+                    owner_user_id=owner_user_id,
+                    req=req,
+                    trigger_context=trigger_context,
+                )
+            )
+
+        if not created_tasks and not created_interactions:
+            raise RuntimeError("Workflow did not create any task or user interaction actions")
+
+        if created_interactions and not created_tasks:
+            await sched_repo.complete_run(
+                str(run["id"]),
+                result=f"Sent {len(created_interactions)} Inbox interaction(s)",
+            )
     except Exception as e:
         logger.error("Workflow %s triggered but task creation failed: %s", schedule_id, e)
         await sched_repo.fail_run(str(run["id"]), str(e))
@@ -531,6 +681,7 @@ async def _trigger_schedule_execution(
         "request": req,
         "run": run,
         "tasks": created_tasks,
+        "interactions": created_interactions,
     }
 
 
@@ -772,6 +923,8 @@ async def create_workflow(
 
     actions = [action.model_dump(exclude_none=True) for action in body.actions]
     for action in actions:
+        if action.get("action_type", "task") != "task":
+            continue
         if action.get("model"):
             model_error = validate_model(action["model"], require_tools=True)
             if model_error:

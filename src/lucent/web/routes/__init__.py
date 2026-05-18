@@ -22,6 +22,7 @@ from . import (
     schedules,
     secrets,
     settings,
+    user_interactions,
 )
 
 # Re-export symbols that tests and other modules import directly
@@ -39,6 +40,7 @@ router.include_router(daemon.router)
 router.include_router(memories.router)
 router.include_router(sandboxes.router)
 router.include_router(settings.router)
+router.include_router(user_interactions.router)
 router.include_router(requests_routes.router)
 router.include_router(schedules.router)
 

@@ -380,8 +380,9 @@ def create_app() -> FastAPI:
 
     @app.middleware("http")
     async def review_badge_middleware(request: Request, call_next):
-        """Attach pending approval count for web templates."""
+        """Attach approval and interaction attention counts for web templates."""
         request.state.pending_approval_count = 0
+        request.state.user_interaction_count = 0
 
         # Only needed for web page rendering, not API/static/other methods.
         if request.method == "GET" and not request.url.path.startswith(("/api/", "/static/")):
@@ -404,6 +405,18 @@ def create_app() -> FastAPI:
                                 org_id,
                             )
                         request.state.pending_approval_count = count or 0
+                        try:
+                            from lucent.db.user_interactions import UserInteractionRepository
+
+                            interaction_repo = UserInteractionRepository(pool)
+                            request.state.user_interaction_count = (
+                                await interaction_repo.count_attention_needed(
+                                    org_id=str(org_id),
+                                    user_id=str(user["id"]),
+                                )
+                            )
+                        except Exception:
+                            request.state.user_interaction_count = 0
             except Exception:
                 # Best-effort UI enhancement only — never block request on badge count.
                 pass
@@ -549,8 +562,14 @@ def create_app() -> FastAPI:
 
     # Include request tracking router
     from lucent.api.routers import requests as requests_router
+    from lucent.api.routers import user_interactions as user_interactions_router
 
     app.include_router(requests_router.router, prefix="/api", tags=["Requests"])
+    app.include_router(
+        user_interactions_router.router,
+        prefix="/api",
+        tags=["User Interactions"],
+    )
 
     # Include reviews router
     from lucent.api.routers import reviews as reviews_router
