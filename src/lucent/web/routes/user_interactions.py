@@ -16,6 +16,64 @@ router = APIRouter()
 ALLOWED_PER_PAGE = {10, 25, 50}
 
 
+async def _get_or_create_interaction_chat_session(pool, user, interaction: dict) -> dict:
+    """Return the persistent embedded chat session for this Inbox item.
+
+    Inbox interactions are not just static messages; opening one starts a
+    focused Lucent session grounded in the handoff thread and attached context.
+    """
+    from lucent.db.llm_sessions import LLMSessionRepository
+
+    interaction_id = str(interaction["id"])
+    org_id = str(user.organization_id)
+    user_id = str(user.id)
+    async with pool.acquire() as conn:
+        existing = await conn.fetchrow(
+            """SELECT * FROM llm_sessions
+               WHERE organization_id = $1::uuid
+                 AND user_id = $2::uuid
+                 AND kind = 'embedded_chat'
+                 AND status <> 'deleted'
+                 AND metadata->>'interaction_id' = $3
+               ORDER BY COALESCE(last_message_at, updated_at, created_at) DESC
+               LIMIT 1""",
+            org_id,
+            user_id,
+            interaction_id,
+        )
+    if existing:
+        return dict(existing)
+
+    repo = LLMSessionRepository(pool)
+    session = await repo.create_session(
+        org_id=org_id,
+        user_id=user_id,
+        kind="embedded_chat",
+        title=f"Inbox: {interaction.get('title') or 'Lucent message'}"[:256],
+        metadata={
+            "interaction_id": interaction_id,
+            "surface": "inbox_interaction",
+            "interaction_type": interaction.get("interaction_type"),
+            "source": interaction.get("source"),
+        },
+    )
+    for message in interaction.get("messages") or []:
+        role = "user" if message.get("sender_type") == "user" else "assistant"
+        await repo.add_message(
+            session["id"],
+            role=role,
+            content=message.get("body") or "",
+            org_id=org_id,
+            metadata={
+                "source": "user_interaction_seed",
+                "interaction_id": interaction_id,
+                "interaction_message_id": str(message.get("id")),
+                "sender_type": message.get("sender_type"),
+            },
+        )
+    return session
+
+
 def _status_filter(status: str | None) -> tuple[str | None, bool]:
     if status in {"open", "waiting_on_user", "responded", "resolved", "dismissed"}:
         return status, status in {"resolved", "dismissed"}
@@ -107,6 +165,7 @@ async def inbox_detail(request: Request, interaction_id: str):
         org_id=str(user.organization_id),
         user_id=str(user.id),
     )
+    chat_session = await _get_or_create_interaction_chat_session(pool, user, interaction)
 
     return templates.TemplateResponse(
         request,
@@ -114,6 +173,7 @@ async def inbox_detail(request: Request, interaction_id: str):
         {
             "user": user,
             "interaction": interaction,
+            "interaction_chat_session": chat_session,
             "csrf_token": request.cookies.get(CSRF_COOKIE_NAME, ""),
         },
     )
@@ -124,6 +184,8 @@ async def inbox_reply(
     request: Request,
     interaction_id: str,
     body: str = Form(...),
+    chat_session_id: str = Form(""),
+    inline_chat: str = Form(""),
 ):
     """Reply to a Lucent interaction; the daemon can read the response later."""
     await _check_csrf(request)
@@ -150,7 +212,10 @@ async def inbox_reply(
             sender_type="user",
             sender_user_id=str(user.id),
             body=content,
-            metadata={"source": "web-ui"},
+            metadata={
+                "source": "inline-chat" if inline_chat else "web-ui",
+                "llm_session_id": chat_session_id or None,
+            },
         )
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc

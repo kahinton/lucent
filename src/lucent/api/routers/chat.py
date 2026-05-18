@@ -654,6 +654,13 @@ async def _build_system_prompt(user: dict, pool, page_context: dict | None) -> s
                     user_id=str(user["id"]),
                 )
                 if interaction:
+                    parts.append(
+                        "\n## Inbox Conversation Instructions\n"
+                        "This page is an active Lucent conversation that began from a proactive "
+                        "Inbox handoff. Respond interactively on the page; do not tell the user "
+                        "to reply elsewhere or wait for a daemon cycle. If the user asks for "
+                        "tracked follow-up work, use `create_request` and summarize what was queued."
+                    )
                     parts.append("\n## Inbox Interaction Being Viewed")
                     parts.append(f"- Title: {interaction.get('title')}")
                     parts.append(f"- Type: {interaction.get('interaction_type')}")

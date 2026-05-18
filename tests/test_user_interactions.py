@@ -257,11 +257,44 @@ async def test_inbox_web_list_detail_and_reply(web_client, db_pool, interaction_
     assert detail_resp.status_code == 200
     assert "Pick A or B." in detail_resp.text
     assert "Candidate A" in detail_resp.text
-    assert "Reply to Lucent" in detail_resp.text
+    assert "Continue with Lucent" in detail_resp.text
+    assert "Context Lucent brought" in detail_resp.text
+    assert "Metadata" not in detail_resp.text
+    assert "Dedupe key" not in detail_resp.text
+    assert "Details" not in detail_resp.text
+    async with db_pool.acquire() as conn:
+        session_row = await conn.fetchrow(
+            """SELECT id, title, metadata
+               FROM llm_sessions
+               WHERE organization_id = $1::uuid
+                 AND user_id = $2::uuid
+                 AND kind = 'embedded_chat'
+                 AND metadata->>'interaction_id' = $3""",
+            str(interaction_user["organization_id"]),
+            str(interaction_user["id"]),
+            str(interaction["id"]),
+        )
+        assert session_row is not None
+        seeded_messages = await conn.fetch(
+            "SELECT role, content, metadata FROM llm_messages WHERE session_id = $1 ORDER BY sequence",
+            session_row["id"],
+        )
+    assert session_row["title"].startswith("Inbox:")
+    assert session_row["metadata"]["interaction_id"] == str(interaction["id"])
+    assert [(m["role"], m["content"]) for m in seeded_messages] == [
+        ("assistant", "I found two memory candidates and need your call."),
+    ]
 
     reply_resp = await web_client.post(
         f"/inbox/{interaction['id']}/reply",
-        data=_csrf_data(web_client, {"body": "Use source A."}),
+        data=_csrf_data(
+            web_client,
+            {
+                "body": "Use source A.",
+                "chat_session_id": str(session_row["id"]),
+                "inline_chat": "1",
+            },
+        ),
         follow_redirects=False,
     )
     assert reply_resp.status_code == 303
@@ -273,6 +306,8 @@ async def test_inbox_web_list_detail_and_reply(web_client, db_pool, interaction_
     )
     assert updated["status"] == "responded"
     assert updated["messages"][-1]["body"] == "Use source A."
+    assert updated["messages"][-1]["metadata"]["source"] == "inline-chat"
+    assert updated["messages"][-1]["metadata"]["llm_session_id"] == str(session_row["id"])
 
     unread = await repo.create_interaction(
         org_id=interaction_user["organization_id"],

@@ -2,27 +2,8 @@
 
 {% block title %}{{ interaction.title }} - Inbox - Lucent{% endblock %}
 
-{% macro status_badge(item) %}
-<span class="inline-flex items-center rounded-full px-2.5 py-1 text-xs font-semibold
-    {% if item.status == 'waiting_on_user' %}bg-amber-100 text-amber-800
-    {% elif item.status == 'responded' %}bg-primary-100 text-primary-700
-    {% elif item.status == 'resolved' %}bg-green-100 text-green-700
-    {% elif item.status == 'dismissed' %}bg-gray-100 text-gray-500
-    {% else %}bg-blue-100 text-blue-700{% endif %}">
-    {{ item.status | replace('_', ' ') }}
-</span>
-{% endmacro %}
-
-{% macro type_badge(item) %}
-<span class="inline-flex items-center rounded-full px-2.5 py-1 text-xs font-semibold
-    {% if item.interaction_type == 'clarification' %}bg-amber-100 text-amber-800
-    {% elif item.interaction_type == 'workflow_output' %}bg-blue-100 text-blue-700
-    {% elif item.interaction_type == 'review' %}bg-purple-100 text-purple-700
-    {% elif item.interaction_type == 'decision' %}bg-orange-100 text-orange-700
-    {% elif item.interaction_type == 'handoff' %}bg-emerald-100 text-emerald-700
-    {% else %}bg-gray-100 text-gray-600{% endif %}">
-    {{ item.interaction_type | replace('_', ' ') }}
-</span>
+{% macro conversation_state(item) %}
+{% if item.status == 'waiting_on_user' %}Lucent needs your input{% elif item.status == 'responded' %}Conversation in progress{% elif item.status == 'resolved' %}Done{% elif item.status == 'dismissed' %}Dismissed{% else %}Ready to discuss{% endif %}
 {% endmacro %}
 
 {% macro reference_href(ref) %}
@@ -34,16 +15,19 @@
 <div class="rounded-lg border border-gray-200 bg-white p-3 shadow-sm">
     <div class="flex items-start justify-between gap-3">
         <div class="min-w-0">
-            <div class="mb-1 flex items-center gap-1.5">
-                <span class="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-gray-500">{{ ref.reference_type | replace('_', ' ') }}</span>
-                {% if ref.reference_id %}<span class="font-mono text-[10px] text-gray-400">{{ (ref.reference_id|string)[:8] }}</span>{% endif %}
-            </div>
+            <p class="text-[11px] font-semibold uppercase tracking-wide text-gray-400">
+                {% if ref.reference_type == 'schedule_run' %}Workflow run
+                {% elif ref.reference_type == 'task_output' %}Task output
+                {% elif ref.reference_type == 'llm_session' %}Conversation
+                {% elif ref.reference_type == 'other' %}Context
+                {% else %}{{ ref.reference_type | replace('_', ' ') }}{% endif %}
+            </p>
             {% if href != '#' %}
-            <a href="{{ href }}" {% if ref.url and not ref.url.startswith('/') %}target="_blank" rel="noopener noreferrer"{% endif %} class="text-sm font-medium text-gray-900 hover:text-primary-700 break-words">
-                {{ ref.label or ref.url or ref.reference_id }}
+            <a href="{{ href }}" {% if ref.url and not ref.url.startswith('/') %}target="_blank" rel="noopener noreferrer"{% endif %} class="mt-1 block break-words text-sm font-medium text-gray-900 hover:text-primary-700">
+                {{ ref.label or ref.url or 'Open context' }}
             </a>
             {% else %}
-            <p class="text-sm font-medium text-gray-900 break-words">{{ ref.label or ref.reference_id or 'Context reference' }}</p>
+            <p class="mt-1 break-words text-sm font-medium text-gray-900">{{ ref.label or 'Context note' }}</p>
             {% endif %}
             {% if ref.metadata and ref.metadata.description %}
             <p class="mt-1 text-xs text-gray-500">{{ ref.metadata.description }}</p>
@@ -56,119 +40,88 @@
 </div>
 {% endmacro %}
 
-{% macro message_bubble(msg) %}
-<div class="flex {% if msg.sender_type == 'user' %}justify-end{% else %}justify-start{% endif %}">
-    <div class="max-w-[82%] rounded-2xl px-4 py-3 shadow-sm
-        {% if msg.sender_type == 'user' %}rounded-br-md bg-primary-600 text-white
-        {% elif msg.sender_type == 'system' %}rounded-bl-md bg-gray-100 text-gray-700 border border-gray-200
-        {% else %}rounded-bl-md bg-white text-gray-800 border border-gray-200{% endif %}">
-        <div class="mb-1 flex items-center gap-2 text-xs {% if msg.sender_type == 'user' %}text-primary-100{% else %}text-gray-400{% endif %}">
-            {% if msg.sender_type == 'user' %}
-            <span class="font-semibold">You</span>
-            {% elif msg.sender_type == 'system' %}
-            <span class="font-semibold">System</span>
-            {% else %}
-            <span class="font-semibold">Lucent</span>
-            {% endif %}
-            <span>{{ msg.created_at.strftime('%Y-%m-%d %H:%M') if msg.created_at }}</span>
-        </div>
-        <div class="whitespace-pre-wrap text-sm leading-relaxed">{{ msg.body }}</div>
-    </div>
-</div>
-{% endmacro %}
-
 {% block content %}
 <div class="mb-6">
     <div class="mb-2 flex items-center gap-2 text-sm text-gray-500">
         <a href="/inbox" class="hover:text-gray-700">Inbox</a>
         <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5"/></svg>
-        <span class="text-gray-700">{{ interaction.title[:60] }}</span>
+        <span class="text-gray-700">Conversation</span>
     </div>
-    <div class="flex items-start justify-between gap-4">
-        <div>
-            <h1 class="text-2xl font-bold text-gray-900">{{ interaction.title }}</h1>
-            <p class="mt-1 max-w-3xl text-sm text-gray-500">Lucent sent this with durable context so the thread can be resumed later without rediscovery.</p>
-            <div class="mt-3 flex flex-wrap items-center gap-2">
-                {{ type_badge(interaction) }}
-                {{ status_badge(interaction) }}
-                {% if interaction.requires_response %}
-                <span class="inline-flex items-center rounded-full bg-amber-100 px-2.5 py-1 text-xs font-semibold text-amber-800">Requires response</span>
-                {% endif %}
-                {% if interaction.priority != 'medium' %}
-                <span class="inline-flex items-center rounded-full bg-orange-100 px-2.5 py-1 text-xs font-semibold text-orange-700">{{ interaction.priority }}</span>
+    <div class="rounded-2xl border border-primary-100 bg-gradient-to-br from-primary-50 via-white to-white p-5 shadow-sm">
+        <div class="flex items-start justify-between gap-4">
+            <div class="min-w-0">
+                <div class="mb-3 inline-flex items-center gap-2 rounded-full bg-white px-3 py-1 text-xs font-semibold text-primary-700 shadow-sm ring-1 ring-primary-100">
+                    <span class="h-2 w-2 rounded-full {% if interaction.status == 'waiting_on_user' %}bg-amber-500{% elif interaction.status in ('resolved', 'dismissed') %}bg-gray-400{% else %}bg-primary-500{% endif %}"></span>
+                    {{ conversation_state(interaction) | trim }}
+                </div>
+                <h1 class="text-2xl font-bold text-gray-900">{{ interaction.title }}</h1>
+                <p class="mt-2 max-w-3xl text-sm text-gray-600">Lucent started this conversation with the context it was already using. You can continue right here — ask questions, make a decision, or tell Lucent to create follow-up work.</p>
+            </div>
+            <div class="flex shrink-0 items-center gap-2">
+                {% if interaction.status not in ('resolved', 'dismissed') %}
+                <form method="post" action="/inbox/{{ interaction.id }}/resolve">
+                    <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
+                    <button type="submit" class="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-emerald-700">Mark done</button>
+                </form>
+                <form method="post" action="/inbox/{{ interaction.id }}/dismiss">
+                    <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
+                    <button type="submit" class="rounded-lg bg-white px-3 py-2 text-sm font-semibold text-gray-600 shadow-sm ring-1 ring-gray-200 hover:bg-gray-50">Dismiss</button>
+                </form>
                 {% endif %}
             </div>
-        </div>
-        <div class="flex shrink-0 items-center gap-2">
-            {% if interaction.status not in ('resolved', 'dismissed') %}
-            <form method="post" action="/inbox/{{ interaction.id }}/resolve">
-                <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
-                <button type="submit" class="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-emerald-700">Resolve</button>
-            </form>
-            <form method="post" action="/inbox/{{ interaction.id }}/dismiss">
-                <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
-                <button type="submit" class="rounded-lg bg-gray-100 px-3 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-200">Dismiss</button>
-            </form>
-            {% endif %}
         </div>
     </div>
 </div>
 
-<div class="grid grid-cols-3 gap-6">
-    <div class="col-span-2 space-y-6">
-        {% if interaction.response_prompt and interaction.status not in ('resolved', 'dismissed') %}
-        <div class="rounded-xl border border-amber-200 bg-amber-50 p-4 shadow-sm">
-            <div class="flex items-start gap-3">
-                <div class="rounded-lg bg-amber-100 p-2 text-amber-700">
-                    <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M8.625 9.75a.375.375 0 11-.75 0 .375.375 0 01.75 0zm3.75 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm3.75 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zM21 12c0 4.556-4.03 8.25-9 8.25a9.764 9.764 0 01-2.555-.337A5.972 5.972 0 015.41 20.97a5.969 5.969 0 01-.474-.065 4.48 4.48 0 00.978-2.025c.09-.457-.133-.901-.467-1.226C3.93 16.178 3 14.189 3 12c0-4.556 4.03-8.25 9-8.25s9 3.694 9 8.25z" /></svg>
-                </div>
+<div class="grid gap-6 xl:grid-cols-[minmax(0,1fr)_320px]">
+    <section class="min-w-0 rounded-2xl border border-gray-200 bg-white shadow-sm" aria-labelledby="conversation-heading">
+        <div class="border-b border-gray-100 px-5 py-4">
+            <div class="flex items-start justify-between gap-3">
                 <div>
-                    <h2 class="text-sm font-semibold text-amber-950">What Lucent needs from you</h2>
-                    <p class="mt-1 whitespace-pre-wrap text-sm text-amber-800">{{ interaction.response_prompt }}</p>
+                    <h2 id="conversation-heading" class="text-lg font-semibold text-gray-900">Continue with Lucent</h2>
+                    <p class="mt-1 text-sm text-gray-500">This is a live session grounded in the Inbox message and its context links.</p>
                 </div>
+                <span id="inline-chat-status" class="rounded-full bg-gray-100 px-2.5 py-1 text-xs font-medium text-gray-500">Connecting…</span>
             </div>
+        </div>
+
+        {% if interaction.response_prompt and interaction.status not in ('resolved', 'dismissed') %}
+        <div class="border-b border-amber-100 bg-amber-50 px-5 py-4">
+            <p class="text-xs font-semibold uppercase tracking-wide text-amber-700">Lucent is asking</p>
+            <p class="mt-1 whitespace-pre-wrap text-sm text-amber-900">{{ interaction.response_prompt }}</p>
         </div>
         {% endif %}
 
-        <div class="rounded-xl border border-gray-200 bg-gray-50 p-4 shadow-sm">
-            <div class="mb-4 flex items-center justify-between gap-3">
-                <div>
-                    <h2 class="text-lg font-semibold text-gray-900">Thread</h2>
-                    <p class="text-sm text-gray-500">Replies are saved for daemon/workflow follow-up.</p>
+        <div id="inline-chat-messages" class="max-h-[620px] min-h-[360px] space-y-4 overflow-y-auto bg-gray-50 px-5 py-5">
+            <div class="flex gap-3" data-inline-chat-loading>
+                <div class="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-primary-100 text-primary-700">✦</div>
+                <div class="max-w-[82%] rounded-2xl rounded-tl-md border border-gray-200 bg-white px-4 py-3 text-sm leading-relaxed text-gray-600 shadow-sm">
+                    Loading this conversation…
                 </div>
-                <span class="rounded-full bg-white px-2.5 py-1 text-xs font-medium text-gray-600 border border-gray-200">{{ interaction.messages|length }} message{% if interaction.messages|length != 1 %}s{% endif %}</span>
-            </div>
-            <div class="space-y-3">
-                {% for msg in interaction.messages %}
-                {{ message_bubble(msg) }}
-                {% endfor %}
             </div>
         </div>
 
         {% if interaction.status not in ('resolved', 'dismissed') %}
-        <div class="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
-            <h2 class="text-sm font-semibold text-gray-900">Reply to Lucent</h2>
-            <p class="mt-1 text-sm text-gray-500">Use this when the daemon should be able to pick up your answer later. For exploratory back-and-forth, the chat bubble on this page includes this interaction as page context.</p>
-            <form method="post" action="/inbox/{{ interaction.id }}/reply" class="mt-3 space-y-3">
-                <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
-                <textarea name="body" rows="5" maxlength="20000" required placeholder="Answer the question, make the decision, or add the context Lucent needs…" class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-800 placeholder:text-gray-400 focus:border-primary-500 focus:outline-none focus:ring-1 focus:ring-primary-500"></textarea>
+        <div class="border-t border-gray-100 bg-white px-5 py-4">
+            <form id="inline-chat-form" class="space-y-3">
+                <textarea id="inline-chat-input" rows="3" maxlength="20000" placeholder="Continue the conversation…" class="w-full resize-none rounded-xl border border-gray-300 px-4 py-3 text-sm text-gray-900 placeholder:text-gray-400 focus:border-primary-500 focus:outline-none focus:ring-2 focus:ring-primary-100"></textarea>
                 <div class="flex items-center justify-between gap-3">
-                    <p class="text-xs text-gray-400">Your reply changes the item to “responded” so Lucent can continue deliberately.</p>
-                    <button type="submit" class="rounded-lg bg-primary-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-primary-700">Send reply</button>
+                    <p class="text-xs text-gray-500">Your message is saved to this Inbox thread and Lucent responds here.</p>
+                    <button id="inline-chat-send" type="submit" class="rounded-lg bg-primary-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-primary-700 disabled:cursor-not-allowed disabled:opacity-40" disabled>Send</button>
                 </div>
             </form>
         </div>
         {% else %}
-        <div class="rounded-xl border border-gray-200 bg-white p-4 text-sm text-gray-500 shadow-sm">
-            This inbox item is {{ interaction.status }}. Re-open by creating a new follow-up interaction if more context is needed.
+        <div class="border-t border-gray-100 bg-white px-5 py-4 text-sm text-gray-500">
+            This conversation is {{ interaction.status }}. Start a new Inbox item or chat if more follow-up is needed.
         </div>
         {% endif %}
-    </div>
+    </section>
 
     <aside class="space-y-4">
-        <div class="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
-            <h2 class="text-xs font-semibold uppercase tracking-wider text-gray-400">Attached context</h2>
-            <p class="mt-1 text-sm text-gray-500">This is the important part: Lucent attached the exact things it was looking at.</p>
+        <div class="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
+            <h2 class="text-sm font-semibold text-gray-900">Context Lucent brought</h2>
+            <p class="mt-1 text-sm text-gray-500">Helpful links and artifacts connected to this conversation.</p>
             {% if interaction.references %}
             <div class="mt-3 space-y-2">
                 {% for ref in interaction.references %}
@@ -176,50 +129,241 @@
                 {% endfor %}
             </div>
             {% else %}
-            <p class="mt-3 rounded-lg bg-gray-50 p-3 text-sm text-gray-400">No structured references attached.</p>
+            <p class="mt-3 rounded-lg bg-gray-50 p-3 text-sm text-gray-400">No extra links were attached.</p>
             {% endif %}
         </div>
 
-        <div class="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
-            <h2 class="text-xs font-semibold uppercase tracking-wider text-gray-400">Details</h2>
-            <dl class="mt-3 space-y-2 text-xs">
-                <div class="flex justify-between gap-3">
-                    <dt class="text-gray-500">ID</dt>
-                    <dd class="font-mono text-gray-700">{{ (interaction.id|string)[:8] }}</dd>
-                </div>
-                <div class="flex justify-between gap-3">
-                    <dt class="text-gray-500">Source</dt>
-                    <dd class="text-gray-700">{{ interaction.source }}</dd>
-                </div>
-                <div class="flex justify-between gap-3">
-                    <dt class="text-gray-500">Created</dt>
-                    <dd class="text-gray-700">{{ interaction.created_at.strftime('%Y-%m-%d %H:%M') if interaction.created_at }}</dd>
-                </div>
-                <div class="flex justify-between gap-3">
-                    <dt class="text-gray-500">Updated</dt>
-                    <dd class="text-gray-700">{{ interaction.updated_at.strftime('%Y-%m-%d %H:%M') if interaction.updated_at }}</dd>
-                </div>
-                {% if interaction.first_response_at %}
-                <div class="flex justify-between gap-3">
-                    <dt class="text-gray-500">First response</dt>
-                    <dd class="text-gray-700">{{ interaction.first_response_at.strftime('%Y-%m-%d %H:%M') }}</dd>
-                </div>
-                {% endif %}
-                {% if interaction.dedupe_key %}
-                <div>
-                    <dt class="mb-1 text-gray-500">Dedupe key</dt>
-                    <dd class="break-all rounded bg-gray-50 p-2 font-mono text-[11px] text-gray-600">{{ interaction.dedupe_key }}</dd>
-                </div>
-                {% endif %}
-            </dl>
+        <div class="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
+            <h2 class="text-sm font-semibold text-gray-900">What you can do here</h2>
+            <ul class="mt-3 space-y-2 text-sm text-gray-600">
+                <li class="flex gap-2"><span class="text-primary-500">•</span><span>Ask Lucent to explain the context.</span></li>
+                <li class="flex gap-2"><span class="text-primary-500">•</span><span>Make the decision Lucent needs.</span></li>
+                <li class="flex gap-2"><span class="text-primary-500">•</span><span>Ask Lucent to create tracked follow-up work.</span></li>
+            </ul>
         </div>
-
-        {% if interaction.metadata %}
-        <div class="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
-            <h2 class="text-xs font-semibold uppercase tracking-wider text-gray-400">Metadata</h2>
-            <pre class="mt-3 max-h-72 overflow-auto rounded-lg bg-gray-900 p-3 text-xs text-gray-100">{{ interaction.metadata | tojson(indent=2) }}</pre>
-        </div>
-        {% endif %}
     </aside>
 </div>
+
+<script nonce="{{ request.state.csp_nonce }}">
+(function() {
+    const state = {
+        interactionId: {{ (interaction.id|string) | tojson }},
+        sessionId: {{ (interaction_chat_session.id|string) | tojson }},
+        csrfToken: {{ csrf_token | tojson }},
+        messages: [],
+        streaming: false,
+        available: false,
+        mirrored: new Set(),
+    };
+
+    const messagesEl = document.getElementById('inline-chat-messages');
+    const formEl = document.getElementById('inline-chat-form');
+    const inputEl = document.getElementById('inline-chat-input');
+    const sendEl = document.getElementById('inline-chat-send');
+    const statusEl = document.getElementById('inline-chat-status');
+
+    function setStatus(text, tone) {
+        statusEl.textContent = text;
+        statusEl.className = 'rounded-full px-2.5 py-1 text-xs font-medium ' + (
+            tone === 'ready' ? 'bg-green-100 text-green-700' :
+            tone === 'busy' ? 'bg-primary-100 text-primary-700' :
+            tone === 'error' ? 'bg-red-100 text-red-700' :
+            'bg-gray-100 text-gray-500'
+        );
+    }
+
+    function escapeHtml(value) {
+        const div = document.createElement('div');
+        div.textContent = value || '';
+        return div.innerHTML;
+    }
+
+    function renderMarkdown(text) {
+        let html = escapeHtml(text || '');
+        html = html.replace(/```(\w*)\n([\s\S]*?)```/g, function(_, _lang, code) {
+            return '<pre class="my-2 overflow-x-auto rounded-lg bg-gray-900 p-3 text-xs text-gray-100"><code>' + code.trim() + '</code></pre>';
+        });
+        html = html.replace(/`([^`]+)`/g, '<code class="rounded bg-gray-100 px-1 py-0.5 text-xs text-primary-700">$1</code>');
+        html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+        html = html.replace(/^### (.+)$/gm, '<h4 class="mt-2 font-semibold text-gray-900">$1</h4>');
+        html = html.replace(/^## (.+)$/gm, '<h3 class="mt-2 text-base font-semibold text-gray-900">$1</h3>');
+        html = html.replace(/^- (.+)$/gm, '<li class="ml-4 list-disc">$1</li>');
+        html = html.replace(/\n\n/g, '</p><p class="mt-2">');
+        html = '<p>' + html + '</p>';
+        return html.replace(/<p>\s*<\/p>/g, '');
+    }
+
+    function scrollToBottom() {
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    function appendMessage(role, content, options) {
+        const wrapper = document.createElement('div');
+        const isUser = role === 'user';
+        wrapper.className = 'flex gap-3 ' + (isUser ? 'justify-end' : 'justify-start');
+        if (isUser) {
+            wrapper.innerHTML = '<div class="max-w-[82%] rounded-2xl rounded-tr-md bg-primary-600 px-4 py-3 text-sm leading-relaxed text-white shadow-sm whitespace-pre-wrap">' + escapeHtml(content) + '</div>';
+        } else {
+            wrapper.innerHTML = '<div class="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-primary-100 text-primary-700">✦</div>' +
+                '<div class="max-w-[82%] rounded-2xl rounded-tl-md border border-gray-200 bg-white px-4 py-3 text-sm leading-relaxed text-gray-700 shadow-sm"><div class="inline-chat-content">' +
+                (options && options.loading ? '<span class="inline-flex gap-1"><span class="h-1.5 w-1.5 animate-bounce rounded-full bg-gray-300"></span><span class="h-1.5 w-1.5 animate-bounce rounded-full bg-gray-300" style="animation-delay:150ms"></span><span class="h-1.5 w-1.5 animate-bounce rounded-full bg-gray-300" style="animation-delay:300ms"></span></span>' : renderMarkdown(content)) +
+                '</div></div>';
+        }
+        messagesEl.appendChild(wrapper);
+        scrollToBottom();
+        return wrapper;
+    }
+
+    function updateSendState() {
+        if (!sendEl || !inputEl) return;
+        sendEl.disabled = state.streaming || !state.available || !inputEl.value.trim();
+    }
+
+    function pageContext() {
+        return {
+            url: window.location.pathname,
+            title: document.title.replace(' - Lucent', ''),
+            type: 'user_interaction_detail',
+            data: {
+                interaction_id: state.interactionId,
+                inline_session: true,
+            },
+        };
+    }
+
+    async function loadSession() {
+        try {
+            const statusResp = await fetch('/api/chat/status');
+            const status = await statusResp.json();
+            state.available = Boolean(status.available);
+            setStatus(state.available ? 'Ready' : 'Chat unavailable', state.available ? 'ready' : 'error');
+
+            const resp = await fetch('/api/chat/sessions/' + state.sessionId);
+            if (!resp.ok) throw new Error('Could not load conversation');
+            const session = await resp.json();
+            const visible = (session.messages || []).filter(function(message) {
+                return message.role === 'user' || message.role === 'assistant';
+            });
+            state.messages = [];
+            messagesEl.innerHTML = '';
+            if (!visible.length) {
+                appendMessage('assistant', 'I started this conversation from the Inbox item. What would you like to do next?');
+            } else {
+                visible.forEach(function(message) {
+                    state.messages.push({ role: message.role, content: message.content || '' });
+                    appendMessage(message.role, message.content || '');
+                });
+            }
+            updateSendState();
+        } catch (error) {
+            messagesEl.innerHTML = '';
+            appendMessage('assistant', 'I could not load this conversation. Refresh the page and try again.');
+            setStatus('Error', 'error');
+        }
+    }
+
+    async function mirrorUserMessage(text) {
+        if (state.mirrored.has(text)) return;
+        const form = new FormData();
+        form.append('csrf_token', state.csrfToken);
+        form.append('body', text);
+        form.append('chat_session_id', state.sessionId || '');
+        form.append('inline_chat', '1');
+        const resp = await fetch('/inbox/' + state.interactionId + '/reply', {
+            method: 'POST',
+            body: form,
+            redirect: 'manual',
+        });
+        if (resp.status >= 400) {
+            throw new Error('Could not save message to Inbox thread');
+        }
+        state.mirrored.add(text);
+    }
+
+    async function sendMessage(event) {
+        event.preventDefault();
+        if (!inputEl || state.streaming) return;
+        const text = inputEl.value.trim();
+        if (!text || !state.available) return;
+
+        state.streaming = true;
+        setStatus('Thinking…', 'busy');
+        updateSendState();
+        inputEl.value = '';
+        inputEl.style.height = 'auto';
+        state.messages.push({ role: 'user', content: text });
+        appendMessage('user', text);
+
+        const assistant = appendMessage('assistant', '', { loading: true });
+        const contentEl = assistant.querySelector('.inline-chat-content');
+        let fullResponse = '';
+
+        try {
+            await mirrorUserMessage(text);
+            const resp = await fetch('/api/chat/stream', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    messages: state.messages,
+                    page_context: pageContext(),
+                    session_id: state.sessionId,
+                    surface: 'embedded_chat',
+                }),
+            });
+            if (!resp.ok || !resp.body) throw new Error('Chat request failed');
+            const reader = resp.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+            while (true) {
+                const chunk = await reader.read();
+                if (chunk.done) break;
+                buffer += decoder.decode(chunk.value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop() || '';
+                for (const line of lines) {
+                    if (!line.startsWith('data: ')) continue;
+                    let data;
+                    try { data = JSON.parse(line.slice(6)); } catch (_err) { continue; }
+                    if (data.type === 'session') {
+                        state.sessionId = data.session_id;
+                    } else if (data.type === 'text') {
+                        fullResponse += data.text;
+                        contentEl.innerHTML = renderMarkdown(fullResponse);
+                        scrollToBottom();
+                    } else if (data.type === 'error') {
+                        contentEl.innerHTML = '<p class="text-red-600">' + escapeHtml(data.error || 'Lucent could not respond.') + '</p>';
+                    }
+                }
+            }
+            if (fullResponse) {
+                state.messages.push({ role: 'assistant', content: fullResponse });
+            }
+        } catch (error) {
+            contentEl.innerHTML = '<p class="text-red-600">' + escapeHtml(error.message || 'Something went wrong. Please try again.') + '</p>';
+        } finally {
+            state.streaming = false;
+            setStatus(state.available ? 'Ready' : 'Chat unavailable', state.available ? 'ready' : 'error');
+            updateSendState();
+            scrollToBottom();
+        }
+    }
+
+    if (formEl && inputEl) {
+        formEl.addEventListener('submit', sendMessage);
+        inputEl.addEventListener('input', function() {
+            inputEl.style.height = 'auto';
+            inputEl.style.height = Math.min(inputEl.scrollHeight, 160) + 'px';
+            updateSendState();
+        });
+        inputEl.addEventListener('keydown', function(event) {
+            if (event.key === 'Enter' && !event.shiftKey) {
+                event.preventDefault();
+                sendMessage(event);
+            }
+        });
+    }
+
+    loadSession();
+})();
+</script>
 {% endblock %}
