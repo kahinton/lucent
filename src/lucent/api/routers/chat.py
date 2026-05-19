@@ -655,13 +655,13 @@ async def _build_system_prompt(user: dict, pool, page_context: dict | None) -> s
                 )
                 if interaction:
                     parts.append(
-                        "\n## Inbox Conversation Instructions\n"
+                        "\n## Handoff Conversation Instructions\n"
                         "This page is an active Lucent conversation that began from a proactive "
-                        "Inbox handoff. Respond interactively on the page; do not tell the user "
+                        "handoff. Respond interactively on the page; do not tell the user "
                         "to reply elsewhere or wait for a daemon cycle. If the user asks for "
                         "tracked follow-up work, use `create_request` and summarize what was queued."
                     )
-                    parts.append("\n## Inbox Interaction Being Viewed")
+                    parts.append("\n## Handoff Being Viewed")
                     parts.append(f"- Title: {interaction.get('title')}")
                     parts.append(f"- Type: {interaction.get('interaction_type')}")
                     parts.append(f"- Status: {interaction.get('status')}")
@@ -1129,10 +1129,10 @@ async def chat_stream_v2(
                 "Prefer drafting trigger, request template, ordered actions, and review "
                 "criteria before creating. For actions, use `task` when work should run "
                 "through the daemon queue, and `user_interaction` when the workflow's "
-                "output should be a context-rich Inbox message or clarification for the "
+                "output should be a Handoff message or clarification for the "
                 "user. Keep explanations plain-language and reflect "
                 "the UI model: schedule/manual/webhook/integration-event trigger, "
-                "request, actions, Inbox handoffs, outputs, review. Do not invent server_function "
+                "request, actions, Handoffs, outputs, review. Do not invent server_function "
                 "actions; those are source-defined built-in maintenance workflows."
             )
 

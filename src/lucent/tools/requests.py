@@ -763,12 +763,12 @@ Returns: JSON with the created output artifact."""
 
     @mcp.tool(
         annotations=CREATE_ONLY,
-        description="""Send a proactive, context-rich message to a user.
+        description="""Send a proactive handoff message to a user.
 
 Use this instead of creating a request when Lucent needs to ask a clarification,
 hand off workflow output, or provide information that does not itself require
-daemon task execution. If requires_response=true, the item appears in the user's
-Inbox as "Reply needed" and the daemon should wait for the user response before
+daemon task execution. If requires_response=true, the item appears in Handoffs
+as "Reply needed" and the daemon should wait for the user response before
 continuing dependent work. Use dedupe_key for recurring cycle-generated
 questions so Lucent does not send duplicates while an earlier item is open."""
     )
@@ -832,7 +832,7 @@ questions so Lucent does not send duplicates while an earlier item is open."""
                 "interaction_type": interaction["interaction_type"],
                 "requires_response": interaction["requires_response"],
                 "deduplicated": bool(interaction.get("deduplicated")),
-                "url": f"/inbox/{interaction['id']}",
+                "url": f"/handoffs/{interaction['id']}",
                 "reference_count": interaction.get("reference_count", 0),
                 "message_count": interaction.get("message_count", 0),
             },
@@ -841,7 +841,7 @@ questions so Lucent does not send duplicates while an earlier item is open."""
 
     @mcp.tool(
         annotations=READ_ONLY,
-        description="""List user Inbox interactions visible to the current/effective user.
+        description="""List user handoffs visible to the current/effective user.
 
 Use this during daemon follow-up to find user replies to clarification
 requests. By default it returns open/waiting/responded items and hides
@@ -875,7 +875,7 @@ resolved/dismissed history unless include_resolved=true."""
 
     @mcp.tool(
         annotations=READ_ONLY,
-        description="""Get one user Inbox interaction with full thread and references.
+        description="""Get one user handoff with full thread and references.
 
 Use this after list_user_interactions shows a responded item. The returned
 messages and references are the durable context needed to resume work."""
@@ -900,10 +900,10 @@ messages and references are the durable context needed to resume work."""
         return json.dumps(detail, default=str)
 
     @mcp.tool(
-        description="""Resolve a user Inbox interaction after processing the response.
+        description="""Resolve a user handoff after processing the response.
 
 Use this when the daemon has consumed the user's reply and resumed or closed
-the dependent work. It removes the item from the active Inbox while preserving
+the dependent work. It removes the item from active Handoffs while preserving
 the thread and references for audit/context."""
     )
     async def resolve_user_interaction(interaction_id: str, note: str = "") -> str:

@@ -1,4 +1,4 @@
-"""Tests for proactive Lucent Inbox user interactions."""
+"""Tests for proactive Lucent handoff user interactions."""
 
 from uuid import uuid4
 
@@ -163,7 +163,7 @@ async def test_repository_dedupe_reply_and_resolve(db_pool, interaction_user):
         user_id=interaction_user["id"],
         created_by=interaction_user["id"],
         title="Clarify Detroit goal next step again",
-        body="This should not create a duplicate Inbox item.",
+        body="This should not create a duplicate handoff.",
         interaction_type="clarification",
         requires_response=True,
         dedupe_key="clarify:detroit:next-step",
@@ -248,7 +248,7 @@ async def test_user_interaction_api_create_list_reply(api_client, interaction_us
 
 
 @pytest.mark.asyncio
-async def test_inbox_web_list_detail_and_reply(web_client, db_pool, interaction_user):
+async def test_handoffs_web_list_detail_and_reply(web_client, db_pool, interaction_user):
     repo = UserInteractionRepository(db_pool)
     interaction = await repo.create_interaction(
         org_id=interaction_user["organization_id"],
@@ -262,7 +262,7 @@ async def test_inbox_web_list_detail_and_reply(web_client, db_pool, interaction_
         references=[
             {
                 "reference_type": "url",
-                "label": "Inbox self-link",
+                "label": "Legacy self-link",
                 "url": f"http://localhost:8767/inbox/{uuid4()}",
             },
             {
@@ -279,26 +279,34 @@ async def test_inbox_web_list_detail_and_reply(web_client, db_pool, interaction_
         ],
     )
 
-    list_resp = await web_client.get("/inbox")
+    list_resp = await web_client.get("/handoffs")
     assert list_resp.status_code == 200
+    assert "Handoffs" in list_resp.text
     assert "Which source should I use?" in list_resp.text
     assert "Reply needed" in list_resp.text
     assert "Questions, decisions, and updates from Lucent." in list_resp.text
     assert "Waiting for your answer before Lucent continues." in list_resp.text
+    assert "Inbox" not in list_resp.text
 
-    detail_resp = await web_client.get(f"/inbox/{interaction['id']}")
+    legacy_list_resp = await web_client.get("/inbox")
+    assert legacy_list_resp.status_code == 200
+    assert "Handoffs" in legacy_list_resp.text
+
+    detail_resp = await web_client.get(f"/handoffs/{interaction['id']}")
     assert detail_resp.status_code == 200
+    assert "Handoffs" in detail_resp.text
     assert "Pick A or B." in detail_resp.text
     assert "Candidate A" in detail_resp.text
-    assert "Inbox self-link" not in detail_resp.text
+    assert "Legacy self-link" not in detail_resp.text
     assert "Workflow run should not show" not in detail_resp.text
     assert "Continue with Lucent" in detail_resp.text
     assert "Related context" in detail_resp.text
     assert "Reply here, ask a follow-up question" in detail_resp.text
-    assert "Lucent can see this Inbox message" in detail_resp.text
     assert "Question from Lucent" in detail_resp.text
     assert "live session grounded" not in detail_resp.text
+    assert "Lucent can see this Inbox message" not in detail_resp.text
     assert "Context Lucent brought" not in detail_resp.text
+    assert "Inbox" not in detail_resp.text
     assert "Metadata" not in detail_resp.text
     assert "Dedupe key" not in detail_resp.text
     assert "Details" not in detail_resp.text
@@ -319,14 +327,14 @@ async def test_inbox_web_list_detail_and_reply(web_client, db_pool, interaction_
             "SELECT role, content, metadata FROM llm_messages WHERE session_id = $1 ORDER BY sequence",
             session_row["id"],
         )
-    assert session_row["title"].startswith("Inbox:")
+    assert session_row["title"].startswith("Handoff:")
     assert session_row["metadata"]["interaction_id"] == str(interaction["id"])
     assert [(m["role"], m["content"]) for m in seeded_messages] == [
         ("assistant", "I found two memory candidates and need your call."),
     ]
 
     reply_resp = await web_client.post(
-        f"/inbox/{interaction['id']}/reply",
+        f"/handoffs/{interaction['id']}/reply",
         data=_csrf_data(
             web_client,
             {
@@ -358,14 +366,14 @@ async def test_inbox_web_list_detail_and_reply(web_client, db_pool, interaction_
         interaction_type="workflow_output",
         requires_response=False,
     )
-    unread_detail = await web_client.get(f"/inbox/{unread['id']}")
+    unread_detail = await web_client.get(f"/handoffs/{unread['id']}")
     assert unread_detail.status_code == 200
     assert "Workflow output ready" in unread_detail.text
     assert "Lucent messages needing attention" not in unread_detail.text
 
 
 @pytest.mark.asyncio
-async def test_workflow_user_interaction_action_triggers_inbox_item(
+async def test_workflow_user_interaction_action_triggers_handoff(
     api_client,
     db_pool,
     interaction_user,
@@ -373,7 +381,7 @@ async def test_workflow_user_interaction_action_triggers_inbox_item(
     create_resp = await api_client.post(
         "/api/workflows",
         json={
-            "title": "Inbox-only workflow",
+            "title": "Handoff-only workflow",
             "description": "Sends a useful update without daemon task work.",
             "trigger_type": "manual",
             "priority": "high",

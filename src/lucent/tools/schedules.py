@@ -240,7 +240,7 @@ Workflows are the broader replacement for schedules. A workflow has:
 - trigger_type: 'schedule', 'manual', 'webhook', or 'integration_event'
 - request_template: request title/description/dependency fields used per run
 - actions: ordered action objects. action_type='task' creates daemon task work;
-    action_type='user_interaction' sends a context-rich Inbox item to the user.
+    action_type='user_interaction' sends a Handoff message to the user.
 - review_instructions: checklist included for post-completion request review
 
 For webhook workflows, provide webhook_secret. Lucent stores only a hash;

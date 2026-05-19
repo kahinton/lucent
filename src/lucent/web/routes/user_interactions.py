@@ -1,4 +1,4 @@
-"""Web routes for the Lucent Inbox user-interaction surface."""
+"""Web routes for Lucent handoffs and user-interaction messages."""
 
 from math import ceil
 from urllib.parse import urlparse
@@ -33,18 +33,20 @@ def _reference_url(ref: dict) -> str:
     return ""
 
 
-def _is_inbox_reference(ref: dict) -> bool:
+def _is_handoff_reference(ref: dict) -> bool:
     url = str(ref.get("url") or "").strip()
     if not url:
         return False
     parsed = urlparse(url)
     path = parsed.path or url
     normalized_path = path.rstrip("/") or "/"
-    return normalized_path == "/inbox" or normalized_path.startswith("/inbox/")
+    return normalized_path in {"/handoffs", "/inbox"} or normalized_path.startswith(
+        ("/handoffs/", "/inbox/")
+    )
 
 
 def _display_references(interaction: dict) -> list[dict]:
-    """Return references useful to humans on the Inbox detail page.
+    """Return references useful to humans on the handoff detail page.
 
     Raw references still stay attached to the interaction for daemon/chat
     grounding. This filters out operational run IDs and self-links that are
@@ -56,7 +58,7 @@ def _display_references(interaction: dict) -> list[dict]:
         ref_type = ref.get("reference_type")
         if ref_type == "schedule_run":
             continue
-        if _is_inbox_reference(ref):
+        if _is_handoff_reference(ref):
             continue
         destination = _reference_url(ref).strip()
         dedupe_key = destination or f"{ref_type}:{ref.get('reference_id') or ref.get('label')}"
@@ -79,10 +81,10 @@ def _display_references(interaction: dict) -> list[dict]:
 
 
 async def _get_or_create_interaction_chat_session(pool, user, interaction: dict) -> dict:
-    """Return the persistent embedded chat session for this Inbox item.
+    """Return the persistent embedded chat session for this handoff.
 
-    Inbox interactions are not just static messages; opening one starts a
-    focused Lucent session grounded in the handoff thread and attached context.
+    Handoffs are not just static messages; opening one starts a focused Lucent
+    session from the handoff thread and attached references.
     """
     from lucent.db.llm_sessions import LLMSessionRepository
 
@@ -111,7 +113,7 @@ async def _get_or_create_interaction_chat_session(pool, user, interaction: dict)
         org_id=org_id,
         user_id=user_id,
         kind="embedded_chat",
-        title=f"Inbox: {interaction.get('title') or 'Lucent message'}"[:256],
+        title=f"Handoff: {interaction.get('title') or 'Lucent message'}"[:256],
         metadata={
             "interaction_id": interaction_id,
             "surface": "inbox_interaction",
@@ -144,6 +146,7 @@ def _status_filter(status: str | None) -> tuple[str | None, bool]:
     return None, False
 
 
+@router.get("/handoffs", response_class=HTMLResponse)
 @router.get("/inbox", response_class=HTMLResponse)
 async def inbox_list(
     request: Request,
@@ -151,7 +154,7 @@ async def inbox_list(
     page: int = 1,
     per_page: int = 25,
 ):
-    """Lucent Inbox — proactive messages and clarification requests."""
+    """Lucent handoffs — questions, decisions, and updates from Lucent."""
     user = await get_user_context(request)
     pool = await get_pool()
     repo = UserInteractionRepository(pool)
@@ -205,6 +208,7 @@ async def inbox_list(
     )
 
 
+@router.get("/handoffs/{interaction_id}", response_class=HTMLResponse)
 @router.get("/inbox/{interaction_id}", response_class=HTMLResponse)
 async def inbox_detail(request: Request, interaction_id: str):
     """Show an interaction thread with attached context and reply controls."""
@@ -217,7 +221,7 @@ async def inbox_detail(request: Request, interaction_id: str):
         user_id=str(user.id),
     )
     if not interaction:
-        raise HTTPException(404, "Inbox item not found")
+        raise HTTPException(404, "Handoff not found")
     await repo.mark_viewed(
         interaction_id=interaction_id,
         org_id=str(user.organization_id),
@@ -242,6 +246,7 @@ async def inbox_detail(request: Request, interaction_id: str):
     )
 
 
+@router.post("/handoffs/{interaction_id}/reply", response_class=HTMLResponse)
 @router.post("/inbox/{interaction_id}/reply", response_class=HTMLResponse)
 async def inbox_reply(
     request: Request,
@@ -267,7 +272,7 @@ async def inbox_reply(
         user_id=str(user.id),
     )
     if not existing:
-        raise HTTPException(404, "Inbox item not found")
+        raise HTTPException(404, "Handoff not found")
     try:
         await repo.add_message(
             interaction_id=interaction_id,
@@ -282,16 +287,17 @@ async def inbox_reply(
         )
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
-    return RedirectResponse(f"/inbox/{interaction_id}", status_code=303)
+    return RedirectResponse(f"/handoffs/{interaction_id}", status_code=303)
 
 
+@router.post("/handoffs/{interaction_id}/resolve", response_class=HTMLResponse)
 @router.post("/inbox/{interaction_id}/resolve", response_class=HTMLResponse)
 async def inbox_resolve(
     request: Request,
     interaction_id: str,
     note: str = Form(""),
 ):
-    """Mark an Inbox item resolved."""
+    """Mark a handoff resolved."""
     await _check_csrf(request)
     user = await get_user_context(request)
     pool = await get_pool()
@@ -303,17 +309,18 @@ async def inbox_resolve(
         note=note.strip() or None,
     )
     if not result:
-        raise HTTPException(404, "Inbox item not found")
-    return RedirectResponse(f"/inbox/{interaction_id}", status_code=303)
+        raise HTTPException(404, "Handoff not found")
+    return RedirectResponse(f"/handoffs/{interaction_id}", status_code=303)
 
 
+@router.post("/handoffs/{interaction_id}/dismiss", response_class=HTMLResponse)
 @router.post("/inbox/{interaction_id}/dismiss", response_class=HTMLResponse)
 async def inbox_dismiss(
     request: Request,
     interaction_id: str,
     note: str = Form(""),
 ):
-    """Dismiss an Inbox item without asking the daemon to continue."""
+    """Dismiss a handoff without asking the daemon to continue."""
     await _check_csrf(request)
     user = await get_user_context(request)
     pool = await get_pool()
@@ -325,5 +332,5 @@ async def inbox_dismiss(
         note=note.strip() or None,
     )
     if not result:
-        raise HTTPException(404, "Inbox item not found")
-    return RedirectResponse("/inbox", status_code=303)
+        raise HTTPException(404, "Handoff not found")
+    return RedirectResponse("/handoffs", status_code=303)

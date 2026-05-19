@@ -306,7 +306,7 @@ def _workflow_interaction_references(
     run: dict | None = None,
     req: dict | None = None,
 ) -> list[dict]:
-    """Build references that let a workflow Inbox item recover its context."""
+    """Build references that let a workflow handoff recover its context."""
     refs = []
     raw_refs = action.get("references") or []
     if isinstance(raw_refs, list):
@@ -671,7 +671,7 @@ async def _trigger_schedule_execution(
         if created_interactions and not created_tasks:
             await sched_repo.complete_run(
                 str(run["id"]),
-                result=f"Sent {len(created_interactions)} Inbox interaction(s)",
+                result=f"Sent {len(created_interactions)} Handoff interaction(s)",
             )
     except Exception as e:
         logger.error("Workflow %s triggered but task creation failed: %s", schedule_id, e)

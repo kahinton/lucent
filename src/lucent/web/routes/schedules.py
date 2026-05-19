@@ -45,8 +45,8 @@ def _annotate_workflow_execution(sched: dict[str, Any]) -> None:
         sched["executor_label"] = "Server function"
         sched["executor_detail"] = action.get("function") or "api_process"
     elif interaction_actions and not task_actions:
-        sched["executor_label"] = "Inbox"
-        sched["executor_detail"] = f"{len(interaction_actions)} user interaction action(s)"
+        sched["executor_label"] = "Handoff"
+        sched["executor_detail"] = f"{len(interaction_actions)} handoff action(s)"
     else:
         sched["executor_label"] = "Agent"
         sched["executor_detail"] = sched.get("agent_type") or "default"
