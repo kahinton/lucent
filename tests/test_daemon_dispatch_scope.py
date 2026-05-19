@@ -148,5 +148,8 @@ class TestMemoryServerToolSelection:
         tools = set(_memory_server_tools_for_task("research", "Summarize market data"))
         assert "search_memories" in tools
         assert "send_handoff" in tools
+        assert "list_handoffs" in tools
+        assert "get_handoff" in tools
+        assert "resolve_handoff" in tools
         assert "create_skill_definition" not in tools
         assert "create_request" not in tools

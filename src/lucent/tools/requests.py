@@ -9,7 +9,7 @@ from mcp.server.fastmcp import FastMCP
 
 from lucent.db.requests import RequestRepository
 from lucent.llm.context import get_llm_context
-from lucent.tools.annotations import CREATE_ONLY, READ_ONLY
+from lucent.tools.annotations import CREATE_ONLY, MUTATING, READ_ONLY
 from lucent.tools.memories import _get_current_user_context
 
 logger = logging.getLogger(__name__)
@@ -885,46 +885,6 @@ Returns: JSON including id, status, and url."""
         )
 
     @mcp.tool(
-        annotations=CREATE_ONLY,
-        description="""Send a proactive handoff message to a user.
-
-Prefer the clearer `send_handoff` tool for new agent/workflow instructions.
-This lower-level compatibility tool supports all interaction_type values.
-Use it instead of creating a request when Lucent needs to ask a clarification,
-hand off workflow output, or provide information that does not itself require
-daemon task execution. If requires_response=true, the item appears in Handoffs
-as "Reply needed" and the daemon should wait for the user response before
-continuing dependent work. Use dedupe_key for recurring cycle-generated
-questions so Lucent does not send duplicates while an earlier item is open."""
-    )
-    async def send_user_interaction(
-        title: str,
-        body: str,
-        interaction_type: str = "message",
-        requires_response: bool = False,
-        response_prompt: str = "",
-        priority: str = "medium",
-        references: list[dict] | None = None,
-        metadata: dict | None = None,
-        dedupe_key: str = "",
-        user_id: str = "",
-        source: str = "daemon",
-    ) -> str:
-        return await _create_handoff_interaction_response(
-            title=title,
-            body=body,
-            interaction_type=interaction_type,
-            requires_response=requires_response,
-            response_prompt=response_prompt,
-            priority=priority,
-            references=references,
-            metadata=metadata,
-            dedupe_key=dedupe_key,
-            user_id=user_id,
-            source=source,
-        )
-
-    @mcp.tool(
         annotations=READ_ONLY,
         description="""List user handoffs visible to the current/effective user.
 
@@ -932,7 +892,7 @@ Use this during daemon follow-up to find user replies to clarification
 requests. By default it returns open/waiting/responded items and hides
 resolved/dismissed history unless include_resolved=true."""
     )
-    async def list_user_interactions(
+    async def list_handoffs(
         status: str = "",
         include_resolved: bool = False,
         limit: int = 25,
@@ -962,10 +922,10 @@ resolved/dismissed history unless include_resolved=true."""
         annotations=READ_ONLY,
         description="""Get one user handoff with full thread and references.
 
-Use this after list_user_interactions shows a responded item. The returned
+Use this after list_handoffs shows a responded item. The returned
 messages and references are the durable context needed to resume work."""
     )
-    async def get_user_interaction(interaction_id: str) -> str:
+    async def get_handoff(interaction_id: str) -> str:
         user_id, org_id, _, _, _ = await _get_current_user_context()
         if not user_id:
             return json.dumps({"error": "Authentication required"})
@@ -985,13 +945,14 @@ messages and references are the durable context needed to resume work."""
         return json.dumps(detail, default=str)
 
     @mcp.tool(
+        annotations=MUTATING,
         description="""Resolve a user handoff after processing the response.
 
 Use this when the daemon has consumed the user's reply and resumed or closed
 the dependent work. It removes the item from active Handoffs while preserving
 the thread and references for audit/context."""
     )
-    async def resolve_user_interaction(interaction_id: str, note: str = "") -> str:
+    async def resolve_handoff(interaction_id: str, note: str = "") -> str:
         user_id, org_id, _, _, _ = await _get_current_user_context()
         if not user_id:
             return json.dumps({"error": "Authentication required"})

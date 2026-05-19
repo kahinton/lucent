@@ -40,9 +40,7 @@ def _is_handoff_reference(ref: dict) -> bool:
     parsed = urlparse(url)
     path = parsed.path or url
     normalized_path = path.rstrip("/") or "/"
-    return normalized_path in {"/handoffs", "/inbox"} or normalized_path.startswith(
-        ("/handoffs/", "/inbox/")
-    )
+    return normalized_path == "/handoffs" or normalized_path.startswith("/handoffs/")
 
 
 def _display_references(interaction: dict) -> list[dict]:
@@ -147,8 +145,7 @@ def _status_filter(status: str | None) -> tuple[str | None, bool]:
 
 
 @router.get("/handoffs", response_class=HTMLResponse)
-@router.get("/inbox", response_class=HTMLResponse)
-async def inbox_list(
+async def handoffs_list(
     request: Request,
     status: str | None = None,
     page: int = 1,
@@ -209,8 +206,7 @@ async def inbox_list(
 
 
 @router.get("/handoffs/{interaction_id}", response_class=HTMLResponse)
-@router.get("/inbox/{interaction_id}", response_class=HTMLResponse)
-async def inbox_detail(request: Request, interaction_id: str):
+async def handoff_detail(request: Request, interaction_id: str):
     """Show an interaction thread with attached context and reply controls."""
     user = await get_user_context(request)
     pool = await get_pool()
@@ -247,8 +243,7 @@ async def inbox_detail(request: Request, interaction_id: str):
 
 
 @router.post("/handoffs/{interaction_id}/reply", response_class=HTMLResponse)
-@router.post("/inbox/{interaction_id}/reply", response_class=HTMLResponse)
-async def inbox_reply(
+async def handoff_reply(
     request: Request,
     interaction_id: str,
     body: str = Form(...),
@@ -291,8 +286,7 @@ async def inbox_reply(
 
 
 @router.post("/handoffs/{interaction_id}/resolve", response_class=HTMLResponse)
-@router.post("/inbox/{interaction_id}/resolve", response_class=HTMLResponse)
-async def inbox_resolve(
+async def handoff_resolve(
     request: Request,
     interaction_id: str,
     note: str = Form(""),
@@ -314,8 +308,7 @@ async def inbox_resolve(
 
 
 @router.post("/handoffs/{interaction_id}/dismiss", response_class=HTMLResponse)
-@router.post("/inbox/{interaction_id}/dismiss", response_class=HTMLResponse)
-async def inbox_dismiss(
+async def handoff_dismiss(
     request: Request,
     interaction_id: str,
     note: str = Form(""),

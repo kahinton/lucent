@@ -260,9 +260,9 @@ async def test_repository_dedupe_reply_and_resolve(db_pool, interaction_user):
 
 
 @pytest.mark.asyncio
-async def test_user_interaction_api_create_list_reply(api_client, interaction_user):
+async def test_handoff_api_create_list_reply(api_client, interaction_user):
     create_resp = await api_client.post(
-        "/api/user-interactions",
+        "/api/handoffs",
         json={
             "title": "Review workflow result",
             "body": "The workflow produced a data summary for you.",
@@ -285,12 +285,12 @@ async def test_user_interaction_api_create_list_reply(api_client, interaction_us
     assert created["status"] == "waiting_on_user"
     assert created["references"][0]["label"] == "Summary artifact"
 
-    list_resp = await api_client.get("/api/user-interactions")
+    list_resp = await api_client.get("/api/handoffs")
     assert list_resp.status_code == 200
     assert any(item["id"] == created["id"] for item in list_resp.json()["items"])
 
     reply_resp = await api_client.post(
-        f"/api/user-interactions/{created['id']}/reply",
+        f"/api/handoffs/{created['id']}/reply",
         json={"body": "Yes, make a request from it."},
     )
 
@@ -299,6 +299,9 @@ async def test_user_interaction_api_create_list_reply(api_client, interaction_us
     assert replied["status"] == "responded"
     assert replied["messages"][-1]["sender_type"] == "user"
     assert replied["messages"][-1]["body"] == "Yes, make a request from it."
+
+    old_api_resp = await api_client.get("/api/user-interactions")
+    assert old_api_resp.status_code == 404
 
 
 @pytest.mark.asyncio
@@ -316,8 +319,8 @@ async def test_handoffs_web_list_detail_and_reply(web_client, db_pool, interacti
         references=[
             {
                 "reference_type": "url",
-                "label": "Legacy self-link",
-                "url": f"http://localhost:8767/inbox/{uuid4()}",
+                "label": "Handoff self-link",
+                "url": f"http://localhost:8767/handoffs/{uuid4()}",
             },
             {
                 "reference_type": "schedule_run",
@@ -342,16 +345,15 @@ async def test_handoffs_web_list_detail_and_reply(web_client, db_pool, interacti
     assert "Waiting for your answer before Lucent continues." in list_resp.text
     assert "Inbox" not in list_resp.text
 
-    legacy_list_resp = await web_client.get("/inbox")
-    assert legacy_list_resp.status_code == 200
-    assert "Handoffs" in legacy_list_resp.text
+    old_path_resp = await web_client.get("/inbox")
+    assert old_path_resp.status_code == 404
 
     detail_resp = await web_client.get(f"/handoffs/{interaction['id']}")
     assert detail_resp.status_code == 200
     assert "Handoffs" in detail_resp.text
     assert "Pick A or B." in detail_resp.text
     assert "Candidate A" in detail_resp.text
-    assert "Legacy self-link" not in detail_resp.text
+    assert "Handoff self-link" not in detail_resp.text
     assert "Workflow run should not show" not in detail_resp.text
     assert "Continue with Lucent" in detail_resp.text
     assert "Related context" in detail_resp.text

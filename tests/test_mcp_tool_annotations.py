@@ -26,6 +26,8 @@ def test_core_read_only_tools_are_annotated():
         "list_planning_targets",
         "list_available_models",
         "list_agent_definitions",
+        "list_handoffs",
+        "get_handoff",
     ]:
         annotations = _tool_annotations(mcp, name)
         assert annotations is not None, name
@@ -44,8 +46,19 @@ def test_core_mutating_tools_are_annotated():
         "create_request",
         "create_task",
         "send_handoff",
-        "send_user_interaction",
+        "resolve_handoff",
     ]:
         annotations = _tool_annotations(mcp, name)
         assert annotations is not None, name
         assert annotations.readOnlyHint is False, name
+
+
+def test_legacy_interaction_tools_are_not_registered():
+    mcp = FastMCP("test")
+    register_request_tools(mcp)
+
+    tool_names = set(mcp._tool_manager._tools)
+    assert "send_user_interaction" not in tool_names
+    assert "list_user_interactions" not in tool_names
+    assert "get_user_interaction" not in tool_names
+    assert "resolve_user_interaction" not in tool_names

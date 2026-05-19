@@ -165,6 +165,9 @@ _BASE_TASK_MEMORY_SERVER_TOOLS = sorted(
         "get_request_details",
         "link_request_memory",
         "link_task_memory",
+        "list_handoffs",
+        "get_handoff",
+        "resolve_handoff",
         "list_available_models",
         "log_task_event",
         "send_handoff",
@@ -312,7 +315,7 @@ def _summarize_memory_tool_params(tool_name: str, arguments: dict) -> str:
         if mid := arguments.get("memory_id"):
             parts.append(f"memory_id={mid}")
 
-    elif tool_name in ("send_handoff", "send_user_interaction"):
+    elif tool_name == "send_handoff":
         if title := arguments.get("title"):
             parts.append(f"title={title!r}")
         if interaction_type := arguments.get("interaction_type"):
@@ -5555,10 +5558,7 @@ class LucentDaemon:
             missing_required_tools: list[str] = []
             for required_tool in sorted(required_tools):
                 if required_tool == "send_handoff":
-                    satisfied = bool(
-                        validation_tool_counts.get("send_handoff", 0)
-                        or validation_tool_counts.get("send_user_interaction", 0)
-                    )
+                    satisfied = bool(validation_tool_counts.get("send_handoff", 0))
                 else:
                     satisfied = bool(validation_tool_counts.get(required_tool, 0))
                 if not satisfied:

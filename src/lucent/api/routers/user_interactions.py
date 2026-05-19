@@ -1,4 +1,4 @@
-"""API endpoints for proactive Lucent↔user interactions."""
+"""API endpoints for proactive Lucent↔user Handoffs."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 from lucent.api.deps import AuthenticatedUser, get_pool
 from lucent.rbac import Role
 
-router = APIRouter(prefix="/user-interactions", tags=["user-interactions"])
+router = APIRouter(prefix="/handoffs", tags=["handoffs"])
 
 
 class InteractionReferenceBody(BaseModel):
@@ -77,12 +77,12 @@ def _require_daemon_interaction_scope(user: AuthenticatedUser) -> None:
 
 
 @router.post("")
-async def create_user_interaction(
+async def create_handoff(
     body: InteractionCreateBody,
     user: AuthenticatedUser,
     pool=Depends(get_pool),
 ):
-    """Create a proactive message/clarification for a user.
+    """Create a proactive Handoff message/clarification for a user.
 
     Daemon-scoped API keys can call this to pause work and ask the human for
     missing context. ``dedupe_key`` prevents recurring cycles from creating
@@ -115,7 +115,7 @@ async def create_user_interaction(
 
 
 @router.get("")
-async def list_user_interactions(
+async def list_handoffs(
     user: AuthenticatedUser,
     status: str | None = None,
     include_resolved: bool = False,
@@ -139,7 +139,7 @@ async def list_user_interactions(
 
 
 @router.get("/attention-count")
-async def user_interaction_attention_count(
+async def handoff_attention_count(
     user: AuthenticatedUser,
     pool=Depends(get_pool),
 ):
@@ -156,7 +156,7 @@ async def user_interaction_attention_count(
 
 
 @router.get("/{interaction_id}")
-async def get_user_interaction(
+async def get_handoff(
     interaction_id: UUID,
     user: AuthenticatedUser,
     pool=Depends(get_pool),
@@ -177,7 +177,7 @@ async def get_user_interaction(
 
 
 @router.post("/{interaction_id}/reply")
-async def reply_to_user_interaction(
+async def reply_to_handoff(
     interaction_id: UUID,
     body: InteractionReplyBody,
     user: AuthenticatedUser,
@@ -209,7 +209,7 @@ async def reply_to_user_interaction(
 
 
 @router.post("/{interaction_id}/resolve")
-async def resolve_user_interaction(
+async def resolve_handoff(
     interaction_id: UUID,
     user: AuthenticatedUser,
     body: InteractionCloseBody = Body(default=InteractionCloseBody()),
@@ -232,7 +232,7 @@ async def resolve_user_interaction(
 
 
 @router.post("/{interaction_id}/dismiss")
-async def dismiss_user_interaction(
+async def dismiss_handoff(
     interaction_id: UUID,
     user: AuthenticatedUser,
     body: InteractionCloseBody = Body(default=InteractionCloseBody()),
