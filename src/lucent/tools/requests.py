@@ -28,10 +28,82 @@ async def _get_request_repository() -> RequestRepository:
 
 async def _get_pool():
     """Get the database connection pool."""
+    from lucent.db import init_db
+
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
         raise RuntimeError("DATABASE_URL environment variable is required")
     return await init_db(database_url)
+
+
+async def _create_handoff_interaction_response(
+    *,
+    title: str,
+    body: str,
+    interaction_type: str = "handoff",
+    requires_response: bool = False,
+    response_prompt: str = "",
+    priority: str = "medium",
+    references: list[dict] | None = None,
+    metadata: dict | None = None,
+    dedupe_key: str = "",
+    user_id: str = "",
+    source: str = "daemon",
+) -> str:
+    """Create a user handoff and return the JSON MCP-tool response."""
+    current_user_id, org_id, user_role, memory_scope, memory_scope_user_id = (
+        await _get_current_user_context()
+    )
+    if not current_user_id:
+        return json.dumps({"error": "Authentication required"})
+    if not org_id:
+        return json.dumps({"error": "No organization context"})
+    target_user_id = user_id or str(current_user_id)
+    if memory_scope == "user" and memory_scope_user_id is not None:
+        if target_user_id and str(target_user_id) != str(memory_scope_user_id):
+            return json.dumps({"error": "API key is scoped to a different user"})
+        target_user_id = str(memory_scope_user_id)
+    elif user_id and user_role not in ("admin", "owner", "daemon"):
+        if str(user_id) != str(current_user_id):
+            return json.dumps({"error": "Only admins/owners can target another user"})
+
+    from lucent.db.user_interactions import UserInteractionRepository
+
+    pool = await _get_pool()
+    repo = UserInteractionRepository(pool)
+    try:
+        interaction = await repo.create_interaction(
+            org_id=str(org_id),
+            user_id=target_user_id,
+            created_by=str(current_user_id),
+            title=title,
+            body=body,
+            source=source,
+            interaction_type=interaction_type,
+            priority=priority,
+            requires_response=requires_response,
+            response_prompt=response_prompt or None,
+            metadata=metadata or {},
+            references=references or [],
+            dedupe_key=dedupe_key or None,
+        )
+    except ValueError as exc:
+        return json.dumps({"error": str(exc)})
+
+    return json.dumps(
+        {
+            "id": str(interaction["id"]),
+            "title": interaction["title"],
+            "status": interaction["status"],
+            "interaction_type": interaction["interaction_type"],
+            "requires_response": interaction["requires_response"],
+            "deduplicated": bool(interaction.get("deduplicated")),
+            "url": f"/handoffs/{interaction['id']}",
+            "reference_count": interaction.get("reference_count", 0),
+            "message_count": interaction.get("message_count", 0),
+        },
+        default=str,
+    )
 
 
 async def _memory_access_service(*, is_admin: bool = False):
@@ -763,9 +835,62 @@ Returns: JSON with the created output artifact."""
 
     @mcp.tool(
         annotations=CREATE_ONLY,
+        description="""Send a Handoff to the user.
+
+Use this when a task/workflow says to "send a handoff", "provide a handoff",
+"hand this to the user", share an update the user should read, or ask a
+question before continuing. This creates a visible item in Handoffs at
+`/handoffs/{id}`.
+
+Important: do NOT merely write a section named "Handoff" in your final task
+output. Call this tool so the user gets an actual Handoffs item. Use
+`record_task_output` instead when you produced a durable artifact that belongs
+on the Activity request page, such as a PR, file, document, deployment, or link.
+
+Args:
+    title: Short user-facing title.
+    body: The message the user should read.
+    requires_response: Set true if Lucent should wait for the user's answer.
+    response_prompt: The specific question to show when a response is needed.
+    interaction_type: Usually 'handoff', or 'clarification'/'decision' when asking.
+    references: Optional related links/artifacts, e.g. workflow, request, URL.
+    dedupe_key: Stable key for recurring updates so duplicates collapse.
+
+Returns: JSON including id, status, and url."""
+    )
+    async def send_handoff(
+        title: str,
+        body: str,
+        requires_response: bool = False,
+        response_prompt: str = "",
+        priority: str = "medium",
+        references: list[dict] | None = None,
+        metadata: dict | None = None,
+        dedupe_key: str = "",
+        user_id: str = "",
+        interaction_type: str = "handoff",
+    ) -> str:
+        return await _create_handoff_interaction_response(
+            title=title,
+            body=body,
+            interaction_type=interaction_type,
+            requires_response=requires_response,
+            response_prompt=response_prompt,
+            priority=priority,
+            references=references,
+            metadata=metadata,
+            dedupe_key=dedupe_key,
+            user_id=user_id,
+            source="daemon",
+        )
+
+    @mcp.tool(
+        annotations=CREATE_ONLY,
         description="""Send a proactive handoff message to a user.
 
-Use this instead of creating a request when Lucent needs to ask a clarification,
+Prefer the clearer `send_handoff` tool for new agent/workflow instructions.
+This lower-level compatibility tool supports all interaction_type values.
+Use it instead of creating a request when Lucent needs to ask a clarification,
 hand off workflow output, or provide information that does not itself require
 daemon task execution. If requires_response=true, the item appears in Handoffs
 as "Reply needed" and the daemon should wait for the user response before
@@ -785,58 +910,18 @@ questions so Lucent does not send duplicates while an earlier item is open."""
         user_id: str = "",
         source: str = "daemon",
     ) -> str:
-        current_user_id, org_id, user_role, memory_scope, memory_scope_user_id = (
-            await _get_current_user_context()
-        )
-        if not current_user_id:
-            return json.dumps({"error": "Authentication required"})
-        if not org_id:
-            return json.dumps({"error": "No organization context"})
-        target_user_id = user_id or str(current_user_id)
-        if memory_scope == "user" and memory_scope_user_id is not None:
-            if target_user_id and str(target_user_id) != str(memory_scope_user_id):
-                return json.dumps({"error": "API key is scoped to a different user"})
-            target_user_id = str(memory_scope_user_id)
-        elif user_id and user_role not in ("admin", "owner", "daemon"):
-            if str(user_id) != str(current_user_id):
-                return json.dumps({"error": "Only admins/owners can target another user"})
-
-        from lucent.db.user_interactions import UserInteractionRepository
-
-        pool = await _get_pool()
-        repo = UserInteractionRepository(pool)
-        try:
-            interaction = await repo.create_interaction(
-                org_id=str(org_id),
-                user_id=target_user_id,
-                created_by=str(current_user_id),
-                title=title,
-                body=body,
-                source=source,
-                interaction_type=interaction_type,
-                priority=priority,
-                requires_response=requires_response,
-                response_prompt=response_prompt or None,
-                metadata=metadata or {},
-                references=references or [],
-                dedupe_key=dedupe_key or None,
-            )
-        except ValueError as exc:
-            return json.dumps({"error": str(exc)})
-
-        return json.dumps(
-            {
-                "id": str(interaction["id"]),
-                "title": interaction["title"],
-                "status": interaction["status"],
-                "interaction_type": interaction["interaction_type"],
-                "requires_response": interaction["requires_response"],
-                "deduplicated": bool(interaction.get("deduplicated")),
-                "url": f"/handoffs/{interaction['id']}",
-                "reference_count": interaction.get("reference_count", 0),
-                "message_count": interaction.get("message_count", 0),
-            },
-            default=str,
+        return await _create_handoff_interaction_response(
+            title=title,
+            body=body,
+            interaction_type=interaction_type,
+            requires_response=requires_response,
+            response_prompt=response_prompt,
+            priority=priority,
+            references=references,
+            metadata=metadata,
+            dedupe_key=dedupe_key,
+            user_id=user_id,
+            source=source,
         )
 
     @mcp.tool(

@@ -167,6 +167,7 @@ _BASE_TASK_MEMORY_SERVER_TOOLS = sorted(
         "link_task_memory",
         "list_available_models",
         "log_task_event",
+        "send_handoff",
         "analyze_tool_failure_patterns",
         "propose_definition_improvement",
     }
@@ -200,6 +201,17 @@ _WORK_ACTIVATION_TOOLS = sorted(
 
 _CAPABILITY_ACTIVATION_AGENT_TYPES = frozenset(
     {"assessment", "definition-engineer", "lucent", "planning", "reflection"}
+)
+
+_HANDOFF_TOOL_REQUIRED_SIGNALS = frozenset(
+    {
+        "send_handoff",
+        "send a handoff",
+        "create a handoff",
+        "provide a handoff",
+        "handoff to the user",
+        "post to handoffs",
+    }
 )
 
 _TASK_MEMORY_SERVER_TOOLS = sorted(
@@ -299,6 +311,16 @@ def _summarize_memory_tool_params(tool_name: str, arguments: dict) -> str:
     elif tool_name == "delete_memory":
         if mid := arguments.get("memory_id"):
             parts.append(f"memory_id={mid}")
+
+    elif tool_name in ("send_handoff", "send_user_interaction"):
+        if title := arguments.get("title"):
+            parts.append(f"title={title!r}")
+        if interaction_type := arguments.get("interaction_type"):
+            parts.append(f"interaction_type={interaction_type}")
+        if arguments.get("requires_response"):
+            parts.append("requires_response=True")
+        if body := arguments.get("body"):
+            parts.append(f"body_len={len(body)}")
 
     elif tool_name == "get_current_user_context":
         pass  # No params
@@ -729,7 +751,22 @@ def _task_requires_mcp_tool_usage(
         "must call an mcp tool",
         "must use memory tools",
     )
-    return any(signal in text for signal in tool_required_signals)
+    return any(signal in text for signal in tool_required_signals) or bool(
+        _required_task_tool_names(agent_type, title, description)
+    )
+
+
+def _required_task_tool_names(
+    agent_type: str | None,
+    title: str | None = None,
+    description: str | None = None,
+) -> set[str]:
+    """Return specific tools a task must call to satisfy explicit instructions."""
+    text = f"{title or ''} {description or ''}".lower()
+    required: set[str] = set()
+    if any(signal in text for signal in _HANDOFF_TOOL_REQUIRED_SIGNALS):
+        required.add("send_handoff")
+    return required
 
 # Database URL for direct key provisioning.
 # Prefers DAEMON_DATABASE_URL (restricted lucent_daemon role) over DATABASE_URL
@@ -2514,6 +2551,17 @@ If you do not have the tool, credential, sandbox, or permission needed to persis
 the artifact, say BLOCKED clearly and explain the missing capability. Do not
 present narrative-only work as completed. When available, call `record_task_output`
 for every durable artifact so the Activity UI can show what was produced.
+
+--- HANDOFFS TO THE USER ---
+If the task or workflow asks you to send, provide, create, or hand off something
+to the user, you MUST call `send_handoff`. Do not just write a section titled
+"Handoff" in your final task output — that only completes the task transcript
+and does not create a visible Handoffs item for the user. Use `send_handoff`
+for updates, recommendations, questions, decisions, or summaries the user should
+read or answer in Handoffs. Set `requires_response=true` and include a concise
+`response_prompt` when Lucent should wait for the user's answer before continuing.
+Use `record_task_output` instead for durable artifacts that belong on the
+Activity request page, such as PRs, files, documents, deployments, or links.
 
 --- GUARDRAILS ---
 - {
@@ -5499,6 +5547,39 @@ class LucentDaemon:
                     "missing_required_tool_usage",
                     reason,
                     {"agent_type": agent_type, "model": selected_model},
+                )
+                await _fail_owned(task_id, reason, result=result)
+                continue
+
+            required_tools = _required_task_tool_names(agent_type, title, description)
+            missing_required_tools: list[str] = []
+            for required_tool in sorted(required_tools):
+                if required_tool == "send_handoff":
+                    satisfied = bool(
+                        validation_tool_counts.get("send_handoff", 0)
+                        or validation_tool_counts.get("send_user_interaction", 0)
+                    )
+                else:
+                    satisfied = bool(validation_tool_counts.get(required_tool, 0))
+                if not satisfied:
+                    missing_required_tools.append(required_tool)
+            if missing_required_tools:
+                reason = (
+                    "Task instructions required tool call(s) "
+                    f"{', '.join(missing_required_tools)}, but the session did not call them. "
+                    "Do not satisfy explicit handoff instructions with narrative text only."
+                )
+                log(f"Tracked task {task_id[:8]} failed: {reason}", "WARN")
+                await RequestAPI.add_event(
+                    task_id,
+                    "missing_specific_tool_usage",
+                    reason,
+                    {
+                        "agent_type": agent_type,
+                        "model": selected_model,
+                        "missing_tools": missing_required_tools,
+                        "tool_counts": validation_tool_counts,
+                    },
                 )
                 await _fail_owned(task_id, reason, result=result)
                 continue

@@ -11,6 +11,7 @@ from daemon.daemon import (
     REQUEST_REVIEW_TASK_TITLE,
     _get_required_memory_scope,
     _memory_server_tools_for_task,
+    _required_task_tool_names,
     _task_requires_mcp_tool_usage,
 )
 
@@ -87,6 +88,31 @@ class TestRequiredToolUsage:
             is True
         )
 
+    def test_explicit_handoff_instruction_requires_mcp_tool_usage(self):
+        assert (
+            _task_requires_mcp_tool_usage(
+                "research",
+                "Daily weather outfit recommendation",
+                "Check the weather and provide a handoff with the recommendation.",
+            )
+            is True
+        )
+        assert _required_task_tool_names(
+            "research",
+            "Daily weather outfit recommendation",
+            "Check the weather and provide a handoff with the recommendation.",
+        ) == {"send_handoff"}
+
+    def test_generic_handoff_word_does_not_require_tool_usage(self):
+        assert (
+            _task_requires_mcp_tool_usage(
+                "documentation",
+                "Define handoff criteria between roles",
+                "Document collaboration handoff criteria for team roles.",
+            )
+            is False
+        )
+
     def test_plain_research_task_does_not_require_mcp_tool_usage(self):
         assert _task_requires_mcp_tool_usage("research", "Summarize sibling results") is False
 
@@ -121,5 +147,6 @@ class TestMemoryServerToolSelection:
     def test_plain_research_keeps_small_tool_surface(self):
         tools = set(_memory_server_tools_for_task("research", "Summarize market data"))
         assert "search_memories" in tools
+        assert "send_handoff" in tools
         assert "create_skill_definition" not in tools
         assert "create_request" not in tools

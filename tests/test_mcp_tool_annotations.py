@@ -37,7 +37,15 @@ def test_core_mutating_tools_are_annotated():
     register_memory_tools(mcp)
     register_request_tools(mcp)
 
-    for name in ["create_memory", "update_memory", "delete_memory", "create_request", "create_task"]:
+    for name in [
+        "create_memory",
+        "update_memory",
+        "delete_memory",
+        "create_request",
+        "create_task",
+        "send_handoff",
+        "send_user_interaction",
+    ]:
         annotations = _tool_annotations(mcp, name)
         assert annotations is not None, name
         assert annotations.readOnlyHint is False, name

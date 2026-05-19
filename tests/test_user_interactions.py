@@ -1,14 +1,17 @@
 """Tests for proactive Lucent handoff user interactions."""
 
+import json
 from uuid import uuid4
 
 import httpx
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport
+from mcp.server.fastmcp import FastMCP
 
 from lucent.api.app import create_app
 from lucent.api.deps import CurrentUser, get_current_user
+from lucent.auth import set_current_user
 from lucent.auth_providers import (
     CSRF_COOKIE_NAME,
     CSRF_FIELD_NAME,
@@ -18,6 +21,7 @@ from lucent.auth_providers import (
 from lucent.db import OrganizationRepository, UserRepository
 from lucent.db.user_interactions import UserInteractionRepository
 from lucent.api.routers.schedules import _workflow_interaction_references
+from lucent.tools.requests import register_request_tools
 
 
 @pytest_asyncio.fixture
@@ -107,6 +111,11 @@ def _csrf_data(client: httpx.AsyncClient, extra: dict | None = None) -> dict:
     return data
 
 
+async def _call_mcp_tool(mcp: FastMCP, tool_name: str, args: dict | None = None):
+    result = await mcp._tool_manager.call_tool(tool_name, args or {})
+    return json.loads(result)
+
+
 def test_workflow_interaction_references_use_activity_request_links():
     workflow_id = str(uuid4())
     run_id = str(uuid4())
@@ -124,6 +133,51 @@ def test_workflow_interaction_references_use_activity_request_links():
     assert refs_by_type["request"]["url"] == f"/activity/{request_id}"
     assert refs_by_type["schedule_run"].get("url") is None
     assert refs_by_type["schedule_run"]["metadata"]["request_id"] == request_id
+
+
+@pytest.mark.asyncio
+async def test_send_handoff_mcp_tool_creates_handoff(db_pool, interaction_user):
+    mcp = FastMCP("test-handoffs")
+    register_request_tools(mcp)
+    set_current_user(
+        {
+            "id": interaction_user["id"],
+            "organization_id": interaction_user["organization_id"],
+            "role": "member",
+            "display_name": interaction_user.get("display_name"),
+            "email": interaction_user.get("email"),
+        }
+    )
+    try:
+        created = await _call_mcp_tool(
+            mcp,
+            "send_handoff",
+            {
+                "title": "Weather outfit recommendation",
+                "body": "It will rain this afternoon; take a light rain jacket.",
+                "requires_response": False,
+                "dedupe_key": "weather-outfit:test",
+            },
+        )
+    finally:
+        set_current_user(None)
+
+    assert created["title"] == "Weather outfit recommendation"
+    assert created["interaction_type"] == "handoff"
+    assert created["requires_response"] is False
+    assert created["url"].startswith("/handoffs/")
+
+    repo = UserInteractionRepository(db_pool)
+    detail = await repo.get_interaction(
+        created["id"],
+        interaction_user["organization_id"],
+        user_id=interaction_user["id"],
+    )
+    assert detail is not None
+    assert detail["title"] == "Weather outfit recommendation"
+    assert detail["messages"][0]["body"] == (
+        "It will rain this afternoon; take a light rain jacket."
+    )
 
 
 @pytest.mark.asyncio

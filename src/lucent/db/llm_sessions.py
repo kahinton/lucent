@@ -34,6 +34,8 @@ _SIGNIFICANT_SESSION_TOOLS = {
     "link_request_memory",
     "link_task_memory",
     "record_task_output",
+    "send_handoff",
+    "send_user_interaction",
     "create_task",
     "propose_sandbox_template",
     "create_agent_definition",
