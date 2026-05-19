@@ -212,9 +212,18 @@ _HANDOFF_TOOL_REQUIRED_SIGNALS = frozenset(
         "send a handoff",
         "create a handoff",
         "provide a handoff",
+        "as a handoff",
         "handoff to the user",
         "post to handoffs",
     }
+)
+
+_HANDOFF_TOOL_REQUIRED_PATTERNS = tuple(
+    re.compile(pattern)
+    for pattern in (
+        r"\b(?:send|create|provide|post|publish|share|deliver|return|write)\b.{0,120}\bhandoff\b",
+        r"\bhandoff\b.{0,80}\b(?:to|for)\b.{0,40}\b(?:user|human|person|owner|requester)\b",
+    )
 )
 
 _TASK_MEMORY_SERVER_TOOLS = sorted(
@@ -767,7 +776,9 @@ def _required_task_tool_names(
     """Return specific tools a task must call to satisfy explicit instructions."""
     text = f"{title or ''} {description or ''}".lower()
     required: set[str] = set()
-    if any(signal in text for signal in _HANDOFF_TOOL_REQUIRED_SIGNALS):
+    if any(signal in text for signal in _HANDOFF_TOOL_REQUIRED_SIGNALS) or any(
+        pattern.search(text) for pattern in _HANDOFF_TOOL_REQUIRED_PATTERNS
+    ):
         required.add("send_handoff")
     return required
 
@@ -2556,12 +2567,13 @@ present narrative-only work as completed. When available, call `record_task_outp
 for every durable artifact so the Activity UI can show what was produced.
 
 --- HANDOFFS TO THE USER ---
-If the task or workflow asks you to send, provide, create, or hand off something
-to the user, you MUST call `send_handoff`. Do not just write a section titled
-"Handoff" in your final task output — that only completes the task transcript
-and does not create a visible Handoffs item for the user. Use `send_handoff`
-for updates, recommendations, questions, decisions, or summaries the user should
-read or answer in Handoffs. Set `requires_response=true` and include a concise
+If the task or workflow asks you to send, provide, create, return, share, or
+publish something "as a handoff" or otherwise hand something off to the user,
+you MUST call `send_handoff`. Do not just write a section titled "Handoff" in
+your final task output — that only completes the task transcript and does not
+create a visible Handoffs item for the user. Use `send_handoff` for updates,
+recommendations, questions, decisions, or summaries the user should read or
+answer in Handoffs. Set `requires_response=true` and include a concise
 `response_prompt` when Lucent should wait for the user's answer before continuing.
 Use `record_task_output` instead for durable artifacts that belong on the
 Activity request page, such as PRs, files, documents, deployments, or links.

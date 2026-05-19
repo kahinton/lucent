@@ -103,6 +103,25 @@ class TestRequiredToolUsage:
             "Check the weather and provide a handoff with the recommendation.",
         ) == {"send_handoff"}
 
+    def test_handoff_output_wording_requires_send_handoff_tool(self):
+        description = (
+            "Fetch the weather, recommend clothes, and provide your recommendation "
+            "as a handoff."
+        )
+        assert (
+            _task_requires_mcp_tool_usage(
+                "weather-advisor",
+                "Daily weather outfit recommendation",
+                description,
+            )
+            is True
+        )
+        assert _required_task_tool_names(
+            "weather-advisor",
+            "Daily weather outfit recommendation",
+            description,
+        ) == {"send_handoff"}
+
     def test_generic_handoff_word_does_not_require_tool_usage(self):
         assert (
             _task_requires_mcp_tool_usage(

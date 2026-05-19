@@ -48,6 +48,29 @@ async def _schedule_owner_context(
 
         owner = await UserRepository(pool).get_by_id(owner_id)
         if owner and owner.get("role"):
+            if (
+                not sched.get("is_system")
+                and (owner.get("role") == "daemon" or owner.get("external_id") == "daemon-service")
+            ):
+                if fallback_user is not None and not _is_daemon_user(fallback_user):
+                    return str(fallback_user.id), str(fallback_user.role)
+                async with pool.acquire() as conn:
+                    human_owner = await conn.fetchrow(
+                        """SELECT id::text, role
+                           FROM users
+                           WHERE organization_id = $1::uuid
+                             AND role <> 'daemon'
+                             AND COALESCE(external_id, '') <> 'daemon-service'
+                           ORDER BY CASE role
+                               WHEN 'owner' THEN 0
+                               WHEN 'admin' THEN 1
+                               ELSE 2
+                           END, created_at ASC
+                           LIMIT 1""",
+                        str(sched.get("organization_id")),
+                    )
+                if human_owner:
+                    return str(human_owner["id"]), str(human_owner["role"] or "member")
             return owner_id, str(owner["role"])
     except Exception:
         logger.debug("Failed to resolve schedule owner %s", owner_id, exc_info=True)

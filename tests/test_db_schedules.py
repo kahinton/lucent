@@ -1699,6 +1699,71 @@ class TestBuiltInScheduleEligibility:
         assert task_row["title"] == schedule_title
         assert task_row["request_title"] == f"[Scheduled] {schedule_title}"
 
+    async def test_manual_daemon_owned_user_workflow_runs_as_triggering_user(
+        self,
+        repo,
+        db_pool,
+        test_user,
+    ):
+        from lucent.api.deps import CurrentUser
+        from lucent.api.routers.schedules import trigger_now
+
+        org_id = str(test_user["organization_id"])
+        user_id = str(test_user["id"])
+        daemon_id = "00000000-0000-0000-0000-0000000000da"
+        await _insert_agent_definition(db_pool, org_id, user_id, "code")
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO users (
+                       id, organization_id, external_id, provider, email,
+                       display_name, role
+                   ) VALUES (
+                       $1::uuid, $2::uuid, 'test_daemon_service', 'local',
+                       'daemon@test.local', 'Lucent Daemon', 'daemon'
+                   )
+                   ON CONFLICT (id) DO NOTHING""",
+                daemon_id,
+                org_id,
+            )
+
+        sched = await repo.create_schedule(
+            title="User-facing daemon-owned workflow",
+            org_id=org_id,
+            schedule_type="interval",
+            interval_seconds=3600,
+            description="Should run as the triggering user, not daemon",
+            agent_type="code",
+            created_by=daemon_id,
+            actions=[
+                {
+                    "action_type": "task",
+                    "title": "Create user handoff",
+                    "description": "Provide your recommendation as a handoff.",
+                    "agent_type": "code",
+                }
+            ],
+        )
+        user = CurrentUser(
+            id=test_user["id"],
+            organization_id=test_user["organization_id"],
+            role="owner",
+            email=test_user["email"],
+            display_name=test_user["display_name"],
+        )
+
+        result = await trigger_now(str(sched["id"]), user, force=True, pool=db_pool)
+
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """SELECT r.created_by::text, t.requesting_user_id::text
+                   FROM requests r
+                   JOIN tasks t ON t.request_id = r.id
+                   WHERE r.id = $1::uuid""",
+                str(result["request"]["id"]),
+            )
+        assert row["created_by"] == user_id
+        assert row["requesting_user_id"] == user_id
+
     async def test_shadow_forget_positive_requires_feature_flag(
         self,
         repo,
