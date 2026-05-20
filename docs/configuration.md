@@ -1,6 +1,24 @@
 # Configuration
 
-Lucent is configured entirely through environment variables. Copy `.env.example` to `.env` and customize as needed.
+Lucent uses environment variables for deployment/bootstrap configuration. Safe, non-secret runtime behavior switches can also be saved in the database from **Settings → Runtime Settings** by an admin or owner.
+
+For DB-backed runtime settings, precedence is:
+
+1. Database value saved for the workspace
+2. Environment variable fallback
+3. Built-in default
+
+Resetting a runtime setting in the UI deletes the database value and returns it to environment/default fallback. Secrets are intentionally excluded from runtime settings; use **Settings → Secrets** or **Settings → Connections** for credentials. Copy `.env.example` to `.env` and customize bootstrap values as needed.
+
+## Runtime Settings UI
+
+Admins and owners can manage allowlisted, non-secret runtime settings in **Settings → Runtime Settings**. These saved values are stored in PostgreSQL, included in normal database backups, and loaded by the API/daemon at startup. Current settings include memory lifecycle/search rollout flags, search observability sampling, daemon request auto-approval, and post-completion review behavior.
+
+The UI shows the active source for each value:
+
+- **Saved in DB** — workspace value takes precedence and is backed up with the database.
+- **From env** — no database value exists, so the matching environment variable is used.
+- **Default** — neither a database value nor environment variable is set.
 
 ## Server Configuration
 
@@ -126,8 +144,8 @@ levels only for complex analysis where extra latency/cost is justified.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LUCENT_AUTO_APPROVE` | `true` | When `false`, daemon-created requests (source: cognitive, daemon, schedule) require human approval via the review queue before work begins. User/API-created requests are always auto-approved. |
-| `LUCENT_SKIP_POST_REVIEW` | `false` | When `true`, bypasses the daemon's automatic post-completion quality review. By default, finished work goes through an internal review task that auto-approves or sends back for rework. |
+| `LUCENT_AUTO_APPROVE` | `false` | Env fallback for **Settings → Runtime Settings → Auto-approve daemon-created requests**. When `false`, daemon/cognitive requests require human approval via the review queue before work begins. User/API/scheduled requests are always auto-approved. |
+| `LUCENT_SKIP_POST_REVIEW` | `false` | Env fallback for **Settings → Runtime Settings → Skip automatic post-completion review**. When `true`, bypasses the daemon's automatic post-completion quality review. By default, finished work goes through an internal review task that auto-approves or sends back for rework. |
 | `LUCENT_REQUIRE_APPROVAL` | `false` | When `true`, completed requests transition to `review` status for human sign-off instead of going directly to `completed`. |
 | `LUCENT_REQUEST_REVIEW_MODEL` | *(daemon default)* | Model for request-level post-completion review |
 | `LUCENT_REQUEST_REVIEW_AGENT_TYPE` | `request-review` | Agent type for post-completion review |

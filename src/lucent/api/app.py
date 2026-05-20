@@ -239,6 +239,9 @@ async def lifespan(app: FastAPI):
         from lucent.auth_providers import initialize_signing_secret
 
         await initialize_signing_secret(_secret_pool)
+        from lucent.settings import load_runtime_settings_from_db
+
+        await load_runtime_settings_from_db(_secret_pool)
 
     # Load model registry from database
     try:

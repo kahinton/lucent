@@ -466,7 +466,7 @@ APPROVAL_REJECTED = "rejected"
 _DAEMON_SOURCES = frozenset({"cognitive", "daemon"})
 
 
-def _requires_approval(source: str) -> bool:
+def _requires_approval(source: str, *, organization_id: str | None = None) -> bool:
     """Check if a request from this source needs human approval.
 
     User/API/schedule requests are always auto-approved.
@@ -475,11 +475,12 @@ def _requires_approval(source: str) -> bool:
     """
     if source not in _DAEMON_SOURCES:
         return False
-    auto_approve = os.environ.get("LUCENT_AUTO_APPROVE", "false").lower()
-    return auto_approve not in ("true", "1", "yes")
+    from lucent.settings import daemon_auto_approve_enabled
+
+    return not daemon_auto_approve_enabled(organization_id=organization_id)
 
 
-def _requires_post_completion_review() -> bool:
+def _requires_post_completion_review(*, organization_id: str | None = None) -> bool:
     """Check if completed requests should go through internal review.
 
     The daemon's post-completion review task is an automatic quality check
@@ -489,8 +490,9 @@ def _requires_post_completion_review() -> bool:
     Set LUCENT_SKIP_POST_REVIEW=true to bypass the automatic review task
     and send completed requests straight to 'completed' status.
     """
-    val = os.environ.get("LUCENT_SKIP_POST_REVIEW", "false").lower()
-    return val not in ("true", "1", "yes")
+    from lucent.settings import post_completion_review_enabled
+
+    return post_completion_review_enabled(organization_id=organization_id)
 
 
 _VALID_OUTPUT_FAILURE_POLICIES = {"fail", "fallback", "retry_then_fallback"}
@@ -696,7 +698,7 @@ class RequestRepository:
             )
         approval = (
             APPROVAL_PENDING
-            if force_pending_approval or _requires_approval(source)
+            if force_pending_approval or _requires_approval(source, organization_id=org_id)
             else APPROVAL_AUTO
         )
         now = datetime.now(timezone.utc) if approval == APPROVAL_AUTO else None
@@ -3193,8 +3195,14 @@ class RequestRepository:
                          AND title IS DISTINCT FROM 'Post-completion review'""",
                     UUID(request_id),
                 )
+                organization_id = await conn.fetchval(
+                    "SELECT organization_id FROM requests WHERE id = $1",
+                    UUID(request_id),
+                )
             status = REQUEST_STATUS_FAILED if failed > 0 else (
-                REQUEST_STATUS_REVIEW if _requires_post_completion_review()
+                REQUEST_STATUS_REVIEW if _requires_post_completion_review(
+                    organization_id=str(organization_id) if organization_id else None,
+                )
                 else REQUEST_STATUS_COMPLETED
             )
             await self.update_request_status(request_id, status)

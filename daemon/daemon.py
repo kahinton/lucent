@@ -2718,6 +2718,12 @@ class LucentDaemon:
             # Pass explicitly so init_db uses the same connection the daemon does.
             _pool = await _init_db(database_url=DATABASE_URL)
             try:
+                from lucent.settings import load_runtime_settings_from_db
+
+                await load_runtime_settings_from_db(_pool)
+            except Exception as settings_exc:
+                log(f"Failed to load runtime settings from DB: {settings_exc}", "WARN")
+            try:
                 from lucent.model_registry import load_models_from_db
 
                 await load_models_from_db(_pool)
