@@ -805,9 +805,6 @@ def _required_task_tool_names(
     description: str | None = None,
 ) -> set[str]:
     """Return specific tools a task must call to satisfy explicit instructions."""
-    agent = (agent_type or "").strip().lower()
-    if agent == "request-review":
-        return set()
     text = f"{title or ''} {description or ''}".lower()
     required: set[str] = set()
     if any(signal in text for signal in _HANDOFF_TOOL_REQUIRED_SIGNALS) or any(
@@ -5318,15 +5315,10 @@ class LucentDaemon:
                     ttl_minutes=60,
                 )
                 if _scoped_key:
-                    _task_mcp_headers = {"Authorization": f"Bearer {_scoped_key}"}
-                    if request_id:
-                        _task_mcp_headers["X-Lucent-Request-Id"] = request_id
-                    if task_id:
-                        _task_mcp_headers["X-Lucent-Task-Id"] = task_id
                     task_mcp_config["memory-server"] = {
                         "type": "http",
                         "url": MCP_URL,
-                        "headers": _task_mcp_headers,
+                        "headers": {"Authorization": f"Bearer {_scoped_key}"},
                         "tools": _memory_server_tools_for_task(
                             agent_type,
                             title,
