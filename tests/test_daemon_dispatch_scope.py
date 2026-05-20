@@ -103,6 +103,25 @@ class TestRequiredToolUsage:
             "Check the weather and provide a handoff with the recommendation.",
         ) == {"send_handoff"}
 
+    def test_request_review_does_not_require_handoff_tool_usage(self):
+        description = (
+            "Perform post-completion request review. Original request asked an "
+            "agent to provide its recommendation as a handoff."
+        )
+        assert (
+            _task_requires_mcp_tool_usage(
+                "request-review",
+                "Post-completion review",
+                description,
+            )
+            is False
+        )
+        assert _required_task_tool_names(
+            "request-review",
+            "Post-completion review",
+            description,
+        ) == set()
+
     def test_handoff_output_wording_requires_send_handoff_tool(self):
         description = (
             "Fetch the weather, recommend clothes, and provide your recommendation "

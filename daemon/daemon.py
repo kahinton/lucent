@@ -774,6 +774,9 @@ def _required_task_tool_names(
     description: str | None = None,
 ) -> set[str]:
     """Return specific tools a task must call to satisfy explicit instructions."""
+    agent = (agent_type or "").strip().lower()
+    if agent == "request-review":
+        return set()
     text = f"{title or ''} {description or ''}".lower()
     required: set[str] = set()
     if any(signal in text for signal in _HANDOFF_TOOL_REQUIRED_SIGNALS) or any(
