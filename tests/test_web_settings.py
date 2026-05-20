@@ -216,6 +216,10 @@ async def test_runtime_settings_page_shows_env_fallback(
     assert "Runtime Settings" in resp.text
     assert "From env" in resp.text
     assert "LUCENT_SEARCH_VITALITY_BOOST_ALPHA" in resp.text
+    assert "Default model" in resp.text
+    assert "Chat model" in resp.text
+    assert "GitHub token" in resp.text
+    assert "Locked" in resp.text
 
 
 @pytest.mark.asyncio
@@ -247,6 +251,49 @@ async def test_runtime_setting_update_persists_db_value(
     assert runtime_settings.search_vitality_boost_alpha(
         organization_id=org["id"],
     ) == 0.27
+
+
+@pytest.mark.asyncio
+async def test_runtime_default_model_drives_model_registry(
+    client,
+    db_pool,
+    web_user,
+):
+    from lucent.auth import set_current_user
+    from lucent.model_registry import ModelInfo, get_default_model_id
+
+    user, org, _token = web_user
+    await _promote_web_user(db_pool, web_user)
+    runtime_settings.clear_runtime_setting_cache()
+
+    resp = await client.post(
+        "/settings/runtime/models.default_model",
+        data=_csrf_data(client, {"value": "test-default-model"}),
+        follow_redirects=False,
+    )
+
+    assert resp.status_code == 303
+    set_current_user({"id": user["id"], "organization_id": org["id"]})
+    try:
+        selected = get_default_model_id(
+            models=[
+                ModelInfo(
+                    id="fallback-model",
+                    provider="test",
+                    name="Fallback",
+                    category="general",
+                ),
+                ModelInfo(
+                    id="test-default-model",
+                    provider="test",
+                    name="DB Default",
+                    category="general",
+                ),
+            ]
+        )
+    finally:
+        set_current_user(None)
+    assert selected == "test-default-model"
 
 
 @pytest.mark.asyncio
@@ -306,3 +353,21 @@ async def test_runtime_setting_validation_rejects_out_of_range_value(
     repo = RuntimeSettingsRepository(db_pool)
     row = await repo.get_setting(org["id"], "memory.search_vitality_boost_log_top_n")
     assert row is None
+
+
+def test_runtime_daemon_git_flags_registered(monkeypatch):
+    runtime_settings.clear_runtime_setting_cache()
+    monkeypatch.setenv("LUCENT_ALLOW_GIT_COMMIT", "true")
+    monkeypatch.setenv("LUCENT_ALLOW_GIT_PUSH", "false")
+
+    try:
+        assert runtime_settings.daemon_git_commit_allowed() is True
+        assert runtime_settings.daemon_git_push_allowed() is False
+        assert runtime_settings.get_runtime_setting_definition(
+            "daemon.allow_git_commit"
+        ) is not None
+        assert runtime_settings.get_runtime_setting_definition(
+            "daemon.allow_git_push"
+        ) is not None
+    finally:
+        runtime_settings.clear_runtime_setting_cache()

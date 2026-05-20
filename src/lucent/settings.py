@@ -35,6 +35,10 @@ class RuntimeSettingDefinition:
     min_value: int | float | None = None
     max_value: int | float | None = None
     editable: bool = True
+    choices: tuple[str, ...] = ()
+    sensitive: bool = False
+    requires_restart: bool = False
+    read_only_reason: str = ""
 
 
 _RUNTIME_SETTING_DEFINITIONS: tuple[RuntimeSettingDefinition, ...] = (
@@ -142,6 +146,696 @@ _RUNTIME_SETTING_DEFINITIONS: tuple[RuntimeSettingDefinition, ...] = (
             "throughput is more important than quality gates."
         ),
     ),
+    RuntimeSettingDefinition(
+        key="requests.require_completion_approval",
+        env_var="LUCENT_REQUIRE_APPROVAL",
+        value_type="boolean",
+        default=False,
+        title="Require human approval for completed requests",
+        section="Requests",
+        description="Move completed requests to human review before final completion.",
+        help_text="Separate from automatic post-completion review; this is a human sign-off gate.",
+    ),
+    RuntimeSettingDefinition(
+        key="requests.review_models",
+        env_var="LUCENT_REVIEW_MODELS",
+        value_type="string",
+        default="",
+        title="Task review models",
+        section="Requests",
+        description="Comma-separated model IDs used for extra task-output review.",
+        help_text="Leave blank to use the normal single-review flow.",
+        requires_restart=True,
+    ),
+    RuntimeSettingDefinition(
+        key="requests.review_model",
+        env_var="LUCENT_REQUEST_REVIEW_MODEL",
+        value_type="string",
+        default="",
+        title="Request review model",
+        section="Requests",
+        description="Model override for request-level post-completion review.",
+        help_text="Leave blank to use the daemon/default model selector.",
+        requires_restart=True,
+    ),
+    RuntimeSettingDefinition(
+        key="requests.review_agent_type",
+        env_var="LUCENT_REQUEST_REVIEW_AGENT_TYPE",
+        value_type="string",
+        default="request-review",
+        title="Request review agent type",
+        section="Requests",
+        description="Preferred agent type for request-level post-completion review tasks.",
+        requires_restart=True,
+    ),
+    RuntimeSettingDefinition(
+        key="requests.review_fallback_agent_type",
+        env_var="LUCENT_REQUEST_REVIEW_FALLBACK_AGENT_TYPE",
+        value_type="string",
+        default="code",
+        title="Request review fallback agent type",
+        section="Requests",
+        description="Fallback agent type when the dedicated review agent is unavailable.",
+        requires_restart=True,
+    ),
+    RuntimeSettingDefinition(
+        key="models.default_model",
+        env_var="LUCENT_DEFAULT_MODEL",
+        value_type="string",
+        default="",
+        title="Default model",
+        section="Models & LLM",
+        description=(
+            "Workspace-wide preferred default model when it is enabled in the "
+            "model registry."
+        ),
+        help_text="Leave blank to let Lucent choose the first enabled general-purpose model.",
+    ),
+    RuntimeSettingDefinition(
+        key="models.chat_model",
+        env_var="LUCENT_CHAT_MODEL",
+        value_type="string",
+        default="",
+        title="Chat model",
+        section="Models & LLM",
+        description="Preferred default model for chat sessions.",
+        help_text="Leave blank to use the workspace default model.",
+    ),
+    RuntimeSettingDefinition(
+        key="models.daemon_model",
+        env_var="LUCENT_DAEMON_MODEL",
+        value_type="string",
+        default="",
+        title="Daemon model",
+        section="Models & LLM",
+        description="Preferred default model for daemon sessions and autonomous work.",
+        help_text="Leave blank to use the workspace default model.",
+        requires_restart=True,
+    ),
+    RuntimeSettingDefinition(
+        key="models.llm_engine",
+        env_var="LUCENT_LLM_ENGINE",
+        value_type="string",
+        default="copilot",
+        title="LLM engine",
+        section="Models & LLM",
+        description="Default engine for model execution when a model does not override it.",
+        choices=("copilot", "langchain"),
+        requires_restart=True,
+    ),
+    RuntimeSettingDefinition(
+        key="models.validation_mode",
+        env_var="LUCENT_MODEL_VALIDATION",
+        value_type="string",
+        default="strict",
+        title="Model validation mode",
+        section="Models & LLM",
+        description="Whether unknown model IDs are rejected or allowed.",
+        choices=("strict", "lenient"),
+    ),
+    RuntimeSettingDefinition(
+        key="chat.mcp_url",
+        env_var="LUCENT_CHAT_MCP_URL",
+        value_type="string",
+        default="http://localhost:8766/mcp",
+        title="Chat MCP URL",
+        section="Chat",
+        description="MCP server URL used by chat sessions for tool access.",
+    ),
+    RuntimeSettingDefinition(
+        key="chat.timeout_seconds",
+        env_var="LUCENT_CHAT_TIMEOUT",
+        value_type="integer",
+        default=300,
+        title="Chat timeout",
+        section="Chat",
+        description="Maximum seconds a chat model call may run.",
+        min_value=30,
+    ),
+    RuntimeSettingDefinition(
+        key="chat.session_experience_summary_enabled",
+        env_var="LUCENT_SESSION_EXPERIENCE_SUMMARY_ENABLED",
+        value_type="boolean",
+        default=True,
+        title="Session experience summaries",
+        section="Chat",
+        description="Capture meaningful chat sessions as experience memories.",
+    ),
+    RuntimeSettingDefinition(
+        key="chat.session_experience_model",
+        env_var="LUCENT_SESSION_EXPERIENCE_MODEL",
+        value_type="string",
+        default="",
+        title="Session experience model",
+        section="Chat",
+        description="Optional model override for writing chat-session experience summaries.",
+        help_text="Leave blank to use the chat/default model.",
+    ),
+    RuntimeSettingDefinition(
+        key="chat.session_experience_timeout_seconds",
+        env_var="LUCENT_SESSION_EXPERIENCE_TIMEOUT",
+        value_type="integer",
+        default=180,
+        title="Session experience timeout",
+        section="Chat",
+        description="Maximum seconds for the session experience summary model call.",
+        min_value=30,
+    ),
+    RuntimeSettingDefinition(
+        key="daemon.max_sessions",
+        env_var="LUCENT_MAX_SESSIONS",
+        value_type="integer",
+        default=3,
+        title="Max daemon sessions",
+        section="Daemon",
+        description="Maximum concurrent sub-agent sessions per daemon instance.",
+        min_value=1,
+        requires_restart=True,
+    ),
+    RuntimeSettingDefinition(
+        key="daemon.interval_minutes",
+        env_var="LUCENT_DAEMON_INTERVAL",
+        value_type="integer",
+        default=15,
+        title="Daemon cognitive interval",
+        section="Daemon",
+        description="Minutes between daemon cognitive cycles.",
+        min_value=1,
+        requires_restart=True,
+    ),
+    RuntimeSettingDefinition(
+        key="daemon.roles",
+        env_var="LUCENT_DAEMON_ROLES",
+        value_type="string",
+        default="all",
+        title="Daemon roles",
+        section="Daemon",
+        description=(
+            "Enabled daemon loops: all, or comma-separated "
+            "cognitive/dispatcher/scheduler/autonomic."
+        ),
+        requires_restart=True,
+    ),
+    RuntimeSettingDefinition(
+        key="daemon.mcp_url",
+        env_var="LUCENT_MCP_URL",
+        value_type="string",
+        default="http://localhost:8766/mcp",
+        title="Daemon MCP URL",
+        section="Daemon",
+        description="MCP server URL used by daemon-run sessions.",
+        requires_restart=True,
+    ),
+    RuntimeSettingDefinition(
+        key="daemon.mcp_api_key",
+        env_var="LUCENT_MCP_API_KEY",
+        value_type="string",
+        default="",
+        title="Daemon MCP API key",
+        section="Daemon",
+        description="Fallback API key for daemon MCP access.",
+        sensitive=True,
+        editable=False,
+        read_only_reason="Manage daemon API keys through the daemon bootstrap/API-key flow.",
+    ),
+    RuntimeSettingDefinition(
+        key="daemon.allow_git_commit",
+        env_var="LUCENT_ALLOW_GIT_COMMIT",
+        value_type="boolean",
+        default=False,
+        title="Allow daemon git commits",
+        section="Daemon",
+        description="Let daemon task sessions create local git commits when a task requires it.",
+        help_text=(
+            "Keep off unless autonomous tasks are allowed to make durable "
+            "repository commits."
+        ),
+        requires_restart=True,
+    ),
+    RuntimeSettingDefinition(
+        key="daemon.allow_git_push",
+        env_var="LUCENT_ALLOW_GIT_PUSH",
+        value_type="boolean",
+        default=False,
+        title="Allow daemon git pushes",
+        section="Daemon",
+        description="Let daemon task sessions push committed changes to a remote repository.",
+        help_text=(
+            "Requires daemon git commits to be enabled too. Leave off unless tasks may publish "
+            "changes to remotes without additional operator action."
+        ),
+        requires_restart=True,
+    ),
+    RuntimeSettingDefinition(
+        key="daemon.stale_heartbeat_minutes",
+        env_var="LUCENT_STALE_HEARTBEAT_MINUTES",
+        value_type="integer",
+        default=30,
+        title="Stale daemon heartbeat minutes",
+        section="Daemon",
+        description="Minutes before a daemon heartbeat is considered stale.",
+        min_value=1,
+        requires_restart=True,
+    ),
+    RuntimeSettingDefinition(
+        key="daemon.session_timeout_seconds",
+        env_var="LUCENT_SESSION_TIMEOUT",
+        value_type="integer",
+        default=3600,
+        title="Daemon session timeout",
+        section="Daemon",
+        description="Overall timeout in seconds for a daemon model session.",
+        min_value=60,
+        requires_restart=True,
+    ),
+    RuntimeSettingDefinition(
+        key="daemon.session_idle_timeout_seconds",
+        env_var="LUCENT_SESSION_IDLE_TIMEOUT",
+        value_type="integer",
+        default=300,
+        title="Daemon session idle timeout",
+        section="Daemon",
+        description="Idle timeout in seconds for daemon model sessions.",
+        min_value=30,
+        requires_restart=True,
+    ),
+    RuntimeSettingDefinition(
+        key="daemon.max_result_length",
+        env_var="LUCENT_MAX_RESULT_LENGTH",
+        value_type="integer",
+        default=8000,
+        title="Max daemon result length",
+        section="Daemon",
+        description="Maximum characters stored from sub-agent results.",
+        min_value=1000,
+        requires_restart=True,
+    ),
+    RuntimeSettingDefinition(
+        key="daemon.watchdog_timeout_seconds",
+        env_var="LUCENT_WATCHDOG_TIMEOUT",
+        value_type="integer",
+        default=3600,
+        title="Daemon watchdog timeout seconds",
+        section="Daemon",
+        description="Seconds without daemon log activity before watchdog intervention.",
+        min_value=60,
+        requires_restart=True,
+    ),
+    RuntimeSettingDefinition(
+        key="daemon.dispatch_poll_seconds",
+        env_var="LUCENT_DISPATCH_POLL_SECONDS",
+        value_type="integer",
+        default=60,
+        title="Dispatch poll seconds",
+        section="Daemon",
+        description="How often the dispatcher polls if PostgreSQL LISTEN misses a signal.",
+        min_value=1,
+        requires_restart=True,
+    ),
+    RuntimeSettingDefinition(
+        key="daemon.scheduler_check_seconds",
+        env_var="LUCENT_SCHEDULER_CHECK_SECONDS",
+        value_type="integer",
+        default=60,
+        title="Scheduler check seconds",
+        section="Daemon",
+        description="How often the daemon scheduler checks for due schedules.",
+        min_value=1,
+        requires_restart=True,
+    ),
+    RuntimeSettingDefinition(
+        key="daemon.autonomic_interval_cycles",
+        env_var="LUCENT_AUTONOMIC_INTERVAL",
+        value_type="integer",
+        default=8,
+        title="Autonomic interval cycles",
+        section="Daemon",
+        description="Cognitive cycles between autonomic maintenance runs.",
+        min_value=1,
+        requires_restart=True,
+    ),
+    RuntimeSettingDefinition(
+        key="daemon.learning_interval_cycles",
+        env_var="LUCENT_LEARNING_INTERVAL",
+        value_type="integer",
+        default=16,
+        title="Learning interval cycles",
+        section="Daemon",
+        description="Cognitive cycles between learning extraction runs.",
+        min_value=1,
+        requires_restart=True,
+    ),
+    RuntimeSettingDefinition(
+        key="daemon.autonomic_minutes",
+        env_var="LUCENT_AUTONOMIC_MINUTES",
+        value_type="integer",
+        default=120,
+        title="Autonomic interval minutes",
+        section="Daemon",
+        description="Time-based interval for autonomic maintenance runs.",
+        min_value=1,
+        requires_restart=True,
+    ),
+    RuntimeSettingDefinition(
+        key="daemon.learning_minutes",
+        env_var="LUCENT_LEARNING_MINUTES",
+        value_type="integer",
+        default=240,
+        title="Learning interval minutes",
+        section="Daemon",
+        description="Time-based interval for learning extraction runs.",
+        min_value=1,
+        requires_restart=True,
+    ),
+    RuntimeSettingDefinition(
+        key="daemon.vitality_scoring_minutes",
+        env_var="LUCENT_VITALITY_SCORING_MINUTES",
+        value_type="integer",
+        default=360,
+        title="Vitality scoring minutes",
+        section="Daemon",
+        description="Interval for memory lifecycle vitality scoring.",
+        min_value=1,
+        requires_restart=True,
+    ),
+    RuntimeSettingDefinition(
+        key="daemon.shadow_forget_scoring_minutes",
+        env_var="LUCENT_SHADOW_FORGET_SCORING_MINUTES",
+        value_type="integer",
+        default=360,
+        title="Shadow forget scoring minutes",
+        section="Daemon",
+        description="Interval for shadow-forgetting score computation.",
+        min_value=1,
+        requires_restart=True,
+    ),
+    RuntimeSettingDefinition(
+        key="daemon.shadow_forget_offset_minutes",
+        env_var="LUCENT_SHADOW_FORGET_OFFSET_MINUTES",
+        value_type="integer",
+        default=15,
+        title="Shadow forget offset minutes",
+        section="Daemon",
+        description="Offset from vitality scoring before shadow-forgetting runs.",
+        min_value=0,
+        requires_restart=True,
+    ),
+    RuntimeSettingDefinition(
+        key="daemon.compression_minutes",
+        env_var="LUCENT_COMPRESSION_MINUTES",
+        value_type="integer",
+        default=1440,
+        title="Experience compression minutes",
+        section="Daemon",
+        description="Interval for daily experience memory compression.",
+        min_value=1,
+        requires_restart=True,
+    ),
+    RuntimeSettingDefinition(
+        key="server.rate_limit_per_minute",
+        env_var="LUCENT_RATE_LIMIT_PER_MINUTE",
+        value_type="integer",
+        default=100,
+        title="API rate limit",
+        section="Server",
+        description="Default requests per minute per API key/IP bucket.",
+        min_value=1,
+    ),
+    RuntimeSettingDefinition(
+        key="server.login_rate_limit",
+        env_var="LUCENT_LOGIN_RATE_LIMIT",
+        value_type="integer",
+        default=5,
+        title="Login rate limit",
+        section="Server",
+        description="Failed login attempts per IP per minute before throttling.",
+        min_value=1,
+    ),
+    RuntimeSettingDefinition(
+        key="server.trusted_proxies",
+        env_var="LUCENT_TRUSTED_PROXIES",
+        value_type="string",
+        default="",
+        title="Trusted proxies",
+        section="Server",
+        description="Comma-separated proxy IPs/CIDRs trusted for X-Forwarded-For parsing.",
+    ),
+    RuntimeSettingDefinition(
+        key="server.host",
+        env_var="LUCENT_HOST",
+        value_type="string",
+        default="0.0.0.0",
+        title="Server host",
+        section="Bootstrap",
+        description="Network interface the server binds to at process start.",
+        editable=False,
+        requires_restart=True,
+        read_only_reason=(
+            "This is needed before the database is available; configure it in "
+            "environment."
+        ),
+    ),
+    RuntimeSettingDefinition(
+        key="server.port",
+        env_var="LUCENT_PORT",
+        value_type="integer",
+        default=8766,
+        title="Server port",
+        section="Bootstrap",
+        description="Port the server binds to at process start.",
+        editable=False,
+        requires_restart=True,
+        read_only_reason=(
+            "This is needed before the database is available; configure it in "
+            "environment."
+        ),
+    ),
+    RuntimeSettingDefinition(
+        key="server.cors_origins",
+        env_var="LUCENT_CORS_ORIGINS",
+        value_type="string",
+        default="",
+        title="CORS origins",
+        section="Bootstrap",
+        description="Comma-separated browser origins allowed to call the API.",
+        editable=False,
+        requires_restart=True,
+        read_only_reason="CORS middleware is built before DB settings are loaded.",
+    ),
+    RuntimeSettingDefinition(
+        key="auth.provider",
+        env_var="LUCENT_AUTH_PROVIDER",
+        value_type="string",
+        default="basic",
+        title="Authentication provider",
+        section="Authentication",
+        description="Authentication backend used for sign-in.",
+        choices=("basic", "api_key"),
+        editable=False,
+        requires_restart=True,
+        read_only_reason="Authentication bootstrap must come from environment.",
+    ),
+    RuntimeSettingDefinition(
+        key="auth.session_ttl_hours",
+        env_var="LUCENT_SESSION_TTL_HOURS",
+        value_type="integer",
+        default=24,
+        title="Session TTL hours",
+        section="Authentication",
+        description="Web session cookie lifetime in hours.",
+        min_value=1,
+        editable=False,
+        requires_restart=True,
+        read_only_reason="Session constants are initialized before DB settings are loaded.",
+    ),
+    RuntimeSettingDefinition(
+        key="auth.secure_cookies",
+        env_var="LUCENT_SECURE_COOKIES",
+        value_type="boolean",
+        default=True,
+        title="Secure cookies",
+        section="Authentication",
+        description="Send session cookies only over HTTPS.",
+        editable=False,
+        requires_restart=True,
+        read_only_reason=(
+            "Cookie security is a bootstrap setting and should be "
+            "environment-controlled."
+        ),
+    ),
+    RuntimeSettingDefinition(
+        key="deployment.mode",
+        env_var="LUCENT_MODE",
+        value_type="string",
+        default="personal",
+        title="Deployment mode",
+        section="Bootstrap",
+        description="Deployment mode: personal or team.",
+        choices=("personal", "team"),
+        editable=False,
+        requires_restart=True,
+        read_only_reason="Mode controls startup behavior and must come from environment.",
+    ),
+    RuntimeSettingDefinition(
+        key="deployment.license_key",
+        env_var="LUCENT_LICENSE_KEY",
+        value_type="string",
+        default="",
+        title="License key",
+        section="Bootstrap",
+        description="License key for team mode.",
+        sensitive=True,
+        editable=False,
+        requires_restart=True,
+        read_only_reason="License material is not stored in runtime_settings.",
+    ),
+    RuntimeSettingDefinition(
+        key="secrets.provider",
+        env_var="LUCENT_SECRET_PROVIDER",
+        value_type="string",
+        default="auto",
+        title="Secret provider",
+        section="Secrets & credentials",
+        description="Secret storage backend selected at startup.",
+        choices=("auto", "builtin", "transit", "vault", "aws", "azure"),
+        editable=False,
+        requires_restart=True,
+        read_only_reason="Secret-provider bootstrap must happen before DB settings are trusted.",
+    ),
+    RuntimeSettingDefinition(
+        key="secrets.signing_secret",
+        env_var="LUCENT_SIGNING_SECRET",
+        value_type="string",
+        default="",
+        title="Signing secret override",
+        section="Secrets & credentials",
+        description="Optional HMAC signing secret override for cookies/impersonation.",
+        sensitive=True,
+        editable=False,
+        read_only_reason="Secrets are managed by the secret provider, not runtime_settings.",
+    ),
+    RuntimeSettingDefinition(
+        key="secrets.builtin_key",
+        env_var="LUCENT_SECRET_KEY",
+        value_type="string",
+        default="",
+        title="Builtin secret-provider key",
+        section="Secrets & credentials",
+        description="Encryption key for the builtin secret provider.",
+        sensitive=True,
+        editable=False,
+        requires_restart=True,
+        read_only_reason="Never persist encryption keys in runtime_settings.",
+    ),
+    RuntimeSettingDefinition(
+        key="credentials.github_token",
+        env_var="GITHUB_TOKEN",
+        value_type="string",
+        default="",
+        title="GitHub token",
+        section="Secrets & credentials",
+        description="GitHub token used for Copilot SDK and GitHub integrations.",
+        sensitive=True,
+        editable=False,
+        read_only_reason="Use Settings → Connections or the secret provider for credentials.",
+    ),
+    RuntimeSettingDefinition(
+        key="credentials.openai_api_key",
+        env_var="OPENAI_API_KEY",
+        value_type="string",
+        default="",
+        title="OpenAI API key",
+        section="Secrets & credentials",
+        description="OpenAI API key for LangChain engine usage.",
+        sensitive=True,
+        editable=False,
+        read_only_reason="Use Settings → Secrets/Connections for provider credentials.",
+    ),
+    RuntimeSettingDefinition(
+        key="credentials.anthropic_api_key",
+        env_var="ANTHROPIC_API_KEY",
+        value_type="string",
+        default="",
+        title="Anthropic API key",
+        section="Secrets & credentials",
+        description="Anthropic API key for LangChain engine usage.",
+        sensitive=True,
+        editable=False,
+        read_only_reason="Use Settings → Secrets/Connections for provider credentials.",
+    ),
+    RuntimeSettingDefinition(
+        key="credentials.google_api_key",
+        env_var="GOOGLE_API_KEY",
+        value_type="string",
+        default="",
+        title="Google API key",
+        section="Secrets & credentials",
+        description="Google/Gemini API key for LangChain engine usage.",
+        sensitive=True,
+        editable=False,
+        read_only_reason="Use Settings → Secrets/Connections for provider credentials.",
+    ),
+    RuntimeSettingDefinition(
+        key="database.url",
+        env_var="DATABASE_URL",
+        value_type="string",
+        default="",
+        title="Database URL",
+        section="Bootstrap",
+        description="PostgreSQL connection URL used before settings can be loaded.",
+        sensitive=True,
+        editable=False,
+        requires_restart=True,
+        read_only_reason="Database bootstrap cannot be read from the database it connects to.",
+    ),
+    RuntimeSettingDefinition(
+        key="database.postgres_user",
+        env_var="POSTGRES_USER",
+        value_type="string",
+        default="lucent",
+        title="Postgres user",
+        section="Bootstrap",
+        description="Docker Compose Postgres user.",
+        editable=False,
+        requires_restart=True,
+        read_only_reason="Database container settings are managed outside the app.",
+    ),
+    RuntimeSettingDefinition(
+        key="database.postgres_db",
+        env_var="POSTGRES_DB",
+        value_type="string",
+        default="lucent",
+        title="Postgres database",
+        section="Bootstrap",
+        description="Docker Compose Postgres database name.",
+        editable=False,
+        requires_restart=True,
+        read_only_reason="Database container settings are managed outside the app.",
+    ),
+    RuntimeSettingDefinition(
+        key="database.postgres_password",
+        env_var="POSTGRES_PASSWORD",
+        value_type="string",
+        default="",
+        title="Postgres password",
+        section="Secrets & credentials",
+        description="Docker Compose Postgres password.",
+        sensitive=True,
+        editable=False,
+        read_only_reason="Database passwords are never stored in runtime_settings.",
+    ),
+    RuntimeSettingDefinition(
+        key="database.daemon_password",
+        env_var="DAEMON_DB_PASSWORD",
+        value_type="string",
+        default="",
+        title="Daemon DB password",
+        section="Secrets & credentials",
+        description="Password for the least-privilege daemon database role.",
+        sensitive=True,
+        editable=False,
+        read_only_reason="Database passwords are never stored in runtime_settings.",
+    ),
 )
 
 _SETTING_DEFINITIONS_BY_KEY = {d.key: d for d in _RUNTIME_SETTING_DEFINITIONS}
@@ -246,6 +940,12 @@ def _coerce_runtime_value(
             else:
                 raise ValueError(f"Value must be at most {definition.max_value}.")
 
+    if definition.choices and str(value) not in definition.choices:
+        choices = ", ".join(definition.choices)
+        if clamp_bounds:
+            return definition.default
+        raise ValueError(f"Value must be one of: {choices}.")
+
     return value
 
 
@@ -269,6 +969,8 @@ def _fallback_value(definition: RuntimeSettingDefinition) -> tuple[Any, RuntimeS
 
 def _org_cache(organization_id: Any | None = None) -> tuple[str | None, dict[str, Any]]:
     org_id = _normalize_org_id(organization_id) or _current_organization_id()
+    if not org_id and len(_runtime_settings_by_org) == 1:
+        org_id = next(iter(_runtime_settings_by_org))
     if not org_id:
         return None, {}
     return org_id, _runtime_settings_by_org.get(org_id, {})
@@ -387,12 +1089,14 @@ def runtime_setting_snapshots(organization_id: Any) -> list[dict[str, Any]]:
             {
                 "definition": definition,
                 "value": value,
+                "display_value": _display_value(definition, value),
                 "form_value": _format_form_value(value),
                 "source": source,
                 "db_value": cached.get(definition.key),
                 "env_var_set": env_raw is not None,
-                "env_raw": env_raw,
+                "env_raw": "***" if definition.sensitive and env_raw else env_raw,
                 "default_value": definition.default,
+                "default_display": _display_value(definition, definition.default),
             }
         )
     return snapshots
@@ -411,6 +1115,207 @@ def _format_form_value(value: Any) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     return str(value)
+
+
+def _display_value(definition: RuntimeSettingDefinition, value: Any) -> str:
+    if definition.sensitive:
+        return "Configured (hidden)" if value else "Not configured"
+    if value == "":
+        return "Not set"
+    return str(value)
+
+
+def _setting_string(key: str, *, organization_id: Any | None = None) -> str:
+    return str(get_runtime_setting(key, organization_id=organization_id)).strip()
+
+
+def _setting_int(key: str, *, organization_id: Any | None = None) -> int:
+    return int(get_runtime_setting(key, organization_id=organization_id))
+
+
+def _setting_bool(key: str, *, organization_id: Any | None = None) -> bool:
+    return bool(get_runtime_setting(key, organization_id=organization_id))
+
+
+def default_model_id(*, organization_id: Any | None = None) -> str | None:
+    """Deployment/admin-selected default model, or None when unset."""
+    return _setting_string("models.default_model", organization_id=organization_id) or None
+
+
+def chat_model_id(*, organization_id: Any | None = None) -> str | None:
+    """Preferred chat model, or None when chat should use the default model."""
+    return _setting_string("models.chat_model", organization_id=organization_id) or None
+
+
+def daemon_model_id(*, organization_id: Any | None = None) -> str | None:
+    """Preferred daemon model, or None when daemon should use the default model."""
+    return _setting_string("models.daemon_model", organization_id=organization_id) or None
+
+
+def llm_engine_name(*, organization_id: Any | None = None) -> str:
+    """Configured default LLM engine name."""
+    return _setting_string("models.llm_engine", organization_id=organization_id).lower()
+
+
+def model_validation_mode(*, organization_id: Any | None = None) -> str:
+    """Model validation mode: strict or lenient."""
+    return _setting_string("models.validation_mode", organization_id=organization_id).lower()
+
+
+def chat_mcp_url(*, organization_id: Any | None = None) -> str:
+    """MCP URL used by chat sessions."""
+    return _setting_string("chat.mcp_url", organization_id=organization_id)
+
+
+def chat_timeout_seconds(*, organization_id: Any | None = None) -> int:
+    """Maximum runtime for chat model sessions."""
+    return _setting_int("chat.timeout_seconds", organization_id=organization_id)
+
+
+def session_experience_summary_enabled(*, organization_id: Any | None = None) -> bool:
+    """Whether meaningful chat sessions should be captured as experience memories."""
+    return _setting_bool(
+        "chat.session_experience_summary_enabled",
+        organization_id=organization_id,
+    )
+
+
+def session_experience_model_id(*, organization_id: Any | None = None) -> str | None:
+    """Model override for chat-session experience summaries, or None."""
+    return _setting_string("chat.session_experience_model", organization_id=organization_id) or None
+
+
+def session_experience_timeout_seconds(*, organization_id: Any | None = None) -> int:
+    """Maximum runtime for session-experience summary model calls."""
+    return _setting_int(
+        "chat.session_experience_timeout_seconds",
+        organization_id=organization_id,
+    )
+
+
+def daemon_max_sessions(*, organization_id: Any | None = None) -> int:
+    return _setting_int("daemon.max_sessions", organization_id=organization_id)
+
+
+def daemon_interval_minutes(*, organization_id: Any | None = None) -> int:
+    return _setting_int("daemon.interval_minutes", organization_id=organization_id)
+
+
+def daemon_roles(*, organization_id: Any | None = None) -> str:
+    return _setting_string("daemon.roles", organization_id=organization_id)
+
+
+def daemon_mcp_url(*, organization_id: Any | None = None) -> str:
+    return _setting_string("daemon.mcp_url", organization_id=organization_id)
+
+
+def daemon_mcp_api_key(*, organization_id: Any | None = None) -> str:
+    return _setting_string("daemon.mcp_api_key", organization_id=organization_id)
+
+
+def daemon_stale_heartbeat_minutes(*, organization_id: Any | None = None) -> int:
+    return _setting_int("daemon.stale_heartbeat_minutes", organization_id=organization_id)
+
+
+def daemon_session_timeout_seconds(*, organization_id: Any | None = None) -> int:
+    return _setting_int("daemon.session_timeout_seconds", organization_id=organization_id)
+
+
+def daemon_session_idle_timeout_seconds(*, organization_id: Any | None = None) -> int:
+    return _setting_int("daemon.session_idle_timeout_seconds", organization_id=organization_id)
+
+
+def daemon_max_result_length(*, organization_id: Any | None = None) -> int:
+    return _setting_int("daemon.max_result_length", organization_id=organization_id)
+
+
+def daemon_watchdog_timeout_seconds(*, organization_id: Any | None = None) -> int:
+    return _setting_int("daemon.watchdog_timeout_seconds", organization_id=organization_id)
+
+
+def daemon_dispatch_poll_seconds(*, organization_id: Any | None = None) -> int:
+    return _setting_int("daemon.dispatch_poll_seconds", organization_id=organization_id)
+
+
+def daemon_scheduler_check_seconds(*, organization_id: Any | None = None) -> int:
+    return _setting_int("daemon.scheduler_check_seconds", organization_id=organization_id)
+
+
+def daemon_autonomic_interval_cycles(*, organization_id: Any | None = None) -> int:
+    return _setting_int("daemon.autonomic_interval_cycles", organization_id=organization_id)
+
+
+def daemon_learning_interval_cycles(*, organization_id: Any | None = None) -> int:
+    return _setting_int("daemon.learning_interval_cycles", organization_id=organization_id)
+
+
+def daemon_autonomic_minutes(*, organization_id: Any | None = None) -> int:
+    return _setting_int("daemon.autonomic_minutes", organization_id=organization_id)
+
+
+def daemon_learning_minutes(*, organization_id: Any | None = None) -> int:
+    return _setting_int("daemon.learning_minutes", organization_id=organization_id)
+
+
+def daemon_vitality_scoring_minutes(*, organization_id: Any | None = None) -> int:
+    return _setting_int("daemon.vitality_scoring_minutes", organization_id=organization_id)
+
+
+def daemon_shadow_forget_scoring_minutes(*, organization_id: Any | None = None) -> int:
+    return _setting_int("daemon.shadow_forget_scoring_minutes", organization_id=organization_id)
+
+
+def daemon_shadow_forget_offset_minutes(*, organization_id: Any | None = None) -> int:
+    return _setting_int("daemon.shadow_forget_offset_minutes", organization_id=organization_id)
+
+
+def daemon_compression_minutes(*, organization_id: Any | None = None) -> int:
+    return _setting_int("daemon.compression_minutes", organization_id=organization_id)
+
+
+def daemon_git_commit_allowed(*, organization_id: Any | None = None) -> bool:
+    return _setting_bool("daemon.allow_git_commit", organization_id=organization_id)
+
+
+def daemon_git_push_allowed(*, organization_id: Any | None = None) -> bool:
+    return _setting_bool("daemon.allow_git_push", organization_id=organization_id)
+
+
+def api_rate_limit_per_minute(*, organization_id: Any | None = None) -> int:
+    return _setting_int("server.rate_limit_per_minute", organization_id=organization_id)
+
+
+def login_rate_limit(*, organization_id: Any | None = None) -> int:
+    return _setting_int("server.login_rate_limit", organization_id=organization_id)
+
+
+def trusted_proxies(*, organization_id: Any | None = None) -> str:
+    return _setting_string("server.trusted_proxies", organization_id=organization_id)
+
+
+def github_token(*, organization_id: Any | None = None) -> str:
+    return _setting_string("credentials.github_token", organization_id=organization_id)
+
+
+def completion_human_approval_required(*, organization_id: Any | None = None) -> bool:
+    return _setting_bool("requests.require_completion_approval", organization_id=organization_id)
+
+
+def review_model_ids(*, organization_id: Any | None = None) -> list[str]:
+    raw = _setting_string("requests.review_models", organization_id=organization_id)
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def request_review_model_id(*, organization_id: Any | None = None) -> str | None:
+    return _setting_string("requests.review_model", organization_id=organization_id) or None
+
+
+def request_review_agent_type(*, organization_id: Any | None = None) -> str:
+    return _setting_string("requests.review_agent_type", organization_id=organization_id)
+
+
+def request_review_fallback_agent_type(*, organization_id: Any | None = None) -> str:
+    return _setting_string("requests.review_fallback_agent_type", organization_id=organization_id)
 
 
 def shadow_forget_enabled(*, organization_id: Any | None = None) -> bool:
