@@ -8,7 +8,7 @@ Lucent MCP server for memory search, creation, and management.
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -156,6 +156,7 @@ class PersistentChatSession:
     user_message_id: str | None
     previous_messages: list[dict[str, Any]]
     repo: Any | None
+    session_metadata: dict[str, Any] = field(default_factory=dict)
 
 
 async def _get_session_user(request: Request):
@@ -442,6 +443,7 @@ async def _prepare_persistent_chat_session(
             user_message_id = str(user_message["id"])
 
         provider_metadata = session.get("provider_metadata") or {}
+        session_metadata = session.get("metadata") if isinstance(session.get("metadata"), dict) else {}
         return PersistentChatSession(
             session_id=session_id,
             provider_session_id=provider_session_id,
@@ -449,6 +451,7 @@ async def _prepare_persistent_chat_session(
             turn_id=turn_id,
             user_message_id=user_message_id,
             previous_messages=previous_messages,
+            session_metadata=session_metadata,
             repo=repo,
         )
     except HTTPException:
@@ -464,8 +467,100 @@ async def _prepare_persistent_chat_session(
             turn_id=turn_id,
             user_message_id=None,
             previous_messages=[],
+            session_metadata={},
             repo=None,
         )
+
+
+async def _chat_session_defaults(
+    *,
+    user: dict,
+    pool,
+    session_id: str | None,
+) -> dict[str, Any]:
+    """Return saved model/agent defaults for an existing chat session."""
+    if not session_id:
+        return {}
+    try:
+        from lucent.db.llm_sessions import LLMSessionRepository
+
+        session = await LLMSessionRepository(pool).get_session(
+            session_id,
+            str(user["organization_id"]),
+            user_id=str(user["id"]),
+        )
+        if not session:
+            return {}
+        agent_id = session.get("agent_definition_id")
+        return {
+            "model": session.get("model"),
+            "reasoning_effort": session.get("reasoning_effort"),
+            "agent_id": str(agent_id) if agent_id else None,
+            "metadata": session.get("metadata") if isinstance(session.get("metadata"), dict) else {},
+        }
+    except Exception:
+        logger.debug("Failed to load chat session defaults", exc_info=True)
+        return {}
+
+
+async def _mirror_handoff_user_turn(
+    *,
+    user: dict,
+    pool,
+    chat_session: PersistentChatSession,
+    content: str,
+) -> None:
+    """Mirror a session user turn to the owning Handoff, when applicable.
+
+    The LLM session is the authoritative conversation transcript. Handoffs use
+    this mirror only for status/attention bookkeeping and compatibility with
+    existing Handoff thread storage.
+    """
+    interaction_id = str(chat_session.session_metadata.get("interaction_id") or "").strip()
+    if not interaction_id or not chat_session.session_id or not chat_session.user_message_id:
+        return
+    if not content.strip():
+        return
+    try:
+        async with pool.acquire() as conn:
+            exists = await conn.fetchval(
+                """SELECT 1
+                   FROM user_interaction_messages
+                   WHERE interaction_id = $1::uuid
+                     AND metadata->>'llm_message_id' = $2
+                   LIMIT 1""",
+                interaction_id,
+                chat_session.user_message_id,
+            )
+        if exists:
+            return
+
+        from lucent.db.user_interactions import UserInteractionRepository
+
+        repo = UserInteractionRepository(pool)
+        interaction = await repo.get_interaction(
+            interaction_id,
+            str(user["organization_id"]),
+            user_id=str(user["id"]),
+        )
+        if not interaction:
+            return
+        await repo.add_message(
+            interaction_id=interaction_id,
+            org_id=str(user["organization_id"]),
+            sender_type="user",
+            sender_user_id=str(user["id"]),
+            body=content,
+            metadata={
+                "source": "llm_session",
+                "surface": "handoff",
+                "llm_session_id": chat_session.session_id,
+                "llm_message_id": chat_session.user_message_id,
+                "llm_turn_id": chat_session.turn_id,
+            },
+        )
+    except Exception:
+        logger.warning("Failed to mirror Handoff session user turn", exc_info=True)
 
 
 async def _maybe_capture_session_experience(
@@ -826,11 +921,21 @@ async def chat_stream(
     from lucent.llm import get_engine_for_model
     from lucent.model_registry import validate_model, validate_reasoning_effort
 
-    selected_model = _resolve_chat_model(body.model)
+    session_defaults = await _chat_session_defaults(
+        user=user,
+        pool=pool,
+        session_id=body.session_id,
+    )
+    selected_model = _resolve_chat_model(body.model or session_defaults.get("model"))
+    reasoning_effort = (
+        body.reasoning_effort
+        if body.reasoning_effort is not None
+        else session_defaults.get("reasoning_effort")
+    )
     validation_error = validate_model(selected_model)
     if validation_error:
         raise HTTPException(status_code=400, detail=validation_error)
-    effort_error = validate_reasoning_effort(selected_model, body.reasoning_effort)
+    effort_error = validate_reasoning_effort(selected_model, reasoning_effort)
     if effort_error:
         raise HTTPException(status_code=400, detail=effort_error)
 
@@ -846,8 +951,14 @@ async def chat_stream(
         kind=body.surface,
         engine_name=engine.name,
         model=selected_model,
-        reasoning_effort=body.reasoning_effort,
+        reasoning_effort=reasoning_effort,
         last_message=last_message,
+    )
+    await _mirror_handoff_user_turn(
+        user=user,
+        pool=pool,
+        chat_session=chat_session,
+        content=last_message,
     )
 
     fallback_history = [_chat_message_to_dict(m) for m in body.messages[:-1]]
@@ -891,7 +1002,7 @@ async def chat_stream(
             prompt=prompt,
             mcp_config=mcp_config,
             timeout=CHAT_SESSION_TIMEOUT,
-            reasoning_effort=body.reasoning_effort,
+            reasoning_effort=reasoning_effort,
             provider_session_id=chat_session.provider_session_id,
             resume=resume_provider,
             message_history=message_history,
@@ -905,7 +1016,7 @@ async def chat_stream(
                 "turn_id": chat_session.turn_id,
                 "message_id": chat_session.user_message_id,
                 "model": selected_model,
-                "reasoning_effort": body.reasoning_effort,
+                "reasoning_effort": reasoning_effort,
                 "engine": engine.name,
             },
         )
@@ -1039,11 +1150,22 @@ async def chat_stream_v2(
     from lucent.llm.engine import SessionEvent, SessionEventType
     from lucent.model_registry import validate_model, validate_reasoning_effort
 
-    selected_model = _resolve_chat_model(body.model)
+    session_defaults = await _chat_session_defaults(
+        user=user,
+        pool=pool,
+        session_id=body.session_id,
+    )
+    selected_model = _resolve_chat_model(body.model or session_defaults.get("model"))
+    reasoning_effort = (
+        body.reasoning_effort
+        if body.reasoning_effort is not None
+        else session_defaults.get("reasoning_effort")
+    )
+    agent_id = body.agent_id or session_defaults.get("agent_id")
     validation_error = validate_model(selected_model)
     if validation_error:
         raise HTTPException(status_code=400, detail=validation_error)
-    effort_error = validate_reasoning_effort(selected_model, body.reasoning_effort)
+    effort_error = validate_reasoning_effort(selected_model, reasoning_effort)
     if effort_error:
         raise HTTPException(status_code=400, detail=effort_error)
 
@@ -1054,17 +1176,17 @@ async def chat_stream_v2(
     agent_name = None
     agent_skill_names: list[str] = []
 
-    if body.agent_id:
+    if agent_id:
         try:
             from lucent.db.definitions import DefinitionRepository
 
             repo = DefinitionRepository(pool)
-            agent = await repo.get_agent(body.agent_id, str(user["organization_id"]))
+            agent = await repo.get_agent(agent_id, str(user["organization_id"]))
             if agent:
                 system_prompt_parts.append(agent.get("content", ""))
                 agent_name = agent.get("name", "Lucent")
                 # Load granted skills
-                skills = await repo.list_agent_skills(body.agent_id)
+                skills = await repo.list_agent_skills(agent_id)
                 for skill in skills:
                     skill_def = await repo.get_skill(
                         str(skill["skill_id"]), str(user["organization_id"])
@@ -1092,7 +1214,7 @@ async def chat_stream_v2(
             f"Current time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}."
         )
 
-    if body.agent_id and agent_name:
+    if agent_id and agent_name:
         system_prompt_parts.append(_chat_tool_grounding_instructions())
         if agent_name == "definition-engineer":
             system_prompt_parts.append(
@@ -1137,7 +1259,7 @@ async def chat_stream_v2(
             )
 
     system_prompt = "\n\n".join(system_prompt_parts)
-    agent_hooks = await _load_agent_hooks(pool, body.agent_id)
+    agent_hooks = await _load_agent_hooks(pool, agent_id)
 
     last_message = body.messages[-1].content if body.messages else ""
     chat_session = await _prepare_persistent_chat_session(
@@ -1147,9 +1269,15 @@ async def chat_stream_v2(
         kind=body.surface,
         engine_name=engine.name,
         model=selected_model,
-        reasoning_effort=body.reasoning_effort,
-        agent_id=body.agent_id,
+        reasoning_effort=reasoning_effort,
+        agent_id=agent_id,
         last_message=last_message,
+    )
+    await _mirror_handoff_user_turn(
+        user=user,
+        pool=pool,
+        chat_session=chat_session,
+        content=last_message,
     )
     fallback_history = [_chat_message_to_dict(m) for m in body.messages[:-1]]
     persisted_history = chat_session.previous_messages or fallback_history
@@ -1240,9 +1368,9 @@ async def chat_stream_v2(
                         "message_id": chat_session.user_message_id,
                         "llm_event_id": str(row["id"]),
                         "model": selected_model,
-                        "reasoning_effort": body.reasoning_effort,
+                        "reasoning_effort": reasoning_effort,
                         "engine": engine.name,
-                        "agent_definition_id": body.agent_id,
+                        "agent_definition_id": agent_id,
                         "skill_names": agent_skill_names,
                     },
                 )
@@ -1323,7 +1451,7 @@ async def chat_stream_v2(
                 on_event=on_event,
                 timeout=CHAT_SESSION_TIMEOUT,
                 idle_timeout=CHAT_SESSION_TIMEOUT,
-                reasoning_effort=body.reasoning_effort,
+                reasoning_effort=reasoning_effort,
                 provider_session_id=chat_session.provider_session_id,
                 resume=resume_provider,
                 message_history=message_history,
@@ -1337,9 +1465,9 @@ async def chat_stream_v2(
                     "turn_id": chat_session.turn_id,
                     "message_id": chat_session.user_message_id,
                     "model": selected_model,
-                    "reasoning_effort": body.reasoning_effort,
+                    "reasoning_effort": reasoning_effort,
                     "engine": engine.name,
-                    "agent_definition_id": body.agent_id,
+                    "agent_definition_id": agent_id,
                     "skill_names": agent_skill_names,
                 },
             )

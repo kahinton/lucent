@@ -19,6 +19,7 @@ from lucent.auth_providers import (
     create_session,
 )
 from lucent.db import OrganizationRepository, UserRepository
+from lucent.db.definitions import DefinitionRepository
 from lucent.db.user_interactions import UserInteractionRepository
 from lucent.api.routers.schedules import _workflow_interaction_references
 from lucent.tools.requests import register_request_tools
@@ -44,6 +45,17 @@ async def interaction_prefix(db_pool):
         await conn.execute(
             "DELETE FROM api_keys WHERE user_id IN "
             "(SELECT id FROM users WHERE external_id LIKE $1)",
+            f"{prefix}%",
+        )
+        await conn.execute(
+            "DELETE FROM agent_skills WHERE agent_id IN "
+            "(SELECT id FROM agent_definitions WHERE organization_id IN "
+            "(SELECT id FROM organizations WHERE name LIKE $1))",
+            f"{prefix}%",
+        )
+        await conn.execute(
+            "DELETE FROM agent_definitions WHERE organization_id IN "
+            "(SELECT id FROM organizations WHERE name LIKE $1)",
             f"{prefix}%",
         )
         await conn.execute("DELETE FROM users WHERE external_id LIKE $1", f"{prefix}%")
@@ -114,6 +126,25 @@ def _csrf_data(client: httpx.AsyncClient, extra: dict | None = None) -> dict:
 async def _call_mcp_tool(mcp: FastMCP, tool_name: str, args: dict | None = None):
     result = await mcp._tool_manager.call_tool(tool_name, args or {})
     return json.loads(result)
+
+
+class _FakeHandoffChatEngine:
+    name = "langchain"
+
+    def __init__(self, seen: dict | None = None):
+        self.seen = seen if seen is not None else {}
+
+    async def run_session_streaming(self, **kwargs):
+        from lucent.llm.engine import SessionEvent, SessionEventType
+
+        self.seen.update(kwargs)
+        kwargs["on_event"](
+            SessionEvent(
+                type=SessionEventType.MESSAGE,
+                content="A breathable light outfit with a thin evening layer is enough.",
+            )
+        )
+        return "A breathable light outfit with a thin evening layer is enough."
 
 
 def test_workflow_interaction_references_use_activity_request_links():
@@ -368,7 +399,7 @@ async def test_handoffs_web_list_detail_and_reply(web_client, db_pool, interacti
     assert "Details" not in detail_resp.text
     async with db_pool.acquire() as conn:
         session_row = await conn.fetchrow(
-            """SELECT id, title, metadata
+                        """SELECT id, title, engine, model, agent_definition_id, metadata
                FROM llm_sessions
                WHERE organization_id = $1::uuid
                  AND user_id = $2::uuid
@@ -384,6 +415,10 @@ async def test_handoffs_web_list_detail_and_reply(web_client, db_pool, interacti
             session_row["id"],
         )
     assert session_row["title"].startswith("Handoff:")
+    assert session_row["model"]
+    assert session_row["metadata"]["surface"] == "handoff"
+    assert session_row["metadata"]["initiator"] == "lucent"
+    assert session_row["metadata"]["participant_user_id"] == str(interaction_user["id"])
     assert session_row["metadata"]["interaction_id"] == str(interaction["id"])
     assert [(m["role"], m["content"]) for m in seeded_messages] == [
         ("assistant", "I found two memory candidates and need your call."),
@@ -426,6 +461,113 @@ async def test_handoffs_web_list_detail_and_reply(web_client, db_pool, interacti
     assert unread_detail.status_code == 200
     assert "Workflow output ready" in unread_detail.text
     assert "Lucent messages needing attention" not in unread_detail.text
+
+
+@pytest.mark.asyncio
+async def test_handoff_detail_sets_csrf_cookie_without_existing_cookie(
+    db_pool,
+    interaction_user,
+):
+    repo = UserInteractionRepository(db_pool)
+    interaction = await repo.create_interaction(
+        org_id=interaction_user["organization_id"],
+        user_id=interaction_user["id"],
+        created_by=interaction_user["id"],
+        title="Session handoff",
+        body="Start from Lucent.",
+        interaction_type="handoff",
+    )
+    session_token = await create_session(db_pool, interaction_user["id"])
+    app = create_app()
+    transport = ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        cookies={SESSION_COOKIE_NAME: session_token},
+    ) as client:
+        resp = await client.get(f"/handoffs/{interaction['id']}")
+
+    assert resp.status_code == 200
+    csrf_cookie = resp.cookies.get(CSRF_COOKIE_NAME)
+    assert csrf_cookie
+    assert f'value="{csrf_cookie}"' in resp.text
+
+
+@pytest.mark.asyncio
+async def test_handoff_inline_chat_uses_session_and_mirrors_user_turn(
+    web_client,
+    db_pool,
+    interaction_user,
+    monkeypatch,
+):
+    seen: dict = {}
+    fake_engine = _FakeHandoffChatEngine(seen)
+    monkeypatch.setattr("lucent.llm.get_engine_for_model", lambda _model: fake_engine)
+    monkeypatch.setattr("lucent.model_registry.validate_model", lambda _model: None)
+    monkeypatch.setattr(
+        "lucent.model_registry.validate_reasoning_effort",
+        lambda _model, _effort: None,
+    )
+
+    agent = await DefinitionRepository(db_pool).create_agent(
+        name="lucent",
+        description="Default Lucent chat agent",
+        content="You are Lucent.",
+        org_id=str(interaction_user["organization_id"]),
+        created_by=str(interaction_user["id"]),
+        status="active",
+    )
+    repo = UserInteractionRepository(db_pool)
+    interaction = await repo.create_interaction(
+        org_id=interaction_user["organization_id"],
+        user_id=interaction_user["id"],
+        created_by=interaction_user["id"],
+        title="Weather handoff",
+        body="Wear something breathable.",
+        interaction_type="handoff",
+    )
+
+    detail_resp = await web_client.get(f"/handoffs/{interaction['id']}")
+    assert detail_resp.status_code == 200
+
+    async with db_pool.acquire() as conn:
+        session = await conn.fetchrow(
+            """SELECT id::text, model, engine, agent_definition_id::text, metadata
+               FROM llm_sessions
+               WHERE metadata->>'interaction_id' = $1""",
+            str(interaction["id"]),
+        )
+    assert session is not None
+    assert session["engine"] == "langchain"
+    assert session["model"]
+    assert session["agent_definition_id"] == str(agent["id"])
+    assert session["metadata"]["initiator"] == "lucent"
+
+    stream_resp = await web_client.post(
+        "/api/chat/stream-v2",
+        json={
+            "messages": [
+                {"role": "assistant", "content": "Wear something breathable."},
+                {"role": "user", "content": "Summarize that in one sentence."},
+            ],
+            "session_id": session["id"],
+            "surface": "embedded_chat",
+        },
+    )
+    assert stream_resp.status_code == 200
+    assert "thin evening layer" in stream_resp.text
+    assert seen["model"] == session["model"]
+
+    updated = await repo.get_interaction(
+        interaction["id"],
+        interaction_user["organization_id"],
+        user_id=interaction_user["id"],
+    )
+    assert updated["status"] == "responded"
+    assert updated["messages"][-1]["sender_type"] == "user"
+    assert updated["messages"][-1]["body"] == "Summarize that in one sentence."
+    assert updated["messages"][-1]["metadata"]["source"] == "llm_session"
+    assert updated["messages"][-1]["metadata"]["llm_session_id"] == session["id"]
 
 
 @pytest.mark.asyncio

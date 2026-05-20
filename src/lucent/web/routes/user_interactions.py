@@ -6,11 +6,16 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from lucent.auth_providers import CSRF_COOKIE_NAME
 from lucent.db import get_pool
 from lucent.db.user_interactions import UserInteractionRepository
 
-from ._shared import _check_csrf, get_user_context, templates
+from ._shared import (
+    _check_csrf,
+    _get_csrf_for_request,
+    _set_csrf_cookie,
+    get_user_context,
+    templates,
+)
 
 router = APIRouter()
 
@@ -84,11 +89,55 @@ async def _get_or_create_interaction_chat_session(pool, user, interaction: dict)
     Handoffs are not just static messages; opening one starts a focused Lucent
     session from the handoff thread and attached references.
     """
+    from lucent.api.routers.chat import _resolve_chat_model
     from lucent.db.llm_sessions import LLMSessionRepository
 
     interaction_id = str(interaction["id"])
     org_id = str(user.organization_id)
     user_id = str(user.id)
+    model = _resolve_chat_model()
+    engine_name = None
+    try:
+        from lucent.llm import get_engine_for_model
+
+        engine_name = get_engine_for_model(model).name
+    except Exception:
+        engine_name = None
+
+    agent_definition_id = None
+    agent_name = "Lucent"
+    try:
+        from lucent.db.definitions import DefinitionRepository
+
+        agents = (
+            await DefinitionRepository(pool).list_agents(
+                org_id,
+                status="active",
+                limit=500,
+                requester_user_id=user_id,
+                requester_role=str(user.role),
+            )
+        )["items"]
+        for agent in agents:
+            if str(agent.get("name") or "").strip().lower() == "lucent":
+                agent_definition_id = str(agent["id"])
+                agent_name = str(agent.get("name") or "Lucent")
+                break
+    except Exception:
+        agent_definition_id = None
+
+    base_metadata = {
+        "interaction_id": interaction_id,
+        "surface": "handoff",
+        "session_surface": "handoff",
+        "initiator": "lucent",
+        "initiator_source": interaction.get("source"),
+        "initiator_user_id": str(interaction.get("created_by") or "") or None,
+        "participant_user_id": user_id,
+        "interaction_type": interaction.get("interaction_type"),
+        "source": interaction.get("source"),
+        "agent_name": agent_name,
+    }
     async with pool.acquire() as conn:
         existing = await conn.fetchrow(
             """SELECT * FROM llm_sessions
@@ -104,7 +153,27 @@ async def _get_or_create_interaction_chat_session(pool, user, interaction: dict)
             interaction_id,
         )
     if existing:
-        return dict(existing)
+        session = dict(existing)
+        metadata = session.get("metadata") if isinstance(session.get("metadata"), dict) else {}
+        updates = {
+            "metadata": {**metadata, **base_metadata},
+        }
+        if not session.get("model"):
+            updates["model"] = model
+        if engine_name and not session.get("engine"):
+            updates["engine"] = engine_name
+        if agent_definition_id and not session.get("agent_definition_id"):
+            updates["agent_definition_id"] = agent_definition_id
+        if updates["metadata"] != metadata or len(updates) > 1:
+            updated = await LLMSessionRepository(pool).update_session(
+                str(session["id"]),
+                org_id,
+                user_id=user_id,
+                **updates,
+            )
+            if updated:
+                return updated
+        return session
 
     repo = LLMSessionRepository(pool)
     session = await repo.create_session(
@@ -112,12 +181,10 @@ async def _get_or_create_interaction_chat_session(pool, user, interaction: dict)
         user_id=user_id,
         kind="embedded_chat",
         title=f"Handoff: {interaction.get('title') or 'Lucent message'}"[:256],
-        metadata={
-            "interaction_id": interaction_id,
-            "surface": "inbox_interaction",
-            "interaction_type": interaction.get("interaction_type"),
-            "source": interaction.get("source"),
-        },
+        engine=engine_name,
+        model=model,
+        agent_definition_id=agent_definition_id,
+        metadata=base_metadata,
     )
     for message in interaction.get("messages") or []:
         role = "user" if message.get("sender_type") == "user" else "assistant"
@@ -229,7 +296,8 @@ async def handoff_detail(request: Request, interaction_id: str):
     )
     chat_session = await _get_or_create_interaction_chat_session(pool, user, interaction)
 
-    return templates.TemplateResponse(
+    csrf_token = _get_csrf_for_request(request)
+    response = templates.TemplateResponse(
         request,
         "user_interaction_detail.html",
         {
@@ -237,9 +305,11 @@ async def handoff_detail(request: Request, interaction_id: str):
             "interaction": interaction,
             "display_references": _display_references(interaction),
             "interaction_chat_session": chat_session,
-            "csrf_token": request.cookies.get(CSRF_COOKIE_NAME, ""),
+            "csrf_token": csrf_token,
         },
     )
+    _set_csrf_cookie(response, csrf_token)
+    return response
 
 
 @router.post("/handoffs/{interaction_id}/reply", response_class=HTMLResponse)

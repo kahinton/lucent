@@ -148,11 +148,9 @@
     const state = {
         interactionId: {{ (interaction.id|string) | tojson }},
         sessionId: {{ (interaction_chat_session.id|string) | tojson }},
-        csrfToken: {{ csrf_token | tojson }},
         messages: [],
         streaming: false,
         available: false,
-        mirrored: new Set(),
     };
 
     const messagesEl = document.getElementById('inline-chat-messages');
@@ -218,18 +216,6 @@
         sendEl.disabled = state.streaming || !state.available || !inputEl.value.trim();
     }
 
-    function pageContext() {
-        return {
-            url: window.location.pathname,
-            title: document.title.replace(' - Lucent', ''),
-            type: 'user_interaction_detail',
-            data: {
-                interaction_id: state.interactionId,
-                inline_session: true,
-            },
-        };
-    }
-
     async function loadSession() {
         try {
             const statusResp = await fetch('/api/chat/status');
@@ -261,24 +247,6 @@
         }
     }
 
-    async function mirrorUserMessage(text) {
-        if (state.mirrored.has(text)) return;
-        const form = new FormData();
-        form.append('csrf_token', state.csrfToken);
-        form.append('body', text);
-        form.append('chat_session_id', state.sessionId || '');
-        form.append('inline_chat', '1');
-        const resp = await fetch('/handoffs/' + state.interactionId + '/reply', {
-            method: 'POST',
-            body: form,
-            redirect: 'manual',
-        });
-        if (resp.status >= 400) {
-            throw new Error('Could not save message to this handoff');
-        }
-        state.mirrored.add(text);
-    }
-
     async function sendMessage(event) {
         event.preventDefault();
         if (!inputEl || state.streaming) return;
@@ -296,15 +264,14 @@
         const assistant = appendMessage('assistant', '', { loading: true });
         const contentEl = assistant.querySelector('.inline-chat-content');
         let fullResponse = '';
+        let gotDeltas = false;
 
         try {
-            await mirrorUserMessage(text);
-            const resp = await fetch('/api/chat/stream', {
+            const resp = await fetch('/api/chat/stream-v2', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     messages: state.messages,
-                    page_context: pageContext(),
                     session_id: state.sessionId,
                     surface: 'embedded_chat',
                 }),
@@ -325,10 +292,17 @@
                     try { data = JSON.parse(line.slice(6)); } catch (_err) { continue; }
                     if (data.type === 'session') {
                         state.sessionId = data.session_id;
-                    } else if (data.type === 'text') {
+                    } else if (data.type === 'text_delta') {
+                        gotDeltas = true;
                         fullResponse += data.text;
                         contentEl.innerHTML = renderMarkdown(fullResponse);
                         scrollToBottom();
+                    } else if (data.type === 'message') {
+                        if (!gotDeltas) {
+                            fullResponse = data.text || '';
+                            contentEl.innerHTML = renderMarkdown(fullResponse);
+                            scrollToBottom();
+                        }
                     } else if (data.type === 'error') {
                         contentEl.innerHTML = '<p class="text-red-600">' + escapeHtml(data.error || 'Lucent could not respond.') + '</p>';
                     }
