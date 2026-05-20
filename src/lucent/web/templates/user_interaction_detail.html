@@ -7,7 +7,7 @@
 {% endmacro %}
 
 {% macro reference_href(ref) %}
-{% if ref.url %}{{ ref.url }}{% elif ref.reference_type == 'request' and ref.reference_id %}/activity/{{ ref.reference_id }}{% elif ref.reference_type == 'memory' and ref.reference_id %}/memories/{{ ref.reference_id }}{% elif ref.reference_type == 'workflow' and ref.reference_id %}/workflows/{{ ref.reference_id }}{% elif ref.reference_type == 'llm_session' and ref.reference_id %}/chat/{{ ref.reference_id }}{% else %}#{% endif %}
+{% if ref.url %}{{ ref.url }}{% elif ref.reference_type == 'request' and ref.reference_id %}/activity/{{ ref.reference_id }}{% elif ref.reference_type == 'task' and ref.reference_id and ref.metadata and ref.metadata.request_id %}/activity/{{ ref.metadata.request_id }}#task-{{ ref.reference_id }}{% elif ref.reference_type == 'memory' and ref.reference_id %}/memories/{{ ref.reference_id }}{% elif ref.reference_type == 'workflow' and ref.reference_id %}/workflows/{{ ref.reference_id }}{% elif ref.reference_type == 'llm_session' and ref.reference_id %}/chat/{{ ref.reference_id }}{% else %}#{% endif %}
 {% endmacro %}
 
 {% macro reference_card(ref) %}
@@ -39,6 +39,53 @@
     </div>
 </div>
 {% endmacro %}
+
+{% block extra_head %}
+<style>
+    .lucent-orb {
+        aspect-ratio: 1;
+        background:
+            radial-gradient(circle at 25% 25%, rgba(255,255,255,0.35) 0%, transparent 35%),
+            radial-gradient(circle at 70% 30%, #00d4ff 0%, transparent 50%),
+            radial-gradient(circle at 30% 70%, #ff2d95 0%, transparent 50%),
+            radial-gradient(circle at 65% 75%, #7b2dff 0%, transparent 45%),
+            radial-gradient(circle at 50% 50%, #00d4ff 0%, #ff2d95 50%, #7b2dff 100%);
+        background-size: 200% 200%;
+        animation: amoeba 12s ease-in-out infinite, swirl 8s ease-in-out infinite alternate, glow-pulse 4s ease-in-out infinite alternate;
+        box-shadow:
+            inset -2px -2px 6px rgba(0, 0, 0, 0.15),
+            inset 2px 2px 6px rgba(255, 255, 255, 0.25),
+            0 0 12px rgba(255, 45, 149, 0.35),
+            0 0 24px rgba(0, 212, 255, 0.25),
+            0 0 40px rgba(123, 45, 255, 0.15);
+    }
+    .lucent-orb-sm { width: 28px; height: 28px; min-width: 28px; min-height: 28px; }
+    @keyframes amoeba {
+        0% { border-radius: 54% 46% 42% 58% / 48% 44% 56% 52%; }
+        20% { border-radius: 44% 56% 48% 52% / 50% 46% 48% 54%; }
+        40% { border-radius: 44% 56% 52% 48% / 56% 48% 44% 52%; }
+        60% { border-radius: 50% 50% 42% 58% / 52% 42% 56% 48%; }
+        80% { border-radius: 52% 48% 44% 56% / 42% 52% 50% 54%; }
+        100% { border-radius: 54% 46% 42% 58% / 48% 44% 56% 52%; }
+    }
+    @keyframes swirl {
+        0% { background-position: 0% 0%; }
+        50% { background-position: 50% 100%; }
+        100% { background-position: 100% 0%; }
+    }
+    @keyframes glow-pulse {
+        0% { box-shadow: inset -2px -2px 6px rgba(0,0,0,0.15), inset 2px 2px 6px rgba(255,255,255,0.25), 0 0 12px rgba(255,45,149,0.35), 0 0 24px rgba(0,212,255,0.25), 0 0 40px rgba(123,45,255,0.15); }
+        100% { box-shadow: inset -2px -2px 6px rgba(0,0,0,0.15), inset 2px 2px 6px rgba(255,255,255,0.25), 0 0 16px rgba(0,212,255,0.4), 0 0 30px rgba(255,45,149,0.3), 0 0 50px rgba(123,45,255,0.2); }
+    }
+    @keyframes pulse-dot {
+        0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
+        40% { opacity: 1; transform: scale(1); }
+    }
+    .typing-dot { animation: pulse-dot 1.4s ease-in-out infinite; }
+    .typing-dot:nth-child(2) { animation-delay: 0.2s; }
+    .typing-dot:nth-child(3) { animation-delay: 0.4s; }
+</style>
+{% endblock %}
 
 {% block content %}
 <div class="mb-6">
@@ -93,7 +140,7 @@
 
         <div id="inline-chat-messages" class="max-h-[620px] min-h-[360px] space-y-4 overflow-y-auto bg-gray-50 px-5 py-5">
             <div class="flex gap-3" data-inline-chat-loading>
-                <div class="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-primary-100 text-primary-700">✦</div>
+                <div class="lucent-orb lucent-orb-sm mt-0.5 shrink-0"></div>
                 <div class="max-w-[82%] rounded-2xl rounded-tl-md border border-gray-200 bg-white px-4 py-3 text-sm leading-relaxed text-gray-600 shadow-sm">
                     Loading this conversation…
                 </div>
@@ -107,6 +154,18 @@
                 <div class="flex items-center justify-between gap-3">
                     <p class="text-xs text-gray-500">Lucent will answer here, and your reply stays with this handoff.</p>
                     <button id="inline-chat-send" type="submit" class="rounded-lg bg-primary-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-primary-700 disabled:cursor-not-allowed disabled:opacity-40" disabled>Send</button>
+                </div>
+                <div class="flex flex-wrap items-center gap-3 px-1">
+                    <select id="agent-select" class="config-select text-xs rounded-lg border border-gray-200 bg-white px-2 py-1 text-gray-500 focus:border-primary-300 focus:ring-1 focus:ring-primary-100 focus:outline-none cursor-pointer">
+                        <option value="">Lucent</option>
+                    </select>
+                    <select id="model-select" class="config-select text-xs rounded-lg border border-gray-200 bg-white px-2 py-1 text-gray-500 focus:border-primary-300 focus:ring-1 focus:ring-primary-100 focus:outline-none cursor-pointer">
+                        <option value="">Loading...</option>
+                    </select>
+                    <select id="reasoning-select" class="config-select hidden text-xs rounded-lg border border-purple-200 bg-purple-50 px-2 py-1 text-purple-600 focus:border-purple-300 focus:ring-1 focus:ring-purple-100 focus:outline-none cursor-pointer" title="Reasoning effort">
+                        <option value="">Reasoning: default</option>
+                    </select>
+                    <p class="ml-auto text-[10px] text-gray-400">Shift+Enter for new line</p>
                 </div>
             </form>
         </div>
@@ -151,6 +210,7 @@
         messages: [],
         streaming: false,
         available: false,
+        modelsById: {},
     };
 
     const messagesEl = document.getElementById('inline-chat-messages');
@@ -158,6 +218,116 @@
     const inputEl = document.getElementById('inline-chat-input');
     const sendEl = document.getElementById('inline-chat-send');
     const statusEl = document.getElementById('inline-chat-status');
+    const agentSelect = document.getElementById('agent-select');
+    const modelSelect = document.getElementById('model-select');
+    const reasoningSelect = document.getElementById('reasoning-select');
+
+    function updateReasoningOptions() {
+        if (!modelSelect || !reasoningSelect) return;
+        const model = state.modelsById[modelSelect.value];
+        const efforts = (model && model.reasoning_efforts) || [];
+        reasoningSelect.innerHTML = '<option value="">Reasoning: default</option>';
+        if (!efforts.length) {
+            reasoningSelect.classList.add('hidden');
+            reasoningSelect.value = '';
+            return;
+        }
+        efforts.forEach(function(effort) {
+            const opt = document.createElement('option');
+            opt.value = effort;
+            opt.textContent = 'Reasoning: ' + effort;
+            reasoningSelect.appendChild(opt);
+        });
+        reasoningSelect.classList.remove('hidden');
+        reasoningSelect.value = '';
+    }
+
+    function setSelectValueIfPresent(select, value) {
+        if (!select || !value) return false;
+        const stringValue = String(value);
+        const exists = Array.from(select.options).some(function(opt) { return opt.value === stringValue; });
+        if (!exists) return false;
+        select.value = stringValue;
+        return true;
+    }
+
+    function addMissingModelOption(modelId) {
+        if (!modelSelect || !modelId || state.modelsById[modelId]) return;
+        const group = document.createElement('optgroup');
+        group.label = 'Previous session';
+        const opt = document.createElement('option');
+        opt.value = modelId;
+        opt.textContent = modelId + ' (previously used)';
+        group.appendChild(opt);
+        modelSelect.appendChild(group);
+        state.modelsById[modelId] = { id: modelId, reasoning_efforts: [] };
+    }
+
+    function applySessionConfig(session) {
+        if (!session) return;
+        if (session.model) {
+            addMissingModelOption(session.model);
+            if (setSelectValueIfPresent(modelSelect, session.model)) {
+                updateReasoningOptions();
+            }
+        }
+        if (session.reasoning_effort) {
+            setSelectValueIfPresent(reasoningSelect, session.reasoning_effort);
+        }
+        if (session.agent_definition_id) {
+            setSelectValueIfPresent(agentSelect, session.agent_definition_id);
+        } else if (agentSelect) {
+            agentSelect.value = '';
+        }
+    }
+
+    async function loadChatControls() {
+        if (modelSelect) {
+            try {
+                const resp = await fetch('/api/chat/models');
+                const data = await resp.json();
+                modelSelect.innerHTML = '';
+                state.modelsById = {};
+                const byProvider = {};
+                (data.models || []).forEach(function(model) {
+                    state.modelsById[model.id] = model;
+                    (byProvider[model.provider] = byProvider[model.provider] || []).push(model);
+                });
+                Object.entries(byProvider).forEach(function(entry) {
+                    const provider = entry[0];
+                    const models = entry[1];
+                    const group = document.createElement('optgroup');
+                    group.label = provider.charAt(0).toUpperCase() + provider.slice(1);
+                    models.forEach(function(model) {
+                        const opt = document.createElement('option');
+                        opt.value = model.id;
+                        opt.textContent = model.name;
+                        if (model.id === data.default) opt.selected = true;
+                        group.appendChild(opt);
+                    });
+                    modelSelect.appendChild(group);
+                });
+                modelSelect.addEventListener('change', updateReasoningOptions);
+                updateReasoningOptions();
+            } catch (_error) {
+                modelSelect.innerHTML = '<option value="">Unavailable</option>';
+            }
+        }
+        if (agentSelect) {
+            try {
+                const resp = await fetch('/api/chat/agents');
+                const agents = await resp.json();
+                (agents || []).forEach(function(agent) {
+                    const opt = document.createElement('option');
+                    opt.value = agent.id;
+                    opt.textContent = agent.name + (agent.description ? ' — ' + agent.description.slice(0, 50) : '');
+                    agentSelect.appendChild(opt);
+                });
+            } catch (_error) {
+                // Default Lucent option remains available.
+            }
+        }
+    }
 
     function setStatus(text, tone) {
         statusEl.textContent = text;
@@ -201,9 +371,9 @@
         if (isUser) {
             wrapper.innerHTML = '<div class="max-w-[82%] rounded-2xl rounded-tr-md bg-primary-600 px-4 py-3 text-sm leading-relaxed text-white shadow-sm whitespace-pre-wrap">' + escapeHtml(content) + '</div>';
         } else {
-            wrapper.innerHTML = '<div class="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-primary-100 text-primary-700">✦</div>' +
+            wrapper.innerHTML = '<div class="lucent-orb lucent-orb-sm mt-0.5 shrink-0"></div>' +
                 '<div class="max-w-[82%] rounded-2xl rounded-tl-md border border-gray-200 bg-white px-4 py-3 text-sm leading-relaxed text-gray-700 shadow-sm"><div class="inline-chat-content">' +
-                (options && options.loading ? '<span class="inline-flex gap-1"><span class="h-1.5 w-1.5 animate-bounce rounded-full bg-gray-300"></span><span class="h-1.5 w-1.5 animate-bounce rounded-full bg-gray-300" style="animation-delay:150ms"></span><span class="h-1.5 w-1.5 animate-bounce rounded-full bg-gray-300" style="animation-delay:300ms"></span></span>' : renderMarkdown(content)) +
+                (options && options.loading ? '<span class="inline-flex gap-1.5"><span class="typing-dot h-2 w-2 rounded-full bg-gray-300"></span><span class="typing-dot h-2 w-2 rounded-full bg-gray-300"></span><span class="typing-dot h-2 w-2 rounded-full bg-gray-300"></span></span>' : renderMarkdown(content)) +
                 '</div></div>';
         }
         messagesEl.appendChild(wrapper);
@@ -214,6 +384,9 @@
     function updateSendState() {
         if (!sendEl || !inputEl) return;
         sendEl.disabled = state.streaming || !state.available || !inputEl.value.trim();
+        [agentSelect, modelSelect, reasoningSelect].forEach(function(select) {
+            if (select) select.disabled = state.streaming;
+        });
     }
 
     async function loadSession() {
@@ -226,6 +399,7 @@
             const resp = await fetch('/api/chat/sessions/' + state.sessionId);
             if (!resp.ok) throw new Error('Could not load conversation');
             const session = await resp.json();
+            applySessionConfig(session);
             const visible = (session.messages || []).filter(function(message) {
                 return message.role === 'user' || message.role === 'assistant';
             });
@@ -274,6 +448,9 @@
                     messages: state.messages,
                     session_id: state.sessionId,
                     surface: 'embedded_chat',
+                    model: modelSelect && modelSelect.value ? modelSelect.value : null,
+                    reasoning_effort: reasoningSelect && reasoningSelect.value ? reasoningSelect.value : null,
+                    agent_id: agentSelect && agentSelect.value ? agentSelect.value : null,
                 }),
             });
             if (!resp.ok || !resp.body) throw new Error('Chat request failed');
@@ -336,7 +513,10 @@
         });
     }
 
-    loadSession();
+    (async function init() {
+        await loadChatControls();
+        await loadSession();
+    })();
 })();
 </script>
 {% endblock %}

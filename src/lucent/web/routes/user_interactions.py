@@ -29,6 +29,11 @@ def _reference_url(ref: dict) -> str:
     ref_id = ref.get("reference_id")
     if ref_type == "request" and ref_id:
         return f"/activity/{ref_id}"
+    if ref_type == "task" and ref_id:
+        metadata = ref.get("metadata") if isinstance(ref.get("metadata"), dict) else {}
+        request_id = metadata.get("request_id")
+        if request_id:
+            return f"/activity/{request_id}#task-{ref_id}"
     if ref_type == "memory" and ref_id:
         return f"/memories/{ref_id}"
     if ref_type == "workflow" and ref_id:

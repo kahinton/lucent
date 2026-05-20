@@ -5279,10 +5279,15 @@ class LucentDaemon:
                     ttl_minutes=60,
                 )
                 if _scoped_key:
+                    _task_mcp_headers = {"Authorization": f"Bearer {_scoped_key}"}
+                    if request_id:
+                        _task_mcp_headers["X-Lucent-Request-Id"] = request_id
+                    if task_id:
+                        _task_mcp_headers["X-Lucent-Task-Id"] = task_id
                     task_mcp_config["memory-server"] = {
                         "type": "http",
                         "url": MCP_URL,
-                        "headers": {"Authorization": f"Bearer {_scoped_key}"},
+                        "headers": _task_mcp_headers,
                         "tools": _memory_server_tools_for_task(
                             agent_type,
                             title,

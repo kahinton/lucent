@@ -20,8 +20,11 @@ from lucent.auth_providers import (
 )
 from lucent.db import OrganizationRepository, UserRepository
 from lucent.db.definitions import DefinitionRepository
+from lucent.db.requests import RequestRepository
+from lucent.db.schedules import ScheduleRepository
 from lucent.db.user_interactions import UserInteractionRepository
 from lucent.api.routers.schedules import _workflow_interaction_references
+from lucent.llm.context import clear_llm_context, set_llm_context
 from lucent.tools.requests import register_request_tools
 
 
@@ -35,6 +38,22 @@ async def interaction_prefix(db_pool):
             "DELETE FROM schedule_runs WHERE schedule_id IN "
             "(SELECT id FROM schedules WHERE organization_id IN "
             "(SELECT id FROM organizations WHERE name LIKE $1))",
+            f"{prefix}%",
+        )
+        await conn.execute(
+            "DELETE FROM task_events WHERE task_id IN "
+            "(SELECT id FROM tasks WHERE organization_id IN "
+            "(SELECT id FROM organizations WHERE name LIKE $1))",
+            f"{prefix}%",
+        )
+        await conn.execute(
+            "DELETE FROM tasks WHERE organization_id IN "
+            "(SELECT id FROM organizations WHERE name LIKE $1)",
+            f"{prefix}%",
+        )
+        await conn.execute(
+            "DELETE FROM requests WHERE organization_id IN "
+            "(SELECT id FROM organizations WHERE name LIKE $1)",
             f"{prefix}%",
         )
         await conn.execute(
@@ -209,6 +228,95 @@ async def test_send_handoff_mcp_tool_creates_handoff(db_pool, interaction_user):
     assert detail["messages"][0]["body"] == (
         "It will rain this afternoon; take a light rain jacket."
     )
+
+
+@pytest.mark.asyncio
+async def test_send_handoff_mcp_tool_adds_task_request_workflow_context(
+    db_pool,
+    interaction_user,
+):
+    schedule = await ScheduleRepository(db_pool).create_schedule(
+        title="Daily weather outfit recommendation",
+        org_id=str(interaction_user["organization_id"]),
+        schedule_type="manual",
+        description="Send the daily outfit handoff.",
+        agent_type="code",
+        created_by=str(interaction_user["id"]),
+    )
+    request_repo = RequestRepository(db_pool)
+    req = await request_repo.create_request(
+        title="[Scheduled] Daily weather outfit recommendation",
+        org_id=str(interaction_user["organization_id"]),
+        source="schedule",
+        created_by=str(interaction_user["id"]),
+    )
+    task = await request_repo.create_task(
+        str(req["id"]),
+        "Daily weather outfit recommendation",
+        str(interaction_user["organization_id"]),
+        agent_type="code",
+        model="gpt-5.5",
+        reasoning_effort="low",
+        requesting_user_id=str(interaction_user["id"]),
+    )
+    async with db_pool.acquire() as conn:
+        schedule_run_id = await conn.fetchval(
+            """INSERT INTO schedule_runs (schedule_id, request_id, status)
+               VALUES ($1::uuid, $2::uuid, 'completed')
+               RETURNING id::text""",
+            str(schedule["id"]),
+            str(req["id"]),
+        )
+
+    mcp = FastMCP("test-handoff-lineage")
+    register_request_tools(mcp)
+    set_current_user(
+        {
+            "id": interaction_user["id"],
+            "organization_id": interaction_user["organization_id"],
+            "role": "member",
+            "display_name": interaction_user.get("display_name"),
+            "email": interaction_user.get("email"),
+        }
+    )
+    set_llm_context(request_id=str(req["id"]), task_id=str(task["id"]))
+    try:
+        created = await _call_mcp_tool(
+            mcp,
+            "send_handoff",
+            {
+                "title": "Weather outfit recommendation",
+                "body": "Wear layers today.",
+                "references": [
+                    {
+                        "reference_type": "url",
+                        "label": "Forecast API",
+                        "url": "https://example.test/forecast",
+                    }
+                ],
+            },
+        )
+    finally:
+        clear_llm_context()
+        set_current_user(None)
+
+    repo = UserInteractionRepository(db_pool)
+    detail = await repo.get_interaction(
+        created["id"],
+        interaction_user["organization_id"],
+        user_id=interaction_user["id"],
+    )
+    refs_by_type = {ref["reference_type"]: ref for ref in detail["references"]}
+    assert set(refs_by_type) >= {"workflow", "schedule_run", "request", "task", "url"}
+    assert str(refs_by_type["workflow"]["reference_id"]) == str(schedule["id"])
+    assert refs_by_type["workflow"]["url"] == f"/workflows/{schedule['id']}"
+    assert str(refs_by_type["request"]["reference_id"]) == str(req["id"])
+    assert refs_by_type["request"]["url"] == f"/activity/{req['id']}"
+    assert str(refs_by_type["task"]["reference_id"]) == str(task["id"])
+    assert refs_by_type["task"]["url"] == f"/activity/{req['id']}#task-{task['id']}"
+    assert refs_by_type["task"]["metadata"]["model"] == "gpt-5.5"
+    assert refs_by_type["task"]["metadata"]["reasoning_effort"] == "low"
+    assert str(refs_by_type["schedule_run"]["reference_id"]) == schedule_run_id
 
 
 @pytest.mark.asyncio
@@ -388,6 +496,11 @@ async def test_handoffs_web_list_detail_and_reply(web_client, db_pool, interacti
     assert "Workflow run should not show" not in detail_resp.text
     assert "Continue with Lucent" in detail_resp.text
     assert "Related context" in detail_resp.text
+    assert "id=\"agent-select\"" in detail_resp.text
+    assert "id=\"model-select\"" in detail_resp.text
+    assert "id=\"reasoning-select\"" in detail_resp.text
+    assert "lucent-orb lucent-orb-sm" in detail_resp.text
+    assert "✦" not in detail_resp.text
     assert "Reply here, ask a follow-up question" in detail_resp.text
     assert "Question from Lucent" in detail_resp.text
     assert "live session grounded" not in detail_resp.text

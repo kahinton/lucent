@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+from typing import Any
 from uuid import UUID
 
 from mcp.server.fastmcp import FastMCP
@@ -34,6 +35,192 @@ async def _get_pool():
     if not database_url:
         raise RuntimeError("DATABASE_URL environment variable is required")
     return await init_db(database_url)
+
+
+def _valid_uuid(value: str | UUID | None) -> str | None:
+    if value in (None, ""):
+        return None
+    try:
+        return str(UUID(str(value)))
+    except (TypeError, ValueError):
+        return None
+
+
+def _reference_key(ref: dict[str, Any]) -> str:
+    ref_type = str(ref.get("reference_type") or ref.get("type") or "other")
+    ref_id = ref.get("reference_id") or ref.get("id")
+    url = str(ref.get("url") or "").strip()
+    label = str(ref.get("label") or ref.get("title") or "").strip()
+    if ref_id:
+        return f"{ref_type}:{ref_id}"
+    if url:
+        return f"url:{url}"
+    return f"{ref_type}:label:{label}"
+
+
+def _append_unique_reference(
+    refs: list[dict[str, Any]],
+    ref: dict[str, Any],
+    seen: set[str],
+) -> None:
+    key = _reference_key(ref)
+    if key in seen:
+        return
+    seen.add(key)
+    refs.append(ref)
+
+
+async def _handoff_lineage_references(
+    pool,
+    *,
+    org_id: str,
+) -> list[dict[str, Any]]:
+    """Build request/task/workflow references from trusted MCP request context."""
+    try:
+        from lucent.llm.context import get_llm_context
+    except Exception:
+        return []
+
+    context = get_llm_context()
+    request_id = _valid_uuid(context.get("request_id"))
+    task_id = _valid_uuid(context.get("task_id"))
+    schedule_run_id = _valid_uuid(context.get("schedule_run_id"))
+    if not any((request_id, task_id, schedule_run_id)):
+        return []
+
+    task: dict[str, Any] | None = None
+    request: dict[str, Any] | None = None
+    workflow: dict[str, Any] | None = None
+
+    async with pool.acquire() as conn:
+        if task_id:
+            task_row = await conn.fetchrow(
+                """SELECT id::text, request_id::text, title, agent_type, model, reasoning_effort
+                   FROM tasks
+                   WHERE id = $1::uuid AND organization_id = $2::uuid""",
+                task_id,
+                org_id,
+            )
+            if task_row:
+                task = dict(task_row)
+                request_id = request_id or task.get("request_id")
+
+        if request_id:
+            request_row = await conn.fetchrow(
+                """SELECT id::text, title, source, status
+                   FROM requests
+                   WHERE id = $1::uuid AND organization_id = $2::uuid""",
+                request_id,
+                org_id,
+            )
+            if request_row:
+                request = dict(request_row)
+
+        if schedule_run_id:
+            workflow_row = await conn.fetchrow(
+                """SELECT sr.id::text AS schedule_run_id,
+                          s.id::text AS workflow_id,
+                          s.title AS workflow_title
+                   FROM schedule_runs sr
+                   JOIN schedules s ON s.id = sr.schedule_id
+                   WHERE sr.id = $1::uuid AND s.organization_id = $2::uuid""",
+                schedule_run_id,
+                org_id,
+            )
+            if workflow_row:
+                workflow = dict(workflow_row)
+        elif request_id:
+            workflow_row = await conn.fetchrow(
+                """SELECT sr.id::text AS schedule_run_id,
+                          s.id::text AS workflow_id,
+                          s.title AS workflow_title
+                   FROM schedule_runs sr
+                   JOIN schedules s ON s.id = sr.schedule_id
+                   WHERE sr.request_id = $1::uuid AND s.organization_id = $2::uuid
+                   ORDER BY sr.created_at DESC
+                   LIMIT 1""",
+                request_id,
+                org_id,
+            )
+            if workflow_row:
+                workflow = dict(workflow_row)
+
+    refs: list[dict[str, Any]] = []
+    if workflow and workflow.get("workflow_id"):
+        refs.append(
+            {
+                "reference_type": "workflow",
+                "reference_id": workflow["workflow_id"],
+                "label": f"Workflow: {workflow.get('workflow_title') or 'Untitled workflow'}",
+                "url": f"/workflows/{workflow['workflow_id']}",
+                "metadata": {
+                    "source": "llm_context",
+                    "request_id": request_id,
+                    "schedule_run_id": workflow.get("schedule_run_id"),
+                },
+            }
+        )
+        refs.append(
+            {
+                "reference_type": "schedule_run",
+                "reference_id": workflow.get("schedule_run_id"),
+                "label": "Workflow run",
+                "metadata": {
+                    "source": "llm_context",
+                    "workflow_id": workflow["workflow_id"],
+                    "request_id": request_id,
+                },
+            }
+        )
+    if request and request.get("id"):
+        refs.append(
+            {
+                "reference_type": "request",
+                "reference_id": request["id"],
+                "label": f"Request: {request.get('title') or 'Untitled request'}",
+                "url": f"/activity/{request['id']}",
+                "metadata": {
+                    "source": "llm_context",
+                    "task_id": task_id,
+                    "schedule_run_id": workflow.get("schedule_run_id") if workflow else None,
+                },
+            }
+        )
+    if task and task.get("id"):
+        task_url = f"/activity/{task['request_id']}#task-{task['id']}" if task.get("request_id") else None
+        refs.append(
+            {
+                "reference_type": "task",
+                "reference_id": task["id"],
+                "label": f"Task: {task.get('title') or 'Untitled task'}",
+                "url": task_url,
+                "metadata": {
+                    "source": "llm_context",
+                    "request_id": task.get("request_id"),
+                    "agent_type": task.get("agent_type"),
+                    "model": task.get("model"),
+                    "reasoning_effort": task.get("reasoning_effort"),
+                },
+            }
+        )
+    return refs
+
+
+async def _enriched_handoff_references(
+    pool,
+    *,
+    org_id: str,
+    references: list[dict] | None,
+) -> list[dict[str, Any]]:
+    enriched: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for ref in await _handoff_lineage_references(pool, org_id=org_id):
+        if ref.get("reference_type") == "schedule_run" and not ref.get("reference_id"):
+            continue
+        _append_unique_reference(enriched, ref, seen)
+    for ref in references or []:
+        _append_unique_reference(enriched, ref, seen)
+    return enriched
 
 
 async def _create_handoff_interaction_response(
@@ -71,6 +258,11 @@ async def _create_handoff_interaction_response(
 
     pool = await _get_pool()
     repo = UserInteractionRepository(pool)
+    enriched_references = await _enriched_handoff_references(
+        pool,
+        org_id=str(org_id),
+        references=references,
+    )
     try:
         interaction = await repo.create_interaction(
             org_id=str(org_id),
@@ -84,7 +276,7 @@ async def _create_handoff_interaction_response(
             requires_response=requires_response,
             response_prompt=response_prompt or None,
             metadata=metadata or {},
-            references=references or [],
+            references=enriched_references,
             dedupe_key=dedupe_key or None,
         )
     except ValueError as exc:

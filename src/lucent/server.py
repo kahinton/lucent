@@ -88,6 +88,9 @@ class MCPAuthMiddleware:
             "session_id": _get(b"x-lucent-llm-session-id"),
             "turn_id": _get(b"x-lucent-llm-turn-id"),
             "message_id": _get(b"x-lucent-llm-message-id"),
+            "request_id": _get(b"x-lucent-request-id"),
+            "task_id": _get(b"x-lucent-task-id"),
+            "schedule_run_id": _get(b"x-lucent-schedule-run-id"),
         }
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send):
