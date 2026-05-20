@@ -459,56 +459,52 @@ class AuthFailureDetectedError(Exception):
 # Configuration
 # ============================================================================
 
-MAX_CONCURRENT_SESSIONS = int(os.environ.get("LUCENT_MAX_SESSIONS", "3"))
-DAEMON_INTERVAL_MINUTES = int(os.environ.get("LUCENT_DAEMON_INTERVAL", "15"))
-MODEL = os.environ.get("LUCENT_DAEMON_MODEL", "").strip()
-STALE_HEARTBEAT_MINUTES = int(os.environ.get("LUCENT_STALE_HEARTBEAT_MINUTES", "30"))
+from lucent import settings as runtime_settings
+
+MAX_CONCURRENT_SESSIONS = runtime_settings.daemon_max_sessions()
+DAEMON_INTERVAL_MINUTES = runtime_settings.daemon_interval_minutes()
+MODEL = runtime_settings.daemon_model_id() or ""
+STALE_HEARTBEAT_MINUTES = runtime_settings.daemon_stale_heartbeat_minutes()
 
 # PG advisory-lock namespace for the request-decomposition backfill.
 # Two-int form: (namespace, hashtext(request_id)::int). Arbitrary unique int.
 DECOMPOSITION_LOCK_NAMESPACE = 0x4C434D50  # "LCMP" — Lucent CoMPose
 # Overall timeout for an entire run_session call (client start + create + response)
-SESSION_TOTAL_TIMEOUT = int(os.environ.get("LUCENT_SESSION_TIMEOUT", "3600"))
+SESSION_TOTAL_TIMEOUT = runtime_settings.daemon_session_timeout_seconds()
 # Idle timeout: kill session if no LLM activity for this long (seconds)
-SESSION_IDLE_TIMEOUT = int(os.environ.get("LUCENT_SESSION_IDLE_TIMEOUT", "300"))
+SESSION_IDLE_TIMEOUT = runtime_settings.daemon_session_idle_timeout_seconds()
 # Watchdog: kill process if no log activity for this many seconds.
 # CopilotClient can block the event loop, defeating asyncio timeouts.
 # Default 3600s (1h) — must exceed the longest schedule interval to avoid
 # killing the daemon during idle periods between cognitive cycles.
-WATCHDOG_TIMEOUT = int(os.environ.get("LUCENT_WATCHDOG_TIMEOUT", "3600"))
+WATCHDOG_TIMEOUT = runtime_settings.daemon_watchdog_timeout_seconds()
 WATCHDOG_CHECK_INTERVAL = 60
 # How many cognitive cycles between autonomic maintenance runs
-AUTONOMIC_INTERVAL = int(os.environ.get("LUCENT_AUTONOMIC_INTERVAL", "8"))
+AUTONOMIC_INTERVAL = runtime_settings.daemon_autonomic_interval_cycles()
 # How many cognitive cycles between learning extraction runs
-LEARNING_INTERVAL = int(os.environ.get("LUCENT_LEARNING_INTERVAL", str(AUTONOMIC_INTERVAL * 2)))
+LEARNING_INTERVAL = runtime_settings.daemon_learning_interval_cycles()
 # Maximum characters stored from sub-agent results
-MAX_RESULT_LENGTH = int(os.environ.get("LUCENT_MAX_RESULT_LENGTH", "8000"))
+MAX_RESULT_LENGTH = runtime_settings.daemon_max_result_length()
 
 # ── Role-based loop configuration ─────────────────────────────────────────
 # Each daemon instance can run a subset of roles. Multi-instance deployments
 # can split work across instances (e.g. one cognitive, N dispatchers).
 # Roles: dispatcher, cognitive, scheduler, autonomic (or 'all')
-DAEMON_ROLES_STR = os.environ.get("LUCENT_DAEMON_ROLES", "all")
+DAEMON_ROLES_STR = runtime_settings.daemon_roles()
 # Dispatch loop: how often to poll if PG LISTEN misses a signal
-DISPATCH_POLL_SECONDS = int(os.environ.get("LUCENT_DISPATCH_POLL_SECONDS", "60"))
+DISPATCH_POLL_SECONDS = runtime_settings.daemon_dispatch_poll_seconds()
 # Scheduler loop: how often to check for due schedules
-SCHEDULER_CHECK_SECONDS = int(os.environ.get("LUCENT_SCHEDULER_CHECK_SECONDS", "60"))
+SCHEDULER_CHECK_SECONDS = runtime_settings.daemon_scheduler_check_seconds()
 # Time-based intervals for independent loops (derive defaults from cycle-count configs)
-AUTONOMIC_MINUTES = int(
-    os.environ.get("LUCENT_AUTONOMIC_MINUTES", str(AUTONOMIC_INTERVAL * DAEMON_INTERVAL_MINUTES))
-)
-LEARNING_MINUTES = int(
-    os.environ.get("LUCENT_LEARNING_MINUTES", str(LEARNING_INTERVAL * DAEMON_INTERVAL_MINUTES))
-)
+AUTONOMIC_MINUTES = runtime_settings.daemon_autonomic_minutes()
+LEARNING_MINUTES = runtime_settings.daemon_learning_minutes()
 # Memory vitality scoring: runs every 6 hours by default (360 minutes)
-VITALITY_SCORING_MINUTES = int(os.environ.get("LUCENT_VITALITY_SCORING_MINUTES", "360"))
+VITALITY_SCORING_MINUTES = runtime_settings.daemon_vitality_scoring_minutes()
 # Shadow forgetting Candidate-A scoring: runs every 6 hours, offset +15m from vitality.
-SHADOW_FORGET_SCORING_MINUTES = int(
-    os.environ.get("LUCENT_SHADOW_FORGET_SCORING_MINUTES", str(VITALITY_SCORING_MINUTES))
-)
-SHADOW_FORGET_OFFSET_MINUTES = int(os.environ.get("LUCENT_SHADOW_FORGET_OFFSET_MINUTES", "15"))
+SHADOW_FORGET_SCORING_MINUTES = runtime_settings.daemon_shadow_forget_scoring_minutes()
+SHADOW_FORGET_OFFSET_MINUTES = runtime_settings.daemon_shadow_forget_offset_minutes()
 # Daily experience compression: runs once per day (default 1440 minutes = 24 hours)
-COMPRESSION_MINUTES = int(os.environ.get("LUCENT_COMPRESSION_MINUTES", "1440"))
+COMPRESSION_MINUTES = runtime_settings.daemon_compression_minutes()
 
 # ── System schedule prompts ────────────────────────────────────────────
 # These are the task descriptions used by the built-in system schedules.
@@ -614,25 +610,19 @@ SHADOW_FORGET_SCORING_PROMPT = (
 
 # Approval flow: when enabled, tasks go to needs-review before completing.
 # When disabled, tasks complete immediately after successful execution.
-REQUIRE_APPROVAL = os.environ.get("LUCENT_REQUIRE_APPROVAL", "false").lower() in (
-    "true",
-    "1",
-    "yes",
-)
+REQUIRE_APPROVAL = runtime_settings.completion_human_approval_required()
 
 # Multi-model review: comma-separated list of models to use for reviewing task output.
 # When set, completed tasks are re-evaluated by each model before final completion.
 # The cognitive model can be pinned by LUCENT_DAEMON_MODEL. When unset, the
 # daemon uses the model registry's enabled default instead of a hardcoded model.
 # these are for sub-agent review.
-REVIEW_MODELS = [
-    m.strip() for m in os.environ.get("LUCENT_REVIEW_MODELS", "").split(",") if m.strip()
-]
+REVIEW_MODELS = runtime_settings.review_model_ids()
 
 # Request-level post-completion review configuration.
-REQUEST_REVIEW_AGENT_TYPE = os.environ.get("LUCENT_REQUEST_REVIEW_AGENT_TYPE", "request-review")
-REQUEST_REVIEW_FALLBACK_AGENT_TYPE = os.environ.get("LUCENT_REQUEST_REVIEW_FALLBACK_AGENT_TYPE", "code")
-REQUEST_REVIEW_MODEL = os.environ.get("LUCENT_REQUEST_REVIEW_MODEL", "").strip()
+REQUEST_REVIEW_AGENT_TYPE = runtime_settings.request_review_agent_type()
+REQUEST_REVIEW_FALLBACK_AGENT_TYPE = runtime_settings.request_review_fallback_agent_type()
+REQUEST_REVIEW_MODEL = runtime_settings.request_review_model_id() or ""
 REQUEST_REVIEW_TASK_TITLE = "Post-completion review"
 
 
@@ -676,10 +666,8 @@ def _truncate_for_context(text: str, limit: int, *, label: str = "content") -> s
     return text[: max(0, limit - len(marker))] + marker
 
 # Git operations: daemon can commit (but never push without ALLOW_GIT_PUSH)
-_git_commit_val = os.environ.get("LUCENT_ALLOW_GIT_COMMIT", "false")
-ALLOW_GIT_COMMIT = _git_commit_val.lower() in ("true", "1", "yes")
-_git_push_val = os.environ.get("LUCENT_ALLOW_GIT_PUSH", "false")
-ALLOW_GIT_PUSH = _git_push_val.lower() in ("true", "1", "yes")
+ALLOW_GIT_COMMIT = runtime_settings.daemon_git_commit_allowed()
+ALLOW_GIT_PUSH = runtime_settings.daemon_git_push_allowed()
 
 # Paths
 DAEMON_DIR = Path(__file__).parent
@@ -687,8 +675,51 @@ COGNITIVE_PROMPT_PATH = DAEMON_DIR / "cognitive.md"
 AGENT_DEF_PATH = DAEMON_DIR.parent / ".github" / "agents" / "lucent.agent.md"
 LOG_FILE = DAEMON_DIR / "daemon.log"
 # MCP configuration — passed to all sessions
-MCP_URL = os.environ.get("LUCENT_MCP_URL", "http://localhost:8766/mcp")
-MCP_API_KEY = os.environ.get("LUCENT_MCP_API_KEY", "")
+MCP_URL = runtime_settings.daemon_mcp_url()
+MCP_API_KEY = runtime_settings.daemon_mcp_api_key()
+
+
+def _refresh_config_from_runtime_settings() -> None:
+    """Refresh daemon globals after DB-backed settings are loaded."""
+    global MAX_CONCURRENT_SESSIONS, DAEMON_INTERVAL_MINUTES, MODEL
+    global STALE_HEARTBEAT_MINUTES, SESSION_TOTAL_TIMEOUT, SESSION_IDLE_TIMEOUT
+    global WATCHDOG_TIMEOUT, AUTONOMIC_INTERVAL, LEARNING_INTERVAL
+    global MAX_RESULT_LENGTH, DAEMON_ROLES_STR, DISPATCH_POLL_SECONDS
+    global SCHEDULER_CHECK_SECONDS, AUTONOMIC_MINUTES, LEARNING_MINUTES
+    global VITALITY_SCORING_MINUTES, SHADOW_FORGET_SCORING_MINUTES
+    global SHADOW_FORGET_OFFSET_MINUTES, COMPRESSION_MINUTES
+    global REQUIRE_APPROVAL, REVIEW_MODELS
+    global REQUEST_REVIEW_AGENT_TYPE, REQUEST_REVIEW_FALLBACK_AGENT_TYPE
+    global REQUEST_REVIEW_MODEL, ALLOW_GIT_COMMIT, ALLOW_GIT_PUSH, MCP_URL, MCP_API_KEY
+
+    MAX_CONCURRENT_SESSIONS = runtime_settings.daemon_max_sessions()
+    DAEMON_INTERVAL_MINUTES = runtime_settings.daemon_interval_minutes()
+    MODEL = runtime_settings.daemon_model_id() or ""
+    STALE_HEARTBEAT_MINUTES = runtime_settings.daemon_stale_heartbeat_minutes()
+    SESSION_TOTAL_TIMEOUT = runtime_settings.daemon_session_timeout_seconds()
+    SESSION_IDLE_TIMEOUT = runtime_settings.daemon_session_idle_timeout_seconds()
+    WATCHDOG_TIMEOUT = runtime_settings.daemon_watchdog_timeout_seconds()
+    AUTONOMIC_INTERVAL = runtime_settings.daemon_autonomic_interval_cycles()
+    LEARNING_INTERVAL = runtime_settings.daemon_learning_interval_cycles()
+    MAX_RESULT_LENGTH = runtime_settings.daemon_max_result_length()
+    DAEMON_ROLES_STR = runtime_settings.daemon_roles()
+    DISPATCH_POLL_SECONDS = runtime_settings.daemon_dispatch_poll_seconds()
+    SCHEDULER_CHECK_SECONDS = runtime_settings.daemon_scheduler_check_seconds()
+    AUTONOMIC_MINUTES = runtime_settings.daemon_autonomic_minutes()
+    LEARNING_MINUTES = runtime_settings.daemon_learning_minutes()
+    VITALITY_SCORING_MINUTES = runtime_settings.daemon_vitality_scoring_minutes()
+    SHADOW_FORGET_SCORING_MINUTES = runtime_settings.daemon_shadow_forget_scoring_minutes()
+    SHADOW_FORGET_OFFSET_MINUTES = runtime_settings.daemon_shadow_forget_offset_minutes()
+    COMPRESSION_MINUTES = runtime_settings.daemon_compression_minutes()
+    REQUIRE_APPROVAL = runtime_settings.completion_human_approval_required()
+    REVIEW_MODELS = runtime_settings.review_model_ids()
+    REQUEST_REVIEW_AGENT_TYPE = runtime_settings.request_review_agent_type()
+    REQUEST_REVIEW_FALLBACK_AGENT_TYPE = runtime_settings.request_review_fallback_agent_type()
+    REQUEST_REVIEW_MODEL = runtime_settings.request_review_model_id() or ""
+    ALLOW_GIT_COMMIT = runtime_settings.daemon_git_commit_allowed()
+    ALLOW_GIT_PUSH = runtime_settings.daemon_git_push_allowed()
+    MCP_URL = runtime_settings.daemon_mcp_url()
+    MCP_API_KEY = runtime_settings.daemon_mcp_api_key()
 
 
 def _resolve_default_model(preferred_model: str | None = None) -> str:
@@ -2721,6 +2752,8 @@ class LucentDaemon:
                 from lucent.settings import load_runtime_settings_from_db
 
                 await load_runtime_settings_from_db(_pool)
+                _refresh_config_from_runtime_settings()
+                self.roles = self._parse_roles(DAEMON_ROLES_STR)
             except Exception as settings_exc:
                 log(f"Failed to load runtime settings from DB: {settings_exc}", "WARN")
             try:

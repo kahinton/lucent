@@ -1,6 +1,6 @@
 # Configuration
 
-Lucent uses environment variables for deployment/bootstrap configuration. Safe, non-secret runtime behavior switches can also be saved in the database from **Settings → Runtime Settings** by an admin or owner.
+Lucent uses **Settings → Runtime Settings** as the canonical settings catalog. Runtime-safe values can be saved in the database by an admin or owner, while bootstrap and credential values are shown for visibility but remain locked/masked when they must be supplied before the database is available or through secret storage.
 
 For DB-backed runtime settings, precedence is:
 
@@ -8,17 +8,20 @@ For DB-backed runtime settings, precedence is:
 2. Environment variable fallback
 3. Built-in default
 
-Resetting a runtime setting in the UI deletes the database value and returns it to environment/default fallback. Secrets are intentionally excluded from runtime settings; use **Settings → Secrets** or **Settings → Connections** for credentials. Copy `.env.example` to `.env` and customize bootstrap values as needed.
+Resetting a runtime setting in the UI deletes the database value and returns it to environment/default fallback. Secrets are intentionally not stored in `runtime_settings`; use **Settings → Secrets**, **Settings → Connections**, or the configured secret provider for credentials. Copy `.env.example` to `.env` and customize bootstrap values as needed.
 
 ## Runtime Settings UI
 
-Admins and owners can manage allowlisted, non-secret runtime settings in **Settings → Runtime Settings**. These saved values are stored in PostgreSQL, included in normal database backups, and loaded by the API/daemon at startup. Current settings include memory lifecycle/search rollout flags, search observability sampling, daemon request auto-approval, and post-completion review behavior.
+Admins and owners can manage allowlisted settings in **Settings → Runtime Settings**. Editable saved values are stored in PostgreSQL, included in normal database backups, and loaded by the API/daemon at startup. The catalog includes model defaults, chat behavior, daemon timing, request/review gates, memory lifecycle/search rollout flags, server rate limits, and read-only visibility for bootstrap/credential settings.
 
 The UI shows the active source for each value:
 
 - **Saved in DB** — workspace value takes precedence and is backed up with the database.
 - **From env** — no database value exists, so the matching environment variable is used.
 - **Default** — neither a database value nor environment variable is set.
+- **Locked** — visible for audit/diagnostics, but managed outside the DB-backed runtime settings table.
+- **Hidden** — secret material is masked and not persisted in `runtime_settings`.
+- **Restart may be required** — the setting is loaded into process-level state; restart affected services after changing it.
 
 ## Server Configuration
 

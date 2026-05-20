@@ -6,7 +6,6 @@ Used by the daemon, MCP tools, and API to validate model selections.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
 
 
@@ -433,9 +432,11 @@ def get_default_model_id(
         return _first_model_id(fallback_models, category="general") or fallback_models[0].id
 
     available_by_id = {m.id: m for m in available}
+    from lucent.settings import default_model_id
+
     for candidate in (
         preferred_model,
-        os.environ.get("LUCENT_DEFAULT_MODEL", "").strip() or None,
+        default_model_id(),
     ):
         if candidate and candidate in available_by_id:
             return candidate
@@ -639,7 +640,9 @@ def validate_model(model_id: str, *, require_tools: bool = False) -> str | None:
     and is enabled. In strict mode (default), unknown models are rejected.
     Set LUCENT_MODEL_VALIDATION=lenient to allow unrecognized model IDs.
     """
-    strict = os.environ.get("LUCENT_MODEL_VALIDATION", "strict").lower() != "lenient"
+    from lucent.settings import model_validation_mode
+
+    strict = model_validation_mode() != "lenient"
 
     # DB-loaded registry takes precedence when available
     if _db_models is not None:

@@ -12,6 +12,7 @@ POST endpoints under /settings/* are CSRF-protected and audit-logged via
 :class:`AdminAuditRepository` for security-sensitive actions.
 """
 
+import logging
 from urllib.parse import quote
 from uuid import UUID
 
@@ -46,6 +47,7 @@ from lucent.db import admin_audit as audit_actions
 from ._shared import _check_csrf, _set_csrf_cookie, get_user_context, templates
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -62,6 +64,17 @@ async def _require_admin_or_owner(request: Request):
     if _role_value(user) not in ("admin", "owner"):
         raise HTTPException(status_code=403, detail="Admin access required.")
     return user
+
+
+def _refresh_runtime_setting_dependents(setting_key: str) -> None:
+    """Best-effort refresh for services whose singletons cache settings."""
+    if setting_key.startswith("server."):
+        try:
+            from lucent.rate_limit import reset_rate_limiters
+
+            reset_rate_limiters()
+        except Exception:
+            logger.debug("failed to reset rate limiters after settings update", exc_info=True)
 
 
 def _encode_pending_key(key_id: str, plain_key: str) -> str:
@@ -591,6 +604,7 @@ async def settings_runtime_reset(request: Request, setting_key: str):
     repo = RuntimeSettingsRepository(pool)
     deleted = await repo.delete_setting(user.organization_id, setting_key)
     runtime_settings.clear_runtime_setting_cache(user.organization_id, setting_key)
+    _refresh_runtime_setting_dependents(setting_key)
 
     new_value = runtime_settings.get_runtime_setting(
         setting_key,
@@ -666,6 +680,7 @@ async def settings_runtime_update(request: Request, setting_key: str):
         user_id=user.id,
     )
     runtime_settings.set_runtime_setting_cache(user.organization_id, setting_key, value)
+    _refresh_runtime_setting_dependents(setting_key)
 
     audit_repo = AdminAuditRepository(pool)
     await audit_repo.log_for_user(

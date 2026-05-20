@@ -21,7 +21,6 @@ upgrade to Redis-based rate limiting.
 
 import ipaddress
 import logging
-import os
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -30,12 +29,14 @@ from uuid import UUID
 
 from starlette.requests import Request
 
+from lucent.settings import api_rate_limit_per_minute, login_rate_limit, trusted_proxies
+
 logger = logging.getLogger(__name__)
 
 
 def _parse_trusted_proxies() -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
     """Parse LUCENT_TRUSTED_PROXIES env var into a list of network objects."""
-    raw = os.environ.get("LUCENT_TRUSTED_PROXIES", "").strip()
+    raw = trusted_proxies()
     if not raw:
         return []
     networks = []
@@ -196,7 +197,7 @@ class RateLimiter:
                            DEFAULT_PREFIX_LIMITS.
         """
         if requests_per_minute is None:
-            requests_per_minute = int(os.environ.get("LUCENT_RATE_LIMIT_PER_MINUTE", "100"))
+            requests_per_minute = api_rate_limit_per_minute()
 
         self.limit = requests_per_minute
         self.window_seconds = window_seconds
@@ -368,7 +369,7 @@ class LoginRateLimiter:
         window_seconds: int = 60,
     ):
         if max_attempts is None:
-            max_attempts = int(os.environ.get("LUCENT_LOGIN_RATE_LIMIT", "5"))
+            max_attempts = login_rate_limit()
         self.max_attempts = max_attempts
         self.window_seconds = window_seconds
         self._buckets: dict[str, RateLimitBucket] = defaultdict(RateLimitBucket)
@@ -431,3 +432,15 @@ def reset_rate_limiter() -> None:
     """Reset the global rate limiter (useful for testing)."""
     global _rate_limiter
     _rate_limiter = None
+
+
+def reset_login_limiter() -> None:
+    """Reset the global login rate limiter."""
+    global _login_limiter
+    _login_limiter = None
+
+
+def reset_rate_limiters() -> None:
+    """Reset all rate limiter singletons so updated settings take effect."""
+    reset_rate_limiter()
+    reset_login_limiter()

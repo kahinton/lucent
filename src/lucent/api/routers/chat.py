@@ -7,7 +7,6 @@ Lucent MCP server for memory search, creation, and management.
 """
 
 import json
-import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -22,23 +21,19 @@ from pydantic import BaseModel, Field
 from lucent.auth_providers import SESSION_COOKIE_NAME, validate_session
 from lucent.db import get_pool
 from lucent.logging import get_logger
+from lucent.settings import (
+    chat_mcp_url,
+    chat_model_id,
+    chat_timeout_seconds,
+    session_experience_model_id,
+    session_experience_summary_enabled,
+    session_experience_timeout_seconds,
+)
 
 logger = get_logger("chat")
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
-CHAT_MODEL = os.environ.get("LUCENT_CHAT_MODEL", "").strip()
-SESSION_EXPERIENCE_SUMMARY_ENABLED = os.environ.get(
-    "LUCENT_SESSION_EXPERIENCE_SUMMARY_ENABLED",
-    "true",
-).strip().lower() not in {"0", "false", "no", "off"}
-SESSION_EXPERIENCE_MODEL = os.environ.get("LUCENT_SESSION_EXPERIENCE_MODEL", "").strip()
-SESSION_EXPERIENCE_TIMEOUT = int(os.environ.get("LUCENT_SESSION_EXPERIENCE_TIMEOUT", "180"))
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
-# MCP server URL — localhost inside the container, configurable for external
-MCP_URL = os.environ.get("LUCENT_CHAT_MCP_URL", "http://localhost:8766/mcp")
-# Session timeout for chat (shorter than daemon — chat should be snappy)
-CHAT_SESSION_TIMEOUT = int(os.environ.get("LUCENT_CHAT_TIMEOUT", "300"))
 CHAT_ALLOWED_TOOLS = [
     "get_current_user_context",
     "search_memories",
@@ -83,7 +78,7 @@ def _resolve_chat_model(override: str | None = None) -> str:
 
     if override:
         return override
-    return get_default_model_id(preferred_model=(CHAT_MODEL or None))
+    return get_default_model_id(preferred_model=chat_model_id())
 
 
 def _chat_allowed_tools_for_agent(
@@ -169,6 +164,12 @@ async def _get_session_user(request: Request):
     user = await validate_session(pool, session_token)
     if not user:
         raise HTTPException(401, "Session expired")
+    try:
+        from lucent.auth import set_current_user
+
+        set_current_user(user)
+    except Exception:
+        pass
     return user, pool
 
 
@@ -196,7 +197,7 @@ def _build_mcp_config(
     return {
         "memory-server": {
             "type": "http",
-            "url": MCP_URL,
+            "url": chat_mcp_url(),
             "headers": headers,
             "tools": list(tools or CHAT_ALLOWED_TOOLS),
         },
@@ -321,13 +322,13 @@ async def _summarize_session_experience(
     evaluation: dict[str, Any],
 ) -> tuple[str | None, str | None, str | None]:
     """Return model-written experience content, model id, and error if any."""
-    if not SESSION_EXPERIENCE_SUMMARY_ENABLED:
+    if not session_experience_summary_enabled():
         return None, None, "disabled"
     try:
         from lucent.llm import get_engine_for_model
         from lucent.model_registry import validate_model
 
-        model = _resolve_chat_model(SESSION_EXPERIENCE_MODEL or None)
+        model = _resolve_chat_model(session_experience_model_id())
         validation_error = validate_model(model)
         if validation_error:
             return None, model, validation_error
@@ -348,7 +349,7 @@ async def _summarize_session_experience(
             system_message=system_message,
             prompt=prompt,
             mcp_config={},
-            timeout=SESSION_EXPERIENCE_TIMEOUT,
+            timeout=session_experience_timeout_seconds(),
         )
         content = (result or "").strip()
         if not content or content == "NO_EXPERIENCE_NEEDED":
@@ -356,7 +357,7 @@ async def _summarize_session_experience(
         return content, model, None
     except Exception as exc:
         logger.warning("Session experience model summary failed", exc_info=True)
-        return None, SESSION_EXPERIENCE_MODEL or None, str(exc)[:500]
+        return None, session_experience_model_id(), str(exc)[:500]
 
 
 async def _prepare_persistent_chat_session(
@@ -443,7 +444,9 @@ async def _prepare_persistent_chat_session(
             user_message_id = str(user_message["id"])
 
         provider_metadata = session.get("provider_metadata") or {}
-        session_metadata = session.get("metadata") if isinstance(session.get("metadata"), dict) else {}
+        session_metadata = (
+            session.get("metadata") if isinstance(session.get("metadata"), dict) else {}
+        )
         return PersistentChatSession(
             session_id=session_id,
             provider_session_id=provider_session_id,
@@ -496,7 +499,9 @@ async def _chat_session_defaults(
             "model": session.get("model"),
             "reasoning_effort": session.get("reasoning_effort"),
             "agent_id": str(agent_id) if agent_id else None,
-            "metadata": session.get("metadata") if isinstance(session.get("metadata"), dict) else {},
+            "metadata": (
+                session.get("metadata") if isinstance(session.get("metadata"), dict) else {}
+            ),
         }
     except Exception:
         logger.debug("Failed to load chat session defaults", exc_info=True)
@@ -739,7 +744,11 @@ async def _build_system_prompt(user: dict, pool, page_context: dict | None) -> s
                         for t in tasks[:5]:
                             parts.append(f"  - [{t.get('status')}] {t.get('title', '?')}")
 
-            elif page_type == "user_interaction_detail" and page_data.get("interaction_id") and org_id:
+            elif (
+                page_type == "user_interaction_detail"
+                and page_data.get("interaction_id")
+                and org_id
+            ):
                 from lucent.db.user_interactions import UserInteractionRepository
 
                 repo = UserInteractionRepository(pool)
@@ -754,7 +763,8 @@ async def _build_system_prompt(user: dict, pool, page_context: dict | None) -> s
                         "This page is an active Lucent conversation that began from a proactive "
                         "handoff. Respond interactively on the page; do not tell the user "
                         "to reply elsewhere or wait for a daemon cycle. If the user asks for "
-                        "tracked follow-up work, use `create_request` and summarize what was queued."
+                        "tracked follow-up work, use `create_request` and summarize "
+                        "what was queued."
                     )
                     parts.append("\n## Handoff Being Viewed")
                     parts.append(f"- Title: {interaction.get('title')}")
@@ -1001,7 +1011,7 @@ async def chat_stream(
             system_message=system_prompt,
             prompt=prompt,
             mcp_config=mcp_config,
-            timeout=CHAT_SESSION_TIMEOUT,
+            timeout=chat_timeout_seconds(),
             reasoning_effort=reasoning_effort,
             provider_session_id=chat_session.provider_session_id,
             resume=resume_provider,
@@ -1449,8 +1459,8 @@ async def chat_stream_v2(
                 prompt=prompt,
                 mcp_config=mcp_config,
                 on_event=on_event,
-                timeout=CHAT_SESSION_TIMEOUT,
-                idle_timeout=CHAT_SESSION_TIMEOUT,
+                timeout=chat_timeout_seconds(),
+                idle_timeout=chat_timeout_seconds(),
                 reasoning_effort=reasoning_effort,
                 provider_session_id=chat_session.provider_session_id,
                 resume=resume_provider,
