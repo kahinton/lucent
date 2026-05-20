@@ -333,6 +333,73 @@ async def test_runtime_setting_reset_uses_env_fallback(
 
 
 @pytest.mark.asyncio
+async def test_runtime_setting_update_json_response(
+    client,
+    db_pool,
+    web_user,
+):
+    _user, org, _token = web_user
+    await _promote_web_user(db_pool, web_user)
+    runtime_settings.clear_runtime_setting_cache()
+
+    resp = await client.post(
+        "/settings/runtime/models.chat_model",
+        data=_csrf_data(client, {"value": "gpt-4.1"}),
+        headers={"Accept": "application/json", "X-Requested-With": "fetch"},
+        follow_redirects=False,
+    )
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["ok"] is True
+    assert payload["message"] == "Chat model updated."
+    assert payload["setting"]["key"] == "models.chat_model"
+    assert payload["setting"]["source"] == "database"
+    assert payload["setting"]["source_label"] == "Saved in DB"
+    assert payload["setting"]["display_value"] == "gpt-4.1"
+    assert runtime_settings.chat_model_id(organization_id=org["id"]) == "gpt-4.1"
+
+
+@pytest.mark.asyncio
+async def test_runtime_setting_reset_json_response(
+    client,
+    db_pool,
+    web_user,
+    monkeypatch,
+):
+    _user, org, _token = web_user
+    await _promote_web_user(db_pool, web_user)
+    monkeypatch.setenv("LUCENT_CHAT_MODEL", "env-chat-model")
+    runtime_settings.clear_runtime_setting_cache()
+
+    await client.post(
+        "/settings/runtime/models.chat_model",
+        data=_csrf_data(client, {"value": "db-chat-model"}),
+        headers={"Accept": "application/json", "X-Requested-With": "fetch"},
+        follow_redirects=False,
+    )
+
+    resp = await client.post(
+        "/settings/runtime/models.chat_model/reset",
+        data=_csrf_data(client),
+        headers={"Accept": "application/json", "X-Requested-With": "fetch"},
+        follow_redirects=False,
+    )
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["ok"] is True
+    assert payload["message"] == "Chat model reset to fallback."
+    assert payload["setting"]["source"] == "environment"
+    assert payload["setting"]["source_label"] == "From env"
+    assert payload["setting"]["display_value"] == "env-chat-model"
+    assert payload["setting"]["form_value"] == "env-chat-model"
+    repo = RuntimeSettingsRepository(db_pool)
+    row = await repo.get_setting(org["id"], "models.chat_model")
+    assert row is None
+
+
+@pytest.mark.asyncio
 async def test_runtime_setting_validation_rejects_out_of_range_value(
     client,
     db_pool,

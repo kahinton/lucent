@@ -18,7 +18,7 @@ from uuid import UUID
 
 import bcrypt
 from fastapi import APIRouter, Form, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from lucent import settings as runtime_settings
 from lucent.auth_providers import (
@@ -75,6 +75,66 @@ def _refresh_runtime_setting_dependents(setting_key: str) -> None:
             reset_rate_limiters()
         except Exception:
             logger.debug("failed to reset rate limiters after settings update", exc_info=True)
+
+
+def _runtime_settings_wants_json(request: Request) -> bool:
+    accept = request.headers.get("accept", "").lower()
+    requested_with = request.headers.get("x-requested-with", "").lower()
+    return "application/json" in accept or requested_with in {"fetch", "xmlhttprequest"}
+
+
+def _runtime_source_badge(source: str) -> dict[str, str]:
+    base = "inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium"
+    if source == "database":
+        return {"label": "Saved in DB", "class_name": f"{base} bg-green-100 text-green-700"}
+    if source == "environment":
+        return {"label": "From env", "class_name": f"{base} bg-amber-100 text-amber-800"}
+    return {"label": "Default", "class_name": f"{base} bg-gray-100 text-gray-600"}
+
+
+def _runtime_source_note(source: str) -> str:
+    if source == "database":
+        return "This saved value takes precedence over the environment fallback."
+    if source == "environment":
+        return "No DB value is saved, so Lucent is using the environment variable."
+    return "No DB value or environment variable is set, so Lucent is using the built-in default."
+
+
+def _runtime_setting_payload(organization_id, setting_key: str, message: str) -> dict:
+    snapshots = runtime_settings.runtime_setting_snapshots(organization_id)
+    snapshot = next(
+        item for item in snapshots if item["definition"].key == setting_key
+    )
+    definition = snapshot["definition"]
+    badge = _runtime_source_badge(snapshot["source"])
+    return {
+        "ok": True,
+        "message": message,
+        "setting": {
+            "key": definition.key,
+            "title": definition.title,
+            "source": snapshot["source"],
+            "source_label": badge["label"],
+            "source_badge_class": badge["class_name"],
+            "source_note": _runtime_source_note(snapshot["source"]),
+            "display_value": snapshot["display_value"],
+            "form_value": snapshot["form_value"],
+        },
+    }
+
+
+def _runtime_settings_error_response(
+    request: Request,
+    message: str,
+    *,
+    status_code: int = 400,
+):
+    if _runtime_settings_wants_json(request):
+        return JSONResponse({"ok": False, "error": message}, status_code=status_code)
+    return RedirectResponse(
+        f"/settings/runtime?error={quote(message)}",
+        status_code=303,
+    )
 
 
 def _encode_pending_key(key_id: str, plain_key: str) -> str:
@@ -586,9 +646,10 @@ async def settings_runtime_reset(request: Request, setting_key: str):
 
     definition = runtime_settings.get_runtime_setting_definition(setting_key)
     if not definition or not definition.editable:
-        return RedirectResponse(
-            f"/settings/runtime?error={quote('Unknown or read-only setting.')}",
-            status_code=303,
+        return _runtime_settings_error_response(
+            request,
+            "Unknown or read-only setting.",
+            status_code=404,
         )
 
     old_value = runtime_settings.get_runtime_setting(
@@ -632,8 +693,13 @@ async def settings_runtime_reset(request: Request, setting_key: str):
         ),
         extra_context={"setting_key": setting_key, "env_var": definition.env_var},
     )
+    message = f"{definition.title} reset to fallback."
+    if _runtime_settings_wants_json(request):
+        return JSONResponse(
+            _runtime_setting_payload(user.organization_id, setting_key, message)
+        )
     return RedirectResponse(
-        f"/settings/runtime?success={quote(f'{definition.title} reset to fallback.')}",
+        f"/settings/runtime?success={quote(message)}",
         status_code=303,
     )
 
@@ -646,9 +712,10 @@ async def settings_runtime_update(request: Request, setting_key: str):
 
     definition = runtime_settings.get_runtime_setting_definition(setting_key)
     if not definition or not definition.editable:
-        return RedirectResponse(
-            f"/settings/runtime?error={quote('Unknown or read-only setting.')}",
-            status_code=303,
+        return _runtime_settings_error_response(
+            request,
+            "Unknown or read-only setting.",
+            status_code=404,
         )
 
     form = await request.form()
@@ -656,9 +723,9 @@ async def settings_runtime_update(request: Request, setting_key: str):
     try:
         value = runtime_settings.validate_runtime_setting_value(setting_key, raw_value)
     except ValueError as exc:
-        return RedirectResponse(
-            f"/settings/runtime?error={quote(f'{definition.title}: {exc}')}",
-            status_code=303,
+        return _runtime_settings_error_response(
+            request,
+            f"{definition.title}: {exc}",
         )
 
     old_value = runtime_settings.get_runtime_setting(
@@ -695,8 +762,13 @@ async def settings_runtime_update(request: Request, setting_key: str):
         notes="runtime setting updated from Settings UI",
         extra_context={"setting_key": setting_key, "env_var": definition.env_var},
     )
+    message = f"{definition.title} updated."
+    if _runtime_settings_wants_json(request):
+        return JSONResponse(
+            _runtime_setting_payload(user.organization_id, setting_key, message)
+        )
     return RedirectResponse(
-        f"/settings/runtime?success={quote(f'{definition.title} updated.')}",
+        f"/settings/runtime?success={quote(message)}",
         status_code=303,
     )
 
