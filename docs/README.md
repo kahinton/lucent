@@ -28,6 +28,7 @@
 ## Features
 
 - **[Sandboxes](sandboxes.md)** — Docker sandbox configuration and lifecycle
+- **[Managed Tools](managed-tools.md)** — Tool Builder lifecycle, sandbox runtime, grants, and security model
 - **[Agent Integration](agent-integration.md)** — MCP agent integration guide
 - **[Memory Lifecycle](memory-lifecycle-design.md)** — Memory type design and lifecycle
 

@@ -103,6 +103,59 @@ class CreateHook(BaseModel):
     proposal_evidence: dict | None = None
 
 
+class CreateManagedTool(BaseModel):
+    name: str = Field(max_length=64)
+    description: str | None = None
+    input_schema: dict = Field(default_factory=lambda: {"type": "object", "properties": {}})
+    output_schema: dict | None = None
+    runtime_type: Literal["python"] = "python"
+    source_code: str
+    entrypoint: str = Field(default="handler", max_length=128)
+    requirements: list[str] = Field(default_factory=list)
+    runtime_config: dict = Field(default_factory=dict)
+    env_vars: dict[str, str] = Field(default_factory=dict)
+    auth_policy: dict = Field(
+        default_factory=lambda: {"mode": "agent_grant", "require_user_access": True}
+    )
+    network_policy: dict = Field(
+        default_factory=lambda: {"network_mode": "none", "allowed_hosts": []}
+    )
+    resource_limits: dict = Field(
+        default_factory=lambda: {
+            "memory_limit": "512m",
+            "cpu_limit": 1.0,
+            "disk_limit": "1g",
+            "timeout_seconds": 300,
+        }
+    )
+    timeout_seconds: int = Field(default=300, ge=1, le=3600)
+    status: Literal["proposed", "active", "rejected"] = "proposed"
+    scope: Literal["instance", "built-in"] = "instance"
+    proposal_reason: str | None = None
+    proposal_evidence: dict | None = None
+
+
+class UpdateManagedTool(BaseModel):
+    name: str | None = Field(default=None, max_length=64)
+    description: str | None = None
+    input_schema: dict | None = None
+    output_schema: dict | None = None
+    runtime_type: Literal["python"] | None = None
+    source_code: str | None = None
+    entrypoint: str | None = Field(default=None, max_length=128)
+    requirements: list[str] | None = None
+    runtime_config: dict | None = None
+    env_vars: dict[str, str] | None = None
+    auth_policy: dict | None = None
+    network_policy: dict | None = None
+    resource_limits: dict | None = None
+    timeout_seconds: int | None = Field(default=None, ge=1, le=3600)
+
+
+class RunManagedTool(BaseModel):
+    arguments: dict = Field(default_factory=dict)
+
+
 class UpdateHook(BaseModel):
     name: str | None = Field(default=None, max_length=64)
     description: str | None = None
@@ -743,6 +796,213 @@ async def delete_hook(hook_id: str, user: AuthenticatedUser):
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     if not await repo.delete_hook(hook_id, str(user.organization_id)):
         raise HTTPException(404, "Hook not found")
+
+
+# ── Managed Tool Endpoints ───────────────────────────────────────────────
+
+
+@router.get("/tools")
+async def list_managed_tools(
+    user: AuthenticatedUser,
+    status: Literal["proposed", "active", "rejected"] | None = None,
+    limit: int = 25,
+    offset: int = 0,
+):
+    pool = await get_pool()
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    return await repo.list_managed_tools(
+        str(user.organization_id),
+        status=status,
+        limit=min(limit, 200),
+        offset=offset,
+        requester_user_id=str(user.id),
+        requester_role=user.role.value,
+    )
+
+
+@router.post("/tools", status_code=201)
+async def create_managed_tool(body: CreateManagedTool, user: AuthenticatedUser):
+    _validate_user_definition_create(body.status, body.scope)
+    pool = await get_pool()
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    security_flags = scan_content_for_injection(body.source_code or "")
+    if body.description:
+        security_flags.extend(scan_content_for_injection(body.description))
+    try:
+        result = await repo.create_managed_tool(
+            name=body.name,
+            description=body.description or "",
+            input_schema=body.input_schema,
+            output_schema=body.output_schema,
+            runtime_type=body.runtime_type,
+            source_code=body.source_code,
+            entrypoint=body.entrypoint,
+            requirements=body.requirements,
+            runtime_config=body.runtime_config,
+            env_vars=body.env_vars,
+            auth_policy=body.auth_policy,
+            network_policy=body.network_policy,
+            resource_limits=body.resource_limits,
+            timeout_seconds=body.timeout_seconds,
+            org_id=str(user.organization_id),
+            created_by=str(user.id),
+            status=body.status,
+            scope=body.scope,
+            owner_user_id=str(user.id),
+            proposal_reason=body.proposal_reason,
+            proposal_evidence=body.proposal_evidence,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    if security_flags:
+        logger.warning("Managed tool '%s' flagged: %s", body.name, security_flags)
+        result["security_warnings"] = security_flags
+    return result
+
+
+@router.get("/tools/{tool_id}")
+async def get_managed_tool(tool_id: str, user: AuthenticatedUser):
+    pool = await get_pool()
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    tool = await repo.get_managed_tool(
+        tool_id,
+        str(user.organization_id),
+        requester_user_id=str(user.id),
+        requester_role=user.role.value,
+    )
+    if not tool:
+        raise HTTPException(404, "Managed tool not found")
+    return tool
+
+
+@router.patch("/tools/{tool_id}")
+async def update_managed_tool(tool_id: str, body: UpdateManagedTool, user: AuthenticatedUser):
+    pool = await get_pool()
+    acl = AccessControlService(pool)
+    if not await acl.can_modify(str(user.id), "managed_tool", tool_id, str(user.organization_id)):
+        raise HTTPException(404, "Managed tool not found")
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    updates = body.model_dump(exclude_none=True)
+    try:
+        result = await repo.update_managed_tool(
+            tool_id,
+            str(user.organization_id),
+            requester_role=user.role.value,
+            **updates,
+        )
+    except BuiltInProtectionError as exc:
+        raise HTTPException(403, str(exc))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    if not result:
+        raise HTTPException(404, "Managed tool not found")
+    return result
+
+
+@router.post("/tools/{tool_id}/approve")
+async def approve_managed_tool(tool_id: str, user: AdminUser):
+    pool = await get_pool()
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    result = await repo.approve_managed_tool(tool_id, str(user.organization_id), str(user.id))
+    if not result:
+        raise HTTPException(404, "Managed tool not found or not in proposed status")
+    return result
+
+
+@router.post("/tools/{tool_id}/reject")
+async def reject_managed_tool(tool_id: str, user: AdminUser):
+    pool = await get_pool()
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    result = await repo.reject_managed_tool(tool_id, str(user.organization_id), str(user.id))
+    if not result:
+        raise HTTPException(404, "Managed tool not found or not in proposed status")
+    return result
+
+
+@router.delete("/tools/{tool_id}", status_code=204)
+async def delete_managed_tool(tool_id: str, user: AuthenticatedUser):
+    if user.role.value not in ("admin", "owner"):
+        raise HTTPException(403, "Forbidden: admin or owner role required")
+    pool = await get_pool()
+    acl = AccessControlService(pool)
+    if not await acl.can_modify(str(user.id), "managed_tool", tool_id, str(user.organization_id)):
+        raise HTTPException(404, "Managed tool not found")
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    if not await repo.delete_managed_tool(tool_id, str(user.organization_id)):
+        raise HTTPException(404, "Managed tool not found")
+
+
+@router.post("/tools/{tool_id}/run")
+async def run_managed_tool_api(tool_id: str, body: RunManagedTool, user: AuthenticatedUser):
+    pool = await get_pool()
+    acl = AccessControlService(pool)
+    if not await acl.can_access(str(user.id), "managed_tool", tool_id, str(user.organization_id)):
+        raise HTTPException(404, "Managed tool not found")
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    tool = await repo.get_managed_tool(
+        tool_id,
+        str(user.organization_id),
+        requester_user_id=str(user.id),
+        requester_role=user.role.value,
+    )
+    if not tool or tool.get("status") != "active":
+        raise HTTPException(409, "Managed tool must be active before it can run")
+    from lucent.services.managed_tools import ManagedToolBlockedError, ManagedToolExecutor
+
+    executor = ManagedToolExecutor(repo)
+    try:
+        result = await executor.execute(
+            tool=tool,
+            arguments=body.arguments,
+            org_id=str(user.organization_id),
+            user_id=str(user.id),
+            user_role=user.role.value,
+            enforce_agent_grant=False,
+        )
+    except ManagedToolBlockedError as exc:
+        raise HTTPException(403, str(exc))
+    except Exception as exc:
+        raise HTTPException(500, str(exc))
+    return result.to_dict()
+
+
+@router.post("/agents/{agent_id}/tools")
+async def grant_managed_tool_to_agent(agent_id: str, body: GrantAccess, user: AdminUser):
+    pool = await get_pool()
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    org_id = str(user.organization_id)
+    if not await repo.get_agent(
+        agent_id, org_id, requester_user_id=str(user.id), requester_role=user.role.value
+    ):
+        raise HTTPException(404, "Agent not found")
+    tool = await repo.get_managed_tool(
+        body.target_id, org_id, requester_user_id=str(user.id), requester_role=user.role.value
+    )
+    if not tool or tool.get("status") != "active":
+        raise HTTPException(404, "Active managed tool not found")
+    if not await repo.grant_managed_tool(
+        agent_id, body.target_id, org_id=org_id, user_id=str(user.id),
+    ):
+        raise HTTPException(400, "Failed to grant managed tool")
+    return {"status": "granted"}
+
+
+@router.delete("/agents/{agent_id}/tools/{tool_id}")
+async def revoke_managed_tool_from_agent(agent_id: str, tool_id: str, user: AdminUser):
+    pool = await get_pool()
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    if not await repo.get_agent(
+        agent_id,
+        str(user.organization_id),
+        requester_user_id=str(user.id),
+        requester_role=user.role.value,
+    ):
+        raise HTTPException(404, "Agent not found")
+    await repo.revoke_managed_tool(
+        agent_id, tool_id,
+        org_id=str(user.organization_id), user_id=str(user.id),
+    )
+    return {"status": "revoked"}
 
 
 # ── Pending Proposals ─────────────────────────────────────────────────────

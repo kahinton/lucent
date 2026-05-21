@@ -34,6 +34,13 @@ logger = get_logger("chat")
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
+# Compatibility constants for tests and older imports. Settings helpers remain
+# the source of the initial values, but callers can monkeypatch these module
+# attributes in unit tests.
+SESSION_EXPERIENCE_SUMMARY_ENABLED = session_experience_summary_enabled()
+SESSION_EXPERIENCE_MODEL = session_experience_model_id()
+SESSION_EXPERIENCE_TIMEOUT = session_experience_timeout_seconds()
+
 CHAT_ALLOWED_TOOLS = [
     "get_current_user_context",
     "search_memories",
@@ -59,9 +66,12 @@ DEFINITION_COMPOSER_TOOLS = [
     "get_skill_definition",
     "list_mcp_server_definitions",
     "list_hook_definitions",
+    "list_tool_definitions",
+    "get_tool_definition",
     "list_proposals",
     "create_agent_definition",
     "create_skill_definition",
+    "create_tool_definition",
 ]
 WORKFLOW_COMPOSER_TOOLS = [
     "list_workflows",
@@ -179,6 +189,7 @@ def _build_mcp_config(
     llm_session_id: str | None = None,
     llm_turn_id: str | None = None,
     llm_message_id: str | None = None,
+    agent_definition_id: str | None = None,
     tools: list[str] | None = None,
 ) -> dict:
     """Build MCP server config using the user's session token.
@@ -193,6 +204,8 @@ def _build_mcp_config(
         headers["X-Lucent-LLM-Turn-Id"] = llm_turn_id
     if llm_message_id:
         headers["X-Lucent-LLM-Message-Id"] = llm_message_id
+    if agent_definition_id:
+        headers["X-Lucent-Agent-Definition-Id"] = agent_definition_id
 
     return {
         "memory-server": {
@@ -322,13 +335,13 @@ async def _summarize_session_experience(
     evaluation: dict[str, Any],
 ) -> tuple[str | None, str | None, str | None]:
     """Return model-written experience content, model id, and error if any."""
-    if not session_experience_summary_enabled():
+    if not SESSION_EXPERIENCE_SUMMARY_ENABLED:
         return None, None, "disabled"
     try:
         from lucent.llm import get_engine_for_model
         from lucent.model_registry import validate_model
 
-        model = _resolve_chat_model(session_experience_model_id())
+        model = _resolve_chat_model(SESSION_EXPERIENCE_MODEL)
         validation_error = validate_model(model)
         if validation_error:
             return None, model, validation_error
@@ -349,7 +362,7 @@ async def _summarize_session_experience(
             system_message=system_message,
             prompt=prompt,
             mcp_config={},
-            timeout=session_experience_timeout_seconds(),
+            timeout=SESSION_EXPERIENCE_TIMEOUT,
         )
         content = (result or "").strip()
         if not content or content == "NO_EXPERIENCE_NEEDED":
@@ -357,7 +370,7 @@ async def _summarize_session_experience(
         return content, model, None
     except Exception as exc:
         logger.warning("Session experience model summary failed", exc_info=True)
-        return None, session_experience_model_id(), str(exc)[:500]
+        return None, SESSION_EXPERIENCE_MODEL, str(exc)[:500]
 
 
 async def _prepare_persistent_chat_session(
@@ -993,6 +1006,7 @@ async def chat_stream(
             llm_session_id=chat_session.session_id,
             llm_turn_id=chat_session.turn_id,
             llm_message_id=chat_session.user_message_id,
+            agent_definition_id=session_defaults.get("agent_id"),
         )
         if session_token
         else {}
@@ -1185,6 +1199,7 @@ async def chat_stream_v2(
     system_prompt_parts = []
     agent_name = None
     agent_skill_names: list[str] = []
+    agent_managed_tool_names: list[str] = []
 
     if agent_id:
         try:
@@ -1196,18 +1211,34 @@ async def chat_stream_v2(
                 system_prompt_parts.append(agent.get("content", ""))
                 agent_name = agent.get("name", "Lucent")
                 # Load granted skills
-                skills = await repo.list_agent_skills(agent_id)
+                skills = await repo.get_agent_skills(agent_id)
                 for skill in skills:
-                    skill_def = await repo.get_skill(
-                        str(skill["skill_id"]), str(user["organization_id"])
+                    if skill.get("name"):
+                        agent_skill_names.append(str(skill["name"]))
+                    system_prompt_parts.append(
+                        f"\n## Skill: {skill.get('name', '')}\n"
+                        f"{skill.get('content', '')}"
                     )
-                    if skill_def:
-                        if skill_def.get("name"):
-                            agent_skill_names.append(str(skill_def["name"]))
-                        system_prompt_parts.append(
-                            f"\n## Skill: {skill_def.get('name', '')}\n"
-                            f"{skill_def.get('content', '')}"
+                managed_tools = await repo.get_agent_managed_tools(agent_id)
+                for tool in managed_tools:
+                    if tool.get("name"):
+                        agent_managed_tool_names.append(str(tool["name"]))
+                if managed_tools:
+                    tool_lines = []
+                    for tool in managed_tools:
+                        input_schema_text = json.dumps(
+                            tool.get("input_schema") or {}, default=str
                         )
+                        tool_lines.append(
+                            f"- {tool.get('name')}: {tool.get('description') or ''}\n"
+                            f"  input_schema: {input_schema_text}"
+                        )
+                    system_prompt_parts.append(
+                        "\n## Granted Managed Tools\n"
+                        "Use `run_managed_tool` only for the tools listed here. "
+                        "Lucent enforces the grant and runs each call in a sandbox.\n"
+                        + "\n".join(tool_lines)
+                    )
         except Exception:
             logger.debug("Failed to load agent definition for chat", exc_info=True)
 
@@ -1230,11 +1261,16 @@ async def chat_stream_v2(
             system_prompt_parts.append(
                 "## Web Agent Composer context\n"
                 "You are running inside the Agent Composer web page, helping a human "
-                "create agents and skills conversationally. There is no daemon task_id "
+                "create agents, skills, and managed tools conversationally. There is no "
+                "daemon task_id "
                 "in this session, so do not call or ask for `log_task_event`. When the "
                 "user wants a new capability, ask concise clarifying questions only when "
-                "needed, then use `create_skill_definition` and `create_agent_definition` "
-                "to create proposed definitions. Do not approve or grant definitions from "
+                "needed, then use `create_skill_definition`, `create_tool_definition`, "
+                "and `create_agent_definition` to create proposed definitions. For requests "
+                "like 'connect to an API and do X', prefer proposing a managed tool with a "
+                "tight JSON input schema, explicit credential references, no-network or "
+                "allowlist network policy, and small resource limits. Do not approve, run, "
+                "or grant definitions from "
                 "chat; tell the user to review proposals in the Pending tab. Keep language "
                 "plain and avoid assuming the user knows prompt-engineering terminology.\n"
                 "Lucent supports three lightweight agent kinds inside the existing definition "
@@ -1305,12 +1341,17 @@ async def chat_stream_v2(
 
     session_token = request.cookies.get(SESSION_COOKIE_NAME)
     allowed_tools = _chat_allowed_tools_for_agent(agent_name, agent_skill_names)
+    if agent_managed_tool_names:
+        for tool in ("list_tool_definitions", "get_tool_definition", "run_managed_tool"):
+            if tool not in allowed_tools:
+                allowed_tools.append(tool)
     mcp_config = (
         _build_mcp_config(
             session_token,
             llm_session_id=chat_session.session_id,
             llm_turn_id=chat_session.turn_id,
             llm_message_id=chat_session.user_message_id,
+            agent_definition_id=agent_id,
             tools=allowed_tools,
         )
         if session_token

@@ -24,6 +24,9 @@ _current_task_id: ContextVar[str | None] = ContextVar("current_task_id", default
 _current_schedule_run_id: ContextVar[str | None] = ContextVar(
     "current_schedule_run_id", default=None
 )
+_current_agent_definition_id: ContextVar[str | None] = ContextVar(
+    "current_agent_definition_id", default=None
+)
 
 
 def set_llm_context(
@@ -34,6 +37,7 @@ def set_llm_context(
     request_id: str | None = None,
     task_id: str | None = None,
     schedule_run_id: str | None = None,
+    agent_definition_id: str | None = None,
 ) -> None:
     """Set request-scoped LLM lineage values."""
     _current_llm_session_id.set(session_id)
@@ -42,6 +46,7 @@ def set_llm_context(
     _current_request_id.set(request_id)
     _current_task_id.set(task_id)
     _current_schedule_run_id.set(schedule_run_id)
+    _current_agent_definition_id.set(agent_definition_id)
 
 
 def clear_llm_context() -> None:
@@ -53,6 +58,7 @@ def clear_llm_context() -> None:
         request_id=None,
         task_id=None,
         schedule_run_id=None,
+        agent_definition_id=None,
     )
 
 
@@ -65,4 +71,5 @@ def get_llm_context() -> dict[str, str | None]:
         "request_id": _current_request_id.get(),
         "task_id": _current_task_id.get(),
         "schedule_run_id": _current_schedule_run_id.get(),
+        "agent_definition_id": _current_agent_definition_id.get(),
     }

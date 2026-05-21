@@ -5,7 +5,7 @@
     <div class="flex items-center justify-between mb-2">
         <div>
             <h1 class="text-2xl font-bold text-gray-900">Agent Composer</h1>
-            <p class="text-sm text-gray-500">Create agents with guided help, then manage their skills, hooks, and MCP connections</p>
+            <p class="text-sm text-gray-500">Create agents with guided help, then manage their skills, tools, hooks, and MCP connections</p>
         </div>
     </div>
 </div>
@@ -14,6 +14,7 @@
         <a href="/definitions?tab=composer&per_page={{ per_page }}" class="py-2 px-1 border-b-2 text-sm font-medium {% if tab == 'composer' %}border-primary-500 text-primary-600{% else %}border-transparent text-gray-500 hover:text-gray-700{% endif %}">Agent Wizard</a>
         <a href="/definitions?tab=agents&per_page={{ per_page }}" class="py-2 px-1 border-b-2 text-sm font-medium {% if tab == 'agents' %}border-primary-500 text-primary-600{% else %}border-transparent text-gray-500 hover:text-gray-700{% endif %}">Agents {% if agents_total is defined %}({{ agents_total }}){% elif agents %}({{ agents|length }}){% endif %}</a>
         <a href="/definitions?tab=skills&per_page={{ per_page }}" class="py-2 px-1 border-b-2 text-sm font-medium {% if tab == 'skills' %}border-primary-500 text-primary-600{% else %}border-transparent text-gray-500 hover:text-gray-700{% endif %}">Skills {% if skills_total is defined %}({{ skills_total }}){% elif skills %}({{ skills|length }}){% endif %}</a>
+        <a href="/definitions?tab=tools&per_page={{ per_page }}" class="py-2 px-1 border-b-2 text-sm font-medium {% if tab == 'tools' %}border-primary-500 text-primary-600{% else %}border-transparent text-gray-500 hover:text-gray-700{% endif %}">Tools {% if tools_total is defined %}({{ tools_total }}){% elif managed_tools %}({{ managed_tools|length }}){% endif %}</a>
         <a href="/definitions?tab=hooks&per_page={{ per_page }}" class="py-2 px-1 border-b-2 text-sm font-medium {% if tab == 'hooks' %}border-primary-500 text-primary-600{% else %}border-transparent text-gray-500 hover:text-gray-700{% endif %}">Hooks {% if hooks_total is defined %}({{ hooks_total }}){% elif hooks %}({{ hooks|length }}){% endif %}</a>
         <a href="/definitions?tab=mcp&per_page={{ per_page }}" class="py-2 px-1 border-b-2 text-sm font-medium {% if tab == 'mcp' %}border-primary-500 text-primary-600{% else %}border-transparent text-gray-500 hover:text-gray-700{% endif %}">MCP Servers {% if mcp_total is defined %}({{ mcp_total }}){% elif mcp_servers %}({{ mcp_servers|length }}){% endif %}</a>
         {% if proposals and proposals.total > 0 %}
@@ -185,6 +186,7 @@
                     {{ agent_kind_badge(agent) }}
                     {{ owner_badge(agent) }}
                     {% if agent.skills %}<span class="text-xs text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded">{{ agent.skills|length }} skill{{ 's' if agent.skills|length != 1 }}</span>{% endif %}
+                    {% if agent.managed_tools %}<span class="text-xs text-orange-600 bg-orange-50 px-1.5 py-0.5 rounded">{{ agent.managed_tools|length }} tool{{ 's' if agent.managed_tools|length != 1 }}</span>{% endif %}
                     {% if agent.hooks %}<span class="text-xs text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded">{{ agent.hooks|length }} hook{{ 's' if agent.hooks|length != 1 }}</span>{% endif %}
                     {% if agent.mcp_servers %}<span class="text-xs text-purple-600 bg-purple-50 px-1.5 py-0.5 rounded">{{ agent.mcp_servers|length }} MCP</span>{% endif %}
                 </div>
@@ -202,6 +204,20 @@
                     <svg class="w-3.5 h-3.5 text-blue-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z"/></svg>
                     <a href="/definitions/skills/{{ skill.id }}" class="text-gray-700 hover:text-blue-600">{{ skill.name }}</a>
                     {% if skill.description %}<span class="text-gray-400">— {{ skill.description[:80] }}</span>{% endif %}
+                </div>
+                {% endfor %}
+                </div>
+            </div>
+            {% endif %}
+            {% if agent.managed_tools %}
+            <div class="mb-3">
+                <h4 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1.5">Tools</h4>
+                <div class="space-y-1">
+                {% for tool in agent.managed_tools %}
+                <div class="flex items-center gap-2 text-sm">
+                    <svg class="w-3.5 h-3.5 text-orange-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M11.42 15.17 17.25 21A2.652 2.652 0 0 0 21 17.25l-5.877-5.877M11.42 15.17l2.472-2.472a3.375 3.375 0 0 0-4.773-4.773L6.75 10.294m4.67 4.876-4.875 4.875a2.121 2.121 0 0 1-3-3l4.875-4.875"/></svg>
+                    <a href="/definitions/tools/{{ tool.id }}" class="text-gray-700 hover:text-orange-600">{{ tool.name }}</a>
+                    <span class="text-xs text-gray-400 font-mono">{{ tool.runtime_type }}</span>
                 </div>
                 {% endfor %}
                 </div>
@@ -235,7 +251,7 @@
                 </div>
             </div>
             {% endif %}
-            {% if not agent.skills and not agent.hooks and not agent.mcp_servers %}<p class="text-sm text-gray-400 italic">No skills, hooks, or MCP servers granted yet.</p>{% endif %}
+            {% if not agent.skills and not agent.managed_tools and not agent.hooks and not agent.mcp_servers %}<p class="text-sm text-gray-400 italic">No skills, tools, hooks, or MCP servers granted yet.</p>{% endif %}
         </div>
     </details>
     {% else %}
@@ -329,6 +345,88 @@
                 </div>
             </div>
             <div class="p-6 border-t border-gray-200 flex justify-end gap-3"><button type="button" onclick="this.closest('.fixed').classList.add('hidden')" class="px-4 py-2 text-sm text-gray-600">Cancel</button><button type="submit" class="px-4 py-2 text-sm bg-primary-600 text-white rounded-md hover:bg-primary-700 font-medium">Create Skill</button></div>
+        </form>
+    </div>
+</div>
+
+{% elif tab == 'tools' %}
+<div class="mb-4 rounded-lg border border-orange-200 bg-orange-50 p-4">
+    <div class="flex items-start gap-3">
+        <svg class="w-5 h-5 text-orange-500 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M11.42 15.17 17.25 21A2.652 2.652 0 0 0 21 17.25l-5.877-5.877M11.42 15.17l2.472-2.472a3.375 3.375 0 0 0-4.773-4.773L6.75 10.294m4.67 4.876-4.875 4.875a2.121 2.121 0 0 1-3-3l4.875-4.875"/></svg>
+        <div>
+            <h2 class="text-sm font-semibold text-orange-900">Managed tools run inside Lucent sandboxes</h2>
+            <p class="text-sm text-orange-800 mt-1">Tools are persistent reviewed capabilities with JSON schemas, agent grants, scoped credential references, resource limits, and a default no-network sandbox policy. Agents can only invoke tools they are explicitly granted.</p>
+        </div>
+    </div>
+</div>
+<div class="mb-4 flex items-center justify-between">
+    {{ pagination_controls(base_url="/definitions", page=page, per_page=per_page, total_pages=total_pages, total_count=total_count, filter_params={"tab": "tools"}, entity_name="tools") }}
+    <button id="open-create-tool-modal" type="button" class="px-4 py-2 text-sm bg-primary-600 text-white rounded-md hover:bg-primary-700 font-medium">+ New Tool</button>
+</div>
+<div class="space-y-3">
+    {% for tool in managed_tools %}
+    <div class="bg-white rounded-lg border border-gray-200 p-4">
+        <div class="flex items-start justify-between gap-4">
+            <div class="flex-1 min-w-0">
+                <div class="flex items-center gap-2 flex-wrap">
+                    <a href="/definitions/tools/{{ tool.id }}" class="font-medium text-gray-900 hover:text-primary-600">{{ tool.name }}</a>
+                    {{ status_badge(tool.status) }}
+                    {{ scope_badge(tool) }}
+                    {{ owner_badge(tool) }}
+                    <span class="text-xs text-orange-600 bg-orange-50 px-1.5 py-0.5 rounded font-mono">{{ tool.runtime_type }}</span>
+                    {% if tool.network_policy and tool.network_policy.network_mode %}<span class="text-xs text-gray-500 bg-gray-50 px-1.5 py-0.5 rounded font-mono">network: {{ tool.network_policy.network_mode }}</span>{% endif %}
+                </div>
+                {% if tool.description %}<p class="text-sm text-gray-500 mt-1">{{ tool.description }}</p>{% endif %}
+                <p class="text-xs text-gray-400 mt-2">Default auth: accessible users only; agent calls require an explicit tool grant.</p>
+            </div>
+            {% if tool.status == 'proposed' %}{{ approval_buttons('tools', tool.id) }}{% endif %}
+        </div>
+    </div>
+    {% else %}
+    <div class="bg-white rounded-lg border border-gray-200 p-8 text-center text-gray-500"><p>No managed tools created yet.</p></div>
+    {% endfor %}
+</div>
+{{ pagination_controls(base_url="/definitions", page=page, per_page=per_page, total_pages=total_pages, total_count=total_count, filter_params={"tab": "tools"}, show_per_page=false, entity_name="tools") }}
+<div id="create-tool-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+    <div class="bg-white rounded-lg shadow-xl w-full max-w-4xl mx-4 max-h-[90vh] overflow-y-auto">
+        <form method="POST" action="/definitions/tools/create">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <div class="p-6 border-b border-gray-200"><div class="flex items-center justify-between"><h2 class="text-lg font-semibold text-gray-900">New Managed Tool</h2><button type="button" class="create-tool-close text-gray-400 hover:text-gray-600 text-xl">&times;</button></div></div>
+            <div class="p-6 space-y-4">
+                <div class="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">Tools start proposed and require approval before agents can use them. Default sandbox policy has no outbound network; use allowlist only for hosts this tool truly needs.</div>
+                <div class="grid grid-cols-2 gap-4">
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Name</label><input name="name" required class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm" placeholder="e.g. lookup-customer"></div>
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Entrypoint</label><input name="entrypoint" value="handler" required class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono"></div>
+                </div>
+                <div><label class="block text-sm font-medium text-gray-700 mb-1">Description</label><input name="description" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm" placeholder="What should this tool do?"></div>
+                <div><label class="block text-sm font-medium text-gray-700 mb-1">Input schema (JSON Schema)</label><textarea name="input_schema" rows="5" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono">{"type":"object","properties":{},"additionalProperties":true}</textarea></div>
+                <div><label class="block text-sm font-medium text-gray-700 mb-1">Source code</label><textarea name="source_code" rows="12" required class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono" placeholder="def handler(args):&#10;    return {'ok': True}"></textarea><p class="text-xs text-gray-400 mt-1">The function receives one dict argument and must return JSON-serializable data. It runs inside a sandbox container, not on the host.</p></div>
+                <div class="grid grid-cols-2 gap-4">
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Requirements <span class="text-xs text-gray-400 font-normal">(one per line)</span></label><textarea name="requirements" rows="4" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono" placeholder="requests==2.33.0"></textarea></div>
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Environment <span class="text-xs text-gray-400 font-normal">(KEY=VALUE)</span></label><textarea name="env_vars" rows="4" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono" placeholder="API_TOKEN=credential://service/access_token"></textarea></div>
+                </div>
+                <div class="grid grid-cols-2 gap-4">
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Network policy</label><textarea name="network_policy" rows="4" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono">{"network_mode":"none","allowed_hosts":[]}</textarea></div>
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Resource limits</label><textarea name="resource_limits" rows="4" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono">{"memory_limit":"512m","cpu_limit":1.0,"disk_limit":"1g"}</textarea></div>
+                </div>
+                <div class="grid grid-cols-2 gap-4">
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Auth policy</label><textarea name="auth_policy" rows="4" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono">{"mode":"agent_grant","require_user_access":true}</textarea></div>
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Runtime config</label><textarea name="runtime_config" rows="4" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono">{"image":"lucent-sandbox:base"}</textarea></div>
+                </div>
+                <div><label class="block text-sm font-medium text-gray-700 mb-1">Timeout seconds</label><input name="timeout_seconds" type="number" min="1" max="3600" value="300" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"></div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Owner</label>
+                    <select name="owner_scope" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
+                        <option value="me" selected>Me ({{ personal_owner_label }})</option>
+                        <option value="org" class="font-semibold text-amber-700">⚠ Entire Organization — shared with everyone</option>
+                        {% for group in owner_groups %}
+                        <option value="group:{{ group.id }}">{{ group.name }}</option>
+                        {% endfor %}
+                    </select>
+                    <p class="mt-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800"><span class="font-medium">Use care:</span> Entire Organization makes this tool readable and usable by everyone in your organization, but agents still need explicit tool grants.</p>
+                </div>
+            </div>
+            <div class="p-6 border-t border-gray-200 flex justify-end gap-3"><button type="button" class="create-tool-close px-4 py-2 text-sm text-gray-600">Cancel</button><button type="submit" class="px-4 py-2 text-sm bg-primary-600 text-white rounded-md hover:bg-primary-700 font-medium">Create Tool</button></div>
         </form>
     </div>
 </div>
@@ -494,6 +592,14 @@
 <div class="space-y-3 mb-6">
     {% for server in proposals.mcp_servers %}
     <div class="bg-amber-50/50 rounded-lg border border-amber-200 p-4"><div class="flex items-start justify-between gap-4"><div class="flex-1 min-w-0"><a href="/definitions/mcp-servers/{{ server.id }}" class="font-medium text-gray-900 hover:text-primary-600">{{ server.name }}</a>{% if server.description %}<p class="text-sm text-gray-600 mt-1">{{ server.description }}</p>{% endif %}{{ proposal_evidence(server) }}</div>{{ approval_buttons('mcp-servers', server.id) }}</div></div>
+    {% endfor %}
+</div>
+{% endif %}
+{% if proposals.managed_tools %}
+<h3 class="text-sm font-semibold text-gray-700 mb-2">Managed Tools</h3>
+<div class="space-y-3 mb-6">
+    {% for tool in proposals.managed_tools %}
+    <div class="bg-amber-50/50 rounded-lg border border-amber-200 p-4"><div class="flex items-start justify-between gap-4"><div class="flex-1 min-w-0"><a href="/definitions/tools/{{ tool.id }}" class="font-medium text-gray-900 hover:text-primary-600">{{ tool.name }}</a>{% if tool.description %}<p class="text-sm text-gray-600 mt-1">{{ tool.description }}</p>{% endif %}{{ proposal_evidence(tool) }}</div>{{ approval_buttons('tools', tool.id) }}</div></div>
     {% endfor %}
 </div>
 {% endif %}
@@ -837,6 +943,27 @@ Instructions here..." class="w-full px-3 py-2 border border-gray-300 rounded-lg 
 
     openBtn.addEventListener('click', () => modal.classList.remove('hidden'));
     modal.querySelectorAll('.create-hook-close').forEach(btn => {
+        btn.addEventListener('click', closeModal);
+    });
+    modal.addEventListener('click', e => {
+        if (e.target === modal) closeModal();
+    });
+    document.addEventListener('keydown', e => {
+        if (e.key === 'Escape' && !modal.classList.contains('hidden')) closeModal();
+    });
+})();
+
+(function() {
+    const modal = document.getElementById('create-tool-modal');
+    const openBtn = document.getElementById('open-create-tool-modal');
+    if (!modal || !openBtn) return;
+
+    function closeModal() {
+        modal.classList.add('hidden');
+    }
+
+    openBtn.addEventListener('click', () => modal.classList.remove('hidden'));
+    modal.querySelectorAll('.create-tool-close').forEach(btn => {
         btn.addEventListener('click', closeModal);
     });
     modal.addEventListener('click', e => {

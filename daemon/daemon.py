@@ -185,6 +185,9 @@ _DEFINITION_ACTIVATION_TOOLS = sorted(
         "list_proposals",
         "create_agent_definition",
         "create_skill_definition",
+        "create_tool_definition",
+        "list_tool_definitions",
+        "get_tool_definition",
         "create_hook_definition",
         "list_hook_definitions",
         "get_hook_definition",
@@ -2402,6 +2405,28 @@ async def load_accessible_hooks_for_agent(
     ]
 
 
+async def load_accessible_managed_tools_for_agent(
+    *, org_id: str, requester_user_id: str, agent_id: str
+) -> list[dict]:
+    """Load active managed tools granted to an agent and accessible to requester."""
+    try:
+        from lucent.db import get_pool
+        pool = await get_pool()
+    except Exception:
+        return []
+
+    from lucent.access_control import AccessControlService
+    from lucent.db.definitions import DefinitionRepository
+    repo = DefinitionRepository(pool)
+    tools = await repo.get_agent_managed_tools(agent_id)
+    acl = AccessControlService(pool)
+    accessible_ids = set(await acl.list_accessible(requester_user_id, "managed_tool", org_id))
+    return [
+        tool for tool in tools
+        if str(tool["id"]) in accessible_ids and tool.get("status") == "active"
+    ]
+
+
 async def load_instance_skills_for_agent(agent_id: str) -> list[dict]:
     """Load skills granted to an instance agent."""
     try:
@@ -2459,6 +2484,7 @@ async def build_subagent_prompt(
     agent_definition_id: str | None = None,
     resolved_agent: dict | None = None,
     resolved_skills: list[dict] | None = None,
+    resolved_tools: list[dict] | None = None,
 ) -> str:
     """Build the system message for a sub-agent session.
 
@@ -2472,6 +2498,7 @@ async def build_subagent_prompt(
     """
     agent_def = ""
     skills_context = ""
+    tools_context = ""
 
     # Try loading from DB definitions (approved only)
     db_agent = resolved_agent
@@ -2537,6 +2564,20 @@ async def build_subagent_prompt(
             except Exception:
                 log(f"Failed to load skills for agent '{agent_type}'", "DEBUG")
         log(f"Using approved DB definition for '{agent_type}' agent (id: {str(db_agent['id'])[:8]})")
+        if resolved_tools:
+            tool_lines = []
+            for tool in resolved_tools:
+                tool_lines.append(
+                    f"- {tool.get('name')}: {tool.get('description') or ''}\n"
+                    f"  input_schema: {json.dumps(tool.get('input_schema') or {}, default=str)}"
+                )
+            tools_context = (
+                "--- MANAGED TOOLS ---\n"
+                "The following managed tools are granted to this agent. Use "
+                "`run_managed_tool` with one of these tool names when a task needs "
+                "the capability. Lucent enforces access, grants, and sandbox policy.\n"
+                + "\n".join(tool_lines)
+            )
     else:
         raise AgentNotFoundError(
             f"No approved agent definition found for '{agent_type}'. "
@@ -2559,6 +2600,8 @@ system prompt.
 {identity}
 
 {f"--- SKILLS ---{skills_context}" if skills_context else ""}
+
+{tools_context}
 
 --- YOUR TASK ---
 {task_description}
@@ -5194,6 +5237,11 @@ class LucentDaemon:
                     requester_user_id=requesting_user_id,
                     agent_id=str(agent_data["id"]),
                 )
+                managed_tools = await load_accessible_managed_tools_for_agent(
+                    org_id=org_id,
+                    requester_user_id=requesting_user_id,
+                    agent_id=str(agent_data["id"]),
+                )
             except AgentNotFoundError as exc:
                 log(f"Tracked task {task_id[:8]} failed: {exc}", "WARN")
                 await _fail_owned(task_id, str(exc))
@@ -5208,6 +5256,7 @@ class LucentDaemon:
                     agent_definition_id=str(agent_def_id) if agent_def_id else None,
                     resolved_agent=agent_data,
                     resolved_skills=skills,
+                    resolved_tools=managed_tools,
                 )
             except AgentNotFoundError as exc:
                 log(f"Tracked task {task_id[:8]} failed: {exc}", "WARN")
@@ -5318,7 +5367,12 @@ class LucentDaemon:
                     task_mcp_config["memory-server"] = {
                         "type": "http",
                         "url": MCP_URL,
-                        "headers": {"Authorization": f"Bearer {_scoped_key}"},
+                        "headers": {
+                            "Authorization": f"Bearer {_scoped_key}",
+                            "X-Lucent-Agent-Definition-Id": str(agent_data["id"]),
+                            "X-Lucent-Task-Id": str(task_id),
+                            "X-Lucent-Request-Id": str(request_id) if request_id else "",
+                        },
                         "tools": _memory_server_tools_for_task(
                             agent_type,
                             title,
@@ -5326,6 +5380,12 @@ class LucentDaemon:
                             description,
                         ),
                     }
+                    if managed_tools:
+                        for tool_name in (
+                            "list_tool_definitions", "get_tool_definition", "run_managed_tool",
+                        ):
+                            if tool_name not in task_mcp_config["memory-server"]["tools"]:
+                                task_mcp_config["memory-server"]["tools"].append(tool_name)
                     log(f"Task {task_id[:8]} using {_scope_type} scoped key"
                         f" (user: {_scope_user[:8] if _scope_user else 'shared'})")
                 else:

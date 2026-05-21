@@ -128,6 +128,16 @@ def cleanup_orphaned_test_data():
                 f"(SELECT id FROM hook_definitions WHERE created_by IN "
                 f"(SELECT id FROM users WHERE {test_user_filter}))"
             )
+            await conn.execute(
+                f"DELETE FROM agent_managed_tools WHERE tool_id IN "
+                f"(SELECT id FROM managed_tool_definitions WHERE created_by IN "
+                f"(SELECT id FROM users WHERE {test_user_filter}))"
+            )
+            await conn.execute(
+                f"DELETE FROM managed_tool_runs WHERE tool_id IN "
+                f"(SELECT id FROM managed_tool_definitions WHERE created_by IN "
+                f"(SELECT id FROM users WHERE {test_user_filter}))"
+            )
             for tbl in ("agent_definitions", "skill_definitions"):
                 await conn.execute(
                     f"DELETE FROM {tbl} WHERE created_by IN "
@@ -135,6 +145,10 @@ def cleanup_orphaned_test_data():
                 )
             await conn.execute(
                 f"DELETE FROM hook_definitions WHERE created_by IN "
+                f"(SELECT id FROM users WHERE {test_user_filter})"
+            )
+            await conn.execute(
+                f"DELETE FROM managed_tool_definitions WHERE created_by IN "
                 f"(SELECT id FROM users WHERE {test_user_filter})"
             )
             await conn.execute(
@@ -189,6 +203,18 @@ async def clean_test_data(db_pool):
             "(SELECT id FROM users WHERE external_id LIKE $1))",
             f"{prefix}%",
         )
+        await conn.execute(
+            "DELETE FROM agent_managed_tools WHERE tool_id IN "
+            "(SELECT id FROM managed_tool_definitions WHERE created_by IN "
+            "(SELECT id FROM users WHERE external_id LIKE $1))",
+            f"{prefix}%",
+        )
+        await conn.execute(
+            "DELETE FROM managed_tool_runs WHERE tool_id IN "
+            "(SELECT id FROM managed_tool_definitions WHERE created_by IN "
+            "(SELECT id FROM users WHERE external_id LIKE $1))",
+            f"{prefix}%",
+        )
         for tbl in (
             "agent_definitions",
             "skill_definitions",
@@ -200,6 +226,11 @@ async def clean_test_data(db_pool):
             )
         await conn.execute(
             "DELETE FROM hook_definitions WHERE created_by IN "
+            "(SELECT id FROM users WHERE external_id LIKE $1)",
+            f"{prefix}%",
+        )
+        await conn.execute(
+            "DELETE FROM managed_tool_definitions WHERE created_by IN "
             "(SELECT id FROM users WHERE external_id LIKE $1)",
             f"{prefix}%",
         )

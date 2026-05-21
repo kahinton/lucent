@@ -2,7 +2,7 @@
 {% block title %}{{ definition.name }} - Agent Composer - Lucent{% endblock %}
 {% block content %}
 <div class="flex items-center gap-2 text-sm text-gray-500 mb-4">
-    <a href="/definitions?tab={{ 'agents' if definition_type == 'agent' else ('skills' if definition_type == 'skill' else ('hooks' if definition_type == 'hook' else 'mcp')) }}" class="hover:text-gray-700">Agent Composer</a>
+    <a href="/definitions?tab={{ 'agents' if definition_type == 'agent' else ('skills' if definition_type == 'skill' else ('tools' if definition_type == 'tool' else ('hooks' if definition_type == 'hook' else 'mcp'))) }}" class="hover:text-gray-700">Agent Composer</a>
     <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5"/></svg>
     <span class="capitalize text-gray-500">{{ definition_type | replace('-', ' ') }}s</span>
     <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5"/></svg>
@@ -50,7 +50,7 @@
 </div>
 
 {% if definition_type == 'agent' %}
-<div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6">
+<div class="grid grid-cols-1 lg:grid-cols-4 gap-4 mb-6">
     <div class="bg-white rounded-lg border border-gray-200 p-5">
         <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Granted Skills</h2>
         {% if skills %}
@@ -80,6 +80,40 @@
                 {% for s in all_skills %}{% if s.id|string not in granted_skill_ids %}<option value="{{ s.id }}">{{ s.name }}</option>{% endif %}{% endfor %}
             </select>
             <button type="submit" class="px-3 py-1.5 text-sm bg-blue-50 text-blue-700 rounded-md hover:bg-blue-100 font-medium">Grant</button>
+        </form>
+        {% endif %}
+    </div>
+
+    <div class="bg-white rounded-lg border border-gray-200 p-5">
+        <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Granted Tools</h2>
+        {% if managed_tools %}
+        <div class="space-y-2 mb-3">
+            {% for tool in managed_tools %}
+            <div class="flex items-center justify-between p-2 rounded-md border border-gray-100 group hover:border-orange-200">
+                <a href="/definitions/tools/{{ tool.id }}" class="flex items-center gap-2 flex-1 min-w-0">
+                    <svg class="w-4 h-4 text-orange-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M11.42 15.17 17.25 21A2.652 2.652 0 0 0 21 17.25l-5.877-5.877M11.42 15.17l2.472-2.472a3.375 3.375 0 0 0-4.773-4.773L6.75 10.294m4.67 4.876-4.875 4.875a2.121 2.121 0 0 1-3-3l4.875-4.875"/></svg>
+                    <span class="text-sm font-medium text-gray-800 truncate">{{ tool.name }}</span>
+                    <span class="text-xs text-gray-400 font-mono">{{ tool.runtime_type }}</span>
+                    {% if tool.scope == 'built-in' %}<span class="px-1.5 py-0.5 rounded text-xs bg-indigo-100 text-indigo-700">built-in</span>{% endif %}
+                </a>
+                <form method="POST" action="/definitions/agents/{{ definition.id }}/revoke-tool/{{ tool.id }}" class="opacity-0 group-hover:opacity-100 transition-opacity">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <button type="submit" class="text-xs text-red-500 hover:text-red-700 px-2 py-1" title="Revoke">&times;</button>
+                </form>
+            </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <p class="text-sm text-gray-400 italic mb-3">No managed tools granted.</p>
+        {% endif %}
+        {% if all_tools %}
+        <form method="POST" action="/definitions/agents/{{ definition.id }}/grant-tool" class="flex gap-2">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <select name="tool_id" class="flex-1 px-2 py-1.5 border border-gray-300 rounded-md text-sm min-w-0">
+                <option value="">Add a tool...</option>
+                {% for t in all_tools %}{% if t.id|string not in granted_tool_ids %}<option value="{{ t.id }}">{{ t.name }} ({{ t.runtime_type }})</option>{% endif %}{% endfor %}
+            </select>
+            <button type="submit" class="px-3 py-1.5 text-sm bg-orange-50 text-orange-700 rounded-md hover:bg-orange-100 font-medium">Grant</button>
         </form>
         {% endif %}
     </div>
@@ -293,6 +327,34 @@
 </div>
 {% endif %}
 
+{% if definition_type == 'tool' %}
+<div class="bg-orange-50 rounded-lg border border-orange-200 p-5 mb-6">
+    <div class="flex items-start gap-3">
+        <svg class="w-5 h-5 text-orange-500 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M11.42 15.17 17.25 21A2.652 2.652 0 0 0 21 17.25l-5.877-5.877M11.42 15.17l2.472-2.472a3.375 3.375 0 0 0-4.773-4.773L6.75 10.294m4.67 4.876-4.875 4.875a2.121 2.121 0 0 1-3-3l4.875-4.875"/></svg>
+        <div>
+            <h2 class="text-sm font-semibold text-orange-900 uppercase tracking-wider">Sandbox-managed tool</h2>
+            <p class="text-sm text-orange-800 mt-1">This tool runs in an isolated container. The default auth wrapper requires caller access to the tool definition, and agent invocations require an explicit grant on the agent detail page.</p>
+        </div>
+    </div>
+</div>
+<div class="bg-white rounded-lg border border-gray-200 p-5 mb-6">
+    <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Tool Contract &amp; Runtime</h2>
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div><dt class="text-xs font-medium text-gray-400 uppercase">Runtime</dt><dd class="mt-1 text-sm text-gray-900 font-mono">{{ definition.runtime_type }}</dd></div>
+        <div><dt class="text-xs font-medium text-gray-400 uppercase">Entrypoint</dt><dd class="mt-1 text-sm text-gray-900 font-mono">{{ definition.entrypoint }}</dd></div>
+        <div><dt class="text-xs font-medium text-gray-400 uppercase">Timeout</dt><dd class="mt-1 text-sm text-gray-900 font-mono">{{ definition.timeout_seconds }}s</dd></div>
+        <div><dt class="text-xs font-medium text-gray-400 uppercase">Network</dt><dd class="mt-1 text-sm text-gray-900 font-mono">{{ definition.network_policy.network_mode if definition.network_policy else 'none' }}</dd></div>
+        <div class="sm:col-span-2"><dt class="text-xs font-medium text-gray-400 uppercase">Input Schema</dt><dd class="mt-1"><pre class="text-xs text-gray-700 bg-gray-50 rounded-md p-3 overflow-x-auto">{{ definition.input_schema | tojson(indent=2) if definition.input_schema is mapping else '{}' }}</pre></dd></div>
+        {% if definition.output_schema %}<div class="sm:col-span-2"><dt class="text-xs font-medium text-gray-400 uppercase">Output Schema</dt><dd class="mt-1"><pre class="text-xs text-gray-700 bg-gray-50 rounded-md p-3 overflow-x-auto">{{ definition.output_schema | tojson(indent=2) if definition.output_schema is mapping else definition.output_schema }}</pre></dd></div>{% endif %}
+        <div class="sm:col-span-2"><dt class="text-xs font-medium text-gray-400 uppercase">Auth Policy</dt><dd class="mt-1"><pre class="text-xs text-gray-700 bg-gray-50 rounded-md p-3 overflow-x-auto">{{ definition.auth_policy | tojson(indent=2) if definition.auth_policy is mapping else '{}' }}</pre></dd></div>
+        <div class="sm:col-span-2"><dt class="text-xs font-medium text-gray-400 uppercase">Network Policy</dt><dd class="mt-1"><pre class="text-xs text-gray-700 bg-gray-50 rounded-md p-3 overflow-x-auto">{{ definition.network_policy | tojson(indent=2) if definition.network_policy is mapping else '{}' }}</pre></dd></div>
+        <div class="sm:col-span-2"><dt class="text-xs font-medium text-gray-400 uppercase">Resource Limits</dt><dd class="mt-1"><pre class="text-xs text-gray-700 bg-gray-50 rounded-md p-3 overflow-x-auto">{{ definition.resource_limits | tojson(indent=2) if definition.resource_limits is mapping else '{}' }}</pre></dd></div>
+        {% if definition.requirements %}<div class="sm:col-span-2"><dt class="text-xs font-medium text-gray-400 uppercase">Requirements</dt><dd class="mt-1"><pre class="text-xs text-gray-700 bg-gray-50 rounded-md p-3 overflow-x-auto">{{ definition.requirements | join('\n') }}</pre></dd></div>{% endif %}
+        {% if definition.env_vars %}<div class="sm:col-span-2"><dt class="text-xs font-medium text-gray-400 uppercase">Environment</dt><dd class="mt-1"><pre class="text-xs text-gray-700 bg-gray-50 rounded-md p-3 overflow-x-auto">{{ definition.env_vars | tojson(indent=2) if definition.env_vars is mapping else definition.env_vars }}</pre></dd></div>{% endif %}
+    </div>
+</div>
+{% endif %}
+
 {% if definition_type == 'hook' %}
 {% if definition.name == 'file-memory-lookup' %}
 <div class="bg-emerald-50 rounded-lg border border-emerald-200 p-5 mb-6">
@@ -332,7 +394,7 @@
 {% if definition.content %}
 <div class="bg-white rounded-lg border border-gray-200 overflow-hidden">
     <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
-        <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider">{% if definition_type == 'agent' %}Agent Definition{% elif definition_type == 'skill' %}Skill Content{% elif definition_type == 'hook' %}Hook Content{% else %}Content{% endif %}</h2>
+        <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider">{% if definition_type == 'agent' %}Agent Definition{% elif definition_type == 'skill' %}Skill Content{% elif definition_type == 'tool' %}Tool Source Code{% elif definition_type == 'hook' %}Hook Content{% else %}Content{% endif %}</h2>
         <button type="button" id="toggle-raw-btn" class="text-xs text-gray-400 hover:text-gray-600 px-2 py-1 rounded border border-gray-200 hover:border-gray-300">Toggle raw</button>
     </div>
     <div id="content-rendered" class="p-6 prose prose-gray prose-sm max-w-none"></div>
@@ -353,6 +415,8 @@
         <form method="POST" action="/definitions/skills/{{ definition.id }}/update">
         {% elif definition_type == 'hook' %}
         <form method="POST" action="/definitions/hooks/{{ definition.id }}/update">
+        {% elif definition_type == 'tool' %}
+        <form method="POST" action="/definitions/tools/{{ definition.id }}/update">
         {% else %}
         <form method="POST" action="/definitions/mcp-servers/{{ definition.id }}/update">
         {% endif %}
@@ -377,6 +441,26 @@
                 </div>
                 <div><label class="block text-sm font-medium text-gray-700 mb-1">Content</label><textarea name="content" rows="6" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono" placeholder="Static context, or shell script body for command hooks.">{{ definition.content }}</textarea></div>
                 <div><label class="block text-sm font-medium text-gray-700 mb-1">Config (JSON)</label><textarea name="config" rows="8" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono">{{ definition.config | tojson(indent=2) if definition.config is mapping else (definition.config or '{}') }}</textarea><p class="text-xs text-gray-400 mt-1">Command hooks receive JSON on stdin. Use <code>command</code>, <code>timeout_seconds</code>, <code>max_output_chars</code>, <code>env</code>, <code>cwd</code>, and <code>pass_input</code> to control execution.</p></div>
+                {% elif definition_type == 'tool' %}
+                <div class="grid grid-cols-2 gap-4">
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Entrypoint</label><input name="entrypoint" value="{{ definition.entrypoint or 'handler' }}" required class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono"></div>
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Timeout seconds</label><input name="timeout_seconds" type="number" min="1" max="3600" value="{{ definition.timeout_seconds or 300 }}" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"></div>
+                </div>
+                <div><label class="block text-sm font-medium text-gray-700 mb-1">Input Schema</label><textarea name="input_schema" rows="5" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono">{{ definition.input_schema_text or '{}' }}</textarea></div>
+                <div><label class="block text-sm font-medium text-gray-700 mb-1">Output Schema</label><textarea name="output_schema" rows="4" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono">{{ definition.output_schema_text or '{}' }}</textarea></div>
+                <div><label class="block text-sm font-medium text-gray-700 mb-1">Source Code</label><textarea name="source_code" rows="14" required class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono">{{ definition.source_code or definition.content or '' }}</textarea></div>
+                <div class="grid grid-cols-2 gap-4">
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Requirements</label><textarea name="requirements" rows="5" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono">{{ definition.requirements_text or '' }}</textarea></div>
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Environment</label><textarea name="env_vars" rows="5" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono">{{ definition.env_vars_text or '' }}</textarea></div>
+                </div>
+                <div class="grid grid-cols-2 gap-4">
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Auth Policy</label><textarea name="auth_policy" rows="5" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono">{{ definition.auth_policy_text or '{}' }}</textarea></div>
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Network Policy</label><textarea name="network_policy" rows="5" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono">{{ definition.network_policy_text or '{}' }}</textarea></div>
+                </div>
+                <div class="grid grid-cols-2 gap-4">
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Resource Limits</label><textarea name="resource_limits" rows="5" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono">{{ definition.resource_limits_text or '{}' }}</textarea></div>
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Runtime Config</label><textarea name="runtime_config" rows="5" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono">{{ definition.runtime_config_text or '{}' }}</textarea></div>
+                </div>
                 {% else %}
                 <div><label class="block text-sm font-medium text-gray-700 mb-1">Content (Markdown)</label><textarea name="content" rows="15" required class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono">{{ definition.content }}</textarea></div>
                 {% endif %}
