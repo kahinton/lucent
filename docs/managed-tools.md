@@ -1,8 +1,13 @@
-# Managed Tools and Tool Builder
+# Tools and Tool Builder
 
-Managed tools are persistent, reviewable capabilities that agents can use when a task needs a concrete external action, such as calling an API, transforming data, or wrapping a specialized workflow.
+Tools are persistent, reviewable capabilities that agents can use when a task needs a concrete external action, such as calling an API, transforming data, or wrapping a specialized workflow.
 
-They are designed for the Agent Composer workflow: a user describes the capability they need, the Agent Wizard proposes a managed tool definition, an admin reviews and approves it, and the tool is granted to specific agents.
+In the Agent Composer UI, all agent-callable capabilities live on one **Tools** page:
+
+- **Custom tools** are Lucent-hosted tools. Lucent runs their Python source in a sandbox with JSON schemas, scoped credentials, resource limits, and network policy.
+- **External tool providers** are MCP server connections. They bring in tools from another service; after granting a provider to an agent, admins choose which discovered tools that agent may call.
+
+The Agent Wizard can propose a custom tool when a user describes a new capability, an admin reviews and approves it, and the tool is granted to specific agents.
 
 ## Lifecycle
 
@@ -21,7 +26,7 @@ They are designed for the Agent Composer workflow: a user describes the capabili
 
 ## Default security model
 
-Managed tools fail closed by default:
+Custom tools fail closed by default:
 
 - **No host execution** — tool source code runs inside a Lucent sandbox container.
 - **No network by default** — `network_policy.network_mode` defaults to `none`; API tools should use `allowlist` with explicit hosts.
@@ -58,7 +63,7 @@ Recommended input schema:
 
 ## API and MCP surfaces
 
-REST endpoints are available under `/api/definitions/tools` and `/api/definitions/agents/{agent_id}/tools`.
+REST endpoints for custom tools are available under `/api/definitions/tools` and `/api/definitions/agents/{agent_id}/tools`. External tool providers continue to use the MCP server definition endpoints.
 
 MCP tools include:
 

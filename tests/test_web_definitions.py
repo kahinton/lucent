@@ -339,6 +339,21 @@ class TestDefinitionsList:
     async def test_list_tab_mcp(self, client, mcp_def):
         resp = await client.get("/definitions", params={"tab": "mcp"})
         assert resp.status_code == 200
+        assert "Tools are capabilities agents can call" in resp.text
+        assert "External tool providers" in resp.text
+        assert "Test MCP" in resp.text
+        assert 'href="/definitions?tab=mcp' not in resp.text
+
+    async def test_list_tab_tools_combines_custom_tools_and_providers(self, client, mcp_def):
+        resp = await client.get("/definitions", params={"tab": "tools"})
+        assert resp.status_code == 200
+        assert "Custom tools" in resp.text
+        assert "External tool providers" in resp.text
+        assert "+ New Custom Tool" in resp.text
+        assert "+ Connect Tool Provider" in resp.text
+        assert "Test MCP" in resp.text
+        assert 'id="open-create-mcp-modal"' in resp.text
+        assert "onclick=\"document.getElementById('create-mcp-modal')" not in resp.text
 
     async def test_list_tab_hooks(self, client, hook_def):
         resp = await client.get("/definitions", params={"tab": "hooks"})

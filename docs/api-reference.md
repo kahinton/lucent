@@ -796,7 +796,7 @@ Base path: `/api/definitions`
 |--------|------|-------------|
 | `POST` | `/agents` | Create an agent definition (status: `proposed`) |
 | `GET` | `/agents` | List agents (filter by `?status=active`) |
-| `GET` | `/agents/{id}` | Get agent with linked skills, MCP servers, and hooks |
+| `GET` | `/agents/{id}` | Get agent with linked skills, tools, external providers, and hooks |
 | `PATCH` | `/agents/{id}` | Update an agent definition |
 | `DELETE` | `/agents/{id}` | Delete an agent definition |
 | `POST` | `/agents/{id}/approve` | Approve a proposed agent |
@@ -867,11 +867,11 @@ Command stdout can be plain text, which is injected as context, or a JSON decisi
 GET /api/definitions/proposals
 ```
 
-Returns all pending proposals (agents, skills, MCP servers, and hooks awaiting approval) in a single response.
+Returns all pending proposals (agents, skills, custom tools, external providers, and hooks awaiting approval) in a single response.
 
 ### Agent Access Grants
 
-Grant or revoke skills, MCP servers, and hooks for agent definitions:
+Grant or revoke skills, custom tools, external providers, and hooks for agent definitions:
 
 | Method | Path | Description |
 |--------|------|-------------|

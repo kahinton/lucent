@@ -1,4 +1,4 @@
-"""Definition management routes — agents, skills, MCP servers, hooks."""
+"""Definition management routes — agents, skills, tools, hooks, providers."""
 
 import json
 from math import ceil
@@ -219,6 +219,8 @@ async def definitions_page(
     role_value = user.role if isinstance(user.role, str) else user.role.value
     if tab in {"agent-composer", "agent_composer", "wizard", "agent-wizard", "agent_wizard"}:
         tab = "composer"
+    if tab in {"mcp", "mcp-servers", "mcp_servers"}:
+        tab = "tools"
 
     page = max(1, page)
     per_page = per_page if per_page in ALLOWED_PER_PAGE else 25
@@ -241,8 +243,8 @@ async def definitions_page(
     )
     mcp_result = await repo.list_mcp_servers(
         org_id,
-        limit=per_page if tab == "mcp" else 1000,
-        offset=offset if tab == "mcp" else 0,
+        limit=1000,
+        offset=0,
         requester_user_id=str(user.id),
         requester_role=role_value,
     )
@@ -255,8 +257,8 @@ async def definitions_page(
     )
     tools_result = await repo.list_managed_tools(
         org_id,
-        limit=per_page if tab == "tools" else 1000,
-        offset=offset if tab == "tools" else 0,
+        limit=1000,
+        offset=0,
         requester_user_id=str(user.id),
         requester_role=role_value,
     )
@@ -286,12 +288,10 @@ async def definitions_page(
         total_count = agents_result["total_count"]
     elif tab == "skills":
         total_count = skills_result["total_count"]
-    elif tab == "mcp":
-        total_count = mcp_result["total_count"]
     elif tab == "hooks":
         total_count = hooks_result["total_count"]
     elif tab == "tools":
-        total_count = tools_result["total_count"]
+        total_count = tools_result["total_count"] + mcp_result["total_count"]
     elif tab == "proposals":
         total_count = proposals["total"]
     else:
@@ -349,7 +349,7 @@ async def agent_detail_page(request: Request, agent_id: str):
     agent = _attach_owner_names([agent], user_map, group_map)[0]
     user_groups = await _get_user_groups(pool, str(user.id), org_id)
 
-    # Get all skills and MCP servers for the assignment dropdowns
+    # Get all skills, tools, hooks, and providers for the assignment dropdowns
     all_skills = (
         await repo.list_skills(
             org_id,
@@ -1113,7 +1113,7 @@ async def delete_mcp_web(request: Request, server_id: str):
 
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     await repo.delete_mcp_server(server_id, str(user.organization_id))
-    return RedirectResponse(url="/definitions?tab=mcp", status_code=303)
+    return RedirectResponse(url="/definitions?tab=tools", status_code=303)
 
 
 @router.post("/definitions/hooks/{hook_id}/update")

@@ -249,11 +249,11 @@ Every memory update is versioned. Use `get_memory_versions` to browse history an
 | `delete_skill_definition` | Delete a skill definition |
 | `grant_skill_to_agent` | Grant a skill to an agent |
 | `revoke_skill_from_agent` | Revoke a skill from an agent |
-| `create_mcp_server_definition` | Register an external MCP server |
-| `list_mcp_server_definitions` | List registered MCP servers |
-| `grant_mcp_server_to_agent` | Grant MCP server access to an agent |
-| `revoke_mcp_server_from_agent` | Revoke MCP server access from an agent |
-| `list_proposals` | List all pending proposals (agents, skills, hooks, tools, MCP servers) |
+| `create_mcp_server_definition` | Register an external tool provider (MCP server) |
+| `list_mcp_server_definitions` | List registered external tool providers |
+| `grant_mcp_server_to_agent` | Grant external provider access to an agent |
+| `revoke_mcp_server_from_agent` | Revoke external provider access from an agent |
+| `list_proposals` | List all pending proposals (agents, skills, hooks, tools, external providers) |
 
 Approval and rejection of proposed definitions are human review actions and are handled through the web UI or authenticated REST API, not MCP tools.
 
@@ -420,7 +420,7 @@ with tool-specific instructions → human approval → grant that skill to the c
 agent.
 
 Definition proposal rows support `proposal_reason` and `proposal_evidence` for
-agents, skills, hooks, and MCP servers. The definitions proposal UI renders
+agents, skills, hooks, custom tools, and external tool providers. The definitions proposal UI renders
 these fields so users can inspect the evidence before approval.
 
 ## Autonomous Daemon
