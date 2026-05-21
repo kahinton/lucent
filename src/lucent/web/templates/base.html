@@ -231,13 +231,13 @@
                         {% endif %}
                     </a>
                     
-                    <a href="/definitions" class="flex items-center gap-3 px-3 py-2.5 text-sm font-medium rounded-lg transition-colors {% if '/definitions' in request.url.path %}bg-primary-50 text-primary-700{% else %}text-gray-700 hover:bg-gray-50{% endif %}">
+                    <a id="agent-composer-nav-link" href="/definitions" class="flex items-center gap-3 px-3 py-2.5 text-sm font-medium rounded-lg transition-colors {% if '/definitions' in request.url.path %}bg-primary-50 text-primary-700{% else %}text-gray-700 hover:bg-gray-50{% endif %}">
                         <svg class="w-5 h-5 {% if '/definitions' in request.url.path %}text-primary-600{% else %}text-gray-400{% endif %}" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
                             <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 6h9.75M10.5 6a1.5 1.5 0 11-3 0m3 0a1.5 1.5 0 10-3 0M3.75 6H7.5m3 12h9.75m-9.75 0a1.5 1.5 0 01-3 0m3 0a1.5 1.5 0 00-3 0m-3.75 0H7.5m9-6h3.75m-3.75 0a1.5 1.5 0 01-3 0m3 0a1.5 1.5 0 00-3 0m-9.75 0h9.75" />
                         </svg>
                         Agent Composer
                         {% if definition_proposal_count > 0 %}
-                        <span class="ml-auto inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-800" title="Definition proposals awaiting review">
+                        <span id="definition-proposal-sidebar-badge" class="ml-auto inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-800" title="Definition proposals awaiting review">
                             {{ definition_proposal_count }}
                         </span>
                         {% endif %}
@@ -357,6 +357,46 @@
                 evt.detail.parameters['csrf_token'] = csrfCookie.split('=')[1];
             }
         }
+    });
+
+    // Keep the Agent Composer proposal badge visible on every page. The server-side
+    // middleware provides this after process reload; this fallback covers template-only
+    // reloads and pages that do not already carry proposal context.
+    document.addEventListener('DOMContentLoaded', function() {
+        const link = document.getElementById('agent-composer-nav-link');
+        if (!link) return;
+
+        const existing = document.getElementById('definition-proposal-sidebar-badge');
+        const existingCount = existing ? parseInt(existing.textContent.trim(), 10) : 0;
+        if (existingCount > 0) return;
+
+        function setDefinitionProposalBadge(count) {
+            if (!Number.isFinite(count) || count <= 0) return;
+            let badge = document.getElementById('definition-proposal-sidebar-badge');
+            if (!badge) {
+                badge = document.createElement('span');
+                badge.id = 'definition-proposal-sidebar-badge';
+                badge.className = 'ml-auto inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-800';
+                badge.title = 'Definition proposals awaiting review';
+                link.appendChild(badge);
+            }
+            badge.textContent = String(count);
+        }
+
+        fetch('/definitions?tab=proposals&per_page=1', {
+            credentials: 'same-origin',
+            headers: { 'X-Requested-With': 'definition-badge-prefetch' },
+        })
+            .then(function(resp) { return resp.ok ? resp.text() : ''; })
+            .then(function(html) {
+                if (!html) return;
+                const doc = new DOMParser().parseFromString(html, 'text/html');
+                const source = doc.getElementById('definition-proposal-sidebar-badge')
+                    || doc.querySelector('a[href*="tab=proposals"] span');
+                if (!source) return;
+                setDefinitionProposalBadge(parseInt(source.textContent.trim(), 10));
+            })
+            .catch(function() { /* Best-effort badge only. */ });
     });
     </script>
 

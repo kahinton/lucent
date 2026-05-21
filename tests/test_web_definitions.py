@@ -383,6 +383,14 @@ class TestDefinitionsList:
         )
         assert "Sidebar Badge Skill One" in resp.text
 
+        chat_resp = await client.get("/chat")
+        assert chat_resp.status_code == 200
+        assert 'id="agent-composer-nav-link"' in chat_resp.text
+        assert re.search(
+            r'title="Definition proposals awaiting review"[^>]*>\s*2\s*</span>',
+            chat_resp.text,
+        )
+
     async def test_list_tab_mcp(self, client, mcp_def):
         resp = await client.get("/definitions", params={"tab": "mcp"})
         assert resp.status_code == 200
