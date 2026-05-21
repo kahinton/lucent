@@ -212,6 +212,22 @@ async def mcp_def(db_pool, web_user):
 
 
 @pytest_asyncio.fixture
+async def managed_tool_def(db_pool, web_user):
+    """Create a test custom tool definition."""
+    _user, org, _token = web_user
+    repo = DefinitionRepository(db_pool)
+    return await repo.create_managed_tool(
+        name="Test Custom Tool",
+        description="A test custom tool",
+        source_code="def handler(args):\n    return {'ok': True}",
+        input_schema={"type": "object", "properties": {}},
+        network_policy={"network_mode": "none", "allowed_hosts": []},
+        org_id=str(org["id"]),
+        created_by=str(_user["id"]),
+    )
+
+
+@pytest_asyncio.fixture
 async def hook_def(db_pool, web_user):
     """Create a test hook definition."""
     _user, org, _token = web_user
@@ -344,14 +360,18 @@ class TestDefinitionsList:
         assert "Test MCP" in resp.text
         assert 'href="/definitions?tab=mcp' not in resp.text
 
-    async def test_list_tab_tools_combines_custom_tools_and_providers(self, client, mcp_def):
+    async def test_list_tab_tools_combines_custom_tools_and_providers(
+        self, client, mcp_def, managed_tool_def
+    ):
         resp = await client.get("/definitions", params={"tab": "tools"})
         assert resp.status_code == 200
         assert "Custom tools" in resp.text
         assert "External tool providers" in resp.text
         assert "+ New Custom Tool" in resp.text
         assert "+ Connect Tool Provider" in resp.text
+        assert "Test Custom Tool" in resp.text
         assert "Test MCP" in resp.text
+        assert "network: none" in resp.text
         assert 'id="open-create-mcp-modal"' in resp.text
         assert "onclick=\"document.getElementById('create-mcp-modal')" not in resp.text
 

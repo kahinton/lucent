@@ -76,6 +76,10 @@
 
 {% from "partials/pagination.html" import pagination_controls %}
 {% set personal_owner_label = user.display_name or user.email or 'you' %}
+{% set managed_tools = managed_tools | default([]) %}
+{% set mcp_servers = mcp_servers | default([]) %}
+{% set tools_total = tools_total | default(managed_tools | length) %}
+{% set mcp_total = mcp_total | default(mcp_servers | length) %}
 
 {% if tab == 'composer' %}
 <div class="mb-6 space-y-4">
