@@ -393,6 +393,7 @@ def create_app() -> FastAPI:
         """Attach approval and interaction attention counts for web templates."""
         request.state.pending_approval_count = 0
         request.state.user_interaction_count = 0
+        request.state.definition_proposal_count = 0
 
         # Only needed for web page rendering, not API/static/other methods.
         if request.method == "GET" and not request.url.path.startswith(("/api/", "/static/")):
@@ -414,7 +415,24 @@ def create_app() -> FastAPI:
                                      AND status NOT IN ('cancelled', 'rejection_processing')""",
                                 org_id,
                             )
+                            definition_count = await conn.fetchval(
+                                """
+                                SELECT
+                                    (SELECT COUNT(*) FROM agent_definitions
+                                     WHERE organization_id = $1 AND status = 'proposed')
+                                  + (SELECT COUNT(*) FROM skill_definitions
+                                     WHERE organization_id = $1 AND status = 'proposed')
+                                  + (SELECT COUNT(*) FROM mcp_server_configs
+                                     WHERE organization_id = $1 AND status = 'proposed')
+                                  + (SELECT COUNT(*) FROM hook_definitions
+                                     WHERE organization_id = $1 AND status = 'proposed')
+                                  + (SELECT COUNT(*) FROM managed_tool_definitions
+                                     WHERE organization_id = $1 AND status = 'proposed')
+                                """,
+                                org_id,
+                            )
                         request.state.pending_approval_count = count or 0
+                        request.state.definition_proposal_count = definition_count or 0
                         try:
                             from lucent.db.user_interactions import UserInteractionRepository
 

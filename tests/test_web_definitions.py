@@ -37,6 +37,7 @@ Tests the HTML-serving endpoints:
 Uses real DB sessions + CSRF tokens through the full ASGI stack.
 """
 
+import re
 from uuid import uuid4
 
 import httpx
@@ -351,6 +352,36 @@ class TestDefinitionsList:
     async def test_list_tab_skills(self, client, skill_def):
         resp = await client.get("/definitions", params={"tab": "skills"})
         assert resp.status_code == 200
+
+    async def test_sidebar_agent_composer_badge_counts_pending_definitions(
+        self, client, db_pool, web_user
+    ):
+        _user, org, _token = web_user
+        repo = DefinitionRepository(db_pool)
+        await repo.create_skill(
+            name="Sidebar Badge Skill One",
+            description="Needs approval",
+            content="# Sidebar Badge Skill One",
+            org_id=str(org["id"]),
+            created_by=str(_user["id"]),
+        )
+        await repo.create_skill(
+            name="Sidebar Badge Skill Two",
+            description="Needs approval too",
+            content="# Sidebar Badge Skill Two",
+            org_id=str(org["id"]),
+            created_by=str(_user["id"]),
+        )
+
+        resp = await client.get("/definitions", params={"tab": "skills"})
+
+        assert resp.status_code == 200
+        assert 'title="Definition proposals awaiting review"' in resp.text
+        assert re.search(
+            r'title="Definition proposals awaiting review"[^>]*>\s*2\s*</span>',
+            resp.text,
+        )
+        assert "Sidebar Badge Skill One" in resp.text
 
     async def test_list_tab_mcp(self, client, mcp_def):
         resp = await client.get("/definitions", params={"tab": "mcp"})
