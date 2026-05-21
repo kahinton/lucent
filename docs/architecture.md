@@ -242,14 +242,10 @@ Every memory update is versioned. Use `get_memory_versions` to browse history an
 | `get_agent_definition` | Get full agent definition by ID |
 | `list_agent_definitions` | List agents with optional status filter |
 | `update_agent_definition` | Update an agent's name, description, or content |
-| `approve_agent_definition` | Approve a proposed agent (admin only) |
-| `reject_agent_definition` | Reject a proposed agent (admin only) |
 | `delete_agent_definition` | Delete an agent definition |
 | `create_skill_definition` | Create a new skill definition (starts as proposed) |
 | `get_skill_definition` | Get full skill definition by ID |
 | `list_skill_definitions` | List skills with optional status filter |
-| `approve_skill_definition` | Approve a proposed skill (admin only) |
-| `reject_skill_definition` | Reject a proposed skill (admin only) |
 | `delete_skill_definition` | Delete a skill definition |
 | `grant_skill_to_agent` | Grant a skill to an agent |
 | `revoke_skill_from_agent` | Revoke a skill from an agent |
@@ -257,7 +253,9 @@ Every memory update is versioned. Use `get_memory_versions` to browse history an
 | `list_mcp_server_definitions` | List registered MCP servers |
 | `grant_mcp_server_to_agent` | Grant MCP server access to an agent |
 | `revoke_mcp_server_from_agent` | Revoke MCP server access from an agent |
-| `list_proposals` | List all pending proposals (agents, skills, MCP servers) |
+| `list_proposals` | List all pending proposals (agents, skills, hooks, tools, MCP servers) |
+
+Approval and rejection of proposed definitions are human review actions and are handled through the web UI or authenticated REST API, not MCP tools.
 
 ### Review & Model Tools
 

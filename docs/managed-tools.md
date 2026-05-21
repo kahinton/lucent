@@ -65,10 +65,8 @@ MCP tools include:
 - `list_tool_definitions`
 - `get_tool_definition`
 - `create_tool_definition`
-- `approve_tool_definition`
-- `reject_tool_definition`
 - `grant_tool_to_agent`
 - `revoke_tool_from_agent`
 - `run_managed_tool`
 
-The Agent Wizard can propose tools but does not approve, grant, or run them from chat. Human review remains the activation boundary.
+Approval and rejection are intentionally not exposed as MCP tools. The Agent Wizard can propose tools but does not approve, grant, or run them from chat. Human review remains the activation boundary through the web UI or authenticated REST endpoints.

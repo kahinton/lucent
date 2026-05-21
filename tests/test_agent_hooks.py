@@ -181,7 +181,7 @@ async def test_active_agent_with_grants_includes_default_hooks(repo, auth_user):
 
 
 @pytest.mark.asyncio
-async def test_hook_mcp_tools_create_approve_and_grant(mcp, auth_user, repo):
+async def test_hook_mcp_tools_create_and_grant_after_human_approval(mcp, auth_user, repo):
     agent = await repo.create_agent(
         name="mcp-hook-agent",
         description="",
@@ -205,7 +205,11 @@ async def test_hook_mcp_tools_create_approve_and_grant(mcp, auth_user, repo):
     )
     assert hook["status"] == "proposed"
 
-    approved = await _call(mcp, "approve_hook_definition", {"hook_id": hook["id"]})
+    approved = await repo.approve_hook(
+        str(hook["id"]),
+        str(auth_user["organization_id"]),
+        str(auth_user["id"]),
+    )
     assert approved["status"] == "active"
 
     grant = await _call(
