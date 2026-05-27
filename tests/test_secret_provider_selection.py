@@ -12,7 +12,12 @@ from lucent.secrets.registry import (
     initialize_secret_provider,
     validate_provider_env,
 )
-from lucent.secrets.utils import SECRET_REF_PREFIX, resolve_env_vars
+from lucent.secrets.utils import (
+    CREDENTIAL_REF_PREFIX,
+    SECRET_REF_PREFIX,
+    resolve_credential_reference,
+    resolve_env_vars,
+)
 
 
 class _FakeProvider(SecretProvider):
@@ -103,6 +108,24 @@ class TestProviderSelection:
         with pytest.raises(ValueError, match="valid http"):
             validate_provider_env("transit")
 
+    def test_transit_accepts_token_file(self, monkeypatch, tmp_path):
+        token_file = tmp_path / "vault-token"
+        token_file.write_text("token-from-file")
+        monkeypatch.setenv("LUCENT_SECRET_PROVIDER", "transit")
+        monkeypatch.setenv("VAULT_ADDR", "http://openbao:8200")
+        monkeypatch.delenv("VAULT_TOKEN", raising=False)
+        monkeypatch.setenv("VAULT_TOKEN_FILE", str(token_file))
+
+        validate_provider_env("transit")
+
+    def test_vault_requires_token_or_token_file(self, monkeypatch):
+        monkeypatch.setenv("VAULT_ADDR", "http://openbao:8200")
+        monkeypatch.delenv("VAULT_TOKEN", raising=False)
+        monkeypatch.delenv("VAULT_TOKEN_FILE", raising=False)
+
+        with pytest.raises(ValueError, match="VAULT_TOKEN or VAULT_TOKEN_FILE"):
+            validate_provider_env("vault")
+
 
 class TestSecretEnvResolution:
     @pytest.mark.asyncio
@@ -135,5 +158,51 @@ class TestSecretEnvResolution:
             env = {"PLAIN": "abc123", "URL": "https://example.com"}
             out = await resolve_env_vars(env, provider)
             assert out == env
+        finally:
+            set_current_user(None)
+
+    @pytest.mark.asyncio
+    async def test_credential_reference_resolves_connected_token(self, monkeypatch):
+        async def fake_connection_token(integration_type: str, user_id: str) -> str | None:
+            assert integration_type == "github"
+            assert user_id == "u1"
+            return "connected-token"
+
+        monkeypatch.setattr(
+            "lucent.secrets.utils._get_connection_access_token",
+            fake_connection_token,
+        )
+        set_current_user({"id": "u1", "organization_id": "o1"})
+        try:
+            provider = _FakeProvider({"github.mcp.token": "fallback-token"})
+            env = {
+                "GITHUB_PERSONAL_ACCESS_TOKEN": (
+                    f"{CREDENTIAL_REF_PREFIX}github/access_token"
+                    "?fallback_secret=github.mcp.token"
+                )
+            }
+            out = await resolve_env_vars(env, provider)
+            assert out["GITHUB_PERSONAL_ACCESS_TOKEN"] == "connected-token"
+        finally:
+            set_current_user(None)
+
+    @pytest.mark.asyncio
+    async def test_credential_reference_falls_back_to_secret(self, monkeypatch):
+        async def fake_connection_token(integration_type: str, user_id: str) -> str | None:
+            return None
+
+        monkeypatch.setattr(
+            "lucent.secrets.utils._get_connection_access_token",
+            fake_connection_token,
+        )
+        set_current_user({"id": "u1", "organization_id": "o1"})
+        try:
+            provider = _FakeProvider({"github.mcp.token": "fallback-token"})
+            value = await resolve_credential_reference(
+                f"{CREDENTIAL_REF_PREFIX}github/access_token?fallback_secret=github.mcp.token",
+                provider,
+                env_key="GITHUB_PERSONAL_ACCESS_TOKEN",
+            )
+            assert value == "fallback-token"
         finally:
             set_current_user(None)

@@ -292,6 +292,7 @@ The following resource types support ownership tracking:
 | Agent Definitions     | `agent_definitions`   | ✓           | ✓                   | ✓                   |
 | Skill Definitions     | `skill_definitions`   | ✓           | ✓                   | ✓                   |
 | MCP Server Configs    | `mcp_server_configs`  | ✓           | ✓                   | ✓                   |
+| Hook Definitions      | `hook_definitions`    | ✓           | ✓                   | ✓                   |
 | Sandbox Templates     | `sandbox_templates`   | ✓           | ✓                   | ✓                   |
 | Secrets               | `secrets`             | —           | ✓                   | ✓                   |
 
@@ -308,15 +309,24 @@ access. Set automatically during resource creation to the authenticated user's I
 
 **Group Ownership** (`owner_group_id`):
 The resource belongs to a group. All members of the group can access (read) the
-resource. Only users with `admin` or `owner` role, or the direct user owner, can
-modify group-owned resources.
+resource. Users with organization `admin`/`owner` role can modify group-owned
+resources; group admins can also modify resources owned by their group.
+
+**Organization-shared definitions** (`scope = 'instance'` with both owner columns NULL):
+Instance-scoped definitions with neither `owner_user_id` nor `owner_group_id` set
+are shared with the entire organization. All organization members can read/use
+them, but only organization `admin`/`owner` users can modify them. Daemon-created
+instance definitions default to this state so the daemon is recorded as the actor
+(`created_by`) without becoming the human-facing owner.
 
 ### Database Constraints
 
-Every non-built-in resource must have an owner:
+Definition-style resources enforce single-owner semantics: a row may be
+user-owned, group-owned, or organization-shared, but not both user- and
+group-owned:
 
 ```sql
-CHECK (scope = 'built-in' OR owner_user_id IS NOT NULL OR owner_group_id IS NOT NULL)
+CHECK (NOT (owner_user_id IS NOT NULL AND owner_group_id IS NOT NULL))
 ```
 
 For secrets, which don't use the `scope` field, at least one owner is always required:
@@ -337,10 +347,14 @@ UNIQUE (key, organization_id, owner_group_id)
 
 During resource creation, the system determines ownership from the request context:
 
-1. If the user specifies a `owner_group_id`, the system validates that the user is
+1. If the user selects organization sharing, both owner columns are left NULL on
+   the instance-scoped row
+2. If the user specifies a `owner_group_id`, the system validates that the user is
    a member of that group before assigning group ownership
-2. If no group is specified, `owner_user_id` is set to the authenticated user's ID
-3. Built-in scope is reserved for system-shipped resources and cannot be set via
+3. If no scope is specified, `owner_user_id` is set to the authenticated user's ID
+4. If an unscoped daemon creates an instance definition, the definition defaults
+   to organization-shared instead of daemon-owned
+5. Built-in scope is reserved for system-shipped resources and cannot be set via
    the API
 
 ### Ownership Transfer
@@ -363,8 +377,9 @@ as a SQL WHERE clause that evaluates conditions in priority order.
 1. Built-in scope  →  ALLOW (read-only, all org members)
 2. Direct owner    →  ALLOW (owner_user_id = requesting user)
 3. Group member    →  ALLOW (owner_group_id in user's groups)
-4. Role override   →  ALLOW (user role is admin or owner)
-5. Default         →  DENY
+4. Org-shared      →  ALLOW (scope='instance' and both owner columns are NULL)
+5. Role override   →  ALLOW (user role is admin or owner)
+6. Default         →  DENY
 ```
 
 ### SQL Implementation
@@ -378,6 +393,7 @@ AND (
     OR a.owner_group_id IN (
         SELECT group_id FROM user_groups WHERE user_id = $3
     )
+   OR (a.scope = 'instance' AND a.owner_user_id IS NULL AND a.owner_group_id IS NULL)
     OR $4 IN ('admin', 'owner')
 )
 ```
@@ -398,10 +414,10 @@ restrictive:
 |--------|------------------------------------------------------|
 | Owner  | Any resource in the organization                     |
 | Admin  | Any resource in the organization                     |
-| Member | Only resources where `owner_user_id` matches their ID |
+| Member | Directly owned resources; group-owned resources only when they are a group admin |
 
-Group members can **read** group-owned resources but cannot **modify** them unless
-they are also an admin/owner or the direct user owner.
+Organization-shared definitions are readable by all organization members but are
+admin/owner-only for modification.
 
 ### Organization Boundary
 

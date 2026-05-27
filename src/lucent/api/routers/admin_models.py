@@ -26,6 +26,7 @@ class ModelUpsertRequest(BaseModel):
     supports_vision: bool = False
     notes: str = ""
     tags: list[str] = Field(default_factory=list)
+    reasoning_efforts: list[str] = Field(default_factory=list)
     is_enabled: bool = True
     engine: Literal["copilot", "langchain"] | None = None
 
@@ -33,6 +34,11 @@ class ModelUpsertRequest(BaseModel):
     @classmethod
     def _normalize_engine(cls, value: Any) -> str | None:
         return normalize_engine(value)
+
+    @field_validator("reasoning_efforts", mode="before")
+    @classmethod
+    def _normalize_reasoning_efforts(cls, value: Any) -> list[str]:
+        return _normalize_reasoning_efforts(value)
 
 
 class ModelPatchRequest(BaseModel):
@@ -45,6 +51,7 @@ class ModelPatchRequest(BaseModel):
     supports_vision: bool | None = None
     notes: str | None = None
     tags: list[str] | None = None
+    reasoning_efforts: list[str] | None = None
     is_enabled: bool | None = None
     engine: Literal["copilot", "langchain"] | None = None
 
@@ -52,6 +59,13 @@ class ModelPatchRequest(BaseModel):
     @classmethod
     def _normalize_engine(cls, value: Any) -> str | None:
         return normalize_engine(value)
+
+    @field_validator("reasoning_efforts", mode="before")
+    @classmethod
+    def _normalize_reasoning_efforts(cls, value: Any) -> list[str] | None:
+        if value is None:
+            return None
+        return _normalize_reasoning_efforts(value)
 
 
 class DiscoverModelsRequest(BaseModel):
@@ -64,6 +78,24 @@ def _to_response(model: dict[str, Any], warnings: list[str] | None = None) -> di
     if warnings:
         payload["warnings"] = warnings
     return payload
+
+
+def _normalize_reasoning_efforts(value: Any) -> list[str]:
+    if value in (None, ""):
+        return []
+    raw_values = value
+    if isinstance(value, str):
+        raw_values = [v.strip() for v in value.split(",")]
+    normalized: list[str] = []
+    for item in raw_values or []:
+        effort = str(item).strip().lower()
+        if not effort:
+            continue
+        if len(effort) > 64:
+            raise ValueError("Reasoning effort values must be 64 characters or fewer")
+        if effort not in normalized:
+            normalized.append(effort)
+    return normalized
 
 
 def _require_admin_user(user: AuthenticatedUser) -> None:
@@ -114,6 +146,7 @@ async def create_model(body: ModelUpsertRequest, user: AuthenticatedUser):
         supports_vision=body.supports_vision,
         notes=body.notes,
         tags=body.tags,
+        reasoning_efforts=body.reasoning_efforts,
         is_enabled=body.is_enabled,
         org_id=str(user.organization_id) if user.organization_id else None,
         engine=body.engine,

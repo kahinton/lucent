@@ -24,6 +24,7 @@ from lucent.auth_providers import (
     create_session,
 )
 from lucent.db import OrganizationRepository, UserRepository
+from lucent.db.definitions import DefinitionRepository
 from lucent.db.schedules import ScheduleRepository
 
 # ============================================================================
@@ -58,6 +59,28 @@ async def web_prefix(db_pool):
         await conn.execute(
             "DELETE FROM api_keys WHERE user_id IN "
             "(SELECT id FROM users WHERE external_id LIKE $1)",
+            f"{prefix}%",
+        )
+        await conn.execute(
+            """DELETE FROM agent_skills
+               WHERE agent_id IN (
+                   SELECT id FROM agent_definitions
+                   WHERE organization_id IN (SELECT id FROM organizations WHERE name LIKE $1)
+               )
+               OR skill_id IN (
+                   SELECT id FROM skill_definitions
+                   WHERE organization_id IN (SELECT id FROM organizations WHERE name LIKE $1)
+               )""",
+            f"{prefix}%",
+        )
+        await conn.execute(
+            "DELETE FROM agent_definitions WHERE organization_id IN "
+            "(SELECT id FROM organizations WHERE name LIKE $1)",
+            f"{prefix}%",
+        )
+        await conn.execute(
+            "DELETE FROM skill_definitions WHERE organization_id IN "
+            "(SELECT id FROM organizations WHERE name LIKE $1)",
             f"{prefix}%",
         )
         await conn.execute("DELETE FROM users WHERE external_id LIKE $1", f"{prefix}%")
@@ -157,6 +180,80 @@ class TestSchedulesList:
             assert resp.status_code == 303
             assert "/login" in resp.headers.get("location", "")
 
+    async def test_workflows_alias_contains_schedule_title(self, client, schedule):
+        resp = await client.get("/workflows")
+        assert resp.status_code == 200
+        assert "Workflows" in resp.text
+        assert "Web Test Schedule" in resp.text
+
+
+class TestWorkflowWizard:
+    async def test_new_workflow_wizard_returns_html(self, client):
+        resp = await client.get("/workflows/new")
+        assert resp.status_code == 200
+        assert "Workflow Wizard" in resp.text
+        assert "Build workflows by conversation" in resp.text
+        assert "Incoming webhook" in resp.text
+
+    async def test_workflow_assistant_uses_workflow_composer(self, client, db_pool, web_user):
+        user, org, _token = web_user
+        repo = DefinitionRepository(db_pool)
+        workflow_composer = await repo.create_agent(
+            name="workflow-composer",
+            description="Workflow composer",
+            content="# Workflow Composer",
+            org_id=str(org["id"]),
+            created_by=str(user["id"]),
+            status="active",
+        )
+
+        resp = await client.get("/workflows/new")
+
+        assert resp.status_code == 200
+        assert "Workflow Assistant" in resp.text
+        assert "Choose a starting point" in resp.text
+        assert "Weekly dependency review" in resp.text
+        assert "Webhook" in resp.text
+        assert f'data-agent-id="{workflow_composer["id"]}"' in resp.text
+        assert "Ask for a draft first" in resp.text
+
+    async def test_wizard_creates_webhook_workflow(self, client, db_pool, web_user):
+        _user, org, _token = web_user
+        resp = await client.post(
+            "/workflows/new",
+            data=_csrf_data(
+                client,
+                {
+                    "title": "Webhook wizard test",
+                    "description": "Created by the workflow wizard",
+                    "trigger_type": "webhook",
+                    "webhook_secret": "wizard-secret",
+                    "request_title": "{event_summary} webhook",
+                    "action_title": "Handle webhook",
+                    "action_prompt": "Process the webhook payload and record outputs.",
+                    "action_agent_type": "code",
+                    "review_instructions": "Confirm outputs are recorded.",
+                },
+            ),
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        assert "/workflows/" in resp.headers.get("location", "")
+
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """SELECT title, trigger_type, schedule_type, actions, review_instructions,
+                          webhook_secret_hash
+                   FROM schedules
+                   WHERE organization_id = $1 AND title = 'Webhook wizard test'""",
+                org["id"],
+            )
+        assert row is not None
+        assert row["trigger_type"] == "webhook"
+        assert row["schedule_type"] == "webhook"
+        assert row["webhook_secret_hash"]
+        assert "Confirm outputs" in row["review_instructions"]
+
 
 # ============================================================================
 # GET /schedules/{id} — detail
@@ -177,6 +274,12 @@ class TestScheduleDetail:
         fake_id = str(uuid4())
         resp = await client.get(f"/schedules/{fake_id}")
         assert resp.status_code == 404
+
+    async def test_workflow_detail_alias_shows_flow(self, client, schedule):
+        resp = await client.get(f"/workflows/{schedule['id']}")
+        assert resp.status_code == 200
+        assert "Workflow flow" in resp.text
+        assert "Actions" in resp.text
 
 
 # ============================================================================

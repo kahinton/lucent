@@ -63,6 +63,14 @@ class LLMEngine(ABC):
         prompt: str,
         mcp_config: dict | None = None,
         timeout: int = 300,
+        reasoning_effort: str | None = None,
+        provider_session_id: str | None = None,
+        resume: bool = False,
+        message_history: list[dict[str, Any]] | None = None,
+        hooks: list[dict[str, Any]] | None = None,
+        audit_context: dict[str, Any] | None = None,
+        enable_config_discovery: bool = False,
+        approve_permissions: bool = True,
     ) -> str | None:
         """Run a single LLM session and return the full response text.
 
@@ -74,6 +82,17 @@ class LLMEngine(ABC):
             prompt: User prompt text.
             mcp_config: MCP server configuration dict for tool access.
             timeout: Maximum seconds to wait for response.
+            reasoning_effort: Optional provider-specific reasoning/thinking level.
+            provider_session_id: Backend-native session identifier, if supported.
+            resume: Whether to resume an existing backend-native session.
+            message_history: Prior persisted messages for engines without native resume.
+            hooks: Approved declarative hook definitions for runtime middleware.
+            audit_context: Optional structured context for tool-call audit rows.
+            enable_config_discovery: Whether the backend should discover its
+                configured/bundled tools for this session.
+            approve_permissions: Whether provider-native built-in tools should
+                be permissioned for execution. Web chat sets this false so only
+                configured MCP tools are available.
 
         Returns:
             The assistant's response text, or None on error.
@@ -89,6 +108,14 @@ class LLMEngine(ABC):
         on_event: Callable[[SessionEvent], None] | None = None,
         timeout: int = 600,
         idle_timeout: int = 300,
+        reasoning_effort: str | None = None,
+        provider_session_id: str | None = None,
+        resume: bool = False,
+        message_history: list[dict[str, Any]] | None = None,
+        hooks: list[dict[str, Any]] | None = None,
+        audit_context: dict[str, Any] | None = None,
+        enable_config_discovery: bool = False,
+        approve_permissions: bool = True,
     ) -> str | None:
         """Run an LLM session with event streaming.
 
@@ -107,7 +134,17 @@ class LLMEngine(ABC):
             idle_timeout: Seconds of inactivity before timing out. If the
                 agent is actively producing events, the session continues
                 indefinitely (up to `timeout`). Default 300s (5 min).
-            timeout: Maximum seconds to wait for completion.
+            reasoning_effort: Optional provider-specific reasoning/thinking level.
+            provider_session_id: Backend-native session identifier, if supported.
+            resume: Whether to resume an existing backend-native session.
+            message_history: Prior persisted messages for engines without native resume.
+            hooks: Approved declarative hook definitions for runtime middleware.
+            audit_context: Optional structured context for tool-call audit rows.
+            enable_config_discovery: Whether the backend should discover its
+                configured/bundled tools for this session.
+            approve_permissions: Whether provider-native built-in tools should
+                be permissioned for execution. Web chat sets this false so only
+                configured MCP tools are available.
 
         Returns:
             The assistant's full response text, or None on error.

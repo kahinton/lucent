@@ -12,6 +12,7 @@ from lucent.auth import get_current_api_key_id, get_current_user
 from lucent.db import (
     AccessRepository,
     AuditRepository,
+    DuplicateTechnicalMemoryError,
     MemoryRepository,
     VersionConflictError,
     get_pool,
@@ -26,9 +27,14 @@ from lucent.models.memory import (
     SearchMemoriesInput,
     UpdateMemoryInput,
 )
-from lucent.models.validation import normalize_tags, validate_metadata
+from lucent.models.validation import (
+    normalize_tags,
+    validate_memory_content_quality,
+    validate_metadata,
+)
 from lucent.security import scan_content_for_injection
 from lucent.services.memory_access_service import MemoryAccessService
+from lucent.tools.annotations import CREATE_ONLY, MUTATING, READ_ONLY
 
 logger = get_logger("tools.memories")
 CREATABLE_MEMORY_TYPES = {MemoryType.EXPERIENCE, MemoryType.TECHNICAL, MemoryType.GOAL}
@@ -236,11 +242,28 @@ Args:
           last_interaction}
     shared: Whether the memory is visible to other users in the same organization. Default is false.
 
+Duplicate protection:
+    Technical memories with metadata.repo and metadata.filename are unique across
+    the caller's own memories plus shared org memories. If create_memory returns
+    a duplicate error, do NOT retry creation. Read/update the existing memory ID
+    and intelligently combine the new information with the existing content:
+    preserve durable facts, merge non-overlapping details, reconcile conflicts,
+    carry forward useful tags/references/metadata, and do not simply overwrite.
+
+Technical memory quality rules:
+    Technical memories are injected as future working context. They must be
+    concise reference material about durable system/code/domain behavior, not
+    task reports, milestone deliverables, research dumps, PR summaries, or
+    changelog entries. Include technical metadata anchoring the memory to at
+    least one of: category, repo, directory, filename, language, code_snippet,
+    or version_info. Use type="experience" for task outcomes/research notes and
+    persist full deliverables to the target repo/docs plus task outputs.
+
 Returns:
     JSON string with the created memory including its ID.
 """
 
-    @mcp.tool(description=create_memory_description)
+    @mcp.tool(description=create_memory_description, annotations=CREATE_ONLY)
     async def create_memory(
         type: str,
         content: str,
@@ -292,6 +315,13 @@ Returns:
 
             # Normalize tags: replace prohibited tags, auto-tag daemon content
             effective_tags = normalize_tags(tags, is_daemon=is_daemon)
+
+            validate_memory_content_quality(
+                memory_type,
+                content,
+                metadata=validated_metadata,
+                tags=effective_tags,
+            )
 
             # Scan content for prompt injection patterns (defense-in-depth)
             injection_matches = scan_content_for_injection(content)
@@ -375,6 +405,9 @@ Returns:
 
             return json.dumps(_serialize_memory(result), indent=2)
 
+        except DuplicateTechnicalMemoryError as e:
+            logger.info("create_memory duplicate technical file memory: %s", e.memory_id)
+            return _error_response(e.message)
         except ValueError as e:
             logger.warning("create_memory validation error: %s", e)
             return _error_response(str(e))
@@ -382,7 +415,7 @@ Returns:
             logger.error("create_memory failed", exc_info=e)
             return _error_response(f"Failed to create memory: {e}")
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     async def get_memory(memory_id: str) -> str:
         """Retrieve a memory by its ID.
 
@@ -443,7 +476,7 @@ Returns:
             logger.error("get_memory failed: id=%s", memory_id, exc_info=e)
             return _error_response(f"Failed to retrieve memory: {e}")
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     async def get_memories(memory_ids: list[str]) -> str:
         """Retrieve multiple memories by their IDs in a single call.
 
@@ -533,7 +566,7 @@ Returns:
             logger.error("get_memories failed", exc_info=e)
             return _error_response(f"Failed to retrieve memories: {str(e)}")
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     async def get_current_user_context() -> str:
         """Get the current authenticated user's context and their individual memory.
 
@@ -584,7 +617,7 @@ Returns:
             logger.error("get_current_user_context failed", exc_info=e)
             return _error_response(f"Failed to get user context: {str(e)}")
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     async def search_memories(
         query: str | None = None,
         username: str | None = None,
@@ -719,7 +752,7 @@ Returns:
             logger.error("search_memories failed", exc_info=e)
             return _error_response(f"Search failed: {str(e)}")
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     async def search_memories_full(
         query: str,
         username: str | None = None,
@@ -820,7 +853,7 @@ Returns:
             logger.error("search_memories_full failed", exc_info=e)
             return _error_response(f"Full search failed: {str(e)}")
 
-    @mcp.tool()
+    @mcp.tool(annotations=MUTATING)
     async def update_memory(
         memory_id: str,
         content: str | None = None,
@@ -876,6 +909,33 @@ Returns:
             validated_metadata = metadata
             if metadata is not None:
                 validated_metadata = validate_metadata(old_memory["type"], metadata)
+                validated_metadata = repo.normalize_metadata_for_storage(
+                    old_memory["type"], validated_metadata
+                )
+                duplicate = await repo.find_duplicate_technical_file_memory(
+                    metadata=validated_metadata,
+                    requesting_user_id=user_id,
+                    requesting_org_id=org_id,
+                    memory_scope=memory_scope,
+                    exclude_id=uuid_id,
+                )
+                if duplicate is not None:
+                    scope = repo._technical_file_scope(validated_metadata)
+                    if scope is not None:
+                        return _error_response(
+                            DuplicateTechnicalMemoryError(
+                                existing_memory=duplicate,
+                                repo=scope["repo"],
+                                filename=scope["filename"],
+                            ).message
+                        )
+
+            validate_memory_content_quality(
+                old_memory["type"],
+                content if content is not None else old_memory["content"],
+                metadata=validated_metadata if metadata is not None else old_memory.get("metadata"),
+                tags=tags if tags is not None else old_memory.get("tags"),
+            )
 
             update_input = UpdateMemoryInput(
                 content=content,
@@ -1094,7 +1154,7 @@ Returns:
         """
         return await _toggle_pin(memory_id, pin=False)
 
-    @mcp.tool()
+    @mcp.tool(annotations=MUTATING)
     async def delete_memory(memory_id: str) -> str:
         """Delete a memory (soft delete - can be recovered).
 
@@ -1183,7 +1243,7 @@ Returns:
             logger.error("delete_memory failed: id=%s", memory_id, exc_info=e)
             return _error_response(f"Failed to delete memory: {str(e)}")
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     async def get_existing_tags(
         username: str | None = None,
         type: str | None = None,
@@ -1484,6 +1544,35 @@ Returns:
 
                 repo = await _get_repository()
 
+                existing = await repo.get_accessible(
+                    UUID(memory_id),
+                    user_id,
+                    org_id,
+                    memory_scope=memory_scope,
+                )
+                if existing is None or existing.get("user_id") != user_id:
+                    return _error_response(
+                        "Memory not found or you are not the owner."
+                        " Only the owner can share a memory."
+                    )
+
+                duplicate = await repo.find_duplicate_technical_file_memory(
+                    metadata=existing.get("metadata"),
+                    requesting_user_id=user_id,
+                    requesting_org_id=org_id,
+                    exclude_id=UUID(memory_id),
+                )
+                if duplicate is not None:
+                    scope = repo._technical_file_scope(existing.get("metadata"))
+                    if scope is not None:
+                        return _error_response(
+                            DuplicateTechnicalMemoryError(
+                                existing_memory=duplicate,
+                                repo=scope["repo"],
+                                filename=scope["filename"],
+                            ).message
+                        )
+
                 result = await repo.set_shared(
                     memory_id=UUID(memory_id),
                     user_id=user_id,
@@ -1631,7 +1720,11 @@ Returns:
                 memory_tags.extend(tags)
 
             # Build metadata
-            metadata: dict[str, Any] = {"submitted_by": str(user_id), "source": "mcp"}
+            metadata: dict[str, Any] = {
+                "category": "daemon-task",
+                "submitted_by": str(user_id),
+                "source": "mcp",
+            }
             if context:
                 metadata["context"] = context
 

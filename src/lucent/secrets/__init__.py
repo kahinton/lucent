@@ -14,13 +14,14 @@ from lucent.secrets.registry import (
     initialize_secret_provider,
     validate_provider_env,
 )
-from lucent.secrets.utils import SECRET_REF_PREFIX, resolve_env_vars
+from lucent.secrets.utils import CREDENTIAL_REF_PREFIX, SECRET_REF_PREFIX, resolve_env_vars
 
 __all__ = [
     "SecretProvider",
     "SecretScope",
     "SecretRegistry",
     "SECRET_REF_PREFIX",
+    "CREDENTIAL_REF_PREFIX",
     "resolve_env_vars",
     "get_selected_provider_name",
     "validate_provider_env",

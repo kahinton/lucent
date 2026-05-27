@@ -222,14 +222,17 @@ Every memory update is versioned. Use `get_memory_versions` to browse history an
 | `link_task_memory` | Link a memory to a task (created/read/updated) |
 | `link_request_memory` | Link a memory to a request (goal/context/reference) |
 
-### Schedule Tools
+### Workflow Tools
 
 | Tool | Purpose |
 |------|---------|
-| `create_schedule` | Create a cron, interval, or one-time schedule |
-| `list_schedules` | List schedules with optional status filter |
-| `get_schedule_details` | Get schedule config, run history, and next run time |
-| `toggle_schedule` | Enable or disable a schedule |
+| `create_workflow` | Create a schedule, manual, webhook, or integration-event workflow |
+| `list_workflows` | List workflows with optional status, enabled, and trigger filters |
+| `get_workflow_details` | Get workflow config and run history |
+| `create_schedule` | Compatibility alias for cron, interval, or one-time schedule rows |
+| `list_schedules` | Compatibility schedule list |
+| `get_schedule_details` | Compatibility schedule detail and run history |
+| `toggle_schedule` | Enable or disable a schedule/workflow row |
 
 ### Definition Tools
 
@@ -239,22 +242,20 @@ Every memory update is versioned. Use `get_memory_versions` to browse history an
 | `get_agent_definition` | Get full agent definition by ID |
 | `list_agent_definitions` | List agents with optional status filter |
 | `update_agent_definition` | Update an agent's name, description, or content |
-| `approve_agent_definition` | Approve a proposed agent (admin only) |
-| `reject_agent_definition` | Reject a proposed agent (admin only) |
 | `delete_agent_definition` | Delete an agent definition |
 | `create_skill_definition` | Create a new skill definition (starts as proposed) |
 | `get_skill_definition` | Get full skill definition by ID |
 | `list_skill_definitions` | List skills with optional status filter |
-| `approve_skill_definition` | Approve a proposed skill (admin only) |
-| `reject_skill_definition` | Reject a proposed skill (admin only) |
 | `delete_skill_definition` | Delete a skill definition |
 | `grant_skill_to_agent` | Grant a skill to an agent |
 | `revoke_skill_from_agent` | Revoke a skill from an agent |
-| `create_mcp_server_definition` | Register an external MCP server |
-| `list_mcp_server_definitions` | List registered MCP servers |
-| `grant_mcp_server_to_agent` | Grant MCP server access to an agent |
-| `revoke_mcp_server_from_agent` | Revoke MCP server access from an agent |
-| `list_proposals` | List all pending proposals (agents, skills, MCP servers) |
+| `create_mcp_server_definition` | Register an external tool provider (MCP server) |
+| `list_mcp_server_definitions` | List registered external tool providers |
+| `grant_mcp_server_to_agent` | Grant external provider access to an agent |
+| `revoke_mcp_server_from_agent` | Revoke external provider access from an agent |
+| `list_proposals` | List all pending proposals (agents, skills, hooks, tools, external providers) |
+
+Approval and rejection of proposed definitions are human review actions and are handled through the web UI or authenticated REST API, not MCP tools.
 
 ### Review & Model Tools
 
@@ -346,6 +347,82 @@ Lucent provides prompt templates (in `src/lucent/prompts/`) to help LLMs use the
 - **`get_memory_system_prompt_short()`**: Condensed version for limited prompt space
 - **`get_user_introduction_prompt()`**: Guidance for greeting users and personalizing interactions based on their individual memory
 
+## Chat Sessions and Experience Capture
+
+Lucent persists chat/embedded-chat sessions in `llm_sessions`, with transcript
+rows in `llm_messages`, tool/event lineage in `llm_session_events`, and request
+links in `llm_session_requests`. Chat-created requests carry origin pointers
+back to the session/message that created them.
+
+After assistant turns, Lucent runs a cheap deterministic session-significance
+check to decide whether to create or update an `experience` memory tagged
+`session-experience`. Capture is triggered by durable work signals such as
+linked requests, mutating tools, substantial multi-turn transcripts, or
+work-oriented session kinds. Trivial sessions — jokes, thanks, greetings, or
+simple status checks without work side effects — are skipped.
+
+When a session crosses the threshold, Lucent uses a skill-guided summarization
+model call by default to write the actual experience memory content. The
+`session-experience-capture` skill tells the summarizer to produce a narrative
+with `Session Summary`, `What Happened`, `Why It Matters`, and `Follow-up`
+sections. Operators can disable this extra model call with
+`LUCENT_SESSION_EXPERIENCE_SUMMARY_ENABLED=false`, in which case Lucent falls
+back to a deterministic summary assembled from session metadata and transcript
+previews. Lucent does not impose a fixed session-context character cap for this
+summary path; choose a summary model with an appropriate context window for your
+deployment.
+
+The auto-captured experience stores useful metadata alongside the narrative:
+`metadata.source = "llm_session"`, the `session_id`, linked request IDs,
+observed tool names, capture score, summary mode/model, and the reason it
+crossed the threshold. If a session continues, Lucent updates the existing
+session experience instead of creating duplicates. Linked request IDs also
+receive the experience memory as a `context` memory so the conversation can act
+as glue between the user discussion, requests, tasks, outputs, and later
+learning extraction.
+
+## Tool-Use Audit Log
+
+Lucent stores operational tool-call telemetry in `tool_call_audit_log`. This is
+explicitly **not memory content**: it is structured audit data used to understand
+patterns in tool success/failure across sessions, models, agents, skills, and
+requests. Learning memories can refer to insights derived from this data later,
+but raw audit rows remain in the audit table.
+
+The audit log records redacted/truncated previews of tool inputs and outputs,
+status (`success`, `failed`, or `blocked`), failure class/message, duration, and
+lineage fields when available:
+
+- organization/user/API key
+- LLM session, turn, message, and session event
+- request/task/schedule run
+- agent definition, agent type, and skill names
+- model, reasoning effort, engine, provider
+- MCP server/tool namespace/tool name
+
+Capture paths include the LangChain MCP bridge, where tool execution is
+programmatically observed for every MCP tool call, and normalized streaming
+tool-result events for Copilot-style sessions in chat/daemon execution. This
+catches allowed, blocked, exception-returning, and error-string tool calls even
+when the model later recovers. The design favors consistent structured rows over
+ad-hoc learning memories so future analysis can identify recurring failure
+patterns by tool, model, agent, skill, request type, or session context.
+
+Learning extraction uses this audit stream as a second source of improvement
+signals. The scheduled learning task calls `analyze_tool_failure_patterns` and
+only acts on repeated failures (default threshold: 3). When a pattern is strong
+enough, it can call `propose_definition_improvement` to create a proposed
+agent, skill, or hook definition with `proposal_reason` and
+`proposal_evidence`. This keeps raw audit data out of memory while still giving
+reviewers a clear explanation of why a change is being suggested. A common path
+is: repeated failures by a code agent using a test tool → proposed focused skill
+with tool-specific instructions → human approval → grant that skill to the code
+agent.
+
+Definition proposal rows support `proposal_reason` and `proposal_evidence` for
+agents, skills, hooks, custom tools, and external tool providers. The definitions proposal UI renders
+these fields so users can inspect the evidence before approval.
+
 ## Autonomous Daemon
 
 The daemon runs as a separate process that communicates with the Lucent server over MCP. It operates four independent loops:
@@ -354,7 +431,7 @@ The daemon runs as a separate process that communicates with the Lucent server o
 |------|----------|---------|
 | **Cognitive** | 15 min | Perceive → Reason → Decide → Act cycle. Reads system state, reasons about goals, creates requests/tasks via MCP tools |
 | **Dispatch** | Event-driven | Claims pending tasks, resolves agent definitions, creates sandboxes, runs sub-agent LLM sessions, validates results |
-| **Scheduler** | 60s | Checks for due schedules (cron/interval/once), creates request+task pairs, advances schedule state |
+| **Scheduler** | 60s | Checks for due schedules (cron/interval/once), advances schedule state, and creates request+task pairs when eligible work exists |
 | **Autonomic** | ~2 hours | Background maintenance: memory cleanup, learning extraction, environment adaptation |
 
 The dispatch loop uses PostgreSQL `LISTEN/NOTIFY` for near-instant task pickup (with 60s polling fallback). Multiple daemon instances can run in parallel — task claims are atomic.
@@ -382,6 +459,17 @@ The daemon uses a two-level work hierarchy:
 Each task flows through: `pending` → `claimed` → `running` → `completed`/`failed`, with full event tracking visible on the Activity page.
 
 Tasks can include **output contracts** — JSON Schema definitions that the daemon validates against before completing the task. Three failure modes are available: `fail`, `fallback`, or `retry_then_fallback`.
+
+Tasks can also produce first-class **outputs** stored in `task_outputs` and
+surfaced on the request detail page. Outputs are the user-facing deliverables
+of work: GitHub issues/PRs, sent emails, generated docs, files, deployments,
+memories, or generic artifacts from custom tools. `tasks.result` remains the
+narrative execution report; `task_outputs` is the structured “what can I open
+or use?” layer. Output types have built-in display affordances for known
+providers and a generic fallback for extension tooling. Agents should record
+outputs explicitly, but task completion also auto-extracts openable URLs from
+plain text results, and post-completion request review checks that any remaining
+deliverables are represented before approval.
 
 Requests support a **review workflow**: when `LUCENT_REQUIRE_APPROVAL=true`, completed requests transition to `review` status for human approval. Reviewers can approve (→ `completed`) or reject with feedback (→ `needs_rework`).
 
@@ -411,17 +499,67 @@ daemon/
     └── skills/         # Skill definition templates (.md.j2)
 ```
 
-## Schedules
+## Workflows
 
-Create recurring or one-time tasks via MCP tools or the web UI:
+Workflows are the evolved schedule system. They still use the existing
+`schedules` and `schedule_runs` tables for compatibility, but add a broader
+trigger/action model:
 
-| Type | Description | Example |
-|------|-------------|---------|
-| `cron` | Standard cron expression (5 fields) | `30 5 * * *` = daily at 5:30 AM |
-| `interval` | Repeat every N seconds (min 60) | Every 5 minutes |
-| `once` | Run once at a specific time | One-shot task |
+| Trigger | Description | Example |
+|---------|-------------|---------|
+| `schedule` | Time-based run using legacy `once`, `interval`, or `cron` fields | `0 9 * * 1` weekly cron |
+| `webhook` | External POST to `/api/workflows/{id}/webhook` with a shared secret | GitHub/Jira/custom webhook |
+| `manual` | User clicks **Run now** from the web UI or calls the workflow trigger API | Ad-hoc report |
+| `integration_event` | Stored provider/event filter for connection-driven routing | `pull_request.opened` |
 
-Schedules support timezone-aware cron (e.g., `US/Eastern`), max run limits, expiration dates, per-schedule model overrides, and sandbox template linking. When a schedule fires, it atomically creates a request + task that flows through the dispatch loop.
+Every workflow run creates a request from `request_template`, then creates one
+or more ordered task actions inside the request/task framework. Task outputs are
+recorded through the same `task_outputs` table used by normal requests. The
+workflow's `review_instructions` are appended to the request description so the
+post-completion reviewer validates the correct success criteria.
+
+Exception: some built-in maintenance workflows use a `server_function` action.
+These execute directly in the API process and write their outcome to
+`schedule_runs.result`; they do not create requests, tasks, or model-backed
+reviews. `Stale Task Reaper` uses this mode so expired task claims can be
+released even when the daemon is unavailable.
+
+Time-based workflows keep timezone-aware cron, interval, once, max-run,
+expiration, model override, and sandbox-template behavior. Existing critical
+built-in schedules are migrated in place; their IDs and run history are not
+changed.
+
+### Built-in workflow pre-flight gates
+
+Built-in daemon workflows run schedule-specific eligibility checks before creating a request or task. If the check proves there is no work, the run is completed with a structured `schedule.skipped` event and no model-backed task is created.
+
+Operators should treat `schedule.skipped` with `candidate_count: 0` as a healthy no-op, not a failed run. Real failures use a failed schedule-run status or exception log.
+
+| Built-in workflow | Empty-work gate |
+|---|---|
+| Cognitive Planning | No open requests, pending approvals, due non-planning schedules, daemon messages/feedback/rejection lessons, proposed definitions/MCP servers, or planning targets. |
+| Learning Extraction | No recent active result/feedback/rejection memory has learning-source tags without `lesson-extracted`. |
+| Experience Compression | No active non-protected experience memory was created before today. |
+| Memory Vitality Scoring | No non-forgotten memory has missing or stale vitality computation. |
+| Shadow Forget Scoring | Shadow forgetting is disabled, or every non-forgotten memory already has a fresh `gcp-v1` sidecar score. |
+| Stale Task Reaper | No claimed/running task has an expired claim, stale claim age, or stale/dead owning daemon instance. |
+| Request Decomposition Backfill | No old non-terminal pending/approved request remains without tasks after in-process and retry-backoff filtering. |
+
+Technical memory consolidation is retired. File-scoped technical memories are
+deduplicated up front at create/update/share time by `(repo, filename)` across
+the caller's own memories plus shared organization memories. Other users'
+private memories remain isolated and do not block creation.
+
+Skip events are written as JSON to the service log and to `schedule_runs.result`:
+
+```json
+{
+  "event_type": "schedule.skipped",
+  "schedule_name": "Experience Compression",
+  "reason": "no_eligible_work",
+  "candidate_count": 0
+}
+```
 
 ## Sandboxes
 

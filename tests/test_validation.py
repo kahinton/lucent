@@ -41,13 +41,24 @@ class TestValidateMetadata:
     def test_technical_valid_metadata(self):
         metadata = {
             "language": "python",
-            "repo": "lucent",
+            "repo": "kahinton/lucent",
             "filename": "server.py",
             "category": "architecture",
         }
         result = validate_metadata("technical", metadata)
         assert result["language"] == "python"
-        assert result["repo"] == "lucent"
+        assert result["repo"] == "kahinton/lucent"
+
+    def test_technical_metadata_normalizes_github_url_repo(self):
+        result = validate_metadata(
+            "technical",
+            {"repo": "https://github.com/kahinton/lucent.git", "category": "architecture"},
+        )
+        assert result["repo"] == "kahinton/lucent"
+
+    def test_technical_metadata_rejects_bare_repo_name(self):
+        with pytest.raises(ValueError, match="owner/repo"):
+            validate_metadata("technical", {"repo": "lucent", "category": "architecture"})
 
     def test_procedural_valid_metadata(self):
         metadata = {

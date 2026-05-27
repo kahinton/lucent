@@ -7,7 +7,9 @@ execute when the daemon is unavailable.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+from typing import Any
 
 from lucent.db import get_pool
 from lucent.db.requests import RequestRepository
@@ -29,6 +31,21 @@ SYSTEM_SCHEDULE_CHECK_SECONDS = int(
 SYSTEM_SCHEDULE_STARTUP_DELAY_SECONDS = int(
     os.environ.get("LUCENT_SYSTEM_SCHEDULE_STARTUP_DELAY_SECONDS", "15")
 )
+
+STALE_TASK_REAPER_ACTION = {
+    "action_type": "server_function",
+    "title": "Release stale task claims",
+    "description": (
+        "Runs directly inside the Lucent API process. It checks for expired "
+        "task claims or dead daemon owners, releases eligible claims, and records "
+        "the result in schedule_runs. It does not dispatch an agent task."
+    ),
+    "function": "release_stale_tasks",
+    "module": "lucent.api.system_schedules",
+    "execution_boundary": "api_process",
+    "preflight": "stale_task_reaper_has_work",
+    "sequence_order": 0,
+}
 
 _system_schedule_runner_task: asyncio.Task | None = None
 
@@ -69,13 +86,35 @@ async def ensure_server_system_schedules() -> int:
             org_id=row["organization_id"],
             description=(
                 "Server-side stale-claim reaper. Releases expired task claims "
-                "without depending on daemon availability."
+                "without depending on daemon availability. Short-circuits with "
+                "schedule.skipped when there are no stale claims to release."
             ),
-            agent_type="system",
+            agent_type="lucent",
             schedule_type="interval",
             interval_seconds=STALE_TASK_REAPER_INTERVAL_SECONDS,
             priority="low",
-            prompt="Built-in server schedule: invoke release_stale_tasks directly.",
+            prompt="",
+            trigger_config={
+                "schedule_type": "interval",
+                "interval_seconds": STALE_TASK_REAPER_INTERVAL_SECONDS,
+                "timezone": "UTC",
+                "execution_mode": "server_side",
+                "runner": "api_process",
+                "preflight": "stale_task_reaper_has_work",
+            },
+            request_template={
+                "title_prefix": "[Server Workflow]",
+                "title": STALE_TASK_REAPER_TITLE,
+                "description": (
+                    "Server-side maintenance workflow. No request is created; "
+                    "results are recorded on schedule_runs."
+                ),
+            },
+            actions=[STALE_TASK_REAPER_ACTION],
+            review_instructions=(
+                "No model review applies. Verify by checking schedule_runs.result "
+                "and task claim state if this workflow reports released tasks."
+            ),
             created_by=row["daemon_user_id"],
         )
         if not existing and sched:
@@ -86,6 +125,75 @@ async def ensure_server_system_schedules() -> int:
     return created
 
 
+async def execute_stale_task_reaper_schedule(
+    sched: dict[str, Any],
+    *,
+    force: bool = False,
+    advance_schedule: bool = True,
+) -> dict[str, Any] | None:
+    """Execute one Stale Task Reaper workflow row.
+
+    This is the server-function implementation behind the workflow action. It
+    intentionally does not create a request or task; its durable artifact is the
+    schedule run record.
+    """
+    pool = await get_pool()
+    if pool is None:
+        return None
+
+    sched_repo = ScheduleRepository(pool)
+    req_repo = RequestRepository(pool)
+    schedule_id = str(sched["id"])
+    org_id = str(sched["organization_id"])
+
+    run = await sched_repo.mark_schedule_run(
+        schedule_id,
+        force=force,
+        advance_schedule=advance_schedule,
+    )
+    if not run:
+        return {"schedule": sched, "already_fired": True}
+
+    try:
+        if not await req_repo.stale_task_reaper_has_work(
+            stale_minutes=STALE_TASK_REAPER_STALE_MINUTES,
+            org_id=org_id,
+        ):
+            skip_event = {
+                "event_type": "schedule.skipped",
+                "schedule_id": schedule_id,
+                "schedule_name": STALE_TASK_REAPER_TITLE,
+                "reason": "no_stale_tasks",
+                "candidate_count": 0,
+            }
+            await sched_repo.complete_run(
+                str(run["id"]),
+                result=json.dumps(skip_event),
+            )
+            logger.info(json.dumps(skip_event, sort_keys=True))
+            return {"schedule": sched, "run": run, "skipped": True, "event": skip_event}
+
+        released = await req_repo.release_stale_tasks(
+            stale_minutes=STALE_TASK_REAPER_STALE_MINUTES,
+            org_id=org_id,
+        )
+        await sched_repo.complete_run(
+            str(run["id"]),
+            result=f"released={released}",
+        )
+        if released:
+            logger.info(
+                "Server stale-task reaper released %d task(s) for org=%s",
+                released,
+                org_id[:8],
+            )
+        return {"schedule": sched, "run": run, "released": released}
+    except Exception as exc:
+        await sched_repo.fail_run(str(run["id"]), error=str(exc)[:1000])
+        logger.exception("Server stale-task reaper failed for schedule %s", schedule_id)
+        raise
+
+
 async def run_server_system_schedules_once() -> int:
     """Execute due server-side built-in schedules once."""
     pool = await get_pool()
@@ -93,7 +201,6 @@ async def run_server_system_schedules_once() -> int:
         return 0
 
     sched_repo = ScheduleRepository(pool)
-    req_repo = RequestRepository(pool)
 
     due = await sched_repo.get_due_schedules()
     executed = 0
@@ -104,31 +211,13 @@ async def run_server_system_schedules_once() -> int:
         if sched.get("title") != STALE_TASK_REAPER_TITLE:
             continue
 
-        schedule_id = str(sched["id"])
-        org_id = str(sched["organization_id"])
-
-        run = await sched_repo.mark_schedule_run(schedule_id)
-        if not run:
-            continue
-
         try:
-            released = await req_repo.release_stale_tasks(
-                stale_minutes=STALE_TASK_REAPER_STALE_MINUTES,
-                org_id=org_id,
-            )
-            await sched_repo.complete_run(
-                str(run["id"]),
-                result=f"released={released}",
-            )
-            if released:
-                logger.info(
-                    "Server stale-task reaper released %d task(s) for org=%s",
-                    released,
-                    org_id[:8],
-                )
-        except Exception as exc:
-            await sched_repo.fail_run(str(run["id"]), error=str(exc)[:1000])
-            logger.exception("Server stale-task reaper failed for schedule %s", schedule_id)
+            result = await execute_stale_task_reaper_schedule(sched)
+        except Exception:
+            executed += 1
+            continue
+        if result and result.get("already_fired"):
+            continue
         executed += 1
 
     return executed

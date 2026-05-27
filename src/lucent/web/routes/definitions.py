@@ -1,5 +1,6 @@
-"""Definition management routes — agents, skills, MCP servers."""
+"""Definition management routes — agents, skills, tools, hooks, providers."""
 
+import json
 from math import ceil
 from uuid import UUID
 
@@ -18,6 +19,7 @@ logger = get_logger("web.routes.definitions")
 router = APIRouter()
 
 ALLOWED_PER_PAGE = {10, 25, 50, 100}
+VALID_AGENT_KINDS = {"functional", "persona", "hybrid"}
 
 
 async def _get_user_groups(pool, user_id: str, org_id: str) -> list[dict]:
@@ -69,20 +71,50 @@ def _attach_owner_names(
     return enriched
 
 
+def _normalize_agent_kind(value) -> str:
+    kind = str(value or "functional").strip().lower()
+    return kind if kind in VALID_AGENT_KINDS else "functional"
+
+
+def _agent_kind_evidence(kind: str, source: str) -> dict[str, str]:
+    return {
+        "agent_kind": _normalize_agent_kind(kind),
+        "classification_source": source,
+    }
+
+
+async def _find_agent_composer_agent(repo, org_id: str, user, role_value: str) -> dict | None:
+    """Return the active definition-engineer agent if this user can access it."""
+    result = await repo.list_agents(
+        org_id,
+        status="active",
+        limit=1000,
+        requester_user_id=str(user.id),
+        requester_role=role_value,
+    )
+    for agent in result.get("items", []):
+        if agent and agent.get("name") == "definition-engineer":
+            return agent
+    return None
+
+
 async def _resolve_owner_scope(
     form_data, user, pool
-) -> tuple[str | None, str | None]:
+) -> tuple[str | None, str | None, bool]:
     owner_scope = str(form_data.get("owner_scope", "me")).strip()
     if not owner_scope or owner_scope == "me":
-        return str(user.id), None
+        return str(user.id), None, False
+    if owner_scope == "org":
+        _require_admin_or_owner(user)
+        return None, None, True
     if owner_scope.startswith("group:"):
         group_id = owner_scope.replace("group:", "", 1).strip()
         user_groups = await _get_user_groups(pool, str(user.id), str(user.organization_id))
         allowed_group_ids = {str(group["id"]) for group in user_groups}
         if group_id not in allowed_group_ids:
             raise HTTPException(status_code=403, detail="Permission denied")
-        return None, group_id
-    return str(user.id), None
+        return None, group_id, False
+    return str(user.id), None, False
 
 
 def _require_admin_or_owner(user) -> None:
@@ -98,6 +130,72 @@ def _require_admin(user: object) -> None:
         raise HTTPException(status_code=403, detail="Permission denied")
 
 
+def _parse_json_object(value: str, default: dict | None = None) -> dict:
+    """Parse a form JSON object, returning default on empty/invalid input."""
+    if default is None:
+        default = {}
+    raw = (value or "").strip()
+    if not raw:
+        return default
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return default
+    return parsed if isinstance(parsed, dict) else default
+
+
+def _parse_lines_or_json_array(value: str) -> list[str]:
+    """Parse a textarea as JSON array or newline-separated strings."""
+    raw = (value or "").strip()
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            return [str(item).strip() for item in parsed if str(item).strip()]
+    except json.JSONDecodeError:
+        pass
+    return [line.strip() for line in raw.splitlines() if line.strip()]
+
+
+def _json_text(value, default) -> str:
+    """Render a JSON-ish value as pretty text for edit forms."""
+    if value in (None, ""):
+        value = default
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return value
+    return json.dumps(value, indent=2) if isinstance(value, (dict, list)) else str(value)
+
+
+def _args_text(value) -> str:
+    if value in (None, ""):
+        return ""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return value
+    if isinstance(value, list):
+        return "\n".join(str(item) for item in value)
+    return str(value)
+
+
+def _env_vars_text(value) -> str:
+    if value in (None, ""):
+        return ""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return value
+    if isinstance(value, dict):
+        return "\n".join(f"{key}={val}" for key, val in value.items())
+    return str(value)
+
+
 # =============================================================================
 # Definitions Management
 # =============================================================================
@@ -106,7 +204,7 @@ def _require_admin(user: object) -> None:
 @router.get("/definitions", response_class=HTMLResponse)
 async def definitions_page(
     request: Request,
-    tab: str = "agents",
+    tab: str = "composer",
     page: int = 1,
     per_page: int = 25,
 ):
@@ -119,6 +217,10 @@ async def definitions_page(
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     org_id = str(user.organization_id)
     role_value = user.role if isinstance(user.role, str) else user.role.value
+    if tab in {"agent-composer", "agent_composer", "wizard", "agent-wizard", "agent_wizard"}:
+        tab = "composer"
+    if tab in {"mcp", "mcp-servers", "mcp_servers"}:
+        tab = "tools"
 
     page = max(1, page)
     per_page = per_page if per_page in ALLOWED_PER_PAGE else 25
@@ -141,25 +243,57 @@ async def definitions_page(
     )
     mcp_result = await repo.list_mcp_servers(
         org_id,
-        limit=per_page if tab == "mcp" else 1000,
-        offset=offset if tab == "mcp" else 0,
+        limit=1000,
+        offset=0,
         requester_user_id=str(user.id),
         requester_role=role_value,
     )
-    all_items = [*agents_result["items"], *skills_result["items"], *mcp_result["items"]]
+    hooks_result = await repo.list_hooks(
+        org_id,
+        limit=per_page if tab == "hooks" else 1000,
+        offset=offset if tab == "hooks" else 0,
+        requester_user_id=str(user.id),
+        requester_role=role_value,
+    )
+    tools_result = await repo.list_managed_tools(
+        org_id,
+        limit=1000,
+        offset=0,
+        requester_user_id=str(user.id),
+        requester_role=role_value,
+    )
+    proposals = await repo.get_pending_proposals(org_id)
+    definition_engineer_agent = await _find_agent_composer_agent(
+        repo, org_id, user, role_value,
+    )
+    all_items = [
+        *agents_result["items"],
+        *skills_result["items"],
+        *mcp_result["items"],
+        *hooks_result["items"],
+        *tools_result["items"],
+    ]
     user_map, group_map = await _resolve_owner_maps(pool, all_items)
     user_groups = await _get_user_groups(pool, str(user.id), org_id)
     agents = _attach_owner_names(agents_result["items"], user_map, group_map)
     skills = _attach_owner_names(skills_result["items"], user_map, group_map)
     mcp_servers = _attach_owner_names(mcp_result["items"], user_map, group_map)
+    hooks = _attach_owner_names(hooks_result["items"], user_map, group_map)
+    managed_tools = _attach_owner_names(tools_result["items"], user_map, group_map)
 
     # Determine total_count and total_pages based on active tab
-    if tab == "agents":
+    if tab == "composer":
+        total_count = 0
+    elif tab == "agents":
         total_count = agents_result["total_count"]
     elif tab == "skills":
         total_count = skills_result["total_count"]
-    elif tab == "mcp":
-        total_count = mcp_result["total_count"]
+    elif tab == "hooks":
+        total_count = hooks_result["total_count"]
+    elif tab == "tools":
+        total_count = tools_result["total_count"] + mcp_result["total_count"]
+    elif tab == "proposals":
+        total_count = proposals["total"]
     else:
         total_count = 0
 
@@ -174,10 +308,16 @@ async def definitions_page(
             "agents": agents,
             "skills": skills,
             "mcp_servers": mcp_servers,
+            "hooks": hooks,
+            "managed_tools": managed_tools,
+            "proposals": proposals,
+            "definition_engineer_agent": definition_engineer_agent,
             "owner_groups": user_groups,
             "agents_total": agents_result["total_count"],
             "skills_total": skills_result["total_count"],
             "mcp_total": mcp_result["total_count"],
+            "hooks_total": hooks_result["total_count"],
+            "tools_total": tools_result["total_count"],
             "tab": tab,
             "page": page,
             "per_page": per_page,
@@ -209,7 +349,7 @@ async def agent_detail_page(request: Request, agent_id: str):
     agent = _attach_owner_names([agent], user_map, group_map)[0]
     user_groups = await _get_user_groups(pool, str(user.id), org_id)
 
-    # Get all skills and MCP servers for the assignment dropdowns
+    # Get all skills, tools, hooks, and providers for the assignment dropdowns
     all_skills = (
         await repo.list_skills(
             org_id,
@@ -226,12 +366,32 @@ async def agent_detail_page(request: Request, agent_id: str):
             requester_role=role_value,
         )
     )["items"]
+    all_hooks = (
+        await repo.list_hooks(
+            org_id,
+            status="active",
+            requester_user_id=str(user.id),
+            requester_role=role_value,
+        )
+    )["items"]
+    all_tools = (
+        await repo.list_managed_tools(
+            org_id,
+            status="active",
+            requester_user_id=str(user.id),
+            requester_role=role_value,
+        )
+    )["items"]
     assigned_skills = await repo.get_agent_skills(agent_id)
     assigned_mcp = await repo.get_agent_mcp_servers(agent_id)
+    assigned_hooks = await repo.get_agent_hooks(agent_id)
+    assigned_tools = await repo.get_agent_managed_tools(agent_id)
 
     # Get assigned skill/mcp IDs for easier template logic
     assigned_skill_ids = {str(s["id"]) for s in assigned_skills}
     assigned_mcp_ids = {str(s["id"]) for s in assigned_mcp}
+    assigned_hook_ids = {str(h["id"]) for h in assigned_hooks}
+    assigned_tool_ids = {str(t["id"]) for t in assigned_tools}
 
     return templates.TemplateResponse(
         request,
@@ -243,10 +403,16 @@ async def agent_detail_page(request: Request, agent_id: str):
             "owner_groups": user_groups,
             "all_skills": all_skills,
             "all_mcp": all_mcp,
+            "all_hooks": all_hooks,
+            "all_tools": all_tools,
             "skills": assigned_skills,
             "mcp_servers": assigned_mcp,
+            "hooks": assigned_hooks,
+            "managed_tools": assigned_tools,
             "granted_skill_ids": assigned_skill_ids,
             "granted_mcp_ids": assigned_mcp_ids,
+            "granted_hook_ids": assigned_hook_ids,
+            "granted_tool_ids": assigned_tool_ids,
             "csrf_token": request.cookies.get(CSRF_COOKIE_NAME, ""),
         },
     )
@@ -305,6 +471,9 @@ async def mcp_server_detail_page(request: Request, server_id: str):
         raise HTTPException(status_code=404, detail="MCP server not found")
     user_map, group_map = await _resolve_owner_maps(pool, [server])
     server = _attach_owner_names([server], user_map, group_map)[0]
+    server["args_text"] = _args_text(server.get("args"))
+    server["headers_text"] = _json_text(server.get("headers"), {})
+    server["env_vars_text"] = _env_vars_text(server.get("env_vars"))
     user_groups = await _get_user_groups(pool, str(user.id), org_id)
 
     return templates.TemplateResponse(
@@ -314,6 +483,82 @@ async def mcp_server_detail_page(request: Request, server_id: str):
             "user": user,
             "definition": server,
             "definition_type": "mcp-server",
+            "owner_groups": user_groups,
+            "csrf_token": request.cookies.get(CSRF_COOKIE_NAME, ""),
+        },
+    )
+
+
+@router.get("/definitions/hooks/{hook_id}", response_class=HTMLResponse)
+async def hook_detail_page(request: Request, hook_id: str):
+    """Hook definition detail page."""
+    user = await get_user_context(request)
+    pool = await get_pool()
+    from lucent.db.audit import AuditRepository
+    from lucent.db.definitions import DefinitionRepository
+
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    org_id = str(user.organization_id)
+
+    role_value = user.role if isinstance(user.role, str) else user.role.value
+    hook = await repo.get_hook(
+        hook_id, org_id, requester_user_id=str(user.id), requester_role=role_value
+    )
+    if not hook:
+        raise HTTPException(status_code=404, detail="Hook not found")
+    user_map, group_map = await _resolve_owner_maps(pool, [hook])
+    hook = _attach_owner_names([hook], user_map, group_map)[0]
+    user_groups = await _get_user_groups(pool, str(user.id), org_id)
+
+    return templates.TemplateResponse(
+        request,
+        "definition_detail.html",
+        {
+            "user": user,
+            "definition": hook,
+            "definition_type": "hook",
+            "owner_groups": user_groups,
+            "csrf_token": request.cookies.get(CSRF_COOKIE_NAME, ""),
+        },
+    )
+
+
+@router.get("/definitions/tools/{tool_id}", response_class=HTMLResponse)
+async def managed_tool_detail_page(request: Request, tool_id: str):
+    """Managed tool definition detail page."""
+    user = await get_user_context(request)
+    pool = await get_pool()
+    from lucent.db.audit import AuditRepository
+    from lucent.db.definitions import DefinitionRepository
+
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    org_id = str(user.organization_id)
+    role_value = user.role if isinstance(user.role, str) else user.role.value
+    tool = await repo.get_managed_tool(
+        tool_id, org_id, requester_user_id=str(user.id), requester_role=role_value
+    )
+    if not tool:
+        raise HTTPException(status_code=404, detail="Managed tool not found")
+    user_map, group_map = await _resolve_owner_maps(pool, [tool])
+    tool = _attach_owner_names([tool], user_map, group_map)[0]
+    tool["input_schema_text"] = _json_text(tool.get("input_schema"), {})
+    tool["output_schema_text"] = _json_text(tool.get("output_schema"), {})
+    tool["requirements_text"] = _args_text(tool.get("requirements"))
+    tool["runtime_config_text"] = _json_text(tool.get("runtime_config"), {})
+    tool["env_vars_text"] = _env_vars_text(tool.get("env_vars"))
+    tool["auth_policy_text"] = _json_text(tool.get("auth_policy"), {})
+    tool["network_policy_text"] = _json_text(tool.get("network_policy"), {})
+    tool["resource_limits_text"] = _json_text(tool.get("resource_limits"), {})
+    tool["content"] = tool.get("source_code") or ""
+    user_groups = await _get_user_groups(pool, str(user.id), org_id)
+
+    return templates.TemplateResponse(
+        request,
+        "definition_detail.html",
+        {
+            "user": user,
+            "definition": tool,
+            "definition_type": "tool",
             "owner_groups": user_groups,
             "csrf_token": request.cookies.get(CSRF_COOKIE_NAME, ""),
         },
@@ -341,7 +586,15 @@ async def discover_tools_ajax(request: Request, server_id: str, refresh: bool = 
         server_id, org_id, requester_user_id=str(user.id), requester_role=role_value
     )
     if not server:
-        return JSONResponse({"tools": [], "from_cache": False, "discovered_at": None, "error": "MCP server not found"}, status_code=404)
+        return JSONResponse(
+            {
+                "tools": [],
+                "from_cache": False,
+                "discovered_at": None,
+                "error": "MCP server not found",
+            },
+            status_code=404,
+        )
 
     try:
         if refresh:
@@ -459,6 +712,66 @@ async def reject_mcp_web(request: Request, server_id: str):
     return RedirectResponse(url=f"/definitions/mcp-servers/{server_id}", status_code=303)
 
 
+@router.post("/definitions/hooks/{hook_id}/approve")
+async def approve_hook_web(request: Request, hook_id: str):
+    """Approve a hook definition."""
+    user = await get_user_context(request)
+    _require_admin_or_owner(user)
+    await _check_csrf(request)
+    pool = await get_pool()
+    from lucent.db.audit import AuditRepository
+    from lucent.db.definitions import DefinitionRepository
+
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    await repo.approve_hook(hook_id, str(user.organization_id), str(user.id))
+    return RedirectResponse(url=f"/definitions/hooks/{hook_id}", status_code=303)
+
+
+@router.post("/definitions/hooks/{hook_id}/reject")
+async def reject_hook_web(request: Request, hook_id: str):
+    """Reject a hook definition."""
+    user = await get_user_context(request)
+    _require_admin_or_owner(user)
+    await _check_csrf(request)
+    pool = await get_pool()
+    from lucent.db.audit import AuditRepository
+    from lucent.db.definitions import DefinitionRepository
+
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    await repo.reject_hook(hook_id, str(user.organization_id), str(user.id))
+    return RedirectResponse(url=f"/definitions/hooks/{hook_id}", status_code=303)
+
+
+@router.post("/definitions/tools/{tool_id}/approve")
+async def approve_managed_tool_web(request: Request, tool_id: str):
+    """Approve a managed tool definition."""
+    user = await get_user_context(request)
+    _require_admin_or_owner(user)
+    await _check_csrf(request)
+    pool = await get_pool()
+    from lucent.db.audit import AuditRepository
+    from lucent.db.definitions import DefinitionRepository
+
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    await repo.approve_managed_tool(tool_id, str(user.organization_id), str(user.id))
+    return RedirectResponse(url=f"/definitions/tools/{tool_id}", status_code=303)
+
+
+@router.post("/definitions/tools/{tool_id}/reject")
+async def reject_managed_tool_web(request: Request, tool_id: str):
+    """Reject a managed tool definition."""
+    user = await get_user_context(request)
+    _require_admin_or_owner(user)
+    await _check_csrf(request)
+    pool = await get_pool()
+    from lucent.db.audit import AuditRepository
+    from lucent.db.definitions import DefinitionRepository
+
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    await repo.reject_managed_tool(tool_id, str(user.organization_id), str(user.id))
+    return RedirectResponse(url=f"/definitions/tools/{tool_id}", status_code=303)
+
+
 @router.post("/definitions/agents/create")
 async def create_agent_web(request: Request):
     """Create a new agent definition."""
@@ -472,7 +785,9 @@ async def create_agent_web(request: Request):
 
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     org_id = str(user.organization_id)
-    owner_user_id, owner_group_id = await _resolve_owner_scope(form, user, pool)
+    owner_user_id, owner_group_id, shared_with_org = await _resolve_owner_scope(
+        form, user, pool
+    )
 
     agent = await repo.create_agent(
         name=str(form.get("name", "")).strip(),
@@ -482,6 +797,8 @@ async def create_agent_web(request: Request):
         created_by=str(user.id),
         owner_user_id=owner_user_id,
         owner_group_id=owner_group_id,
+        shared_with_org=shared_with_org,
+        proposal_evidence=_agent_kind_evidence(form.get("agent_kind"), "web_form"),
     )
     return RedirectResponse(url=f"/definitions/agents/{agent['id']}", status_code=303)
 
@@ -501,7 +818,9 @@ async def update_agent_web(request: Request, agent_id: str):
     org_id = str(user.organization_id)
     owner_kwargs = {}
     if "owner_scope" in form:
-        owner_user_id, owner_group_id = await _resolve_owner_scope(form, user, pool)
+        owner_user_id, owner_group_id, _shared_with_org = await _resolve_owner_scope(
+            form, user, pool
+        )
         owner_kwargs = {"owner_user_id": owner_user_id, "owner_group_id": owner_group_id}
 
     await repo.update_agent(
@@ -543,7 +862,9 @@ async def create_skill_web(request: Request):
 
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     org_id = str(user.organization_id)
-    owner_user_id, owner_group_id = await _resolve_owner_scope(form, user, pool)
+    owner_user_id, owner_group_id, shared_with_org = await _resolve_owner_scope(
+        form, user, pool
+    )
 
     skill = await repo.create_skill(
         name=str(form.get("name", "")).strip(),
@@ -553,6 +874,7 @@ async def create_skill_web(request: Request):
         created_by=str(user.id),
         owner_user_id=owner_user_id,
         owner_group_id=owner_group_id,
+        shared_with_org=shared_with_org,
     )
     return RedirectResponse(url=f"/definitions/skills/{skill['id']}", status_code=303)
 
@@ -572,7 +894,9 @@ async def update_skill_web(request: Request, skill_id: str):
     org_id = str(user.organization_id)
     owner_kwargs = {}
     if "owner_scope" in form:
-        owner_user_id, owner_group_id = await _resolve_owner_scope(form, user, pool)
+        owner_user_id, owner_group_id, _shared_with_org = await _resolve_owner_scope(
+            form, user, pool
+        )
         owner_kwargs = {"owner_user_id": owner_user_id, "owner_group_id": owner_group_id}
 
     await repo.update_skill(
@@ -619,22 +943,118 @@ async def create_mcp_web(request: Request):
     args_raw = str(form.get("args", "")).strip()
     args = [a.strip() for a in args_raw.split("\n") if a.strip()] if args_raw else []
     env_vars = _parse_env_vars(str(form.get("env_vars", "")))
-    owner_user_id, owner_group_id = await _resolve_owner_scope(form, user, pool)
+    owner_user_id, owner_group_id, shared_with_org = await _resolve_owner_scope(
+        form, user, pool
+    )
+
+    server_type = str(form.get("server_type", "stdio")).strip() or "stdio"
+    url = str(form.get("url", "")).strip() or None
+    headers = _parse_json_object(str(form.get("headers", "")), {})
 
     server = await repo.create_mcp_server(
         name=str(form.get("name", "")).strip(),
         org_id=org_id,
         description=str(form.get("description", "")).strip(),
-        server_type="stdio",
-        url=None,
+        server_type=server_type,
+        url=url,
         created_by=str(user.id),
         command=command,
         args=args,
+        headers=headers,
         env_vars=env_vars,
         owner_user_id=owner_user_id,
         owner_group_id=owner_group_id,
+        shared_with_org=shared_with_org,
     )
     return RedirectResponse(url=f"/definitions/mcp-servers/{server['id']}", status_code=303)
+
+
+@router.post("/definitions/hooks/create")
+async def create_hook_web(request: Request):
+    """Create a new hook definition."""
+    user = await get_user_context(request)
+    _require_admin_or_owner(user)
+    await _check_csrf(request)
+    form = await request.form()
+    pool = await get_pool()
+    from lucent.db.audit import AuditRepository
+    from lucent.db.definitions import DefinitionRepository
+
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    org_id = str(user.organization_id)
+    owner_user_id, owner_group_id, shared_with_org = await _resolve_owner_scope(
+        form, user, pool
+    )
+
+    hook = await repo.create_hook(
+        name=str(form.get("name", "")).strip(),
+        org_id=org_id,
+        description=str(form.get("description", "")).strip(),
+        trigger_event=(
+            str(form.get("trigger_event", "before_tool_call")).strip()
+            or "before_tool_call"
+        ),
+        action_type=str(form.get("action_type", "static_context")).strip() or "static_context",
+        content=str(form.get("content", "")).strip(),
+        config=_parse_json_object(str(form.get("config", "")), {}),
+        created_by=str(user.id),
+        owner_user_id=owner_user_id,
+        owner_group_id=owner_group_id,
+        shared_with_org=shared_with_org,
+    )
+    return RedirectResponse(url=f"/definitions/hooks/{hook['id']}", status_code=303)
+
+
+@router.post("/definitions/tools/create")
+async def create_managed_tool_web(request: Request):
+    """Create a new managed tool definition."""
+    user = await get_user_context(request)
+    _require_admin_or_owner(user)
+    await _check_csrf(request)
+    form = await request.form()
+    pool = await get_pool()
+    from lucent.db.audit import AuditRepository
+    from lucent.db.definitions import DefinitionRepository
+
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    org_id = str(user.organization_id)
+    owner_user_id, owner_group_id, shared_with_org = await _resolve_owner_scope(
+        form, user, pool
+    )
+
+    tool = await repo.create_managed_tool(
+        name=str(form.get("name", "")).strip(),
+        org_id=org_id,
+        description=str(form.get("description", "")).strip(),
+        input_schema=_parse_json_object(
+            str(form.get("input_schema", "")), {"type": "object", "properties": {}}
+        ),
+        output_schema=_parse_json_object(str(form.get("output_schema", "")), {}) or None,
+        runtime_type="python",
+        source_code=str(form.get("source_code", "")).strip(),
+        entrypoint=str(form.get("entrypoint", "handler")).strip() or "handler",
+        requirements=_parse_lines_or_json_array(str(form.get("requirements", ""))),
+        runtime_config=_parse_json_object(str(form.get("runtime_config", "")), {}),
+        env_vars=_parse_env_vars(str(form.get("env_vars", ""))),
+        auth_policy=_parse_json_object(
+            str(form.get("auth_policy", "")),
+            {"mode": "agent_grant", "require_user_access": True},
+        ),
+        network_policy=_parse_json_object(
+            str(form.get("network_policy", "")),
+            {"network_mode": "none", "allowed_hosts": []},
+        ),
+        resource_limits=_parse_json_object(
+            str(form.get("resource_limits", "")),
+            {"memory_limit": "512m", "cpu_limit": 1.0, "disk_limit": "1g"},
+        ),
+        timeout_seconds=int(str(form.get("timeout_seconds", "300") or "300")),
+        created_by=str(user.id),
+        owner_user_id=owner_user_id,
+        owner_group_id=owner_group_id,
+        shared_with_org=shared_with_org,
+    )
+    return RedirectResponse(url=f"/definitions/tools/{tool['id']}", status_code=303)
 
 
 @router.post("/definitions/mcp-servers/{server_id}/update")
@@ -655,9 +1075,14 @@ async def update_mcp_web(request: Request, server_id: str):
     args_raw = str(form.get("args", "")).strip()
     args = [a.strip() for a in args_raw.split("\n") if a.strip()] if args_raw else []
     env_vars = _parse_env_vars(str(form.get("env_vars", "")))
+    headers = _parse_json_object(str(form.get("headers", "")), {})
+    server_type = str(form.get("server_type", "stdio")).strip() or "stdio"
+    url = str(form.get("url", "")).strip() or None
     owner_kwargs = {}
     if "owner_scope" in form:
-        owner_user_id, owner_group_id = await _resolve_owner_scope(form, user, pool)
+        owner_user_id, owner_group_id, _shared_with_org = await _resolve_owner_scope(
+            form, user, pool
+        )
         owner_kwargs = {"owner_user_id": owner_user_id, "owner_group_id": owner_group_id}
 
     await repo.update_mcp_server(
@@ -665,8 +1090,11 @@ async def update_mcp_web(request: Request, server_id: str):
         org_id,
         name=str(form.get("name", "")).strip(),
         description=str(form.get("description", "")).strip(),
+        server_type=server_type,
+        url=url,
         command=command,
         args=args,
+        headers=headers,
         env_vars=env_vars,
         **owner_kwargs,
     )
@@ -685,7 +1113,131 @@ async def delete_mcp_web(request: Request, server_id: str):
 
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     await repo.delete_mcp_server(server_id, str(user.organization_id))
-    return RedirectResponse(url="/definitions?tab=mcp", status_code=303)
+    return RedirectResponse(url="/definitions?tab=tools", status_code=303)
+
+
+@router.post("/definitions/hooks/{hook_id}/update")
+async def update_hook_web(request: Request, hook_id: str):
+    """Update a hook definition."""
+    user = await get_user_context(request)
+    _require_admin_or_owner(user)
+    await _check_csrf(request)
+    form = await request.form()
+    pool = await get_pool()
+    from lucent.db.audit import AuditRepository
+    from lucent.db.definitions import DefinitionRepository
+
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    org_id = str(user.organization_id)
+    owner_kwargs = {}
+    if "owner_scope" in form:
+        owner_user_id, owner_group_id, _shared_with_org = await _resolve_owner_scope(
+            form, user, pool
+        )
+        owner_kwargs = {"owner_user_id": owner_user_id, "owner_group_id": owner_group_id}
+
+    role_value = user.role if isinstance(user.role, str) else user.role.value
+    await repo.update_hook(
+        hook_id,
+        org_id,
+        requester_role=role_value,
+        name=str(form.get("name", "")).strip(),
+        description=str(form.get("description", "")).strip(),
+        trigger_event=(
+            str(form.get("trigger_event", "before_tool_call")).strip()
+            or "before_tool_call"
+        ),
+        action_type=str(form.get("action_type", "static_context")).strip() or "static_context",
+        content=str(form.get("content", "")).strip(),
+        config=_parse_json_object(str(form.get("config", "")), {}),
+        **owner_kwargs,
+    )
+    return RedirectResponse(url=f"/definitions/hooks/{hook_id}", status_code=303)
+
+
+@router.post("/definitions/tools/{tool_id}/update")
+async def update_managed_tool_web(request: Request, tool_id: str):
+    """Update a managed tool definition."""
+    user = await get_user_context(request)
+    _require_admin_or_owner(user)
+    await _check_csrf(request)
+    form = await request.form()
+    pool = await get_pool()
+    from lucent.db.audit import AuditRepository
+    from lucent.db.definitions import DefinitionRepository
+
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    org_id = str(user.organization_id)
+    owner_kwargs = {}
+    if "owner_scope" in form:
+        owner_user_id, owner_group_id, _shared_with_org = await _resolve_owner_scope(
+            form, user, pool
+        )
+        owner_kwargs = {"owner_user_id": owner_user_id, "owner_group_id": owner_group_id}
+    role_value = user.role if isinstance(user.role, str) else user.role.value
+
+    await repo.update_managed_tool(
+        tool_id,
+        org_id,
+        requester_role=role_value,
+        name=str(form.get("name", "")).strip(),
+        description=str(form.get("description", "")).strip(),
+        input_schema=_parse_json_object(
+            str(form.get("input_schema", "")), {"type": "object", "properties": {}}
+        ),
+        output_schema=_parse_json_object(str(form.get("output_schema", "")), {}) or None,
+        runtime_type="python",
+        source_code=str(form.get("source_code", "")).strip(),
+        entrypoint=str(form.get("entrypoint", "handler")).strip() or "handler",
+        requirements=_parse_lines_or_json_array(str(form.get("requirements", ""))),
+        runtime_config=_parse_json_object(str(form.get("runtime_config", "")), {}),
+        env_vars=_parse_env_vars(str(form.get("env_vars", ""))),
+        auth_policy=_parse_json_object(
+            str(form.get("auth_policy", "")),
+            {"mode": "agent_grant", "require_user_access": True},
+        ),
+        network_policy=_parse_json_object(
+            str(form.get("network_policy", "")),
+            {"network_mode": "none", "allowed_hosts": []},
+        ),
+        resource_limits=_parse_json_object(
+            str(form.get("resource_limits", "")),
+            {"memory_limit": "512m", "cpu_limit": 1.0, "disk_limit": "1g"},
+        ),
+        timeout_seconds=int(str(form.get("timeout_seconds", "300") or "300")),
+        **owner_kwargs,
+    )
+    return RedirectResponse(url=f"/definitions/tools/{tool_id}", status_code=303)
+
+
+@router.post("/definitions/hooks/{hook_id}/delete")
+async def delete_hook_web(request: Request, hook_id: str):
+    """Delete a hook definition."""
+    user = await get_user_context(request)
+    _require_admin_or_owner(user)
+    await _check_csrf(request)
+    pool = await get_pool()
+    from lucent.db.audit import AuditRepository
+    from lucent.db.definitions import DefinitionRepository
+
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    await repo.delete_hook(hook_id, str(user.organization_id))
+    return RedirectResponse(url="/definitions?tab=hooks", status_code=303)
+
+
+@router.post("/definitions/tools/{tool_id}/delete")
+async def delete_managed_tool_web(request: Request, tool_id: str):
+    """Delete a managed tool definition."""
+    user = await get_user_context(request)
+    _require_admin_or_owner(user)
+    await _check_csrf(request)
+    pool = await get_pool()
+    from lucent.db.audit import AuditRepository
+    from lucent.db.definitions import DefinitionRepository
+
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    await repo.delete_managed_tool(tool_id, str(user.organization_id))
+    return RedirectResponse(url="/definitions?tab=tools", status_code=303)
 
 
 @router.post("/definitions/agents/{agent_id}/grant-skill")
@@ -765,6 +1317,84 @@ async def revoke_mcp_web(request: Request, agent_id: str, server_id: str):
     return RedirectResponse(url=f"/definitions/agents/{agent_id}", status_code=303)
 
 
+@router.post("/definitions/agents/{agent_id}/grant-hook")
+async def grant_hook_web(request: Request, agent_id: str):
+    """Grant a hook to an agent."""
+    user = await get_user_context(request)
+    _require_admin_or_owner(user)
+    await _check_csrf(request)
+    form = await request.form()
+    pool = await get_pool()
+    from lucent.db.audit import AuditRepository
+    from lucent.db.definitions import DefinitionRepository
+
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    hook_id = str(form.get("hook_id", ""))
+    if hook_id:
+        await repo.grant_hook(
+            agent_id, hook_id,
+            org_id=str(user.organization_id), user_id=str(user.id),
+        )
+    return RedirectResponse(url=f"/definitions/agents/{agent_id}", status_code=303)
+
+
+@router.post("/definitions/agents/{agent_id}/grant-tool")
+async def grant_managed_tool_web(request: Request, agent_id: str):
+    """Grant a managed tool to an agent."""
+    user = await get_user_context(request)
+    _require_admin_or_owner(user)
+    await _check_csrf(request)
+    form = await request.form()
+    pool = await get_pool()
+    from lucent.db.audit import AuditRepository
+    from lucent.db.definitions import DefinitionRepository
+
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    tool_id = str(form.get("tool_id", ""))
+    if tool_id:
+        await repo.grant_managed_tool(
+            agent_id, tool_id,
+            org_id=str(user.organization_id), user_id=str(user.id),
+        )
+    return RedirectResponse(url=f"/definitions/agents/{agent_id}", status_code=303)
+
+
+@router.post("/definitions/agents/{agent_id}/revoke-hook/{hook_id}")
+async def revoke_hook_web(request: Request, agent_id: str, hook_id: str):
+    """Revoke a hook from an agent."""
+    user = await get_user_context(request)
+    _require_admin_or_owner(user)
+    await _check_csrf(request)
+    pool = await get_pool()
+    from lucent.db.audit import AuditRepository
+    from lucent.db.definitions import DefinitionRepository
+
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    await repo.revoke_hook(
+        agent_id, hook_id,
+        org_id=str(user.organization_id), user_id=str(user.id),
+    )
+    return RedirectResponse(url=f"/definitions/agents/{agent_id}", status_code=303)
+
+
+@router.post("/definitions/agents/{agent_id}/revoke-tool/{tool_id}")
+async def revoke_managed_tool_web(request: Request, agent_id: str, tool_id: str):
+    """Revoke a managed tool from an agent."""
+    user = await get_user_context(request)
+    _require_admin_or_owner(user)
+    await _check_csrf(request)
+    pool = await get_pool()
+    from lucent.db.audit import AuditRepository
+    from lucent.db.definitions import DefinitionRepository
+
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    await repo.revoke_managed_tool(
+        agent_id, tool_id,
+        org_id=str(user.organization_id), user_id=str(user.id),
+    )
+    return RedirectResponse(url=f"/definitions/agents/{agent_id}", status_code=303)
+
+
 @router.post("/definitions/agents/{agent_id}/mcp-tools/{server_id}")
 async def update_mcp_tools_web(request: Request, agent_id: str, server_id: str):
     """Update allowed tools for an agent's MCP server assignment."""
@@ -793,7 +1423,7 @@ async def update_mcp_tools_web(request: Request, agent_id: str, server_id: str):
 @router.post("/definitions/import/preview")
 async def import_preview_web(request: Request):
     """Preview an import — session-authenticated endpoint for the web UI."""
-    user = await get_user_context(request)
+    await get_user_context(request)
     body = await request.json()
 
     from lucent.services.definition_import import ImportSourceType, import_definition
@@ -860,7 +1490,10 @@ async def import_commit_web(request: Request):
         )
 
     if not created:
-        return JSONResponse({"status": "error", "error": "Failed to create definition"}, status_code=500)
+        return JSONResponse(
+            {"status": "error", "error": "Failed to create definition"},
+            status_code=500,
+        )
 
     return JSONResponse({
         "status": "imported",

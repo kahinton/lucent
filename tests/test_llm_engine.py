@@ -83,6 +83,110 @@ class TestCopilotEngine:
         engine = CopilotEngine()
         await engine.cleanup()  # Should not raise
 
+    def test_enable_config_discovery_session_kwarg(self):
+        from lucent.llm.copilot_engine import CopilotEngine
+
+        engine = CopilotEngine()
+        kwargs = engine._make_session_kwargs(
+            "claude-opus-4.7",
+            "system",
+            {},
+            enable_config_discovery=True,
+        )
+
+        assert kwargs["enable_config_discovery"] is True
+
+    def test_mutable_mcp_permission_uses_legacy_compat(self):
+        from lucent.llm.copilot_engine import _should_use_legacy_permission_response
+
+        class Request:
+            kind = "mcp"
+            read_only = False
+
+        class Result:
+            kind = "approved"
+
+        assert _should_use_legacy_permission_response(Request(), Result()) is True
+
+    def test_read_only_mcp_permission_uses_legacy_compat(self):
+        from lucent.llm.copilot_engine import _should_use_legacy_permission_response
+
+        class Request:
+            kind = "mcp"
+            read_only = True
+
+        class Result:
+            kind = "approved"
+
+        assert _should_use_legacy_permission_response(Request(), Result()) is True
+
+    def test_bash_permission_uses_legacy_compat(self):
+        from lucent.llm.copilot_engine import _should_use_legacy_permission_response
+
+        class Request:
+            kind = "tool"
+            tool_name = "bash"
+
+        class Result:
+            kind = "approved"
+
+        assert _should_use_legacy_permission_response(Request(), Result()) is True
+
+    @pytest.mark.asyncio
+    async def test_legacy_mcp_permission_payload_shape(self):
+        from lucent.llm.copilot_engine import _send_legacy_permission_response
+
+        calls = []
+
+        class Client:
+            async def request(self, method, payload):
+                calls.append((method, payload))
+                return {"success": True}
+
+        class Permissions:
+            _client = Client()
+
+        class Rpc:
+            permissions = Permissions()
+
+        class Session:
+            session_id = "session-123"
+            rpc = Rpc()
+
+        class Result:
+            kind = "approved"
+            feedback = None
+            message = None
+            path = None
+
+        await _send_legacy_permission_response(Session(), "perm-123", Result())
+
+        assert calls == [
+            (
+                "session.permissions.handlePendingPermissionRequest",
+                {
+                    "requestId": "perm-123",
+                    "result": {"kind": "approve-once"},
+                    "sessionId": "session-123",
+                },
+            )
+        ]
+
+    def test_copilot_compaction_token_payload_compat(self):
+        pytest.importorskip("copilot.generated.session_events")
+        from copilot.generated.session_events import CompactionTokensUsed
+
+        from lucent.llm import copilot_engine
+
+        copilot_engine._session_event_compat_installed = False
+        copilot_engine._install_copilot_session_event_compat()
+
+        parsed = CompactionTokensUsed.from_dict({"inputTokens": "42", "outputTokens": 7})
+
+        assert parsed.cached_input == 0.0
+        assert parsed.input == 42.0
+        assert parsed.output == 7.0
+
 
 class TestLangChainEngine:
     def test_name(self):
@@ -351,6 +455,30 @@ class TestModelRegistry:
         )
 
         assert selection.model_id == "deep-reasoner"
+        assert selection.source == "specialized"
+
+    def test_planning_selection_can_override_fast_default_for_complex_work(self, monkeypatch):
+        from lucent import model_registry
+        from lucent.model_registry import ModelInfo, select_model_for_task
+
+        models = [
+            ModelInfo(id="deep-reasoner", provider="x", name="Deep", category="reasoning"),
+            ModelInfo(id="cheap-fast", provider="x", name="Cheap", category="fast"),
+        ]
+        monkeypatch.setattr(model_registry, "_db_models", models)
+        monkeypatch.setattr(model_registry, "_db_enabled_ids", {m.id for m in models})
+        monkeypatch.setattr(model_registry, "_MODEL_BY_ID", {m.id: m for m in models})
+
+        selection = select_model_for_task(
+            agent_type="planning",
+            title="Build proof-of-concept business planning repo",
+            description="Create a multi-step strategy, synthesis, roadmap, and risk plan.",
+            require_tools=True,
+        )
+
+        assert selection.default_model_id == "cheap-fast"
+        assert selection.model_id == "deep-reasoner"
+        assert selection.requested_category == "reasoning"
         assert selection.source == "specialized"
 
     def test_task_selection_uses_fast_for_memory_when_available(self, monkeypatch):

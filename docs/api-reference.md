@@ -542,6 +542,33 @@ POST /api/requests/tasks/{task_id}/model
 
 **Complete** — Body: `{"result": "...", "result_structured": {...}}`. Marks as done.
 
+Completion may also include `outputs`, a list of user-facing deliverables:
+
+```json
+{
+  "result": "Opened a pull request and sent a summary email.",
+  "outputs": [
+    {
+      "title": "Implementation PR",
+      "url": "https://github.com/kahinton/lucent/pull/123",
+      "is_primary": true
+    },
+    {
+      "output_type": "email",
+      "provider": "gmail",
+      "title": "Summary email",
+      "external_id": "message-id-abc123"
+    }
+  ]
+}
+```
+
+Structured results can also expose `outputs` or `artifacts` arrays; validated
+task completion extracts those into the same artifact table. As a reliability
+backstop, Lucent also auto-extracts openable URLs from the plain text `result`
+and records them as outputs when the agent forgot to provide structured
+artifacts. Explicit outputs win when the same URL appears in both places.
+
 **Fail** — Body: `{"error": "..."}`. Marks as failed.
 
 **Release** — Releases a claimed task back to pending.
@@ -569,6 +596,32 @@ GET /api/requests/tasks/{task_id}/events
 
 Events are appended to the task timeline and visible on the Activity page.
 
+### Task Outputs
+
+```
+POST /api/requests/tasks/{task_id}/outputs
+```
+
+Records a deliverable after or during task execution. These outputs are shown
+prominently on the request detail page and grouped back to the producing task.
+Request review tasks verify that deliverables mentioned in task results are
+listed here; reviewers can call `record_task_output` for missing artifacts when
+they have enough information, or request rework when they do not.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `title` | string | yes | Human-readable label |
+| `output_type` | string | no | `link`, `github_issue`, `github_pr`, `email`, `document`, `file`, `memory`, `deployment`, `artifact`, `other` |
+| `provider` | string | no | Integration/source name such as `github`, `gmail`, `google_docs` |
+| `url` | string | no | Openable URL; GitHub issue/PR and document URLs are auto-classified |
+| `external_id` | string | no | Provider-native ID when there is no URL, or as additional identity |
+| `description` | string | no | Short explanation |
+| `mime_type` | string | no | MIME type for file/document artifacts |
+| `metadata` | object | no | Integration-specific metadata |
+| `is_primary` | boolean | no | Marks the output as a primary request deliverable |
+
+At least one of `url`, `external_id`, or `output_type: "other"` is required.
+
 ### Task Memory Links
 
 ```
@@ -580,113 +633,156 @@ Link memories to tasks for lineage tracking. POST body: `{"memory_id": "uuid", "
 
 ---
 
-## Schedules
+## Workflows and Schedules
 
-Base path: `/api/schedules`
+Base paths:
 
-### Create Schedule
+- New workflow API: `/api/workflows`
+- Compatibility schedule API: `/api/schedules`
+
+Workflows are stored in the existing `schedules` table so critical built-in
+daemon schedules keep their IDs, run history, and scheduler behavior. A
+workflow adds `trigger_type`, `request_template`, ordered `actions`, and
+`review_instructions` on top of the legacy schedule fields.
+
+### Create Workflow
 
 ```
-POST /api/schedules
+POST /api/workflows
 ```
 
 ```json
 {
-  "title": "Daily weather check",
-  "description": "Fetch weather and recommend outfit",
+  "title": "Weekly dependency review",
+  "description": "Scan project dependencies and report actionable updates",
+  "trigger_type": "schedule",
   "schedule_type": "cron",
-  "cron_expression": "30 5 * * *",
+  "cron_expression": "0 9 * * 1",
   "timezone": "US/Eastern",
-  "agent_type": "weather-advisor",
-  "priority": "low",
-  "description": "Fetch weather for West Bloomfield, MI and recommend outfit",
-  "sandbox_template_id": "uuid-of-template"
+  "priority": "medium",
+  "request_template": {
+    "title_prefix": "[Scheduled]",
+    "title": "{workflow_title}",
+    "description": "Run {workflow_title} and record durable outputs.",
+    "dependency_policy": "strict"
+  },
+  "actions": [
+    {
+      "action_type": "task",
+      "title": "Audit dependency changes",
+      "description": "Check outdated packages and create a concise report.",
+      "agent_type": "code",
+      "sequence_order": 0
+    }
+  ],
+  "review_instructions": "Do not approve unless the report is recorded as a task output."
 }
 ```
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `title` | string | yes | Schedule name |
-| `schedule_type` | string | yes | `once`, `interval`, or `cron` |
+| `title` | string | yes | Workflow name |
+| `trigger_type` | string | no | `schedule`, `manual`, `webhook`, or `integration_event` |
+| `schedule_type` | string | schedule only | `once`, `interval`, or `cron` for time-based workflows |
 | `cron_expression` | string | cron only | 5-field cron (min hour dom month dow) |
 | `interval_seconds` | int | interval only | Repeat interval (minimum 60) |
 | `timezone` | string | no | IANA timezone (default: `UTC`) |
-| `agent_type` | string | no | Agent for task dispatch |
-| `model` | string | no | LLM model override |
-| `sandbox_template_id` | UUID | no | Sandbox template for each run |
-| `sandbox_config` | object | no | Inline sandbox config (template takes precedence) |
-| `task_template` | object | no | Reusable task template |
+| `request_template` | object | no | Request title/description/dependency template per run |
+| `actions` | array | no | Ordered task action templates. Empty creates one legacy-style task. |
+| `review_instructions` | string | no | Reviewer checklist appended to generated request descriptions |
+| `webhook_secret` | string | webhook only | Shared secret; Lucent stores only its hash |
 | `priority` | string | no | `low`, `medium`, `high`, `urgent` |
-| `max_runs` | int | no | Stop after N runs (≥ 1) |
-| `expires_at` | datetime | no | Schedule expiration time |
+| `max_runs` | int | schedule only | Stop after N scheduled runs (≥ 1) |
+| `expires_at` | datetime | schedule only | Schedule expiration time |
 
-### List Schedules
+Task action objects support `agent_type`, `agent_definition_id`, `model`,
+`reasoning_effort`, `sandbox_template_id`, `sandbox_config`,
+`output_contract`, and the compatibility alias `output_schema`.
 
-```
-GET /api/schedules?status=active&enabled=true
-```
+Built-in maintenance workflows may use `action_type: "server_function"` instead
+of `action_type: "task"`. These run inside Lucent itself, do not dispatch an
+agent, and record their result directly on `schedule_runs.result` without
+creating a request.
 
-### Schedule Summary
-
-```
-GET /api/schedules/summary
-```
-
-Returns aggregate stats for schedules (counts by status).
-
-### Get Due Schedules
+### Webhook Workflow
 
 ```
-GET /api/schedules/due
+POST /api/workflows/{workflow_id}/webhook
 ```
 
-Returns schedules where `next_run_at <= now()` and `status = 'active'` and `enabled = true`.
+Webhook workflow calls are unauthenticated by API key/session. The workflow's
+shared secret is the authentication mechanism. Send it in one of these places:
 
-### Get Schedule Details
+- `X-Lucent-Workflow-Token: <secret>`
+- `Authorization: Bearer <secret>`
+- `?token=<secret>`
 
-```
-GET /api/schedules/{schedule_id}
-```
+Example:
 
-Returns the schedule with its run history.
-
-### Update Schedule
-
-```
-PUT /api/schedules/{schedule_id}
-```
-
-All fields from Create Schedule are accepted (all optional). Only provided fields are updated.
-
-### Toggle Schedule
-
-```
-POST /api/schedules/{schedule_id}/toggle
+```bash
+curl -X POST \
+  -H 'Content-Type: application/json' \
+  -H 'X-Lucent-Workflow-Token: your-secret' \
+  -H 'X-Event-Type: issue.opened' \
+  -d '{"number": 123, "action": "opened"}' \
+  https://your-lucent-host/api/workflows/{workflow_id}/webhook
 ```
 
-Body: `{"enabled": true}` or `{"enabled": false}`.
+The payload and non-sensitive headers are appended to the generated request and
+task descriptions as trigger context. Webhook workflows are not returned by the
+daemon's due-schedule polling endpoint.
 
-### Trigger Schedule
+### Workflow List, Summary, Details, and Trigger
 
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/workflows?status=active&enabled=true&trigger_type=webhook` | List workflows |
+| `GET` | `/api/workflows/summary` | Aggregate workflow counts by status and trigger type |
+| `GET` | `/api/workflows/{workflow_id}` | Workflow detail with run history |
+| `POST` | `/api/workflows/{workflow_id}/trigger?force=true` | Manual run; records a run without advancing time schedule state |
+
+### Compatibility Schedule API
+
+The legacy `/api/schedules` endpoints remain available for built-ins and older
+clients. They now create/read the same workflow-capable rows.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/schedules` | Create a legacy schedule or workflow-capable schedule row |
+| `GET` | `/api/schedules?status=active&enabled=true` | List schedule rows |
+| `GET` | `/api/schedules/summary` | Aggregate schedule/workflow stats |
+| `GET` | `/api/schedules/due` | Time-based workflows due for daemon polling |
+| `GET` | `/api/schedules/{schedule_id}` | Schedule/workflow detail with run history |
+| `PUT` | `/api/schedules/{schedule_id}` | Update schedule/workflow fields |
+| `POST` | `/api/schedules/{schedule_id}/toggle` | Enable or disable a workflow |
+| `POST` | `/api/schedules/{schedule_id}/trigger?force=false` | Time-based trigger path with due-time guard |
+| `GET` | `/api/schedules/{schedule_id}/runs` | Run history |
+| `DELETE` | `/api/schedules/{schedule_id}` | Delete non-system workflow |
+
+`GET /api/schedules/due` returns only rows with `trigger_type = 'schedule'`,
+`next_run_at <= now()`, `status = 'active'`, and `enabled = true`.
+
+Built-in daemon schedules may return a healthy no-op when their pre-flight
+eligibility check finds no candidates:
+
+```json
+{
+  "skipped": true,
+  "event": {
+    "event_type": "schedule.skipped",
+    "schedule_name": "Experience Compression",
+    "reason": "no_eligible_work",
+    "candidate_count": 0
+  }
+}
 ```
-POST /api/schedules/{schedule_id}/trigger?force=false
-```
 
-Fires the schedule immediately. Pass `force=true` to bypass the time guard (for manual "Run Now" actions). Returns the created request and run record.
+This is distinct from a failed run: no request or task is created, and the skip event is stored in `schedule_runs.result`.
 
-### Schedule Runs
-
-```
-GET /api/schedules/{schedule_id}/runs
-```
-
-Returns the execution history for a schedule.
-
-### Delete Schedule
-
-```
-DELETE /api/schedules/{schedule_id}
-```
+`Memory Consolidation` is retired. Technical memory duplicate prevention now
+happens during memory create/update/share operations: file-scoped technical
+memories with the same `(repo, filename)` are rejected when an existing memory
+is already owned by the caller or shared in the caller's organization.
 
 ---
 
@@ -700,7 +796,7 @@ Base path: `/api/definitions`
 |--------|------|-------------|
 | `POST` | `/agents` | Create an agent definition (status: `proposed`) |
 | `GET` | `/agents` | List agents (filter by `?status=active`) |
-| `GET` | `/agents/{id}` | Get agent with linked skills and MCP servers |
+| `GET` | `/agents/{id}` | Get agent with linked skills, tools, external providers, and hooks |
 | `PATCH` | `/agents/{id}` | Update an agent definition |
 | `DELETE` | `/agents/{id}` | Delete an agent definition |
 | `POST` | `/agents/{id}/approve` | Approve a proposed agent |
@@ -728,17 +824,54 @@ Base path: `/api/definitions`
 | `POST` | `/mcp-servers/{id}/reject` | Reject a proposed MCP server |
 | `GET` | `/mcp-servers/{id}/tools` | Discover available tools (`?refresh=true` to force rediscovery) |
 
+### Hooks
+
+Hooks are approved agent middleware. They observe approved runtime events and can
+inject additional context, block tool/model execution, or rewrite tool args/results
+depending on the hook decision. Supported actions are `memory_lookup`,
+`static_context`, and `command`; supported trigger events are
+`before_model_call`, `after_model_call`, `before_tool_call`, `after_tool_call`,
+and legacy `tool_call` (an alias for `before_tool_call`).
+
+`command` hooks run a configured shell command or script out-of-process with
+timeout/output limits. Lucent passes the hook event as JSON on stdin, including
+`event`, `tool_name`, `arguments`, `tool_result`, `messages`, `model_text`, and
+extracted `file_refs` when available. Command hooks can set `config.command` to a
+shell string or argv list; if omitted, hook `content` is treated as the shell
+script body. Useful config keys include `tool_names`, `require_file_reference`,
+`timeout_seconds`, `max_output_chars`, `env`, `cwd`, and `pass_input`.
+
+Command stdout can be plain text, which is injected as context, or a JSON decision:
+
+```json
+{"action": "inject", "context": "extra model-visible context"}
+{"action": "block", "message": "do not run this tool"}
+{"action": "replace_args", "arguments": {"filePath": "safe/path.py"}}
+{"action": "replace_result", "result": "sanitized tool result"}
+{"action": "allow"}
+```
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/hooks` | Create a hook definition (status: `proposed`) |
+| `GET` | `/hooks` | List hooks (filter by `?status=active`) |
+| `GET` | `/hooks/{id}` | Get hook details |
+| `PATCH` | `/hooks/{id}` | Update a hook definition |
+| `DELETE` | `/hooks/{id}` | Delete a hook definition |
+| `POST` | `/hooks/{id}/approve` | Approve a proposed hook |
+| `POST` | `/hooks/{id}/reject` | Reject a proposed hook |
+
 ### Proposals
 
 ```
 GET /api/definitions/proposals
 ```
 
-Returns all pending proposals (agents, skills, and MCP servers awaiting approval) in a single response.
+Returns all pending proposals (agents, skills, custom tools, external providers, and hooks awaiting approval) in a single response.
 
 ### Agent Access Grants
 
-Grant or revoke skills and MCP servers for agent definitions:
+Grant or revoke skills, custom tools, external providers, and hooks for agent definitions:
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -746,6 +879,8 @@ Grant or revoke skills and MCP servers for agent definitions:
 | `DELETE` | `/agents/{id}/skills/{skill_id}` | Revoke a skill from an agent |
 | `POST` | `/agents/{id}/mcp-servers` | Grant an MCP server (body: `{"target_id": "server-uuid"}`) |
 | `DELETE` | `/agents/{id}/mcp-servers/{server_id}` | Revoke an MCP server from an agent |
+| `POST` | `/agents/{id}/hooks` | Grant a hook (body: `{"target_id": "hook-uuid"}`) |
+| `DELETE` | `/agents/{id}/hooks/{hook_id}` | Revoke a hook from an agent |
 
 ---
 

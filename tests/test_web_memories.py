@@ -300,6 +300,17 @@ class TestKnowledgeTree:
             organization_id=org["id"],
             shared=True,
         )
+        superseded_memory = await repo.create(
+            username=f"{web_prefix}User",
+            type="technical",
+            content=f"{web_prefix}Superseded redirect memory",
+            tags=["knowledge-tree", "superseded", "do_not_consolidate"],
+            importance=10,
+            metadata={"repo": "org/root-visible", "category": "redirect"},
+            user_id=user["id"],
+            organization_id=org["id"],
+            shared=True,
+        )
 
         async def _repo_exists(self, repo_full_name):  # pragma: no cover - signature shim
             return True
@@ -315,6 +326,7 @@ class TestKnowledgeTree:
         assert "org/root-visible" in resp.text
         assert str(root_memory["id"]) in resp.text
         assert str(audit_memory["id"]) not in resp.text
+        assert str(superseded_memory["id"]) not in resp.text
         match = re.search(r"const treeData = (.*?);\n", resp.text, re.S)
         assert match is not None
         tree = json.loads(match.group(1))

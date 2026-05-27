@@ -88,6 +88,7 @@ migration files are:
 |---|---|
 | `037_groups.sql` | Creates the `groups` and `user_groups` tables for the group directory model. Groups are scoped to an organization with unique names. Users can be `member` or `admin` of a group. |
 | `038_resource_ownership.sql` | Adds `owner_user_id` and `owner_group_id` columns to `agent_definitions`, `skill_definitions`, `mcp_server_configs`, and `sandbox_templates`. Backfills ownership from `created_by` for existing instance-scoped rows. Adds `NOT VALID` CHECK constraints requiring ownership on non-built-in resources. |
+| `077_definition_org_shared_ownership.sql` | Reclassifies daemon-owned instance definitions as organization-shared, allows NULL/NULL owner columns on instance definitions to mean “shared with org,” and adds single-owner checks so a definition cannot be both user- and group-owned. |
 | `039_requesting_user_id.sql` | Adds `requesting_user_id` to the `tasks` table and backfills it from `requests.created_by`. Enables audit trails from task execution back to the originating user. |
 | `040_secrets.sql` | Creates the `secrets` table for encrypted secret storage with user/group ownership, organization scoping, and composite unique constraints on key + org + owner. |
 | `041_secret_audit_types.sql` | Extends the `memory_audit_log` action type CHECK constraint with `secret_create`, `secret_read`, and `secret_delete` event types. |
@@ -453,12 +454,13 @@ re-create the affected secrets.
 If you see a CHECK constraint error when creating a definition:
 
 ```
-ck_agent_def_owner_or_builtin
+ck_agent_def_single_owner
 ```
 
-This means the definition has `scope != 'built-in'` but neither
-`owner_user_id` nor `owner_group_id` is set. Ensure the creating code passes
-ownership information. This is handled automatically by the API and Web UI.
+This means the definition is trying to set both `owner_user_id` and
+`owner_group_id`. Definitions must be exactly one of: user-owned, group-owned,
+or organization-shared (`scope = 'instance'` with both owner columns NULL). The
+API and Web UI handle this automatically.
 
 ### Groups page returns 404
 

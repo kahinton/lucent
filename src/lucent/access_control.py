@@ -15,6 +15,12 @@ RESOURCE_TABLE_MAP: dict[str, str] = {
     "mcp_server": "mcp_server_configs",
     "mcp_servers": "mcp_server_configs",
     "mcp": "mcp_server_configs",
+    "hook": "hook_definitions",
+    "hooks": "hook_definitions",
+    "managed_tool": "managed_tool_definitions",
+    "managed_tools": "managed_tool_definitions",
+    "tool": "managed_tool_definitions",
+    "tools": "managed_tool_definitions",
     "sandbox_template": "sandbox_templates",
     "sandbox_templates": "sandbox_templates",
     "secret": "secrets",
@@ -23,7 +29,8 @@ RESOURCE_TABLE_MAP: dict[str, str] = {
 
 # Tables that have a 'scope' column (supports built-in detection)
 _TABLES_WITH_SCOPE = {
-    "agent_definitions", "skill_definitions", "mcp_server_configs", "sandbox_templates",
+    "agent_definitions", "skill_definitions", "mcp_server_configs",
+    "hook_definitions", "managed_tool_definitions", "sandbox_templates",
 }
 
 
@@ -83,6 +90,10 @@ class AccessControlService:
 
         group_ids = [UUID(g) for g in await self.get_user_group_ids(user_id)]
         builtin_clause = "scope = 'built-in' OR " if table in _TABLES_WITH_SCOPE else ""
+        org_shared_clause = (
+            "OR (scope = 'instance' AND owner_user_id IS NULL AND owner_group_id IS NULL) "
+            if table in _TABLES_WITH_SCOPE else ""
+        )
         query = f"""
             SELECT EXISTS(
                 SELECT 1
@@ -92,6 +103,7 @@ class AccessControlService:
                   AND (
                       {builtin_clause}owner_user_id = $3
                       OR owner_group_id = ANY($4::uuid[])
+                      {org_shared_clause}
                       OR $5 IN ('admin', 'owner')
                   )
             ) AS allowed
@@ -127,16 +139,24 @@ class AccessControlService:
                     UUID(org_id),
                 )
             return bool(row["e"]) if row else False
-        # Members can only modify resources they directly own
+        # Members can only modify resources they directly own. Group admins can
+        # modify resources owned by their group. Org-shared resources are
+        # intentionally admin/owner-only for writes.
+        group_ids = [UUID(g) for g in await self.get_user_group_ids(user_id)]
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 f"SELECT EXISTS("
                 f"SELECT 1 FROM {table}"
-                f" WHERE id = $1 AND organization_id = $2 AND owner_user_id = $3"
+                f" WHERE id = $1 AND organization_id = $2"
+                f" AND (owner_user_id = $3 OR owner_group_id IN ("
+                f"SELECT group_id FROM user_groups"
+                f" WHERE user_id = $3 AND role = 'admin'"
+                f" AND group_id = ANY($4::uuid[])))"
                 f") AS e",
                 UUID(resource_id),
                 UUID(org_id),
                 UUID(user_id),
+                group_ids,
             )
         return bool(row["e"]) if row else False
 
@@ -150,6 +170,10 @@ class AccessControlService:
 
         group_ids = [UUID(g) for g in await self.get_user_group_ids(user_id)]
         builtin_clause = "scope = 'built-in' OR " if table in _TABLES_WITH_SCOPE else ""
+        org_shared_clause = (
+            "OR (scope = 'instance' AND owner_user_id IS NULL AND owner_group_id IS NULL) "
+            if table in _TABLES_WITH_SCOPE else ""
+        )
         query = f"""
             SELECT id
             FROM {table}
@@ -157,6 +181,7 @@ class AccessControlService:
               AND (
                   {builtin_clause}owner_user_id = $2
                   OR owner_group_id = ANY($3::uuid[])
+                  {org_shared_clause}
                   OR $4 IN ('admin', 'owner')
               )
             ORDER BY id

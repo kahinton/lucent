@@ -27,9 +27,9 @@ class VaultSecretProvider(SecretProvider):
         "change-me-insecure-dev-root-token",
     })
 
-    def __init__(self) -> None:
-        addr = os.environ.get("VAULT_ADDR")
-        token = os.environ.get("VAULT_TOKEN")
+    def __init__(self, vault_addr: str | None = None, vault_token: str | None = None) -> None:
+        addr = vault_addr or os.environ.get("VAULT_ADDR")
+        token = vault_token or os.environ.get("VAULT_TOKEN")
         if not addr or not token:
             raise ValueError(
                 "VaultSecretProvider requires VAULT_ADDR and VAULT_TOKEN "
@@ -64,7 +64,10 @@ class VaultSecretProvider(SecretProvider):
 
     def _build_path(self, scope: SecretScope) -> str:
         """Build the Vault path prefix for a scope (without the key)."""
-        if scope.owner_user_id:
+        if scope.system_managed:
+            owner_type = "system"
+            owner_id = "lucent"
+        elif scope.owner_user_id:
             owner_type = "user"
             owner_id = scope.owner_user_id
         elif scope.owner_group_id:

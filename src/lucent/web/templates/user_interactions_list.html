@@ -1,0 +1,189 @@
+{% extends "base.html" %}
+
+{% block title %}Handoffs - Lucent{% endblock %}
+
+{% macro type_label(item) %}
+{% if item.interaction_type == 'clarification' %}Question{% elif item.interaction_type == 'workflow_output' %}Workflow update{% elif item.interaction_type == 'review' %}Review{% elif item.interaction_type == 'decision' %}Decision{% elif item.interaction_type == 'handoff' %}Handoff{% else %}Message{% endif %}
+{% endmacro %}
+
+{% macro type_badge(item) %}
+<span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium
+    {% if item.interaction_type == 'clarification' %}bg-amber-100 text-amber-800
+    {% elif item.interaction_type == 'workflow_output' %}bg-blue-100 text-blue-700
+    {% elif item.interaction_type == 'review' %}bg-purple-100 text-purple-700
+    {% elif item.interaction_type == 'decision' %}bg-orange-100 text-orange-700
+    {% elif item.interaction_type == 'handoff' %}bg-emerald-100 text-emerald-700
+    {% else %}bg-gray-100 text-gray-600{% endif %}">
+    {{ type_label(item) | trim }}
+</span>
+{% endmacro %}
+
+{% macro status_label(item) %}
+{% if item.status == 'waiting_on_user' %}Waiting for you{% elif item.status == 'responded' %}Reply sent{% elif item.status == 'resolved' %}Done{% elif item.status == 'dismissed' %}Dismissed{% else %}Open{% endif %}
+{% endmacro %}
+
+{% macro status_badge(item) %}
+<span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium
+    {% if item.status == 'waiting_on_user' %}bg-amber-100 text-amber-800
+    {% elif item.status == 'responded' %}bg-primary-100 text-primary-700
+    {% elif item.status == 'resolved' %}bg-green-100 text-green-700
+    {% elif item.status == 'dismissed' %}bg-gray-100 text-gray-500
+    {% else %}bg-blue-100 text-blue-700{% endif %}">
+    {{ status_label(item) | trim }}
+</span>
+{% endmacro %}
+
+{% macro priority_badge(item) %}
+{% if item.priority != 'medium' %}
+<span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium
+    {% if item.priority == 'urgent' %}bg-red-100 text-red-700
+    {% elif item.priority == 'high' %}bg-orange-100 text-orange-700
+    {% else %}bg-gray-100 text-gray-500{% endif %}">
+    {% if item.priority == 'urgent' %}Urgent{% elif item.priority == 'high' %}High priority{% else %}{{ item.priority | capitalize }}{% endif %}
+</span>
+{% endif %}
+{% endmacro %}
+
+{% macro interaction_card(item, lane='default') %}
+<a href="/handoffs/{{ item.id }}" class="block rounded-xl border p-4 shadow-sm transition-all hover:shadow-md
+    {% if item.needs_response %}border-amber-300 bg-amber-50/70 hover:border-amber-400
+    {% elif item.is_unread %}border-primary-200 bg-primary-50/50 hover:border-primary-300
+    {% else %}border-gray-200 bg-white hover:border-gray-300{% endif %}">
+    <div class="flex items-start justify-between gap-4">
+        <div class="min-w-0 flex-1">
+            <div class="flex items-center gap-2 flex-wrap">
+                <span class="font-semibold text-gray-900">{{ item.title }}</span>
+                {% if item.needs_response %}
+                <span class="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800">
+                    <span class="h-1.5 w-1.5 rounded-full bg-amber-500"></span>
+                    Reply needed
+                </span>
+                {% elif item.is_unread %}
+                <span class="inline-flex items-center gap-1 rounded-full bg-primary-100 px-2 py-0.5 text-xs font-semibold text-primary-700">
+                    <span class="h-1.5 w-1.5 rounded-full bg-primary-500"></span>
+                    New
+                </span>
+                {% endif %}
+                {{ type_badge(item) }}
+                {{ status_badge(item) }}
+                {{ priority_badge(item) }}
+            </div>
+            <p class="mt-2 line-clamp-2 text-sm text-gray-600">{{ item.body[:260] }}{% if item.body|length > 260 %}…{% endif %}</p>
+            <div class="mt-3 flex flex-wrap items-center gap-2 text-xs text-gray-400">
+                <span>{{ item.source | capitalize }}</span>
+                <span>{{ item.message_count }} message{% if item.message_count != 1 %}s{% endif %}</span>
+            </div>
+        </div>
+        <div class="shrink-0 text-right text-xs text-gray-400">
+            <div>{{ item.updated_at.strftime('%Y-%m-%d') if item.updated_at }}</div>
+            <div>{{ item.updated_at.strftime('%H:%M') if item.updated_at }}</div>
+        </div>
+    </div>
+</a>
+{% endmacro %}
+
+{% block content %}
+<div class="mb-6">
+    <div class="flex items-start justify-between gap-4">
+        <div class="flex items-center gap-3">
+            <div class="flex h-10 w-10 items-center justify-center rounded-full bg-gradient-to-br from-primary-400 to-primary-600 shadow-md">
+                <svg class="h-5 w-5 text-white" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M21.75 6.75v10.5A2.25 2.25 0 0119.5 19.5h-15a2.25 2.25 0 01-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25m19.5 0v.243a2.25 2.25 0 01-1.07 1.916l-7.5 4.615a2.25 2.25 0 01-2.36 0l-7.5-4.615a2.25 2.25 0 01-1.07-1.916V6.75" />
+                </svg>
+            </div>
+            <div>
+                <h1 class="text-2xl font-bold text-gray-900">Handoffs</h1>
+                <p class="text-sm text-gray-500">Questions, decisions, and updates from Lucent.</p>
+            </div>
+        </div>
+        {% if attention_count > 0 %}
+        <div class="rounded-xl border border-primary-200 bg-primary-50 px-4 py-3 text-sm text-primary-800">
+            <span class="font-semibold">{{ attention_count }}</span> item{% if attention_count != 1 %}s need{% else %} needs{% endif %} your attention.
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<div class="mb-6 grid gap-4 md:grid-cols-3">
+    <div class="rounded-xl border border-amber-200 bg-amber-50 p-4">
+        <p class="text-xs font-semibold uppercase tracking-wider text-amber-700">Reply needed</p>
+        <p class="mt-2 text-3xl font-bold text-amber-900">{{ needs_response|length }}</p>
+        <p class="mt-1 text-sm text-amber-800">Waiting for your answer before Lucent continues.</p>
+    </div>
+    <div class="rounded-xl border border-primary-200 bg-primary-50 p-4">
+        <p class="text-xs font-semibold uppercase tracking-wider text-primary-600">New from Lucent</p>
+        <p class="mt-2 text-3xl font-bold text-primary-800">{{ unread|length }}</p>
+        <p class="mt-1 text-sm text-primary-700">Updates you have not opened yet.</p>
+    </div>
+    <div class="rounded-xl border border-gray-200 bg-white p-4">
+        <p class="text-xs font-semibold uppercase tracking-wider text-gray-500">Showing</p>
+        <p class="mt-2 text-3xl font-bold text-gray-900">{{ total_count }}</p>
+        <p class="mt-1 text-sm text-gray-500">Items in this view.</p>
+    </div>
+</div>
+
+<div class="mb-5 flex flex-wrap items-center gap-2 text-sm">
+    <a href="/handoffs" class="rounded-md px-3 py-1.5 {% if filter_status == 'active' %}bg-gray-900 text-white{% else %}bg-gray-100 text-gray-600 hover:bg-gray-200{% endif %}">Active</a>
+    <a href="/handoffs?status=waiting_on_user" class="rounded-md px-3 py-1.5 {% if filter_status == 'waiting_on_user' %}bg-amber-600 text-white{% else %}bg-amber-50 text-amber-700 hover:bg-amber-100{% endif %}">Needs reply</a>
+    <a href="/handoffs?status=responded" class="rounded-md px-3 py-1.5 {% if filter_status == 'responded' %}bg-primary-600 text-white{% else %}bg-primary-50 text-primary-700 hover:bg-primary-100{% endif %}">Responded</a>
+    <a href="/handoffs?status=resolved" class="rounded-md px-3 py-1.5 {% if filter_status == 'resolved' %}bg-green-600 text-white{% else %}bg-green-50 text-green-700 hover:bg-green-100{% endif %}">Resolved</a>
+    <a href="/handoffs?status=all" class="rounded-md px-3 py-1.5 {% if filter_status == 'all' %}bg-gray-900 text-white{% else %}bg-gray-100 text-gray-600 hover:bg-gray-200{% endif %}">All</a>
+</div>
+
+{% if needs_response %}
+<section class="mb-6" aria-labelledby="needs-response-heading">
+    <div class="mb-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
+        <h2 id="needs-response-heading" class="text-sm font-semibold text-amber-950">Waiting on you</h2>
+        <p class="mt-0.5 text-sm text-amber-800">Lucent needs an answer or decision before moving on.</p>
+    </div>
+    <div class="space-y-3">
+        {% for item in needs_response %}{{ interaction_card(item, 'needs-response') }}{% endfor %}
+    </div>
+</section>
+{% endif %}
+
+{% if unread %}
+<section class="mb-6" aria-labelledby="unread-heading">
+    <div class="mb-3 rounded-xl border border-primary-200 bg-primary-50 px-4 py-3">
+        <h2 id="unread-heading" class="text-sm font-semibold text-primary-950">New from Lucent</h2>
+        <p class="mt-0.5 text-sm text-primary-800">Updates you can read or discuss right here.</p>
+    </div>
+    <div class="space-y-3">
+        {% for item in unread %}{{ interaction_card(item, 'unread') }}{% endfor %}
+    </div>
+</section>
+{% endif %}
+
+{% if other %}
+<section aria-labelledby="other-heading">
+    <div class="mb-3 flex items-center justify-between gap-3">
+        <div>
+            <h2 id="other-heading" class="text-sm font-semibold text-gray-900">{% if needs_response or unread %}Other handoffs{% else %}Handoffs{% endif %}</h2>
+            <p class="mt-0.5 text-sm text-gray-500">Use the filters above to see older or finished items.</p>
+        </div>
+        <span class="rounded-full bg-gray-100 px-2.5 py-1 text-xs font-medium text-gray-600">{{ other|length }}</span>
+    </div>
+    <div class="space-y-3">
+        {% for item in other %}{{ interaction_card(item) }}{% endfor %}
+    </div>
+</section>
+{% endif %}
+
+{% if not needs_response and not unread and not other %}
+<div class="rounded-xl border border-gray-200 bg-white p-10 text-center">
+    <svg class="mx-auto h-10 w-10 text-gray-300" fill="none" viewBox="0 0 24 24" stroke-width="1" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M21.75 6.75v10.5A2.25 2.25 0 0119.5 19.5h-15a2.25 2.25 0 01-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25" />
+    </svg>
+    <h2 class="mt-3 text-lg font-semibold text-gray-900">No handoffs</h2>
+    <p class="mt-1 text-sm text-gray-500">When Lucent has a question or update for you, it will appear here.</p>
+</div>
+{% endif %}
+
+{% if total_pages > 1 %}
+<div class="mt-8 flex items-center justify-center gap-2 text-sm">
+    {% for p in range(1, total_pages + 1) %}
+    <a href="/handoffs?{% if filter_status != 'active' %}status={{ filter_status }}&{% endif %}page={{ p }}&per_page={{ per_page }}" class="rounded-md px-3 py-2 {% if p == page %}bg-primary-600 text-white{% else %}border border-gray-300 bg-white text-gray-700 hover:bg-gray-50{% endif %}">{{ p }}</a>
+    {% endfor %}
+</div>
+{% endif %}
+{% endblock %}

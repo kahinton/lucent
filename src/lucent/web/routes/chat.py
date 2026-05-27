@@ -9,11 +9,12 @@ router = APIRouter()
 
 
 @router.get("/chat", response_class=HTMLResponse)
-async def chat_page(request: Request):
+@router.get("/chat/{session_id}", response_class=HTMLResponse)
+async def chat_page(request: Request, session_id: str | None = None):
     """Dedicated chat page with model/agent selection and tool visibility."""
     user = await get_user_context(request)
     return templates.TemplateResponse(
         request,
         "chat.html",
-        {"user": user},
+        {"user": user, "session_id": session_id},
     )

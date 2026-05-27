@@ -7,6 +7,7 @@ This is the default engine and preserves all existing behavior.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import os
 import re
 import shutil
@@ -18,6 +19,16 @@ from lucent.llm.engine import LLMEngine, ModelNotAvailableError, SessionEvent, S
 from lucent.logging import get_logger
 
 logger = get_logger("llm.copilot")
+
+RESTRICTED_WEB_CHAT_EXCLUDED_TOOLS = [
+    "bash",
+    "grep",
+    "view",
+    "str_replace_editor",
+    "create_file",
+    "edit_file",
+    "run_in_terminal",
+]
 
 # Lazy import — only loaded when this engine is actually used
 _CopilotClient: Any = None
@@ -32,6 +43,184 @@ _sdk_available: bool | None = None
 # the `is` check.
 _UNRESOLVED = object()
 _cli_path_cache: str | None | object = _UNRESOLVED
+_permission_compat_installed = False
+_session_event_compat_installed = False
+
+
+def _value(value: Any) -> str:
+    return str(getattr(value, "value", value) or "")
+
+
+def _permission_compat_mode() -> str:
+    return os.environ.get("LUCENT_COPILOT_MCP_PERMISSION_COMPAT", "auto").strip().lower()
+
+
+def _legacy_permission_kind(result_kind: str) -> str | None:
+    """Map SDK final permission result kinds to newer CLI UI-response kinds."""
+    if result_kind == "approved":
+        return "approve-once"
+    if result_kind == "denied-no-approval-rule-and-could-not-request-from-user":
+        return "user-not-available"
+    if result_kind.startswith("denied"):
+        return "reject"
+    return None
+
+
+def _should_use_legacy_permission_response(permission_request: Any, result: Any) -> bool:
+    """Return True when the SDK/CLI permission compatibility shim should run.
+
+    VS Code-managed Copilot CLI 1.0.4x currently routes some tool permission
+    approvals through a UI-response converter that expects values such as
+    ``approve-once``. The Python SDK sends final permission values such as
+    ``approved``, which the CLI accepts for the permission-completed event but
+    later rejects when executing the tool with ``unexpected user permission
+    response``. This has been observed for mutable MCP tools and built-in
+    bash/view tool calls in daemon SDK sessions.
+    """
+    mode = _permission_compat_mode()
+    if mode in {"0", "false", "off", "disabled"}:
+        return False
+    if mode not in {"auto", "legacy-ui-result", "on", "true", "1"}:
+        return False
+    result_kind = _value(getattr(result, "kind", "")).lower()
+    return _legacy_permission_kind(result_kind) is not None
+
+
+async def _send_legacy_permission_response(session: Any, request_id: str, result: Any) -> None:
+    result_kind = _value(getattr(result, "kind", "")).lower()
+    legacy_kind = _legacy_permission_kind(result_kind)
+    if not legacy_kind:
+        raise ValueError(f"Unsupported permission result kind: {result_kind}")
+    payload_result: dict[str, Any] = {"kind": legacy_kind}
+    for attr in ("feedback", "message", "path"):
+        value = getattr(result, attr, None)
+        if value is not None:
+            payload_result[attr] = value
+    payload = {
+        "requestId": request_id,
+        "result": payload_result,
+        "sessionId": session.session_id,
+    }
+    await session.rpc.permissions._client.request(  # noqa: SLF001 - SDK compat shim
+        "session.permissions.handlePendingPermissionRequest",
+        payload,
+    )
+
+
+def _install_copilot_permission_compat() -> None:
+    """Install mutable-MCP permission compatibility for newer Copilot CLIs."""
+    global _permission_compat_installed
+    if _permission_compat_installed:
+        return
+    if _permission_compat_mode() in {"0", "false", "off", "disabled"}:
+        _permission_compat_installed = True
+        return
+    try:
+        import copilot.session as _session_mod
+    except Exception:
+        return
+
+    session_cls = getattr(_session_mod, "CopilotSession", None)
+    if session_cls is None:
+        return
+    original = getattr(session_cls, "_lucent_original_execute_permission_and_respond", None)
+    if original is None:
+        original = session_cls._execute_permission_and_respond
+        setattr(session_cls, "_lucent_original_execute_permission_and_respond", original)
+
+    async def _patched_execute_permission_and_respond(
+        self, request_id, permission_request, handler
+    ):
+        try:
+            result = handler(permission_request, {"session_id": self.session_id})
+            if inspect.isawaitable(result):
+                result = await result
+            if _value(getattr(result, "kind", "")).lower() == "no-result":
+                return
+            if _should_use_legacy_permission_response(permission_request, result):
+                await _send_legacy_permission_response(self, request_id, result)
+                return
+
+            async def _constant_handler(_request, _invocation):
+                return result
+
+            return await original(self, request_id, permission_request, _constant_handler)
+        except Exception:
+            return await original(self, request_id, permission_request, handler)
+
+    session_cls._execute_permission_and_respond = _patched_execute_permission_and_respond
+    _permission_compat_installed = True
+
+
+def _install_copilot_session_event_compat() -> None:
+    """Tolerate newer Copilot CLI event payloads with older SDK schemas.
+
+    VS Code-managed Copilot CLI builds can add fields or evolve event field
+    shapes before the Python SDK's generated dataclasses are regenerated. A
+    recent example is `compactionTokensUsed`, which may arrive without all of
+    the `cachedInput`/`input`/`output` fields the bundled schema marks as
+    required. The SDK decodes notifications in an asyncio callback before
+    Lucent sees the event; an AssertionError there can kill daemon sessions.
+    Patch only that narrow decoder to preserve the rest of the SDK behavior.
+    """
+    global _session_event_compat_installed
+    if _session_event_compat_installed:
+        return
+    try:
+        import copilot.generated.session_events as _events_mod
+    except Exception:
+        return
+
+    compaction_cls = getattr(_events_mod, "CompactionTokensUsed", None)
+    if compaction_cls is None:
+        _session_event_compat_installed = True
+        return
+
+    original = getattr(compaction_cls, "_lucent_original_from_dict", None)
+    if original is None:
+        original = compaction_cls.from_dict
+        setattr(compaction_cls, "_lucent_original_from_dict", original)
+
+    def _num(obj: Any, *names: str) -> float:
+        if not isinstance(obj, dict):
+            return 0.0
+        for name in names:
+            value = obj.get(name)
+            if isinstance(value, bool) or value is None:
+                continue
+            if isinstance(value, (int, float)):
+                return float(value)
+            if isinstance(value, str):
+                try:
+                    return float(value)
+                except ValueError:
+                    continue
+        return 0.0
+
+    @staticmethod
+    def _patched_compaction_tokens_from_dict(obj: Any):
+        try:
+            return original(obj)
+        except Exception:
+            if isinstance(obj, bool) or obj is None:
+                raise
+            if isinstance(obj, (int, float)):
+                return compaction_cls(0.0, float(obj), 0.0)
+            if isinstance(obj, str):
+                try:
+                    return compaction_cls(0.0, float(obj), 0.0)
+                except ValueError:
+                    raise
+            if isinstance(obj, dict):
+                return compaction_cls(
+                    _num(obj, "cachedInput", "cached_input", "cached", "cacheReadTokens"),
+                    _num(obj, "input", "inputTokens", "tokens", "total", "totalTokens"),
+                    _num(obj, "output", "outputTokens"),
+                )
+            raise
+
+    compaction_cls.from_dict = _patched_compaction_tokens_from_dict
+    _session_event_compat_installed = True
 
 
 def resolve_copilot_cli_path() -> str | None:
@@ -126,7 +315,8 @@ def resolve_copilot_cli_path() -> str | None:
 
 def _ensure_sdk() -> bool:
     """Lazily import the Copilot SDK. Returns True if available."""
-    global _CopilotClient, _PermissionHandler, _SubprocessConfig, _SystemMessageReplaceConfig, _sdk_available
+    global _CopilotClient, _PermissionHandler, _SubprocessConfig
+    global _SystemMessageReplaceConfig, _sdk_available
     if _sdk_available is not None:
         return _sdk_available
     try:
@@ -152,6 +342,8 @@ def _ensure_sdk() -> bool:
                 _SystemMessageReplaceConfig = SystemMessageReplaceConfig
             except ImportError:
                 _SystemMessageReplaceConfig = None
+        _install_copilot_permission_compat()
+        _install_copilot_session_event_compat()
         _sdk_available = True
     except ImportError:
         _sdk_available = False
@@ -179,12 +371,29 @@ class CopilotEngine(LLMEngine):
             config_kwargs["cli_path"] = cli_path
         return _CopilotClient(config=_SubprocessConfig(**config_kwargs))
 
-    def _make_session_kwargs(self, model: str, system_message: str, mcp_config: dict | None) -> dict:
+    def _make_session_kwargs(
+        self,
+        model: str,
+        system_message: str,
+        mcp_config: dict | None,
+        reasoning_effort: str | None = None,
+        enable_config_discovery: bool = False,
+        approve_permissions: bool = True,
+    ) -> dict:
         """Build create_session kwargs."""
         kwargs: dict[str, Any] = {
             "model": model,
             "mcp_servers": mcp_config or {},
         }
+        if reasoning_effort:
+            kwargs["reasoning_effort"] = reasoning_effort
+        if enable_config_discovery:
+            kwargs["enable_config_discovery"] = True
+        if not approve_permissions:
+            # Web chat should use only explicitly configured MCP tools.  The
+            # Copilot SDK's excluded_tools list disables provider-native tools
+            # such as bash/view without suppressing configured MCP tools.
+            kwargs["excluded_tools"] = list(RESTRICTED_WEB_CHAT_EXCLUDED_TOOLS)
         if _PermissionHandler is not None:
             kwargs["on_permission_request"] = _PermissionHandler.approve_all
         if _SystemMessageReplaceConfig is not None:
@@ -194,6 +403,36 @@ class CopilotEngine(LLMEngine):
         else:
             kwargs["system_message"] = system_message
         return kwargs
+
+    async def _open_session(
+        self,
+        client: Any,
+        session_kwargs: dict[str, Any],
+        *,
+        provider_session_id: str | None,
+        resume: bool,
+    ) -> Any:
+        """Create or resume a Copilot SDK session.
+
+        Lucent owns the durable session row; the Copilot SDK owns provider-side
+        history and artifacts. When resume fails (for example, the SDK session
+        was pruned from disk), fall back to creating a new provider session with
+        the same identifier so Lucent can continue from its DB transcript.
+        """
+        if provider_session_id and resume:
+            try:
+                return await client.resume_session(provider_session_id, **session_kwargs)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to resume Copilot session %s; creating a fresh session: %s",
+                    provider_session_id,
+                    exc,
+                )
+
+        create_kwargs = dict(session_kwargs)
+        if provider_session_id:
+            create_kwargs["session_id"] = provider_session_id
+        return await client.create_session(**create_kwargs)
 
     @property
     def name(self) -> str:
@@ -206,6 +445,14 @@ class CopilotEngine(LLMEngine):
         prompt: str,
         mcp_config: dict | None = None,
         timeout: int = 300,
+        reasoning_effort: str | None = None,
+        provider_session_id: str | None = None,
+        resume: bool = False,
+        message_history: list[dict[str, Any]] | None = None,
+        hooks: list[dict[str, Any]] | None = None,
+        audit_context: dict[str, Any] | None = None,
+        enable_config_discovery: bool = False,
+        approve_permissions: bool = True,
     ) -> str | None:
         """Run a blocking session using send_and_wait (chat pattern)."""
         if not _ensure_sdk():
@@ -219,8 +466,20 @@ class CopilotEngine(LLMEngine):
             client = self._make_client()
             await client.start()
 
-            session_kwargs = self._make_session_kwargs(model, system_message, mcp_config)
-            session = await client.create_session(**session_kwargs)
+            session_kwargs = self._make_session_kwargs(
+                model,
+                system_message,
+                mcp_config,
+                reasoning_effort=reasoning_effort,
+                enable_config_discovery=enable_config_discovery,
+                approve_permissions=approve_permissions,
+            )
+            session = await self._open_session(
+                client,
+                session_kwargs,
+                provider_session_id=provider_session_id,
+                resume=resume,
+            )
 
             response = await session.send_and_wait(
                 prompt,
@@ -266,6 +525,14 @@ class CopilotEngine(LLMEngine):
         on_event: Callable[[SessionEvent], None] | None = None,
         timeout: int = 3600,
         idle_timeout: int = 300,
+        reasoning_effort: str | None = None,
+        provider_session_id: str | None = None,
+        resume: bool = False,
+        message_history: list[dict[str, Any]] | None = None,
+        hooks: list[dict[str, Any]] | None = None,
+        audit_context: dict[str, Any] | None = None,
+        enable_config_discovery: bool = False,
+        approve_permissions: bool = True,
     ) -> str | None:
         """Run a streaming session using send + event callbacks (daemon pattern).
 
@@ -284,8 +551,20 @@ class CopilotEngine(LLMEngine):
             client = self._make_client()
             await client.start()
 
-            session_kwargs = self._make_session_kwargs(model, system_message, mcp_config)
-            session = await client.create_session(**session_kwargs)
+            session_kwargs = self._make_session_kwargs(
+                model,
+                system_message,
+                mcp_config,
+                reasoning_effort=reasoning_effort,
+                enable_config_discovery=enable_config_discovery,
+                approve_permissions=approve_permissions,
+            )
+            session = await self._open_session(
+                client,
+                session_kwargs,
+                provider_session_id=provider_session_id,
+                resume=resume,
+            )
 
             response_parts: list[str] = []
             done = asyncio.Event()
@@ -326,10 +605,11 @@ class CopilotEngine(LLMEngine):
                     if call_id and tool_name:
                         _tool_call_names[str(call_id)] = tool_name
                     # Extract input/arguments
-                    tool_input = (
+                    raw_tool_input = (
                         getattr(event.data, "arguments", None)
                         or getattr(event.data, "input", None)
                     )
+                    tool_input = raw_tool_input
                     if tool_input and not isinstance(tool_input, str):
                         import json as _json
                         try:
@@ -339,7 +619,12 @@ class CopilotEngine(LLMEngine):
                     normalized = SessionEvent(
                         type=SessionEventType.TOOL_CALL,
                         tool_name=tool_name,
-                        content=tool_input if isinstance(tool_input, str) else str(tool_input or "")[:500],
+                        tool_input=raw_tool_input if isinstance(raw_tool_input, dict) else None,
+                        content=(
+                            tool_input
+                            if isinstance(tool_input, str)
+                            else str(tool_input or "")[:500]
+                        ),
                         raw=event,
                     )
                 elif etype == "tool.execution_complete":
@@ -357,6 +642,10 @@ class CopilotEngine(LLMEngine):
                     # Extract result content from Result object
                     raw_result = getattr(event.data, "result", None)
                     tool_output = None
+                    raw_error = getattr(event.data, "error", None)
+                    if raw_error is not None:
+                        error_message = getattr(raw_error, "message", None) or str(raw_error)
+                        tool_output = f"Error: {error_message}"[:2000]
                     if raw_result is not None:
                         # SDK Result objects have a .content field
                         content_val = getattr(raw_result, "content", None)
@@ -446,7 +735,7 @@ class CopilotEngine(LLMEngine):
 
             # Cleanup session
             try:
-                await session.destroy()
+                await session.disconnect()
             except Exception:
                 logger.debug("Failed to destroy Copilot streaming session", exc_info=True)
 

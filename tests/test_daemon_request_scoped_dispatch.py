@@ -7,7 +7,12 @@ from uuid import UUID
 
 import pytest
 
-from daemon.daemon import LucentDaemon, load_accessible_agent
+from daemon.daemon import (
+    LucentDaemon,
+    _build_mcp_tool_summary,
+    _is_operational_tool_call,
+    load_accessible_agent,
+)
 from lucent.db.definitions import DefinitionRepository
 from lucent.db.user import UserRepository
 from lucent.log_context import clear_log_context
@@ -26,6 +31,170 @@ def test_validate_task_result_rejects_empty_consolidation_execution():
     )
     assert success is False
     assert reason == "Plan identified 3 operations but 0 were executed"
+
+
+def test_validate_task_result_rejects_long_blocked_report():
+    daemon = LucentDaemon()
+    result = (
+        "I cannot complete this task in the current sub-agent environment.\n\n"
+        "## Status: BLOCKED — missing required tooling\n\n"
+        "No GitHub MCP tool is available, and neither gh nor git is exposed.\n\n"
+        + "More diagnostic detail. " * 120
+    )
+
+    success, reason = daemon._validate_task_result(
+        result,
+        task={"title": "Bootstrap repo", "description": "Create GitHub repo"},
+        tool_counts={"bash": 4, "create_memory": 1},
+    )
+
+    assert success is False
+    assert reason == "output reports task is blocked or missing required tooling"
+
+
+def test_prefixed_memory_server_tool_counts_as_memory_tool():
+    summary = _build_mcp_tool_summary(
+        [
+            {
+                "tool": "memory-server-search_memories",
+                "params": "query='repo bootstrap'",
+            }
+        ]
+    )
+
+    assert "Memory tool calls: 1 total" in summary
+    assert "search=1" in summary
+    assert "search_memories=1" in summary
+
+
+def test_report_intent_is_not_operational_tool_usage():
+    assert _is_operational_tool_call({"tool": "report_intent"}) is False
+    assert _is_operational_tool_call({"tool": "bash"}) is True
+    assert _is_operational_tool_call({"tool": "memory-server-search_memories"}) is True
+
+
+def test_extract_suggested_breakdown_items_from_request_description():
+    description = """
+Some request context.
+
+Suggested task breakdown:
+1. Bootstrap private repo and initial docs.
+2. Research the local market and customer hypotheses.
+3. Synthesize the launch roadmap.
+
+Definition of done:
+Everything is documented.
+"""
+
+    items = LucentDaemon._extract_suggested_breakdown_items(description)
+
+    assert items == [
+        "Bootstrap private repo and initial docs.",
+        "Research the local market and customer hypotheses.",
+        "Synthesize the launch roadmap.",
+    ]
+
+
+def test_milestone_scoped_fallback_ignores_full_goal_breakdown():
+    daemon = LucentDaemon()
+
+    specs = daemon._build_fallback_decomposition_tasks(
+        {
+            "title": "Full goal request",
+            "goal_milestone_index": 1,
+            "goal_milestone_description": "Bootstrap the private planning repository.",
+            "target_repo": "kahinton/example",
+            "target_paths": ["README.md", "docs/"],
+            "description": """
+Suggested task breakdown:
+1. Bootstrap repo.
+2. Research market.
+3. Build financial model.
+
+Required outcome:
+- Create README.md and docs/ placeholders only.
+""",
+        }
+    )
+
+    assert len(specs) == 1
+    assert specs[0]["title"] == "Bootstrap the private planning repository"
+    assert "Bootstrap the private planning repository" in specs[0]["description"]
+    assert "Required outcome" in specs[0]["description"]
+    assert "README.md" in specs[0]["description"]
+    assert "Research market" not in specs[0]["description"]
+    assert "create_task" not in specs[0]["description"]
+
+
+def test_decomposition_prompt_names_single_goal_milestone_scope():
+    daemon = LucentDaemon()
+
+    prompt = daemon._build_decomposition_prompt(
+        {
+            "request_id": "request-1",
+            "title": "Full goal request",
+            "priority": "high",
+            "goal_milestone_index": 1,
+            "goal_milestone_description": "Bootstrap the private planning repository.",
+            "description": "Full goal context with later milestones.",
+        }
+    )
+
+    assert "ONLY goal milestone 1" in prompt
+    assert "Bootstrap the private planning repository" in prompt
+    assert "Do not decompose the whole goal" in prompt
+
+
+@pytest.mark.asyncio
+async def test_fallback_decomposition_creates_tasks_from_suggested_breakdown(monkeypatch):
+    daemon = LucentDaemon()
+    created: list[dict] = []
+
+    async def _create_task(
+        request_id,
+        title,
+        agent_type=None,
+        description=None,
+        priority="medium",
+        sequence_order=0,
+        **_kwargs,
+    ):
+        created.append({
+            "request_id": request_id,
+            "title": title,
+            "agent_type": agent_type,
+            "description": description,
+            "priority": priority,
+            "sequence_order": sequence_order,
+        })
+        return {"id": f"task-{sequence_order}", "title": title}
+
+    monkeypatch.setattr("daemon.daemon.RequestAPI.create_task", _create_task)
+
+    count = await daemon._create_fallback_decomposition_tasks(
+        {
+            "request_id": "request-1",
+            "title": "Build business proof of concept",
+            "priority": "high",
+            "target_repo": "kahinton/example",
+            "target_paths": ["docs/"],
+            "description": """
+Suggested task breakdown:
+1. Bootstrap private GitHub repo and initial docs.
+2. Research Metro Detroit customer segments.
+3. Design autonomous roles and tooling.
+""",
+        },
+        "I would create three tasks.",
+        [],
+    )
+
+    assert count == 3
+    assert [task["sequence_order"] for task in created] == [0, 1, 2]
+    assert created[0]["agent_type"] == "code"
+    assert created[1]["agent_type"] == "research"
+    assert created[2]["agent_type"] == "planning"
+    assert all(task["priority"] == "high" for task in created)
 
 
 @pytest.mark.asyncio

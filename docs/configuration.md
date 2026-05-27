@@ -1,6 +1,27 @@
 # Configuration
 
-Lucent is configured entirely through environment variables. Copy `.env.example` to `.env` and customize as needed.
+Lucent uses **Settings → Runtime Settings** as the canonical settings catalog. Runtime-safe values can be saved in the database by an admin or owner, while bootstrap and credential values are shown for visibility but remain locked/masked when they must be supplied before the database is available or through secret storage.
+
+For DB-backed runtime settings, precedence is:
+
+1. Database value saved for the workspace
+2. Environment variable fallback
+3. Built-in default
+
+Resetting a runtime setting in the UI deletes the database value and returns it to environment/default fallback. Secrets are intentionally not stored in `runtime_settings`; use **Settings → Secrets**, **Settings → Connections**, or the configured secret provider for credentials. Copy `.env.example` to `.env` and customize bootstrap values as needed.
+
+## Runtime Settings UI
+
+Admins and owners can manage allowlisted settings in **Settings → Runtime Settings**. Editable saved values are stored in PostgreSQL, included in normal database backups, and loaded by the API/daemon at startup. The catalog includes model defaults, chat behavior, daemon timing, request/review gates, memory lifecycle/search rollout flags, server rate limits, and read-only visibility for bootstrap/credential settings.
+
+The UI shows the active source for each value:
+
+- **Saved in DB** — workspace value takes precedence and is backed up with the database.
+- **From env** — no database value exists, so the matching environment variable is used.
+- **Default** — neither a database value nor environment variable is set.
+- **Locked** — visible for audit/diagnostics, but managed outside the DB-backed runtime settings table.
+- **Hidden** — secret material is masked and not persisted in `runtime_settings`.
+- **Restart may be required** — the setting is loaded into process-level state; restart affected services after changing it.
 
 ## Server Configuration
 
@@ -25,7 +46,7 @@ Lucent is configured entirely through environment variables. Copy `.env.example`
 | `LUCENT_AUTH_PROVIDER` | `basic` | Auth backend (`basic` or `api_key`) |
 | `LUCENT_SESSION_TTL_HOURS` | `24` | Web session cookie lifetime in hours |
 | `LUCENT_SECURE_COOKIES` | `true` | Cookie `Secure` flag. Set to `false` for local HTTP development without HTTPS |
-| `LUCENT_SIGNING_SECRET` | *(random)* | HMAC key for signing session cookies. Auto-generated if not set; set explicitly for multi-instance deployments |
+| `LUCENT_SIGNING_SECRET` | *(secret storage)* | Optional override for the cookie/impersonation HMAC key. By default Lucent creates and reloads a system-managed secret via the configured secret provider (OpenBao Transit in local compose). |
 
 ## Networking & Security
 
@@ -40,11 +61,12 @@ Lucent is configured entirely through environment variables. Copy `.env.example`
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LUCENT_SECRET_PROVIDER` | `builtin` | Secret storage backend (`builtin`, `transit`, `vault`, `aws`, or `azure`) |
+| `LUCENT_SECRET_PROVIDER` | `auto` | Secret storage backend (`auto`, `builtin`, `transit`, `vault`, `aws`, or `azure`) |
 | `LUCENT_SECRET_KEY` | *(required for builtin)* | Fernet encryption key for the builtin provider |
 | `LUCENT_CREDENTIAL_KEY` | *(none)* | Fernet key for encrypting integration credentials (Slack/Discord tokens). Separate from `LUCENT_SECRET_KEY` |
 | `VAULT_ADDR` | `http://openbao:8200` | OpenBao/Vault server address |
-| `VAULT_TOKEN` | `root` | OpenBao/Vault authentication token |
+| `VAULT_TOKEN_FILE` | `/shared/vault-token` in Docker | Preferred local OpenBao token source; avoids putting the token in process env |
+| `VAULT_TOKEN` | *(none)* | OpenBao/Vault authentication token override when a token file is not available |
 
 For detailed secret storage configuration, see [Secret Storage](secret-storage.md).
 
@@ -57,11 +79,35 @@ For detailed secret storage configuration, see [Secret Storage](secret-storage.m
 | `LUCENT_MODEL_VALIDATION` | `strict` | Model validation mode: `strict` rejects unknown models, `lenient` allows them |
 | `LUCENT_CHAT_MCP_URL` | `http://localhost:8766/mcp` | MCP URL for chat-initiated tool calls |
 | `LUCENT_CHAT_TIMEOUT` | `300` | Chat session timeout in seconds |
+| `LUCENT_SESSION_EXPERIENCE_SUMMARY_ENABLED` | `true` | Enable an extra skill-guided model call to write narrative experience memories for meaningful chat sessions |
+| `LUCENT_SESSION_EXPERIENCE_MODEL` | *(model registry default)* | Optional model override for session experience summaries |
+| `LUCENT_SESSION_EXPERIENCE_TIMEOUT` | `180` | Timeout in seconds for the session experience summary model call |
 | `ANTHROPIC_API_KEY` | — | Anthropic API key (only when `LUCENT_LLM_ENGINE=langchain`) |
 | `OPENAI_API_KEY` | — | OpenAI API key (only when `LUCENT_LLM_ENGINE=langchain`) |
 | `GOOGLE_API_KEY` | — | Google API key (only when `LUCENT_LLM_ENGINE=langchain`) |
 | `OLLAMA_HOST` | `http://host.docker.internal:11434` | Ollama host URL for local models |
 | `GITHUB_TOKEN` | — | GitHub token for Copilot SDK authentication |
+
+### Model Reasoning Effort
+
+Admins can configure selectable reasoning/thinking levels per model in
+**Settings → Models**. Provider sync stores provider-reported levels as
+`reasoning_efforts` on the model registry record. Lucent does not maintain a
+global static enum of possible levels; if a provider catalog does not report
+exact selectable values for a model, Lucent leaves the list blank and uses the
+provider default.
+
+Runtime mappings:
+
+| Backend | Parameter sent |
+|---------|----------------|
+| GitHub Copilot SDK | `reasoning_effort` |
+| LangChain OpenAI | `reasoning_effort` |
+| LangChain Anthropic | `effort` |
+| LangChain Google GenAI | `thinking_level` |
+
+Leave `reasoning_effort` unset to use the provider default. Choose higher
+levels only for complex analysis where extra latency/cost is justified.
 
 ## Daemon Configuration
 
@@ -101,8 +147,8 @@ For detailed secret storage configuration, see [Secret Storage](secret-storage.m
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LUCENT_AUTO_APPROVE` | `true` | When `false`, daemon-created requests (source: cognitive, daemon, schedule) require human approval via the review queue before work begins. User/API-created requests are always auto-approved. |
-| `LUCENT_SKIP_POST_REVIEW` | `false` | When `true`, bypasses the daemon's automatic post-completion quality review. By default, finished work goes through an internal review task that auto-approves or sends back for rework. |
+| `LUCENT_AUTO_APPROVE` | `false` | Env fallback for **Settings → Runtime Settings → Auto-approve daemon-created requests**. When `false`, daemon/cognitive requests require human approval via the review queue before work begins. User/API/scheduled requests are always auto-approved. |
+| `LUCENT_SKIP_POST_REVIEW` | `false` | Env fallback for **Settings → Runtime Settings → Skip automatic post-completion review**. When `true`, bypasses the daemon's automatic post-completion quality review. By default, finished work goes through an internal review task that auto-approves or sends back for rework. |
 | `LUCENT_REQUIRE_APPROVAL` | `false` | When `true`, completed requests transition to `review` status for human sign-off instead of going directly to `completed`. |
 | `LUCENT_REQUEST_REVIEW_MODEL` | *(daemon default)* | Model for request-level post-completion review |
 | `LUCENT_REQUEST_REVIEW_AGENT_TYPE` | `request-review` | Agent type for post-completion review |

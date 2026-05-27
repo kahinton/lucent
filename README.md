@@ -69,6 +69,7 @@ Lucent runs as an application server plus an optional long-running agent process
 ```
 
 The server keeps durable state and exposes the dashboard, API, and MCP interface. The agent process plans work, dispatches tasks, runs schedules, validates outputs, and records what it learns back into Lucent.
+Built-in daemon schedules run cheap pre-flight eligibility checks first, so an idle maintenance cycle records a `schedule.skipped` no-work event instead of creating empty model-backed work.
 
 ## Enterprise operating model
 

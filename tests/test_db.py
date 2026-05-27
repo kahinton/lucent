@@ -51,13 +51,30 @@ class TestMemoryRepository:
             username=f"{prefix}user",
             type="technical",
             content="Code pattern example",
-            metadata={"language": "python", "repo": "lucent"},
+            metadata={"language": "python", "repo": "kahinton/lucent"},
             user_id=test_user["id"],
             organization_id=test_user["organization_id"],
         )
 
         assert memory["metadata"]["language"] == "python"
-        assert memory["metadata"]["repo"] == "lucent"
+        assert memory["metadata"]["repo"] == "kahinton/lucent"
+
+    async def test_create_memory_rejects_bare_repo_metadata(
+        self, db_pool, test_user, clean_test_data
+    ):
+        """Repository layer rejects malformed repo metadata from direct callers."""
+        prefix = clean_test_data
+        repo = MemoryRepository(db_pool)
+
+        with pytest.raises(ValueError, match="owner/repo"):
+            await repo.create(
+                username=f"{prefix}user",
+                type="technical",
+                content="Code pattern example",
+                metadata={"language": "python", "repo": "lucent"},
+                user_id=test_user["id"],
+                organization_id=test_user["organization_id"],
+            )
 
     async def test_get_memory(self, db_pool, test_memory):
         """Test retrieving a memory by ID."""
@@ -278,7 +295,7 @@ class TestMemoryRepository:
             type="technical",
             content=f"{prefix} Generic content",
             tags=["unique-tag-xyz"],
-            metadata={"repo": "lucent"},
+            metadata={"repo": "kahinton/lucent"},
             user_id=test_user["id"],
             organization_id=test_user["organization_id"],
         )

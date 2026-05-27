@@ -44,6 +44,7 @@
                     <th class="text-left text-xs font-medium text-gray-500 uppercase px-4 py-3">Model</th>
                     <th class="text-left text-xs font-medium text-gray-500 uppercase px-4 py-3">Category</th>
                     <th class="text-left text-xs font-medium text-gray-500 uppercase px-4 py-3 hidden sm:table-cell">Context</th>
+                    <th class="text-left text-xs font-medium text-gray-500 uppercase px-4 py-3 hidden lg:table-cell">Reasoning</th>
                     <th class="text-left text-xs font-medium text-gray-500 uppercase px-4 py-3 hidden md:table-cell">Tags</th>
                     <th class="text-left text-xs font-medium text-gray-500 uppercase px-4 py-3">Status</th>
                     <th class="text-right text-xs font-medium text-gray-500 uppercase px-4 py-3">Actions</th>
@@ -71,6 +72,17 @@
                         <span class="text-xs text-gray-600 font-mono">{{ (model.context_window / 1000)|int }}k</span>
                         {% else %}
                         <span class="text-xs text-gray-400">—</span>
+                        {% endif %}
+                    </td>
+                    <td class="px-4 py-3 hidden lg:table-cell">
+                        {% if model.reasoning_efforts %}
+                        <div class="flex flex-wrap gap-1 max-w-40">
+                            {% for effort in model.reasoning_efforts %}
+                            <span class="inline-block px-1.5 py-0.5 rounded text-xs bg-purple-100 text-purple-700">{{ effort }}</span>
+                            {% endfor %}
+                        </div>
+                        {% else %}
+                        <span class="text-xs text-gray-400">not reported</span>
                         {% endif %}
                     </td>
                     <td class="px-4 py-3 hidden md:table-cell">
@@ -103,6 +115,7 @@
                                 data-context-window="{{ model.context_window or 0 }}"
                                 data-notes="{{ model.notes or '' }}"
                                 data-tags="{{ (model.tags or [])|join(', ') }}"
+                                data-reasoning-efforts="{{ (model.reasoning_efforts or [])|join(',') }}"
                                 data-supports-tools="{{ 'true' if model.supports_tools else 'false' }}"
                                 data-supports-vision="{{ 'true' if model.supports_vision else 'false' }}"
                                 data-engine="{{ model.engine or '' }}">Edit</button>
@@ -182,6 +195,11 @@
                 </div>
             </div>
             <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Provider-reported reasoning levels</label>
+                <input name="reasoning_efforts" id="add-reasoning-efforts" placeholder="comma-separated, if reported by provider metadata" class="w-full px-3 py-2 border border-purple-200 rounded-lg text-sm bg-purple-50/60">
+                <p class="mt-1 text-xs text-gray-500">Normally populated by Sync Providers. Leave blank when the provider does not report selectable levels.</p>
+            </div>
+            <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Notes</label>
                 <input name="notes" placeholder="Brief description of capabilities" class="w-full px-3 py-2 border rounded-lg text-sm">
             </div>
@@ -254,6 +272,11 @@
                 </div>
             </div>
             <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Provider-reported reasoning levels</label>
+                <input name="reasoning_efforts" id="edit-reasoning-efforts" class="w-full px-3 py-2 border border-purple-200 rounded-lg text-sm bg-purple-50/60">
+                <p class="mt-1 text-xs text-gray-500">Sync Providers refreshes this from provider metadata when available. Blank means no selectable levels were reported.</p>
+            </div>
+            <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Notes</label>
                 <input name="notes" id="edit-notes" class="w-full px-3 py-2 border rounded-lg text-sm">
             </div>
@@ -283,6 +306,7 @@ function openEditModal(btn) {
     document.getElementById('edit-supports-tools').checked = d.supportsTools === 'true';
     document.getElementById('edit-supports-vision').checked = d.supportsVision === 'true';
     document.getElementById('edit-engine').value = d.engine || '';
+    document.getElementById('edit-reasoning-efforts').value = (d.reasoningEfforts || '').split(',').filter(Boolean).join(', ');
     document.getElementById('edit-model-form').action = '/settings/models/' + encodeURIComponent(d.id) + '/edit';
     document.getElementById('edit-model-modal').classList.remove('hidden');
 }

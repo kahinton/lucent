@@ -512,8 +512,9 @@ MODEL_CATEGORIES = [
     "general", "fast", "reasoning", "agentic", "frontier", "research", "visual",
 ]
 MODEL_TAGS = [
-    "coding", "frontier", "reasoning", "agentic", "fast", "research", "tools",
-    "reflection", "general", "writing", "lightweight", "preview", "default",
+    "coding", "frontier", "reasoning", "reasoning-effort", "agentic", "fast",
+    "research", "tools", "reflection", "general", "writing", "lightweight",
+    "preview", "default",
 ]
 MODEL_PROVIDERS = ["anthropic", "copilot", "google", "ollama", "openai", "xai"]
 
@@ -528,6 +529,17 @@ async def _require_admin(request: Request):
 
 def _parse_tags(raw: str) -> list[str]:
     return [t.strip() for t in raw.split(",") if t.strip()]
+
+
+def _parse_reasoning_efforts(form) -> list[str]:
+    raw_values = form.getlist("reasoning_efforts") if hasattr(form, "getlist") else []
+    values: list[str] = []
+    for raw in raw_values:
+        for part in str(raw).split(","):
+            effort = part.strip().lower()
+            if effort and len(effort) <= 64 and effort not in values:
+                values.append(effort)
+    return values
 
 
 def _validate_engine_form(provider: str, engine: str | None) -> tuple[str | None, list[str], str | None]:
@@ -697,6 +709,7 @@ async def edit_model(request: Request, model_id: str):
         context_window=int(form.get("context_window") or 0),
         notes=form.get("notes", model["notes"]),
         tags=_parse_tags(form.get("tags", "")),
+        reasoning_efforts=_parse_reasoning_efforts(form),
         supports_tools="supports_tools" in form,
         supports_vision="supports_vision" in form,
         engine=engine,
@@ -738,6 +751,7 @@ async def add_model(request: Request):
         context_window=int(form.get("context_window") or 0),
         notes=form.get("notes", ""),
         tags=_parse_tags(form.get("tags", "")),
+        reasoning_efforts=_parse_reasoning_efforts(form),
         supports_tools="supports_tools" in form,
         supports_vision="supports_vision" in form,
         org_id=str(user.organization_id),

@@ -16,6 +16,7 @@ import asyncpg
 from asyncpg import Pool
 
 from lucent.metrics import metrics
+from lucent.models.repo_names import normalize_repository_full_name
 from lucent.settings import (
     search_exclude_archived_enabled,
     search_vitality_boost_alpha,
@@ -49,6 +50,32 @@ class VersionConflictError(Exception):
         super().__init__(
             f"Version conflict for memory {memory_id}: "
             f"expected {expected_version}, actual {actual_version}"
+        )
+
+
+class DuplicateTechnicalMemoryError(Exception):
+    """Raised when a file-scoped technical memory already exists."""
+
+    def __init__(self, existing_memory: dict[str, Any], repo: str, filename: str):
+        self.existing_memory = existing_memory
+        self.repo = repo
+        self.filename = filename
+        self.memory_id = existing_memory["id"]
+        self.can_update = existing_memory.get("user_id") is not None
+        super().__init__(self.message)
+
+    @property
+    def message(self) -> str:
+        return (
+            "A technical memory already exists for "
+            f"{self.repo}:{self.filename} with ID {self.memory_id}. "
+            "Update that memory instead of creating a duplicate. "
+            "Use update_memory with that ID and intelligently combine the new information "
+            "with the existing memory: preserve durable facts, merge non-overlapping details, "
+            "reconcile conflicts explicitly, carry forward useful tags/references/metadata, "
+            "and do not simply overwrite the existing content. If you do not have permission "
+            "to update that shared memory, do not create a duplicate; ask the owner, an admin, "
+            "or a daemon-managed workflow to merge the new information."
         )
 
 
@@ -190,6 +217,21 @@ class MemoryRepository:
         Returns:
             The created memory record.
         """
+        metadata = self.normalize_metadata_for_storage(type, metadata)
+        duplicate = await self.find_duplicate_technical_file_memory(
+            metadata=metadata,
+            requesting_user_id=user_id,
+            requesting_org_id=organization_id,
+        )
+        if duplicate is not None:
+            scope = self._technical_file_scope(metadata)
+            if scope is not None:
+                raise DuplicateTechnicalMemoryError(
+                    existing_memory=duplicate,
+                    repo=scope["repo"],
+                    filename=scope["filename"],
+                )
+
         # Auto-sync lifecycle_stage for goal memories created with an
         # initial metadata.status (e.g. importing a completed goal).
         initial_stage = self._resolve_goal_lifecycle_stage(type, metadata)
@@ -243,6 +285,163 @@ class MemoryRepository:
             row = await conn.fetchrow(query, *create_params)
 
         return self._row_to_dict(row)
+
+    @classmethod
+    def normalize_metadata_for_storage(
+        cls,
+        memory_type: str,
+        metadata: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Normalize metadata fields used for technical file dedupe.
+
+        File-scoped technical memories use ``metadata.repo`` and
+        ``metadata.filename`` as their duplicate key. Keep the stored metadata
+        consistent enough that callers do not need a later consolidation pass
+        just to derive ``metadata.directory`` from the filename.
+        """
+        normalized = dict(metadata or {})
+        if memory_type != "technical":
+            return normalized
+
+        repo = cls._clean_repo(normalized.get("repo"), strict=True)
+        filename = cls._clean_path(normalized.get("filename"))
+        directory = cls._normalize_directory(normalized.get("directory"))
+
+        if repo:
+            normalized["repo"] = repo
+        if filename:
+            normalized["filename"] = filename
+            normalized["directory"] = cls._parent_directory(filename)
+        elif directory is not None:
+            normalized["directory"] = directory
+
+        return normalized
+
+    async def find_duplicate_technical_file_memory(
+        self,
+        *,
+        metadata: dict[str, Any] | None,
+        requesting_user_id: UUID | None,
+        requesting_org_id: UUID | None,
+        memory_scope: str | None = None,
+        exclude_id: UUID | None = None,
+    ) -> dict[str, Any] | None:
+        """Find an accessible existing technical memory for the same file.
+
+        The duplicate boundary intentionally mirrors ordinary memory access:
+        the caller's own memories plus shared memories in the same org. Private
+        memories owned by other users do not block creation because their
+        existence is not visible to the caller.
+        """
+        scope = self._technical_file_scope(metadata)
+        if scope is None or requesting_user_id is None or requesting_org_id is None:
+            return None
+
+        conditions = [
+            "type = 'technical'",
+            "deleted_at IS NULL",
+            "COALESCE(lifecycle_stage, 'active') != 'forgotten'",
+            "lower(metadata->>'repo') = $1",
+            "lower(metadata->>'filename') = $2",
+        ]
+        params: list[Any] = [scope["repo"], scope["filename"]]
+        param_idx = 3
+
+        normalized_scope = memory_scope if memory_scope in {"user", "org_shared_only"} else None
+        if normalized_scope == "user":
+            conditions.append(f"user_id = ${param_idx}")
+            params.append(str(requesting_user_id))
+            param_idx += 1
+        elif normalized_scope == "org_shared_only":
+            conditions.append(
+                f"(organization_id = ${param_idx}::uuid AND shared IS TRUE)"
+            )
+            params.append(str(requesting_org_id))
+            param_idx += 1
+        else:
+            conditions.append(
+                f"(user_id = ${param_idx}::uuid OR "
+                f"(organization_id = ${param_idx + 1}::uuid AND shared IS TRUE))"
+            )
+            params.append(str(requesting_user_id))
+            params.append(str(requesting_org_id))
+            param_idx += 2
+
+        if exclude_id is not None:
+            conditions.append(f"id != ${param_idx}::uuid")
+            params.append(str(exclude_id))
+            param_idx += 1
+
+        where_clause = " AND ".join(conditions)
+        query = f"""
+            SELECT {self._FULL_COLUMNS}
+            FROM memories
+            WHERE {where_clause}
+            ORDER BY
+                CASE WHEN user_id = ${param_idx}::uuid THEN 0 ELSE 1 END,
+                shared DESC,
+                updated_at DESC,
+                created_at ASC
+            LIMIT 1
+        """
+        params.append(str(requesting_user_id))
+
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(query, *params)
+
+        return self._row_to_dict(row) if row else None
+
+    @classmethod
+    def _technical_file_scope(cls, metadata: dict[str, Any] | None) -> dict[str, str] | None:
+        if not isinstance(metadata, dict):
+            return None
+        repo = cls._clean_repo(metadata.get("repo"))
+        filename = cls._clean_path(metadata.get("filename"))
+        if not repo or not filename:
+            return None
+        return {"repo": repo.lower(), "filename": filename.lower()}
+
+    @staticmethod
+    def _clean_repo(value: Any, *, strict: bool = False) -> str | None:
+        if not isinstance(value, str):
+            return None
+        cleaned = value.strip().strip("`'\" ")
+        if not cleaned:
+            return None
+        try:
+            return normalize_repository_full_name(cleaned)
+        except ValueError:
+            if strict:
+                raise
+            return None
+
+    @staticmethod
+    def _clean_path(value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        cleaned = value.strip().strip("`'\" ").replace("\\", "/")
+        cleaned = cleaned.removeprefix("./")
+        return cleaned or None
+
+    @classmethod
+    def _normalize_directory(cls, value: Any) -> str | None:
+        cleaned = cls._clean_path(value)
+        if not cleaned:
+            return None
+        if cls._looks_like_file_path(cleaned):
+            return cls._parent_directory(cleaned)
+        return cleaned.rstrip("/") + "/"
+
+    @staticmethod
+    def _looks_like_file_path(path: str) -> bool:
+        name = path.rstrip("/").rsplit("/", 1)[-1]
+        return "." in name and not path.endswith("/")
+
+    @staticmethod
+    def _parent_directory(filename: str) -> str | None:
+        if "/" not in filename:
+            return None
+        return filename.rsplit("/", 1)[0] + "/"
 
     async def get(self, memory_id: UUID) -> dict[str, Any] | None:
         """Get a memory by ID (no access control).

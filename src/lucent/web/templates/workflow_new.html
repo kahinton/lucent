@@ -1,0 +1,667 @@
+{% extends "base.html" %}
+
+{% block title %}New Workflow - Lucent{% endblock %}
+
+{% block content %}
+<div class="mb-6">
+    <div class="flex items-center gap-2 text-sm text-gray-500 mb-3">
+        <a href="/workflows" class="hover:text-gray-900 transition-colors">Workflows</a>
+        <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" /></svg>
+        <span class="text-gray-900">New workflow</span>
+    </div>
+    <div class="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+        <div>
+            <h1 class="text-2xl font-bold text-gray-900">Workflow Wizard</h1>
+            <p class="mt-1 text-sm text-gray-500">Choose a trigger, define the actions, and tell the reviewer how success should be checked.</p>
+        </div>
+        <div class="flex flex-wrap gap-2 text-xs text-primary-800">
+            <span class="rounded-full bg-primary-50 px-2.5 py-1 ring-1 ring-primary-100">1. Trigger</span>
+            <span class="rounded-full bg-primary-50 px-2.5 py-1 ring-1 ring-primary-100">2. Request</span>
+            <span class="rounded-full bg-primary-50 px-2.5 py-1 ring-1 ring-primary-100">3. Actions</span>
+            <span class="rounded-full bg-primary-50 px-2.5 py-1 ring-1 ring-primary-100">4. Review</span>
+        </div>
+    </div>
+</div>
+
+<section id="workflow-composer-chat" data-agent-id="{{ workflow_composer_agent.id if workflow_composer_agent else '' }}" class="mb-6 flex min-h-[560px] flex-col overflow-hidden rounded-xl border border-primary-200 bg-white shadow-sm">
+    <div class="border-b border-primary-100 bg-primary-50/70 px-5 py-4">
+        <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <div class="flex items-start gap-3">
+                <div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary-600 text-white">
+                    <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.847.814a4.5 4.5 0 0 0-3.09 3.09Z" /></svg>
+                </div>
+                <div>
+                    <h2 class="text-base font-semibold text-primary-950">Build workflows by conversation</h2>
+                    <p class="mt-0.5 text-sm text-primary-900">Describe the automation. The Workflow Assistant drafts the trigger, request, actions, and review checklist, then can create it when you confirm.</p>
+                </div>
+            </div>
+            <span id="workflow-composer-status" class="shrink-0 self-start rounded-full bg-gray-100 px-2 py-1 text-[11px] font-medium text-gray-500">Ready</span>
+        </div>
+    </div>
+    {% if workflow_composer_agent %}
+    <div id="workflow-composer-messages" class="flex-1 space-y-3 overflow-y-auto bg-gray-50/60 p-4">
+        <div class="flex gap-2.5">
+            <div class="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary-100 text-primary-700">
+                <svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09Z" /></svg>
+            </div>
+            <div class="max-w-[85%] rounded-2xl rounded-tl-sm bg-white px-3.5 py-2.5 text-sm text-gray-700 shadow-sm ring-1 ring-gray-100">What workflow should we automate? Tell me the trigger, what should happen, and what proof you want reviewers to see. I’ll draft first and only create it after you confirm.</div>
+        </div>
+    </div>
+    <div class="border-t border-gray-100 bg-white px-4 py-3">
+        <div class="mb-2 text-[11px] font-semibold uppercase tracking-wide text-gray-400">Choose a starting point</div>
+        <div class="grid gap-2 md:grid-cols-4">
+            <button type="button" data-workflow-composer-prompt="Help me design a scheduled workflow. Ask me what should run, how often, and what outputs/review checklist it needs before creating anything." class="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-left hover:border-blue-300 hover:bg-blue-100">
+                <span class="block text-sm font-semibold text-blue-800">Scheduled</span>
+                <span class="mt-0.5 block text-xs text-blue-600">Runs by time or interval.</span>
+            </button>
+            <button type="button" data-workflow-composer-prompt="Help me design a webhook workflow. Ask for the external event, payload context, shared secret plan, actions, and review checklist before creating it." class="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-left hover:border-emerald-300 hover:bg-emerald-100">
+                <span class="block text-sm font-semibold text-emerald-800">Webhook</span>
+                <span class="mt-0.5 block text-xs text-emerald-600">Triggered by external POST.</span>
+            </button>
+            <button type="button" data-workflow-composer-prompt="Help me design a manual workflow that I can run from the workflow detail page. Draft the request, actions, and review criteria." class="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-left hover:border-slate-300 hover:bg-slate-100">
+                <span class="block text-sm font-semibold text-slate-800">Manual</span>
+                <span class="mt-0.5 block text-xs text-slate-500">Run on demand.</span>
+            </button>
+            <button type="button" data-workflow-composer-prompt="Help me design a connection-event workflow for a provider event like GitHub, Slack, or Jira. Identify what can be stored now and what integration routing still needs follow-up." class="rounded-lg border border-violet-200 bg-violet-50 px-3 py-2 text-left hover:border-violet-300 hover:bg-violet-100">
+                <span class="block text-sm font-semibold text-violet-800">Connection event</span>
+                <span class="mt-0.5 block text-xs text-violet-600">Provider event filter.</span>
+            </button>
+        </div>
+    </div>
+    <div class="border-t border-gray-100 bg-white px-4 py-3">
+        <div class="mb-2 text-[11px] font-semibold uppercase tracking-wide text-gray-400">Starter prompts</div>
+        <div class="flex flex-wrap gap-2">
+            <button type="button" data-workflow-composer-prompt="Draft a weekly dependency review workflow for a repository. It should inspect outdated packages, identify risky updates, and record a report output for review. Do not create it until I confirm." class="rounded-full border border-primary-200 bg-primary-50 px-3 py-1.5 text-xs font-medium text-primary-700 hover:bg-primary-100">Weekly dependency review</button>
+            <button type="button" data-workflow-composer-prompt="Draft a webhook workflow for incoming GitHub pull_request.opened events. It should triage the PR, identify risky areas, and create review notes. Ask me for any missing values and do not create it yet." class="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-medium text-emerald-700 hover:bg-emerald-100">PR opened webhook</button>
+            <button type="button" data-workflow-composer-prompt="Draft a manual release-readiness workflow that checks tests, docs, changelog, and deployment notes, then records links to evidence. Do not create it until I confirm." class="rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100">Release readiness</button>
+            <button type="button" data-workflow-composer-prompt="List similar existing workflows first, then help me decide whether I should create a new workflow or adjust an existing one." class="rounded-full border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50">Check duplicates first</button>
+        </div>
+    </div>
+    <form id="workflow-composer-form" class="border-t border-gray-100 bg-white p-3">
+        <label for="workflow-composer-input" class="sr-only">Message the Workflow Assistant</label>
+        <div class="flex items-end gap-2 rounded-xl border border-gray-200 bg-gray-50 px-3 py-2 focus-within:border-primary-300 focus-within:bg-white focus-within:ring-2 focus-within:ring-primary-100">
+            <textarea id="workflow-composer-input" rows="2" placeholder="Describe the workflow you want to automate…" class="min-h-[44px] flex-1 resize-none border-0 bg-transparent text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-0"></textarea>
+            <button id="workflow-composer-send" type="submit" disabled class="rounded-lg bg-primary-600 px-3 py-2 text-sm font-medium text-white hover:bg-primary-700 disabled:cursor-not-allowed disabled:bg-gray-300">Send</button>
+        </div>
+        <div class="mt-2 flex items-center justify-between gap-3 text-[11px] text-gray-400">
+            <span>Ask for a draft first; say “create it” when you want an active workflow.</span>
+            <button id="workflow-composer-reset" type="button" class="font-medium text-gray-500 hover:text-gray-700">Reset chat</button>
+        </div>
+    </form>
+    {% else %}
+    <div class="flex flex-1 items-center justify-center bg-gray-50 p-6 text-center">
+        <div>
+            <p class="text-sm font-medium text-gray-700">Workflow Assistant is not active yet.</p>
+            <p class="mt-1 text-sm text-gray-500">Restart or sync built-in definitions so the assistant can design and create workflows.</p>
+        </div>
+    </div>
+    {% endif %}
+</section>
+
+<div class="mb-4 flex items-center gap-3">
+    <div class="h-px flex-1 bg-gray-200"></div>
+    <span class="text-xs font-semibold uppercase tracking-wide text-gray-400">Or build manually</span>
+    <div class="h-px flex-1 bg-gray-200"></div>
+</div>
+
+<form method="POST" action="/workflows/new" class="space-y-6" id="workflow-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+    <section class="rounded-xl border border-gray-200 bg-white shadow-sm">
+        <div class="border-b border-gray-100 px-5 py-4">
+            <h2 class="text-lg font-semibold text-gray-900">What should start this workflow?</h2>
+            <p class="mt-1 text-sm text-gray-500">A trigger starts a request. The request then creates one or more ordered tasks.</p>
+        </div>
+        <div class="p-5 space-y-5">
+            <div class="grid gap-4 lg:grid-cols-2">
+                <div>
+                    <label for="title" class="block text-sm font-medium text-gray-700 mb-1">Workflow name</label>
+                    <input id="title" name="title" required maxlength="256" placeholder="e.g. Weekly dependency review" class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-primary-500 focus:ring-2 focus:ring-primary-100 outline-none">
+                    <p class="mt-1 text-xs text-gray-400">Use a plain-language name users can recognize in Activity.</p>
+                </div>
+                <div>
+                    <label for="priority" class="block text-sm font-medium text-gray-700 mb-1">Priority</label>
+                    <select id="priority" name="priority" class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:border-primary-500 focus:ring-2 focus:ring-primary-100 outline-none">
+                        <option value="low">Low</option>
+                        <option value="medium" selected>Medium</option>
+                        <option value="high">High</option>
+                        <option value="urgent">Urgent</option>
+                    </select>
+                </div>
+            </div>
+            <div>
+                <label for="description" class="block text-sm font-medium text-gray-700 mb-1">Description</label>
+                <textarea id="description" name="description" rows="3" placeholder="What is this workflow for?" class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-primary-500 focus:ring-2 focus:ring-primary-100 outline-none"></textarea>
+            </div>
+
+            <div class="grid gap-3 md:grid-cols-4" id="trigger-cards">
+                <label class="trigger-card cursor-pointer rounded-xl border border-primary-200 bg-primary-50 p-4 ring-2 ring-primary-100" data-trigger-card="schedule">
+                    <input type="radio" name="trigger_type" value="schedule" checked class="sr-only">
+                    <span class="block text-sm font-semibold text-primary-900">Scheduled</span>
+                    <span class="mt-1 block text-xs text-primary-700">Run on an interval or cron expression.</span>
+                </label>
+                <label class="trigger-card cursor-pointer rounded-xl border border-gray-200 bg-white p-4 hover:border-gray-300" data-trigger-card="webhook">
+                    <input type="radio" name="trigger_type" value="webhook" class="sr-only">
+                    <span class="block text-sm font-semibold text-gray-900">Incoming webhook</span>
+                    <span class="mt-1 block text-xs text-gray-500">External systems can POST an event.</span>
+                </label>
+                <label class="trigger-card cursor-pointer rounded-xl border border-gray-200 bg-white p-4 hover:border-gray-300" data-trigger-card="manual">
+                    <input type="radio" name="trigger_type" value="manual" class="sr-only">
+                    <span class="block text-sm font-semibold text-gray-900">Manual</span>
+                    <span class="mt-1 block text-xs text-gray-500">Run from the workflow detail page.</span>
+                </label>
+                <label class="trigger-card cursor-pointer rounded-xl border border-gray-200 bg-white p-4 hover:border-gray-300" data-trigger-card="integration_event">
+                    <input type="radio" name="trigger_type" value="integration_event" class="sr-only">
+                    <span class="block text-sm font-semibold text-gray-900">Connection event</span>
+                    <span class="mt-1 block text-xs text-gray-500">Reserve for provider events like GitHub, Slack, Jira.</span>
+                </label>
+            </div>
+
+            <div id="schedule-settings" class="rounded-lg border border-blue-100 bg-blue-50/70 p-4">
+                <div class="grid gap-4 md:grid-cols-3">
+                    <div>
+                        <label for="schedule_type" class="block text-sm font-medium text-blue-900 mb-1">Schedule mode</label>
+                        <select id="schedule_type" name="schedule_type" class="w-full rounded-lg border border-blue-200 bg-white px-3 py-2 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-100 outline-none">
+                            <option value="interval" selected>Every interval</option>
+                            <option value="cron">Cron expression</option>
+                            <option value="once">Run once soon</option>
+                        </select>
+                    </div>
+                    <div data-schedule-field="interval">
+                        <label for="interval_amount" class="block text-sm font-medium text-blue-900 mb-1">Every</label>
+                        <div class="flex gap-2">
+                            <input id="interval_amount" name="interval_amount" type="number" min="1" value="1" class="w-24 rounded-lg border border-blue-200 px-3 py-2 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-100 outline-none">
+                            <select name="interval_unit" class="flex-1 rounded-lg border border-blue-200 bg-white px-3 py-2 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-100 outline-none">
+                                <option value="minutes">minutes</option>
+                                <option value="hours" selected>hours</option>
+                                <option value="days">days</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div data-schedule-field="cron" class="hidden">
+                        <label for="cron_expression" class="block text-sm font-medium text-blue-900 mb-1">Cron</label>
+                        <input id="cron_expression" name="cron_expression" placeholder="0 9 * * 1" class="w-full rounded-lg border border-blue-200 px-3 py-2 text-sm font-mono focus:border-blue-500 focus:ring-2 focus:ring-blue-100 outline-none">
+                    </div>
+                    <div>
+                        <label for="timezone" class="block text-sm font-medium text-blue-900 mb-1">Timezone</label>
+                        <input id="timezone" name="timezone" value="UTC" class="w-full rounded-lg border border-blue-200 px-3 py-2 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-100 outline-none">
+                    </div>
+                </div>
+            </div>
+
+            <div id="webhook-settings" class="hidden rounded-lg border border-emerald-100 bg-emerald-50/70 p-4">
+                <label for="webhook_secret" class="block text-sm font-medium text-emerald-900 mb-1">Shared secret</label>
+                <input id="webhook_secret" name="webhook_secret" type="password" autocomplete="new-password" placeholder="Paste a long random token" class="w-full rounded-lg border border-emerald-200 px-3 py-2 text-sm focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 outline-none">
+                <p class="mt-1 text-xs text-emerald-700">External callers send this as <span class="font-mono">X-Lucent-Workflow-Token</span>, a Bearer token, or a <span class="font-mono">?token=</span> query parameter. Lucent stores only a hash.</p>
+            </div>
+
+            <div id="integration-settings" class="hidden rounded-lg border border-violet-100 bg-violet-50/70 p-4">
+                <div class="grid gap-4 md:grid-cols-2">
+                    <div>
+                        <label for="integration_provider" class="block text-sm font-medium text-violet-900 mb-1">Provider</label>
+                        <input id="integration_provider" name="integration_provider" placeholder="github_app, slack, jira…" class="w-full rounded-lg border border-violet-200 px-3 py-2 text-sm focus:border-violet-500 focus:ring-2 focus:ring-violet-100 outline-none">
+                    </div>
+                    <div>
+                        <label for="integration_event_name" class="block text-sm font-medium text-violet-900 mb-1">Event name</label>
+                        <input id="integration_event_name" name="integration_event_name" placeholder="pull_request.opened" class="w-full rounded-lg border border-violet-200 px-3 py-2 text-sm focus:border-violet-500 focus:ring-2 focus:ring-violet-100 outline-none">
+                    </div>
+                </div>
+                <p class="mt-2 text-xs text-violet-700">This stores the event filter now; provider-specific routing can attach to it as connection integrations mature.</p>
+            </div>
+        </div>
+    </section>
+
+    <section class="rounded-xl border border-gray-200 bg-white shadow-sm">
+        <div class="border-b border-gray-100 px-5 py-4">
+            <h2 class="text-lg font-semibold text-gray-900">Request template</h2>
+            <p class="mt-1 text-sm text-gray-500">Each run creates a request. These fields are what users and reviewers see first.</p>
+        </div>
+        <div class="p-5 space-y-4">
+            <div class="grid gap-4 lg:grid-cols-2">
+                <div>
+                    <label for="request_title" class="block text-sm font-medium text-gray-700 mb-1">Request title</label>
+                    <input id="request_title" name="request_title" placeholder="Defaults to the workflow name" class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-primary-500 focus:ring-2 focus:ring-primary-100 outline-none">
+                    <p class="mt-1 text-xs text-gray-400">You can use <span class="font-mono">{workflow_title}</span> or <span class="font-mono">{event_summary}</span>.</p>
+                </div>
+                <div>
+                    <label for="dependency_policy" class="block text-sm font-medium text-gray-700 mb-1">Task dependency policy</label>
+                    <select id="dependency_policy" name="dependency_policy" class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:border-primary-500 focus:ring-2 focus:ring-primary-100 outline-none">
+                        <option value="strict" selected>Strict — review only when all actions finish</option>
+                        <option value="permissive">Permissive — review even if some actions fail</option>
+                    </select>
+                </div>
+            </div>
+            <div>
+                <label for="request_description" class="block text-sm font-medium text-gray-700 mb-1">Request description</label>
+                <textarea id="request_description" name="request_description" rows="3" placeholder="Optional run-level context for every request" class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-primary-500 focus:ring-2 focus:ring-primary-100 outline-none"></textarea>
+            </div>
+        </div>
+    </section>
+
+    <section class="rounded-xl border border-gray-200 bg-white shadow-sm">
+        <div class="flex items-center justify-between border-b border-gray-100 px-5 py-4">
+            <div>
+                <h2 class="text-lg font-semibold text-gray-900">Actions</h2>
+                <p class="mt-1 text-sm text-gray-500">Actions become ordered tasks inside the request framework and can record outputs.</p>
+            </div>
+            <button type="button" id="add-action" class="rounded-lg border border-primary-200 bg-primary-50 px-3 py-2 text-sm font-medium text-primary-700 hover:bg-primary-100">+ Add action</button>
+        </div>
+        <div id="actions" class="divide-y divide-gray-100">
+            <div class="action-row p-5 space-y-4">
+                <div class="flex items-center justify-between">
+                    <span class="rounded-full bg-gray-100 px-2.5 py-1 text-xs font-medium text-gray-600">Action 1</span>
+                    <button type="button" class="remove-action hidden text-xs font-medium text-red-600 hover:text-red-700">Remove</button>
+                </div>
+                <div class="grid gap-4 lg:grid-cols-2">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Action title</label>
+                        <input name="action_title" placeholder="e.g. Check dependencies" class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-primary-500 focus:ring-2 focus:ring-primary-100 outline-none">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Agent</label>
+                        <select name="action_agent_type" class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:border-primary-500 focus:ring-2 focus:ring-primary-100 outline-none">
+                            {% for agent in active_agents %}
+                            <option value="{{ agent.name }}" {% if agent.name == 'code' %}selected{% endif %}>{{ agent.name }}</option>
+                            {% endfor %}
+                            {% if active_agents|length == 0 %}<option value="code">code</option>{% endif %}
+                        </select>
+                    </div>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Instructions for this action</label>
+                    <textarea name="action_prompt" rows="5" placeholder="Tell the task agent exactly what to do and what output to record." class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-primary-500 focus:ring-2 focus:ring-primary-100 outline-none"></textarea>
+                </div>
+                <div class="grid gap-4 md:grid-cols-2">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Model override</label>
+                        <select name="action_model" class="action-model w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:border-primary-500 focus:ring-2 focus:ring-primary-100 outline-none">
+                            <option value="" data-reasoning-efforts="">daemon default</option>
+                            {% for model in available_models %}
+                            <option value="{{ model.id }}" data-reasoning-efforts="{{ (model.reasoning_efforts or [])|join(',') }}">{{ model.name }} ({{ model.id }})</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Reasoning effort</label>
+                        <select name="action_reasoning_effort" class="action-reasoning w-full rounded-lg border border-purple-200 bg-purple-50 px-3 py-2 text-sm focus:border-purple-500 focus:ring-2 focus:ring-purple-100 outline-none">
+                            <option value="">provider default</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section class="rounded-xl border border-gray-200 bg-white shadow-sm">
+        <div class="border-b border-gray-100 px-5 py-4">
+            <h2 class="text-lg font-semibold text-gray-900">Review checklist</h2>
+            <p class="mt-1 text-sm text-gray-500">These instructions are included in the generated request so the post-completion reviewer checks the right things.</p>
+        </div>
+        <div class="p-5 space-y-4">
+            <textarea name="review_instructions" rows="5" placeholder="Example: Confirm every created issue/PR/document is recorded as an output, and reject if the report does not include links." class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-primary-500 focus:ring-2 focus:ring-primary-100 outline-none"></textarea>
+            <label class="inline-flex items-center gap-2 text-sm text-gray-600">
+                <input type="checkbox" name="allow_concurrent" class="rounded border-gray-300 text-primary-600 focus:ring-primary-500">
+                Allow multiple runs at the same time
+            </label>
+        </div>
+    </section>
+
+    <div class="sticky bottom-0 -mx-2 border-t border-gray-200 bg-white/95 px-2 py-4 backdrop-blur">
+        <div class="flex items-center justify-between gap-3">
+            <a href="/workflows" class="text-sm font-medium text-gray-500 hover:text-gray-700">Cancel</a>
+            <button type="submit" class="rounded-lg bg-primary-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-primary-700">Create workflow</button>
+        </div>
+    </div>
+</form>
+
+<script nonce="{{ request.state.csp_nonce }}">
+(function() {
+    const root = document.getElementById('workflow-composer-chat');
+    if (!root) return;
+
+    const agentId = root.dataset.agentId || '';
+    const form = document.getElementById('workflow-composer-form');
+    const input = document.getElementById('workflow-composer-input');
+    const sendBtn = document.getElementById('workflow-composer-send');
+    const messagesEl = document.getElementById('workflow-composer-messages');
+    const resetBtn = document.getElementById('workflow-composer-reset');
+    const statusEl = document.getElementById('workflow-composer-status');
+    const initialMessagesHtml = messagesEl ? messagesEl.innerHTML : '';
+    const state = {
+        messages: [],
+        sessionId: null,
+        streaming: false,
+        abortController: null,
+    };
+
+    function setStatus(text, tone) {
+        if (!statusEl) return;
+        statusEl.textContent = text;
+        const palette = tone === 'error'
+            ? 'bg-red-100 text-red-700'
+            : tone === 'active'
+                ? 'bg-primary-100 text-primary-700'
+                : tone === 'success'
+                    ? 'bg-green-100 text-green-700'
+                    : 'bg-gray-100 text-gray-500';
+        statusEl.className = 'shrink-0 self-start rounded-full px-2 py-1 text-[11px] font-medium ' + palette;
+    }
+
+    function scrollMessages() {
+        if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    function updateSendButton() {
+        if (!sendBtn || !input) return;
+        sendBtn.disabled = state.streaming || !input.value.trim() || !agentId;
+    }
+
+    function bubbleClasses(role) {
+        if (role === 'user') {
+            return 'max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-tr-sm bg-primary-600 px-3.5 py-2.5 text-sm text-white shadow-sm';
+        }
+        return 'max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-tl-sm bg-white px-3.5 py-2.5 text-sm text-gray-700 shadow-sm ring-1 ring-gray-100';
+    }
+
+    function appendMessage(role, text) {
+        if (!messagesEl) return null;
+        const row = document.createElement('div');
+        row.className = role === 'user' ? 'flex justify-end' : 'flex gap-2.5';
+
+        if (role !== 'user') {
+            const avatar = document.createElement('div');
+            avatar.className = 'mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary-100 text-primary-700';
+            avatar.innerHTML = '<svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09Z" /></svg>';
+            row.appendChild(avatar);
+        }
+
+        const bubble = document.createElement('div');
+        bubble.className = bubbleClasses(role);
+        bubble.textContent = text;
+        row.appendChild(bubble);
+        messagesEl.appendChild(row);
+        scrollMessages();
+        return bubble;
+    }
+
+    function appendToolNote(text) {
+        if (!messagesEl) return;
+        const note = document.createElement('div');
+        note.className = 'mx-10 rounded-full bg-white px-3 py-1 text-center text-[11px] text-gray-500 ring-1 ring-gray-100';
+        note.textContent = text;
+        messagesEl.appendChild(note);
+        scrollMessages();
+    }
+
+    function shortToolName(tool) {
+        return String(tool || 'tool').replace(/^memory-server-/, '').replace(/^mcp_memory-server_/, '');
+    }
+
+    function resetComposerChat() {
+        if (state.abortController) {
+            state.abortController.abort();
+            state.abortController = null;
+        }
+        state.messages = [];
+        state.sessionId = null;
+        state.streaming = false;
+        if (messagesEl) messagesEl.innerHTML = initialMessagesHtml;
+        if (input) {
+            input.value = '';
+            input.style.height = 'auto';
+        }
+        setStatus(agentId ? 'Ready' : 'Unavailable');
+        updateSendButton();
+    }
+
+    function toolResultNote(tool, output) {
+        const name = shortToolName(tool);
+        if (name === 'create_workflow') {
+            let label = 'Created workflow. Open the Workflows list to review and test it.';
+            const rawOutput = String(output || '');
+            const lowerOutput = rawOutput.toLowerCase();
+            if (lowerOutput.includes('permission denied') || lowerOutput.includes('error')) {
+                label = 'create_workflow returned an error: ' + rawOutput.slice(0, 180);
+                return label;
+            }
+            try {
+                const parsed = JSON.parse(rawOutput || '{}');
+                if (parsed && parsed.error) {
+                    label = 'create_workflow returned an error: ' + parsed.error;
+                } else if (parsed && parsed.id) {
+                    label = 'Created workflow ' + String(parsed.id).slice(0, 8) + '. Open it from the Workflows list.';
+                }
+            } catch (_err) {
+                // Keep generic label.
+            }
+            return label;
+        }
+        if (name === 'list_workflows') return 'Checked existing workflows.';
+        if (name === 'get_workflow_details') return 'Loaded workflow details.';
+        return 'Finished ' + name + '.';
+    }
+
+    async function sendComposerMessage(e) {
+        e.preventDefault();
+        if (!input || !agentId || state.streaming) return;
+        const text = input.value.trim();
+        if (!text) return;
+
+        state.messages.push({ role: 'user', content: text });
+        appendMessage('user', text);
+        input.value = '';
+        input.style.height = 'auto';
+        state.streaming = true;
+        state.abortController = new AbortController();
+        updateSendButton();
+        setStatus('Thinking…', 'active');
+
+        const assistantBubble = appendMessage('assistant', '');
+        let assistantText = '';
+        let gotDeltas = false;
+
+        try {
+            const resp = await fetch('/api/chat/stream-v2', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    messages: state.messages,
+                    session_id: state.sessionId,
+                    surface: 'embedded_chat',
+                    agent_id: agentId,
+                }),
+                signal: state.abortController.signal,
+            });
+
+            if (!resp.ok || !resp.body) {
+                const errText = await resp.text().catch(() => resp.statusText);
+                throw new Error(errText || 'Chat request failed');
+            }
+
+            const reader = resp.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop() || '';
+                for (const line of lines) {
+                    if (!line.startsWith('data: ')) continue;
+                    let event;
+                    try {
+                        event = JSON.parse(line.slice(6));
+                    } catch (_err) {
+                        continue;
+                    }
+                    if (event.type === 'session') {
+                        state.sessionId = event.session_id;
+                    } else if (event.type === 'text_delta') {
+                        gotDeltas = true;
+                        assistantText += event.text || '';
+                        if (assistantBubble) assistantBubble.textContent = assistantText;
+                        setStatus('Writing…', 'active');
+                        scrollMessages();
+                    } else if (event.type === 'message') {
+                        if (!gotDeltas) assistantText = event.text || '';
+                        if (assistantBubble) assistantBubble.textContent = assistantText;
+                        scrollMessages();
+                    } else if (event.type === 'tool_call') {
+                        setStatus('Using ' + shortToolName(event.tool) + '…', 'active');
+                        appendToolNote('Using ' + shortToolName(event.tool) + '…');
+                    } else if (event.type === 'tool_result') {
+                        appendToolNote(toolResultNote(event.tool, event.output));
+                        setStatus('Thinking…', 'active');
+                    } else if (event.type === 'error') {
+                        throw new Error(event.error || 'The workflow assistant hit an error');
+                    }
+                }
+            }
+
+            if (!assistantText.trim()) {
+                assistantText = 'No response came back. Try again, or check the chat/model configuration.';
+                if (assistantBubble) assistantBubble.textContent = assistantText;
+            }
+            state.messages.push({ role: 'assistant', content: assistantText });
+            setStatus('Ready', 'success');
+        } catch (err) {
+            if (err.name !== 'AbortError') {
+                const message = 'Workflow Assistant error: ' + (err.message || 'unknown error');
+                if (assistantBubble) assistantBubble.textContent = message;
+                setStatus('Error', 'error');
+            }
+        } finally {
+            state.streaming = false;
+            state.abortController = null;
+            updateSendButton();
+        }
+    }
+
+    document.querySelectorAll('[data-workflow-composer-prompt]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            if (!input || state.streaming) return;
+            input.value = btn.dataset.workflowComposerPrompt || '';
+            input.style.height = 'auto';
+            input.style.height = Math.min(input.scrollHeight, 160) + 'px';
+            input.focus();
+            updateSendButton();
+        });
+    });
+
+    if (form) form.addEventListener('submit', sendComposerMessage);
+    if (resetBtn) resetBtn.addEventListener('click', resetComposerChat);
+    if (input) {
+        input.addEventListener('input', () => {
+            input.style.height = 'auto';
+            input.style.height = Math.min(input.scrollHeight, 160) + 'px';
+            updateSendButton();
+        });
+        input.addEventListener('keydown', e => {
+            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                form?.requestSubmit();
+            }
+        });
+    }
+    setStatus(agentId ? 'Ready' : 'Unavailable');
+    updateSendButton();
+})();
+
+(function() {
+    const triggerCards = document.querySelectorAll('[data-trigger-card]');
+    const scheduleSettings = document.getElementById('schedule-settings');
+    const webhookSettings = document.getElementById('webhook-settings');
+    const integrationSettings = document.getElementById('integration-settings');
+    const scheduleType = document.getElementById('schedule_type');
+    const actions = document.getElementById('actions');
+    const addAction = document.getElementById('add-action');
+
+    function selectedTrigger() {
+        const checked = document.querySelector('input[name="trigger_type"]:checked');
+        return checked ? checked.value : 'schedule';
+    }
+
+    function refreshTrigger() {
+        const value = selectedTrigger();
+        triggerCards.forEach(card => {
+            const active = card.dataset.triggerCard === value;
+            card.className = active
+                ? 'trigger-card cursor-pointer rounded-xl border border-primary-200 bg-primary-50 p-4 ring-2 ring-primary-100'
+                : 'trigger-card cursor-pointer rounded-xl border border-gray-200 bg-white p-4 hover:border-gray-300';
+        });
+        scheduleSettings.classList.toggle('hidden', value !== 'schedule');
+        webhookSettings.classList.toggle('hidden', value !== 'webhook');
+        integrationSettings.classList.toggle('hidden', value !== 'integration_event');
+    }
+
+    function refreshScheduleMode() {
+        const mode = scheduleType ? scheduleType.value : 'interval';
+        document.querySelectorAll('[data-schedule-field]').forEach(el => {
+            el.classList.toggle('hidden', el.dataset.scheduleField !== mode);
+        });
+    }
+
+    function refreshActionLabels() {
+        const rows = actions.querySelectorAll('.action-row');
+        rows.forEach((row, idx) => {
+            const badge = row.querySelector('span');
+            const remove = row.querySelector('.remove-action');
+            if (badge) badge.textContent = 'Action ' + (idx + 1);
+            if (remove) remove.classList.toggle('hidden', rows.length === 1);
+        });
+    }
+
+    function refreshReasoning(row) {
+        const modelSelect = row.querySelector('.action-model');
+        const reasoningSelect = row.querySelector('.action-reasoning');
+        if (!modelSelect || !reasoningSelect) return;
+        const selected = modelSelect.options[modelSelect.selectedIndex];
+        const efforts = ((selected && selected.dataset.reasoningEfforts) || '').split(',').filter(Boolean);
+        const current = reasoningSelect.value;
+        reasoningSelect.innerHTML = '<option value="">provider default</option>';
+        for (const effort of efforts) {
+            const opt = document.createElement('option');
+            opt.value = effort;
+            opt.textContent = effort;
+            if (effort === current) opt.selected = true;
+            reasoningSelect.appendChild(opt);
+        }
+    }
+
+    function wireAction(row) {
+        const remove = row.querySelector('.remove-action');
+        const model = row.querySelector('.action-model');
+        if (remove) remove.addEventListener('click', () => {
+            row.remove();
+            refreshActionLabels();
+        });
+        if (model) model.addEventListener('change', () => refreshReasoning(row));
+        refreshReasoning(row);
+    }
+
+    triggerCards.forEach(card => {
+        card.addEventListener('click', () => {
+            const input = card.querySelector('input[type="radio"]');
+            if (input) input.checked = true;
+            refreshTrigger();
+        });
+    });
+    if (scheduleType) scheduleType.addEventListener('change', refreshScheduleMode);
+    actions.querySelectorAll('.action-row').forEach(wireAction);
+    if (addAction) addAction.addEventListener('click', () => {
+        const first = actions.querySelector('.action-row');
+        const clone = first.cloneNode(true);
+        clone.querySelectorAll('input, textarea, select').forEach(el => {
+            if (el.tagName === 'SELECT') el.selectedIndex = 0;
+            else el.value = '';
+        });
+        actions.appendChild(clone);
+        wireAction(clone);
+        refreshActionLabels();
+    });
+    refreshTrigger();
+    refreshScheduleMode();
+    refreshActionLabels();
+})();
+</script>
+{% endblock %}

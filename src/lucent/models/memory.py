@@ -7,6 +7,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
 
+from lucent.models.repo_names import normalize_repository_full_name
+
 
 class MemoryType(str, Enum):
     """Types of memories that can be stored."""
@@ -60,15 +62,34 @@ class TechnicalMetadata(BaseModel):
     )
     version_info: str | None = Field(default=None, description="Version-specific information")
     repo: str | None = Field(
-        default=None, description="Repository name in owner/repo format (e.g. 'octocat/hello-world')"
+        default=None,
+        description="Repository name in owner/repo format (e.g. 'octocat/hello-world')",
     )
     directory: str | None = Field(
         default=None,
-        description="Directory path within the repo this knowledge relates to (e.g. 'src/lucent/api/'). Null for repo-level knowledge.",
+        description=(
+            "Directory path within the repo this knowledge relates to "
+            "(e.g. 'src/lucent/api/'). Null for repo-level knowledge."
+        ),
     )
     filename: str | None = Field(
-        default=None, description="Specific file path this knowledge relates to (e.g. 'src/lucent/db/memory.py'). Null for repo-level or directory-level knowledge."
+        default=None,
+        description=(
+            "Specific file path this knowledge relates to "
+            "(e.g. 'src/lucent/db/memory.py'). Null for repo-level or "
+            "directory-level knowledge."
+        ),
     )
+
+    @field_validator("repo")
+    @classmethod
+    def normalize_repo(cls, value: str | None) -> str | None:
+        """Require repository metadata to be a canonical owner/repo full name."""
+        if value is None:
+            return None
+        if not value.strip():
+            return None
+        return normalize_repository_full_name(value)
 
 
 class ProceduralStep(BaseModel):

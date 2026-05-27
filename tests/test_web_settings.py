@@ -13,6 +13,7 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport
 
+from lucent import settings as runtime_settings
 from lucent.api.app import create_app
 from lucent.auth_providers import (
     CSRF_COOKIE_NAME,
@@ -21,7 +22,12 @@ from lucent.auth_providers import (
     create_session,
     set_user_password,
 )
-from lucent.db import ApiKeyRepository, OrganizationRepository, UserRepository
+from lucent.db import (
+    ApiKeyRepository,
+    OrganizationRepository,
+    RuntimeSettingsRepository,
+    UserRepository,
+)
 
 TEST_PASSWORD = "TestPass1"
 
@@ -89,6 +95,12 @@ def _csrf_data(client: httpx.AsyncClient, extra: dict | None = None) -> dict:
     if extra:
         data.update(extra)
     return data
+
+
+async def _promote_web_user(db_pool, web_user, role: str = "admin") -> None:
+    user, _org, _token = web_user
+    user_repo = UserRepository(db_pool)
+    await user_repo.update_role(user["id"], role)
 
 
 # ---------------------------------------------------------------------------
@@ -174,3 +186,255 @@ async def test_revoke_nonexistent_key_returns_404(client):
         follow_redirects=False,
     )
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# /settings/runtime
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_runtime_settings_page_requires_admin(client):
+    resp = await client.get("/settings/runtime", follow_redirects=False)
+    assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_runtime_settings_page_shows_env_fallback(
+    client,
+    db_pool,
+    web_user,
+    monkeypatch,
+):
+    await _promote_web_user(db_pool, web_user)
+    monkeypatch.setenv("LUCENT_SEARCH_VITALITY_BOOST_ALPHA", "0.2")
+    runtime_settings.clear_runtime_setting_cache()
+
+    resp = await client.get("/settings/runtime")
+
+    assert resp.status_code == 200
+    assert "Runtime Settings" in resp.text
+    assert "From env" in resp.text
+    assert "LUCENT_SEARCH_VITALITY_BOOST_ALPHA" in resp.text
+    assert "Default model" in resp.text
+    assert "Chat model" in resp.text
+    assert "GitHub token" in resp.text
+    assert "Locked" in resp.text
+
+
+@pytest.mark.asyncio
+async def test_runtime_setting_update_persists_db_value(
+    client,
+    db_pool,
+    web_user,
+    monkeypatch,
+):
+    user, org, _token = web_user
+    await _promote_web_user(db_pool, web_user)
+    monkeypatch.setenv("LUCENT_SEARCH_VITALITY_BOOST_ALPHA", "0.2")
+    runtime_settings.clear_runtime_setting_cache()
+
+    resp = await client.post(
+        "/settings/runtime/memory.search_vitality_boost_alpha",
+        data=_csrf_data(client, {"value": "0.27"}),
+        follow_redirects=False,
+    )
+
+    assert resp.status_code == 303
+    assert resp.headers["location"].startswith("/settings/runtime?success=")
+
+    repo = RuntimeSettingsRepository(db_pool)
+    row = await repo.get_setting(org["id"], "memory.search_vitality_boost_alpha")
+    assert row is not None
+    assert row["value"] == 0.27
+    assert row["updated_by"] == user["id"]
+    assert runtime_settings.search_vitality_boost_alpha(
+        organization_id=org["id"],
+    ) == 0.27
+
+
+@pytest.mark.asyncio
+async def test_runtime_default_model_drives_model_registry(
+    client,
+    db_pool,
+    web_user,
+):
+    from lucent.auth import set_current_user
+    from lucent.model_registry import ModelInfo, get_default_model_id
+
+    user, org, _token = web_user
+    await _promote_web_user(db_pool, web_user)
+    runtime_settings.clear_runtime_setting_cache()
+
+    resp = await client.post(
+        "/settings/runtime/models.default_model",
+        data=_csrf_data(client, {"value": "test-default-model"}),
+        follow_redirects=False,
+    )
+
+    assert resp.status_code == 303
+    set_current_user({"id": user["id"], "organization_id": org["id"]})
+    try:
+        selected = get_default_model_id(
+            models=[
+                ModelInfo(
+                    id="fallback-model",
+                    provider="test",
+                    name="Fallback",
+                    category="general",
+                ),
+                ModelInfo(
+                    id="test-default-model",
+                    provider="test",
+                    name="DB Default",
+                    category="general",
+                ),
+            ]
+        )
+    finally:
+        set_current_user(None)
+    assert selected == "test-default-model"
+
+
+@pytest.mark.asyncio
+async def test_runtime_setting_reset_uses_env_fallback(
+    client,
+    db_pool,
+    web_user,
+    monkeypatch,
+):
+    _user, org, _token = web_user
+    await _promote_web_user(db_pool, web_user)
+    monkeypatch.setenv("LUCENT_SEARCH_VITALITY_BOOST_ALPHA", "0.31")
+    runtime_settings.clear_runtime_setting_cache()
+
+    await client.post(
+        "/settings/runtime/memory.search_vitality_boost_alpha",
+        data=_csrf_data(client, {"value": "0.27"}),
+        follow_redirects=False,
+    )
+    assert runtime_settings.search_vitality_boost_alpha(
+        organization_id=org["id"],
+    ) == 0.27
+
+    resp = await client.post(
+        "/settings/runtime/memory.search_vitality_boost_alpha/reset",
+        data=_csrf_data(client),
+        follow_redirects=False,
+    )
+
+    assert resp.status_code == 303
+    repo = RuntimeSettingsRepository(db_pool)
+    row = await repo.get_setting(org["id"], "memory.search_vitality_boost_alpha")
+    assert row is None
+    assert runtime_settings.search_vitality_boost_alpha(
+        organization_id=org["id"],
+    ) == 0.31
+
+
+@pytest.mark.asyncio
+async def test_runtime_setting_update_json_response(
+    client,
+    db_pool,
+    web_user,
+):
+    _user, org, _token = web_user
+    await _promote_web_user(db_pool, web_user)
+    runtime_settings.clear_runtime_setting_cache()
+
+    resp = await client.post(
+        "/settings/runtime/models.chat_model",
+        data=_csrf_data(client, {"value": "gpt-4.1"}),
+        headers={"Accept": "application/json", "X-Requested-With": "fetch"},
+        follow_redirects=False,
+    )
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["ok"] is True
+    assert payload["message"] == "Chat model updated."
+    assert payload["setting"]["key"] == "models.chat_model"
+    assert payload["setting"]["source"] == "database"
+    assert payload["setting"]["source_label"] == "Saved in DB"
+    assert payload["setting"]["display_value"] == "gpt-4.1"
+    assert runtime_settings.chat_model_id(organization_id=org["id"]) == "gpt-4.1"
+
+
+@pytest.mark.asyncio
+async def test_runtime_setting_reset_json_response(
+    client,
+    db_pool,
+    web_user,
+    monkeypatch,
+):
+    _user, org, _token = web_user
+    await _promote_web_user(db_pool, web_user)
+    monkeypatch.setenv("LUCENT_CHAT_MODEL", "env-chat-model")
+    runtime_settings.clear_runtime_setting_cache()
+
+    await client.post(
+        "/settings/runtime/models.chat_model",
+        data=_csrf_data(client, {"value": "db-chat-model"}),
+        headers={"Accept": "application/json", "X-Requested-With": "fetch"},
+        follow_redirects=False,
+    )
+
+    resp = await client.post(
+        "/settings/runtime/models.chat_model/reset",
+        data=_csrf_data(client),
+        headers={"Accept": "application/json", "X-Requested-With": "fetch"},
+        follow_redirects=False,
+    )
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["ok"] is True
+    assert payload["message"] == "Chat model reset to fallback."
+    assert payload["setting"]["source"] == "environment"
+    assert payload["setting"]["source_label"] == "From env"
+    assert payload["setting"]["display_value"] == "env-chat-model"
+    assert payload["setting"]["form_value"] == "env-chat-model"
+    repo = RuntimeSettingsRepository(db_pool)
+    row = await repo.get_setting(org["id"], "models.chat_model")
+    assert row is None
+
+
+@pytest.mark.asyncio
+async def test_runtime_setting_validation_rejects_out_of_range_value(
+    client,
+    db_pool,
+    web_user,
+):
+    _user, org, _token = web_user
+    await _promote_web_user(db_pool, web_user)
+    runtime_settings.clear_runtime_setting_cache()
+
+    resp = await client.post(
+        "/settings/runtime/memory.search_vitality_boost_log_top_n",
+        data=_csrf_data(client, {"value": "0"}),
+        follow_redirects=False,
+    )
+
+    assert resp.status_code == 303
+    assert "error=" in resp.headers["location"]
+    repo = RuntimeSettingsRepository(db_pool)
+    row = await repo.get_setting(org["id"], "memory.search_vitality_boost_log_top_n")
+    assert row is None
+
+
+def test_runtime_daemon_git_flags_registered(monkeypatch):
+    runtime_settings.clear_runtime_setting_cache()
+    monkeypatch.setenv("LUCENT_ALLOW_GIT_COMMIT", "true")
+    monkeypatch.setenv("LUCENT_ALLOW_GIT_PUSH", "false")
+
+    try:
+        assert runtime_settings.daemon_git_commit_allowed() is True
+        assert runtime_settings.daemon_git_push_allowed() is False
+        assert runtime_settings.get_runtime_setting_definition(
+            "daemon.allow_git_commit"
+        ) is not None
+        assert runtime_settings.get_runtime_setting_definition(
+            "daemon.allow_git_push"
+        ) is not None
+    finally:
+        runtime_settings.clear_runtime_setting_cache()
