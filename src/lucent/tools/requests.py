@@ -6,6 +6,7 @@ import os
 from typing import Any
 from uuid import UUID
 
+import httpx
 from mcp.server.fastmcp import FastMCP
 
 from lucent.db.requests import RequestRepository
@@ -14,6 +15,18 @@ from lucent.tools.annotations import CREATE_ONLY, MUTATING, READ_ONLY
 from lucent.tools.memories import _get_current_user_context
 
 logger = logging.getLogger(__name__)
+
+_HANDOFF_REFERENCE_TYPES = {
+    "request",
+    "task",
+    "task_output",
+    "memory",
+    "workflow",
+    "schedule_run",
+    "llm_session",
+    "url",
+    "other",
+}
 
 
 async def _get_request_repository() -> RequestRepository:
@@ -219,6 +232,16 @@ async def _enriched_handoff_references(
             continue
         _append_unique_reference(enriched, ref, seen)
     for ref in references or []:
+        ref_type = str(ref.get("reference_type") or ref.get("type") or "other").strip().lower()
+        if ref_type not in _HANDOFF_REFERENCE_TYPES:
+            metadata = dict(ref.get("metadata") or {}) if isinstance(ref.get("metadata"), dict) else {}
+            metadata.setdefault("original_reference_type", ref_type)
+            ref = {
+                **ref,
+                "reference_type": "other",
+                "label": ref.get("label") or ref.get("title") or ref_type,
+                "metadata": metadata,
+            }
         _append_unique_reference(enriched, ref, seen)
     return enriched
 
@@ -946,6 +969,195 @@ Returns: JSON confirmation."""
         except ValueError as exc:
             return json.dumps({"error": str(exc)})
         return json.dumps({"id": str(event["id"]), "event_type": event_type})
+
+    @mcp.tool(
+        description="""Execute a shell command inside the sandbox assigned to the current task.
+
+Use this for task work that must run in an approved sandbox, including network
+checks against hosts allowed by the sandbox template. If sandbox_id is omitted,
+Lucent resolves the current task's latest sandbox_created event.
+
+Args:
+    command: Shell command to execute in the sandbox
+    sandbox_id: Optional sandbox ID; defaults to the current task sandbox
+    cwd: Optional working directory inside the sandbox
+    timeout: Command timeout in seconds
+
+Returns: JSON with exit_code, stdout, stderr, duration_ms, timed_out, and sandbox_id."""
+    )
+    async def exec_sandbox_command(
+        command: str,
+        sandbox_id: str | None = None,
+        cwd: str | None = None,
+        timeout: int = 300,
+    ) -> str:
+        user_id, org_id, _, _, _ = await _get_current_user_context()
+        if not user_id:
+            return json.dumps({"error": "Authentication required"})
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+
+        context = get_llm_context()
+        task_id = _valid_uuid(context.get("task_id"))
+        resolved_sandbox_id = _valid_uuid(sandbox_id)
+
+        try:
+            bounded_timeout = max(1, min(int(timeout), 3600))
+        except (TypeError, ValueError):
+            bounded_timeout = 300
+
+        pool = await _get_pool()
+        async with pool.acquire() as conn:
+            if task_id:
+                task_row = await conn.fetchrow(
+                    """SELECT id::text
+                       FROM tasks
+                       WHERE id = $1::uuid AND organization_id = $2::uuid""",
+                    task_id,
+                    str(org_id),
+                )
+                if not task_row:
+                    return json.dumps({"error": "Current task not found"})
+
+            if not resolved_sandbox_id:
+                if not task_id:
+                    return json.dumps({"error": "sandbox_id is required outside task context"})
+                event_row = await conn.fetchrow(
+                    """SELECT metadata
+                       FROM task_events
+                       WHERE task_id = $1::uuid
+                         AND event_type = 'sandbox_created'
+                       ORDER BY created_at DESC
+                       LIMIT 1""",
+                    task_id,
+                )
+                metadata = dict(event_row["metadata"] or {}) if event_row else {}
+                resolved_sandbox_id = _valid_uuid(metadata.get("sandbox_id"))
+                if not resolved_sandbox_id:
+                    return json.dumps({"error": "No sandbox_created event for current task"})
+
+        from lucent.sandbox.manager import get_sandbox_manager
+
+        manager = get_sandbox_manager()
+        info = await manager.get(resolved_sandbox_id)
+        if not info:
+            return json.dumps({"error": "Sandbox not found"})
+        info_org_id = info.get("organization_id") if isinstance(info, dict) else getattr(info, "organization_id", None)
+        if info_org_id and str(info_org_id) != str(org_id):
+            return json.dumps({"error": "Sandbox not found"})
+
+        result = await manager.exec(
+            resolved_sandbox_id,
+            command,
+            cwd=cwd,
+            timeout=bounded_timeout,
+        )
+        return json.dumps(
+            {
+                "sandbox_id": resolved_sandbox_id,
+                "exit_code": result.exit_code,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "duration_ms": result.duration_ms,
+                "timed_out": result.timed_out,
+            }
+        )
+
+    @mcp.tool(
+        description="""Fetch a live weather forecast from Open-Meteo.
+
+Use this for weather recommendation workflows that need current forecast data
+without requiring a task sandbox. The tool is intentionally scoped to
+api.open-meteo.com and returns the upstream JSON response plus request params.
+
+Args:
+    latitude: Forecast latitude
+    longitude: Forecast longitude
+    timezone: Forecast timezone, defaults to America/Detroit
+    forecast_days: Number of forecast days, 1-7
+
+Returns: JSON with Open-Meteo forecast data or an error."""
+    )
+    async def fetch_open_meteo_forecast(
+        latitude: float,
+        longitude: float,
+        timezone: str = "America/Detroit",
+        forecast_days: int = 1,
+    ) -> str:
+        user_id, org_id, _, _, _ = await _get_current_user_context()
+        if not user_id:
+            return json.dumps({"error": "Authentication required"})
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+
+        try:
+            lat = float(latitude)
+            lon = float(longitude)
+        except (TypeError, ValueError):
+            return json.dumps({"error": "latitude and longitude must be numeric"})
+        if not -90 <= lat <= 90 or not -180 <= lon <= 180:
+            return json.dumps({"error": "latitude or longitude out of range"})
+
+        try:
+            days = max(1, min(int(forecast_days), 7))
+        except (TypeError, ValueError):
+            days = 1
+
+        params = {
+            "latitude": lat,
+            "longitude": lon,
+            "timezone": (timezone or "America/Detroit").strip() or "America/Detroit",
+            "forecast_days": days,
+            "temperature_unit": "fahrenheit",
+            "wind_speed_unit": "mph",
+            "precipitation_unit": "inch",
+            "current": ",".join(
+                [
+                    "temperature_2m",
+                    "apparent_temperature",
+                    "precipitation",
+                    "rain",
+                    "weather_code",
+                    "wind_speed_10m",
+                    "wind_gusts_10m",
+                ]
+            ),
+            "hourly": ",".join(
+                [
+                    "temperature_2m",
+                    "apparent_temperature",
+                    "precipitation_probability",
+                    "precipitation",
+                    "weather_code",
+                    "wind_speed_10m",
+                    "wind_gusts_10m",
+                    "uv_index",
+                ]
+            ),
+            "daily": ",".join(
+                [
+                    "temperature_2m_max",
+                    "temperature_2m_min",
+                    "precipitation_probability_max",
+                    "precipitation_sum",
+                    "wind_speed_10m_max",
+                    "wind_gusts_10m_max",
+                    "uv_index_max",
+                    "weather_code",
+                ]
+            ),
+        }
+        url = "https://api.open-meteo.com/v1/forecast"
+        try:
+            async with httpx.AsyncClient(timeout=20.0, follow_redirects=False) as client:
+                response = await client.get(url, params=params)
+                response.raise_for_status()
+                data = response.json()
+        except Exception as exc:
+            logger.warning("Open-Meteo forecast fetch failed", exc_info=True)
+            return json.dumps({"error": f"Open-Meteo forecast fetch failed: {exc}"})
+
+        return json.dumps({"provider": "open-meteo", "url": url, "params": params, "data": data})
 
     @mcp.tool(
         description="""Record a user-facing output/deliverable produced by a task.

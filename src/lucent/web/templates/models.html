@@ -33,6 +33,57 @@
 </div>
 {% endif %}
 
+<div class="mb-8 bg-white rounded-xl border border-gray-200 overflow-hidden">
+    <div class="px-5 py-4 border-b border-gray-100 flex items-center justify-between gap-4">
+        <div>
+            <h2 class="text-base font-semibold text-gray-900">Provider Credentials</h2>
+            <p class="mt-1 text-sm text-gray-500">Saved credentials are encrypted through Lucent secret storage and override environment fallback values.</p>
+        </div>
+    </div>
+    <div class="divide-y divide-gray-100">
+        {% for provider_config in provider_statuses %}
+        <div class="p-5 grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(20rem,28rem)] lg:items-start">
+            <div class="min-w-0">
+                <div class="flex flex-wrap items-center gap-2">
+                    <h3 class="text-sm font-semibold text-gray-900">{{ provider_config.name }}</h3>
+                    {% if provider_config.configured %}
+                    <span class="px-2 py-0.5 rounded text-xs bg-green-100 text-green-700">configured</span>
+                    {% else %}
+                    <span class="px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-500">not configured</span>
+                    {% endif %}
+                    {% if provider_config.source == 'database' %}
+                    <span class="px-2 py-0.5 rounded text-xs bg-blue-100 text-blue-700">saved</span>
+                    {% elif provider_config.source == 'environment' %}
+                    <span class="px-2 py-0.5 rounded text-xs bg-amber-100 text-amber-800">env</span>
+                    {% endif %}
+                </div>
+                <p class="mt-1 text-sm text-gray-600">{{ provider_config.credential_label }}</p>
+                {% if provider_config.help_text %}
+                <p class="mt-1 text-xs text-gray-500">{{ provider_config.help_text }}</p>
+                {% endif %}
+                {% if provider_config.env_vars %}
+                <p class="mt-2 text-xs text-gray-500">Fallback: <code class="font-mono bg-gray-100 px-1 py-0.5 rounded">{{ provider_config.env_vars|join('</code>, <code class="font-mono bg-gray-100 px-1 py-0.5 rounded">')|safe }}</code></p>
+                {% endif %}
+                {% if provider_config.error %}
+                <p class="mt-2 text-xs font-medium text-red-700">{{ provider_config.error }}</p>
+                {% endif %}
+            </div>
+            {% if provider_config.secret_key %}
+            <div class="flex flex-col sm:flex-row gap-2">
+                <form method="POST" action="/settings/models/providers/{{ provider_config.provider }}/credential" class="flex-1 flex gap-2">
+                    <input name="credential" type="password" autocomplete="off" placeholder="Paste {{ provider_config.credential_label|lower }}" class="min-w-0 flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-500">
+                    <button type="submit" class="px-3 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 text-sm font-medium whitespace-nowrap">Save</button>
+                </form>
+                <form method="POST" action="/settings/models/providers/{{ provider_config.provider }}/credential/clear">
+                    <button type="submit" class="w-full sm:w-auto px-3 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-100 text-sm font-medium whitespace-nowrap">Clear</button>
+                </form>
+            </div>
+            {% endif %}
+        </div>
+        {% endfor %}
+    </div>
+</div>
+
 <!-- Group by provider -->
 {% for provider in providers %}
 <div class="mb-8">

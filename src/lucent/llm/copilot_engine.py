@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -45,6 +46,27 @@ _UNRESOLVED = object()
 _cli_path_cache: str | None | object = _UNRESOLVED
 _permission_compat_installed = False
 _session_event_compat_installed = False
+
+
+def _coerce_copilot_timestamp_ms(value: Any) -> int:
+    """Return a millisecond timestamp for SDK/CLI payloads with mixed timestamp shapes."""
+    if isinstance(value, bool) or value is None:
+        raise ValueError(f"Unsupported Copilot timestamp: {value!r}")
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        try:
+            return int(stripped)
+        except ValueError:
+            try:
+                parsed = datetime.fromisoformat(stripped.replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise ValueError(f"Unsupported Copilot timestamp: {value!r}") from exc
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return int(parsed.timestamp() * 1000)
+    raise ValueError(f"Unsupported Copilot timestamp: {value!r}")
 
 
 def _value(value: Any) -> str:
@@ -167,19 +189,48 @@ def _install_copilot_session_event_compat() -> None:
     if _session_event_compat_installed:
         return
     try:
+        import copilot.client as _client_mod
         import copilot.generated.session_events as _events_mod
     except Exception:
         return
 
-    compaction_cls = getattr(_events_mod, "CompactionTokensUsed", None)
-    if compaction_cls is None:
+    ping_cls = getattr(_client_mod, "PingResponse", None)
+    if ping_cls is not None:
+        original_ping = getattr(ping_cls, "_lucent_original_from_dict", None)
+        if original_ping is None:
+            original_ping = ping_cls.from_dict
+            setattr(ping_cls, "_lucent_original_from_dict", original_ping)
+
+        @staticmethod
+        def _patched_ping_response_from_dict(obj: Any):
+            try:
+                return original_ping(obj)
+            except ValueError as exc:
+                if not isinstance(obj, dict) or "timestamp" not in obj:
+                    raise
+                try:
+                    timestamp = _coerce_copilot_timestamp_ms(obj.get("timestamp"))
+                except ValueError:
+                    raise exc
+                return ping_cls(
+                    str(obj.get("message")),
+                    timestamp,
+                    int(obj.get("protocolVersion")),
+                )
+
+        ping_cls.from_dict = _patched_ping_response_from_dict
+
+    compaction_classes = [
+        cls
+        for cls in (
+            getattr(_events_mod, "CompactionTokensUsed", None),
+            getattr(_events_mod, "CompactionCompleteCompactionTokensUsed", None),
+        )
+        if cls is not None
+    ]
+    if not compaction_classes:
         _session_event_compat_installed = True
         return
-
-    original = getattr(compaction_cls, "_lucent_original_from_dict", None)
-    if original is None:
-        original = compaction_cls.from_dict
-        setattr(compaction_cls, "_lucent_original_from_dict", original)
 
     def _num(obj: Any, *names: str) -> float:
         if not isinstance(obj, dict):
@@ -197,29 +248,51 @@ def _install_copilot_session_event_compat() -> None:
                     continue
         return 0.0
 
-    @staticmethod
-    def _patched_compaction_tokens_from_dict(obj: Any):
-        try:
-            return original(obj)
-        except Exception:
-            if isinstance(obj, bool) or obj is None:
-                raise
-            if isinstance(obj, (int, float)):
-                return compaction_cls(0.0, float(obj), 0.0)
-            if isinstance(obj, str):
-                try:
-                    return compaction_cls(0.0, float(obj), 0.0)
-                except ValueError:
-                    raise
-            if isinstance(obj, dict):
-                return compaction_cls(
-                    _num(obj, "cachedInput", "cached_input", "cached", "cacheReadTokens"),
-                    _num(obj, "input", "inputTokens", "tokens", "total", "totalTokens"),
-                    _num(obj, "output", "outputTokens"),
-                )
-            raise
+    def _build_compaction_tokens(compaction_cls: Any, obj: Any) -> Any:
+        if isinstance(obj, (int, float)) and not isinstance(obj, bool):
+            cached_input = 0.0
+            input_tokens = float(obj)
+            output_tokens = 0.0
+        elif isinstance(obj, str):
+            cached_input = 0.0
+            input_tokens = float(obj)
+            output_tokens = 0.0
+        elif isinstance(obj, dict):
+            cached_input = _num(obj, "cachedInput", "cached_input", "cached", "cacheReadTokens")
+            input_tokens = _num(obj, "input", "inputTokens", "tokens", "total", "totalTokens")
+            output_tokens = _num(obj, "output", "outputTokens")
+        else:
+            raise ValueError(f"Unsupported compaction token payload: {obj!r}")
 
-    compaction_cls.from_dict = _patched_compaction_tokens_from_dict
+        fields = getattr(compaction_cls, "__dataclass_fields__", {})
+        if "input_tokens" in fields:
+            return compaction_cls(
+                cache_read_tokens=cached_input,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+            )
+        return compaction_cls(cached_input, input_tokens, output_tokens)
+
+    for compaction_cls in compaction_classes:
+        original = getattr(compaction_cls, "_lucent_original_from_dict", None)
+        if original is None:
+            original = compaction_cls.from_dict
+            setattr(compaction_cls, "_lucent_original_from_dict", original)
+
+        def _make_patched_compaction_tokens_from_dict(cls: Any, original_from_dict: Any):
+            @staticmethod
+            def _patched_compaction_tokens_from_dict(obj: Any):
+                try:
+                    return original_from_dict(obj)
+                except Exception:
+                    return _build_compaction_tokens(cls, obj)
+
+            return _patched_compaction_tokens_from_dict
+
+        compaction_cls.from_dict = _make_patched_compaction_tokens_from_dict(
+            compaction_cls,
+            original,
+        )
     _session_event_compat_installed = True
 
 
@@ -361,11 +434,36 @@ class CopilotEngine(LLMEngine):
         self._github_token = github_token
         self._log_level = log_level
 
-    def _make_client(self) -> Any:
+    async def _provider_github_token(
+        self,
+        audit_context: dict[str, Any] | None = None,
+    ) -> str | None:
+        """Return a saved Copilot provider token for the request organization, if any."""
+        org_id = str((audit_context or {}).get("organization_id") or "").strip()
+        if not org_id:
+            return None
+        try:
+            from lucent.model_discovery import model_provider_secret_scope
+            from lucent.secrets import SecretRegistry
+
+            secret_provider = SecretRegistry.get()
+            token = await secret_provider.get(
+                "model_providers.copilot.github_token",
+                model_provider_secret_scope(org_id),
+            )
+            return (token or "").strip() or None
+        except KeyError:
+            return None
+        except Exception:
+            logger.warning("Failed to load saved Copilot provider credential", exc_info=True)
+            return None
+
+    def _make_client(self, github_token: str | None = None) -> Any:
         """Create a CopilotClient with SubprocessConfig."""
         config_kwargs: dict[str, Any] = {"log_level": self._log_level}
-        if self._github_token:
-            config_kwargs["github_token"] = self._github_token
+        token = github_token or self._github_token
+        if token:
+            config_kwargs["github_token"] = token
         cli_path = resolve_copilot_cli_path()
         if cli_path:
             config_kwargs["cli_path"] = cli_path
@@ -463,7 +561,8 @@ class CopilotEngine(LLMEngine):
 
         client = None
         try:
-            client = self._make_client()
+            github_token = await self._provider_github_token(audit_context)
+            client = self._make_client(github_token)
             await client.start()
 
             session_kwargs = self._make_session_kwargs(
@@ -548,7 +647,8 @@ class CopilotEngine(LLMEngine):
 
         client = None
         try:
-            client = self._make_client()
+            github_token = await self._provider_github_token(audit_context)
+            client = self._make_client(github_token)
             await client.start()
 
             session_kwargs = self._make_session_kwargs(

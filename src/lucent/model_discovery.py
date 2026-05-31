@@ -18,8 +18,68 @@ import httpx
 
 from lucent.db.models import ModelRepository
 from lucent.logging import get_logger
+from lucent.secrets import SecretRegistry, SecretScope
 
 logger = get_logger("model_discovery")
+
+
+@dataclass(frozen=True, slots=True)
+class ModelProviderCredentialDefinition:
+    """Credential metadata for one discoverable model provider."""
+
+    provider: str
+    name: str
+    credential_label: str
+    secret_key: str
+    env_vars: tuple[str, ...]
+    help_text: str = ""
+
+
+MODEL_PROVIDER_CREDENTIALS: tuple[ModelProviderCredentialDefinition, ...] = (
+    ModelProviderCredentialDefinition(
+        provider="copilot",
+        name="GitHub Copilot",
+        credential_label="GitHub token",
+        secret_key="model_providers.copilot.github_token",
+        env_vars=("GITHUB_TOKEN",),
+        help_text="Used by the Copilot SDK to discover models and run Copilot-hosted models.",
+    ),
+    ModelProviderCredentialDefinition(
+        provider="openai",
+        name="OpenAI",
+        credential_label="API key",
+        secret_key="model_providers.openai.api_key",
+        env_vars=("OPENAI_API_KEY",),
+    ),
+    ModelProviderCredentialDefinition(
+        provider="anthropic",
+        name="Anthropic",
+        credential_label="API key",
+        secret_key="model_providers.anthropic.api_key",
+        env_vars=("ANTHROPIC_API_KEY",),
+    ),
+    ModelProviderCredentialDefinition(
+        provider="google",
+        name="Google Gemini",
+        credential_label="API key",
+        secret_key="model_providers.google.api_key",
+        env_vars=("GOOGLE_API_KEY", "GEMINI_API_KEY"),
+    ),
+)
+
+_PROVIDER_CREDENTIALS_BY_PROVIDER = {
+    definition.provider: definition for definition in MODEL_PROVIDER_CREDENTIALS
+}
+
+
+def model_provider_credential_definitions() -> list[ModelProviderCredentialDefinition]:
+    """Return provider credential definitions for UI/API configuration surfaces."""
+    return list(MODEL_PROVIDER_CREDENTIALS)
+
+
+def model_provider_secret_scope(organization_id: str) -> SecretScope:
+    """System-managed secret scope for workspace model-provider credentials."""
+    return SecretScope(organization_id=str(organization_id), system_managed=True)
 
 
 @dataclass(slots=True)
@@ -218,7 +278,12 @@ class ModelDiscoveryService:
         self.timeout = timeout
 
     def configured_providers(self, providers: list[str] | None = None) -> list[str]:
-        """Return providers with enough local configuration to attempt discovery."""
+        """Return env-configured providers.
+
+        This synchronous method is retained for legacy callers. Discovery itself
+        uses ``configured_providers_async`` so DB-backed provider credentials can
+        participate without requiring process environment variables.
+        """
         requested = [p.strip().lower() for p in providers or [] if p.strip()]
         if requested:
             return requested
@@ -236,16 +301,122 @@ class ModelDiscoveryService:
             out.append("copilot")
         return out
 
-    async def discover(self, providers: list[str] | None = None) -> list[ProviderDiscoveryResult]:
+    async def configured_providers_async(
+        self,
+        providers: list[str] | None = None,
+        *,
+        org_id: str | None = None,
+    ) -> list[str]:
+        """Return providers configured via DB-backed secrets or env fallbacks."""
+        requested = [p.strip().lower() for p in providers or [] if p.strip()]
+        if requested:
+            return requested
+
+        out: list[str] = []
+        for definition in MODEL_PROVIDER_CREDENTIALS:
+            if await self._provider_credential(definition.provider, org_id=org_id):
+                out.append(definition.provider)
+        if os.environ.get("COPILOT_CLI_PATH") and "copilot" not in out:
+            out.append("copilot")
+        if os.environ.get("OLLAMA_HOST"):
+            out.append("ollama")
+        return out
+
+    async def provider_configuration_statuses(
+        self,
+        *,
+        org_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return UI-safe provider configuration status without secret values."""
+        statuses: list[dict[str, Any]] = []
+        for definition in MODEL_PROVIDER_CREDENTIALS:
+            source = "none"
+            configured = False
+            error: str | None = None
+            try:
+                if org_id and await self._provider_secret(definition.provider, org_id=org_id):
+                    source = "database"
+                    configured = True
+                elif any(os.environ.get(env_var) for env_var in definition.env_vars):
+                    source = "environment"
+                    configured = True
+                elif definition.provider == "copilot" and os.environ.get("COPILOT_CLI_PATH"):
+                    source = "environment"
+                    configured = True
+            except Exception:
+                error = "Stored credential could not be read. Save a new credential."
+
+            statuses.append(
+                {
+                    "provider": definition.provider,
+                    "name": definition.name,
+                    "credential_label": definition.credential_label,
+                    "help_text": definition.help_text,
+                    "env_vars": list(definition.env_vars),
+                    "secret_key": definition.secret_key,
+                    "configured": configured,
+                    "source": source,
+                    "error": error,
+                }
+            )
+        if os.environ.get("OLLAMA_HOST"):
+            statuses.append(
+                {
+                    "provider": "ollama",
+                    "name": "Ollama",
+                    "credential_label": "Base URL",
+                    "help_text": "Configured through OLLAMA_HOST for local model discovery.",
+                    "env_vars": ["OLLAMA_HOST"],
+                    "secret_key": "",
+                    "configured": True,
+                    "source": "environment",
+                    "error": None,
+                }
+            )
+        return statuses
+
+    async def _provider_secret(self, provider: str, *, org_id: str | None = None) -> str:
+        definition = _PROVIDER_CREDENTIALS_BY_PROVIDER.get(provider)
+        if not definition or not org_id:
+            return ""
+        try:
+            secret_provider = SecretRegistry.get()
+        except KeyError:
+            return ""
+        value = await secret_provider.get(
+            definition.secret_key,
+            model_provider_secret_scope(org_id),
+        )
+        return (value or "").strip()
+
+    async def _provider_credential(self, provider: str, *, org_id: str | None = None) -> str:
+        definition = _PROVIDER_CREDENTIALS_BY_PROVIDER.get(provider)
+        if not definition:
+            return ""
+        secret = await self._provider_secret(provider, org_id=org_id)
+        if secret:
+            return secret
+        for env_var in definition.env_vars:
+            value = os.environ.get(env_var, "").strip()
+            if value:
+                return value
+        return ""
+
+    async def discover(
+        self,
+        providers: list[str] | None = None,
+        *,
+        org_id: str | None = None,
+    ) -> list[ProviderDiscoveryResult]:
         """Discover models from configured or explicitly requested providers."""
-        provider_ids = self.configured_providers(providers)
+        provider_ids = await self.configured_providers_async(providers, org_id=org_id)
         if not provider_ids:
             return []
 
         results: list[ProviderDiscoveryResult] = []
         for provider in provider_ids:
             try:
-                models = await self._discover_provider(provider)
+                models = await self._discover_provider(provider, org_id=org_id)
                 results.append(
                     ProviderDiscoveryResult(provider=provider, configured=True, models=models)
                 )
@@ -273,7 +444,7 @@ class ModelDiscoveryService:
         ``disable_missing`` only affects rows previously discovered from a
         provider; manual rows are never disabled by provider discovery.
         """
-        results = await self.discover(providers)
+        results = await self.discover(providers, org_id=org_id)
         provider_summaries: list[dict[str, Any]] = []
         total_models = 0
         total_upserted = 0
@@ -311,17 +482,22 @@ class ModelDiscoveryService:
             "synced_at": datetime.now(timezone.utc).isoformat(),
         }
 
-    async def _discover_provider(self, provider: str) -> list[DiscoveredModel]:
+    async def _discover_provider(
+        self,
+        provider: str,
+        *,
+        org_id: str | None = None,
+    ) -> list[DiscoveredModel]:
         if provider == "openai":
-            return await self._discover_openai()
+            return await self._discover_openai(org_id=org_id)
         if provider == "anthropic":
-            return await self._discover_anthropic()
+            return await self._discover_anthropic(org_id=org_id)
         if provider in ("google", "google_genai", "gemini"):
-            return await self._discover_google()
+            return await self._discover_google(org_id=org_id)
         if provider == "ollama":
             return await self._discover_ollama()
         if provider in ("copilot", "github"):
-            return await self._discover_copilot()
+            return await self._discover_copilot(org_id=org_id)
         raise ValueError(f"Unsupported model provider: {provider}")
 
     async def _get_json(
@@ -418,8 +594,8 @@ class ModelDiscoveryService:
             "checked_at": datetime.now(timezone.utc).isoformat(),
         }
 
-    async def _discover_openai(self) -> list[DiscoveredModel]:
-        api_key = os.environ.get("OPENAI_API_KEY", "")
+    async def _discover_openai(self, *, org_id: str | None = None) -> list[DiscoveredModel]:
+        api_key = await self._provider_credential("openai", org_id=org_id)
         if not api_key:
             raise ValueError("OPENAI_API_KEY is not configured")
         data = await self._get_json(
@@ -455,8 +631,8 @@ class ModelDiscoveryService:
             )
         return models
 
-    async def _discover_anthropic(self) -> list[DiscoveredModel]:
-        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    async def _discover_anthropic(self, *, org_id: str | None = None) -> list[DiscoveredModel]:
+        api_key = await self._provider_credential("anthropic", org_id=org_id)
         if not api_key:
             raise ValueError("ANTHROPIC_API_KEY is not configured")
         headers = {
@@ -508,8 +684,8 @@ class ModelDiscoveryService:
                 break
         return models
 
-    async def _discover_google(self) -> list[DiscoveredModel]:
-        api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY") or ""
+    async def _discover_google(self, *, org_id: str | None = None) -> list[DiscoveredModel]:
+        api_key = await self._provider_credential("google", org_id=org_id)
         if not api_key:
             raise ValueError("GOOGLE_API_KEY or GEMINI_API_KEY is not configured")
         page_token: str | None = None
@@ -631,7 +807,7 @@ class ModelDiscoveryService:
             )
         return models
 
-    async def _discover_copilot(self) -> list[DiscoveredModel]:
+    async def _discover_copilot(self, *, org_id: str | None = None) -> list[DiscoveredModel]:
         try:
             from copilot import CopilotClient, SubprocessConfig
 
@@ -640,7 +816,7 @@ class ModelDiscoveryService:
             raise ValueError("github-copilot-sdk is not installed") from exc
 
         config_kwargs: dict[str, Any] = {"log_level": "warning"}
-        github_token = os.environ.get("GITHUB_TOKEN", "")
+        github_token = await self._provider_credential("copilot", org_id=org_id)
         if github_token:
             config_kwargs["github_token"] = github_token
         cli_path = resolve_copilot_cli_path()

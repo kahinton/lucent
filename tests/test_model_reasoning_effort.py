@@ -1,5 +1,7 @@
 """Tests for model reasoning effort controls."""
 
+import pytest
+
 
 def test_validate_reasoning_effort_accepts_model_specific_dynamic_value(monkeypatch):
     from lucent import model_registry
@@ -49,7 +51,8 @@ def test_validate_reasoning_effort_rejects_model_without_controls():
     assert "does not expose" in error
 
 
-def test_langchain_openai_reasoning_effort_passed(monkeypatch):
+@pytest.mark.asyncio
+async def test_langchain_openai_reasoning_effort_passed(monkeypatch):
     from lucent.llm import langchain_engine
 
     captured = {}
@@ -61,14 +64,15 @@ def test_langchain_openai_reasoning_effort_passed(monkeypatch):
 
     monkeypatch.setattr("langchain.chat_models.init_chat_model", fake_init_chat_model)
 
-    langchain_engine._get_chat_model("gpt-5.1", reasoning_effort="medium")
+    await langchain_engine._get_chat_model("gpt-5.1", reasoning_effort="medium")
 
     assert captured["model"] == "gpt-5.1"
     assert captured["kwargs"]["model_provider"] == "openai"
     assert captured["kwargs"]["reasoning_effort"] == "medium"
 
 
-def test_langchain_anthropic_reasoning_effort_maps_to_effort(monkeypatch):
+@pytest.mark.asyncio
+async def test_langchain_anthropic_reasoning_effort_maps_to_effort(monkeypatch):
     from lucent.llm import langchain_engine
 
     captured = {}
@@ -80,13 +84,14 @@ def test_langchain_anthropic_reasoning_effort_maps_to_effort(monkeypatch):
 
     monkeypatch.setattr("langchain.chat_models.init_chat_model", fake_init_chat_model)
 
-    langchain_engine._get_chat_model("claude-opus-4.7", reasoning_effort="xhigh")
+    await langchain_engine._get_chat_model("claude-opus-4.7", reasoning_effort="xhigh")
 
     assert captured["kwargs"]["model_provider"] == "anthropic"
     assert captured["kwargs"]["effort"] == "xhigh"
 
 
-def test_langchain_google_reasoning_effort_maps_to_thinking_level(monkeypatch):
+@pytest.mark.asyncio
+async def test_langchain_google_reasoning_effort_maps_to_thinking_level(monkeypatch):
     from lucent.llm import langchain_engine
 
     captured = {}
@@ -98,7 +103,39 @@ def test_langchain_google_reasoning_effort_maps_to_thinking_level(monkeypatch):
 
     monkeypatch.setattr("langchain.chat_models.init_chat_model", fake_init_chat_model)
 
-    langchain_engine._get_chat_model("gemini-3-pro", reasoning_effort="low")
+    await langchain_engine._get_chat_model("gemini-3-pro", reasoning_effort="low")
 
     assert captured["kwargs"]["model_provider"] == "google_genai"
     assert captured["kwargs"]["thinking_level"] == "low"
+
+
+@pytest.mark.asyncio
+async def test_langchain_openai_uses_system_managed_provider_secret(monkeypatch):
+    from lucent.llm import langchain_engine
+
+    captured = {}
+
+    class FakeSecretProvider:
+        async def get(self, key, scope):
+            captured["secret_key"] = key
+            captured["scope"] = scope
+            return "saved-openai-key"
+
+    def fake_init_chat_model(model, **kwargs):
+        captured["model"] = model
+        captured["kwargs"] = kwargs
+        return object()
+
+    monkeypatch.setattr("lucent.secrets.SecretRegistry.get", lambda: FakeSecretProvider())
+    monkeypatch.setattr("langchain.chat_models.init_chat_model", fake_init_chat_model)
+
+    await langchain_engine._get_chat_model(
+        "gpt-5.1",
+        audit_context={"organization_id": "org-123"},
+    )
+
+    assert captured["model"] == "gpt-5.1"
+    assert captured["kwargs"]["api_key"] == "saved-openai-key"
+    assert captured["secret_key"] == "model_providers.openai.api_key"
+    assert captured["scope"].organization_id == "org-123"
+    assert captured["scope"].system_managed is True

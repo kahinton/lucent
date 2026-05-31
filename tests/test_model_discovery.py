@@ -49,6 +49,34 @@ async def test_openai_discovery_maps_generation_models(db_pool, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_openai_discovery_uses_system_managed_provider_secret(db_pool, monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    service = ModelDiscoveryService(db_pool)
+    captured = {}
+
+    class FakeSecretProvider:
+        async def get(self, key, scope):
+            captured["secret_key"] = key
+            captured["scope"] = scope
+            return "db-backed-key"
+
+    monkeypatch.setattr("lucent.model_discovery.SecretRegistry.get", lambda: FakeSecretProvider())
+
+    async def fake_get_json(url, *, headers=None, **_kwargs):
+        assert url == "https://api.openai.com/v1/models"
+        assert headers == {"Authorization": "Bearer db-backed-key"}
+        return {"data": [{"id": "gpt-4o-mini", "owned_by": "openai"}]}
+
+    monkeypatch.setattr(service, "_get_json", fake_get_json)
+    models = await service._discover_openai(org_id="org-123")
+
+    assert [m.id for m in models] == ["gpt-4o-mini"]
+    assert captured["secret_key"] == "model_providers.openai.api_key"
+    assert captured["scope"].organization_id == "org-123"
+    assert captured["scope"].system_managed is True
+
+
+@pytest.mark.asyncio
 async def test_openai_discovery_uses_provider_reported_reasoning_values(db_pool, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     service = ModelDiscoveryService(db_pool)

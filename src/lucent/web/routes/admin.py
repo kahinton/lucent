@@ -599,12 +599,18 @@ async def models_list(request: Request):
     user = await _require_admin(request)
     pool = await get_pool()
     from lucent.db.models import ModelRepository
+    from lucent.model_discovery import ModelDiscoveryService
 
     repo = ModelRepository(pool)
     all_models = (await repo.list_models(limit=500))["items"]
-    from lucent.model_discovery import ModelDiscoveryService
 
-    active_providers = set(ModelDiscoveryService(pool).configured_providers())
+    discovery_service = ModelDiscoveryService(pool)
+    provider_statuses = await discovery_service.provider_configuration_statuses(
+        org_id=str(user.organization_id),
+    )
+    active_providers = set(
+        await discovery_service.configured_providers_async(org_id=str(user.organization_id))
+    )
     providers = _visible_model_providers(all_models, active_providers)
     models = [m for m in all_models if m["provider"] in providers]
     enabled_count = sum(1 for m in models if m["is_enabled"])
@@ -621,8 +627,106 @@ async def models_list(request: Request):
             "all_categories": MODEL_CATEGORIES,
             "all_tags": MODEL_TAGS,
             "all_providers": MODEL_PROVIDERS,
+            "provider_statuses": provider_statuses,
         },
     )
+
+
+@router.post("/models/providers/{provider}/credential")
+async def configure_model_provider_credential(request: Request, provider: str):
+    """Store a workspace model-provider credential via configured secret storage."""
+    await _check_csrf(request)
+    user = await _require_admin(request)
+    pool = await get_pool()
+    from lucent.model_discovery import (
+        model_provider_credential_definitions,
+        model_provider_secret_scope,
+    )
+    from lucent.secrets import SecretRegistry
+
+    provider = provider.strip().lower()
+    definition = next(
+        (item for item in model_provider_credential_definitions() if item.provider == provider),
+        None,
+    )
+    if not definition:
+        return _models_redirect(error="Unsupported model provider")
+
+    form = await request.form()
+    credential = str(form.get("credential", "")).strip()
+    if not credential:
+        return _models_redirect(error=f"{definition.name} credential is required")
+
+    secret_provider = SecretRegistry.get()
+    await secret_provider.set(
+        definition.secret_key,
+        credential,
+        model_provider_secret_scope(str(user.organization_id)),
+    )
+
+    audit_repo = AdminAuditRepository(pool)
+    await audit_repo.log_for_user(
+        user,
+        request,
+        action=audit_actions.SETTING_UPDATE,
+        entity_type="settings",
+        entity_label=f"{definition.name} model provider credential",
+        changed_fields=[definition.secret_key],
+        new_values={
+            "provider": definition.provider,
+            "secret_key": definition.secret_key,
+            "configured": True,
+        },
+        notes="model provider credential updated from Models UI",
+    )
+    return _models_redirect(success=f"{definition.name} credential saved")
+
+
+@router.post("/models/providers/{provider}/credential/clear")
+async def clear_model_provider_credential(request: Request, provider: str):
+    """Remove a DB-backed model-provider credential so env fallback can apply."""
+    await _check_csrf(request)
+    user = await _require_admin(request)
+    pool = await get_pool()
+    from lucent.model_discovery import (
+        model_provider_credential_definitions,
+        model_provider_secret_scope,
+    )
+    from lucent.secrets import SecretRegistry
+
+    provider = provider.strip().lower()
+    definition = next(
+        (item for item in model_provider_credential_definitions() if item.provider == provider),
+        None,
+    )
+    if not definition:
+        return _models_redirect(error="Unsupported model provider")
+
+    secret_provider = SecretRegistry.get()
+    deleted = await secret_provider.delete(
+        definition.secret_key,
+        model_provider_secret_scope(str(user.organization_id)),
+    )
+
+    audit_repo = AdminAuditRepository(pool)
+    await audit_repo.log_for_user(
+        user,
+        request,
+        action=audit_actions.SETTING_RESET,
+        entity_type="settings",
+        entity_label=f"{definition.name} model provider credential",
+        changed_fields=[definition.secret_key],
+        old_values={
+            "provider": definition.provider,
+            "secret_key": definition.secret_key,
+            "configured": bool(deleted),
+        },
+        new_values={"configured": False},
+        notes="model provider credential cleared from Models UI",
+    )
+    if deleted:
+        return _models_redirect(success=f"{definition.name} credential cleared")
+    return _models_redirect(warning=f"{definition.name} had no saved credential")
 
 
 @router.post("/models/discover")

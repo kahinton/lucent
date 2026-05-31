@@ -518,12 +518,22 @@ def register_auth_provider(name: str, provider_class: type[AuthProvider]) -> Non
 
 
 async def is_first_run(pool: Pool) -> bool:
-    """Check if this is the first run (no users exist).
+    """Check if this is the first run (no human users exist).
 
     Returns:
-        True if no users exist in the database.
+        True if no active human users exist in the database.
     """
-    query = "SELECT EXISTS(SELECT 1 FROM users LIMIT 1)"
+    query = """
+        SELECT EXISTS(
+            SELECT 1
+            FROM users
+            WHERE is_active = TRUE
+              AND role <> 'daemon'
+              AND COALESCE(external_id, '') NOT LIKE '%-service%'
+              AND COALESCE(email, '') NOT LIKE '%@lucent.local'
+            LIMIT 1
+        )
+    """
     async with pool.acquire() as conn:
         return not await conn.fetchval(query)
 

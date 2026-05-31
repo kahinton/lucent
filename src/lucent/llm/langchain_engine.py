@@ -167,10 +167,49 @@ def _messages_for_hooks(messages: list[Any]) -> list[dict[str, Any]]:
     return out
 
 
-def _get_chat_model(
+async def _provider_api_key(
+    provider: str,
+    audit_context: dict[str, Any] | None = None,
+) -> str | None:
+    """Return a saved model-provider API key for the request organization, if any."""
+    org_id = str((audit_context or {}).get("organization_id") or "").strip()
+    if not org_id:
+        return None
+    provider_key = "google" if provider == "google_genai" else provider
+    try:
+        from lucent.model_discovery import (
+            model_provider_credential_definitions,
+            model_provider_secret_scope,
+        )
+        from lucent.secrets import SecretRegistry
+
+        definition = next(
+            (
+                item
+                for item in model_provider_credential_definitions()
+                if item.provider == provider_key
+            ),
+            None,
+        )
+        if not definition:
+            return None
+        token = await SecretRegistry.get().get(
+            definition.secret_key,
+            model_provider_secret_scope(org_id),
+        )
+        return (token or "").strip() or None
+    except KeyError:
+        return None
+    except Exception:
+        logger.warning("Failed to load saved %s provider credential", provider_key, exc_info=True)
+        return None
+
+
+async def _get_chat_model(
     model_id: str,
     timeout: int = 300,
     reasoning_effort: str | None = None,
+    audit_context: dict[str, Any] | None = None,
 ) -> Any:
     """Create a LangChain chat model from a Lucent model ID."""
     try:
@@ -187,6 +226,10 @@ def _get_chat_model(
     kwargs: dict[str, Any] = {"timeout": timeout}
     if provider:
         kwargs["model_provider"] = provider
+
+    api_key = await _provider_api_key(provider, audit_context)
+    if api_key and provider in {"openai", "anthropic", "google_genai"}:
+        kwargs["api_key"] = api_key
 
     if reasoning_effort:
         if provider == "openai":
@@ -316,10 +359,11 @@ class LangChainEngine(LLMEngine):
             ToolMessage,
         )
 
-        chat_model = _get_chat_model(
+        chat_model = await _get_chat_model(
             model,
             timeout=timeout,
             reasoning_effort=reasoning_effort,
+            audit_context=audit_context,
         )
 
         # Set up MCP tool bridges if config is provided

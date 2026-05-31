@@ -83,6 +83,28 @@ class TestCopilotEngine:
         engine = CopilotEngine()
         await engine.cleanup()  # Should not raise
 
+    @pytest.mark.asyncio
+    async def test_provider_github_token_uses_system_managed_provider_secret(self, monkeypatch):
+        from lucent.llm.copilot_engine import CopilotEngine
+
+        captured = {}
+
+        class FakeSecretProvider:
+            async def get(self, key, scope):
+                captured["secret_key"] = key
+                captured["scope"] = scope
+                return "saved-copilot-token"
+
+        monkeypatch.setattr("lucent.secrets.SecretRegistry.get", lambda: FakeSecretProvider())
+
+        engine = CopilotEngine(github_token="env-token")
+        token = await engine._provider_github_token({"organization_id": "org-123"})
+
+        assert token == "saved-copilot-token"
+        assert captured["secret_key"] == "model_providers.copilot.github_token"
+        assert captured["scope"].organization_id == "org-123"
+        assert captured["scope"].system_managed is True
+
     def test_enable_config_discovery_session_kwarg(self):
         from lucent.llm.copilot_engine import CopilotEngine
 
@@ -174,18 +196,43 @@ class TestCopilotEngine:
 
     def test_copilot_compaction_token_payload_compat(self):
         pytest.importorskip("copilot.generated.session_events")
-        from copilot.generated.session_events import CompactionTokensUsed
+        import copilot.generated.session_events as session_events
 
         from lucent.llm import copilot_engine
 
         copilot_engine._session_event_compat_installed = False
         copilot_engine._install_copilot_session_event_compat()
 
-        parsed = CompactionTokensUsed.from_dict({"inputTokens": "42", "outputTokens": 7})
+        compaction_cls = getattr(session_events, "CompactionTokensUsed", None) or getattr(
+            session_events,
+            "CompactionCompleteCompactionTokensUsed",
+        )
+        parsed = compaction_cls.from_dict({"inputTokens": "42", "outputTokens": 7})
 
-        assert parsed.cached_input == 0.0
-        assert parsed.input == 42.0
-        assert parsed.output == 7.0
+        assert getattr(parsed, "cached_input", getattr(parsed, "cache_read_tokens", None)) == 0.0
+        assert getattr(parsed, "input", getattr(parsed, "input_tokens", None)) == 42.0
+        assert getattr(parsed, "output", getattr(parsed, "output_tokens", None)) == 7.0
+
+    def test_copilot_ping_response_iso_timestamp_compat(self):
+        pytest.importorskip("copilot.client")
+        from copilot.client import PingResponse
+
+        from lucent.llm import copilot_engine
+
+        copilot_engine._session_event_compat_installed = False
+        copilot_engine._install_copilot_session_event_compat()
+
+        parsed = PingResponse.from_dict(
+            {
+                "message": "pong: lucent",
+                "timestamp": "2026-05-29T13:04:15.613Z",
+                "protocolVersion": 1,
+            }
+        )
+
+        assert parsed.message == "pong: lucent"
+        assert parsed.timestamp == 1780059855613
+        assert parsed.protocolVersion == 1
 
 
 class TestLangChainEngine:

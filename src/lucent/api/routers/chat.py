@@ -363,6 +363,13 @@ async def _summarize_session_experience(
             prompt=prompt,
             mcp_config={},
             timeout=SESSION_EXPERIENCE_TIMEOUT,
+            audit_context={
+                "source": "chat.session_experience_summary",
+                "organization_id": str(session.get("organization_id") or ""),
+                "session_id": str(session.get("id") or ""),
+                "model": model,
+                "engine": engine.name,
+            },
         )
         content = (result or "").strip()
         if not content or content == "NO_EXPERIENCE_NEEDED":

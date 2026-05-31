@@ -320,6 +320,108 @@ async def test_send_handoff_mcp_tool_adds_task_request_workflow_context(
 
 
 @pytest.mark.asyncio
+async def test_send_handoff_sanitizes_unknown_reference_types(db_pool, interaction_user):
+    mcp = FastMCP("test-handoff-reference-sanitizer")
+    register_request_tools(mcp)
+    set_current_user(
+        {
+            "id": interaction_user["id"],
+            "organization_id": interaction_user["organization_id"],
+            "role": "member",
+            "display_name": interaction_user.get("display_name"),
+            "email": interaction_user.get("email"),
+        }
+    )
+    try:
+        created = await _call_mcp_tool(
+            mcp,
+            "send_handoff",
+            {
+                "title": "Weather reference sanitizer",
+                "body": "Wear sunglasses and light layers.",
+                "references": [
+                    {
+                        "reference_type": "source",
+                        "label": "Open-Meteo",
+                        "url": "https://api.open-meteo.com/",
+                    }
+                ],
+            },
+        )
+    finally:
+        set_current_user(None)
+
+    repo = UserInteractionRepository(db_pool)
+    detail = await repo.get_interaction(
+        created["id"],
+        interaction_user["organization_id"],
+        user_id=interaction_user["id"],
+    )
+    reference = detail["references"][0]
+    assert reference["reference_type"] == "other"
+    assert reference["metadata"]["original_reference_type"] == "source"
+
+
+@pytest.mark.asyncio
+async def test_fetch_open_meteo_forecast_tool_returns_weather_data(
+    interaction_user,
+    monkeypatch,
+):
+    captured = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"current": {"temperature_2m": 62.0}}
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs):
+            captured["client_kwargs"] = kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def get(self, url, params=None):
+            captured["url"] = url
+            captured["params"] = params
+            return FakeResponse()
+
+    monkeypatch.setattr("lucent.tools.requests.httpx.AsyncClient", FakeAsyncClient)
+
+    mcp = FastMCP("test-open-meteo-tool")
+    register_request_tools(mcp)
+    set_current_user(
+        {
+            "id": interaction_user["id"],
+            "organization_id": interaction_user["organization_id"],
+            "role": "member",
+            "display_name": interaction_user.get("display_name"),
+            "email": interaction_user.get("email"),
+        }
+    )
+    try:
+        result = await _call_mcp_tool(
+            mcp,
+            "fetch_open_meteo_forecast",
+            {"latitude": 42.5681, "longitude": -83.3827},
+        )
+    finally:
+        set_current_user(None)
+
+    assert result["provider"] == "open-meteo"
+    assert result["data"]["current"]["temperature_2m"] == 62.0
+    assert captured["url"] == "https://api.open-meteo.com/v1/forecast"
+    assert captured["params"]["latitude"] == 42.5681
+    assert captured["params"]["longitude"] == -83.3827
+    assert "uv_index" in captured["params"]["hourly"]
+
+
+@pytest.mark.asyncio
 async def test_repository_dedupe_reply_and_resolve(db_pool, interaction_user):
     repo = UserInteractionRepository(db_pool)
 

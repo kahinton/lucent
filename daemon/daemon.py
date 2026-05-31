@@ -170,6 +170,7 @@ _BASE_TASK_MEMORY_SERVER_TOOLS = sorted(
         "resolve_handoff",
         "list_available_models",
         "log_task_event",
+        "exec_sandbox_command",
         "send_handoff",
         "analyze_tool_failure_patterns",
         "propose_definition_improvement",
@@ -251,6 +252,14 @@ def _memory_server_tools_for_task(
     """
     normalized_agent = (agent_type or "").strip().lower()
     text = "\n".join(part or "" for part in (title, request_title, description)).lower()
+    if normalized_agent == "weather-advisor":
+        return sorted({
+            "create_memory",
+            "fetch_open_meteo_forecast",
+            "log_task_event",
+            "send_handoff",
+        })
+
     tools = set(_BASE_TASK_MEMORY_SERVER_TOOLS)
 
     capability_task = (
@@ -769,7 +778,7 @@ def _task_requires_mcp_tool_usage(
     """Return True when a successful task must have used at least one MCP tool."""
     agent = (agent_type or "").strip().lower()
     text = f"{title or ''} {description or ''}".lower()
-    if agent == "request-review":
+    if _task_skips_tool_validation(agent):
         return False
     mutating_memory_signals = (
         "create_memory",
@@ -808,6 +817,10 @@ def _required_task_tool_names(
     description: str | None = None,
 ) -> set[str]:
     """Return specific tools a task must call to satisfy explicit instructions."""
+    agent = (agent_type or "").strip().lower()
+    if _task_skips_tool_validation(agent):
+        return set()
+
     text = f"{title or ''} {description or ''}".lower()
     required: set[str] = set()
     if any(signal in text for signal in _HANDOFF_TOOL_REQUIRED_SIGNALS) or any(
@@ -815,6 +828,11 @@ def _required_task_tool_names(
     ):
         required.add("send_handoff")
     return required
+
+
+def _task_skips_tool_validation(agent_type: str | None) -> bool:
+    """Return True for task agents whose success must never depend on tool calls."""
+    return (agent_type or "").strip().lower() == "request-review"
 
 # Database URL for direct key provisioning.
 # Prefers DAEMON_DATABASE_URL (restricted lucent_daemon role) over DATABASE_URL
@@ -5647,7 +5665,8 @@ class LucentDaemon:
                     log(f"Sandbox cleanup failed for {sandbox_id[:12]}: {e}", "WARN")
 
             if (
-                _task_requires_mcp_tool_usage(agent_type, title, description)
+                not _task_skips_tool_validation(agent_type)
+                and _task_requires_mcp_tool_usage(agent_type, title, description)
                 and not operational_tool_tracker
             ):
                 reason = (
@@ -5665,7 +5684,10 @@ class LucentDaemon:
                 await _fail_owned(task_id, reason, result=result)
                 continue
 
-            required_tools = _required_task_tool_names(agent_type, title, description)
+            if _task_skips_tool_validation(agent_type):
+                required_tools = set()
+            else:
+                required_tools = _required_task_tool_names(agent_type, title, description)
             missing_required_tools: list[str] = []
             for required_tool in sorted(required_tools):
                 if required_tool == "send_handoff":

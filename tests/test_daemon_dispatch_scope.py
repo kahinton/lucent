@@ -191,3 +191,10 @@ class TestMemoryServerToolSelection:
         assert "resolve_handoff" in tools
         assert "create_skill_definition" not in tools
         assert "create_request" not in tools
+
+    def test_weather_advisor_gets_weather_tool_without_requiring_sandbox_only(self):
+        tools = set(_memory_server_tools_for_task("weather-advisor", "Daily weather outfit"))
+        assert "fetch_open_meteo_forecast" in tools
+        assert "exec_sandbox_command" not in tools
+        assert "send_handoff" in tools
+        assert "create_memory" in tools

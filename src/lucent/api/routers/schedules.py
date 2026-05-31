@@ -591,17 +591,9 @@ async def _trigger_schedule_execution(
             for idx, action in enumerate(task_actions):
                 agent_type = action.get("agent_type") or sched.get("agent_type") or "code"
                 if agent_type and agent_type not in active_names:
-                    logger.warning(
-                        "Workflow %s action %s references unknown agent_type '%s' — "
-                        "falling back to 'code'",
-                        schedule_id, idx, agent_type,
-                    )
-                    agent_type = "code"
-                if agent_type and agent_type not in active_names:
                     raise RuntimeError(
                         f"Workflow action references agent_type '{action.get('agent_type')}', "
-                        "but neither it nor fallback agent 'code' is approved/accessible "
-                        "for the workflow owner."
+                        "but that agent is not approved/accessible for the workflow owner."
                     )
 
                 task_model = action.get("model") if "model" in action else sched.get("model")
