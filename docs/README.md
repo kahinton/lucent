@@ -29,6 +29,7 @@
 
 - **[Sandboxes](sandboxes.md)** — Docker sandbox configuration and lifecycle
 - **[Tools](managed-tools.md)** — Tool Builder lifecycle, sandbox runtime, external providers, grants, and security model
+- **[Handoffs](api-reference.md#handoffs)** — Human-in-the-loop messages, clarifications, decisions, workflow outputs, and response tracking
 - **[Agent Integration](agent-integration.md)** — MCP agent integration guide
 - **[Memory Lifecycle](memory-lifecycle-design.md)** — Memory type design and lifecycle
 

@@ -6,6 +6,47 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+#### Chat, Handoffs, and Session Persistence
+- Persisted LLM session tracking for chat/task runs, including message lineage, request links, tool call audit records, and session lifecycle state. **Migrations 075 and 079**.
+- Proactive user Handoffs for daemon/workflow-to-human communication, with REST endpoints, web UI pages, MCP tools (`send_handoff`, `list_handoffs`, `get_handoff`, `resolve_handoff`), message threads, references, dedupe keys, attention counts, and response-required states. **Migration 084**.
+- Chat page support for persisted conversation context, request creation/linking from chat sessions, and richer page-aware context for Activity and Handoff pages.
+
+#### Workflows
+- Workflow API and UI as the broader replacement for legacy schedules, with typed triggers (`schedule`, `manual`, `webhook`, `integration_event`), request templates, ordered actions, review instructions, webhook shared secrets, manual trigger support, and run history.
+- Workflow action support for both task dispatch and `user_interaction` Handoff messages, including workflow output/clarification/decision flows that can require a user response. **Migrations 082 and 083**.
+- Built-in server-function workflow action support for internal maintenance jobs that should record schedule-run results without dispatching agent tasks.
+
+#### Agent Runtime Capabilities
+- Agent hook definitions, approval workflow, agent grants, and runtime hook execution for model/tool call events. Hooks can inject context, block execution, or rewrite tool arguments/results. **Migration 076**.
+- Managed Tool Builder for Lucent-hosted custom tools with proposal/approval flow, agent grants, sandboxed Python execution, JSON schemas, credential references, resource limits, and per-run audit records. **Migration 087**.
+- Definition proposal evidence fields and org-shared ownership support for definition resources. **Migrations 077 and 080**.
+
+#### Model and Runtime Settings
+- Selectable model reasoning-effort metadata in the model registry, provider discovery, task/workflow creation, and LLM engine calls. **Migrations 073 and 074**.
+- DB-backed Runtime Settings catalog and Settings UI for runtime-safe configuration, with environment/default fallback and locked/hidden visibility for bootstrap and credential settings. **Migration 086**.
+- System-managed secret storage for values such as the signing secret, avoiding a hard requirement to persist sensitive runtime secrets in env vars for local compose. **Migration 085**.
+
+#### Request and Activity Tracking
+- Dedicated task outputs table and request output APIs for durable deliverables linked to tasks, requests, and external URLs. **Migration 078**.
+- Request view helpers for activity/query performance. **Migration 081**.
+
+### Changed
+- Legacy schedules now read and write workflow-capable rows while preserving compatibility APIs and built-in schedule behavior.
+- Built-in daemon maintenance cycles now prefer workflow/server-function execution and no-op skip records when there is no eligible work.
+- MCP tool annotations classify read-only, create-only, and mutating tools for safer runtime/tool-call handling.
+- Model validation now validates `reasoning_effort` against the selected model when provided.
+- The Settings and Definitions UI now expose runtime settings, proposal evidence, hooks, custom tools, and external provider grants in the unified review/agent-composer flow.
+
+### Fixed
+- First-login/session setup flow now preserves the intended target path and handles authenticated redirects more consistently.
+- Daemon dispatch and request-scoped planning now carry per-user/request context through task creation, LLM sessions, workflow runs, and handoff references.
+- Secret resolution supports system-managed values and safer reference handling across providers.
+
+### Documentation
+- Added/updated API, architecture, configuration, security, troubleshooting, workflow, runtime settings, and managed tools documentation for the v5 surfaces.
+
 ## [0.4.0] - 2026-04-30
 
 ### Added

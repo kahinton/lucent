@@ -633,6 +633,67 @@ Link memories to tasks for lineage tracking. POST body: `{"memory_id": "uuid", "
 
 ---
 
+## Handoffs
+
+Base path: `/api/handoffs`
+
+Handoffs are proactive Lucent-to-user interaction threads. Daemon, workflow,
+task, request, integration, system, and human producers can use them to send an
+update, ask for clarification, request a decision, or deliver workflow output
+without losing lineage to the originating request, task, workflow, schedule run,
+LLM session, memory, or URL.
+
+### Create Handoff
+
+```
+POST /api/handoffs
+```
+
+Creation is intended for daemon/workflow producers. The caller must be an
+admin/owner, the daemon service user, or an API key with `daemon-tasks` scope.
+
+```json
+{
+  "title": "Need deployment target",
+  "body": "The workflow is ready to continue but needs the target environment.",
+  "source": "workflow",
+  "interaction_type": "clarification",
+  "priority": "high",
+  "requires_response": true,
+  "response_prompt": "Which environment should this deploy to?",
+  "dedupe_key": "deploy-target:request-uuid",
+  "references": [
+    {
+      "reference_type": "request",
+      "reference_id": "request-uuid",
+      "label": "Deployment request",
+      "url": "/activity/request-uuid"
+    }
+  ]
+}
+```
+
+Supported `interaction_type` values are `message`, `clarification`, `review`,
+`decision`, `workflow_output`, and `handoff`. Supported `reference_type` values
+are `request`, `task`, `task_output`, `memory`, `workflow`, `schedule_run`,
+`llm_session`, `url`, and `other`.
+
+### Handoff List, Thread, and Actions
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/handoffs?status=responded&include_resolved=false&limit=25&offset=0` | List handoffs visible to the current/effective user |
+| `GET` | `/api/handoffs/attention-count` | Count open/waiting/responded handoffs needing attention |
+| `GET` | `/api/handoffs/{interaction_id}` | Get one handoff with messages and references |
+| `POST` | `/api/handoffs/{interaction_id}/reply` | Add a user reply: `{"body": "..."}` |
+| `POST` | `/api/handoffs/{interaction_id}/resolve` | Resolve after the response has been processed |
+| `POST` | `/api/handoffs/{interaction_id}/dismiss` | Dismiss without marking as processed |
+
+MCP tools mirror the daemon-facing workflow: `send_handoff`, `list_handoffs`,
+`get_handoff`, and `resolve_handoff`.
+
+---
+
 ## Workflows and Schedules
 
 Base paths:
@@ -688,7 +749,7 @@ POST /api/workflows
 | `interval_seconds` | int | interval only | Repeat interval (minimum 60) |
 | `timezone` | string | no | IANA timezone (default: `UTC`) |
 | `request_template` | object | no | Request title/description/dependency template per run |
-| `actions` | array | no | Ordered task action templates. Empty creates one legacy-style task. |
+| `actions` | array | no | Ordered action templates. Empty creates one legacy-style task. |
 | `review_instructions` | string | no | Reviewer checklist appended to generated request descriptions |
 | `webhook_secret` | string | webhook only | Shared secret; Lucent stores only its hash |
 | `priority` | string | no | `low`, `medium`, `high`, `urgent` |
@@ -698,6 +759,12 @@ POST /api/workflows
 Task action objects support `agent_type`, `agent_definition_id`, `model`,
 `reasoning_effort`, `sandbox_template_id`, `sandbox_config`,
 `output_contract`, and the compatibility alias `output_schema`.
+
+`user_interaction` action objects create Handoffs instead of daemon tasks. They
+support `interaction_type`, `requires_response`, `response_prompt`, `metadata`,
+`references`, and `dedupe_key`. When `requires_response` is true, the workflow
+creates a clarification-style thread that remains visible in Handoffs until the
+user responds and the daemon processes the answer.
 
 Built-in maintenance workflows may use `action_type: "server_function"` instead
 of `action_type: "task"`. These run inside Lucent itself, do not dispatch an

@@ -84,7 +84,7 @@ Lucent is designed for teams that need AI work to fit existing enterprise expect
 | **Control who can do what** | Roles, groups, ownership, permissions, and approval workflows keep access aligned with organizational policy. |
 | **Prevent arbitrary agent action** | Agent capabilities, connected tools, integrations, and sandbox templates can require review before use. |
 | **Protect credentials and code** | Secrets are encrypted, code runs in isolated sandboxes, and execution can be constrained by resource and network policy. |
-| **Operate with visibility** | Dashboards, timelines, logs, reviews, and audit records make agent work inspectable after the fact. |
+| **Operate with visibility** | Dashboards, timelines, handoffs, logs, reviews, and audit records make agent work inspectable after the fact. |
 
 ## Quick Start
 

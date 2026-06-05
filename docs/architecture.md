@@ -221,6 +221,10 @@ Every memory update is versioned. Use `get_memory_versions` to browse history an
 | `log_task_event` | Record an event in a task's timeline |
 | `link_task_memory` | Link a memory to a task (created/read/updated) |
 | `link_request_memory` | Link a memory to a request (goal/context/reference) |
+| `send_handoff` | Create a visible Handoff message, clarification, decision request, or workflow output for a user |
+| `list_handoffs` | List open/responded/resolved Handoffs visible to the current/effective user |
+| `get_handoff` | Retrieve one Handoff with its message thread and references |
+| `resolve_handoff` | Close a Handoff after the daemon has processed the user's response |
 
 ### Workflow Tools
 
@@ -253,6 +257,12 @@ Every memory update is versioned. Use `get_memory_versions` to browse history an
 | `list_mcp_server_definitions` | List registered external tool providers |
 | `grant_mcp_server_to_agent` | Grant external provider access to an agent |
 | `revoke_mcp_server_from_agent` | Revoke external provider access from an agent |
+| `create_tool_definition` | Propose a Lucent-hosted managed tool for review |
+| `list_tool_definitions` | List managed tool definitions |
+| `get_tool_definition` | Get one managed tool definition by ID or name |
+| `grant_tool_to_agent` | Grant a managed tool to an agent definition |
+| `revoke_tool_from_agent` | Revoke a managed tool from an agent definition |
+| `run_managed_tool` | Execute an approved, granted managed tool in a sandbox |
 | `list_proposals` | List all pending proposals (agents, skills, hooks, tools, external providers) |
 
 Approval and rejection of proposed definitions are human review actions and are handled through the web UI or authenticated REST API, not MCP tools.
