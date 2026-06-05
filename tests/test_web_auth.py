@@ -137,9 +137,56 @@ def _reset_login_limiter() -> None:
     rl._login_limiter = None
 
 
+class _FakeFirstRunAcquire:
+    def __init__(self, conn):
+        self.conn = conn
+
+    async def __aenter__(self):
+        return self.conn
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return None
+
+
+class _FakeFirstRunPool:
+    def __init__(self, exists_result: bool):
+        self.conn = _FakeFirstRunConn(exists_result)
+
+    def acquire(self):
+        return _FakeFirstRunAcquire(self.conn)
+
+
+class _FakeFirstRunConn:
+    def __init__(self, exists_result: bool):
+        self.exists_result = exists_result
+        self.query = ""
+
+    async def fetchval(self, query):
+        self.query = query
+        return self.exists_result
+
+
 # ============================================================================
 # GET /login
 # ============================================================================
+
+
+class TestFirstRunDetection:
+    async def test_first_run_ignores_service_users(self):
+        from lucent.auth_providers import is_first_run
+
+        pool = _FakeFirstRunPool(exists_result=False)
+
+        assert await is_first_run(pool) is True
+        assert "role <> 'daemon'" in pool.conn.query
+        assert "external_id" in pool.conn.query
+        assert "%-service%" in pool.conn.query
+        assert "@lucent.local" in pool.conn.query
+
+    async def test_first_run_detects_human_users(self):
+        from lucent.auth_providers import is_first_run
+
+        assert await is_first_run(_FakeFirstRunPool(exists_result=True)) is False
 
 
 class TestLoginPage:
@@ -371,6 +418,41 @@ class TestSetupPage:
         resp = await unauthenticated_client.get("/setup", follow_redirects=False)
         assert resp.status_code == 303
         assert resp.headers.get("location") == "/login"
+
+    async def test_protected_web_route_redirects_to_setup_on_first_run(
+        self,
+        unauthenticated_client,
+        monkeypatch,
+    ):
+        """Fresh startup entrypoints should show setup instead of normal login."""
+
+        async def first_run(_pool):
+            return True
+
+        monkeypatch.setattr("lucent.web.routes._shared.is_first_run", first_run)
+
+        resp = await unauthenticated_client.get("/chat", follow_redirects=False)
+
+        assert resp.status_code == 303
+        assert resp.headers.get("location") == "/setup"
+
+    async def test_invalid_session_redirects_to_setup_on_first_run(
+        self,
+        unauthenticated_client,
+        monkeypatch,
+    ):
+        """A stale browser cookie on a fresh database should still land on setup."""
+
+        async def first_run(_pool):
+            return True
+
+        monkeypatch.setattr("lucent.web.routes._shared.is_first_run", first_run)
+        unauthenticated_client.cookies.set(SESSION_COOKIE_NAME, "stale-session")
+
+        resp = await unauthenticated_client.get("/chat", follow_redirects=False)
+
+        assert resp.status_code == 303
+        assert resp.headers.get("location") == "/setup"
 
 
 # ============================================================================

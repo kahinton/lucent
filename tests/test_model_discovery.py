@@ -7,6 +7,19 @@ import pytest
 from lucent.model_discovery import ModelDiscoveryService
 
 
+def test_extract_reasoning_efforts_from_copilot_metadata_shape():
+    from lucent.model_discovery import _extract_reasoning_efforts_from_metadata
+
+    metadata = {
+        "id": "claude-opus-4.7",
+        "capabilities": {"supports": {"reasoningEffort": True}},
+        "supportedReasoningEfforts": ["medium"],
+        "defaultReasoningEffort": "medium",
+    }
+
+    assert _extract_reasoning_efforts_from_metadata(metadata) == ["medium"]
+
+
 @pytest.fixture
 def discovery_prefix():
     return f"test_discovery_{str(uuid4())[:8]}_"
@@ -32,6 +45,63 @@ async def test_openai_discovery_maps_generation_models(db_pool, monkeypatch):
     assert [m.id for m in models] == ["gpt-5.4"]
     assert models[0].provider == "openai"
     assert models[0].api_model_id == "gpt-5.4"
+    assert models[0].reasoning_efforts == []
+
+
+@pytest.mark.asyncio
+async def test_openai_discovery_uses_system_managed_provider_secret(db_pool, monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    service = ModelDiscoveryService(db_pool)
+    captured = {}
+
+    class FakeSecretProvider:
+        async def get(self, key, scope):
+            captured["secret_key"] = key
+            captured["scope"] = scope
+            return "db-backed-key"
+
+    monkeypatch.setattr("lucent.model_discovery.SecretRegistry.get", lambda: FakeSecretProvider())
+
+    async def fake_get_json(url, *, headers=None, **_kwargs):
+        assert url == "https://api.openai.com/v1/models"
+        assert headers == {"Authorization": "Bearer db-backed-key"}
+        return {"data": [{"id": "gpt-4o-mini", "owned_by": "openai"}]}
+
+    monkeypatch.setattr(service, "_get_json", fake_get_json)
+    models = await service._discover_openai(org_id="org-123")
+
+    assert [m.id for m in models] == ["gpt-4o-mini"]
+    assert captured["secret_key"] == "model_providers.openai.api_key"
+    assert captured["scope"].organization_id == "org-123"
+    assert captured["scope"].system_managed is True
+
+
+@pytest.mark.asyncio
+async def test_openai_discovery_uses_provider_reported_reasoning_values(db_pool, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    service = ModelDiscoveryService(db_pool)
+
+    async def fake_get_json(*_args, **_kwargs):
+        return {
+            "object": "list",
+            "data": [
+                {
+                    "id": "gpt-dynamic",
+                    "owned_by": "openai",
+                    "capabilities": {
+                        "reasoning_effort": {
+                            "values": ["none", "low", "research-grade"]
+                        }
+                    },
+                },
+            ],
+        }
+
+    monkeypatch.setattr(service, "_get_json", fake_get_json)
+    models = await service._discover_openai()
+
+    assert [m.id for m in models] == ["gpt-dynamic"]
+    assert models[0].reasoning_efforts == ["none", "low", "research-grade"]
 
 
 @pytest.mark.asyncio
@@ -63,6 +133,30 @@ async def test_google_discovery_filters_generate_content(db_pool, monkeypatch):
     assert [m.id for m in models] == ["gemini-3.1-pro"]
     assert models[0].context_window == 1000000
     assert models[0].supports_tools is True
+
+
+@pytest.mark.asyncio
+async def test_google_discovery_uses_provider_reported_thinking_levels(db_pool, monkeypatch):
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
+    service = ModelDiscoveryService(db_pool)
+
+    async def fake_get_json(*_args, **_kwargs):
+        return {
+            "models": [
+                {
+                    "name": "models/gemini-dynamic",
+                    "baseModelId": "gemini-dynamic",
+                    "displayName": "Gemini Dynamic",
+                    "supportedGenerationMethods": ["generateContent"],
+                    "supportedThinkingLevels": ["adaptive", "deep"],
+                },
+            ]
+        }
+
+    monkeypatch.setattr(service, "_get_json", fake_get_json)
+    models = await service._discover_google()
+
+    assert models[0].reasoning_efforts == ["adaptive", "deep"]
 
 
 @pytest.mark.asyncio
@@ -186,6 +280,60 @@ async def test_sync_inserts_provider_model(db_pool, discovery_prefix):
         assert model["is_custom"] is False
         assert model["is_enabled"] is False
         assert model["last_discovered_at"] is not None
+        async with db_pool.acquire() as conn:
+            metadata_type = await conn.fetchval(
+                "SELECT jsonb_typeof(discovery_metadata) FROM models WHERE id = $1",
+                model_id,
+            )
+        assert metadata_type == "object"
+    finally:
+        await repo.delete_model(model_id)
+
+
+@pytest.mark.asyncio
+async def test_sync_replaces_stale_provider_reasoning_efforts(db_pool, discovery_prefix):
+    from lucent.db.models import ModelRepository
+
+    model_id = f"{discovery_prefix}reasoning-refresh"
+    repo = ModelRepository(db_pool)
+    try:
+        await repo.sync_discovered_models(
+            provider="copilot",
+            models=[
+                {
+                    "model_id": model_id,
+                    "provider": "copilot",
+                    "name": "Reasoning Refresh",
+                    "category": "reasoning",
+                    "api_model_id": model_id,
+                    "supports_tools": True,
+                    "supports_vision": False,
+                    "tags": ["reasoning-effort"],
+                    "reasoning_efforts": ["low", "medium", "high", "xhigh"],
+                    "discovery_metadata": {"supportedReasoningEfforts": ["medium"]},
+                }
+            ],
+        )
+        await repo.sync_discovered_models(
+            provider="copilot",
+            models=[
+                {
+                    "model_id": model_id,
+                    "provider": "copilot",
+                    "name": "Reasoning Refresh",
+                    "category": "reasoning",
+                    "api_model_id": model_id,
+                    "supports_tools": True,
+                    "supports_vision": False,
+                    "tags": ["reasoning-effort"],
+                    "reasoning_efforts": ["medium"],
+                    "discovery_metadata": {"supportedReasoningEfforts": ["medium"]},
+                }
+            ],
+        )
+        model = await repo.get_model(model_id)
+
+        assert model["reasoning_efforts"] == ["medium"]
     finally:
         await repo.delete_model(model_id)
 

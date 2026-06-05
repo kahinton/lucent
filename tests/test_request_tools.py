@@ -6,12 +6,14 @@ Tests auth context enforcement, JSON serialization, and error handling.
 """
 
 import json
+from uuid import uuid4
 
 import pytest
 import pytest_asyncio
 from mcp.server.fastmcp import FastMCP
 
 from lucent.auth import set_current_user
+from lucent.db import UserRepository
 from lucent.db.requests import RequestRepository
 from lucent.tools.requests import register_request_tools
 
@@ -192,6 +194,39 @@ class TestCreateTask:
         )
         assert "error" in result
         assert "nonexistent_agent_xyz" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_inaccessible_agent_type_rejected(self, mcp, auth_user, request_id, db_pool):
+        user_repo = UserRepository(db_pool)
+        other = await user_repo.create(
+            external_id=f"request-tool-other-{uuid4()}",
+            provider="local",
+            organization_id=auth_user["organization_id"],
+            email=f"request-tool-other-{uuid4()}@test.com",
+            display_name="Other User",
+            role="member",
+        )
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                self._UPSERT_AGENT_DEFINITION_SQL,
+                "private-code",
+                auth_user["organization_id"],
+                "private definition",
+                other["id"],
+            )
+
+        result = await _call(
+            mcp,
+            "create_task",
+            {
+                "request_id": request_id,
+                "title": "Private Agent Task",
+                "agent_type": "private-code",
+            },
+        )
+
+        assert "error" in result
+        assert "private-code" in result["error"]
 
     @pytest.mark.asyncio
     async def test_with_model(self, mcp, auth_user, request_id, db_pool, monkeypatch):

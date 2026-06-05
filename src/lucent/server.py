@@ -14,6 +14,7 @@ from mcp.server.fastmcp import FastMCP
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from lucent.auth import set_current_api_key_id, set_current_user
+from lucent.llm.context import clear_llm_context, set_llm_context
 from lucent.logging import configure_logging, get_logger
 from lucent.prompts.memory_usage import (
     get_memory_system_prompt,
@@ -51,6 +52,11 @@ from lucent.tools.definitions import register_definition_tools  # noqa: E402
 
 register_definition_tools(mcp)
 
+# Register tool-call audit analysis and definition-improvement proposal tools
+from lucent.tools.tool_audit import register_tool_audit_tools  # noqa: E402
+
+register_tool_audit_tools(mcp)
+
 # Get logger for this module
 logger = get_logger("server")
 
@@ -70,6 +76,23 @@ class MCPAuthMiddleware:
 
     def __init__(self, app: ASGIApp):
         self.app = app
+
+    @staticmethod
+    def _extract_llm_context(headers: dict[bytes, bytes]) -> dict[str, str | None]:
+        """Extract model-session lineage headers from an MCP request."""
+        def _get(name: bytes) -> str | None:
+            value = headers.get(name, b"").decode("utf-8", errors="ignore").strip()
+            return value or None
+
+        return {
+            "session_id": _get(b"x-lucent-llm-session-id"),
+            "turn_id": _get(b"x-lucent-llm-turn-id"),
+            "message_id": _get(b"x-lucent-llm-message-id"),
+            "request_id": _get(b"x-lucent-request-id"),
+            "task_id": _get(b"x-lucent-task-id"),
+            "schedule_run_id": _get(b"x-lucent-schedule-run-id"),
+            "agent_definition_id": _get(b"x-lucent-agent-definition-id"),
+        }
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send):
         if scope["type"] != "http":
@@ -151,6 +174,7 @@ class MCPAuthMiddleware:
                                 user["memory_scope"] = key_info.get("memory_scope")
                                 set_current_user(user)
                                 set_current_api_key_id(key_info["id"])
+                                set_llm_context(**self._extract_llm_context(headers))
 
                                 # Wrap send to inject rate limit headers
                                 rate_headers = rate_result.headers
@@ -168,6 +192,7 @@ class MCPAuthMiddleware:
                                 finally:
                                     set_current_user(None)
                                     set_current_api_key_id(None)
+                                    clear_llm_context()
                                 return
                 except Exception as e:
                     logger.error("API key auth error: %s", type(e).__name__)
@@ -222,6 +247,7 @@ class MCPAuthMiddleware:
                                 return
 
                             set_current_user(user)
+                            set_llm_context(**self._extract_llm_context(headers))
 
                             # Wrap send to inject rate limit headers
                             rate_headers = rate_result.headers
@@ -238,6 +264,7 @@ class MCPAuthMiddleware:
                                 await self.app(scope, receive, send_with_session_headers)
                             finally:
                                 set_current_user(None)
+                                clear_llm_context()
                             return
                         else:
                             logger.warning("MCP session token auth: validate_session returned None")

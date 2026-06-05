@@ -134,10 +134,64 @@ async def test_access_control_service_resolution(db_pool, test_organization, acl
     assert await acl.can_access(owner_id, "agent", str(own_agent["id"]), org_id) is True
     assert await acl.can_access(user2_id, "agent", str(built_in["id"]), org_id) is True
 
+    org_shared_agent = await def_repo.create_agent(
+        name=f"{acl_prefix}org_shared_agent",
+        description="org shared",
+        content="# org shared",
+        org_id=org_id,
+        created_by=user1_id,
+        shared_with_org=True,
+    )
+    assert org_shared_agent["owner_user_id"] is None
+    assert org_shared_agent["owner_group_id"] is None
+    assert await acl.can_access(user2_id, "agent", str(org_shared_agent["id"]), org_id) is True
+    assert await acl.can_modify(user2_id, "agent", str(org_shared_agent["id"]), org_id) is False
+    assert await acl.can_modify(admin_id, "agent", str(org_shared_agent["id"]), org_id) is True
+
     accessible_user2 = await acl.list_accessible(user2_id, "agent", org_id)
     assert str(group_agent["id"]) in accessible_user2
     assert str(own_agent["id"]) not in accessible_user2
     assert str(built_in["id"]) in accessible_user2
+    assert str(org_shared_agent["id"]) in accessible_user2
 
     await group_repo.remove_member(str(group["id"]), user2_id)
     assert await acl.can_access(user2_id, "agent", str(group_agent["id"]), org_id) is False
+
+
+@pytest.mark.asyncio
+async def test_daemon_created_definitions_default_to_org_shared(
+    db_pool, test_organization, acl_prefix
+):
+    org_id = str(test_organization["id"])
+    user_repo = UserRepository(db_pool)
+    daemon = await user_repo.create(
+        external_id=f"{acl_prefix}daemon",
+        provider="local",
+        organization_id=test_organization["id"],
+        email=f"{acl_prefix}daemon@test.com",
+        display_name=f"{acl_prefix}Daemon",
+        role="daemon",
+    )
+    member = await user_repo.create(
+        external_id=f"{acl_prefix}member",
+        provider="local",
+        organization_id=test_organization["id"],
+        email=f"{acl_prefix}member@test.com",
+        display_name=f"{acl_prefix}Member",
+        role="member",
+    )
+
+    def_repo = DefinitionRepository(db_pool)
+    agent = await def_repo.create_agent(
+        name=f"{acl_prefix}daemon_agent",
+        description="daemon-created",
+        content="# daemon-created",
+        org_id=org_id,
+        created_by=str(daemon["id"]),
+    )
+
+    assert agent["owner_user_id"] is None
+    assert agent["owner_group_id"] is None
+    assert await AccessControlService(db_pool).can_access(
+        str(member["id"]), "agent", str(agent["id"]), org_id
+    )

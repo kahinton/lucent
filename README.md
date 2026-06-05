@@ -69,6 +69,7 @@ Lucent runs as an application server plus an optional long-running agent process
 ```
 
 The server keeps durable state and exposes the dashboard, API, and MCP interface. The agent process plans work, dispatches tasks, runs schedules, validates outputs, and records what it learns back into Lucent.
+Built-in daemon schedules run cheap pre-flight eligibility checks first, so an idle maintenance cycle records a `schedule.skipped` no-work event instead of creating empty model-backed work.
 
 ## Enterprise operating model
 
@@ -83,7 +84,7 @@ Lucent is designed for teams that need AI work to fit existing enterprise expect
 | **Control who can do what** | Roles, groups, ownership, permissions, and approval workflows keep access aligned with organizational policy. |
 | **Prevent arbitrary agent action** | Agent capabilities, connected tools, integrations, and sandbox templates can require review before use. |
 | **Protect credentials and code** | Secrets are encrypted, code runs in isolated sandboxes, and execution can be constrained by resource and network policy. |
-| **Operate with visibility** | Dashboards, timelines, logs, reviews, and audit records make agent work inspectable after the fact. |
+| **Operate with visibility** | Dashboards, timelines, handoffs, logs, reviews, and audit records make agent work inspectable after the fact. |
 
 ## Quick Start
 

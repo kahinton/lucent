@@ -38,7 +38,7 @@ to an organization and owned by a user or group.
 When `LUCENT_SECRET_PROVIDER` is unset (or set to `auto`), Lucent probes
 the environment at startup and selects the best available provider:
 
-1. If `VAULT_ADDR` and `VAULT_TOKEN` are set and OpenBao/Vault is healthy →
+1. If `VAULT_ADDR` and either `VAULT_TOKEN` or `VAULT_TOKEN_FILE` are set and OpenBao/Vault is healthy →
    check for the Transit encryption key (`lucent-secrets`)
 2. If the Transit key exists → use **transit**
 3. If Vault is healthy but no Transit key → use **vault** (KV v2)
@@ -51,9 +51,12 @@ encryption automatically — no configuration changes required.
 
 ## Built-in Provider Setup
 
-The built-in provider is the default and the only fully implemented backend. It
+The built-in provider is the fallback when OpenBao/Vault is not configured. It
 encrypts secret values at rest in PostgreSQL using Fernet symmetric encryption
 (AES-128 in CBC mode with HMAC-SHA256 authentication).
+
+Local Docker Compose is configured for OpenBao Transit by default. Use `builtin`
+only when intentionally opting out of the OpenBao sidecar.
 
 ### Environment Variables
 
@@ -262,7 +265,8 @@ The included init script (`docker/openbao-init.sh`) configures:
 |-----------------------|----------|---------|------------------------------------------|
 | `LUCENT_SECRET_PROVIDER` | No    | `auto`  | Set to `transit` to force Transit, or leave as `auto` |
 | `VAULT_ADDR`          | Yes      | `http://openbao:8200` (in docker-compose) | OpenBao/Vault API URL |
-| `VAULT_TOKEN`         | Yes      | `root` (dev mode)   | Token with Transit encrypt/decrypt permissions |
+| `VAULT_TOKEN_FILE`    | Conditional | `/shared/vault-token` (in docker-compose) | Preferred token source written by `openbao-init` |
+| `VAULT_TOKEN`         | Conditional | — | Token with Transit encrypt/decrypt permissions when no token file is available |
 | `VAULT_TRANSIT_MOUNT` | No       | `transit` | Transit engine mount path                |
 | `VAULT_TRANSIT_KEY`   | No       | `lucent-secrets` | Name of the Transit encryption key    |
 
@@ -282,9 +286,9 @@ Or in `docker-compose.yml` (already configured by default):
 services:
   lucent:
     environment:
-      LUCENT_SECRET_PROVIDER: transit
+      LUCENT_SECRET_PROVIDER: auto
       VAULT_ADDR: http://openbao:8200
-      VAULT_TOKEN: ${VAULT_TOKEN:-root}
+      VAULT_TOKEN_FILE: /shared/vault-token
 ```
 
 ---

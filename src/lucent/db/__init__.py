@@ -24,11 +24,18 @@ from lucent.db.audit import AuditRepository
 from lucent.db.definitions import DefinitionRepository
 from lucent.db.groups import GroupRepository
 from lucent.db.integrations import IntegrationRepository
-from lucent.db.memory import MemoryRepository, VersionConflictError
+from lucent.db.llm_sessions import LLMSessionRepository
+from lucent.db.memory import (
+    DuplicateTechnicalMemoryError,
+    MemoryRepository,
+    VersionConflictError,
+)
 from lucent.db.models import ModelRepository
 from lucent.db.organization import OrganizationRepository
 from lucent.db.pool import close_db, get_pool, init_db
 from lucent.db.reviews import ReviewRepository
+from lucent.db.runtime_settings import RuntimeSettingsRepository
+from lucent.db.tool_audit import ToolAuditRepository
 
 # TypedDict definitions for repository return values
 from lucent.db.types import (
@@ -51,6 +58,7 @@ from lucent.db.types import (
     UserRecord,
 )
 from lucent.db.user import UserRepository
+from lucent.db.user_interactions import UserInteractionRepository
 
 __all__ = [
     # Pool management
@@ -59,10 +67,12 @@ __all__ = [
     "close_db",
     # Repositories
     "MemoryRepository",
+    "DuplicateTechnicalMemoryError",
     "VersionConflictError",
     "DefinitionRepository",
     "GroupRepository",
     "IntegrationRepository",
+    "LLMSessionRepository",
     "UserRepository",
     "ApiKeyRepository",
     "OrganizationRepository",
@@ -71,6 +81,9 @@ __all__ = [
     "AccessRepository",
     "ModelRepository",
     "ReviewRepository",
+    "RuntimeSettingsRepository",
+    "ToolAuditRepository",
+    "UserInteractionRepository",
     # TypedDict definitions
     "MemoryRecord",
     "MemoryShadowScoreRecord",

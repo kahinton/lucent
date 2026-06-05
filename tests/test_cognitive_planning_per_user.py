@@ -146,7 +146,9 @@ async def req_repo(db_pool):
     return RequestRepository(db_pool)
 
 
-async def _create_active_goal(mem_repo, user, org, prefix, title="Test Goal"):
+async def _create_active_goal(
+    mem_repo, user, org, prefix, title="Test Goal", metadata=None
+):
     """Helper to create an active goal memory for a user."""
     return await mem_repo.create(
         username=f"{prefix}{user['external_id']}",
@@ -157,7 +159,7 @@ async def _create_active_goal(mem_repo, user, org, prefix, title="Test Goal"):
         user_id=user["id"],
         organization_id=org["id"],
         shared=False,
-        metadata={"status": "active"},
+        metadata=metadata or {"status": "active"},
     )
 
 
@@ -550,6 +552,89 @@ class TestNoGoalsNoIteration:
 
 
 # ============================================================================
+# Test: Direct target request creation
+# ============================================================================
+
+
+class TestDirectTargetRequestCreation:
+    """The daemon should create plannable target requests directly.
+
+    This avoids relying on mutating MCP tool calls from Copilot sessions, which
+    can fail at the permission protocol layer before Lucent sees the request.
+    """
+
+    @pytest.mark.asyncio
+    async def test_fanout_creates_pending_request_from_target(
+        self, db_pool, org, user_a, mem_repo, prefix
+    ):
+        from daemon.daemon import LucentDaemon
+
+        goal = await _create_active_goal(
+            mem_repo,
+            user_a,
+            org,
+            prefix,
+            "Milestoned Goal",
+            metadata={
+                "status": "active",
+                "milestones": [
+                    {"description": "First milestone", "status": "completed"},
+                    {"description": "Second milestone", "status": "active"},
+                ],
+            },
+        )
+        target = {
+            "goal_id": str(goal["id"]),
+            "goal_title": "Milestoned Goal",
+            "next_milestone_index": 2,
+            "next_milestone_description": "Second milestone",
+            "suggested_title": f"{prefix}M2 direct fanout request",
+            "target_repo": "kahinton/example-planning-repo",
+            "target_paths": ["docs/m2.md"],
+        }
+
+        daemon = LucentDaemon()
+        with (
+            patch(
+                "daemon.daemon._mint_scoped_api_key",
+                new_callable=AsyncMock,
+                return_value="hs_fake_key",
+            ),
+            patch(
+                "daemon.daemon.RequestAPI.list_planning_targets",
+                new_callable=AsyncMock,
+                return_value=[target],
+            ),
+            patch.object(daemon, "run_session", new_callable=AsyncMock) as run_session,
+        ):
+            result = await daemon._run_cognitive_planning_fanout(
+                task_id=str(uuid4()),
+                org_id=str(org["id"]),
+                system_message="test",
+                mcp_config_base={},
+            )
+
+        run_session.assert_not_called()
+        assert "requests=1" in result
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """SELECT created_by, source, approval_status,
+                          goal_memory_id, goal_milestone_index,
+                          target_repo, target_paths
+                   FROM requests WHERE title = $1""",
+                target["suggested_title"],
+            )
+        assert row is not None
+        assert str(row["created_by"]) == str(user_a["id"])
+        assert row["source"] == "cognitive"
+        assert row["approval_status"] == APPROVAL_PENDING
+        assert str(row["goal_memory_id"]) == str(goal["id"])
+        assert row["goal_milestone_index"] == 2
+        assert row["target_repo"] == "kahinton/example-planning-repo"
+        assert row["target_paths"] == ["docs/m2.md"]
+
+
+# ============================================================================
 # Test: Error isolation
 # ============================================================================
 
@@ -577,14 +662,12 @@ class TestErrorIsolation:
                 return None  # Simulate failure for user A
             return "hs_fake_key_for_user_b"
 
-        # Mock both mint and run_session to isolate the fan-out logic
         with (
             patch("daemon.daemon._mint_scoped_api_key", side_effect=_mock_mint),
-            patch.object(
-                daemon,
-                "run_session",
+            patch(
+                "daemon.daemon.RequestAPI.list_planning_targets",
                 new_callable=AsyncMock,
-                return_value="planned goals",
+                return_value=[],
             ),
         ):
             result = await daemon._run_cognitive_planning_fanout(
@@ -600,10 +683,10 @@ class TestErrorIsolation:
         assert "fan-out complete" in result.lower()
 
     @pytest.mark.asyncio
-    async def test_session_exception_is_caught(
+    async def test_target_creation_exception_is_caught(
         self, db_pool, org, user_a, mem_repo, prefix
     ):
-        """An exception during run_session is caught and logged, not raised."""
+        """An exception during direct target creation is caught and logged."""
         from daemon.daemon import LucentDaemon
 
         await _create_active_goal(mem_repo, user_a, org, prefix, "Goal A")
@@ -611,7 +694,7 @@ class TestErrorIsolation:
         daemon = LucentDaemon()
 
         async def _boom(*args, **kwargs):
-            raise RuntimeError("LLM session exploded")
+            raise RuntimeError("target create exploded")
 
         with (
             patch(
@@ -622,9 +705,19 @@ class TestErrorIsolation:
             patch(
                 "daemon.daemon.RequestAPI.list_planning_targets",
                 new_callable=AsyncMock,
-                return_value=[{"goal_id": str(uuid4()), "title": "Goal A"}],
+                return_value=[
+                    {
+                        "goal_id": str(uuid4()),
+                        "next_milestone_index": 1,
+                        "suggested_title": "Goal A M1",
+                    }
+                ],
             ),
-            patch.object(daemon, "run_session", side_effect=_boom),
+            patch.object(
+                daemon,
+                "_create_cognitive_request_for_target",
+                side_effect=_boom,
+            ),
         ):
             result = await daemon._run_cognitive_planning_fanout(
                 task_id=str(uuid4()),
@@ -647,13 +740,13 @@ class TestErrorIsolation:
         await _create_active_goal(mem_repo, user_b, org, prefix, "Goal B")
 
         daemon = LucentDaemon()
-        session_calls = []
+        create_calls = []
 
-        async def _mock_session(name, system, prompt, **kwargs):
-            session_calls.append(name)
-            if user_a["id"].__str__()[:8] in name:
-                raise RuntimeError("User A session failed")
-            return "Planned 1 goal for user B"
+        async def _mock_create(*, org_id, user_id, target):
+            create_calls.append(user_id)
+            if user_id == str(user_a["id"]):
+                raise RuntimeError("User A target create failed")
+            return "created", {"id": str(uuid4()), "status": "pending"}
 
         with (
             patch(
@@ -664,9 +757,19 @@ class TestErrorIsolation:
             patch(
                 "daemon.daemon.RequestAPI.list_planning_targets",
                 new_callable=AsyncMock,
-                return_value=[{"goal_id": str(uuid4()), "title": "Goal"}],
+                return_value=[
+                    {
+                        "goal_id": str(uuid4()),
+                        "next_milestone_index": 1,
+                        "suggested_title": "Goal M1",
+                    }
+                ],
             ),
-            patch.object(daemon, "run_session", side_effect=_mock_session),
+            patch.object(
+                daemon,
+                "_create_cognitive_request_for_target",
+                side_effect=_mock_create,
+            ),
         ):
             result = await daemon._run_cognitive_planning_fanout(
                 task_id=str(uuid4()),
@@ -675,7 +778,7 @@ class TestErrorIsolation:
                 mcp_config_base={},
             )
 
-        assert len(session_calls) == 2
+        assert len(create_calls) == 2
         assert "fan-out complete" in result.lower()
 
 

@@ -13,6 +13,106 @@ from lucent.secrets import SecretRegistry, resolve_env_vars
 from lucent.url_validation import SSRFError, validate_url
 
 DISCOVERY_TIMEOUT_SECONDS = 10
+COPILOT_BUILTIN_GITHUB_TYPES = frozenset({
+    "copilot_github",
+    "copilot_builtin_github",
+    "copilot-builtin-github",
+    "github_builtin",
+    "github-builtin",
+})
+
+COPILOT_BUILTIN_GITHUB_TOOLS = [
+    {
+        "name": "github-mcp-server-actions_get",
+        "description": "Read details for a GitHub Actions workflow run or job.",
+        "input_schema": {},
+    },
+    {
+        "name": "github-mcp-server-actions_list",
+        "description": "List GitHub Actions workflows, runs, or jobs.",
+        "input_schema": {},
+    },
+    {
+        "name": "github-mcp-server-get_commit",
+        "description": "Read details for a GitHub commit.",
+        "input_schema": {},
+    },
+    {
+        "name": "github-mcp-server-list_commits",
+        "description": "List commits in a GitHub repository.",
+        "input_schema": {},
+    },
+    {
+        "name": "github-mcp-server-search_repositories",
+        "description": "Search GitHub repositories through Copilot's bundled GitHub MCP server.",
+        "input_schema": {},
+    },
+    {
+        "name": "github-mcp-server-get_file_contents",
+        "description": "Read file contents from a GitHub repository.",
+        "input_schema": {},
+    },
+    {
+        "name": "github-mcp-server-get_job_logs",
+        "description": "Read logs for a GitHub Actions job.",
+        "input_schema": {},
+    },
+    {
+        "name": "github-mcp-server-issue_read",
+        "description": "Read a GitHub issue.",
+        "input_schema": {},
+    },
+    {
+        "name": "github-mcp-server-list_issues",
+        "description": "List issues in a GitHub repository.",
+        "input_schema": {},
+    },
+    {
+        "name": "github-mcp-server-pull_request_read",
+        "description": "Read a GitHub pull request.",
+        "input_schema": {},
+    },
+    {
+        "name": "github-mcp-server-list_pull_requests",
+        "description": "List pull requests in a GitHub repository.",
+        "input_schema": {},
+    },
+    {
+        "name": "github-mcp-server-list_branches",
+        "description": "List branches in a GitHub repository.",
+        "input_schema": {},
+    },
+    {
+        "name": "github-mcp-server-search_code",
+        "description": "Search code on GitHub.",
+        "input_schema": {},
+    },
+    {
+        "name": "github-mcp-server-search_issues",
+        "description": "Search GitHub issues.",
+        "input_schema": {},
+    },
+    {
+        "name": "github-mcp-server-search_pull_requests",
+        "description": "Search GitHub pull requests.",
+        "input_schema": {},
+    },
+    {
+        "name": "github-mcp-server-search_users",
+        "description": "Search GitHub users.",
+        "input_schema": {},
+    },
+    {
+        "name": "github-mcp-server-list_copilot_spaces",
+        "description": "List Copilot Spaces available to the authenticated account.",
+        "input_schema": {},
+    },
+    {
+        "name": "github-mcp-server-get_copilot_space",
+        "description": "Read a Copilot Space.",
+        "input_schema": {},
+    },
+]
 
 
 class MCPDiscoveryError(RuntimeError):
@@ -186,6 +286,12 @@ async def discover_mcp_tools(server_config: dict, db_pool) -> list[dict]:
         tools = await _discover_http(server_config)
     elif server_type == "stdio":
         tools = await _discover_stdio(server_config)
+    elif server_type in COPILOT_BUILTIN_GITHUB_TYPES:
+        # Copilot's bundled GitHub MCP server is exposed by the Copilot runtime
+        # when SDK sessions opt into config discovery. It is not an external MCP
+        # endpoint we can enumerate via the MCP protocol from the web process, so
+        # return the stable/relevant repo-operation tool names used by the daemon.
+        tools = [dict(tool) for tool in COPILOT_BUILTIN_GITHUB_TOOLS]
     else:
         raise MCPDiscoveryError(f"Unsupported MCP server type: {server_type}")
 

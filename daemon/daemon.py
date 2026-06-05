@@ -117,7 +117,39 @@ _MEMORY_CAPTURE_TOOLS = frozenset({
     "update_memory",
 })
 
-_TASK_MEMORY_SERVER_TOOLS = sorted(
+_NON_OPERATIONAL_TOOL_NAMES = frozenset({
+    "report_intent",
+})
+
+
+def _normalize_tool_name(tool_name: str | None) -> str | None:
+    """Normalize Copilot SDK MCP tool names to Lucent tool names."""
+    if not tool_name:
+        return None
+    if tool_name.startswith("memory-server-"):
+        return tool_name[len("memory-server-"):]
+    return tool_name
+
+
+def _is_memory_server_tool(tool_name: str | None) -> bool:
+    """Return True for tools served by Lucent's memory-server MCP."""
+    normalized = _normalize_tool_name(tool_name)
+    return bool(
+        tool_name
+        and (
+            tool_name.startswith("memory-server-")
+            or normalized in _MEMORY_TOOL_NAMES
+            or normalized in _TASK_MEMORY_SERVER_TOOLS
+        )
+    )
+
+
+def _is_operational_tool_call(entry: dict) -> bool:
+    """Return True when a tool event represents real tool execution."""
+    tool = _normalize_tool_name(entry.get("tool") or entry.get("raw_tool"))
+    return bool(tool and tool not in _NON_OPERATIONAL_TOOL_NAMES)
+
+_BASE_TASK_MEMORY_SERVER_TOOLS = sorted(
     {
         "create_memory",
         "get_current_user_context",
@@ -133,10 +165,126 @@ _TASK_MEMORY_SERVER_TOOLS = sorted(
         "get_request_details",
         "link_request_memory",
         "link_task_memory",
+        "list_handoffs",
+        "get_handoff",
+        "resolve_handoff",
         "list_available_models",
         "log_task_event",
+        "exec_sandbox_command",
+        "send_handoff",
+        "analyze_tool_failure_patterns",
+        "propose_definition_improvement",
     }
 )
+
+_DEFINITION_ACTIVATION_TOOLS = sorted(
+    {
+        "list_agent_definitions",
+        "get_agent_definition",
+        "list_skill_definitions",
+        "get_skill_definition",
+        "list_proposals",
+        "create_agent_definition",
+        "create_skill_definition",
+        "create_tool_definition",
+        "list_tool_definitions",
+        "get_tool_definition",
+        "create_hook_definition",
+        "list_hook_definitions",
+        "get_hook_definition",
+        "list_mcp_server_definitions",
+        "create_mcp_server_definition",
+    }
+)
+
+_WORK_ACTIVATION_TOOLS = sorted(
+    {
+        "create_request",
+        "create_task",
+        "list_sandbox_templates",
+        "propose_sandbox_template",
+    }
+)
+
+_CAPABILITY_ACTIVATION_AGENT_TYPES = frozenset(
+    {"assessment", "definition-engineer", "lucent", "planning", "reflection"}
+)
+
+_HANDOFF_TOOL_REQUIRED_SIGNALS = frozenset(
+    {
+        "send_handoff",
+        "send a handoff",
+        "create a handoff",
+        "provide a handoff",
+        "as a handoff",
+        "handoff to the user",
+        "post to handoffs",
+    }
+)
+
+_HANDOFF_TOOL_REQUIRED_PATTERNS = tuple(
+    re.compile(pattern)
+    for pattern in (
+        r"\b(?:send|create|provide|post|publish|share|deliver|return|write)\b.{0,120}\bhandoff\b",
+        r"\bhandoff\b.{0,80}\b(?:to|for)\b.{0,40}\b(?:user|human|person|owner|requester)\b",
+    )
+)
+
+_TASK_MEMORY_SERVER_TOOLS = sorted(
+    set(_BASE_TASK_MEMORY_SERVER_TOOLS)
+    | set(_DEFINITION_ACTIVATION_TOOLS)
+    | set(_WORK_ACTIVATION_TOOLS)
+)
+
+
+def _memory_server_tools_for_task(
+    agent_type: str | None,
+    title: str | None = None,
+    request_title: str | None = None,
+    description: str | None = None,
+) -> list[str]:
+    """Return memory-server tools exposed to a dispatched task.
+
+    Most task agents only need memory/search/task-event tools. Agents whose
+    purpose is learning, reflection, planning, or capability generation need
+    mutating definition/request tools so they can activate system changes
+    instead of merely recording lessons in memory.
+    """
+    normalized_agent = (agent_type or "").strip().lower()
+    text = "\n".join(part or "" for part in (title, request_title, description)).lower()
+    if normalized_agent == "weather-advisor":
+        return sorted({
+            "create_memory",
+            "fetch_open_meteo_forecast",
+            "log_task_event",
+            "send_handoff",
+        })
+
+    tools = set(_BASE_TASK_MEMORY_SERVER_TOOLS)
+
+    capability_task = (
+        normalized_agent in _CAPABILITY_ACTIVATION_AGENT_TYPES
+        or "learning extraction" in text
+        or "self-improvement" in text
+        or "definition" in text
+        or ("agent" in text and "skill" in text)
+        or "capability" in text
+    )
+    if capability_task:
+        tools.update(_DEFINITION_ACTIVATION_TOOLS)
+
+    work_planning_task = (
+        normalized_agent in _CAPABILITY_ACTIVATION_AGENT_TYPES
+        or "learning extraction" in text
+        or "create request" in text
+        or "create task" in text
+        or ("plan" in text and "task" in text)
+        or "capability" in text
+    )
+    if work_planning_task:
+        tools.update(_WORK_ACTIVATION_TOOLS)
+
+    return sorted(tools)
 
 
 def _summarize_memory_tool_params(tool_name: str, arguments: dict) -> str:
@@ -145,6 +293,7 @@ def _summarize_memory_tool_params(tool_name: str, arguments: dict) -> str:
     Extracts operationally meaningful fields for each tool type while
     omitting large content bodies. Designed for structured log lines.
     """
+    tool_name = _normalize_tool_name(tool_name) or tool_name
     parts: list[str] = []
 
     if tool_name in ("search_memories", "search_memories_full"):
@@ -187,6 +336,16 @@ def _summarize_memory_tool_params(tool_name: str, arguments: dict) -> str:
         if mid := arguments.get("memory_id"):
             parts.append(f"memory_id={mid}")
 
+    elif tool_name == "send_handoff":
+        if title := arguments.get("title"):
+            parts.append(f"title={title!r}")
+        if interaction_type := arguments.get("interaction_type"):
+            parts.append(f"interaction_type={interaction_type}")
+        if arguments.get("requires_response"):
+            parts.append("requires_response=True")
+        if body := arguments.get("body"):
+            parts.append(f"body_len={len(body)}")
+
     elif tool_name == "get_current_user_context":
         pass  # No params
 
@@ -211,7 +370,7 @@ def _build_mcp_tool_summary(tracker: list[dict]) -> str:
 
     tool_counts: dict[str, int] = {}
     for entry in tracker:
-        tool = entry["tool"]
+        tool = _normalize_tool_name(entry["tool"]) or entry["tool"]
         tool_counts[tool] = tool_counts.get(tool, 0) + 1
 
     search_count = sum(
@@ -312,155 +471,66 @@ class AuthFailureDetectedError(Exception):
 # Configuration
 # ============================================================================
 
-MAX_CONCURRENT_SESSIONS = int(os.environ.get("LUCENT_MAX_SESSIONS", "3"))
-DAEMON_INTERVAL_MINUTES = int(os.environ.get("LUCENT_DAEMON_INTERVAL", "15"))
-MODEL = os.environ.get("LUCENT_DAEMON_MODEL", "").strip()
-STALE_HEARTBEAT_MINUTES = int(os.environ.get("LUCENT_STALE_HEARTBEAT_MINUTES", "30"))
+from lucent import settings as runtime_settings
+
+MAX_CONCURRENT_SESSIONS = runtime_settings.daemon_max_sessions()
+DAEMON_INTERVAL_MINUTES = runtime_settings.daemon_interval_minutes()
+MODEL = runtime_settings.daemon_model_id() or ""
+STALE_HEARTBEAT_MINUTES = runtime_settings.daemon_stale_heartbeat_minutes()
 
 # PG advisory-lock namespace for the request-decomposition backfill.
 # Two-int form: (namespace, hashtext(request_id)::int). Arbitrary unique int.
 DECOMPOSITION_LOCK_NAMESPACE = 0x4C434D50  # "LCMP" — Lucent CoMPose
 # Overall timeout for an entire run_session call (client start + create + response)
-SESSION_TOTAL_TIMEOUT = int(os.environ.get("LUCENT_SESSION_TIMEOUT", "3600"))
+SESSION_TOTAL_TIMEOUT = runtime_settings.daemon_session_timeout_seconds()
 # Idle timeout: kill session if no LLM activity for this long (seconds)
-SESSION_IDLE_TIMEOUT = int(os.environ.get("LUCENT_SESSION_IDLE_TIMEOUT", "300"))
+SESSION_IDLE_TIMEOUT = runtime_settings.daemon_session_idle_timeout_seconds()
 # Watchdog: kill process if no log activity for this many seconds.
 # CopilotClient can block the event loop, defeating asyncio timeouts.
 # Default 3600s (1h) — must exceed the longest schedule interval to avoid
 # killing the daemon during idle periods between cognitive cycles.
-WATCHDOG_TIMEOUT = int(os.environ.get("LUCENT_WATCHDOG_TIMEOUT", "3600"))
+WATCHDOG_TIMEOUT = runtime_settings.daemon_watchdog_timeout_seconds()
 WATCHDOG_CHECK_INTERVAL = 60
 # How many cognitive cycles between autonomic maintenance runs
-AUTONOMIC_INTERVAL = int(os.environ.get("LUCENT_AUTONOMIC_INTERVAL", "8"))
+AUTONOMIC_INTERVAL = runtime_settings.daemon_autonomic_interval_cycles()
 # How many cognitive cycles between learning extraction runs
-LEARNING_INTERVAL = int(os.environ.get("LUCENT_LEARNING_INTERVAL", str(AUTONOMIC_INTERVAL * 2)))
+LEARNING_INTERVAL = runtime_settings.daemon_learning_interval_cycles()
 # Maximum characters stored from sub-agent results
-MAX_RESULT_LENGTH = int(os.environ.get("LUCENT_MAX_RESULT_LENGTH", "8000"))
+MAX_RESULT_LENGTH = runtime_settings.daemon_max_result_length()
 
 # ── Role-based loop configuration ─────────────────────────────────────────
 # Each daemon instance can run a subset of roles. Multi-instance deployments
 # can split work across instances (e.g. one cognitive, N dispatchers).
 # Roles: dispatcher, cognitive, scheduler, autonomic (or 'all')
-DAEMON_ROLES_STR = os.environ.get("LUCENT_DAEMON_ROLES", "all")
+DAEMON_ROLES_STR = runtime_settings.daemon_roles()
 # Dispatch loop: how often to poll if PG LISTEN misses a signal
-DISPATCH_POLL_SECONDS = int(os.environ.get("LUCENT_DISPATCH_POLL_SECONDS", "60"))
+DISPATCH_POLL_SECONDS = runtime_settings.daemon_dispatch_poll_seconds()
 # Scheduler loop: how often to check for due schedules
-SCHEDULER_CHECK_SECONDS = int(os.environ.get("LUCENT_SCHEDULER_CHECK_SECONDS", "60"))
+SCHEDULER_CHECK_SECONDS = runtime_settings.daemon_scheduler_check_seconds()
 # Time-based intervals for independent loops (derive defaults from cycle-count configs)
-AUTONOMIC_MINUTES = int(
-    os.environ.get("LUCENT_AUTONOMIC_MINUTES", str(AUTONOMIC_INTERVAL * DAEMON_INTERVAL_MINUTES))
-)
-LEARNING_MINUTES = int(
-    os.environ.get("LUCENT_LEARNING_MINUTES", str(LEARNING_INTERVAL * DAEMON_INTERVAL_MINUTES))
-)
+AUTONOMIC_MINUTES = runtime_settings.daemon_autonomic_minutes()
+LEARNING_MINUTES = runtime_settings.daemon_learning_minutes()
 # Memory vitality scoring: runs every 6 hours by default (360 minutes)
-VITALITY_SCORING_MINUTES = int(os.environ.get("LUCENT_VITALITY_SCORING_MINUTES", "360"))
+VITALITY_SCORING_MINUTES = runtime_settings.daemon_vitality_scoring_minutes()
 # Shadow forgetting Candidate-A scoring: runs every 6 hours, offset +15m from vitality.
-SHADOW_FORGET_SCORING_MINUTES = int(
-    os.environ.get("LUCENT_SHADOW_FORGET_SCORING_MINUTES", str(VITALITY_SCORING_MINUTES))
-)
-SHADOW_FORGET_OFFSET_MINUTES = int(os.environ.get("LUCENT_SHADOW_FORGET_OFFSET_MINUTES", "15"))
+SHADOW_FORGET_SCORING_MINUTES = runtime_settings.daemon_shadow_forget_scoring_minutes()
+SHADOW_FORGET_OFFSET_MINUTES = runtime_settings.daemon_shadow_forget_offset_minutes()
 # Daily experience compression: runs once per day (default 1440 minutes = 24 hours)
-COMPRESSION_MINUTES = int(os.environ.get("LUCENT_COMPRESSION_MINUTES", "1440"))
+COMPRESSION_MINUTES = runtime_settings.daemon_compression_minutes()
 
 # ── System schedule prompts ────────────────────────────────────────────
 # These are the task descriptions used by the built-in system schedules.
 # The cognitive prompt is built dynamically from cognitive.md at startup.
 
-MEMORY_CONSOLIDATION_PROMPT = (
-    "Run a memory consolidation pass focused on TECHNICAL memories.\n\n"
-    "## Goal: One Technical Memory Per Scope\n\n"
-    "Technical memories must follow a strict hierarchy:\n"
-    "- **Repo-level**: One memory per repo (metadata.repo=<owner/repo>, metadata.directory=null, metadata.filename=null)\n"
-    "  Contains: general architecture, conventions, build/test commands, key patterns\n"
-    "- **Directory-level**: One memory per significant directory (metadata.repo=<owner/repo>, metadata.directory=<path/>, metadata.filename=null)\n"
-    "  Contains: what this directory does, key files, patterns specific to this area\n"
-    "- **File-level**: One memory per file that has enough knowledge to warrant it (metadata.repo=<owner/repo>, metadata.directory=<parent/dir/>, metadata.filename=<parent/dir/file.ext>)\n"
-    "  Contains: what this file does, key functions, gotchas, patterns\n\n"
-    "## Desired Content Contract\n\n"
-    "The hierarchy is a navigational knowledge base for future agents. It is NOT an audit log.\n"
-    "Repo-level memories should read like a compact contributor briefing with these sections when known:\n"
-    "- Architecture map: major subsystems and how requests/data flow between them\n"
-    "- Working conventions: how to run/build/test locally, including background workers, services, "
-    "and containerized dependencies when the repo uses them\n"
-    "- Important docs/runbooks: docs worth reading before changing the repo\n"
-    "- Do / don't: operational constraints, security boundaries, and common footguns\n"
-    "- Current decisions/invariants: durable design choices and why they exist\n"
-    "Directory-level memories should explain the directory's responsibility, boundaries, key files, "
-    "local patterns, and gotchas. File-level memories should explain responsibilities, important "
-    "symbols, invariants, and edit hazards.\n\n"
-    "## Determining the repo name\n\n"
-    "The repo name MUST be in owner/repo format (e.g. 'octocat/hello-world'). "
-    "To find the correct repo name, look at existing technical memories that already have metadata.repo set. "
-    "Use whatever value they already have — do NOT invent a new name or use the filesystem directory name. "
-    "If no existing memories have metadata.repo set, search for clues in memory content or tags.\n\n"
-    "## Process (Mandatory Phases)\n\n"
-    "1. Search for all technical memories (use search_memories with type='technical', limit=50).\n"
-    "   Also search with search_memories_full for broader coverage. Before planning writes, exclude "
-    "protected or non-knowledge records from the consolidation set: anything tagged 'pinned', "
-    "'do_not_consolidate', maintenance, or records that are plain task reports, heartbeat/state "
-    "records, telemetry, or other runtime bookkeeping rather than durable codebase knowledge.\n\n"
-    "2. For each in-scope memory, determine its correct scope:\n"
-    "   - If it's about a specific file -> file-level\n"
-    "   - If it's about a directory/module -> directory-level\n"
-    "   - If it's about the repo generally -> repo-level\n\n"
-    "3. **Merge duplicates**: If two memories belong to the same scope, merge them into one.\n"
-    "   Keep the best scope-fit memory as canonical: prefer durable overview/convention content "
-    "over audit reports, one-off research outputs, maintenance logs, or transient task summaries. "
-    "Then tie-break by higher vitality_score (missing=0.5), higher importance, then older created_at.\n"
-    "   Update the canonical memory with combined content, delete lower-vitality fragments.\n"
-    "   The surviving memory should be comprehensive but concise.\n\n"
-    "4. **MANDATORY METADATA NORMALIZATION PASS (separate from merge pass)**:\n"
-    "   Update EVERY in-scope technical codebase memory so it has these exact metadata fields:\n"
-    "   - metadata.repo (repository name in owner/repo format. Get this from existing memories — do NOT hardcode or guess)\n"
-    "   - metadata.directory (path within repo; directory path ending with '/', or null)\n"
-    "   - metadata.filename (specific file path within repo, or null. Must be null for directory-level memories)\n"
-    "   Scope mapping is strict and non-optional:\n"
-    "   - repo-level -> repo set, directory=null, filename=null\n"
-    "   - directory-level -> repo set, directory='path/within/repo/', filename=null\n"
-    "   - file-level -> repo set, directory='parent/dir/', filename='full/path/to/file.ext'\n"
-    "   Also set metadata.category to a short category like 'architecture', 'api', 'database', 'testing'.\n\n"
-    "5. **MANDATORY VERIFICATION PASS (after all updates/deletes)**:\n"
-    "   Re-read in-scope technical codebase memories and verify each one includes metadata.repo, metadata.directory, and metadata.filename\n"
-    "   with values consistent with its scope mapping above. If any memory is non-compliant, fix it in this run before finishing.\n\n"
-    "6. **Non-technical memories** (experience, goal, individual, etc.): Leave these alone.\n\n"
-    "7. Create a summary of what you changed, including verification counts and any corrected memory IDs.\n\n"
-    "## Important Rules\n"
-    "- NEVER create new memories. Only update existing ones or delete duplicates.\n"
-    "- The ONLY valid operations are: update_memory and delete_memory.\n"
-    "- NEVER create a memory maintenance log, run report, or audit-result memory. Put the run summary only in the task response.\n"
-    "- If you identify merge/update/delete operations, you MUST execute them in this run.\n"
-    "- Do not stop after planning. Planning without writes is an incomplete run.\n"
-    "- If two memories cover the same scope, update the better one and delete the other.\n"
-    "- The total memory count must go DOWN or stay the same, never up.\n"
-    "- Each scope should have AT MOST one technical memory.\n"
-    "- Do NOT treat metadata normalization as optional; it is a required pass every run.\n"
-    "- NEVER touch memories tagged 'pinned' or 'do_not_consolidate'.\n"
-    "- NEVER normalize heartbeat/state records, maintenance logs, run reports, or telemetry records into repo metadata. These are not codebase knowledge.\n"
-    "- Final output MUST include: 'Planned operations: <N>' and 'Executed write operations: <M>'.\n"
-    "- Content should be practical: what does a developer need to know to work here?\n\n"
-    "## Content Quality: Focus on WHY, not WHAT\n\n"
-    "Technical memories are used as working context for agents executing tasks. "
-    "They should describe conventions, patterns, design decisions, and constraints — "
-    "NOT be a changelog of what was done.\n\n"
-    "GOOD (why/how — useful for future work):\n"
-    "- 'Uses repository pattern with asyncpg connection pools'\n"
-    "- 'ACL enforcement: user_id = caller OR (org_id AND shared = true)'\n"
-    "- 'All API endpoints require AuthenticatedUser dependency for API key auth'\n"
-    "- 'Migrations are sequential numbered SQL files, applied on startup'\n\n"
-    "BAD (what — reads like a commit log, not useful as context):\n"
-    "- 'Added memory_scope_user_id column in migration 057'\n"
-    "- 'Fixed bug where get_accessible() failed under scoped keys'\n"
-    "- 'Implemented multi-engine LLM abstraction in March 2026'\n\n"
-    "When consolidating, strip out changelog-style entries and distill the "
-    "underlying conventions and patterns. A developer reading this memory should "
-    "understand HOW to work in this area, not WHAT was historically done."
-)
-
 LEARNING_EXTRACTION_PROMPT = (
     "Run the learning extraction pipeline. "
     "Core principle: INTEGRATE, don't accumulate. Lessons get folded into "
-    "existing memories, not stored as standalone 'Lesson:' entries.\n\n"
+    "existing memories, not stored as standalone 'Lesson:' entries. "
+    "Tool-call audit data is operational telemetry, NOT memory content. "
+    "Learning must activate behavior changes through human-reviewed channels: create "
+    "proposed agents/skills/hooks when capability is missing, and create follow-up "
+    "requests for grants, built-in changes, or source-code changes. Memory updates "
+    "are supporting evidence, not the final product.\n\n"
     "1. Search for memories tagged 'daemon-result' "
     "or 'rejection-lesson' or 'feedback-rejected' "
     "or 'validated' that do "
@@ -474,11 +544,29 @@ LEARNING_EXTRACTION_PROMPT = (
     "4. Tag processed source memories with 'lesson-extracted'.\n"
     "5. Delete source experience memories that are now redundant "
     "(their knowledge has been absorbed).\n"
+    "6. Call analyze_tool_failure_patterns(since_days=14, min_failures=3). "
+    "For repeated tool failures, classify whether the likely fix belongs in an "
+    "agent definition, an existing/new skill, a hook, or the tool/server itself. "
+    "Do NOT create memories from raw audit rows.\n"
+    "7. When the pattern has enough evidence and a concrete improvement, call "
+    "propose_definition_improvement with proposal_reason and proposal_evidence. "
+    "Prefer proposing focused skills that can be granted to the affected agent; "
+    "use agent updates only when the behavior is core to that agent's identity. "
+    "The proposal must explain WHY the change is suggested so a human can review it.\n"
+    "8. When the right change is clear, create a human-reviewed activation artifact: "
+    "create a proposed skill/agent/hook, or create a request that asks an owner to "
+    "approve/grant/update the relevant definition or source file. Do not stop at a "
+    "memory note when a system change is needed, and do not grant yourself access.\n"
     "\n\nSTRICT RULES:\n"
     "- NEVER create standalone 'Lesson:' or 'Learning Extraction Run' memories.\n"
     "- NEVER create a new memory if an existing one covers the same scope - update it.\n"
     "- The total memory count must go DOWN or stay the same, never up.\n"
     "- Prefer update_memory and delete_memory. Only use create_memory for genuine gaps.\n"
+    "- NEVER store raw tool audit data as memories. Use definition proposals with evidence.\n"
+    "- NEVER propose a definition change from a single failure; require repeated evidence.\n"
+    "- NEVER treat capability requests as documentation-only work; create a proposed "
+    "agent/skill/hook or a concrete request/task for human-reviewed activation.\n"
+    "- NEVER grant yourself access to skills, hooks, MCP servers, or other runtime powers.\n"
     "- Skip runtime heartbeat or telemetry records if any legacy records are still present."
 )
 
@@ -534,32 +622,64 @@ SHADOW_FORGET_SCORING_PROMPT = (
 
 # Approval flow: when enabled, tasks go to needs-review before completing.
 # When disabled, tasks complete immediately after successful execution.
-REQUIRE_APPROVAL = os.environ.get("LUCENT_REQUIRE_APPROVAL", "false").lower() in (
-    "true",
-    "1",
-    "yes",
-)
+REQUIRE_APPROVAL = runtime_settings.completion_human_approval_required()
 
 # Multi-model review: comma-separated list of models to use for reviewing task output.
 # When set, completed tasks are re-evaluated by each model before final completion.
 # The cognitive model can be pinned by LUCENT_DAEMON_MODEL. When unset, the
 # daemon uses the model registry's enabled default instead of a hardcoded model.
 # these are for sub-agent review.
-REVIEW_MODELS = [
-    m.strip() for m in os.environ.get("LUCENT_REVIEW_MODELS", "").split(",") if m.strip()
-]
+REVIEW_MODELS = runtime_settings.review_model_ids()
 
 # Request-level post-completion review configuration.
-REQUEST_REVIEW_AGENT_TYPE = os.environ.get("LUCENT_REQUEST_REVIEW_AGENT_TYPE", "request-review")
-REQUEST_REVIEW_FALLBACK_AGENT_TYPE = os.environ.get("LUCENT_REQUEST_REVIEW_FALLBACK_AGENT_TYPE", "code")
-REQUEST_REVIEW_MODEL = os.environ.get("LUCENT_REQUEST_REVIEW_MODEL", "").strip()
+REQUEST_REVIEW_AGENT_TYPE = runtime_settings.request_review_agent_type()
+REQUEST_REVIEW_FALLBACK_AGENT_TYPE = runtime_settings.request_review_fallback_agent_type()
+REQUEST_REVIEW_MODEL = runtime_settings.request_review_model_id() or ""
 REQUEST_REVIEW_TASK_TITLE = "Post-completion review"
 
+
+def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
+    """Read a positive integer environment value with a safe fallback."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        log(f"Invalid {name}={raw!r}; using default {default}", "WARN")
+        return default
+    return max(value, minimum)
+
+
+# Context budgets are intentionally high. Modern daemon models can handle large
+# review inputs, and premature truncation caused reviewers to miss missing
+# durable artifacts. These limits are character budgets (roughly 4 chars/token)
+# and should only cut content when approaching practical model/context limits.
+TASK_CONTEXT_CHAR_BUDGET = _env_int("LUCENT_TASK_CONTEXT_CHAR_BUDGET", 180_000)
+TASK_CONTEXT_ITEM_CHAR_BUDGET = _env_int("LUCENT_TASK_CONTEXT_ITEM_CHAR_BUDGET", 120_000)
+REQUEST_REVIEW_CONTEXT_CHAR_BUDGET = _env_int(
+    "LUCENT_REQUEST_REVIEW_CONTEXT_CHAR_BUDGET",
+    360_000,
+)
+REQUEST_REVIEW_TASK_RESULT_CHAR_BUDGET = _env_int(
+    "LUCENT_REQUEST_REVIEW_TASK_RESULT_CHAR_BUDGET",
+    180_000,
+)
+
+
+def _truncate_for_context(text: str, limit: int, *, label: str = "content") -> str:
+    """Trim text only when it exceeds a large context budget."""
+    if len(text) <= limit:
+        return text
+    marker = (
+        f"\n\n[... {label} truncated at {limit:,} characters because the "
+        "aggregate prompt context is approaching the configured model budget ...]"
+    )
+    return text[: max(0, limit - len(marker))] + marker
+
 # Git operations: daemon can commit (but never push without ALLOW_GIT_PUSH)
-_git_commit_val = os.environ.get("LUCENT_ALLOW_GIT_COMMIT", "false")
-ALLOW_GIT_COMMIT = _git_commit_val.lower() in ("true", "1", "yes")
-_git_push_val = os.environ.get("LUCENT_ALLOW_GIT_PUSH", "false")
-ALLOW_GIT_PUSH = _git_push_val.lower() in ("true", "1", "yes")
+ALLOW_GIT_COMMIT = runtime_settings.daemon_git_commit_allowed()
+ALLOW_GIT_PUSH = runtime_settings.daemon_git_push_allowed()
 
 # Paths
 DAEMON_DIR = Path(__file__).parent
@@ -567,8 +687,51 @@ COGNITIVE_PROMPT_PATH = DAEMON_DIR / "cognitive.md"
 AGENT_DEF_PATH = DAEMON_DIR.parent / ".github" / "agents" / "lucent.agent.md"
 LOG_FILE = DAEMON_DIR / "daemon.log"
 # MCP configuration — passed to all sessions
-MCP_URL = os.environ.get("LUCENT_MCP_URL", "http://localhost:8766/mcp")
-MCP_API_KEY = os.environ.get("LUCENT_MCP_API_KEY", "")
+MCP_URL = runtime_settings.daemon_mcp_url()
+MCP_API_KEY = runtime_settings.daemon_mcp_api_key()
+
+
+def _refresh_config_from_runtime_settings() -> None:
+    """Refresh daemon globals after DB-backed settings are loaded."""
+    global MAX_CONCURRENT_SESSIONS, DAEMON_INTERVAL_MINUTES, MODEL
+    global STALE_HEARTBEAT_MINUTES, SESSION_TOTAL_TIMEOUT, SESSION_IDLE_TIMEOUT
+    global WATCHDOG_TIMEOUT, AUTONOMIC_INTERVAL, LEARNING_INTERVAL
+    global MAX_RESULT_LENGTH, DAEMON_ROLES_STR, DISPATCH_POLL_SECONDS
+    global SCHEDULER_CHECK_SECONDS, AUTONOMIC_MINUTES, LEARNING_MINUTES
+    global VITALITY_SCORING_MINUTES, SHADOW_FORGET_SCORING_MINUTES
+    global SHADOW_FORGET_OFFSET_MINUTES, COMPRESSION_MINUTES
+    global REQUIRE_APPROVAL, REVIEW_MODELS
+    global REQUEST_REVIEW_AGENT_TYPE, REQUEST_REVIEW_FALLBACK_AGENT_TYPE
+    global REQUEST_REVIEW_MODEL, ALLOW_GIT_COMMIT, ALLOW_GIT_PUSH, MCP_URL, MCP_API_KEY
+
+    MAX_CONCURRENT_SESSIONS = runtime_settings.daemon_max_sessions()
+    DAEMON_INTERVAL_MINUTES = runtime_settings.daemon_interval_minutes()
+    MODEL = runtime_settings.daemon_model_id() or ""
+    STALE_HEARTBEAT_MINUTES = runtime_settings.daemon_stale_heartbeat_minutes()
+    SESSION_TOTAL_TIMEOUT = runtime_settings.daemon_session_timeout_seconds()
+    SESSION_IDLE_TIMEOUT = runtime_settings.daemon_session_idle_timeout_seconds()
+    WATCHDOG_TIMEOUT = runtime_settings.daemon_watchdog_timeout_seconds()
+    AUTONOMIC_INTERVAL = runtime_settings.daemon_autonomic_interval_cycles()
+    LEARNING_INTERVAL = runtime_settings.daemon_learning_interval_cycles()
+    MAX_RESULT_LENGTH = runtime_settings.daemon_max_result_length()
+    DAEMON_ROLES_STR = runtime_settings.daemon_roles()
+    DISPATCH_POLL_SECONDS = runtime_settings.daemon_dispatch_poll_seconds()
+    SCHEDULER_CHECK_SECONDS = runtime_settings.daemon_scheduler_check_seconds()
+    AUTONOMIC_MINUTES = runtime_settings.daemon_autonomic_minutes()
+    LEARNING_MINUTES = runtime_settings.daemon_learning_minutes()
+    VITALITY_SCORING_MINUTES = runtime_settings.daemon_vitality_scoring_minutes()
+    SHADOW_FORGET_SCORING_MINUTES = runtime_settings.daemon_shadow_forget_scoring_minutes()
+    SHADOW_FORGET_OFFSET_MINUTES = runtime_settings.daemon_shadow_forget_offset_minutes()
+    COMPRESSION_MINUTES = runtime_settings.daemon_compression_minutes()
+    REQUIRE_APPROVAL = runtime_settings.completion_human_approval_required()
+    REVIEW_MODELS = runtime_settings.review_model_ids()
+    REQUEST_REVIEW_AGENT_TYPE = runtime_settings.request_review_agent_type()
+    REQUEST_REVIEW_FALLBACK_AGENT_TYPE = runtime_settings.request_review_fallback_agent_type()
+    REQUEST_REVIEW_MODEL = runtime_settings.request_review_model_id() or ""
+    ALLOW_GIT_COMMIT = runtime_settings.daemon_git_commit_allowed()
+    ALLOW_GIT_PUSH = runtime_settings.daemon_git_push_allowed()
+    MCP_URL = runtime_settings.daemon_mcp_url()
+    MCP_API_KEY = runtime_settings.daemon_mcp_api_key()
 
 
 def _resolve_default_model(preferred_model: str | None = None) -> str:
@@ -615,7 +778,7 @@ def _task_requires_mcp_tool_usage(
     """Return True when a successful task must have used at least one MCP tool."""
     agent = (agent_type or "").strip().lower()
     text = f"{title or ''} {description or ''}".lower()
-    if agent == "request-review":
+    if _task_skips_tool_validation(agent):
         return False
     mutating_memory_signals = (
         "create_memory",
@@ -643,7 +806,33 @@ def _task_requires_mcp_tool_usage(
         "must call an mcp tool",
         "must use memory tools",
     )
-    return any(signal in text for signal in tool_required_signals)
+    return any(signal in text for signal in tool_required_signals) or bool(
+        _required_task_tool_names(agent_type, title, description)
+    )
+
+
+def _required_task_tool_names(
+    agent_type: str | None,
+    title: str | None = None,
+    description: str | None = None,
+) -> set[str]:
+    """Return specific tools a task must call to satisfy explicit instructions."""
+    agent = (agent_type or "").strip().lower()
+    if _task_skips_tool_validation(agent):
+        return set()
+
+    text = f"{title or ''} {description or ''}".lower()
+    required: set[str] = set()
+    if any(signal in text for signal in _HANDOFF_TOOL_REQUIRED_SIGNALS) or any(
+        pattern.search(text) for pattern in _HANDOFF_TOOL_REQUIRED_PATTERNS
+    ):
+        required.add("send_handoff")
+    return required
+
+
+def _task_skips_tool_validation(agent_type: str | None) -> bool:
+    """Return True for task agents whose success must never depend on tool calls."""
+    return (agent_type or "").strip().lower() == "request-review"
 
 # Database URL for direct key provisioning.
 # Prefers DAEMON_DATABASE_URL (restricted lucent_daemon role) over DATABASE_URL
@@ -957,21 +1146,17 @@ async def _mint_scoped_api_key(
 
 
 # Schedule titles that require org-shared-only processing.
-# These are system-wide maintenance tasks with no single owning user; they
-# operate only on shared org memories. All other tasks default to 'user'
-# scope tied to the request's creator.
-_ORG_SHARED_SCHEDULE_TITLES = frozenset({
-    "Memory Consolidation",
-})
+# Technical memory consolidation is retired; model-backed schedules now default
+# to per-user memory scope unless a future org-wide maintenance task is added.
+_ORG_SHARED_SCHEDULE_TITLES = frozenset()
 
 
 def _get_required_memory_scope(task_title: str, request_title: str) -> str | None:
     """Return an OVERRIDE memory scope for special system tasks.
 
     Returns:
-        - 'org_shared_only' for org-wide maintenance schedules (consolidation
-          etc.) that have no single owning user and must operate only on
-          shared org memories.
+                - 'org_shared_only' for org-wide maintenance schedules that have no
+                    single owning user and must operate only on shared org memories.
         - None for everything else, which means the dispatcher will use its
           default of 'user' scoped to the request's owning user. This is the
           security floor: every user-initiated task runs under the user's
@@ -1363,6 +1548,7 @@ class RequestAPI:
         priority: str = "medium",
         sequence_order: int = 0,
         model: str | None = None,
+        reasoning_effort: str | None = None,
         output_contract: dict | None = None,
     ) -> dict | None:
         body = {"title": title, "priority": priority, "sequence_order": sequence_order}
@@ -1372,6 +1558,8 @@ class RequestAPI:
             body["description"] = description
         if model:
             body["model"] = model
+        if reasoning_effort:
+            body["reasoning_effort"] = reasoning_effort
         if output_contract:
             body["output_contract"] = output_contract
         try:
@@ -1381,6 +1569,10 @@ class RequestAPI:
                 )
                 if resp.status_code in (200, 201):
                     return resp.json()
+                log(
+                    f"API create_task returned {resp.status_code}: {resp.text[:300]}",
+                    "WARN",
+                )
         except Exception as e:
             log(f"API create_task failed: {e}", "WARN")
         return None
@@ -1549,11 +1741,20 @@ class RequestAPI:
 
     @staticmethod
     async def update_task_model(task_id: str, model: str) -> dict | None:
+        return await RequestAPI.update_task_model_settings(task_id, model=model)
+
+    @staticmethod
+    async def update_task_model_settings(
+        task_id: str,
+        *,
+        model: str,
+        reasoning_effort: str | None = None,
+    ) -> dict | None:
         try:
             async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
                 resp = await client.post(
                     f"{API_BASE}/requests/tasks/{task_id}/model",
-                    json={"model": model},
+                    json={"model": model, "reasoning_effort": reasoning_effort},
                     headers=API_HEADERS,
                 )
                 if resp.status_code == 200:
@@ -1610,12 +1811,20 @@ class RequestAPI:
         return None
 
     @staticmethod
-    async def fail_task(task_id: str, error: str, instance_id: str | None = None) -> dict | None:
+    async def fail_task(
+        task_id: str,
+        error: str,
+        instance_id: str | None = None,
+        result: str | None = None,
+    ) -> dict | None:
         try:
+            body = {"error": error[:10000], "instance_id": instance_id}
+            if result is not None:
+                body["result"] = result[:200000]
             async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
                 resp = await client.post(
                     f"{API_BASE}/requests/tasks/{task_id}/fail",
-                    json={"error": error[:10000], "instance_id": instance_id},
+                    json=body,
                     headers=API_HEADERS,
                 )
                 if resp.status_code == 200:
@@ -1688,6 +1897,17 @@ class RequestAPI:
             return "", ""
 
         request_desc = data.get("description", "")
+        target_repo = data.get("target_repo") or ""
+        target_paths = data.get("target_paths") or []
+        if target_repo or target_paths:
+            request_desc = (
+                f"{request_desc}\n\n"
+                "--- TARGET PERSISTENCE SCOPE ---\n"
+                f"target_repo: {target_repo or 'unspecified'}\n"
+                f"target_paths: {target_paths or []}\n"
+                "Repo-backed deliverables must be persisted as concrete file changes "
+                "and reported with paths plus commit/URL."
+            ).strip()
         review_feedback = (data.get("review_feedback") or "").strip()
         if review_feedback:
             request_desc = (
@@ -1698,10 +1918,13 @@ class RequestAPI:
             ).strip()
         tasks = data.get("tasks", [])
 
-        # Collect results from completed sibling tasks
+        # Collect results from completed sibling tasks. Do not aggressively
+        # summarize here: downstream and review agents often need the full
+        # artifact body to verify consistency and persistence. Only truncate
+        # when the aggregate context approaches the configured model budget.
         sibling_parts = []
         total_len = 0
-        max_context = 30000  # keep total under ~30KB to avoid blowing context windows
+        max_context = TASK_CONTEXT_CHAR_BUDGET
 
         for t in tasks:
             if t.get("status") != "completed":
@@ -1720,8 +1943,11 @@ class RequestAPI:
             validation_status = t.get("validation_status", "not_applicable")
             if result_structured and validation_status in ("valid", "repair_succeeded"):
                 structured_json = json.dumps(result_structured, indent=2)
-                if len(structured_json) > 6000:
-                    structured_json = structured_json[:6000] + "\n... truncated ..."
+                structured_json = _truncate_for_context(
+                    structured_json,
+                    TASK_CONTEXT_ITEM_CHAR_BUDGET,
+                    label="structured output",
+                )
                 parts.append(f"\n### Structured Output\n```json\n{structured_json}\n```")
                 summary = t.get("result_summary")
                 if summary:
@@ -1731,13 +1957,29 @@ class RequestAPI:
                 result_text = t.get("result") or ""
                 if not result_text:
                     continue
-                if len(result_text) > 8000:
-                    result_text = result_text[:8000] + "\n[... truncated ...]"
+                result_text = _truncate_for_context(
+                    result_text,
+                    TASK_CONTEXT_ITEM_CHAR_BUDGET,
+                    label="task result",
+                )
                 parts.append(f"\n{result_text}")
 
             sibling_text = "\n".join(parts)
             if total_len + len(sibling_text) > max_context:
-                sibling_parts.append("[Additional completed task results omitted for space]")
+                remaining = max_context - total_len
+                if remaining > 10_000:
+                    sibling_parts.append(
+                        _truncate_for_context(
+                            sibling_text,
+                            remaining,
+                            label="completed sibling task results",
+                        )
+                    )
+                sibling_parts.append(
+                    "[Additional completed task results omitted because the "
+                    f"aggregate context exceeded {max_context:,} characters. "
+                    "Use get_request_details/search/full artifacts if needed.]"
+                )
                 break
             sibling_parts.append(sibling_text)
             total_len += len(sibling_text)
@@ -2159,6 +2401,50 @@ async def load_accessible_mcp_servers_for_agent(
     return allowed
 
 
+async def load_accessible_hooks_for_agent(
+    *, org_id: str, requester_user_id: str, agent_id: str
+) -> list[dict]:
+    """Load active hooks granted to an agent and accessible to requester."""
+    try:
+        from lucent.db import get_pool
+        pool = await get_pool()
+    except Exception:
+        return []
+
+    from lucent.access_control import AccessControlService
+    from lucent.db.definitions import DefinitionRepository
+    repo = DefinitionRepository(pool)
+    hooks = await repo.get_agent_hooks(agent_id)
+    acl = AccessControlService(pool)
+    accessible_ids = set(await acl.list_accessible(requester_user_id, "hook", org_id))
+    return [
+        hook for hook in hooks
+        if str(hook["id"]) in accessible_ids and hook.get("status") == "active"
+    ]
+
+
+async def load_accessible_managed_tools_for_agent(
+    *, org_id: str, requester_user_id: str, agent_id: str
+) -> list[dict]:
+    """Load active managed tools granted to an agent and accessible to requester."""
+    try:
+        from lucent.db import get_pool
+        pool = await get_pool()
+    except Exception:
+        return []
+
+    from lucent.access_control import AccessControlService
+    from lucent.db.definitions import DefinitionRepository
+    repo = DefinitionRepository(pool)
+    tools = await repo.get_agent_managed_tools(agent_id)
+    acl = AccessControlService(pool)
+    accessible_ids = set(await acl.list_accessible(requester_user_id, "managed_tool", org_id))
+    return [
+        tool for tool in tools
+        if str(tool["id"]) in accessible_ids and tool.get("status") == "active"
+    ]
+
+
 async def load_instance_skills_for_agent(agent_id: str) -> list[dict]:
     """Load skills granted to an instance agent."""
     try:
@@ -2216,6 +2502,7 @@ async def build_subagent_prompt(
     agent_definition_id: str | None = None,
     resolved_agent: dict | None = None,
     resolved_skills: list[dict] | None = None,
+    resolved_tools: list[dict] | None = None,
 ) -> str:
     """Build the system message for a sub-agent session.
 
@@ -2229,6 +2516,7 @@ async def build_subagent_prompt(
     """
     agent_def = ""
     skills_context = ""
+    tools_context = ""
 
     # Try loading from DB definitions (approved only)
     db_agent = resolved_agent
@@ -2294,6 +2582,20 @@ async def build_subagent_prompt(
             except Exception:
                 log(f"Failed to load skills for agent '{agent_type}'", "DEBUG")
         log(f"Using approved DB definition for '{agent_type}' agent (id: {str(db_agent['id'])[:8]})")
+        if resolved_tools:
+            tool_lines = []
+            for tool in resolved_tools:
+                tool_lines.append(
+                    f"- {tool.get('name')}: {tool.get('description') or ''}\n"
+                    f"  input_schema: {json.dumps(tool.get('input_schema') or {}, default=str)}"
+                )
+            tools_context = (
+                "--- MANAGED TOOLS ---\n"
+                "The following managed tools are granted to this agent. Use "
+                "`run_managed_tool` with one of these tool names when a task needs "
+                "the capability. Lucent enforces access, grants, and sandbox policy.\n"
+                + "\n".join(tool_lines)
+            )
     else:
         raise AgentNotFoundError(
             f"No approved agent definition found for '{agent_type}'. "
@@ -2316,6 +2618,8 @@ system prompt.
 {identity}
 
 {f"--- SKILLS ---{skills_context}" if skills_context else ""}
+
+{tools_context}
 
 --- YOUR TASK ---
 {task_description}
@@ -2340,13 +2644,39 @@ After completing work, save what you learned:
 Always output your findings and results as text. Do not rely solely on saving
 to memory — the dispatch system validates your text output.
 
+--- DURABLE DELIVERABLES ---
+If the task/request asks for repository files, documentation, reports, plans,
+code, or any other user-facing artifact in a durable location, the task is NOT
+complete until that artifact is persisted to the named durable system. For a
+`target_repo`, that means concrete repository file changes (and a commit/push or
+other approved publication path) plus exact paths/URLs/commit SHAs in your final
+output. Saving a memory or returning markdown in chat is useful context, but it
+does not satisfy a repo-backed deliverable by itself.
+
+If you do not have the tool, credential, sandbox, or permission needed to persist
+the artifact, say BLOCKED clearly and explain the missing capability. Do not
+present narrative-only work as completed. When available, call `record_task_output`
+for every durable artifact so the Activity UI can show what was produced.
+
+--- HANDOFFS TO THE USER ---
+If the task or workflow asks you to send, provide, create, return, share, or
+publish something "as a handoff" or otherwise hand something off to the user,
+you MUST call `send_handoff`. Do not just write a section titled "Handoff" in
+your final task output — that only completes the task transcript and does not
+create a visible Handoffs item for the user. Use `send_handoff` for updates,
+recommendations, questions, decisions, or summaries the user should read or
+answer in Handoffs. Set `requires_response=true` and include a concise
+`response_prompt` when Lucent should wait for the user's answer before continuing.
+Use `record_task_output` instead for durable artifacts that belong on the
+Activity request page, such as PRs, files, documents, deployments, or links.
+
 --- GUARDRAILS ---
 - {
         "Git commit is ALLOWED — commit meaningful changes with clear messages"
         if ALLOW_GIT_COMMIT
         else "DO NOT run git commit"
     }
-- {"Git push is ALLOWED" if ALLOW_GIT_PUSH else "DO NOT run git push"}
+- {"Git push is ALLOWED only when this task explicitly requires remote repository persistence and the target repo/branch is verified" if ALLOW_GIT_PUSH else "DO NOT run git push"}
 - DO NOT take irreversible actions without approval
 - Tag all memories with 'daemon' so activity is visible
 - When creating memories that need human review or approval, also tag with 'needs-review'
@@ -2394,6 +2724,7 @@ class LucentDaemon:
 
         # MCP memory-tool usage tracking per session (for observability)
         self._session_mcp_trackers: dict[str, list[dict]] = {}
+        self._session_tool_trackers: dict[str, list[dict]] = {}
 
         # OTEL instrumentation — create tracer and metrics (no-ops when unavailable)
         self._init_telemetry_instruments()
@@ -2475,6 +2806,14 @@ class LucentDaemon:
             # The daemon uses DAEMON_DATABASE_URL (or falls back to DATABASE_URL).
             # Pass explicitly so init_db uses the same connection the daemon does.
             _pool = await _init_db(database_url=DATABASE_URL)
+            try:
+                from lucent.settings import load_runtime_settings_from_db
+
+                await load_runtime_settings_from_db(_pool)
+                _refresh_config_from_runtime_settings()
+                self.roles = self._parse_roles(DAEMON_ROLES_STR)
+            except Exception as settings_exc:
+                log(f"Failed to load runtime settings from DB: {settings_exc}", "WARN")
             try:
                 from lucent.model_registry import load_models_from_db
 
@@ -2575,12 +2914,25 @@ class LucentDaemon:
                 user_id = str(user["id"])
                 org_id = str(user["organization_id"])
 
+                await conn.execute(
+                    """UPDATE schedules
+                       SET enabled = false,
+                           status = 'completed',
+                           updated_at = NOW()
+                       WHERE title = 'Memory Consolidation'
+                         AND organization_id = $1::uuid
+                         AND is_system = true""",
+                    org_id,
+                )
+
                 system_schedules = [
                     {
                         "title": "Cognitive Planning",
                         "description": (
                             "Autonomous planning cycle — perceive state, reason about priorities, "
-                            "create requests and tasks to drive work forward."
+                            "create requests and tasks to drive work forward. Short-circuits "
+                            "with schedule.skipped when cheap state probes find no actionable "
+                            "planning signals."
                         ),
                         "agent_type": "lucent",
                         "schedule_type": "interval",
@@ -2589,23 +2941,12 @@ class LucentDaemon:
                         "prompt": self._build_cognitive_schedule_prompt(),
                     },
                     {
-                        "title": "Memory Consolidation",
-                        "description": (
-                            "Autonomic memory maintenance — merge duplicate technical memories, "
-                            "enforce one-memory-per-scope hierarchy, run mandatory repo→directory→filename "
-                            "metadata normalization, then verify metadata compliance."
-                        ),
-                        "agent_type": "memory",
-                        "schedule_type": "interval",
-                        "interval_seconds": AUTONOMIC_MINUTES * 60,
-                        "priority": "low",
-                        "prompt": MEMORY_CONSOLIDATION_PROMPT,
-                    },
-                    {
                         "title": "Learning Extraction",
                         "description": (
                             "Process recent work results and feedback into reusable lessons. "
-                            "Integrate knowledge into existing memories rather than creating standalone entries."
+                            "Integrate knowledge into existing memories rather than creating standalone entries. "
+                            "Short-circuits with schedule.skipped when there are no unextracted "
+                            "recent result or feedback memories."
                         ),
                         "agent_type": "reflection",
                         "schedule_type": "interval",
@@ -2616,7 +2957,9 @@ class LucentDaemon:
                     {
                         "title": "Experience Compression",
                         "description": (
-                            "Daily compression of granular experience memories into concise daily digests."
+                            "Daily compression of granular experience memories into concise daily digests. "
+                            "Short-circuits with schedule.skipped when there are no eligible "
+                            "experience memories before today."
                         ),
                         "agent_type": "memory",
                         "schedule_type": "cron",
@@ -2628,7 +2971,9 @@ class LucentDaemon:
                         "title": "Memory Vitality Scoring",
                         "description": (
                             "Compute and persist memory vitality scores and lifecycle stages "
-                            "for shadow-mode observability. No search behavior changes."
+                            "for shadow-mode observability. No search behavior changes. "
+                            "Short-circuits with schedule.skipped when no memories need missing "
+                            "or stale vitality computation."
                         ),
                         "agent_type": "memory",
                         "schedule_type": "interval",
@@ -2640,7 +2985,9 @@ class LucentDaemon:
                         "title": "Shadow Forget Scoring",
                         "description": (
                             "Run Candidate-A graph-centrality pruning as shadow-only scoring. "
-                            "Writes sidecar rows and emits comparison metrics only."
+                            "Writes sidecar rows and emits comparison metrics only. Short-circuits "
+                            "with schedule.skipped when shadow forgetting is disabled or no "
+                            "memories need fresh sidecar scores."
                         ),
                         "agent_type": "memory",
                         "schedule_type": "interval",
@@ -2654,6 +3001,32 @@ class LucentDaemon:
                 created = 0
                 updated = 0
                 for sched in system_schedules:
+                    workflow_action = {
+                        "action_type": "task",
+                        "title": sched["title"],
+                        "description": sched["prompt"],
+                        "agent_type": sched["agent_type"],
+                        "priority": sched["priority"],
+                        "sequence_order": 0,
+                    }
+                    trigger_config = {
+                        "schedule_type": sched["schedule_type"],
+                        "timezone": "UTC",
+                    }
+                    if sched.get("interval_seconds"):
+                        trigger_config["interval_seconds"] = sched["interval_seconds"]
+                    if sched.get("cron_expression"):
+                        trigger_config["cron_expression"] = sched["cron_expression"]
+                    request_template = {
+                        "title_prefix": "[Scheduled]",
+                        "title": sched["title"],
+                        "description": sched["description"],
+                        "dependency_policy": "strict",
+                    }
+                    review_instructions = (
+                        "Review the generated request and recorded task outputs "
+                        "before approval."
+                    )
                     existing = await conn.fetchrow(
                         """SELECT id FROM schedules
                            WHERE title = $1 AND organization_id = $2::uuid AND is_system = true""",
@@ -2674,6 +3047,11 @@ class LucentDaemon:
                                    cron_expression = $7,
                                    priority = $8,
                                    prompt = $9,
+                                   trigger_type = 'schedule',
+                                   trigger_config = ($10::text)::jsonb,
+                                   request_template = ($11::text)::jsonb,
+                                   actions = ($12::text)::jsonb,
+                                   review_instructions = $13,
                                    updated_at = NOW()
                                WHERE id = $1::uuid AND organization_id = $2::uuid
                                  AND is_system = true""",
@@ -2686,6 +3064,10 @@ class LucentDaemon:
                             sched.get("cron_expression"),
                             sched["priority"],
                             sched["prompt"],
+                            json.dumps(trigger_config),
+                            json.dumps(request_template),
+                            json.dumps([workflow_action]),
+                            review_instructions,
                         )
                         updated += 1
                         continue
@@ -2705,8 +3087,11 @@ class LucentDaemon:
                         """INSERT INTO schedules
                            (title, organization_id, description, agent_type, schedule_type,
                             interval_seconds, cron_expression, next_run_at, priority, prompt,
-                            created_by, is_system, enabled)
-                           VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10, $11::uuid, true, true)""",
+                            created_by, is_system, enabled, trigger_type, trigger_config,
+                            request_template, actions, review_instructions)
+                           VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10,
+                               $11::uuid, true, true, 'schedule', ($12::text)::jsonb,
+                               ($13::text)::jsonb, ($14::text)::jsonb, $15)""",
                         sched["title"],
                         org_id,
                         sched["description"],
@@ -2718,6 +3103,10 @@ class LucentDaemon:
                         sched["priority"],
                         sched["prompt"],
                         user_id,
+                        json.dumps(trigger_config),
+                        json.dumps(request_template),
+                        json.dumps([workflow_action]),
+                        review_instructions,
                     )
                     created += 1
 
@@ -2925,6 +3314,109 @@ class LucentDaemon:
         finally:
             await conn.close()
 
+    def _build_cognitive_request_description(self, target: dict[str, Any]) -> str:
+        """Build a deterministic request description for a planning target."""
+        goal_title = (target.get("goal_title") or "").strip() or "Untitled goal"
+        milestone_index = target.get("next_milestone_index")
+        milestone_description = (
+            target.get("next_milestone_description") or ""
+        ).strip() or "Advance the next active milestone."
+        target_repo = (target.get("target_repo") or "").strip()
+        target_paths = target.get("target_paths") or []
+        target_block = ""
+        if target_repo:
+            target_block += f"\nTarget repository: {target_repo}"
+        if target_paths:
+            target_block += f"\nTarget paths: {target_paths}"
+
+        header = (
+            f"Advance milestone {milestone_index} for goal: {goal_title}\n\n"
+            f"Milestone scope:\n{milestone_description}\n\n"
+        )
+        if target_block:
+            header += f"{target_block}\n\n"
+
+        return header + (
+            "This request was created deterministically by the daemon cognitive "
+            "planner from the server-side planning-targets list. The target "
+            "was already filtered as active, unblocked, and without open work.\n\n"
+            "Expected outcome:\n"
+            "- Produce the deliverable described by the milestone.\n"
+            "- If a target repository is provided, persist user-facing deliverables "
+            "to that repository as concrete file changes and report the paths and "
+            "commit/URL. Memory-only or chat-only outputs do not satisfy repo-backed "
+            "milestones.\n"
+            "- Keep any project-specific boundaries from the parent goal intact.\n"
+            "- Record sources, assumptions, and open questions in the output.\n"
+        )
+
+    async def _create_cognitive_request_for_target(
+        self,
+        *,
+        org_id: str,
+        user_id: str,
+        target: dict[str, Any],
+    ) -> tuple[str, dict[str, Any]]:
+        """Create one cognitive request for a pre-filtered planning target.
+
+        The planning-targets endpoint is authoritative: it has already selected
+        the next active milestone and filtered out in-flight work. Creating the
+        request here avoids relying on a model-side mutating MCP call, which can
+        be blocked by Copilot permission protocol changes before the Lucent MCP
+        server ever sees the request.
+        """
+        from lucent.db import init_db
+        from lucent.db.requests import RequestRepository
+
+        goal_id = str(target.get("goal_id") or "").strip()
+        milestone_index = target.get("next_milestone_index")
+        if not goal_id or milestone_index is None:
+            return (
+                "skipped",
+                {
+                    "status": "skipped",
+                    "reason": "missing_target_fields",
+                    "detail": "Planning target lacked goal_id or next_milestone_index.",
+                },
+            )
+
+        title = (
+            target.get("suggested_title")
+            or f"{target.get('goal_title') or 'Goal'} M{milestone_index}"
+        ).strip()
+        description = self._build_cognitive_request_description(target)
+
+        pool = await init_db()
+        repo = RequestRepository(pool)
+        req = await repo.create_request(
+            title=title,
+            org_id=org_id,
+            description=description,
+            source="cognitive",
+            priority="medium",
+            created_by=user_id,
+            force_pending_approval=True,
+            goal_id=goal_id,
+            goal_milestone_index=int(milestone_index),
+            target_repo=(target.get("target_repo") or None),
+            target_paths=(target.get("target_paths") or None),
+        )
+
+        if req.get("status") == "skipped":
+            return "skipped", req
+
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute("SELECT pg_notify('request_ready', $1)", str(req["id"]))
+        except Exception as notify_err:
+            log(
+                "cognitive direct request notify failed "
+                f"for {str(req.get('id', ''))[:8]}: {notify_err}",
+                "WARN",
+            )
+
+        return "created", req
+
     async def _run_cognitive_planning_fanout(
         self,
         *,
@@ -2984,26 +3476,46 @@ class LucentDaemon:
                     )
                     continue
 
-                prompt = self._build_user_scoped_cognitive_prompt(
-                    targets=targets
-                )
-
-                scoped_mcp = dict(mcp_config_base)
-                scoped_mcp["memory-server"] = {
-                    "type": "http",
-                    "url": MCP_URL,
-                    "headers": {"Authorization": f"Bearer {scoped_key}"},
-                    "tools": ["*"],
-                }
-
-                session_result = await self.run_session(
-                    f"cognitive-plan-{task_id[:8]}-{user_id[:8]}",
-                    system_message,
-                    prompt,
-                    mcp_config_override=scoped_mcp,
-                )
-                if not session_result:
-                    errors.append("planner session produced no output")
+                # Create requests directly from authoritative planning targets.
+                # The prior implementation asked the LLM to call the mutating
+                # MCP create_request/create_task tools. With newer Copilot CLI
+                # builds those mutating MCP calls can fail at the permission
+                # layer with "unexpected user permission response" before the
+                # Lucent MCP server sees the call, causing the planner to loop
+                # forever with targets_count>0 and requests_created=0.
+                for target in targets:
+                    try:
+                        outcome, req = await self._create_cognitive_request_for_target(
+                            org_id=org_id,
+                            user_id=user_id,
+                            target=target,
+                        )
+                        log(
+                            "cognitive_planning_target_request "
+                            + json.dumps(
+                                {
+                                    "user_id": user_id,
+                                    "goal_id": target.get("goal_id"),
+                                    "goal_milestone_index": target.get(
+                                        "next_milestone_index"
+                                    ),
+                                    "outcome": outcome,
+                                    "request_id": str(req.get("id", "")) or None,
+                                    "status": req.get("status"),
+                                    "reason": req.get("reason"),
+                                },
+                                sort_keys=True,
+                                default=str,
+                            )
+                        )
+                    except Exception as target_err:
+                        errors.append(str(target_err))
+                        log(
+                            "Cognitive planning target create failed "
+                            f"for user {user_id[:8]} goal "
+                            f"{str(target.get('goal_id', ''))[:8]}: {target_err}",
+                            "WARN",
+                        )
                 requests_created = await self._count_user_cognitive_requests_since(
                     org_id=org_id,
                     user_id=user_id,
@@ -3071,8 +3583,17 @@ class LucentDaemon:
                        r.target_paths,
                        r.priority,
                        r.source,
-                       r.approval_status
+                                             r.approval_status,
+                                             r.goal_memory_id::text AS goal_memory_id,
+                                             r.goal_milestone_index,
+                                             CASE
+                                                 WHEN r.goal_memory_id IS NOT NULL
+                                                            AND r.goal_milestone_index IS NOT NULL
+                                                 THEN gm.metadata->'milestones'->(r.goal_milestone_index - 1)->>'description'
+                                                 ELSE NULL
+                                             END AS goal_milestone_description
                 FROM requests r
+                                LEFT JOIN memories gm ON gm.id = r.goal_memory_id
                 WHERE r.organization_id = $1::uuid
                   AND r.approval_status IN (
                       'pending_approval', 'auto_approved', 'approved'
@@ -3104,12 +3625,25 @@ class LucentDaemon:
         target_repo = request.get("target_repo") or ""
         target_paths = request.get("target_paths") or []
         priority = request.get("priority") or "medium"
+        milestone_index = request.get("goal_milestone_index")
+        milestone_description = (request.get("goal_milestone_description") or "").strip()
 
         target_block = ""
         if target_repo:
             target_block += f"\n- target_repo: {target_repo}"
         if target_paths:
             target_block += f"\n- target_paths: {target_paths}"
+
+        milestone_block = ""
+        if milestone_index and milestone_description:
+            milestone_block = (
+                "\n\nSTRUCTURED GOAL SCOPE:\n"
+                f"This request advances ONLY goal milestone {milestone_index}: "
+                f"{milestone_description}\n"
+                "Create tasks only for this milestone. Do not decompose the whole goal, "
+                "do not create tasks for later milestones, and ignore any parent-goal "
+                "description sections that are unrelated to this milestone."
+            )
 
         return (
             "You are running a focused decomposition session. Your ONLY job is to "
@@ -3119,6 +3653,7 @@ class LucentDaemon:
             f"TITLE: {title}\n"
             f"PRIORITY: {priority}\n"
             f"{target_block}\n\n"
+            f"{milestone_block}\n\n"
             f"DESCRIPTION:\n{description}\n\n"
             "Procedure:\n"
             "1. Call list_available_models() once to see enabled models and the "
@@ -3126,13 +3661,19 @@ class LucentDaemon:
             "specialized fast, reasoning, agentic, or visual model.\n"
             "2. Decide on a task breakdown — typically 1 to 5 tasks. Each task should "
             "have a clear, actionable title and a short description of what it does.\n"
-            "3. For each task, call create_task(request_id=..., title=..., "
-            "description=..., agent_type=..., sequence_order=..., model=<optional>). Use "
-            "agent_type values like 'research', 'code', or 'documentation' depending "
-            "on the work. Omit model for standard/default tasks; set model only when "
+            "3. Call list_agent_definitions(status='active') and choose only "
+            "agent_type names from agents visible to this request owner. For each task, "
+            "call create_task(request_id=..., title=..., description=..., "
+            "agent_type=..., sequence_order=..., model=<optional>). Omit model for "
+            "standard/default tasks; set model only when "
             "the available model list gives a concrete reason to specialize. Set "
             "sequence_order so dependent tasks come after their prerequisites (0 for "
             "the first batch, 1 for the next, etc.).\n"
+            "   If the request has target_repo or asks for docs/files/reports that belong "
+            "in a repository, every relevant task description MUST name the exact target "
+            "repo/path(s), require durable file persistence, require reporting paths plus "
+            "commit/URL, and require record_task_output when possible. Memory-only or "
+            "chat-only deliverables must be treated as incomplete.\n"
             "4. DO NOT create the request — it already exists. DO NOT call any "
             "approval, status update, or rejection tools. Your output is a short "
             "summary of how many tasks you created and why this breakdown.\n"
@@ -3142,6 +3683,206 @@ class LucentDaemon:
             "not start sub-agents. Just call create_task one or more times for the "
             "above request, then return your summary."
         )
+
+    @staticmethod
+    def _extract_suggested_breakdown_items(description: str) -> list[str]:
+        """Extract explicit numbered items from a request's suggested breakdown."""
+        lines = (description or "").splitlines()
+        start_idx: int | None = None
+        for idx, line in enumerate(lines):
+            if "suggested task breakdown" in line.strip().lower():
+                start_idx = idx + 1
+                break
+        if start_idx is None:
+            return []
+
+        items: list[str] = []
+        for line in lines[start_idx:]:
+            stripped = line.strip()
+            if not stripped:
+                if items:
+                    continue
+                continue
+            if items and re.match(r"^[A-Z][A-Za-z /-]{2,}:\s*$", stripped):
+                break
+            match = re.match(r"^\d+[.)]\s+(.+)$", stripped)
+            if match:
+                items.append(match.group(1).strip())
+        return items
+
+    @staticmethod
+    def _strip_suggested_breakdown_section(description: str) -> str:
+        """Remove a suggested full-goal numbered breakdown from request details."""
+        lines = (description or "").splitlines()
+        out: list[str] = []
+        skipping = False
+        for line in lines:
+            stripped = line.strip()
+            if "suggested task breakdown" in stripped.lower():
+                skipping = True
+                continue
+            if skipping:
+                if not stripped:
+                    continue
+                if re.match(r"^\d+[.)]\s+", stripped):
+                    continue
+                skipping = False
+            out.append(line)
+        return "\n".join(out).strip()
+
+    @staticmethod
+    def _fallback_agent_type_for_decomposition_item(item: str) -> str:
+        """Choose a conservative built-in agent type for deterministic fallback tasks."""
+        text = item.lower()
+        if any(token in text for token in ("repo", "repository", "readme", "docs", "file")):
+            return "code"
+        if any(
+            token in text
+            for token in (
+                "market",
+                "research",
+                "customer",
+                "competitor",
+                "pricing",
+                "formation",
+                "compliance",
+                "zoning",
+                "licensing",
+            )
+        ):
+            return "research"
+        return "planning"
+
+    @staticmethod
+    def _fallback_task_title(item: str) -> str:
+        """Turn a numbered breakdown item into a task title."""
+        title = re.split(r"\s+[—-]\s+|\.\s+", item.strip(), maxsplit=1)[0]
+        title = title.strip(" .:-") or item.strip()
+        return title[:120]
+
+    def _build_fallback_decomposition_tasks(self, request: dict[str, Any]) -> list[dict[str, Any]]:
+        """Build deterministic fallback task specs when the planner narrates only."""
+        description = request.get("description") or ""
+        milestone_index = request.get("goal_milestone_index")
+        milestone_description = (request.get("goal_milestone_description") or "").strip()
+        if milestone_index and milestone_description:
+            items = [milestone_description]
+        else:
+            items = self._extract_suggested_breakdown_items(description)
+        if not items:
+            return [
+                {
+                    "title": f"Plan and decompose: {request.get('title', 'Request')[:80]}",
+                    "description": (
+                        "The automated decomposition session returned a narrative response "
+                        "without creating tasks. Review the parent request, produce a visible "
+                        "task breakdown, and execute only planning/documentation-safe next steps."
+                    ),
+                    "agent_type": "planning",
+                    "sequence_order": 0,
+                }
+            ]
+
+        target_repo = request.get("target_repo") or ""
+        target_paths = request.get("target_paths") or []
+        raw_request_details = (request.get("description") or "").strip()
+        request_details = (
+            self._strip_suggested_breakdown_section(raw_request_details)
+            if milestone_index
+            else raw_request_details
+        )
+        target_context = ""
+        if target_repo or target_paths:
+            target_context = (
+                f"\n\nTarget repo: {target_repo or 'unspecified'}"
+                f"\nTarget paths: {target_paths or []}"
+            )
+        request_context = ""
+        if milestone_index and request_details:
+            request_context = f"\n\nMilestone-scoped request details:\n{request_details}"
+        boundary = (
+            "\n\nThis task was created by deterministic daemon fallback because "
+            "the planner session returned text instead of creating tasks. "
+            "Respect the parent request boundaries and avoid real-world business "
+            "filings, purchases, vendor/customer contact, or binding commitments."
+        )
+        persistence = ""
+        if target_repo:
+            persistence = (
+                "\n\nDurable output requirement: persist the milestone deliverable "
+                f"as concrete file changes in target repo {target_repo}; report "
+                "the changed paths and commit/URL. Memory-only or chat-only output "
+                "does not complete this fallback task."
+            )
+        return [
+            {
+                "title": self._fallback_task_title(item),
+                "description": (
+                    f"Fallback decomposition item: {item}"
+                    f"{target_context}{request_context}{boundary}{persistence}"
+                ),
+                "agent_type": self._fallback_agent_type_for_decomposition_item(item),
+                "sequence_order": idx,
+            }
+            for idx, item in enumerate(items)
+        ]
+
+    async def _create_fallback_decomposition_tasks(
+        self,
+        request: dict[str, Any],
+        session_result: str | None,
+        tool_events: list[dict],
+    ) -> int:
+        """Create deterministic tasks when model-driven decomposition produces none."""
+        request_id = request.get("request_id", "")
+        if not request_id:
+            return 0
+        specs = self._build_fallback_decomposition_tasks(request)
+        created = 0
+        for spec in specs:
+            task = await RequestAPI.create_task(
+                request_id,
+                spec["title"],
+                agent_type=spec["agent_type"],
+                description=spec["description"],
+                priority=request.get("priority") or "medium",
+                sequence_order=spec["sequence_order"],
+            )
+            if not task and spec["agent_type"] != "planning":
+                task = await RequestAPI.create_task(
+                    request_id,
+                    spec["title"],
+                    agent_type="planning",
+                    description=spec["description"],
+                    priority=request.get("priority") or "medium",
+                    sequence_order=spec["sequence_order"],
+                )
+            if task:
+                created += 1
+
+        excerpt = _redact_secrets((session_result or "")[:2000])
+        log(
+            "Decomp backfill fallback "
+            + json.dumps(
+                {
+                    "request_id": request_id,
+                    "fallback_tasks_created": created,
+                    "planned_fallback_tasks": len(specs),
+                    "tool_calls": [e.get("tool") for e in tool_events],
+                    "response_excerpt": excerpt,
+                },
+                sort_keys=True,
+            ),
+            "WARN" if created == 0 else "INFO",
+        )
+        return created
+
+    def request_decomposition_backfill_has_work(
+        self,
+        candidates: list[dict[str, Any]],
+    ) -> bool:
+        """True when the periodic decomposition backfill has queued candidates."""
+        return bool(candidates)
 
     async def _backfill_pending_decomposition(
         self,
@@ -3208,22 +3949,20 @@ class LucentDaemon:
                 continue
             filtered.append(req)
         candidates = filtered
-        if not candidates:
+        if not self.request_decomposition_backfill_has_work(candidates):
+            log(
+                json.dumps(
+                    {
+                        "event_type": "schedule.skipped",
+                        "schedule_name": "Request Decomposition Backfill",
+                        "reason": "no_undecomposed_requests",
+                        "candidate_count": 0,
+                    },
+                    sort_keys=True,
+                ),
+                "INFO",
+            )
             return 0
-
-        # Build the system message once — same context as a normal sub-agent.
-        try:
-            system_message = await build_subagent_prompt(
-                "planning",
-                "Break a pending_approval request into a visible task list.",
-            )
-        except Exception:
-            # Fall back to a minimal system message if the planning agent
-            # definition isn't available — the per-request prompt is fully
-            # self-contained anyway.
-            system_message = (
-                "You are a focused planning sub-agent. Follow the user prompt exactly."
-            )
 
         attempted = 0
         for req in candidates:
@@ -3296,6 +4035,31 @@ class LucentDaemon:
                 terminal_after_session = False
                 errors: list[str] = []
                 try:
+                    planning_agent = await load_accessible_agent(
+                        org_id=org_id,
+                        requester_user_id=owner_user_id,
+                        agent_type="planning",
+                    )
+                    planning_skills = []
+                    if planning_agent:
+                        planning_skills = await load_accessible_skills_for_agent(
+                            org_id=org_id,
+                            requester_user_id=owner_user_id,
+                            agent_id=str(planning_agent["id"]),
+                        )
+                    try:
+                        system_message = await build_subagent_prompt(
+                            "planning",
+                            "Break a pending_approval request into a visible task list.",
+                            resolved_agent=planning_agent,
+                            resolved_skills=planning_skills,
+                        )
+                    except AgentNotFoundError:
+                        errors.append(
+                            "request owner has no accessible active planning agent"
+                        )
+                        continue
+
                     scoped_key = await _mint_scoped_api_key(
                         memory_scope="user",
                         memory_scope_user_id=owner_user_id,
@@ -3314,17 +4078,40 @@ class LucentDaemon:
                     }
 
                     prompt = self._build_decomposition_prompt(req)
+                    decomposition_model, decomposition_model_reason = _select_model_for_task(
+                        agent_type="planning",
+                        title=req.get("title"),
+                        description=req.get("description"),
+                    )
+                    log(
+                        f"Decomp backfill: request {request_id[:8]} model selection: "
+                        f"{decomposition_model} ({decomposition_model_reason})",
+                        "INFO",
+                    )
+                    session_name = f"decompose-{request_id[:8]}-{owner_user_id[:8]}"
 
                     session_result = await self.run_session(
-                        f"decompose-{request_id[:8]}-{owner_user_id[:8]}",
+                        session_name,
                         system_message,
                         prompt,
+                        model=decomposition_model,
                         mcp_config_override=scoped_mcp,
                     )
                     if not session_result:
                         errors.append("session produced no output")
 
                     tasks_created = await self._count_tasks_for_request(request_id)
+                    tool_events = self._session_tool_trackers.pop(session_name, [])
+                    if session_result and tasks_created == 0:
+                        fallback_created = await self._create_fallback_decomposition_tasks(
+                            req,
+                            session_result,
+                            tool_events,
+                        )
+                        if fallback_created > 0:
+                            tasks_created = await self._count_tasks_for_request(request_id)
+                        else:
+                            errors.append("session produced output but no tasks were created")
 
                     # Defensive post-session check: if the user cancelled or
                     # the request otherwise reached terminal state during the
@@ -3499,7 +4286,11 @@ class LucentDaemon:
         system_message: str,
         prompt: str,
         model: str | None = None,
+        reasoning_effort: str | None = None,
         mcp_config_override: dict | None = None,
+        enable_config_discovery: bool = False,
+        hooks: list[dict] | None = None,
+        audit_context: dict | None = None,
     ) -> str | None:
         """Run a single Copilot session with the given system message and prompt.
 
@@ -3516,7 +4307,8 @@ class LucentDaemon:
             return None
 
         selected_model = _resolve_default_model(model)
-        log(f"Starting session: {name} (model: {selected_model})")
+        effort_label = f", reasoning_effort: {reasoning_effort}" if reasoning_effort else ""
+        log(f"Starting session: {name} (model: {selected_model}{effort_label})")
         start_time = time.time()
         status = "success"
 
@@ -3542,13 +4334,23 @@ class LucentDaemon:
         try:
             while True:
                 try:
+                    inner_kwargs = {
+                        "model": selected_model,
+                        "mcp_config_override": mcp_config_override,
+                        "enable_config_discovery": enable_config_discovery,
+                    }
+                    if hooks is not None:
+                        inner_kwargs["hooks"] = hooks
+                    if audit_context is not None:
+                        inner_kwargs["audit_context"] = audit_context
+                    if reasoning_effort:
+                        inner_kwargs["reasoning_effort"] = reasoning_effort
                     result = await asyncio.wait_for(
                         self._run_session_inner(
                             name,
                             system_message,
                             prompt,
-                            model=selected_model,
-                            mcp_config_override=mcp_config_override,
+                            **inner_kwargs,
                         ),
                         timeout=SESSION_TOTAL_TIMEOUT,
                     )
@@ -3620,7 +4422,11 @@ class LucentDaemon:
         system_message: str,
         prompt: str,
         model: str | None = None,
+        reasoning_effort: str | None = None,
         mcp_config_override: dict | None = None,
+        enable_config_discovery: bool = False,
+        hooks: list[dict] | None = None,
+        audit_context: dict | None = None,
     ) -> str | None:
         """Inner session runner — uses the LLM engine abstraction.
 
@@ -3637,7 +4443,11 @@ class LucentDaemon:
                 system_message,
                 prompt,
                 selected_model,
+                reasoning_effort=reasoning_effort,
                 mcp_config_override=effective_mcp,
+                enable_config_discovery=enable_config_discovery,
+                hooks=hooks,
+                audit_context=audit_context,
             )
         elif _COPILOT_SDK_AVAILABLE:
             return await self._run_via_copilot_direct(
@@ -3645,7 +4455,9 @@ class LucentDaemon:
                 system_message,
                 prompt,
                 selected_model,
+                reasoning_effort=reasoning_effort,
                 mcp_config_override=mcp_config_override,
+                enable_config_discovery=enable_config_discovery,
             )
         else:
             log("No LLM engine available — install lucent or github-copilot-sdk", "ERROR")
@@ -3673,7 +4485,11 @@ class LucentDaemon:
         system_message: str,
         prompt: str,
         model: str,
+        reasoning_effort: str | None = None,
         mcp_config_override: dict | None = None,
+        enable_config_discovery: bool = False,
+        hooks: list[dict] | None = None,
+        audit_context: dict | None = None,
     ) -> str | None:
         """Run session using the LLM engine abstraction layer."""
         engine = get_engine_for_model(model) if _LLM_ENGINE_AVAILABLE else get_engine()
@@ -3683,8 +4499,37 @@ class LucentDaemon:
         # Initialize MCP memory-tool tracker for this session
         tracker: list[dict] = []
         self._session_mcp_trackers[name] = tracker
+        tool_tracker: list[dict] = []
+        self._session_tool_trackers[name] = tool_tracker
+        audit_tasks: list[asyncio.Task] = []
+        tool_call_inputs: dict[str, dict | str] = {}
 
         try:
+
+            async def audit_stream_tool_result(event: SessionEvent) -> None:
+                if getattr(engine, "name", "") == "langchain" or not event.tool_name:
+                    return
+                try:
+                    from lucent.db import init_db
+                    from lucent.db.tool_audit import ToolAuditRepository, classify_tool_result
+
+                    status, failure_class, error_message = classify_tool_result(
+                        event.tool_output
+                    )
+                    pool = await init_db()
+                    repo = ToolAuditRepository(pool)
+                    await repo.log_tool_call(
+                        tool_name=event.tool_name,
+                        status=status,
+                        source="daemon.session_event",
+                        input_payload=tool_call_inputs.get(event.tool_name, {}),
+                        output_payload=event.tool_output,
+                        failure_class=failure_class,
+                        error_message=error_message,
+                        context={**(audit_context or {}), "engine": getattr(engine, "name", "")},
+                    )
+                except Exception:
+                    log("Failed to audit daemon tool event", "DEBUG")
 
             def on_event(event: SessionEvent) -> None:
                 etype = event.type.value
@@ -3699,13 +4544,23 @@ class LucentDaemon:
                         )
                 elif event.type == SessionEventType.TOOL_CALL:
                     log(f"  [{name}] event: tool.call tool={event.tool_name}", "STREAM")
+                    normalized_tool = _normalize_tool_name(event.tool_name)
+                    tool_tracker.append({
+                        "tool": normalized_tool or event.tool_name,
+                        "raw_tool": event.tool_name,
+                        "input": event.tool_input or event.content or {},
+                        "timestamp": time.time(),
+                    })
+                    if event.tool_name:
+                        tool_call_inputs[event.tool_name] = event.tool_input or event.content or {}
                     # Track memory-server tool calls for observability
-                    if event.tool_name and event.tool_name in _MEMORY_TOOL_NAMES:
+                    if _is_memory_server_tool(event.tool_name):
                         params_summary = _summarize_memory_tool_params(
                             event.tool_name, event.tool_input or {}
                         )
                         tracker.append({
-                            "tool": event.tool_name,
+                            "tool": normalized_tool or event.tool_name,
+                            "raw_tool": event.tool_name,
                             "params": params_summary,
                             "timestamp": time.time(),
                         })
@@ -3719,6 +4574,7 @@ class LucentDaemon:
                         f"  [{name}] event: tool.result tool={event.tool_name} output={output}",
                         "STREAM",
                     )
+                    audit_tasks.append(asyncio.create_task(audit_stream_tool_result(event)))
                     if self._is_mcp_auth_failure_message(event.tool_output):
                         raise AuthFailureDetectedError(
                             f"MCP auth failure on tool '{event.tool_name}' in session '{name}'"
@@ -3734,6 +4590,16 @@ class LucentDaemon:
                 on_event=on_event,
                 timeout=SESSION_TOTAL_TIMEOUT,
                 idle_timeout=SESSION_IDLE_TIMEOUT,
+                reasoning_effort=reasoning_effort,
+                hooks=hooks,
+                audit_context={
+                    **(audit_context or {}),
+                    "source": (audit_context or {}).get("source", "daemon.session"),
+                    "model": model,
+                    "reasoning_effort": reasoning_effort,
+                    "engine": getattr(engine, "name", "unknown"),
+                },
+                enable_config_discovery=enable_config_discovery,
             )
 
             if result:
@@ -3743,6 +4609,8 @@ class LucentDaemon:
                 log(f"Session '{name}' completed (no response)")
             return result
         finally:
+            if audit_tasks:
+                await asyncio.gather(*audit_tasks, return_exceptions=True)
             if session_id in self.active_sessions:
                 self.active_sessions.remove(session_id)
 
@@ -3752,7 +4620,9 @@ class LucentDaemon:
         system_message: str,
         prompt: str,
         model: str,
+        reasoning_effort: str | None = None,
         mcp_config_override: dict | None = None,
+        enable_config_discovery: bool = False,
     ) -> str | None:
         """Legacy fallback: run session using CopilotClient directly."""
         client = None
@@ -3775,10 +4645,12 @@ class LucentDaemon:
             session = await client.create_session(
                 on_permission_request=PermissionHandler.approve_all,
                 model=model,
+                reasoning_effort=reasoning_effort,
                 system_message=SystemMessageReplaceConfig(
                     mode="replace", content=system_message
                 ),
                 mcp_servers=mcp_config_override or MCP_CONFIG,
+                enable_config_discovery=enable_config_discovery,
             )
             self.active_sessions.append(session)
 
@@ -4033,6 +4905,23 @@ class LucentDaemon:
         if len(stripped) < 100:
             return False, f"output too short ({len(stripped)} chars)"
 
+        text_lower = stripped.lower()
+        blocking_indicators = [
+            "status: blocked",
+            "blocked — missing required tooling",
+            "blocked - missing required tooling",
+            "missing required tooling",
+            "cannot complete this task",
+            "i cannot complete this task",
+            "unable to complete this task",
+            "no github mcp tool is available",
+            "neither is exposed to this sub-agent",
+            "tooling is not available",
+            "permission response",
+        ]
+        if any(indicator in text_lower for indicator in blocking_indicators):
+            return False, "output reports task is blocked or missing required tooling"
+
         # For substantial output (1000+ chars), trust it — the agent did real work
         # even if it mentioned limitations along the way
         if len(stripped) >= 1000:
@@ -4138,9 +5027,14 @@ class LucentDaemon:
                 # Backwards-compatible for tests that monkeypatch old signatures.
                 return await RequestAPI.start_task(task_id)
 
-        async def _fail_owned(task_id: str, error: str):
+        async def _fail_owned(task_id: str, error: str, result: str | None = None):
             try:
-                return await RequestAPI.fail_task(task_id, error, instance_id=self.instance_id)
+                return await RequestAPI.fail_task(
+                    task_id,
+                    error,
+                    instance_id=self.instance_id,
+                    result=result,
+                )
             except TypeError:
                 return await RequestAPI.fail_task(task_id, error)
 
@@ -4173,6 +5067,7 @@ class LucentDaemon:
             task_id = str(task["id"])
             agent_type = task.get("agent_type", "code")
             task_model = task.get("model")  # per-task model override
+            task_reasoning_effort = task.get("reasoning_effort")
             title = task.get("title", "")
             description = task.get("description", title)
             selected_model, model_reason = _select_model_for_task(
@@ -4181,6 +5076,24 @@ class LucentDaemon:
                 description=description,
                 explicit_model=task_model,
             )
+            if task_reasoning_effort:
+                try:
+                    from lucent.model_registry import validate_reasoning_effort
+
+                    effort_error = validate_reasoning_effort(
+                        selected_model,
+                        task_reasoning_effort,
+                    )
+                except Exception as exc:
+                    effort_error = f"reasoning-effort validator unavailable: {exc}"
+                if effort_error:
+                    log(
+                        f"Task {task_id[:8]} reasoning_effort '{task_reasoning_effort}' "
+                        f"is invalid for model '{selected_model}': {effort_error}; "
+                        "using provider default",
+                        "WARN",
+                    )
+                    task_reasoning_effort = None
 
             # Claim it atomically
             claimed = await RequestAPI.claim_task(task_id, self.instance_id)
@@ -4188,11 +5101,18 @@ class LucentDaemon:
                 continue
 
             # Persist the resolved model before dispatch so it's recorded even if the task fails
-            await RequestAPI.update_task_model(task_id, selected_model)
+            await RequestAPI.update_task_model_settings(
+                task_id,
+                model=selected_model,
+                reasoning_effort=task_reasoning_effort,
+            )
 
+            effort_label = (
+                f" reasoning_effort={task_reasoning_effort}" if task_reasoning_effort else ""
+            )
             log(
                 f"Dispatching tracked task {task_id[:8]} to {agent_type} "
-                f"model={selected_model}: {title[:80]}...",
+                f"model={selected_model}{effort_label}: {title[:80]}...",
                 request_id=task_id,
                 user_id=str(task.get("requesting_user_id")) if task.get("requesting_user_id") else None,
             )
@@ -4330,6 +5250,16 @@ class LucentDaemon:
                     requester_user_id=requesting_user_id,
                     agent_id=str(agent_data["id"]),
                 )
+                hooks = await load_accessible_hooks_for_agent(
+                    org_id=org_id,
+                    requester_user_id=requesting_user_id,
+                    agent_id=str(agent_data["id"]),
+                )
+                managed_tools = await load_accessible_managed_tools_for_agent(
+                    org_id=org_id,
+                    requester_user_id=requesting_user_id,
+                    agent_id=str(agent_data["id"]),
+                )
             except AgentNotFoundError as exc:
                 log(f"Tracked task {task_id[:8]} failed: {exc}", "WARN")
                 await _fail_owned(task_id, str(exc))
@@ -4344,6 +5274,7 @@ class LucentDaemon:
                     agent_definition_id=str(agent_def_id) if agent_def_id else None,
                     resolved_agent=agent_data,
                     resolved_skills=skills,
+                    resolved_tools=managed_tools,
                 )
             except AgentNotFoundError as exc:
                 log(f"Tracked task {task_id[:8]} failed: {exc}", "WARN")
@@ -4355,12 +5286,27 @@ class LucentDaemon:
 
             # Build requester-scoped MCP config for this task
             task_mcp_config = {}
+            task_enable_config_discovery = False
             if mcp_servers:
                 set_current_user({"id": requesting_user_id, "organization_id": org_id})
                 try:
                     provider = await get_secret_provider()
                     for server in mcp_servers:
-                        server_type = "http" if server.get("server_type", "http") == "http" else "stdio"
+                        raw_server_type = (server.get("server_type") or "http").lower()
+                        if raw_server_type in {
+                            "copilot_github",
+                            "copilot_builtin_github",
+                            "copilot-builtin-github",
+                            "github_builtin",
+                            "github-builtin",
+                        }:
+                            # Marker definition: approving and granting this MCP server
+                            # allows the Copilot runtime to expose its bundled GitHub
+                            # MCP tools via SDK config discovery. No external process
+                            # or token env vars are needed for this mode.
+                            task_enable_config_discovery = True
+                            continue
+                        server_type = "http" if raw_server_type == "http" else "stdio"
                         if server_type == "http":
                             conf = {
                                 "type": server_type,
@@ -4403,8 +5349,8 @@ class LucentDaemon:
             # by giving sub-agents org-wide read access. That's reverted.
             # Per-user scope is the security boundary; nothing exempts it.
             #
-            # Org-shared-only is reserved for system-level org maintenance
-            # (memory consolidation etc.) where there's no single owning user.
+            # Org-shared-only is reserved for future system-level org maintenance
+            # where there's no single owning user.
             _request_title = ""
             if request_id:
                 try:
@@ -4439,9 +5385,25 @@ class LucentDaemon:
                     task_mcp_config["memory-server"] = {
                         "type": "http",
                         "url": MCP_URL,
-                        "headers": {"Authorization": f"Bearer {_scoped_key}"},
-                        "tools": _TASK_MEMORY_SERVER_TOOLS,
+                        "headers": {
+                            "Authorization": f"Bearer {_scoped_key}",
+                            "X-Lucent-Agent-Definition-Id": str(agent_data["id"]),
+                            "X-Lucent-Task-Id": str(task_id),
+                            "X-Lucent-Request-Id": str(request_id) if request_id else "",
+                        },
+                        "tools": _memory_server_tools_for_task(
+                            agent_type,
+                            title,
+                            _request_title,
+                            description,
+                        ),
                     }
+                    if managed_tools:
+                        for tool_name in (
+                            "list_tool_definitions", "get_tool_definition", "run_managed_tool",
+                        ):
+                            if tool_name not in task_mcp_config["memory-server"]["tools"]:
+                                task_mcp_config["memory-server"]["tools"].append(tool_name)
                     log(f"Task {task_id[:8]} using {_scope_type} scoped key"
                         f" (user: {_scope_user[:8] if _scope_user else 'shared'})")
                 else:
@@ -4590,7 +5552,22 @@ class LucentDaemon:
                     system_message,
                     f"Execute this task:\n\n{description}",
                     model=selected_model,
+                    reasoning_effort=task_reasoning_effort,
                     mcp_config_override=task_mcp_config,
+                    enable_config_discovery=task_enable_config_discovery,
+                    hooks=hooks,
+                    audit_context={
+                        "source": "daemon.task",
+                        "organization_id": org_id,
+                        "user_id": requesting_user_id,
+                        "request_id": request_id,
+                        "task_id": task_id,
+                        "agent_definition_id": str(agent_data["id"]),
+                        "agent_type": agent_type,
+                        "skill_names": [s.get("name") for s in skills if s.get("name")],
+                        "model": selected_model,
+                        "reasoning_effort": task_reasoning_effort,
+                    },
                 )
             except ModelNotAvailableError as exc:
                 log(
@@ -4616,6 +5593,10 @@ class LucentDaemon:
             # Log MCP memory-tool usage summary as a queryable task event
             session_name = f"{agent_type}-{task_id[:8]}"
             mcp_tracker = self._session_mcp_trackers.pop(session_name, [])
+            tool_tracker = self._session_tool_trackers.pop(session_name, [])
+            operational_tool_tracker = [
+                entry for entry in tool_tracker if _is_operational_tool_call(entry)
+            ]
             mcp_summary = _build_mcp_tool_summary(mcp_tracker)
             log(f"Task {task_id[:8]} ({agent_type}): {mcp_summary}")
 
@@ -4629,6 +5610,11 @@ class LucentDaemon:
             tool_counts: dict[str, int] = {}
             for entry in mcp_tracker:
                 tool_counts[entry["tool"]] = tool_counts.get(entry["tool"], 0) + 1
+            validation_tool_counts: dict[str, int] = {}
+            for entry in operational_tool_tracker:
+                tool = _normalize_tool_name(entry.get("tool") or entry.get("raw_tool"))
+                if tool:
+                    validation_tool_counts[tool] = validation_tool_counts.get(tool, 0) + 1
             await RequestAPI.add_event(
                 task_id,
                 "mcp_tool_usage",
@@ -4638,6 +5624,7 @@ class LucentDaemon:
                     "search_calls": search_count,
                     "capture_calls": capture_count,
                     "tool_counts": tool_counts,
+                    "all_tool_counts": validation_tool_counts,
                     "calls": [
                         {"tool": e["tool"], "params": e["params"]}
                         for e in mcp_tracker
@@ -4677,9 +5664,13 @@ class LucentDaemon:
                 except Exception as e:
                     log(f"Sandbox cleanup failed for {sandbox_id[:12]}: {e}", "WARN")
 
-            if _task_requires_mcp_tool_usage(agent_type, title, description) and not mcp_tracker:
+            if (
+                not _task_skips_tool_validation(agent_type)
+                and _task_requires_mcp_tool_usage(agent_type, title, description)
+                and not operational_tool_tracker
+            ):
                 reason = (
-                    f"{agent_type} task completed without any MCP tool calls. "
+                    f"{agent_type} task completed without any operational tool calls. "
                     "Tool-dependent tasks must perform real tool operations, not "
                     "narrate intended changes."
                 )
@@ -4690,11 +5681,48 @@ class LucentDaemon:
                     reason,
                     {"agent_type": agent_type, "model": selected_model},
                 )
-                await _fail_owned(task_id, reason)
+                await _fail_owned(task_id, reason, result=result)
+                continue
+
+            if _task_skips_tool_validation(agent_type):
+                required_tools = set()
+            else:
+                required_tools = _required_task_tool_names(agent_type, title, description)
+            missing_required_tools: list[str] = []
+            for required_tool in sorted(required_tools):
+                if required_tool == "send_handoff":
+                    satisfied = bool(validation_tool_counts.get("send_handoff", 0))
+                else:
+                    satisfied = bool(validation_tool_counts.get(required_tool, 0))
+                if not satisfied:
+                    missing_required_tools.append(required_tool)
+            if missing_required_tools:
+                reason = (
+                    "Task instructions required tool call(s) "
+                    f"{', '.join(missing_required_tools)}, but the session did not call them. "
+                    "Do not satisfy explicit handoff instructions with narrative text only."
+                )
+                log(f"Tracked task {task_id[:8]} failed: {reason}", "WARN")
+                await RequestAPI.add_event(
+                    task_id,
+                    "missing_specific_tool_usage",
+                    reason,
+                    {
+                        "agent_type": agent_type,
+                        "model": selected_model,
+                        "missing_tools": missing_required_tools,
+                        "tool_counts": validation_tool_counts,
+                    },
+                )
+                await _fail_owned(task_id, reason, result=result)
                 continue
 
             # Validate
-            success, reason = self._validate_task_result(result, task=task, tool_counts=tool_counts)
+            success, reason = self._validate_task_result(
+                result,
+                task=task,
+                tool_counts=validation_tool_counts,
+            )
 
             if success:
                 output_contract = task.get("output_contract")
@@ -4779,7 +5807,13 @@ class LucentDaemon:
                             1, attributes={"status": "manual_review", "agent_type": agent_type}
                         )
                 else:
-                    await _fail_owned(task_id, reason)
+                    await RequestAPI.add_event(
+                        task_id,
+                        "validation_failed",
+                        reason,
+                        {"result_excerpt": (result or "")[:2000]},
+                    )
+                    await _fail_owned(task_id, reason, result=result)
                     log(f"Tracked task {task_id[:8]} failed: {reason}", "WARN")
                     if self._tracer:
                         self._tasks_completed_total.add(
@@ -5322,18 +6356,58 @@ class LucentDaemon:
         non_review_tasks = [t for t in tasks if not self._is_request_review_task(t)]
         done_tasks = [t for t in non_review_tasks if t.get("status") in ("completed", "failed", "cancelled")]
         task_summaries = []
+        task_summary_chars = 0
+        review_context_budget = REQUEST_REVIEW_CONTEXT_CHAR_BUDGET
         for idx, t in enumerate(done_tasks, 1):
             tid = str(t.get("id", ""))
             status = t.get("status", "unknown")
             title = t.get("title", "Untitled")
-            result = (t.get("result") or t.get("error") or "")[:1500]
+            result_source = t.get("result") or t.get("error") or ""
+            result = _truncate_for_context(
+                result_source,
+                REQUEST_REVIEW_TASK_RESULT_CHAR_BUDGET,
+                label="review task result",
+            )
             if not result:
                 result = "(no output)"
-            task_summaries.append(
+            outputs = t.get("outputs") or []
+            if outputs:
+                output_lines = []
+                for output in outputs[:10]:
+                    output_lines.append(
+                        f"     - [{output.get('output_type', 'link')}] "
+                        f"{output.get('title', 'Untitled output')} "
+                        f"url={output.get('url') or 'n/a'} "
+                        f"external_id={output.get('external_id') or 'n/a'}"
+                    )
+                outputs_text = "\n   recorded outputs:\n" + "\n".join(output_lines)
+            else:
+                outputs_text = "\n   recorded outputs: (none)"
+            summary_text = (
                 f"{idx}. [{status}] {title}\n"
                 f"   task_id: {tid}\n"
                 f"   output:\n{result}"
+                f"{outputs_text}"
             )
+            if task_summary_chars + len(summary_text) > review_context_budget:
+                remaining = review_context_budget - task_summary_chars
+                if remaining > 10_000:
+                    task_summaries.append(
+                        _truncate_for_context(
+                            summary_text,
+                            remaining,
+                            label="request review task summaries",
+                        )
+                    )
+                task_summaries.append(
+                    "[Additional task outcomes omitted because request review "
+                    f"context exceeded {review_context_budget:,} characters. "
+                    "Reviewers should fetch full task details before approving if "
+                    "the omitted work affects the decision.]"
+                )
+                break
+            task_summaries.append(summary_text)
+            task_summary_chars += len(summary_text)
         if not task_summaries:
             task_summaries.append("No terminal tasks found.")
 
@@ -5345,6 +6419,19 @@ class LucentDaemon:
             incomplete_note = (
                 "\n\nNOTE: dependency_policy is permissive and some tasks are incomplete/failed. "
                 "Account for this in your review and require rework if needed."
+            )
+
+        target_repo = request_data.get("target_repo") or ""
+        target_paths = request_data.get("target_paths") or []
+        target_section = ""
+        if target_repo or target_paths:
+            target_section = (
+                "\n\nTarget persistence scope:\n"
+                f"- target_repo: {target_repo or 'unspecified'}\n"
+                f"- target_paths: {target_paths or []}\n"
+                "If this request produced docs/files/reports intended for the target "
+                "repository, do not approve unless the task outputs show actual durable "
+                "repo changes (paths plus commit/URL or equivalent recorded artifact)."
             )
 
         # Fetch linked memories so the review task can update them
@@ -5402,10 +6489,30 @@ class LucentDaemon:
             "request goals AND propagating those outcomes into linked memories.\n\n"
             f"Original request title: {request_data.get('title', '')}\n"
             f"Original request description:\n{request_data.get('description', '')}\n\n"
+            f"{target_section}\n\n"
             "Task outcomes:\n"
             f"{chr(10).join(task_summaries)}"
             f"{incomplete_note}"
             f"{memory_section}\n\n"
+            "=== OUTPUT ARTIFACT REVIEW ===\n"
+            "Each task may include a 'recorded outputs' list. These are the "
+            "user-visible deliverables shown in the Activity UI: GitHub PRs/issues, "
+            "emails, docs, files, deployments, memories, or generic artifacts.\n"
+            "Durable persistence is mandatory for external artifacts: if the request "
+            "asked for repository documentation/files or named a target_repo, narrative "
+            "markdown in the task result is insufficient. Require concrete changed file "
+            "paths and a commit/URL (or an explicit BLOCKED result explaining missing "
+            "write capability).\n"
+            "Before approving, verify that every deliverable mentioned in task output "
+            "has a corresponding recorded output. Plain URLs in task results are "
+            "auto-extracted by Lucent, but non-URL deliverables such as sent emails, "
+            "created documents identified only by provider ID, or files stored in an "
+            "external system may require an explicit `record_task_output` call.\n"
+            "If a deliverable is missing and you have enough task_id/title/url or "
+            "external_id/provider information, call `record_task_output` before approving. "
+            "If you cannot identify the missing deliverable precisely, return "
+            "NEEDS_REWORK and ask the task agent to record the output.\n"
+            "=== END OUTPUT ARTIFACT REVIEW ===\n\n"
             "Return your decision in this exact machine-readable shape "
             "(emit it ONLY after completing all mandatory memory updates above):\n"
             "REQUEST_REVIEW_DECISION: APPROVED|NEEDS_REWORK\n"
@@ -5642,90 +6749,11 @@ class LucentDaemon:
 
     async def run_autonomic(self):
         """Run autonomic background task — memory maintenance."""
-        log("Running autonomic: memory maintenance")
-
-        try:
-            system_message = await build_subagent_prompt(
-                "memory",
-                (
-                    "Deep memory consolidation pass — build long-term "
-                    "knowledge by integrating recent observations into "
-                    "established understanding."
-                ),
-                ("This is an autonomic background task, not a cognitive decision."),
-            )
-        except AgentNotFoundError:
-            log("No approved 'memory' agent — skipping autonomic maintenance", "WARN")
-            return
-
-        # Create a request/task record via the HTTP API so it appears on Activity
-        task_id = None
-        try:
-            memory_model, _memory_model_reason = _select_model_for_task(
-                agent_type="memory",
-                title="Consolidate memories",
-                description=MEMORY_CONSOLIDATION_PROMPT,
-            )
-            request_record = await RequestAPI.create_request(
-                title="Memory consolidation",
-                description="Autonomic memory maintenance — consolidating fragments into long-term knowledge.",
-                source="daemon",
-                priority="low",
-            )
-            if request_record:
-                request_id = str(request_record["id"])
-                task_record = await RequestAPI.create_task(
-                    request_id=request_id,
-                    title="Consolidate memories",
-                    agent_type="memory",
-                    description=(
-                        "Enforce one-memory-per-scope hierarchy for technical memories. "
-                        "Run mandatory metadata normalization for metadata.repo, "
-                        "metadata.directory, metadata.filename, then verify compliance."
-                    ),
-                    model=memory_model,
-                )
-                if task_record:
-                    task_id = str(task_record["id"])
-                    await RequestAPI.claim_task(task_id, self.instance_id)
-                    try:
-                        await RequestAPI.start_task(task_id, instance_id=self.instance_id)
-                    except TypeError:
-                        await RequestAPI.start_task(task_id)
-        except Exception as e:
-            log(f"Failed to create request record for autonomic run: {e}", "WARN")
-            task_id = None
-
-        result = await self.run_session(
-            "autonomic-maintenance",
-            system_message,
-            MEMORY_CONSOLIDATION_PROMPT,
-            model=memory_model if task_id else None,
+        log(
+            "Technical memory consolidation is retired — duplicate file-scoped "
+            "technical memories are rejected at create/update time."
         )
-
-        # Update the request/task records with the outcome
-        if task_id:
-            try:
-                if result:
-                    try:
-                        await RequestAPI.complete_task(
-                            task_id,
-                            result[:4000],
-                            instance_id=self.instance_id,
-                        )
-                    except TypeError:
-                        await RequestAPI.complete_task(task_id, result[:4000])
-                else:
-                    try:
-                        await RequestAPI.fail_task(
-                            task_id,
-                            "No output from maintenance session",
-                            instance_id=self.instance_id,
-                        )
-                    except TypeError:
-                        await RequestAPI.fail_task(task_id, "No output from maintenance session")
-            except Exception as e:
-                log(f"Failed to update request record for autonomic run: {e}", "WARN")
+        return
 
     async def run_learning_extraction(self):
         """Run autonomic learning extraction — process recent results into reusable lessons.
@@ -5757,7 +6785,11 @@ class LucentDaemon:
             (
                 "Run the learning extraction pipeline from the learning-extraction skill. "
                 "Core principle: INTEGRATE, don't accumulate. Lessons get folded into "
-                "existing memories, not stored as standalone 'Lesson:' entries.\n\n"
+                "existing memories, not stored as standalone 'Lesson:' entries. "
+                "If the lesson reveals missing capability or bad behavior, create a "
+                "human-reviewed activation artifact: a proposed agent/skill/hook or a "
+                "follow-up request for grants, definition updates, or built-in/source-code "
+                "changes.\n\n"
                 "1. Search for memories tagged 'daemon-result' "
                 "or 'rejection-lesson' or 'feedback-rejected' "
                 "or 'validated' that do "
@@ -5772,12 +6804,18 @@ class LucentDaemon:
                 "4. Tag processed source memories with 'lesson-extracted'.\n"
                 "5. Delete source experience memories that are now redundant "
                 "(their knowledge has been absorbed).\n"
+                "6. Review repeated tool failures with analyze_tool_failure_patterns. "
+                "For confirmed patterns, use proposal/request tools to queue the smallest "
+                "concrete improvement for human review; do not merely summarize the issue.\n"
                 "\n\nSTRICT RULES:\n"
                 "- NEVER create standalone 'Lesson:' or 'Learning Extraction Run' memories.\n"
                 "- NEVER create a new memory if an existing one covers the same scope — update it.\n"
                 "- The total memory count must go DOWN or stay the same, never up.\n"
                 "- Prefer update_memory and delete_memory. Only use create_memory for genuine gaps.\n"
-                "- Skip runtime heartbeat or telemetry records if any legacy records are still present."
+                "- Skip runtime heartbeat or telemetry records if any legacy records are still present.\n"
+                "- NEVER treat capability requests as documentation-only work; create the "
+                "needed proposed role/skill/hook or request when evidence supports it.\n"
+                "- NEVER grant yourself access to skills, hooks, MCP servers, or other runtime powers."
             ),
         )
 
@@ -6039,16 +7077,15 @@ class LucentDaemon:
             await conn.close()
 
     async def _autonomic_loop(self):
-        """Periodic maintenance: memory consolidation, learning extraction.
+        """Periodic maintenance: learning extraction and experience compression.
 
         Uses a timestamp file to track last run, surviving daemon restarts.
         """
         log(
-            f"Autonomic loop started (maintenance: {AUTONOMIC_MINUTES}m, "
-            f"learning: {LEARNING_MINUTES}m, compression: {COMPRESSION_MINUTES}m)"
+            f"Autonomic loop started (learning: {LEARNING_MINUTES}m, "
+            f"compression: {COMPRESSION_MINUTES}m)"
         )
 
-        ts_file = Path("/tmp/lucent_last_consolidation")
         learning_ts_file = Path("/tmp/lucent_last_learning")
         compression_ts_file = Path("/tmp/lucent_last_compression")
 
@@ -6067,12 +7104,6 @@ class LucentDaemon:
 
         while self.running:
             try:
-                # Memory consolidation
-                if _minutes_since(ts_file) >= AUTONOMIC_MINUTES:
-                    if await _verify_and_provision_key(self.instance_id):
-                        _touch(ts_file)
-                        await self.run_autonomic()
-
                 # Learning extraction
                 if _minutes_since(learning_ts_file) >= LEARNING_MINUTES:
                     if await _verify_and_provision_key(self.instance_id):

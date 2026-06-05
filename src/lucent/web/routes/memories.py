@@ -10,12 +10,14 @@ from lucent.auth_providers import CSRF_COOKIE_NAME
 from lucent.db import (
     AccessRepository,
     AuditRepository,
+    DuplicateTechnicalMemoryError,
     MemoryRepository,
     UserRepository,
     get_pool,
 )
 from lucent.integrations.github_repo_access_service import GitHubRepoAccessService
 from lucent.mode import is_team_mode
+from lucent.models.validation import normalize_tags, validate_memory_content_quality
 from lucent.rbac import Role
 from lucent.services.memory_access_service import MemoryAccessService
 
@@ -79,6 +81,10 @@ def _prefer_repo_root_memory(current: dict | None, candidate: dict) -> dict:
     if _repo_root_memory_priority(candidate) > _repo_root_memory_priority(current):
         return candidate
     return current
+
+
+def _raise_duplicate_technical_memory(error: DuplicateTechnicalMemoryError) -> None:
+    raise HTTPException(status_code=409, detail=error.message)
 
 
 router = APIRouter()
@@ -265,7 +271,7 @@ async def memory_new_submit(
     username = user.display_name or "unknown"
 
     # Parse tags
-    tag_list = [t.strip().lower() for t in tags.split(",") if t.strip()]
+    tag_list = normalize_tags([t for t in tags.split(",") if t.strip()])
 
     # Individual memories cannot be created via web interface
     # - they are auto-created when users join
@@ -312,16 +318,27 @@ async def memory_new_submit(
     )
 
     # Create memory
-    result = await repo.create(
-        username=username,
-        type=type,
-        content=content,
-        tags=tag_list if tag_list else None,
-        importance=importance,
-        metadata=metadata if metadata else None,
-        user_id=user.id,
-        organization_id=user.organization_id,
-    )
+    try:
+        validate_memory_content_quality(
+            type,
+            content,
+            metadata=metadata,
+            tags=tag_list,
+        )
+        result = await repo.create(
+            username=username,
+            type=type,
+            content=content,
+            tags=tag_list if tag_list else None,
+            importance=importance,
+            metadata=metadata if metadata else None,
+            user_id=user.id,
+            organization_id=user.organization_id,
+        )
+    except DuplicateTechnicalMemoryError as e:
+        _raise_duplicate_technical_memory(e)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
     # Log creation
     await audit_repo.log(
@@ -501,7 +518,7 @@ async def memory_edit_submit(
         raise HTTPException(status_code=403, detail="You can only edit your own memories")
 
     # Parse tags
-    tag_list = [t.strip().lower() for t in tags.split(",") if t.strip()]
+    tag_list = normalize_tags([t for t in tags.split(",") if t.strip()])
 
     # Build type-specific metadata based on the memory's type
     memory_type = existing.get("type")
@@ -539,6 +556,38 @@ async def memory_edit_submit(
         meta_github=meta_github,
         meta_preferences=meta_preferences,
     )
+
+    try:
+        metadata = repo.normalize_metadata_for_storage(memory_type, metadata)
+        duplicate = await repo.find_duplicate_technical_file_memory(
+            metadata=metadata,
+            requesting_user_id=user.id,
+            requesting_org_id=user.organization_id,
+            memory_scope=getattr(user, "memory_scope", None),
+            exclude_id=memory_id,
+        )
+        if duplicate is not None:
+            scope = repo._technical_file_scope(metadata)
+            if scope is not None:
+                _raise_duplicate_technical_memory(
+                    DuplicateTechnicalMemoryError(
+                        existing_memory=duplicate,
+                        repo=scope["repo"],
+                        filename=scope["filename"],
+                    )
+                )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    try:
+        validate_memory_content_quality(
+            memory_type,
+            content,
+            metadata=metadata,
+            tags=tag_list,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
     # Update
     result = await repo.update(
@@ -610,6 +659,23 @@ async def memory_share(request: Request, memory_id: UUID):
         raise HTTPException(status_code=403, detail="You can only share your own memories")
 
     new_shared = not memory.get("shared", False)
+    if new_shared:
+        duplicate = await repo.find_duplicate_technical_file_memory(
+            metadata=memory.get("metadata"),
+            requesting_user_id=user.id,
+            requesting_org_id=user.organization_id,
+            exclude_id=memory_id,
+        )
+        if duplicate is not None:
+            scope = repo._technical_file_scope(memory.get("metadata"))
+            if scope is not None:
+                _raise_duplicate_technical_memory(
+                    DuplicateTechnicalMemoryError(
+                        existing_memory=duplicate,
+                        repo=scope["repo"],
+                        filename=scope["filename"],
+                    )
+                )
     await repo.set_shared(memory_id, user.id, new_shared)
 
     await audit_repo.log(
@@ -797,9 +863,13 @@ async def knowledge_tree(request: Request):
         FROM memories
         WHERE deleted_at IS NULL
           AND type = 'technical'
+                    AND COALESCE(lifecycle_stage, 'active') = 'active'
+                    AND NOT ('superseded' = ANY(tags))
           AND metadata->>'repo' IS NOT NULL
           AND (user_id = $1 OR (organization_id = $2 AND shared = true))
-        ORDER BY metadata->>'repo', metadata->>'directory' NULLS FIRST, metadata->>'filename' NULLS FIRST
+                ORDER BY metadata->>'repo',
+                                 metadata->>'directory' NULLS FIRST,
+                                 metadata->>'filename' NULLS FIRST
     """
     async with pool.acquire() as conn:
         rows = await conn.fetch(query, str(user.id), str(user.organization_id))
@@ -848,7 +918,13 @@ async def knowledge_tree(request: Request):
         filename = r["filename"]
 
         if repo_name not in tree:
-            tree[repo_name] = {"memory": None, "dirs": {}, "root_files": [], "file_count": 0, "total": 0}
+            tree[repo_name] = {
+                "memory": None,
+                "dirs": {},
+                "root_files": [],
+                "file_count": 0,
+                "total": 0,
+            }
 
         node = tree[repo_name]
         node["total"] += 1
@@ -929,7 +1005,10 @@ async def search_github_repos(request: Request, q: str = ""):
         token = os.environ.get("GITHUB_TOKEN", "")
 
     if not token:
-        return JSONResponse({"error": "No GitHub token available. Connect GitHub on the Connections page."}, status_code=400)
+        return JSONResponse(
+            {"error": "No GitHub token available. Connect GitHub on the Connections page."},
+            status_code=400,
+        )
 
     import httpx
     try:
@@ -965,7 +1044,7 @@ async def search_github_repos(request: Request, q: str = ""):
 @router.post("/knowledge/scan-repo")
 async def scan_repo(request: Request):
     """Create a request to scan a GitHub repo and build knowledge tree memories.
-    
+
     Only creates the request — the daemon's cognitive planner will decompose
     it into tasks with proper agent assignment, model selection, and sandbox config.
     """
@@ -1010,7 +1089,8 @@ async def scan_repo(request: Request):
             f"https://github.com/{repo_full_name}.git, one agent session that produces "
             f"all memories in one pass. Do not split this into multiple tasks; double "
             f"cloning wastes time and sandbox resources.\n\n"
-            f"In that single session, the agent should create technical memories at three levels:\n\n"
+            f"In that single session, the agent should create technical memories "
+            f"at three levels:\n\n"
             f"1. **Directory-level memories** — For each significant directory, document "
             f"what it's for, key patterns, conventions, and how it relates to other parts. "
             f"Set metadata: repo='{repo_full_name}', directory='path/', filename=null\n\n"
@@ -1042,5 +1122,8 @@ async def scan_repo(request: Request):
     return JSONResponse({
         "status": "scanning",
         "request_id": str(req["id"]),
-        "message": f"Knowledge scan requested for {repo_full_name}. The daemon will plan and execute the tasks.",
+        "message": (
+            f"Knowledge scan requested for {repo_full_name}. "
+            "The daemon will plan and execute the tasks."
+        ),
     })

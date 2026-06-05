@@ -127,7 +127,11 @@ async def create_task(
         tags.extend(data.tags)
 
     # Store context in metadata
-    metadata: dict[str, Any] = {"submitted_by": str(user.id), "source": "api"}
+    metadata: dict[str, Any] = {
+        "category": "daemon-task",
+        "submitted_by": str(user.id),
+        "source": "api",
+    }
     if data.context:
         metadata["context"] = data.context
 

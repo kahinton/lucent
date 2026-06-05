@@ -43,28 +43,73 @@ if not SECURE_COOKIES:
 CSRF_COOKIE_NAME = "lucent_csrf"
 CSRF_FIELD_NAME = "csrf_token"
 
-# Signing secret for impersonation cookies — MUST be persistent across restarts.
-# In team mode, a missing signing secret is a configuration error because
-# impersonation cookies become invalid after every restart.
-_signing_secret_from_env = os.environ.get("LUCENT_SIGNING_SECRET")
-if _signing_secret_from_env:
-    SIGNING_SECRET = _signing_secret_from_env
-else:
-    SIGNING_SECRET = secrets.token_urlsafe(32)
-    _mode = os.environ.get("LUCENT_MODE", "personal")
-    if _mode == "team":
-        logger.critical(
-            "LUCENT_SIGNING_SECRET is not set — a random secret was generated. "
-            "Impersonation cookies will NOT survive restarts. "
-            "Set LUCENT_SIGNING_SECRET to a stable value: "
-            "openssl rand -base64 32"
-        )
-    else:
+# Signing secret for impersonation cookies. Prefer configured secret storage;
+# LUCENT_SIGNING_SECRET remains as an explicit override/backward-compatible
+# escape hatch. Startup calls initialize_signing_secret() after the secret
+# provider is registered. If signing happens before startup, an ephemeral value
+# is generated as a last-resort fallback.
+SIGNING_SECRET_KEY = "lucent.system.signing_secret"
+SYSTEM_SECRET_ORG_NAME = "__lucent_system__"
+SIGNING_SECRET = os.environ.get("LUCENT_SIGNING_SECRET") or ""
+_signing_secret_source = "env" if SIGNING_SECRET else "uninitialized"
+_ephemeral_signing_warning_logged = False
+
+
+def _set_signing_secret(value: str, source: str) -> None:
+    global SIGNING_SECRET, _signing_secret_source
+    SIGNING_SECRET = value
+    _signing_secret_source = source
+
+
+def _get_signing_secret() -> str:
+    """Return the currently configured signing secret.
+
+    This function is intentionally synchronous because sign/verify are used in
+    web route helpers. Startup should initialize SIGNING_SECRET from secret
+    storage before normal traffic reaches those helpers.
+    """
+    global _ephemeral_signing_warning_logged
+    if SIGNING_SECRET:
+        return SIGNING_SECRET
+    value = secrets.token_urlsafe(32)
+    _set_signing_secret(value, "ephemeral")
+    if not _ephemeral_signing_warning_logged:
+        _ephemeral_signing_warning_logged = True
         logger.warning(
-            "LUCENT_SIGNING_SECRET is not set — using an ephemeral random value. "
-            "Set this env var for cookie persistence across restarts. "
-            "Generate with: openssl rand -base64 32"
+            "Signing secret was needed before secret storage initialization; "
+            "using an ephemeral fallback for this process."
         )
+    return value
+
+
+async def initialize_signing_secret(pool: Pool) -> str:
+    """Load or create the app signing secret via configured secret storage.
+
+    Local Docker uses OpenBao Transit via the default secret provider. The
+    secret is stored as a system-managed secret, not in process env vars.
+    """
+    if os.environ.get("LUCENT_SIGNING_SECRET"):
+        logger.info("Using LUCENT_SIGNING_SECRET override for cookie signing")
+        return SIGNING_SECRET
+
+    from lucent.db import OrganizationRepository
+    from lucent.secrets import SecretRegistry, SecretScope
+
+    provider = SecretRegistry.get()
+    org, _ = await OrganizationRepository(pool).get_or_create(SYSTEM_SECRET_ORG_NAME)
+    scope = SecretScope(
+        organization_id=str(org["id"]),
+        system_managed=True,
+    )
+    value = await provider.get(SIGNING_SECRET_KEY, scope)
+    if not value:
+        value = secrets.token_urlsafe(32)
+        await provider.set(SIGNING_SECRET_KEY, value, scope)
+        logger.info("Created cookie signing secret in configured secret storage")
+    else:
+        logger.info("Loaded cookie signing secret from configured secret storage")
+    _set_signing_secret(value, "secret_storage")
+    return value
 
 
 def get_cookie_params() -> dict:
@@ -97,7 +142,8 @@ def sign_value(value: str) -> str:
 
     Used for the impersonation cookie to prevent forgery.
     """
-    signature = hmac.new(SIGNING_SECRET.encode(), value.encode(), hashlib.sha256).hexdigest()
+    signing_secret = _get_signing_secret()
+    signature = hmac.new(signing_secret.encode(), value.encode(), hashlib.sha256).hexdigest()
     return f"{value}.{signature}"
 
 
@@ -106,7 +152,8 @@ def verify_signed_value(signed: str | None) -> str | None:
     if not signed or "." not in signed:
         return None
     value, signature = signed.rsplit(".", 1)
-    expected = hmac.new(SIGNING_SECRET.encode(), value.encode(), hashlib.sha256).hexdigest()
+    signing_secret = _get_signing_secret()
+    expected = hmac.new(signing_secret.encode(), value.encode(), hashlib.sha256).hexdigest()
     if hmac.compare_digest(signature, expected):
         return value
     return None
@@ -471,12 +518,22 @@ def register_auth_provider(name: str, provider_class: type[AuthProvider]) -> Non
 
 
 async def is_first_run(pool: Pool) -> bool:
-    """Check if this is the first run (no users exist).
+    """Check if this is the first run (no human users exist).
 
     Returns:
-        True if no users exist in the database.
+        True if no active human users exist in the database.
     """
-    query = "SELECT EXISTS(SELECT 1 FROM users LIMIT 1)"
+    query = """
+        SELECT EXISTS(
+            SELECT 1
+            FROM users
+            WHERE is_active = TRUE
+              AND role <> 'daemon'
+              AND COALESCE(external_id, '') NOT LIKE '%-service%'
+              AND COALESCE(email, '') NOT LIKE '%@lucent.local'
+            LIMIT 1
+        )
+    """
     async with pool.acquire() as conn:
         return not await conn.fetchval(query)
 

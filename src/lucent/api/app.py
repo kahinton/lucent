@@ -110,6 +110,10 @@ async def _sync_built_in_definitions():
                     logger.info(f"Synced {count} built-in agent definitions")
                 break
 
+        hook_count = await repo.sync_built_in_hooks(org_id)
+        if hook_count:
+            logger.info(f"Synced {hook_count} built-in hook definitions")
+
         # Sync sandbox templates from .github/sandbox-templates/
         from lucent.db.sandbox_template import SandboxTemplateRepository
 
@@ -164,8 +168,8 @@ def _check_security_defaults() -> None:
     In team mode (multi-user), insecure defaults are treated as errors
     logged at CRITICAL level. In personal mode they produce warnings.
 
-    Also warns when critical secrets (like LUCENT_SIGNING_SECRET) are
-    not explicitly configured.
+    Also notes when critical secrets will be managed by the configured secret
+    provider instead of process environment variables.
     """
     import os
 
@@ -177,9 +181,14 @@ def _check_security_defaults() -> None:
         if current == insecure_value:
             issues.append(var)
 
-    # Check for missing critical secrets that default to random values
-    required_secrets = ["LUCENT_SIGNING_SECRET"]
-    missing: list[str] = [v for v in required_secrets if not os.environ.get(v)]
+    secret_provider_configured = bool(
+        os.environ.get("VAULT_TOKEN")
+        or os.environ.get("VAULT_TOKEN_FILE")
+        or os.environ.get("LUCENT_SECRET_KEY")
+    )
+    missing: list[str] = []
+    if not os.environ.get("LUCENT_SIGNING_SECRET") and not secret_provider_configured:
+        missing.append("LUCENT_SIGNING_SECRET or configured secret provider")
 
     if issues:
         msg = (
@@ -194,10 +203,9 @@ def _check_security_defaults() -> None:
 
     if missing:
         msg = (
-            "SECURITY: The following secrets are not set and will use "
-            "ephemeral random values that do not persist across restarts: %s. "
-            "Set them explicitly for production. "
-            "Generate with: openssl rand -base64 32"
+            "SECURITY: The following secrets are not set and no secret provider "
+            "bootstrap appears configured; ephemeral random values may be used: %s. "
+            "Configure OpenBao/Transit or set explicit production overrides."
         )
         if mode == "team":
             logger.critical(msg, ", ".join(missing))
@@ -228,6 +236,12 @@ async def lifespan(app: FastAPI):
 
         _secret_pool = await _get_pool_for_secrets()
         await initialize_secret_provider(_secret_pool)
+        from lucent.auth_providers import initialize_signing_secret
+
+        await initialize_signing_secret(_secret_pool)
+        from lucent.settings import load_runtime_settings_from_db
+
+        await load_runtime_settings_from_db(_secret_pool)
 
     # Load model registry from database
     try:
@@ -376,8 +390,10 @@ def create_app() -> FastAPI:
 
     @app.middleware("http")
     async def review_badge_middleware(request: Request, call_next):
-        """Attach pending approval count for web templates."""
+        """Attach approval and interaction attention counts for web templates."""
         request.state.pending_approval_count = 0
+        request.state.user_interaction_count = 0
+        request.state.definition_proposal_count = 0
 
         # Only needed for web page rendering, not API/static/other methods.
         if request.method == "GET" and not request.url.path.startswith(("/api/", "/static/")):
@@ -399,7 +415,36 @@ def create_app() -> FastAPI:
                                      AND status NOT IN ('cancelled', 'rejection_processing')""",
                                 org_id,
                             )
+                            definition_count = await conn.fetchval(
+                                """
+                                SELECT
+                                    (SELECT COUNT(*) FROM agent_definitions
+                                     WHERE organization_id = $1 AND status = 'proposed')
+                                  + (SELECT COUNT(*) FROM skill_definitions
+                                     WHERE organization_id = $1 AND status = 'proposed')
+                                  + (SELECT COUNT(*) FROM mcp_server_configs
+                                     WHERE organization_id = $1 AND status = 'proposed')
+                                  + (SELECT COUNT(*) FROM hook_definitions
+                                     WHERE organization_id = $1 AND status = 'proposed')
+                                  + (SELECT COUNT(*) FROM managed_tool_definitions
+                                     WHERE organization_id = $1 AND status = 'proposed')
+                                """,
+                                org_id,
+                            )
                         request.state.pending_approval_count = count or 0
+                        request.state.definition_proposal_count = definition_count or 0
+                        try:
+                            from lucent.db.user_interactions import UserInteractionRepository
+
+                            interaction_repo = UserInteractionRepository(pool)
+                            request.state.user_interaction_count = (
+                                await interaction_repo.count_attention_needed(
+                                    org_id=str(org_id),
+                                    user_id=str(user["id"]),
+                                )
+                            )
+                        except Exception:
+                            request.state.user_interaction_count = 0
             except Exception:
                 # Best-effort UI enhancement only — never block request on badge count.
                 pass
@@ -545,8 +590,14 @@ def create_app() -> FastAPI:
 
     # Include request tracking router
     from lucent.api.routers import requests as requests_router
+    from lucent.api.routers import user_interactions as user_interactions_router
 
     app.include_router(requests_router.router, prefix="/api", tags=["Requests"])
+    app.include_router(
+        user_interactions_router.router,
+        prefix="/api",
+        tags=["User Interactions"],
+    )
 
     # Include reviews router
     from lucent.api.routers import reviews as reviews_router
@@ -557,6 +608,7 @@ def create_app() -> FastAPI:
     from lucent.api.routers import schedules as schedules_router
 
     app.include_router(schedules_router.router, prefix="/api", tags=["Schedules"])
+    app.include_router(schedules_router.workflow_router, prefix="/api", tags=["Workflows"])
 
     # Include chat router
     from lucent.api.routers import chat as chat_router

@@ -125,8 +125,9 @@ Once running, the web UI at http://localhost:8766 provides:
 | `/` | Dashboard overview |
 | `/memories` | Memory management UI |
 | `/activity` | Request/task tracking and event timeline |
-| `/definitions` | Agent, skill, and MCP server management |
-| `/schedules` | Schedule creation and monitoring |
+| `/handoffs` | Human-in-the-loop messages, clarifications, decisions, and workflow outputs |
+| `/definitions` | Agent, skill, tool, hook, and external provider management |
+| `/workflows` | Workflow wizard, triggers, actions, and run monitoring |
 | `/sandboxes` | Sandbox template and instance management |
 | `/daemon/review` | Review queue for daemon-generated content |
 | `/audit` | Audit log viewer |

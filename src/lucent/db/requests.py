@@ -9,6 +9,7 @@ import os
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import urlparse
 from uuid import UUID
 
 from asyncpg import Pool
@@ -44,6 +45,22 @@ MEMORY_LINK_LOCK_NAMESPACE = 0x4C4D454D  # "LMEM" — Lucent MEMory link
 # milestone state hasn't been updated.
 RECENT_COMPLETION_WINDOW_HOURS = 24
 
+VALID_TASK_OUTPUT_TYPES = {
+    "link",
+    "github_issue",
+    "github_pr",
+    "email",
+    "document",
+    "file",
+    "memory",
+    "deployment",
+    "artifact",
+    "other",
+}
+
+_OUTPUT_URL_RE = re.compile(r"(?P<url>https?://[^\s<>()\[\]{}\"']+|mailto:[^\s<>()\[\]{}\"']+)")
+_TRAILING_URL_PUNCTUATION = ".,;:!?)]}>'\""
+
 
 def _normalize_title_for_dedup(title: str | None) -> str:
     """Normalize a request title for duplicate detection.
@@ -72,6 +89,155 @@ def _coerce_metadata(metadata: Any) -> dict | None:
         except (TypeError, ValueError):
             return None
     return metadata if isinstance(metadata, dict) else None
+
+
+def _infer_output_type_from_url(url: str | None, fallback: str = "link") -> str:
+    """Infer a well-known output type from a URL when callers provide generic links."""
+    if not url:
+        return fallback if fallback in VALID_TASK_OUTPUT_TYPES else "link"
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return fallback if fallback in VALID_TASK_OUTPUT_TYPES else "link"
+
+    host = parsed.netloc.lower()
+    path = parsed.path.lower()
+    if host == "github.com" or host.endswith(".github.com"):
+        if "/pull/" in path:
+            return "github_pr"
+        if "/issues/" in path:
+            return "github_issue"
+    if parsed.scheme == "mailto":
+        return "email"
+    if "docs.google.com" in host or "notion.so" in host or path.endswith(('.md', '.pdf')):
+        return "document"
+    return fallback if fallback in VALID_TASK_OUTPUT_TYPES else "link"
+
+
+def _normalize_task_output(output: dict[str, Any]) -> dict[str, Any]:
+    """Normalize a task output artifact supplied by API/MCP/structured result."""
+    if not isinstance(output, dict):
+        raise ValueError("Each task output must be an object")
+
+    url = str(output.get("url") or "").strip() or None
+    external_id = str(output.get("external_id") or output.get("id") or "").strip() or None
+    output_type = str(output.get("output_type") or output.get("type") or "link").strip().lower()
+    output_type = _infer_output_type_from_url(url, output_type)
+    if output_type not in VALID_TASK_OUTPUT_TYPES:
+        raise ValueError(
+            f"Invalid output_type '{output_type}'. Must be one of: "
+            f"{', '.join(sorted(VALID_TASK_OUTPUT_TYPES))}"
+        )
+
+    title = str(output.get("title") or "").strip()
+    if not title:
+        if output_type == "github_pr":
+            title = "GitHub pull request"
+        elif output_type == "github_issue":
+            title = "GitHub issue"
+        elif output_type == "email":
+            title = "Email"
+        elif output_type == "document":
+            title = "Document"
+        elif url:
+            title = url
+        elif external_id:
+            title = external_id
+    if not title:
+        raise ValueError("Task output title is required")
+    if not url and not external_id and output_type != "other":
+        raise ValueError("Task output requires url or external_id")
+
+    metadata = output.get("metadata") or {}
+    if not isinstance(metadata, dict):
+        raise ValueError("Task output metadata must be an object")
+
+    return {
+        "output_type": output_type,
+        "provider": str(output.get("provider") or "").strip() or None,
+        "title": title[:256],
+        "description": str(output.get("description") or "").strip() or None,
+        "url": url,
+        "external_id": external_id,
+        "mime_type": str(output.get("mime_type") or "").strip() or None,
+        "metadata": metadata,
+        "is_primary": bool(output.get("is_primary", False)),
+    }
+
+
+def _extract_outputs_from_structured_result(result_structured: Any) -> list[dict[str, Any]]:
+    """Extract outputs/artifacts from validated structured task output when present."""
+    if not isinstance(result_structured, dict):
+        return []
+    raw = result_structured.get("outputs") or result_structured.get("artifacts") or []
+    if not isinstance(raw, list):
+        return []
+    return [_normalize_task_output(item) for item in raw]
+
+
+def _extract_outputs_from_text(result_text: str | None) -> list[dict[str, Any]]:
+    """Extract openable URLs from unstructured task output as artifact links.
+
+    This is a reliability backstop: agents should still call record_task_output
+    or return structured outputs, but links mentioned in the narrative result
+    should not be invisible to users if the agent forgets.
+    """
+    if not result_text:
+        return []
+
+    outputs: list[dict[str, Any]] = []
+    seen_urls: set[str] = set()
+    for match in _OUTPUT_URL_RE.finditer(result_text):
+        raw_url = match.group("url").rstrip(_TRAILING_URL_PUNCTUATION)
+        if not raw_url or raw_url in seen_urls:
+            continue
+        seen_urls.add(raw_url)
+
+        line_start = result_text.rfind("\n", 0, match.start()) + 1
+        line_end = result_text.find("\n", match.end())
+        if line_end == -1:
+            line_end = len(result_text)
+        line = result_text[line_start:line_end].strip()
+        title_prefix = line[: max(0, match.start() - line_start)].strip(" -*•:—–\t")
+        output_type = _infer_output_type_from_url(raw_url)
+        if title_prefix and len(title_prefix) <= 120:
+            title = title_prefix
+        elif output_type == "github_pr":
+            title = "GitHub pull request"
+        elif output_type == "github_issue":
+            title = "GitHub issue"
+        elif output_type == "email":
+            title = "Email"
+        elif output_type == "document":
+            title = "Document"
+        else:
+            title = raw_url
+
+        outputs.append(
+            _normalize_task_output(
+                {
+                    "output_type": output_type,
+                    "title": title,
+                    "url": raw_url,
+                    "metadata": {"auto_extracted": True, "source": "task_result"},
+                }
+            )
+        )
+    return outputs
+
+
+def _dedupe_task_outputs(outputs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Deduplicate normalized task outputs by URL/external identity."""
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for output in outputs:
+        key_value = output.get("url") or output.get("external_id") or output.get("title")
+        key = (output.get("output_type") or "link", str(key_value or "").lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(output)
+    return deduped
 
 
 def _next_active_milestone_index(metadata: dict | None) -> int | None:
@@ -300,7 +466,7 @@ APPROVAL_REJECTED = "rejected"
 _DAEMON_SOURCES = frozenset({"cognitive", "daemon"})
 
 
-def _requires_approval(source: str) -> bool:
+def _requires_approval(source: str, *, organization_id: str | None = None) -> bool:
     """Check if a request from this source needs human approval.
 
     User/API/schedule requests are always auto-approved.
@@ -309,11 +475,12 @@ def _requires_approval(source: str) -> bool:
     """
     if source not in _DAEMON_SOURCES:
         return False
-    auto_approve = os.environ.get("LUCENT_AUTO_APPROVE", "false").lower()
-    return auto_approve not in ("true", "1", "yes")
+    from lucent.settings import daemon_auto_approve_enabled
+
+    return not daemon_auto_approve_enabled(organization_id=organization_id)
 
 
-def _requires_post_completion_review() -> bool:
+def _requires_post_completion_review(*, organization_id: str | None = None) -> bool:
     """Check if completed requests should go through internal review.
 
     The daemon's post-completion review task is an automatic quality check
@@ -323,8 +490,9 @@ def _requires_post_completion_review() -> bool:
     Set LUCENT_SKIP_POST_REVIEW=true to bypass the automatic review task
     and send completed requests straight to 'completed' status.
     """
-    val = os.environ.get("LUCENT_SKIP_POST_REVIEW", "false").lower()
-    return val not in ("true", "1", "yes")
+    from lucent.settings import post_completion_review_enabled
+
+    return post_completion_review_enabled(organization_id=organization_id)
 
 
 _VALID_OUTPUT_FAILURE_POLICIES = {"fail", "fallback", "retry_then_fallback"}
@@ -530,7 +698,7 @@ class RequestRepository:
             )
         approval = (
             APPROVAL_PENDING
-            if force_pending_approval or _requires_approval(source)
+            if force_pending_approval or _requires_approval(source, organization_id=org_id)
             else APPROVAL_AUTO
         )
         now = datetime.now(timezone.utc) if approval == APPROVAL_AUTO else None
@@ -719,6 +887,30 @@ class RequestRepository:
             )
         return dict(row) if row else None
 
+    async def mark_request_viewed(
+        self,
+        request_id: str,
+        org_id: str,
+        user_id: str,
+    ) -> dict | None:
+        """Record that a user opened a request detail page."""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """INSERT INTO request_views (
+                       request_id, user_id, organization_id, first_viewed_at, last_viewed_at
+                   )
+                   SELECT r.id, $3::uuid, r.organization_id, NOW(), NOW()
+                   FROM requests r
+                   WHERE r.id = $1::uuid AND r.organization_id = $2::uuid
+                   ON CONFLICT (request_id, user_id)
+                   DO UPDATE SET last_viewed_at = EXCLUDED.last_viewed_at
+                   RETURNING *""",
+                request_id,
+                org_id,
+                user_id,
+            )
+        return dict(row) if row else None
+
     async def list_requests(
         self,
         org_id: str,
@@ -727,34 +919,96 @@ class RequestRepository:
         limit: int = 25,
         offset: int = 0,
         exclude_status: str | None = None,
+        viewer_user_id: str | None = None,
     ) -> dict:
-        base = "FROM requests WHERE organization_id = $1"
+        base = "FROM requests r WHERE r.organization_id = $1"
         params: list[Any] = [UUID(org_id)]
         if status:
             params.append(status)
-            base += f" AND status = ${len(params)}"
+            base += f" AND r.status = ${len(params)}"
         elif exclude_status:
             excluded = [s.strip() for s in exclude_status.split(",") if s.strip()]
             if excluded:
                 placeholders = ", ".join(f"${len(params) + i + 1}" for i in range(len(excluded)))
                 params.extend(excluded)
-                base += f" AND status NOT IN ({placeholders})"
+                base += f" AND r.status NOT IN ({placeholders})"
         if source:
             sources = [s.strip() for s in source.split(",") if s.strip()]
             if len(sources) == 1:
                 params.append(sources[0])
-                base += f" AND source = ${len(params)}"
+                base += f" AND r.source = ${len(params)}"
             else:
                 placeholders = ", ".join(f"${len(params) + i + 1}" for i in range(len(sources)))
                 params.extend(sources)
-                base += f" AND source IN ({placeholders})"
+                base += f" AND r.source IN ({placeholders})"
 
         count_query = f"SELECT COUNT(*) AS total {base}"
+        query_params = list(params)
+        if viewer_user_id:
+            query_params.append(UUID(viewer_user_id))
+            view_join = (
+                "LEFT JOIN request_views rv "
+                f"ON rv.request_id = r.id AND rv.user_id = ${len(query_params)}"
+            )
+            last_viewed_expr = "rv.last_viewed_at"
+        else:
+            view_join = ""
+            last_viewed_expr = "NULL::timestamptz"
+
         query = (
-            f"SELECT * {base} ORDER BY created_at DESC "
-            f"LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}"
+            "SELECT r.*, "
+            "COALESCE(task_stats.task_count, 0)::int AS task_count, "
+            "COALESCE(task_stats.tasks_completed, 0)::int AS tasks_completed, "
+            "COALESCE(task_stats.tasks_running, 0)::int AS tasks_running, "
+            "COALESCE(task_stats.tasks_failed, 0)::int AS tasks_failed, "
+            "COALESCE(task_stats.models_used, ARRAY[]::text[]) AS models_used, "
+            "COALESCE(output_stats.output_count, 0)::int AS output_count, "
+            f"{last_viewed_expr} AS last_viewed_at, "
+            "(r.status IN ('completed', 'failed') "
+            " AND r.completed_at IS NOT NULL "
+            f" AND ({last_viewed_expr} IS NULL OR {last_viewed_expr} < r.completed_at)"
+            ") AS is_unviewed_completion "
+            "FROM requests r "
+            "LEFT JOIN LATERAL ("
+            "  SELECT COUNT(*) AS task_count, "
+            "         COUNT(*) FILTER (WHERE t.status = 'completed') AS tasks_completed, "
+            "         COUNT(*) FILTER (WHERE t.status IN ('claimed', 'running')) AS tasks_running, "
+            "         COUNT(*) FILTER (WHERE t.status = 'failed') AS tasks_failed, "
+            "         COALESCE(ARRAY_AGG(DISTINCT t.model ORDER BY t.model) "
+            "                  FILTER (WHERE t.model IS NOT NULL), ARRAY[]::text[]) AS models_used "
+            "  FROM tasks t WHERE t.request_id = r.id"
+            ") task_stats ON TRUE "
+            "LEFT JOIN LATERAL ("
+            "  SELECT COUNT(*) AS output_count "
+            "  FROM task_outputs o WHERE o.request_id = r.id"
+            ") output_stats ON TRUE "
+            f"{view_join} "
+            f"WHERE r.organization_id = $1"
         )
-        params_with_page = [*params, limit, offset]
+        # Re-apply dynamic filters after the joins so the list can use summary
+        # fields in its ordering while the count query stays compact.
+        where_suffix = base.removeprefix("FROM requests r WHERE r.organization_id = $1")
+        query += where_suffix
+        query += (
+            " ORDER BY "
+            "CASE "
+            "  WHEN r.approval_status = 'pending_approval' "
+            "       AND r.status NOT IN ('cancelled', 'rejection_processing') THEN 0 "
+            "  WHEN COALESCE(task_stats.tasks_running, 0) > 0 THEN 1 "
+            "  ELSE 2 "
+            "END, "
+            "CASE "
+            "  WHEN (r.approval_status = 'pending_approval' "
+            "        AND r.status NOT IN ('cancelled', 'rejection_processing')) "
+            "       OR COALESCE(task_stats.tasks_running, 0) > 0 "
+            "  THEN CASE r.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 "
+            "                       WHEN 'medium' THEN 2 ELSE 3 END "
+            "  ELSE 0 "
+            "END, "
+            "COALESCE(r.updated_at, r.created_at) DESC, r.created_at DESC "
+            f"LIMIT ${len(query_params) + 1} OFFSET ${len(query_params) + 2}"
+        )
+        params_with_page = [*query_params, limit, offset]
 
         async with self.pool.acquire() as conn:
             count_row = await conn.fetchrow(count_query, *params)
@@ -1127,7 +1381,10 @@ class RequestRepository:
         rejected_by: str,
         comment: str,
     ) -> dict | None:
-        """Reject a pending_approval request — enters rejection_processing for daemon feedback loop."""
+        """Reject a pending_approval request.
+
+        Rejected requests enter rejection_processing for the daemon feedback loop.
+        """
         now = datetime.now(timezone.utc)
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -1244,7 +1501,7 @@ class RequestRepository:
                 "validation_errors",
             )
 
-        # Batch-load events and memory links for ALL tasks (avoids N+1)
+        # Batch-load events, memory links, and outputs for ALL tasks (avoids N+1)
         task_ids = [task["id"] for task in req["tasks"]]
         if task_ids:
             async with self.pool.acquire() as conn:
@@ -1263,6 +1520,14 @@ class RequestRepository:
                     task_ids,
                     UUID(org_id),
                 )
+                output_rows = await conn.fetch(
+                    """SELECT * FROM task_outputs
+                       WHERE task_id = ANY($1)
+                         AND organization_id = $2
+                       ORDER BY is_primary DESC, created_at DESC""",
+                    task_ids,
+                    UUID(org_id),
+                )
 
             # Group by task_id
             events_by_task: dict[str, list[dict]] = {}
@@ -1277,14 +1542,26 @@ class RequestRepository:
                 tid = str(row["task_id"])
                 memories_by_task.setdefault(tid, []).append(dict(row))
 
+            outputs_by_task: dict[str, list[dict]] = {}
+            request_outputs: list[dict] = []
+            for row in output_rows:
+                tid = str(row["task_id"])
+                output = self._row_to_output_dict(row)
+                outputs_by_task.setdefault(tid, []).append(output)
+                request_outputs.append(output)
+
             for task in req["tasks"]:
                 tid = str(task["id"])
                 task["events"] = events_by_task.get(tid, [])
                 task["memories"] = memories_by_task.get(tid, [])
+                task["outputs"] = outputs_by_task.get(tid, [])
+            req["outputs"] = request_outputs
         else:
             for task in req["tasks"]:
                 task["events"] = []
                 task["memories"] = []
+                task["outputs"] = []
+            req["outputs"] = []
 
         # Load reviews for this request (batch, no N+1)
         async with self.pool.acquire() as conn:
@@ -1338,6 +1615,88 @@ class RequestRepository:
         }
         return req
 
+    def _row_to_output_dict(self, row) -> dict[str, Any]:
+        output = dict(row)
+        metadata = output.get("metadata") or {}
+        if isinstance(metadata, str):
+            try:
+                metadata = json.loads(metadata)
+            except (TypeError, ValueError):
+                metadata = {}
+        output["metadata"] = metadata
+        return output
+
+    async def create_task_output(
+        self,
+        *,
+        task_id: str,
+        org_id: str,
+        output: dict[str, Any],
+        created_by: str | None = None,
+    ) -> dict:
+        """Create a user-facing output artifact for a task."""
+        normalized = _normalize_task_output(output)
+        async with self.pool.acquire() as conn:
+            task = await conn.fetchrow(
+                """SELECT id, request_id, organization_id
+                   FROM tasks
+                   WHERE id = $1::uuid AND organization_id = $2::uuid""",
+                task_id,
+                org_id,
+            )
+            if not task:
+                raise ValueError("Task not found")
+
+            row = await conn.fetchrow(
+                """INSERT INTO task_outputs (
+                       task_id, request_id, organization_id, created_by,
+                       output_type, provider, title, description, url,
+                       external_id, mime_type, metadata, is_primary
+                   ) VALUES (
+                       $1::uuid, $2::uuid, $3::uuid, $4::uuid,
+                       $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13
+                   )
+                   RETURNING *""",
+                task_id,
+                str(task["request_id"]),
+                org_id,
+                created_by,
+                normalized["output_type"],
+                normalized["provider"],
+                normalized["title"],
+                normalized["description"],
+                normalized["url"],
+                normalized["external_id"],
+                normalized["mime_type"],
+                json.dumps(normalized["metadata"]),
+                normalized["is_primary"],
+            )
+        created = self._row_to_output_dict(row)
+        await self.add_task_event(
+            task_id,
+            "output_created",
+            f"Output recorded: {created['title']}",
+            metadata={
+                "output_id": str(created["id"]),
+                "output_type": created["output_type"],
+                "url": created.get("url"),
+            },
+            org_id=org_id,
+        )
+        return created
+
+    async def list_request_outputs(self, request_id: str, org_id: str) -> list[dict]:
+        """List all outputs for a request, newest/primary first."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT * FROM task_outputs
+                   WHERE request_id = $1::uuid AND organization_id = $2::uuid
+                   ORDER BY is_primary DESC, created_at DESC""",
+                request_id,
+                org_id,
+            )
+        return [self._row_to_output_dict(r) for r in rows]
+
     # ── Tasks ─────────────────────────────────────────────────────────────
 
     async def create_task(
@@ -1352,6 +1711,7 @@ class RequestRepository:
         priority: str = "medium",
         sequence_order: int = 0,
         model: str | None = None,
+        reasoning_effort: str | None = None,
         sandbox_template_id: str | None = None,
         sandbox_config: dict | None = None,
         requesting_user_id: str | None = None,
@@ -1363,15 +1723,15 @@ class RequestRepository:
             row = await conn.fetchrow(
                 """INSERT INTO tasks
                    (request_id, parent_task_id, title, description, agent_type,
-                     agent_definition_id, priority, sequence_order, organization_id,
-                     model, sandbox_template_id, sandbox_config, requesting_user_id,
-                     output_contract)
+                    agent_definition_id, priority, sequence_order, organization_id,
+                    model, reasoning_effort, sandbox_template_id, sandbox_config,
+                    requesting_user_id, output_contract)
                    VALUES (
-                     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-                     COALESCE($13, (SELECT created_by FROM requests WHERE id = $1)),
-                     $14
-                    )
-                    RETURNING *""",
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+                    COALESCE($14, (SELECT created_by FROM requests WHERE id = $1)),
+                    $15
+                   )
+                   RETURNING *""",
                 UUID(request_id),
                 UUID(parent_task_id) if parent_task_id else None,
                 title,
@@ -1382,6 +1742,7 @@ class RequestRepository:
                 sequence_order,
                 UUID(org_id),
                 model,
+                reasoning_effort,
                 UUID(sandbox_template_id) if sandbox_template_id else None,
                 (json.dumps(sandbox_config) if isinstance(sandbox_config, dict)
                  else sandbox_config if isinstance(sandbox_config, str) and sandbox_config
@@ -1510,6 +1871,8 @@ class RequestRepository:
               "next_milestone_description": str | None,
               "next_milestone_start_after": str | None,
               "suggested_title": str,
+                            "target_repo": str | None,
+                            "target_paths": list[str],
               "total_milestones": int,
               "active_milestone_indexes": list[int],
               "completed_milestone_count": int,
@@ -1613,9 +1976,27 @@ class RequestRepository:
                 # free to write its own. The structured fields are what
                 # actually identify the work.
                 if next_idx is not None and next_desc:
-                    suggested_title = f"{short_title or 'Goal'} M{next_idx}: {next_desc[:80]}".strip()
+                    suggested_title = (
+                        f"{short_title or 'Goal'} M{next_idx}: {next_desc[:80]}"
+                    ).strip()
                 else:
                     suggested_title = short_title or "Goal"
+
+                target_repo = None
+                target_paths: list[str] = []
+                if metadata:
+                    raw_repo = (
+                        metadata.get("target_repo")
+                        or metadata.get("repo")
+                        or metadata.get("repository")
+                    )
+                    if isinstance(raw_repo, str) and raw_repo.strip():
+                        target_repo = raw_repo.strip()
+                    raw_paths = metadata.get("target_paths") or metadata.get("paths") or []
+                    if isinstance(raw_paths, str) and raw_paths.strip():
+                        target_paths = [raw_paths.strip()]
+                    elif isinstance(raw_paths, list):
+                        target_paths = [str(p).strip() for p in raw_paths if str(p).strip()]
 
                 targets.append({
                     "goal_id": str(row["id"]),
@@ -1624,6 +2005,8 @@ class RequestRepository:
                     "next_milestone_description": next_desc,
                     "next_milestone_start_after": next_start_after,
                     "suggested_title": suggested_title,
+                    "target_repo": target_repo,
+                    "target_paths": target_paths,
                     "total_milestones": summary["total"],
                     "active_milestone_indexes": summary["active_indexes"],
                     "completed_milestone_count": summary["completed_count"],
@@ -1853,6 +2236,23 @@ class RequestRepository:
             )
         return dict(row) if row else None
 
+    async def update_task_reasoning_effort(
+        self,
+        task_id: str,
+        reasoning_effort: str | None,
+    ) -> dict | None:
+        """Write the resolved reasoning effort back to the task record."""
+        now = datetime.now(timezone.utc)
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """UPDATE tasks SET reasoning_effort = $1, updated_at = $2
+                   WHERE id = $3 RETURNING *""",
+                reasoning_effort,
+                now,
+                UUID(task_id),
+            )
+        return dict(row) if row else None
+
     # Statuses where the task is in flight or already finalized successfully.
     # Anything else (pending, planned, failed, cancelled, needs_review, etc.)
     # is safe to edit because the daemon won't be actively executing it.
@@ -1866,6 +2266,7 @@ class RequestRepository:
         title: str | None = None,
         description: str | None = None,
         model: str | None = None,
+        reasoning_effort: str | None = None,
         agent_type: str | None = None,
         sandbox_template_id: str | None = None,
         clear_sandbox_template: bool = False,
@@ -1891,6 +2292,9 @@ class RequestRepository:
         if model is not None:
             params.append(model)
             sets.append(f"model = ${len(params)}")
+        if reasoning_effort is not None:
+            params.append(reasoning_effort or None)
+            sets.append(f"reasoning_effort = ${len(params)}")
         if agent_type is not None:
             params.append(agent_type)
             sets.append(f"agent_type = ${len(params)}")
@@ -1920,10 +2324,11 @@ class RequestRepository:
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(sql, *params)
         if row:
+            edited_fields = sorted(s.split(" = ")[0] for s in sets if "updated_at" not in s)
             await self.add_task_event(
                 task_id,
                 "edited",
-                f"Task edited: {', '.join(sorted(s.split(' = ')[0] for s in sets if 'updated_at' not in s))}",
+                f"Task edited: {', '.join(edited_fields)}",
             )
         return dict(row) if row else None
 
@@ -1994,6 +2399,7 @@ class RequestRepository:
         result_summary: str | None = None,
         validation_status: str = "not_applicable",
         validation_errors: list | None = None,
+        outputs: list[dict[str, Any]] | None = None,
     ) -> dict | None:
         """Mark task as completed with result.
 
@@ -2005,6 +2411,12 @@ class RequestRepository:
             raise ValueError(
                 f"Invalid validation_status '{validation_status}'. Must be one of: {valid}"
             )
+        output_candidates: list[dict[str, Any]] = []
+        if outputs:
+            output_candidates.extend(_normalize_task_output(item) for item in outputs)
+        output_candidates.extend(_extract_outputs_from_structured_result(result_structured))
+        output_candidates.extend(_extract_outputs_from_text(result))
+        output_candidates = _dedupe_task_outputs(output_candidates)
         now = datetime.now(timezone.utc)
         if org_id:
             async with self.pool.acquire() as conn:
@@ -2096,6 +2508,21 @@ class RequestRepository:
                     )
         if row:
             task = dict(row)
+            created_outputs: list[dict] = []
+            for output in output_candidates:
+                created_outputs.append(
+                    await self.create_task_output(
+                        task_id=task_id,
+                        org_id=str(task["organization_id"]),
+                        output=output,
+                        created_by=(
+                            str(task["requesting_user_id"])
+                            if task.get("requesting_user_id")
+                            else None
+                        ),
+                    )
+                )
+            task["outputs"] = created_outputs
             await self.add_task_event(
                 task_id,
                 "completed",
@@ -2112,6 +2539,7 @@ class RequestRepository:
         error: str,
         org_id: str | None = None,
         instance_id: str | None = None,
+        result: str | None = None,
     ) -> dict | None:
         """Mark task as failed.
 
@@ -2124,6 +2552,11 @@ class RequestRepository:
                 if instance_id:
                     row = await conn.fetchrow(
                         """UPDATE tasks SET status = 'failed', error = $2,
+                           result = COALESCE($6, result),
+                           result_summary = CASE
+                               WHEN $6::text IS NULL THEN result_summary
+                               ELSE left($6::text, 500)
+                           END,
                            completed_at = $3, updated_at = $3
                            WHERE id = $1 AND status IN ('claimed', 'running')
                            AND organization_id = $4
@@ -2134,10 +2567,16 @@ class RequestRepository:
                         now,
                         UUID(org_id),
                         instance_id,
+                        result,
                     )
                 else:
                     row = await conn.fetchrow(
                         """UPDATE tasks SET status = 'failed', error = $2,
+                           result = COALESCE($5, result),
+                           result_summary = CASE
+                               WHEN $5::text IS NULL THEN result_summary
+                               ELSE left($5::text, 500)
+                           END,
                            completed_at = $3, updated_at = $3
                            WHERE id = $1 AND status IN ('claimed', 'running')
                            AND organization_id = $4
@@ -2146,12 +2585,18 @@ class RequestRepository:
                         error,
                         now,
                         UUID(org_id),
+                        result,
                     )
         else:
             async with self.pool.acquire() as conn:
                 if instance_id:
                     row = await conn.fetchrow(
                         """UPDATE tasks SET status = 'failed', error = $2,
+                           result = COALESCE($5, result),
+                           result_summary = CASE
+                               WHEN $5::text IS NULL THEN result_summary
+                               ELSE left($5::text, 500)
+                           END,
                            completed_at = $3, updated_at = $3
                            WHERE id = $1 AND status IN ('claimed', 'running')
                            AND claimed_by = $4
@@ -2160,20 +2605,32 @@ class RequestRepository:
                         error,
                         now,
                         instance_id,
+                        result,
                     )
                 else:
                     row = await conn.fetchrow(
                         """UPDATE tasks SET status = 'failed', error = $2,
+                           result = COALESCE($4, result),
+                           result_summary = CASE
+                               WHEN $4::text IS NULL THEN result_summary
+                               ELSE left($4::text, 500)
+                           END,
                            completed_at = $3, updated_at = $3
                            WHERE id = $1 AND status IN ('claimed', 'running')
                            RETURNING *""",
                         UUID(task_id),
                         error,
                         now,
+                        result,
                     )
         if row:
             task = dict(row)
-            await self.add_task_event(task_id, "failed", f"Failed: {error[:200]}")
+            await self.add_task_event(
+                task_id,
+                "failed",
+                f"Failed: {error[:200]}",
+                {"rejected_output_chars": len(result or "")},
+            )
             await self._check_request_completion(str(task["request_id"]))
             return task
         return None
@@ -2435,6 +2892,78 @@ class RequestRepository:
             )
         return len(rows)
 
+    async def stale_task_reaper_has_work(
+        self,
+        stale_minutes: int = 30,
+        org_id: str | None = None,
+        instance_stale_seconds: int = DEFAULT_INSTANCE_STALE_SECONDS,
+    ) -> bool:
+        """True when at least one claimed/running task is stale enough to release."""
+        stale_seconds = max(60, int(stale_minutes * 60))
+        if org_id:
+            async with self.pool.acquire() as conn:
+                count = await conn.fetchval(
+                    """
+                    SELECT COUNT(*)
+                    FROM tasks t
+                    WHERE t.status IN ('claimed', 'running')
+                      AND t.organization_id = $2
+                      AND (
+                          t.claim_expires_at < NOW()
+                          OR (
+                              t.claimed_by IS NOT NULL
+                              AND EXISTS (
+                                  SELECT 1 FROM daemon_instances di
+                                  WHERE di.organization_id = t.organization_id
+                                    AND di.instance_id = t.claimed_by
+                                    AND (
+                                        di.status <> 'active'
+                                        OR di.last_seen_at < NOW() - make_interval(secs := $3)
+                                    )
+                              )
+                          )
+                          OR (
+                              t.claimed_at IS NOT NULL
+                              AND t.claimed_at < NOW() - make_interval(secs := $1)
+                          )
+                      )
+                    """,
+                    stale_seconds,
+                    UUID(org_id),
+                    instance_stale_seconds,
+                )
+        else:
+            async with self.pool.acquire() as conn:
+                count = await conn.fetchval(
+                    """
+                    SELECT COUNT(*)
+                    FROM tasks t
+                    WHERE t.status IN ('claimed', 'running')
+                      AND (
+                          t.claim_expires_at < NOW()
+                          OR (
+                              t.claimed_by IS NOT NULL
+                              AND EXISTS (
+                                  SELECT 1 FROM daemon_instances di
+                                  WHERE di.organization_id = t.organization_id
+                                    AND di.instance_id = t.claimed_by
+                                    AND (
+                                        di.status <> 'active'
+                                        OR di.last_seen_at < NOW() - make_interval(secs := $2)
+                                    )
+                              )
+                          )
+                          OR (
+                              t.claimed_at IS NOT NULL
+                              AND t.claimed_at < NOW() - make_interval(secs := $1)
+                          )
+                      )
+                    """,
+                    stale_seconds,
+                    instance_stale_seconds,
+                )
+        return int(count or 0) > 0
+
     # ── Task Events ───────────────────────────────────────────────────────
 
     async def add_task_event(
@@ -2666,8 +3195,14 @@ class RequestRepository:
                          AND title IS DISTINCT FROM 'Post-completion review'""",
                     UUID(request_id),
                 )
+                organization_id = await conn.fetchval(
+                    "SELECT organization_id FROM requests WHERE id = $1",
+                    UUID(request_id),
+                )
             status = REQUEST_STATUS_FAILED if failed > 0 else (
-                REQUEST_STATUS_REVIEW if _requires_post_completion_review()
+                REQUEST_STATUS_REVIEW if _requires_post_completion_review(
+                    organization_id=str(organization_id) if organization_id else None,
+                )
                 else REQUEST_STATUS_COMPLETED
             )
             await self.update_request_status(request_id, status)

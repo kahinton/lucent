@@ -3,12 +3,9 @@
 Covers: list_agent_definitions, get_agent_definition, list_skill_definitions,
 get_skill_definition, list_proposals, create_agent_definition,
 create_skill_definition, grant_skill_to_agent, update_agent_definition,
-approve_agent_definition, reject_agent_definition, delete_agent_definition,
-revoke_skill_from_agent, grant_mcp_server_to_agent, revoke_mcp_server_from_agent,
-approve_skill_definition, reject_skill_definition, delete_skill_definition,
-list_mcp_server_definitions, create_mcp_server_definition,
-update_mcp_server_definition, approve_mcp_server_definition,
-reject_mcp_server_definition.
+update_skill_definition, delete_agent_definition, revoke_skill_from_agent,
+grant_mcp_server_to_agent, revoke_mcp_server_from_agent, delete_skill_definition,
+list_mcp_server_definitions, create_mcp_server_definition, update_mcp_server_definition.
 Tests auth context enforcement, JSON serialization, and error handling.
 """
 
@@ -73,15 +70,36 @@ async def cleanup_definitions(db_pool, test_organization):
             "(SELECT id FROM agent_definitions WHERE organization_id = $1)",
             org_id,
         )
+        await conn.execute(
+            "DELETE FROM agent_hooks WHERE agent_id IN "
+            "(SELECT id FROM agent_definitions WHERE organization_id = $1)",
+            org_id,
+        )
         await conn.execute("DELETE FROM agent_definitions WHERE organization_id = $1", org_id)
         await conn.execute("DELETE FROM skill_definitions WHERE organization_id = $1", org_id)
         await conn.execute("DELETE FROM mcp_server_configs WHERE organization_id = $1", org_id)
+        await conn.execute("DELETE FROM hook_definitions WHERE organization_id = $1", org_id)
 
 
 async def _call(mcp, tool_name: str, args: dict | None = None) -> dict | list:
     """Call an MCP tool and parse the JSON response."""
     result = await mcp._tool_manager.call_tool(tool_name, args or {})
     return json.loads(result)
+
+
+def _set_scoped_admin(auth_user) -> None:
+    """Simulate a daemon-dispatched agent with a scoped key for an admin user."""
+    set_current_user(
+        {
+            "id": auth_user["id"],
+            "organization_id": auth_user["organization_id"],
+            "role": "admin",
+            "display_name": "Scoped Test User",
+            "email": "scoped@test.com",
+            "memory_scope": "user",
+            "memory_scope_user_id": auth_user["id"],
+        }
+    )
 
 
 # ============================================================================
@@ -131,7 +149,7 @@ class TestListAgentDefinitions:
         set_current_user(None)
         result = await _call(mcp, "list_agent_definitions")
         assert "error" in result
-
+    # End of definition tool tests.
 
 # ============================================================================
 # get_agent_definition
@@ -159,7 +177,6 @@ class TestGetAgentDefinition:
             mcp, "get_agent_definition", {"agent_id": "00000000-0000-0000-0000-000000000000"}
         )
         assert "error" in result
-
     @pytest.mark.asyncio
     async def test_no_auth_returns_error(self, mcp):
         set_current_user(None)
@@ -167,8 +184,6 @@ class TestGetAgentDefinition:
             mcp, "get_agent_definition", {"agent_id": "00000000-0000-0000-0000-000000000000"}
         )
         assert "error" in result
-
-
 # ============================================================================
 # list_skill_definitions
 # ============================================================================
@@ -432,6 +447,34 @@ class TestGrantSkillToAgent:
         )
         assert "error" in result
 
+    @pytest.mark.asyncio
+    async def test_scoped_agent_context_cannot_grant_skill(self, mcp, auth_user, repo):
+        agent = await repo.create_agent(
+            name="scoped-grantee-agent",
+            description="",
+            content="# Agent",
+            org_id=str(auth_user["organization_id"]),
+            created_by=str(auth_user["id"]),
+            owner_user_id=str(auth_user["id"]),
+        )
+        skill = await repo.create_skill(
+            name="scoped-granted-skill",
+            description="",
+            content="# Skill",
+            org_id=str(auth_user["organization_id"]),
+            created_by=str(auth_user["id"]),
+            owner_user_id=str(auth_user["id"]),
+        )
+        _set_scoped_admin(auth_user)
+        result = await _call(
+            mcp,
+            "grant_skill_to_agent",
+            {"agent_id": str(agent["id"]), "skill_id": str(skill["id"])},
+        )
+        assert result["code"] == 403
+        assert "Human approval required" in result["error"]
+        assert await repo.get_agent_skills(str(agent["id"])) == []
+
 
 # ============================================================================
 # update_agent_definition
@@ -476,52 +519,58 @@ class TestUpdateAgentDefinition:
         )
         assert "error" in result
 
-
-# ============================================================================
-# approve_agent_definition
-# ============================================================================
-
-
-class TestApproveAgentDefinition:
     @pytest.mark.asyncio
-    async def test_approve_succeeds(self, mcp, auth_user, repo):
+    async def test_scoped_agent_context_cannot_update_agent(self, mcp, auth_user, repo):
         agent = await repo.create_agent(
-            name="to-approve-agent",
-            description="",
-            content="# Agent",
+            name="scoped-update-agent",
+            description="Original",
+            content="# Original",
             org_id=str(auth_user["organization_id"]),
             created_by=str(auth_user["id"]),
             owner_user_id=str(auth_user["id"]),
-            status="proposed",
         )
-        result = await _call(mcp, "approve_agent_definition", {"agent_id": str(agent["id"])})
-        assert result["status"] == "active"
+        _set_scoped_admin(auth_user)
+        result = await _call(
+            mcp,
+            "update_agent_definition",
+            {"agent_id": str(agent["id"]), "content": "# Hot patch"},
+        )
+        assert result["code"] == 403
+        assert "Human approval required" in result["error"]
+        fetched = await repo.get_agent(str(agent["id"]), str(auth_user["organization_id"]))
+        assert fetched["content"] == "# Original"
 
+
+# ============================================================================
+# update_skill_definition
+# ============================================================================
+
+
+class TestUpdateSkillDefinition:
     @pytest.mark.asyncio
-    async def test_non_admin_rejected(self, mcp, auth_user):
-        set_current_user(
-            {
-                "id": auth_user["id"],
-                "organization_id": auth_user["organization_id"],
-                "role": "member",
-                "display_name": "Member",
-                "email": "member@test.com",
-            }
+    async def test_update_succeeds(self, mcp, auth_user, repo):
+        skill = await repo.create_skill(
+            name="update-skill",
+            description="Original",
+            content="# Original",
+            org_id=str(auth_user["organization_id"]),
+            created_by=str(auth_user["id"]),
+            owner_user_id=str(auth_user["id"]),
         )
         result = await _call(
             mcp,
-            "approve_agent_definition",
-            {"agent_id": "00000000-0000-0000-0000-000000000000"},
+            "update_skill_definition",
+            {"skill_id": str(skill["id"]), "description": "Updated", "content": "# Updated"},
         )
-        assert "error" in result
-        assert "Admin" in result["error"] or "admin" in result["error"]
+        assert result["description"] == "Updated"
+        assert result["content"] == "# Updated"
 
     @pytest.mark.asyncio
-    async def test_not_found(self, mcp, auth_user):
+    async def test_update_not_found(self, mcp, auth_user):
         result = await _call(
             mcp,
-            "approve_agent_definition",
-            {"agent_id": "00000000-0000-0000-0000-000000000000"},
+            "update_skill_definition",
+            {"skill_id": "00000000-0000-0000-0000-000000000000", "content": "# x"},
         )
         assert "error" in result
 
@@ -530,59 +579,93 @@ class TestApproveAgentDefinition:
         set_current_user(None)
         result = await _call(
             mcp,
-            "approve_agent_definition",
-            {"agent_id": "00000000-0000-0000-0000-000000000000"},
+            "update_skill_definition",
+            {"skill_id": "00000000-0000-0000-0000-000000000000", "content": "# x"},
         )
         assert "error" in result
 
-
-# ============================================================================
-# reject_agent_definition
-# ============================================================================
-
-
-class TestRejectAgentDefinition:
     @pytest.mark.asyncio
-    async def test_reject_succeeds(self, mcp, auth_user, repo):
+    async def test_scoped_agent_context_cannot_update_skill(self, mcp, auth_user, repo):
+        skill = await repo.create_skill(
+            name="scoped-update-skill",
+            description="Original",
+            content="# Original",
+            org_id=str(auth_user["organization_id"]),
+            created_by=str(auth_user["id"]),
+            owner_user_id=str(auth_user["id"]),
+        )
+        _set_scoped_admin(auth_user)
+        result = await _call(
+            mcp,
+            "update_skill_definition",
+            {"skill_id": str(skill["id"]), "content": "# Hot patch"},
+        )
+        assert result["code"] == 403
+        assert "Human approval required" in result["error"]
+        fetched = await repo.get_skill(str(skill["id"]), str(auth_user["organization_id"]))
+        assert fetched["content"] == "# Original"
+
+
+# ============================================================================
+# grant_hook_to_agent
+# ============================================================================
+
+
+class TestGrantHookToAgent:
+    @pytest.mark.asyncio
+    async def test_scoped_agent_context_cannot_grant_hook(self, mcp, auth_user, repo):
         agent = await repo.create_agent(
-            name="to-reject-agent",
+            name="scoped-hook-agent",
             description="",
             content="# Agent",
             org_id=str(auth_user["organization_id"]),
             created_by=str(auth_user["id"]),
             owner_user_id=str(auth_user["id"]),
-            status="proposed",
         )
-        result = await _call(mcp, "reject_agent_definition", {"agent_id": str(agent["id"])})
-        assert result["status"] == "rejected"
-
-    @pytest.mark.asyncio
-    async def test_non_admin_rejected(self, mcp, auth_user):
-        set_current_user(
-            {
-                "id": auth_user["id"],
-                "organization_id": auth_user["organization_id"],
-                "role": "member",
-                "display_name": "Member",
-                "email": "member@test.com",
-            }
+        hook = await repo.create_hook(
+            name="scoped-hook",
+            description="Inject context",
+            trigger_event="before_tool_call",
+            action_type="static_context",
+            content="Context",
+            config={},
+            org_id=str(auth_user["organization_id"]),
+            created_by=str(auth_user["id"]),
+            status="active",
+            owner_user_id=str(auth_user["id"]),
         )
+        _set_scoped_admin(auth_user)
         result = await _call(
             mcp,
-            "reject_agent_definition",
-            {"agent_id": "00000000-0000-0000-0000-000000000000"},
+            "grant_hook_to_agent",
+            {"agent_id": str(agent["id"]), "hook_id": str(hook["id"])},
         )
-        assert "error" in result
+        assert result["code"] == 403
+        assert "Human approval required" in result["error"]
+        assert await repo.get_agent_hooks(str(agent["id"])) == []
 
-    @pytest.mark.asyncio
-    async def test_no_auth_returns_error(self, mcp):
-        set_current_user(None)
-        result = await _call(
-            mcp,
+
+# ============================================================================
+# human approval tools are not exposed over MCP
+# ============================================================================
+
+
+class TestHumanApprovalToolsNotRegistered:
+    def test_approval_and_rejection_tools_not_registered(self, mcp):
+        tool_names = set(mcp._tool_manager._tools)  # noqa: SLF001 - test introspection
+        human_only_tools = {
+            "approve_agent_definition",
             "reject_agent_definition",
-            {"agent_id": "00000000-0000-0000-0000-000000000000"},
-        )
-        assert "error" in result
+            "approve_skill_definition",
+            "reject_skill_definition",
+            "approve_hook_definition",
+            "reject_hook_definition",
+            "approve_tool_definition",
+            "reject_tool_definition",
+            "approve_mcp_server_definition",
+            "reject_mcp_server_definition",
+        }
+        assert tool_names.isdisjoint(human_only_tools)
 
 
 # ============================================================================
@@ -797,104 +880,6 @@ class TestRevokeMcpServerFromAgent:
 
 
 # ============================================================================
-# approve_skill_definition
-# ============================================================================
-
-
-class TestApproveSkillDefinition:
-    @pytest.mark.asyncio
-    async def test_approve_succeeds(self, mcp, auth_user, repo):
-        skill = await repo.create_skill(
-            name="to-approve-skill",
-            description="",
-            content="# Skill",
-            org_id=str(auth_user["organization_id"]),
-            created_by=str(auth_user["id"]),
-            owner_user_id=str(auth_user["id"]),
-            status="proposed",
-        )
-        result = await _call(mcp, "approve_skill_definition", {"skill_id": str(skill["id"])})
-        assert result["status"] == "active"
-
-    @pytest.mark.asyncio
-    async def test_non_admin_rejected(self, mcp, auth_user):
-        set_current_user(
-            {
-                "id": auth_user["id"],
-                "organization_id": auth_user["organization_id"],
-                "role": "member",
-                "display_name": "Member",
-                "email": "member@test.com",
-            }
-        )
-        result = await _call(
-            mcp,
-            "approve_skill_definition",
-            {"skill_id": "00000000-0000-0000-0000-000000000000"},
-        )
-        assert "error" in result
-
-    @pytest.mark.asyncio
-    async def test_no_auth_returns_error(self, mcp):
-        set_current_user(None)
-        result = await _call(
-            mcp,
-            "approve_skill_definition",
-            {"skill_id": "00000000-0000-0000-0000-000000000000"},
-        )
-        assert "error" in result
-
-
-# ============================================================================
-# reject_skill_definition
-# ============================================================================
-
-
-class TestRejectSkillDefinition:
-    @pytest.mark.asyncio
-    async def test_reject_succeeds(self, mcp, auth_user, repo):
-        skill = await repo.create_skill(
-            name="to-reject-skill",
-            description="",
-            content="# Skill",
-            org_id=str(auth_user["organization_id"]),
-            created_by=str(auth_user["id"]),
-            owner_user_id=str(auth_user["id"]),
-            status="proposed",
-        )
-        result = await _call(mcp, "reject_skill_definition", {"skill_id": str(skill["id"])})
-        assert result["status"] == "rejected"
-
-    @pytest.mark.asyncio
-    async def test_non_admin_rejected(self, mcp, auth_user):
-        set_current_user(
-            {
-                "id": auth_user["id"],
-                "organization_id": auth_user["organization_id"],
-                "role": "member",
-                "display_name": "Member",
-                "email": "member@test.com",
-            }
-        )
-        result = await _call(
-            mcp,
-            "reject_skill_definition",
-            {"skill_id": "00000000-0000-0000-0000-000000000000"},
-        )
-        assert "error" in result
-
-    @pytest.mark.asyncio
-    async def test_no_auth_returns_error(self, mcp):
-        set_current_user(None)
-        result = await _call(
-            mcp,
-            "reject_skill_definition",
-            {"skill_id": "00000000-0000-0000-0000-000000000000"},
-        )
-        assert "error" in result
-
-
-# ============================================================================
 # delete_skill_definition
 # ============================================================================
 
@@ -1023,7 +1008,12 @@ class TestCreateMcpServerDefinition:
         result = await _call(
             mcp,
             "create_mcp_server_definition",
-            {"name": "bad-args-server", "server_type": "stdio", "command": "mybin", "args": "not-json"},
+            {
+                "name": "bad-args-server",
+                "server_type": "stdio",
+                "command": "mybin",
+                "args": "not-json",
+            },
         )
         assert "error" in result
 
@@ -1080,109 +1070,5 @@ class TestUpdateMcpServerDefinition:
             mcp,
             "update_mcp_server_definition",
             {"server_id": "00000000-0000-0000-0000-000000000000", "description": "x"},
-        )
-        assert "error" in result
-
-
-# ============================================================================
-# approve_mcp_server_definition
-# ============================================================================
-
-
-class TestApproveMcpServerDefinition:
-    @pytest.mark.asyncio
-    async def test_approve_succeeds(self, mcp, auth_user, repo):
-        server = await repo.create_mcp_server(
-            name="to-approve-mcp-server",
-            description="",
-            server_type="http",
-            url="http://approve.example.com",
-            org_id=str(auth_user["organization_id"]),
-            created_by=str(auth_user["id"]),
-            owner_user_id=str(auth_user["id"]),
-            status="proposed",
-        )
-        result = await _call(
-            mcp, "approve_mcp_server_definition", {"server_id": str(server["id"])}
-        )
-        assert result["status"] == "active"
-
-    @pytest.mark.asyncio
-    async def test_non_admin_rejected(self, mcp, auth_user):
-        set_current_user(
-            {
-                "id": auth_user["id"],
-                "organization_id": auth_user["organization_id"],
-                "role": "member",
-                "display_name": "Member",
-                "email": "member@test.com",
-            }
-        )
-        result = await _call(
-            mcp,
-            "approve_mcp_server_definition",
-            {"server_id": "00000000-0000-0000-0000-000000000000"},
-        )
-        assert "error" in result
-
-    @pytest.mark.asyncio
-    async def test_no_auth_returns_error(self, mcp):
-        set_current_user(None)
-        result = await _call(
-            mcp,
-            "approve_mcp_server_definition",
-            {"server_id": "00000000-0000-0000-0000-000000000000"},
-        )
-        assert "error" in result
-
-
-# ============================================================================
-# reject_mcp_server_definition
-# ============================================================================
-
-
-class TestRejectMcpServerDefinition:
-    @pytest.mark.asyncio
-    async def test_reject_succeeds(self, mcp, auth_user, repo):
-        server = await repo.create_mcp_server(
-            name="to-reject-mcp-server",
-            description="",
-            server_type="http",
-            url="http://reject.example.com",
-            org_id=str(auth_user["organization_id"]),
-            created_by=str(auth_user["id"]),
-            owner_user_id=str(auth_user["id"]),
-            status="proposed",
-        )
-        result = await _call(
-            mcp, "reject_mcp_server_definition", {"server_id": str(server["id"])}
-        )
-        assert result["status"] == "rejected"
-
-    @pytest.mark.asyncio
-    async def test_non_admin_rejected(self, mcp, auth_user):
-        set_current_user(
-            {
-                "id": auth_user["id"],
-                "organization_id": auth_user["organization_id"],
-                "role": "member",
-                "display_name": "Member",
-                "email": "member@test.com",
-            }
-        )
-        result = await _call(
-            mcp,
-            "reject_mcp_server_definition",
-            {"server_id": "00000000-0000-0000-0000-000000000000"},
-        )
-        assert "error" in result
-
-    @pytest.mark.asyncio
-    async def test_no_auth_returns_error(self, mcp):
-        set_current_user(None)
-        result = await _call(
-            mcp,
-            "reject_mcp_server_definition",
-            {"server_id": "00000000-0000-0000-0000-000000000000"},
         )
         assert "error" in result

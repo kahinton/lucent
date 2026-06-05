@@ -1,0 +1,228 @@
+{% extends "settings_layout.html" %}
+{% set settings_section = "runtime" %}
+{% set settings_title = "Runtime Settings" %}
+{% set settings_subtitle = "Canonical settings catalog with DB-backed runtime values and env fallback." %}
+
+{% block settings_content %}
+<div class="rounded-xl border border-blue-200 bg-blue-50 p-4">
+    <div class="flex gap-3">
+        <svg class="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z"/></svg>
+        <div>
+            <h3 class="text-sm font-semibold text-blue-900">How these settings are applied</h3>
+            <p class="mt-1 text-sm text-blue-800">
+                Runtime values saved here live in the database, so they are included with normal backups and shared by the workspace. If a setting is reset or has never been saved, Lucent falls back to its environment variable, then to the built-in default.
+            </p>
+            <p class="mt-2 text-xs text-blue-700">
+                Bootstrap and credential settings are shown for visibility, but locked or hidden when they must remain in environment, Secrets, or Connections.
+            </p>
+        </div>
+    </div>
+</div>
+
+<div data-runtime-flash class="hidden rounded-xl border p-4 text-sm font-medium"></div>
+
+{% for section, setting_items in settings_by_section.items() %}
+<div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+    <div class="px-6 py-4 border-b border-gray-100">
+        <h3 class="text-base font-semibold text-gray-900">{{ section }}</h3>
+    </div>
+    <div class="divide-y divide-gray-100">
+        {% for item in setting_items %}
+        {% set d = item.definition %}
+        <div class="p-6" data-runtime-setting-card="{{ d.key }}">
+            <div class="flex flex-col xl:flex-row xl:items-start xl:justify-between gap-4">
+                <div class="min-w-0 flex-1">
+                    <div class="flex flex-wrap items-center gap-2">
+                        <h4 class="text-sm font-semibold text-gray-900">{{ d.title }}</h4>
+                        {% if item.source == 'database' %}
+                        <span data-runtime-source-badge class="inline-flex items-center rounded-full bg-green-100 px-2 py-0.5 text-[11px] font-medium text-green-700">Saved in DB</span>
+                        {% elif item.source == 'environment' %}
+                        <span data-runtime-source-badge class="inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium text-amber-800">From env</span>
+                        {% else %}
+                        <span data-runtime-source-badge class="inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-[11px] font-medium text-gray-600">Default</span>
+                        {% endif %}
+                        {% if not d.editable %}
+                        <span class="inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-700">Locked</span>
+                        {% endif %}
+                        {% if d.sensitive %}
+                        <span class="inline-flex items-center rounded-full bg-rose-100 px-2 py-0.5 text-[11px] font-medium text-rose-700">Hidden</span>
+                        {% endif %}
+                        {% if d.requires_restart %}
+                        <span class="inline-flex items-center rounded-full bg-indigo-100 px-2 py-0.5 text-[11px] font-medium text-indigo-700">Restart may be required</span>
+                        {% endif %}
+                    </div>
+                    <p class="mt-1 text-sm text-gray-600">{{ d.description }}</p>
+                    {% if d.help_text %}
+                    <p class="mt-1 text-xs text-gray-500">{{ d.help_text }}</p>
+                    {% endif %}
+                    <div class="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-500">
+                        <span>Key: <code class="font-mono bg-gray-100 px-1 py-0.5 rounded">{{ d.key }}</code></span>
+                        <span>Env fallback: <code class="font-mono bg-gray-100 px-1 py-0.5 rounded">{{ d.env_var }}</code>{% if item.env_var_set %} <span class="text-amber-700">set</span>{% endif %}</span>
+                        <span>Default: <code class="font-mono bg-gray-100 px-1 py-0.5 rounded">{{ item.default_display }}</code></span>
+                    </div>
+                </div>
+
+                <div class="w-full xl:w-[28rem]">
+                    <div class="rounded-lg border border-gray-200 bg-gray-50 p-3">
+                        <p class="text-[11px] uppercase tracking-wider text-gray-500">Effective value</p>
+                        <p data-runtime-display-value class="mt-1 text-sm font-semibold text-gray-900 break-all">{{ item.display_value }}</p>
+                    </div>
+
+                    {% if d.editable %}
+                    <div class="mt-3 flex flex-col sm:flex-row gap-2">
+                        <form action="/settings/runtime/{{ d.key }}" method="post" class="flex-1 flex gap-2" data-runtime-form="save">
+                            {% if d.choices %}
+                            <select name="value" class="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-500">
+                                {% for choice in d.choices %}
+                                <option value="{{ choice }}" {% if item.form_value == choice %}selected{% endif %}>{{ choice }}</option>
+                                {% endfor %}
+                            </select>
+                            {% elif d.value_type == 'boolean' %}
+                            <select name="value" class="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-500">
+                                <option value="true" {% if item.form_value == 'true' %}selected{% endif %}>Enabled</option>
+                                <option value="false" {% if item.form_value == 'false' %}selected{% endif %}>Disabled</option>
+                            </select>
+                            {% elif d.value_type == 'integer' %}
+                            <input type="number" name="value" value="{{ item.form_value }}" step="1"
+                                {% if d.min_value is not none %}min="{{ d.min_value }}"{% endif %}
+                                {% if d.max_value is not none %}max="{{ d.max_value }}"{% endif %}
+                                class="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-500">
+                            {% elif d.value_type == 'float' %}
+                            <input type="number" name="value" value="{{ item.form_value }}" step="0.01"
+                                {% if d.min_value is not none %}min="{{ d.min_value }}"{% endif %}
+                                {% if d.max_value is not none %}max="{{ d.max_value }}"{% endif %}
+                                class="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-500">
+                            {% else %}
+                            <input type="text" name="value" value="{{ item.form_value }}"
+                                class="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-500">
+                            {% endif %}
+                            <button type="submit" class="px-3 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 text-sm font-medium whitespace-nowrap">Save</button>
+                        </form>
+                        <form action="/settings/runtime/{{ d.key }}/reset" method="post" data-runtime-form="reset">
+                            <button type="submit" class="w-full sm:w-auto px-3 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-100 text-sm font-medium whitespace-nowrap">
+                                Reset
+                            </button>
+                        </form>
+                    </div>
+                    {% else %}
+                    <div class="mt-3 rounded-lg border border-gray-200 bg-gray-50 p-3">
+                        <p class="text-xs font-medium text-gray-700">Managed outside Runtime Settings</p>
+                        <p class="mt-1 text-xs text-gray-500">
+                            {{ d.read_only_reason or 'This value is read during bootstrap or contains secret material, so it must be managed from environment, Secrets, or Connections.' }}
+                        </p>
+                    </div>
+                    {% endif %}
+                    <p class="mt-2 text-xs text-gray-500" data-runtime-source-note>
+                        {% if item.source == 'database' %}
+                        This saved value takes precedence over the environment fallback.
+                        {% elif item.source == 'environment' %}
+                        No DB value is saved, so Lucent is using the environment variable.
+                        {% else %}
+                        No DB value or environment variable is set, so Lucent is using the built-in default.
+                        {% endif %}
+                    </p>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endfor %}
+{% endblock %}
+
+{% block extra_scripts %}
+{{ super() }}
+<script nonce="{{ request.state.csp_nonce }}">
+document.addEventListener('DOMContentLoaded', function() {
+    const flash = document.querySelector('[data-runtime-flash]');
+
+    function csrfToken() {
+        const cookie = document.cookie.split('; ').find(c => c.startsWith('lucent_csrf='));
+        return cookie ? decodeURIComponent(cookie.split('=')[1] || '') : '';
+    }
+
+    function showFlash(kind, message) {
+        if (!flash || !message) return;
+        const styles = kind === 'error'
+            ? 'rounded-xl border p-4 text-sm font-medium bg-red-50 border-red-200 text-red-800'
+            : 'rounded-xl border p-4 text-sm font-medium bg-green-50 border-green-200 text-green-800';
+        flash.className = styles;
+        flash.textContent = message;
+        window.clearTimeout(showFlash._timer);
+        showFlash._timer = window.setTimeout(function() {
+            flash.className = 'hidden rounded-xl border p-4 text-sm font-medium';
+            flash.textContent = '';
+        }, 3500);
+    }
+
+    function setControlsDisabled(card, disabled) {
+        card.querySelectorAll('button, input, select').forEach(function(control) {
+            control.disabled = disabled;
+            control.classList.toggle('opacity-60', disabled);
+            control.classList.toggle('cursor-wait', disabled);
+        });
+    }
+
+    function updateFormControl(card, formValue) {
+        const control = card.querySelector('[data-runtime-form="save"] [name="value"]');
+        if (control && formValue !== undefined && formValue !== null) {
+            control.value = String(formValue);
+        }
+    }
+
+    function updateCard(setting) {
+        const card = document.querySelector('[data-runtime-setting-card="' + CSS.escape(setting.key) + '"]');
+        if (!card) return;
+        const badge = card.querySelector('[data-runtime-source-badge]');
+        if (badge) {
+            badge.textContent = setting.source_label;
+            badge.className = setting.source_badge_class;
+        }
+        const value = card.querySelector('[data-runtime-display-value]');
+        if (value) value.textContent = setting.display_value;
+        const note = card.querySelector('[data-runtime-source-note]');
+        if (note) note.textContent = setting.source_note;
+        updateFormControl(card, setting.form_value);
+    }
+
+    async function submitRuntimeForm(event) {
+        event.preventDefault();
+        const form = event.currentTarget;
+        const card = form.closest('[data-runtime-setting-card]');
+        if (!card) return;
+
+        const data = new FormData(form);
+        if (!data.has('csrf_token')) {
+            data.set('csrf_token', csrfToken());
+        }
+
+        setControlsDisabled(card, true);
+        try {
+            const response = await fetch(form.action, {
+                method: 'POST',
+                body: data,
+                credentials: 'same-origin',
+                headers: {
+                    'Accept': 'application/json',
+                    'X-Requested-With': 'fetch'
+                }
+            });
+            const payload = await response.json().catch(function() { return null; });
+            if (!response.ok || !payload || payload.ok === false) {
+                throw new Error((payload && payload.error) || 'Setting update failed.');
+            }
+            updateCard(payload.setting);
+            showFlash('success', payload.message || 'Setting saved.');
+        } catch (err) {
+            showFlash('error', err && err.message ? err.message : 'Setting update failed.');
+        } finally {
+            setControlsDisabled(card, false);
+        }
+    }
+
+    document.querySelectorAll('[data-runtime-form]').forEach(function(form) {
+        form.addEventListener('submit', submitRuntimeForm);
+    });
+});
+</script>
+{% endblock %}

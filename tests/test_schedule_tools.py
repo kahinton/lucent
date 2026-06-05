@@ -11,8 +11,9 @@ import pytest_asyncio
 from mcp.server.fastmcp import FastMCP
 
 from lucent.auth import set_current_user
+from lucent.db.definitions import DefinitionRepository
 from lucent.db.schedules import ScheduleRepository
-from lucent.tools.schedules import register_schedule_tools
+from lucent.tools.schedules import FALLBACK_WORKFLOW_AGENT_TYPES, register_schedule_tools
 
 # ============================================================================
 # Fixtures
@@ -223,6 +224,112 @@ class TestCreateSchedule:
             {"title": "Limited", "schedule_type": "once", "max_runs": 5},
         )
         assert "id" in result
+
+
+# ============================================================================
+# create_workflow
+# ============================================================================
+
+
+class TestCreateWorkflow:
+    def test_fallback_agent_types_exclude_chat_only_composer(self):
+        assert "workflow-composer" not in FALLBACK_WORKFLOW_AGENT_TYPES
+
+    @pytest.mark.asyncio
+    async def test_create_workflow_rejects_unknown_action_agent(self, mcp, auth_user, db_pool):
+        repo = DefinitionRepository(db_pool)
+        await repo.create_agent(
+            name="code",
+            description="Code agent",
+            content="# Code",
+            org_id=str(auth_user["organization_id"]),
+            created_by=str(auth_user["id"]),
+            status="active",
+        )
+
+        result = await _call(
+            mcp,
+            "create_workflow",
+            {
+                "title": "Bad workflow agent",
+                "trigger_type": "manual",
+                "actions_json": json.dumps(
+                    [
+                        {
+                            "action_type": "task",
+                            "title": "Do generic work",
+                            "agent_type": "general-purpose",
+                        }
+                    ]
+                ),
+            },
+        )
+
+        assert result["error"] == "Unknown workflow action agent_type"
+        assert result["invalid_agent_types"] == ["general-purpose"]
+
+    @pytest.mark.asyncio
+    async def test_create_workflow_rejects_server_function_actions(self, mcp, auth_user):
+        result = await _call(
+            mcp,
+            "create_workflow",
+            {
+                "title": "Bad server workflow",
+                "trigger_type": "manual",
+                "actions_json": json.dumps(
+                    [
+                        {
+                            "action_type": "server_function",
+                            "title": "Run internal thing",
+                            "function": "release_stale_tasks",
+                        }
+                    ]
+                ),
+            },
+        )
+
+        assert "server_function actions are reserved" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_create_workflow_normalizes_action_aliases(self, mcp, auth_user, db_pool):
+        repo = DefinitionRepository(db_pool)
+        await repo.create_agent(
+            name="code",
+            description="Code agent",
+            content="# Code",
+            org_id=str(auth_user["organization_id"]),
+            created_by=str(auth_user["id"]),
+            status="active",
+        )
+
+        result = await _call(
+            mcp,
+            "create_workflow",
+            {
+                "title": "Alias workflow",
+                "trigger_type": "manual",
+                "actions_json": json.dumps(
+                    [
+                        {
+                            "type": "task",
+                            "title": "Record output",
+                            "agent_type": "code",
+                            "instructions": "Record a result.",
+                        }
+                    ]
+                ),
+            },
+        )
+
+        assert result["id"]
+        actions = result["actions"]
+        if isinstance(actions, str):
+            actions = json.loads(actions)
+        assert actions[0]["action_type"] == "task"
+        assert actions[0]["description"] == "Record a result."
+        assert actions[0]["sequence_order"] == 0
+        assert "type" not in actions[0]
+        assert "instructions" not in actions[0]
 
 
 # ============================================================================

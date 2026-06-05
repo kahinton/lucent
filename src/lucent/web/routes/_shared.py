@@ -18,6 +18,7 @@ from lucent.auth_providers import (
     generate_csrf_token,
     get_cookie_params,
     hash_session_token,
+    is_first_run,
     validate_csrf_token,
     validate_session,
     verify_signed_value,
@@ -290,10 +291,14 @@ async def get_user_context(
     # Check session cookie
     session_token = request.cookies.get(SESSION_COOKIE_NAME)
     if not session_token:
+        if await is_first_run(pool):
+            raise HTTPException(status_code=303, headers={"Location": "/setup"})
         raise HTTPException(status_code=303, headers={"Location": "/login"})
 
     user = await validate_session(pool, session_token)
     if user is None:
+        if await is_first_run(pool):
+            raise HTTPException(status_code=303, headers={"Location": "/setup"})
         raise HTTPException(status_code=303, headers={"Location": "/login"})
 
     # Check force password change before building user context

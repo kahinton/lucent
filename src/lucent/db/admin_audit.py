@@ -65,6 +65,10 @@ MODEL_UPDATE = "model.update"
 MODEL_CREATE = "model.create"
 MODEL_DELETE = "model.delete"
 
+# Runtime settings
+SETTING_UPDATE = "settings.update"
+SETTING_RESET = "settings.reset"
+
 
 class AdminAuditRepository:
     """Repository for admin/security audit log entries."""

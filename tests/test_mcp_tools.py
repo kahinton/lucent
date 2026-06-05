@@ -87,6 +87,45 @@ class TestCreateMemory:
         assert result["importance"] == 7
         assert result["version"] == 1
 
+    async def test_create_duplicate_technical_file_returns_update_instruction(
+        self, mcp_tools, auth_user, clean_test_data
+    ):
+        prefix = clean_test_data
+        first = await _call(
+            mcp_tools,
+            "create_memory",
+            {
+                "type": "technical",
+                "content": f"{prefix}Technical note for memory.py",
+                "tags": ["lucent", "database"],
+                "metadata": {
+                    "repo": "kahinton/lucent",
+                    "filename": "src/lucent/db/memory.py",
+                },
+            },
+        )
+        assert "id" in first
+
+        duplicate = await _call(
+            mcp_tools,
+            "create_memory",
+            {
+                "type": "technical",
+                "content": f"{prefix}Duplicate note for memory.py",
+                "tags": ["lucent", "database"],
+                "metadata": {
+                    "repo": "kahinton/lucent",
+                    "directory": "src/lucent/db/",
+                    "filename": "src/lucent/db/memory.py",
+                },
+            },
+        )
+
+        assert duplicate["error"]
+        assert first["id"] in duplicate["error"]
+        assert "Update that memory instead" in duplicate["error"]
+        assert "intelligently combine" in duplicate["error"]
+
     async def test_create_retired_type_rejected(
         self, mcp_tools, auth_user, clean_test_data
     ):
@@ -142,13 +181,71 @@ class TestCreateMemory:
                 "type": "technical",
                 "content": f"{prefix} Technical memory with metadata",
                 "username": f"{prefix}user",
-                "metadata": {"language": "python", "repo": "lucent"},
+                "metadata": {"language": "python", "repo": "kahinton/lucent"},
             },
         )
 
         assert "id" in result
         assert result["type"] == "technical"
         assert result["metadata"]["language"] == "python"
+
+    async def test_create_technical_memory_bare_repo_rejected(
+        self, mcp_tools, auth_user, clean_test_data
+    ):
+        """Bare project names must not create orphan Knowledge Tree repo roots."""
+        prefix = clean_test_data
+        result = await _call(
+            mcp_tools,
+            "create_memory",
+            {
+                "type": "technical",
+                "content": f"{prefix} Technical memory with malformed repo",
+                "metadata": {"language": "python", "repo": "lucent"},
+            },
+        )
+
+        assert "error" in result
+        assert "owner/repo" in result["error"]
+
+    async def test_create_technical_memory_without_anchor_rejected(
+        self, mcp_tools, auth_user, clean_test_data
+    ):
+        """Technical memories need metadata that anchors them to a technical area."""
+        prefix = clean_test_data
+        result = await _call(
+            mcp_tools,
+            "create_memory",
+            {
+                "type": "technical",
+                "content": f"{prefix} Unanchored technical-ish note",
+                "tags": ["daemon", "needs-review"],
+            },
+        )
+
+        assert "error" in result
+        assert "metadata.category" in result["error"]
+
+    async def test_create_technical_memory_task_report_rejected(
+        self, mcp_tools, auth_user, clean_test_data
+    ):
+        """Task reports and deliverable indexes should be experience/output artifacts."""
+        prefix = clean_test_data
+        result = await _call(
+            mcp_tools,
+            "create_memory",
+            {
+                "type": "technical",
+                "content": (
+                    f"{prefix} Done.\n\n## Deliverables\n\n"
+                    "- Branch: docs/example\n- Commit SHA: abc123"
+                ),
+                "tags": ["daemon", "needs-review"],
+                "metadata": {"category": "architecture"},
+            },
+        )
+
+        assert "error" in result
+        assert "task report" in result["error"]
 
     async def test_create_memory_defaults(self, mcp_tools, auth_user, clean_test_data):
         """Test that default values are applied correctly."""
@@ -379,6 +476,7 @@ class TestSearchMemories:
                 "content": f"{prefix} Tagged memory for search",
                 "username": f"{prefix}user",
                 "tags": ["unique-search-tag-xyz"],
+                "metadata": {"category": "search-test"},
             },
         )
 
@@ -404,6 +502,7 @@ class TestSearchMemories:
                 "type": "technical",
                 "content": f"{prefix} Technical search content",
                 "username": f"{prefix}user",
+                "metadata": {"category": "search-test"},
             },
         )
 
@@ -569,6 +668,7 @@ class TestSearchMemoriesFull:
                 "content": f"{prefix} Full search test content",
                 "username": f"{prefix}user",
                 "tags": ["full-search-test"],
+                "metadata": {"category": "search-test"},
             },
         )
 
@@ -698,6 +798,7 @@ class TestSearchIncludeArchived:
                 "type": "technical",
                 "content": f"{prefix} mcp-full-archived ACTIVE row",
                 "username": f"{prefix}u",
+                "metadata": {"category": "search-test"},
             },
         )
         archived = await _call(
@@ -707,6 +808,7 @@ class TestSearchIncludeArchived:
                 "type": "technical",
                 "content": f"{prefix} mcp-full-archived ARCHIVED row",
                 "username": f"{prefix}u",
+                "metadata": {"category": "search-test"},
             },
         )
         await self._archive(db_pool, archived["id"])
@@ -1278,6 +1380,7 @@ class TestGetExistingTags:
                 "content": f"{prefix} Tech tag test",
                 "username": f"{prefix}user",
                 "tags": ["tech-tag-filter-test"],
+                "metadata": {"category": "tag-test"},
             },
         )
 
@@ -1967,6 +2070,7 @@ class TestExportMemories:
                 "content": f"{prefix} Untagged export",
                 "username": f"{prefix}user",
                 "tags": ["acl-export", "visible"],
+                "metadata": {"category": "export-test"},
             },
         )
 

@@ -37,6 +37,12 @@ Before entering deep reasoning, classify the cycle:
 
 If classified as idle, do not force full reasoning to "find something." Prefer skip + back-off.
 
+### Built-in Schedule Pre-flight
+
+Model-backed built-in schedules have cheap eligibility gates before request/task creation. When a gate finds no candidates, the scheduler records a structured `schedule.skipped` event with `candidate_count: 0` and does not invoke a model.
+
+Treat these skips as healthy idle outcomes. Do not create replacement work unless a real input signal exists.
+
 ### Reason
 - What's most valuable right now? Not what's scheduled — what actually matters.
 - Am I making progress on goals, or spinning my wheels?

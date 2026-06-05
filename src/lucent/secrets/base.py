@@ -10,13 +10,15 @@ from dataclasses import dataclass
 class SecretScope:
     """Ownership scope for a secret.
 
-    organization_id is always required. Exactly one of owner_user_id or
-    owner_group_id should be set to associate the secret with an owner.
+    organization_id is always required. User-facing secrets set exactly one of
+    owner_user_id or owner_group_id. Lucent-owned application secrets set
+    system_managed=True and leave both owner fields empty.
     """
 
     organization_id: str
     owner_user_id: str | None = None
     owner_group_id: str | None = None
+    system_managed: bool = False
 
 
 class SecretProvider(ABC):

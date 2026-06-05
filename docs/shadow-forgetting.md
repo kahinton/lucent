@@ -37,7 +37,9 @@ scores.
   minutes). It computes a graph-centrality protection score per memory and
   writes one row per scored memory to `memory_shadow_scores` with
   `strategy='gcp-v1'` and a divergence tag comparing the shadow decision
-  against the current vitality lifecycle stage.
+  against the current vitality lifecycle stage. The schedule short-circuits
+  with `schedule.skipped` when the feature flag is off or every eligible memory
+  already has a fresh `gcp-v1` sidecar score.
 - **MCP tools** `compute_shadow_forget_scores` and
   `get_shadow_forget_comparison` become functional (they no-op when the flag
   is off).
@@ -144,8 +146,10 @@ window and sign-off recorded against the goal memory
   environment that has not explicitly opted into the soak.
 - [ ] Apply migration `065` and verify the sidecar table and indexes exist.
 - [ ] When opting into the soak, record the start date in the goal memory and
-  verify the `Shadow Forget Scoring` schedule is registered and runs at
-  vitality cadence + offset.
+   verify the `Shadow Forget Scoring` schedule is registered and runs at
+   vitality cadence + offset. A `schedule.skipped` no-work run is not a failure,
+   but repeated skips during a soak should be explainable by fresh sidecar
+   scores or an intentionally empty memory set.
 - [ ] Watch the five `lucent.shadow_forget.*` metrics; investigate any gap
   longer than 24h and reset the soak clock if one occurs.
 - [ ] Do **not** wire the sidecar into delete or ranking paths for any reason

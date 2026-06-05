@@ -41,6 +41,9 @@ async def test_seed_system_schedules_excludes_retired_procedure_cleanup(monkeypa
     daemon = LucentDaemon()
     await daemon._seed_system_schedules()
 
+    memory_consolidation = [row for row in inserted_rows if row[0] == "Memory Consolidation"]
+    assert memory_consolidation == []
+
     retired_cleanup = [row for row in inserted_rows if row[0] == "Procedural Consolidation"]
     assert retired_cleanup == []
 
@@ -96,10 +99,7 @@ async def test_seed_system_schedules_refreshes_existing_prompts(monkeypatch):
     await daemon._seed_system_schedules()
 
     memory_updates = [row for row in updates if row[2].startswith("Autonomic memory maintenance")]
-    assert len(memory_updates) == 1
-    memory_update = memory_updates[0]
-    assert memory_update[3] == "memory"
-    assert memory_update[4] == "interval"
-    assert memory_update[5] == daemon_module.AUTONOMIC_MINUTES * 60
-    assert memory_update[8] == daemon_module.MEMORY_CONSOLIDATION_PROMPT
-    assert "Desired Content Contract" in memory_update[8]
+    assert memory_updates == []
+
+    learning_updates = [row for row in updates if row[2].startswith("Process recent work results")]
+    assert len(learning_updates) == 1

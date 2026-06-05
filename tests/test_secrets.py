@@ -255,6 +255,66 @@ class TestBuiltinProvider:
         assert await provider.get(f"{secret_prefix}private", scope_b) is None
         assert f"{secret_prefix}private" not in await provider.list_keys(scope_b)
 
+    @pytest.mark.asyncio
+    async def test_system_managed_scope(self, provider, org_and_users, db_pool, secret_prefix):
+        """Lucent-owned app secrets can be stored without user/group ownership."""
+        system_scope = SecretScope(
+            organization_id=str(org_and_users["org"]["id"]),
+            system_managed=True,
+        )
+        user_scope = SecretScope(
+            organization_id=str(org_and_users["org"]["id"]),
+            owner_user_id=str(org_and_users["user_a"]["id"]),
+        )
+        key = f"{secret_prefix}system-signing"
+
+        await provider.set(key, "stored-in-secret-provider", system_scope)
+
+        assert await provider.get(key, system_scope) == "stored-in-secret-provider"
+        assert await provider.get(key, user_scope) is None
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """SELECT system_managed, owner_user_id, owner_group_id
+                   FROM secrets WHERE key = $1""",
+                key,
+            )
+        assert row["system_managed"] is True
+        assert row["owner_user_id"] is None
+        assert row["owner_group_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_initialize_signing_secret_uses_secret_storage(
+        self,
+        registered_provider,
+        db_pool,
+        secret_prefix,
+        monkeypatch,
+    ):
+        """Cookie signing secret is created and reloaded through SecretRegistry."""
+        import lucent.auth_providers as auth_providers
+
+        monkeypatch.delenv("LUCENT_SIGNING_SECRET", raising=False)
+        monkeypatch.setattr(auth_providers, "SYSTEM_SECRET_ORG_NAME", f"{secret_prefix}system")
+        auth_providers._set_signing_secret("", "test")
+
+        first = await auth_providers.initialize_signing_secret(db_pool)
+        auth_providers._set_signing_secret("", "test")
+        second = await auth_providers.initialize_signing_secret(db_pool)
+
+        assert second == first
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """SELECT s.system_managed, s.owner_user_id, s.owner_group_id
+                   FROM secrets s
+                   JOIN organizations o ON o.id = s.organization_id
+                   WHERE o.name = $1 AND s.key = $2""",
+                f"{secret_prefix}system",
+                auth_providers.SIGNING_SECRET_KEY,
+            )
+        assert row["system_managed"] is True
+        assert row["owner_user_id"] is None
+        assert row["owner_group_id"] is None
+
 
 # ============================================================================
 # Unit Tests: Registry

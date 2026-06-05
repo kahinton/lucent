@@ -106,9 +106,10 @@ Key variables for Docker Compose:
 | `LUCENT_PORT` | `8766` | Host port for Lucent |
 | `LUCENT_MODE` | `personal` | `personal` or `team` |
 | `LUCENT_SECRET_PROVIDER` | `auto` | Secret backend: `auto`, `builtin`, `transit`, `vault` |
-| `LUCENT_SECRET_KEY` | `lucent-dev-secret-key-change-in-production` | Fernet key (only needed for `builtin` provider) |
+| `LUCENT_SECRET_KEY` | *(none)* | Fernet key; only needed if you opt out of OpenBao with `LUCENT_SECRET_PROVIDER=builtin` |
 | `DAEMON_DB_PASSWORD` | `change-me-insecure-daemon-password` | Restricted daemon DB role password |
-| `VAULT_TOKEN` | `change-me-insecure-dev-root-token` | OpenBao/Vault token |
+| `VAULT_TOKEN_FILE` | `/shared/vault-token` | Preferred local OpenBao token source written by `openbao-init` |
+| `VAULT_TOKEN` | *(none)* | OpenBao/Vault token override when a token file is not available |
 
 ## PostgreSQL Setup
 
@@ -213,7 +214,7 @@ docker run --rm -v lucent_data:/data -v $(pwd):/backup alpine \
 | `LUCENT_AUTH_PROVIDER` | `basic` | `basic` (username/password) or `api_key` |
 | `LUCENT_SESSION_TTL_HOURS` | `24` | Web session cookie lifetime |
 | `LUCENT_SECURE_COOKIES` | `true` | Set `false` for local HTTP development without HTTPS |
-| `LUCENT_SIGNING_SECRET` | *(random)* | HMAC secret for impersonation cookies — set a fixed value for persistence across restarts |
+| `LUCENT_SIGNING_SECRET` | *(secret storage)* | Optional HMAC override for impersonation cookies. Local compose stores this as a system-managed secret through OpenBao Transit. |
 
 ### Integrations
 

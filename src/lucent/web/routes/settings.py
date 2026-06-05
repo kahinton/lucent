@@ -12,13 +12,15 @@ POST endpoints under /settings/* are CSRF-protected and audit-logged via
 :class:`AdminAuditRepository` for security-sensitive actions.
 """
 
+import logging
 from urllib.parse import quote
 from uuid import UUID
 
 import bcrypt
 from fastapi import APIRouter, Form, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
+from lucent import settings as runtime_settings
 from lucent.auth_providers import (
     CSRF_FIELD_NAME,
     SESSION_COOKIE_NAME,
@@ -36,6 +38,7 @@ from lucent.db import (
     AdminAuditRepository,
     ApiKeyRepository,
     OrganizationRepository,
+    RuntimeSettingsRepository,
     UserRepository,
     get_pool,
 )
@@ -44,6 +47,7 @@ from lucent.db import admin_audit as audit_actions
 from ._shared import _check_csrf, _set_csrf_cookie, get_user_context, templates
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -53,6 +57,84 @@ router = APIRouter()
 
 def _role_value(user) -> str:
     return user.role.value if hasattr(user.role, "value") else str(user.role)
+
+
+async def _require_admin_or_owner(request: Request):
+    user = await get_user_context(request)
+    if _role_value(user) not in ("admin", "owner"):
+        raise HTTPException(status_code=403, detail="Admin access required.")
+    return user
+
+
+def _refresh_runtime_setting_dependents(setting_key: str) -> None:
+    """Best-effort refresh for services whose singletons cache settings."""
+    if setting_key.startswith("server."):
+        try:
+            from lucent.rate_limit import reset_rate_limiters
+
+            reset_rate_limiters()
+        except Exception:
+            logger.debug("failed to reset rate limiters after settings update", exc_info=True)
+
+
+def _runtime_settings_wants_json(request: Request) -> bool:
+    accept = request.headers.get("accept", "").lower()
+    requested_with = request.headers.get("x-requested-with", "").lower()
+    return "application/json" in accept or requested_with in {"fetch", "xmlhttprequest"}
+
+
+def _runtime_source_badge(source: str) -> dict[str, str]:
+    base = "inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium"
+    if source == "database":
+        return {"label": "Saved in DB", "class_name": f"{base} bg-green-100 text-green-700"}
+    if source == "environment":
+        return {"label": "From env", "class_name": f"{base} bg-amber-100 text-amber-800"}
+    return {"label": "Default", "class_name": f"{base} bg-gray-100 text-gray-600"}
+
+
+def _runtime_source_note(source: str) -> str:
+    if source == "database":
+        return "This saved value takes precedence over the environment fallback."
+    if source == "environment":
+        return "No DB value is saved, so Lucent is using the environment variable."
+    return "No DB value or environment variable is set, so Lucent is using the built-in default."
+
+
+def _runtime_setting_payload(organization_id, setting_key: str, message: str) -> dict:
+    snapshots = runtime_settings.runtime_setting_snapshots(organization_id)
+    snapshot = next(
+        item for item in snapshots if item["definition"].key == setting_key
+    )
+    definition = snapshot["definition"]
+    badge = _runtime_source_badge(snapshot["source"])
+    return {
+        "ok": True,
+        "message": message,
+        "setting": {
+            "key": definition.key,
+            "title": definition.title,
+            "source": snapshot["source"],
+            "source_label": badge["label"],
+            "source_badge_class": badge["class_name"],
+            "source_note": _runtime_source_note(snapshot["source"]),
+            "display_value": snapshot["display_value"],
+            "form_value": snapshot["form_value"],
+        },
+    }
+
+
+def _runtime_settings_error_response(
+    request: Request,
+    message: str,
+    *,
+    status_code: int = 400,
+):
+    if _runtime_settings_wants_json(request):
+        return JSONResponse({"ok": False, "error": message}, status_code=status_code)
+    return RedirectResponse(
+        f"/settings/runtime?error={quote(message)}",
+        status_code=303,
+    )
 
 
 def _encode_pending_key(key_id: str, plain_key: str) -> str:
@@ -521,6 +603,173 @@ async def settings_organization_update(request: Request, name: str = Form(...)):
     )
     return RedirectResponse(
         f"/settings/organization?success={quote('Workspace updated.')}", status_code=303
+    )
+
+
+# ---------------------------------------------------------------------------
+# /settings/runtime — admin/owner editable runtime settings
+# ---------------------------------------------------------------------------
+
+
+@router.get("/settings/runtime", response_class=HTMLResponse)
+async def settings_runtime(
+    request: Request,
+    error: str | None = Query(default=None),
+    success: str | None = Query(default=None),
+):
+    """Admin/owner view for safe DB-backed runtime settings."""
+    user = await _require_admin_or_owner(request)
+    pool = await get_pool()
+    await runtime_settings.load_runtime_settings_from_db(
+        pool,
+        organization_id=user.organization_id,
+    )
+    return templates.TemplateResponse(
+        request,
+        "settings/runtime.html",
+        {
+            "user": user,
+            "settings_by_section": runtime_settings.runtime_settings_by_section(
+                user.organization_id
+            ),
+            "error": error,
+            "success": success,
+        },
+    )
+
+
+@router.post("/settings/runtime/{setting_key:path}/reset")
+async def settings_runtime_reset(request: Request, setting_key: str):
+    """Delete a DB setting so env/default fallback is used again."""
+    user = await _require_admin_or_owner(request)
+    await _check_csrf(request)
+
+    definition = runtime_settings.get_runtime_setting_definition(setting_key)
+    if not definition or not definition.editable:
+        return _runtime_settings_error_response(
+            request,
+            "Unknown or read-only setting.",
+            status_code=404,
+        )
+
+    old_value = runtime_settings.get_runtime_setting(
+        setting_key,
+        organization_id=user.organization_id,
+    )
+    old_source = runtime_settings.get_runtime_setting_source(
+        setting_key,
+        organization_id=user.organization_id,
+    )
+
+    pool = await get_pool()
+    repo = RuntimeSettingsRepository(pool)
+    deleted = await repo.delete_setting(user.organization_id, setting_key)
+    runtime_settings.clear_runtime_setting_cache(user.organization_id, setting_key)
+    _refresh_runtime_setting_dependents(setting_key)
+
+    new_value = runtime_settings.get_runtime_setting(
+        setting_key,
+        organization_id=user.organization_id,
+    )
+    new_source = runtime_settings.get_runtime_setting_source(
+        setting_key,
+        organization_id=user.organization_id,
+    )
+
+    audit_repo = AdminAuditRepository(pool)
+    await audit_repo.log_for_user(
+        user,
+        request,
+        action=audit_actions.SETTING_RESET,
+        entity_type="settings",
+        entity_label=definition.title,
+        changed_fields=[setting_key],
+        old_values={"value": old_value, "source": old_source},
+        new_values={"value": new_value, "source": new_source},
+        notes=(
+            "runtime setting reset to fallback"
+            if deleted
+            else "runtime setting already using fallback"
+        ),
+        extra_context={"setting_key": setting_key, "env_var": definition.env_var},
+    )
+    message = f"{definition.title} reset to fallback."
+    if _runtime_settings_wants_json(request):
+        return JSONResponse(
+            _runtime_setting_payload(user.organization_id, setting_key, message)
+        )
+    return RedirectResponse(
+        f"/settings/runtime?success={quote(message)}",
+        status_code=303,
+    )
+
+
+@router.post("/settings/runtime/{setting_key:path}")
+async def settings_runtime_update(request: Request, setting_key: str):
+    """Create/update a DB-backed runtime setting value."""
+    user = await _require_admin_or_owner(request)
+    await _check_csrf(request)
+
+    definition = runtime_settings.get_runtime_setting_definition(setting_key)
+    if not definition or not definition.editable:
+        return _runtime_settings_error_response(
+            request,
+            "Unknown or read-only setting.",
+            status_code=404,
+        )
+
+    form = await request.form()
+    raw_value = form.get("value", "")
+    try:
+        value = runtime_settings.validate_runtime_setting_value(setting_key, raw_value)
+    except ValueError as exc:
+        return _runtime_settings_error_response(
+            request,
+            f"{definition.title}: {exc}",
+        )
+
+    old_value = runtime_settings.get_runtime_setting(
+        setting_key,
+        organization_id=user.organization_id,
+    )
+    old_source = runtime_settings.get_runtime_setting_source(
+        setting_key,
+        organization_id=user.organization_id,
+    )
+
+    pool = await get_pool()
+    repo = RuntimeSettingsRepository(pool)
+    await repo.upsert_setting(
+        organization_id=user.organization_id,
+        key=setting_key,
+        value=value,
+        value_type=definition.value_type,
+        user_id=user.id,
+    )
+    runtime_settings.set_runtime_setting_cache(user.organization_id, setting_key, value)
+    _refresh_runtime_setting_dependents(setting_key)
+
+    audit_repo = AdminAuditRepository(pool)
+    await audit_repo.log_for_user(
+        user,
+        request,
+        action=audit_actions.SETTING_UPDATE,
+        entity_type="settings",
+        entity_label=definition.title,
+        changed_fields=[setting_key],
+        old_values={"value": old_value, "source": old_source},
+        new_values={"value": value, "source": "database"},
+        notes="runtime setting updated from Settings UI",
+        extra_context={"setting_key": setting_key, "env_var": definition.env_var},
+    )
+    message = f"{definition.title} updated."
+    if _runtime_settings_wants_json(request):
+        return JSONResponse(
+            _runtime_setting_payload(user.organization_id, setting_key, message)
+        )
+    return RedirectResponse(
+        f"/settings/runtime?success={quote(message)}",
+        status_code=303,
     )
 
 

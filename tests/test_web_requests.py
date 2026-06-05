@@ -200,6 +200,89 @@ class TestActivityList:
         # Request was created with source="user", should not appear
         assert "Web Test Request" not in resp.text
 
+    async def test_list_groups_approvals_running_and_finished_outputs(
+        self, client, db_pool, web_user
+    ):
+        user, org, _token = web_user
+        await _promote_web_user(db_pool, user)
+        repo = RequestRepository(db_pool)
+
+        approval = await repo.create_request(
+            title="Lane Approval Request",
+            org_id=str(org["id"]),
+            description="Needs human approval before running",
+            source="cognitive",
+            created_by=str(user["id"]),
+            force_pending_approval=True,
+        )
+        running = await repo.create_request(
+            title="Lane Running Request",
+            org_id=str(org["id"]),
+            source="user",
+        )
+        running_task = await repo.create_task(
+            request_id=str(running["id"]),
+            title="Currently running task",
+            org_id=str(org["id"]),
+            agent_type="code",
+        )
+        await repo.claim_task(str(running_task["id"]), "web-running", org_id=str(org["id"]))
+
+        completed = await repo.create_request(
+            title="Lane Completed Request",
+            org_id=str(org["id"]),
+            source="user",
+        )
+        completed_task = await repo.create_task(
+            request_id=str(completed["id"]),
+            title="Completed output task",
+            org_id=str(org["id"]),
+            agent_type="documentation",
+        )
+        await repo.create_task_output(
+            task_id=str(completed_task["id"]),
+            org_id=str(org["id"]),
+            output={"title": "Completion artifact", "external_id": "artifact-1"},
+            created_by=str(user["id"]),
+        )
+        await repo.update_request_status(str(completed["id"]), "completed", str(org["id"]))
+
+        resp = await client.get("/activity")
+
+        assert resp.status_code == 200
+        assert "Needs approval" in resp.text
+        assert "Lane Approval Request" in resp.text
+        assert f'hx-post="/daemon/review/{approval["id"]}/action"' in resp.text
+        assert "Running now" in resp.text
+        assert "Lane Running Request" in resp.text
+        assert "Recent and finished work" in resp.text
+        assert "Lane Completed Request" in resp.text
+        assert "Finished since last viewed" in resp.text
+        assert "1 output" in resp.text
+
+    async def test_detail_marks_completed_request_viewed(self, client, db_pool, web_user):
+        _user, org, _token = web_user
+        repo = RequestRepository(db_pool)
+        req = await repo.create_request(
+            title="View Clears Finished Highlight",
+            org_id=str(org["id"]),
+            source="user",
+        )
+        await repo.update_request_status(str(req["id"]), "completed", str(org["id"]))
+
+        before = await client.get("/activity", params={"status": "completed"})
+        assert before.status_code == 200
+        assert "View Clears Finished Highlight" in before.text
+        assert "Finished since last viewed" in before.text
+
+        detail = await client.get(f"/activity/{req['id']}")
+        assert detail.status_code == 200
+
+        after = await client.get("/activity", params={"status": "completed"})
+        assert after.status_code == 200
+        assert "View Clears Finished Highlight" in after.text
+        assert "Finished since last viewed" not in after.text
+
     async def test_list_unauthenticated_redirects(self, db_pool):
         """No session cookie → redirect to login."""
         app = create_app()

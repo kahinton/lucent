@@ -3,14 +3,30 @@
 import json
 import logging
 import os
+from typing import Any
 from uuid import UUID
 
+import httpx
 from mcp.server.fastmcp import FastMCP
 
 from lucent.db.requests import RequestRepository
+from lucent.llm.context import get_llm_context
+from lucent.tools.annotations import CREATE_ONLY, MUTATING, READ_ONLY
 from lucent.tools.memories import _get_current_user_context
 
 logger = logging.getLogger(__name__)
+
+_HANDOFF_REFERENCE_TYPES = {
+    "request",
+    "task",
+    "task_output",
+    "memory",
+    "workflow",
+    "schedule_run",
+    "llm_session",
+    "url",
+    "other",
+}
 
 
 async def _get_request_repository() -> RequestRepository:
@@ -32,6 +48,277 @@ async def _get_pool():
     if not database_url:
         raise RuntimeError("DATABASE_URL environment variable is required")
     return await init_db(database_url)
+
+
+def _valid_uuid(value: str | UUID | None) -> str | None:
+    if value in (None, ""):
+        return None
+    try:
+        return str(UUID(str(value)))
+    except (TypeError, ValueError):
+        return None
+
+
+def _reference_key(ref: dict[str, Any]) -> str:
+    ref_type = str(ref.get("reference_type") or ref.get("type") or "other")
+    ref_id = ref.get("reference_id") or ref.get("id")
+    url = str(ref.get("url") or "").strip()
+    label = str(ref.get("label") or ref.get("title") or "").strip()
+    if ref_id:
+        return f"{ref_type}:{ref_id}"
+    if url:
+        return f"url:{url}"
+    return f"{ref_type}:label:{label}"
+
+
+def _append_unique_reference(
+    refs: list[dict[str, Any]],
+    ref: dict[str, Any],
+    seen: set[str],
+) -> None:
+    key = _reference_key(ref)
+    if key in seen:
+        return
+    seen.add(key)
+    refs.append(ref)
+
+
+async def _handoff_lineage_references(
+    pool,
+    *,
+    org_id: str,
+) -> list[dict[str, Any]]:
+    """Build request/task/workflow references from trusted MCP request context."""
+    try:
+        from lucent.llm.context import get_llm_context
+    except Exception:
+        return []
+
+    context = get_llm_context()
+    request_id = _valid_uuid(context.get("request_id"))
+    task_id = _valid_uuid(context.get("task_id"))
+    schedule_run_id = _valid_uuid(context.get("schedule_run_id"))
+    if not any((request_id, task_id, schedule_run_id)):
+        return []
+
+    task: dict[str, Any] | None = None
+    request: dict[str, Any] | None = None
+    workflow: dict[str, Any] | None = None
+
+    async with pool.acquire() as conn:
+        if task_id:
+            task_row = await conn.fetchrow(
+                """SELECT id::text, request_id::text, title, agent_type, model, reasoning_effort
+                   FROM tasks
+                   WHERE id = $1::uuid AND organization_id = $2::uuid""",
+                task_id,
+                org_id,
+            )
+            if task_row:
+                task = dict(task_row)
+                request_id = request_id or task.get("request_id")
+
+        if request_id:
+            request_row = await conn.fetchrow(
+                """SELECT id::text, title, source, status
+                   FROM requests
+                   WHERE id = $1::uuid AND organization_id = $2::uuid""",
+                request_id,
+                org_id,
+            )
+            if request_row:
+                request = dict(request_row)
+
+        if schedule_run_id:
+            workflow_row = await conn.fetchrow(
+                """SELECT sr.id::text AS schedule_run_id,
+                          s.id::text AS workflow_id,
+                          s.title AS workflow_title
+                   FROM schedule_runs sr
+                   JOIN schedules s ON s.id = sr.schedule_id
+                   WHERE sr.id = $1::uuid AND s.organization_id = $2::uuid""",
+                schedule_run_id,
+                org_id,
+            )
+            if workflow_row:
+                workflow = dict(workflow_row)
+        elif request_id:
+            workflow_row = await conn.fetchrow(
+                """SELECT sr.id::text AS schedule_run_id,
+                          s.id::text AS workflow_id,
+                          s.title AS workflow_title
+                   FROM schedule_runs sr
+                   JOIN schedules s ON s.id = sr.schedule_id
+                   WHERE sr.request_id = $1::uuid AND s.organization_id = $2::uuid
+                   ORDER BY sr.created_at DESC
+                   LIMIT 1""",
+                request_id,
+                org_id,
+            )
+            if workflow_row:
+                workflow = dict(workflow_row)
+
+    refs: list[dict[str, Any]] = []
+    if workflow and workflow.get("workflow_id"):
+        refs.append(
+            {
+                "reference_type": "workflow",
+                "reference_id": workflow["workflow_id"],
+                "label": f"Workflow: {workflow.get('workflow_title') or 'Untitled workflow'}",
+                "url": f"/workflows/{workflow['workflow_id']}",
+                "metadata": {
+                    "source": "llm_context",
+                    "request_id": request_id,
+                    "schedule_run_id": workflow.get("schedule_run_id"),
+                },
+            }
+        )
+        refs.append(
+            {
+                "reference_type": "schedule_run",
+                "reference_id": workflow.get("schedule_run_id"),
+                "label": "Workflow run",
+                "metadata": {
+                    "source": "llm_context",
+                    "workflow_id": workflow["workflow_id"],
+                    "request_id": request_id,
+                },
+            }
+        )
+    if request and request.get("id"):
+        refs.append(
+            {
+                "reference_type": "request",
+                "reference_id": request["id"],
+                "label": f"Request: {request.get('title') or 'Untitled request'}",
+                "url": f"/activity/{request['id']}",
+                "metadata": {
+                    "source": "llm_context",
+                    "task_id": task_id,
+                    "schedule_run_id": workflow.get("schedule_run_id") if workflow else None,
+                },
+            }
+        )
+    if task and task.get("id"):
+        task_url = f"/activity/{task['request_id']}#task-{task['id']}" if task.get("request_id") else None
+        refs.append(
+            {
+                "reference_type": "task",
+                "reference_id": task["id"],
+                "label": f"Task: {task.get('title') or 'Untitled task'}",
+                "url": task_url,
+                "metadata": {
+                    "source": "llm_context",
+                    "request_id": task.get("request_id"),
+                    "agent_type": task.get("agent_type"),
+                    "model": task.get("model"),
+                    "reasoning_effort": task.get("reasoning_effort"),
+                },
+            }
+        )
+    return refs
+
+
+async def _enriched_handoff_references(
+    pool,
+    *,
+    org_id: str,
+    references: list[dict] | None,
+) -> list[dict[str, Any]]:
+    enriched: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for ref in await _handoff_lineage_references(pool, org_id=org_id):
+        if ref.get("reference_type") == "schedule_run" and not ref.get("reference_id"):
+            continue
+        _append_unique_reference(enriched, ref, seen)
+    for ref in references or []:
+        ref_type = str(ref.get("reference_type") or ref.get("type") or "other").strip().lower()
+        if ref_type not in _HANDOFF_REFERENCE_TYPES:
+            metadata = dict(ref.get("metadata") or {}) if isinstance(ref.get("metadata"), dict) else {}
+            metadata.setdefault("original_reference_type", ref_type)
+            ref = {
+                **ref,
+                "reference_type": "other",
+                "label": ref.get("label") or ref.get("title") or ref_type,
+                "metadata": metadata,
+            }
+        _append_unique_reference(enriched, ref, seen)
+    return enriched
+
+
+async def _create_handoff_interaction_response(
+    *,
+    title: str,
+    body: str,
+    interaction_type: str = "handoff",
+    requires_response: bool = False,
+    response_prompt: str = "",
+    priority: str = "medium",
+    references: list[dict] | None = None,
+    metadata: dict | None = None,
+    dedupe_key: str = "",
+    user_id: str = "",
+    source: str = "daemon",
+) -> str:
+    """Create a user handoff and return the JSON MCP-tool response."""
+    current_user_id, org_id, user_role, memory_scope, memory_scope_user_id = (
+        await _get_current_user_context()
+    )
+    if not current_user_id:
+        return json.dumps({"error": "Authentication required"})
+    if not org_id:
+        return json.dumps({"error": "No organization context"})
+    target_user_id = user_id or str(current_user_id)
+    if memory_scope == "user" and memory_scope_user_id is not None:
+        if target_user_id and str(target_user_id) != str(memory_scope_user_id):
+            return json.dumps({"error": "API key is scoped to a different user"})
+        target_user_id = str(memory_scope_user_id)
+    elif user_id and user_role not in ("admin", "owner", "daemon"):
+        if str(user_id) != str(current_user_id):
+            return json.dumps({"error": "Only admins/owners can target another user"})
+
+    from lucent.db.user_interactions import UserInteractionRepository
+
+    pool = await _get_pool()
+    repo = UserInteractionRepository(pool)
+    enriched_references = await _enriched_handoff_references(
+        pool,
+        org_id=str(org_id),
+        references=references,
+    )
+    try:
+        interaction = await repo.create_interaction(
+            org_id=str(org_id),
+            user_id=target_user_id,
+            created_by=str(current_user_id),
+            title=title,
+            body=body,
+            source=source,
+            interaction_type=interaction_type,
+            priority=priority,
+            requires_response=requires_response,
+            response_prompt=response_prompt or None,
+            metadata=metadata or {},
+            references=enriched_references,
+            dedupe_key=dedupe_key or None,
+        )
+    except ValueError as exc:
+        return json.dumps({"error": str(exc)})
+
+    return json.dumps(
+        {
+            "id": str(interaction["id"]),
+            "title": interaction["title"],
+            "status": interaction["status"],
+            "interaction_type": interaction["interaction_type"],
+            "requires_response": interaction["requires_response"],
+            "deduplicated": bool(interaction.get("deduplicated")),
+            "url": f"/handoffs/{interaction['id']}",
+            "reference_count": interaction.get("reference_count", 0),
+            "message_count": interaction.get("message_count", 0),
+        },
+        default=str,
+    )
 
 
 async def _memory_access_service(*, is_admin: bool = False):
@@ -76,6 +363,7 @@ def register_request_tools(mcp: FastMCP) -> None:
     """Register request tracking tools with the MCP server."""
 
     @mcp.tool(
+        annotations=CREATE_ONLY,
         description="""Create a tracked request \u2014 a top-level work item
 that will be broken into tasks.
 
@@ -204,6 +492,27 @@ returns status='skipped' with reason and a note explaining what to do."""
                 ),
             })
 
+        # If this MCP request was made by a persisted chat/LLM session, attach
+        # the created request back to that session. The IDs come from trusted
+        # HTTP headers injected by the chat server, not from model-authored
+        # tool arguments, so lineage cannot be hallucinated by the model.
+        llm_context = get_llm_context()
+        if llm_context.get("session_id") and req.get("id"):
+            try:
+                from lucent.db.llm_sessions import LLMSessionRepository
+
+                pool = await _get_pool()
+                session_repo = LLMSessionRepository(pool)
+                await session_repo.link_request(
+                    llm_context["session_id"],
+                    str(req["id"]),
+                    org_id=str(org_id),
+                    message_id=llm_context.get("message_id"),
+                    relation="created",
+                )
+            except Exception:
+                logger.debug("Failed to link request to LLM session", exc_info=True)
+
         result = {
             "id": str(req["id"]),
             "title": req["title"],
@@ -219,14 +528,16 @@ returns status='skipped' with reason and a note explaining what to do."""
         return json.dumps(result)
 
     @mcp.tool(
+        annotations=CREATE_ONLY,
         description="""Create a task within a tracked request.
 
 Use after create_request to break a request into individual tasks that agents will execute.
 Each task can be assigned to a specific agent type and will be dispatched in sequence_order.
 
 IMPORTANT: The agent_type must match an approved agent definition in /definitions.
-Tasks with unrecognized agent types will be rejected. Use list_available_agents or
-check /definitions to see which agents are available.
+Tasks with unrecognized or inaccessible agent types will be rejected. Use
+list_agent_definitions(status='active') or check /definitions to see which
+agents are available to the request owner.
 
 SANDBOX POLICY: Tasks that need a sandbox MUST reference an approved sandbox
 template via ``sandbox_template_id``. Inline ``sandbox_config`` is no longer
@@ -241,6 +552,8 @@ Args:
     agent_type: Name of an approved agent definition to handle this task
     model: LLM model to use for this task. If not set, the daemon
         picks a default. See list_available_models for options.
+    reasoning_effort: Optional reasoning/thinking level for models that expose
+        selectable levels. Must be one of the chosen model's allowed values.
     priority: 'low', 'medium', 'high', or 'urgent'
     sequence_order: Execution order (0-based, lower runs first)
     parent_task_id: Optional \u2014 ID of parent task for sub-tasks
@@ -262,6 +575,7 @@ if the agent type is not approved or the sandbox template is invalid."""
         description: str = "",
         agent_type: str = "code",
         model: str | None = None,
+        reasoning_effort: str | None = None,
         priority: str = "medium",
         sequence_order: int = 0,
         parent_task_id: str | None = None,
@@ -280,11 +594,16 @@ if the agent type is not approved or the sandbox template is invalid."""
 
         # Validate model against registry
         if model:
-            from lucent.model_registry import validate_model
+            from lucent.model_registry import validate_model, validate_reasoning_effort
 
             error = validate_model(model, require_tools=True)
             if error:
                 return json.dumps({"error": error})
+            effort_error = validate_reasoning_effort(model, reasoning_effort)
+            if effort_error:
+                return json.dumps({"error": effort_error})
+        elif reasoning_effort:
+            return json.dumps({"error": "reasoning_effort requires model"})
 
         # Validate agent_type resolves to an approved definition
         from lucent.db import get_pool
@@ -426,6 +745,7 @@ if the agent type is not approved or the sandbox template is invalid."""
                 sequence_order=sequence_order,
                 parent_task_id=parent_task_id,
                 model=model,
+                reasoning_effort=reasoning_effort,
                 sandbox_template_id=sandbox_template_id,
                 sandbox_config=sandbox_config,
                 requesting_user_id=str(requesting_user_id) if requesting_user_id else None,
@@ -440,6 +760,7 @@ if the agent type is not approved or the sandbox template is invalid."""
                 "status": task["status"],
                 "agent_type": task["agent_type"],
                 "model": task.get("model"),
+                "reasoning_effort": task.get("reasoning_effort"),
                 "sandbox_template_id": (
                     str(task["sandbox_template_id"])
                     if task.get("sandbox_template_id")
@@ -648,6 +969,412 @@ Returns: JSON confirmation."""
         except ValueError as exc:
             return json.dumps({"error": str(exc)})
         return json.dumps({"id": str(event["id"]), "event_type": event_type})
+
+    @mcp.tool(
+        description="""Execute a shell command inside the sandbox assigned to the current task.
+
+Use this for task work that must run in an approved sandbox, including network
+checks against hosts allowed by the sandbox template. If sandbox_id is omitted,
+Lucent resolves the current task's latest sandbox_created event.
+
+Args:
+    command: Shell command to execute in the sandbox
+    sandbox_id: Optional sandbox ID; defaults to the current task sandbox
+    cwd: Optional working directory inside the sandbox
+    timeout: Command timeout in seconds
+
+Returns: JSON with exit_code, stdout, stderr, duration_ms, timed_out, and sandbox_id."""
+    )
+    async def exec_sandbox_command(
+        command: str,
+        sandbox_id: str | None = None,
+        cwd: str | None = None,
+        timeout: int = 300,
+    ) -> str:
+        user_id, org_id, _, _, _ = await _get_current_user_context()
+        if not user_id:
+            return json.dumps({"error": "Authentication required"})
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+
+        context = get_llm_context()
+        task_id = _valid_uuid(context.get("task_id"))
+        resolved_sandbox_id = _valid_uuid(sandbox_id)
+
+        try:
+            bounded_timeout = max(1, min(int(timeout), 3600))
+        except (TypeError, ValueError):
+            bounded_timeout = 300
+
+        pool = await _get_pool()
+        async with pool.acquire() as conn:
+            if task_id:
+                task_row = await conn.fetchrow(
+                    """SELECT id::text
+                       FROM tasks
+                       WHERE id = $1::uuid AND organization_id = $2::uuid""",
+                    task_id,
+                    str(org_id),
+                )
+                if not task_row:
+                    return json.dumps({"error": "Current task not found"})
+
+            if not resolved_sandbox_id:
+                if not task_id:
+                    return json.dumps({"error": "sandbox_id is required outside task context"})
+                event_row = await conn.fetchrow(
+                    """SELECT metadata
+                       FROM task_events
+                       WHERE task_id = $1::uuid
+                         AND event_type = 'sandbox_created'
+                       ORDER BY created_at DESC
+                       LIMIT 1""",
+                    task_id,
+                )
+                metadata = dict(event_row["metadata"] or {}) if event_row else {}
+                resolved_sandbox_id = _valid_uuid(metadata.get("sandbox_id"))
+                if not resolved_sandbox_id:
+                    return json.dumps({"error": "No sandbox_created event for current task"})
+
+        from lucent.sandbox.manager import get_sandbox_manager
+
+        manager = get_sandbox_manager()
+        info = await manager.get(resolved_sandbox_id)
+        if not info:
+            return json.dumps({"error": "Sandbox not found"})
+        info_org_id = info.get("organization_id") if isinstance(info, dict) else getattr(info, "organization_id", None)
+        if info_org_id and str(info_org_id) != str(org_id):
+            return json.dumps({"error": "Sandbox not found"})
+
+        result = await manager.exec(
+            resolved_sandbox_id,
+            command,
+            cwd=cwd,
+            timeout=bounded_timeout,
+        )
+        return json.dumps(
+            {
+                "sandbox_id": resolved_sandbox_id,
+                "exit_code": result.exit_code,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "duration_ms": result.duration_ms,
+                "timed_out": result.timed_out,
+            }
+        )
+
+    @mcp.tool(
+        description="""Fetch a live weather forecast from Open-Meteo.
+
+Use this for weather recommendation workflows that need current forecast data
+without requiring a task sandbox. The tool is intentionally scoped to
+api.open-meteo.com and returns the upstream JSON response plus request params.
+
+Args:
+    latitude: Forecast latitude
+    longitude: Forecast longitude
+    timezone: Forecast timezone, defaults to America/Detroit
+    forecast_days: Number of forecast days, 1-7
+
+Returns: JSON with Open-Meteo forecast data or an error."""
+    )
+    async def fetch_open_meteo_forecast(
+        latitude: float,
+        longitude: float,
+        timezone: str = "America/Detroit",
+        forecast_days: int = 1,
+    ) -> str:
+        user_id, org_id, _, _, _ = await _get_current_user_context()
+        if not user_id:
+            return json.dumps({"error": "Authentication required"})
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+
+        try:
+            lat = float(latitude)
+            lon = float(longitude)
+        except (TypeError, ValueError):
+            return json.dumps({"error": "latitude and longitude must be numeric"})
+        if not -90 <= lat <= 90 or not -180 <= lon <= 180:
+            return json.dumps({"error": "latitude or longitude out of range"})
+
+        try:
+            days = max(1, min(int(forecast_days), 7))
+        except (TypeError, ValueError):
+            days = 1
+
+        params = {
+            "latitude": lat,
+            "longitude": lon,
+            "timezone": (timezone or "America/Detroit").strip() or "America/Detroit",
+            "forecast_days": days,
+            "temperature_unit": "fahrenheit",
+            "wind_speed_unit": "mph",
+            "precipitation_unit": "inch",
+            "current": ",".join(
+                [
+                    "temperature_2m",
+                    "apparent_temperature",
+                    "precipitation",
+                    "rain",
+                    "weather_code",
+                    "wind_speed_10m",
+                    "wind_gusts_10m",
+                ]
+            ),
+            "hourly": ",".join(
+                [
+                    "temperature_2m",
+                    "apparent_temperature",
+                    "precipitation_probability",
+                    "precipitation",
+                    "weather_code",
+                    "wind_speed_10m",
+                    "wind_gusts_10m",
+                    "uv_index",
+                ]
+            ),
+            "daily": ",".join(
+                [
+                    "temperature_2m_max",
+                    "temperature_2m_min",
+                    "precipitation_probability_max",
+                    "precipitation_sum",
+                    "wind_speed_10m_max",
+                    "wind_gusts_10m_max",
+                    "uv_index_max",
+                    "weather_code",
+                ]
+            ),
+        }
+        url = "https://api.open-meteo.com/v1/forecast"
+        try:
+            async with httpx.AsyncClient(timeout=20.0, follow_redirects=False) as client:
+                response = await client.get(url, params=params)
+                response.raise_for_status()
+                data = response.json()
+        except Exception as exc:
+            logger.warning("Open-Meteo forecast fetch failed", exc_info=True)
+            return json.dumps({"error": f"Open-Meteo forecast fetch failed: {exc}"})
+
+        return json.dumps({"provider": "open-meteo", "url": url, "params": params, "data": data})
+
+    @mcp.tool(
+        description="""Record a user-facing output/deliverable produced by a task.
+
+Use this whenever a task produces something the user can open, inspect, or act on:
+GitHub issues/PRs, sent emails, generated docs, files, deployments, memories,
+or generic links from custom tooling. These outputs are shown prominently on
+the request detail page instead of being buried inside raw task text.
+
+Known output_type values: link, github_issue, github_pr, email, document, file,
+memory, deployment, artifact, other. If output_type='link' and the URL is a
+GitHub issue/PR or mailto/document URL, Lucent will infer a more specific type.
+
+Args:
+    task_id: ID of the task that produced the output
+    title: Short human-readable label
+    url: Openable URL, if available
+    output_type: Output classification for icon/display
+    provider: Optional provider/integration name (github, gmail, google_docs, etc.)
+    description: Optional one-sentence explanation
+    external_id: Provider-native ID if no URL exists or as additional identity
+    mime_type: Optional MIME type for files/documents
+    metadata: Optional integration-specific metadata
+    is_primary: Mark this as a primary deliverable for the request
+
+Returns: JSON with the created output artifact."""
+    )
+    async def record_task_output(
+        task_id: str,
+        title: str,
+        url: str = "",
+        output_type: str = "link",
+        provider: str = "",
+        description: str = "",
+        external_id: str = "",
+        mime_type: str = "",
+        metadata: dict | None = None,
+        is_primary: bool = False,
+    ) -> str:
+        user_id, org_id, _, _, _ = await _get_current_user_context()
+        if not user_id:
+            return json.dumps({"error": "Authentication required"})
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+
+        repo = await _get_request_repository()
+        task = await repo.get_task(task_id, org_id=str(org_id))
+        if not task:
+            return json.dumps({"error": "Task not found"})
+
+        try:
+            output = await repo.create_task_output(
+                task_id=task_id,
+                org_id=str(org_id),
+                created_by=str(user_id),
+                output={
+                    "output_type": output_type,
+                    "provider": provider or None,
+                    "title": title,
+                    "description": description or None,
+                    "url": url or None,
+                    "external_id": external_id or None,
+                    "mime_type": mime_type or None,
+                    "metadata": metadata or {},
+                    "is_primary": is_primary,
+                },
+            )
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)})
+
+        def serialize(obj):
+            if hasattr(obj, "isoformat"):
+                return obj.isoformat()
+            if isinstance(obj, UUID):
+                return str(obj)
+            return str(obj)
+
+        return json.dumps(output, default=serialize)
+
+    @mcp.tool(
+        annotations=CREATE_ONLY,
+        description="""Send a Handoff to the user.
+
+Use this when a task/workflow says to "send a handoff", "provide a handoff",
+"hand this to the user", share an update the user should read, or ask a
+question before continuing. This creates a visible item in Handoffs at
+`/handoffs/{id}`.
+
+Important: do NOT merely write a section named "Handoff" in your final task
+output. Call this tool so the user gets an actual Handoffs item. Use
+`record_task_output` instead when you produced a durable artifact that belongs
+on the Activity request page, such as a PR, file, document, deployment, or link.
+
+Args:
+    title: Short user-facing title.
+    body: The message the user should read.
+    requires_response: Set true if Lucent should wait for the user's answer.
+    response_prompt: The specific question to show when a response is needed.
+    interaction_type: Usually 'handoff', or 'clarification'/'decision' when asking.
+    references: Optional related links/artifacts, e.g. workflow, request, URL.
+    dedupe_key: Stable key for recurring updates so duplicates collapse.
+
+Returns: JSON including id, status, and url."""
+    )
+    async def send_handoff(
+        title: str,
+        body: str,
+        requires_response: bool = False,
+        response_prompt: str = "",
+        priority: str = "medium",
+        references: list[dict] | None = None,
+        metadata: dict | None = None,
+        dedupe_key: str = "",
+        user_id: str = "",
+        interaction_type: str = "handoff",
+    ) -> str:
+        return await _create_handoff_interaction_response(
+            title=title,
+            body=body,
+            interaction_type=interaction_type,
+            requires_response=requires_response,
+            response_prompt=response_prompt,
+            priority=priority,
+            references=references,
+            metadata=metadata,
+            dedupe_key=dedupe_key,
+            user_id=user_id,
+            source="daemon",
+        )
+
+    @mcp.tool(
+        annotations=READ_ONLY,
+        description="""List user handoffs visible to the current/effective user.
+
+Use this during daemon follow-up to find user replies to clarification
+requests. By default it returns open/waiting/responded items and hides
+resolved/dismissed history unless include_resolved=true."""
+    )
+    async def list_handoffs(
+        status: str = "",
+        include_resolved: bool = False,
+        limit: int = 25,
+    ) -> str:
+        user_id, org_id, _, _, _ = await _get_current_user_context()
+        if not user_id:
+            return json.dumps({"error": "Authentication required"})
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+        from lucent.db.user_interactions import UserInteractionRepository
+
+        pool = await _get_pool()
+        repo = UserInteractionRepository(pool)
+        try:
+            result = await repo.list_interactions(
+                org_id=str(org_id),
+                user_id=str(user_id),
+                status=status or None,
+                include_resolved=include_resolved,
+                limit=min(max(limit, 1), 100),
+            )
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)})
+        return json.dumps(result, default=str)
+
+    @mcp.tool(
+        annotations=READ_ONLY,
+        description="""Get one user handoff with full thread and references.
+
+Use this after list_handoffs shows a responded item. The returned
+messages and references are the durable context needed to resume work."""
+    )
+    async def get_handoff(interaction_id: str) -> str:
+        user_id, org_id, _, _, _ = await _get_current_user_context()
+        if not user_id:
+            return json.dumps({"error": "Authentication required"})
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+        from lucent.db.user_interactions import UserInteractionRepository
+
+        pool = await _get_pool()
+        repo = UserInteractionRepository(pool)
+        detail = await repo.get_interaction(
+            interaction_id,
+            str(org_id),
+            user_id=str(user_id),
+        )
+        if not detail:
+            return json.dumps({"error": "Interaction not found"})
+        return json.dumps(detail, default=str)
+
+    @mcp.tool(
+        annotations=MUTATING,
+        description="""Resolve a user handoff after processing the response.
+
+Use this when the daemon has consumed the user's reply and resumed or closed
+the dependent work. It removes the item from active Handoffs while preserving
+the thread and references for audit/context."""
+    )
+    async def resolve_handoff(interaction_id: str, note: str = "") -> str:
+        user_id, org_id, _, _, _ = await _get_current_user_context()
+        if not user_id:
+            return json.dumps({"error": "Authentication required"})
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+        from lucent.db.user_interactions import UserInteractionRepository
+
+        pool = await _get_pool()
+        repo = UserInteractionRepository(pool)
+        detail = await repo.resolve_interaction(
+            interaction_id=interaction_id,
+            org_id=str(org_id),
+            user_id=str(user_id),
+            note=note or None,
+        )
+        if not detail:
+            return json.dumps({"error": "Interaction not found"})
+        return json.dumps(detail, default=str)
 
     @mcp.tool(
         description="""Link a memory to a tracked task \u2014 showing which
@@ -894,6 +1621,7 @@ Use this during cognitive cycles to discover new work."""
         return json.dumps(requests, default=serialize)
 
     @mcp.tool(
+        annotations=READ_ONLY,
         description="""List all active (non-completed) work \
 — requests and their task status summaries.
 
@@ -920,6 +1648,7 @@ new requests. This prevents duplicate work items."""
         return json.dumps(work, default=serialize)
 
     @mcp.tool(
+        annotations=READ_ONLY,
         description="""List goals that have actual plannable work right now.
 
 This is the canonical "what should the planner work on" view. It applies all
@@ -964,12 +1693,15 @@ Returns: JSON list of {goal_id, goal_title, next_milestone_index,
         return json.dumps(targets)
 
     @mcp.tool(
+        annotations=READ_ONLY,
         description="""List available LLM models for task assignment.
 
 Use this to choose a model when creating tasks. Returns all available models
 with their categories, capabilities, provider info, and generic selection
 guidance. Default models should be used whenever there is no clear reason to
-pick a specialized model.
+pick a specialized model. Some models also expose selectable reasoning_efforts;
+use the provider default unless the task clearly benefits from lower latency or
+deeper reasoning.
 
 Args:
     category: Optional filter — one of: general, fast, reasoning, agentic, visual
@@ -994,7 +1726,10 @@ provided, the recommended model plus a selection reason."""
                 "specialized category such as fast, reasoning, agentic, or visual. "
                 "Daemon-dispatched tasks require tool-capable models, because "
                 "agents receive MCP tools for memory/request operations. Only "
-                "choose from enabled models in this list."
+                "choose from enabled models in this list. If a model includes "
+                "reasoning_efforts, omit reasoning_effort for provider default, "
+                "choose low/minimal for cheap simple work, and high/xhigh/max only "
+                "for hard analysis where extra latency and cost are justified."
             ),
             "models": [
                 {
@@ -1005,6 +1740,7 @@ provided, the recommended model plus a selection reason."""
                     "supports_tools": m.supports_tools,
                     "supports_vision": m.supports_vision,
                     "context_window": m.context_window,
+                    "reasoning_efforts": m.reasoning_efforts,
                     "notes": m.notes,
                     "tags": m.tags,
                 }

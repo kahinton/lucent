@@ -8,9 +8,10 @@ for auto-created post-completion review tasks.
 
 from daemon.daemon import (
     _ORG_SHARED_SCHEDULE_TITLES,
-    MEMORY_CONSOLIDATION_PROMPT,
     REQUEST_REVIEW_TASK_TITLE,
     _get_required_memory_scope,
+    _memory_server_tools_for_task,
+    _required_task_tool_names,
     _task_requires_mcp_tool_usage,
 )
 
@@ -28,24 +29,19 @@ class TestRequiredMemoryScope:
             is None
         )
 
-    def test_review_task_on_org_shared_schedule_inherits_org_shared(self):
-        # When the parent request IS an org-shared system maintenance task,
-        # the review of it must also operate on shared org memories — there's
-        # no single owning user whose private memories should be touched.
+    def test_review_task_on_retired_memory_consolidation_schedule_has_no_override(self):
+        # Technical memory consolidation is retired; there is no org-wide
+        # shared-memory override for its historical schedule title.
         assert (
             _get_required_memory_scope(
                 REQUEST_REVIEW_TASK_TITLE,
                 "[Scheduled] Memory Consolidation",
             )
-            == "org_shared_only"
+            is None
         )
 
-    def test_org_shared_schedule_returns_org_shared_only(self):
-        for title in _ORG_SHARED_SCHEDULE_TITLES:
-            assert (
-                _get_required_memory_scope("Some task", f"[Scheduled] {title}")
-                == "org_shared_only"
-            )
+    def test_no_org_shared_schedule_overrides_exist(self):
+        assert _ORG_SHARED_SCHEDULE_TITLES == frozenset()
 
     def test_per_user_schedule_returns_no_override(self):
         # Per-user schedules are no longer enumerated — they fall through
@@ -63,15 +59,6 @@ class TestRequiredMemoryScope:
     def test_arbitrary_user_request_returns_no_override(self):
         # A normal user-initiated request gets None → dispatcher uses 'user' scope.
         assert _get_required_memory_scope("Draft a memo", "Investigate widget bug") is None
-
-
-class TestMemoryConsolidationPrompt:
-    def test_prompt_requires_repo_overview_quality_and_blocks_run_logs(self):
-        assert "Desired Content Contract" in MEMORY_CONSOLIDATION_PROMPT
-        assert "Architecture map" in MEMORY_CONSOLIDATION_PROMPT
-        assert "background workers, services" in MEMORY_CONSOLIDATION_PROMPT
-        assert "NEVER create a memory maintenance log" in MEMORY_CONSOLIDATION_PROMPT
-        assert "heartbeat/state records" in MEMORY_CONSOLIDATION_PROMPT
 
 
 class TestRequiredToolUsage:
@@ -101,5 +88,113 @@ class TestRequiredToolUsage:
             is True
         )
 
+    def test_explicit_handoff_instruction_requires_mcp_tool_usage(self):
+        assert (
+            _task_requires_mcp_tool_usage(
+                "research",
+                "Daily weather outfit recommendation",
+                "Check the weather and provide a handoff with the recommendation.",
+            )
+            is True
+        )
+        assert _required_task_tool_names(
+            "research",
+            "Daily weather outfit recommendation",
+            "Check the weather and provide a handoff with the recommendation.",
+        ) == {"send_handoff"}
+
+    def test_request_review_does_not_require_handoff_tool_usage(self):
+        description = (
+            "Perform post-completion request review. Original request asked an "
+            "agent to provide its recommendation as a handoff."
+        )
+        assert (
+            _task_requires_mcp_tool_usage(
+                "request-review",
+                "Post-completion review",
+                description,
+            )
+            is False
+        )
+        assert _required_task_tool_names(
+            "request-review",
+            "Post-completion review",
+            description,
+        ) == set()
+
+    def test_handoff_output_wording_requires_send_handoff_tool(self):
+        description = (
+            "Fetch the weather, recommend clothes, and provide your recommendation "
+            "as a handoff."
+        )
+        assert (
+            _task_requires_mcp_tool_usage(
+                "weather-advisor",
+                "Daily weather outfit recommendation",
+                description,
+            )
+            is True
+        )
+        assert _required_task_tool_names(
+            "weather-advisor",
+            "Daily weather outfit recommendation",
+            description,
+        ) == {"send_handoff"}
+
+    def test_generic_handoff_word_does_not_require_tool_usage(self):
+        assert (
+            _task_requires_mcp_tool_usage(
+                "documentation",
+                "Define handoff criteria between roles",
+                "Document collaboration handoff criteria for team roles.",
+            )
+            is False
+        )
+
     def test_plain_research_task_does_not_require_mcp_tool_usage(self):
         assert _task_requires_mcp_tool_usage("research", "Summarize sibling results") is False
+
+
+class TestMemoryServerToolSelection:
+    def test_learning_extraction_gets_definition_activation_tools(self):
+        tools = set(
+            _memory_server_tools_for_task(
+                "reflection",
+                "Learning Extraction",
+                "[Scheduled] Learning Extraction",
+                "Run the learning extraction pipeline",
+            )
+        )
+        assert "analyze_tool_failure_patterns" in tools
+        assert "create_skill_definition" in tools
+        assert "create_agent_definition" in tools
+        assert "create_request" in tools
+        assert "update_skill_definition" not in tools
+        assert "update_agent_definition" not in tools
+        assert "grant_skill_to_agent" not in tools
+        assert "grant_hook_to_agent" not in tools
+
+    def test_definition_engineer_gets_capability_tools(self):
+        tools = set(_memory_server_tools_for_task("definition-engineer", "Define roles"))
+        assert "create_skill_definition" in tools
+        assert "create_agent_definition" in tools
+        assert "create_request" in tools
+        assert "grant_skill_to_agent" not in tools
+        assert "grant_hook_to_agent" not in tools
+
+    def test_plain_research_keeps_small_tool_surface(self):
+        tools = set(_memory_server_tools_for_task("research", "Summarize market data"))
+        assert "search_memories" in tools
+        assert "send_handoff" in tools
+        assert "list_handoffs" in tools
+        assert "get_handoff" in tools
+        assert "resolve_handoff" in tools
+        assert "create_skill_definition" not in tools
+        assert "create_request" not in tools
+
+    def test_weather_advisor_gets_weather_tool_without_requiring_sandbox_only(self):
+        tools = set(_memory_server_tools_for_task("weather-advisor", "Daily weather outfit"))
+        assert "fetch_open_meteo_forecast" in tools
+        assert "exec_sandbox_command" not in tools
+        assert "send_handoff" in tools
+        assert "create_memory" in tools

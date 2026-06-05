@@ -191,9 +191,10 @@ async def test_send_daemon_message_without_csrf_fails(client):
 
 
 @pytest.mark.asyncio
-async def test_daemon_review_queue_returns_200(client):
-    resp = await client.get("/daemon/review")
-    assert resp.status_code == 200
+async def test_daemon_review_queue_redirects_to_activity(client):
+    resp = await client.get("/daemon/review", follow_redirects=False)
+    assert resp.status_code == 301
+    assert resp.headers["location"] == "/activity"
 
 
 # ============================================================================

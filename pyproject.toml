@@ -36,6 +36,7 @@ dependencies = [
     "langchain-openai>=1.1.14",
     "langchain-google-genai>=4.0.0",
     "langchain-ollama>=1.0.0",
+    "github-copilot-sdk>=0.3.0",
     "jsonschema>=4.23.0",
     "PyYAML>=6.0",
     "langsmith>=0.7.31",

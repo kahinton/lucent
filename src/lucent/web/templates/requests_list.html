@@ -17,12 +17,12 @@
             </div>
         </div>
         {% if pending_approval_count > 0 %}
-        <a href="/daemon/review" class="inline-flex items-center gap-2 px-4 py-2 bg-amber-100 text-amber-800 text-sm font-medium rounded-lg hover:bg-amber-200 transition-colors">
+        <div class="inline-flex items-center gap-2 px-4 py-2 bg-amber-100 text-amber-800 text-sm font-medium rounded-lg">
             <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" />
             </svg>
-            {{ pending_approval_count }} Needs Approval
-        </a>
+            {{ pending_approval_count }} awaiting approval below
+        </div>
         {% endif %}
     </div>
 </div>
@@ -96,5 +96,52 @@ function updatePerPage(size) {
     params.delete('page');
     window.location.href = '/activity?' + params.toString();
 }
+
+document.addEventListener('change', function(e) {
+    var select = e.target.closest('.js-per-page-select');
+    if (!select) return;
+    updatePerPage(select.value);
+});
+
+document.addEventListener('click', function(e) {
+    var showReject = e.target.closest('[data-action="show-reject"]');
+    if (showReject) {
+        var container = showReject.closest('[id^="review-actions-"]');
+        if (!container) return;
+        var form = container.querySelector('.reject-form');
+        if (!form) return;
+        form.classList.remove('hidden');
+        var input = form.querySelector('input[name="comment"]');
+        if (input) input.focus();
+        return;
+    }
+
+    var cancelReject = e.target.closest('[data-action="cancel-reject"]');
+    if (cancelReject) {
+        var rejectForm = cancelReject.closest('.reject-form');
+        if (rejectForm) rejectForm.classList.add('hidden');
+    }
+});
+
+document.addEventListener('htmx:afterSwap', function(evt) {
+    var target = evt.detail.target;
+    if (!target || !target.id || !target.id.startsWith('review-actions-')) return;
+    var hasResolved = target.querySelector('.bg-emerald-50, .bg-red-50');
+    if (!hasResolved) return;
+    var card = target.closest('[id^="review-card-"]');
+    if (!card) return;
+    setTimeout(function() {
+        card.style.opacity = '0';
+        card.style.maxHeight = card.scrollHeight + 'px';
+        card.style.overflow = 'hidden';
+        setTimeout(function() {
+            card.style.maxHeight = '0';
+            card.style.padding = '0';
+            card.style.margin = '0';
+            card.style.borderWidth = '0';
+        }, 150);
+        setTimeout(function() { card.remove(); }, 450);
+    }, 800);
+});
 </script>
 {% endblock %}

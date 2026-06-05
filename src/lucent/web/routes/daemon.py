@@ -3,7 +3,6 @@
 import asyncio
 import html
 from datetime import datetime, timezone
-from math import ceil
 from uuid import UUID
 
 from fastapi import APIRouter, Form, HTTPException, Request
@@ -20,8 +19,6 @@ logger = get_logger("web.routes.daemon")
 _deprecation_logger = get_logger("web.routes.daemon.deprecation")
 
 router = APIRouter()
-
-ALLOWED_PER_PAGE = {10, 25, 50, 100}
 
 
 # Valid priorities for tasks
@@ -141,54 +138,8 @@ async def daemon_review_queue(
     page: int = 1,
     per_page: int = 25,
 ):
-    """Show requests needing human approval before execution."""
-    user = await get_user_context(request)
-    pool = await get_pool()
-
-    page = max(1, page)
-    per_page = per_page if per_page in ALLOWED_PER_PAGE else 25
-    offset = (page - 1) * per_page
-
-    async with pool.acquire() as conn:
-        total_count = await conn.fetchval(
-            "SELECT COUNT(*) FROM requests WHERE organization_id = $1 AND approval_status = 'pending_approval' AND status NOT IN ('cancelled', 'rejection_processing')",
-            user.organization_id,
-        )
-
-        pending_approvals = await conn.fetch(
-            """SELECT r.id, r.title, r.description, r.source, r.priority,
-                      r.created_at, r.updated_at,
-                      (SELECT count(*) FROM tasks t WHERE t.request_id = r.id) as task_count,
-                      u.display_name as creator_name
-               FROM requests r
-               LEFT JOIN users u ON r.created_by = u.id
-               WHERE r.organization_id = $1
-                 AND r.approval_status = 'pending_approval'
-                  AND r.status NOT IN ('cancelled', 'rejection_processing')
-               ORDER BY
-                 CASE r.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1
-                                 WHEN 'medium' THEN 2 ELSE 3 END,
-                 r.created_at
-               LIMIT $2 OFFSET $3""",
-            user.organization_id, per_page, offset,
-        )
-
-    approval_items = [dict(r) for r in pending_approvals]
-    total_pages = ceil(total_count / per_page) if total_count > 0 else 1
-    page = min(page, total_pages)
-
-    return templates.TemplateResponse(
-        request,
-        "daemon_review.html",
-        {
-            "user": user,
-            "approval_items": approval_items,
-            "page": page,
-            "per_page": per_page,
-            "total_pages": total_pages,
-            "total_count": total_count,
-        },
-    )
+    """Redirect the retired approval queue page to unified activity."""
+    return RedirectResponse(url="/activity", status_code=301)
 
 
 @router.post("/daemon/review/{request_id}/action", response_class=HTMLResponse)
@@ -271,7 +222,12 @@ async def daemon_review_action(
                     f"Reason: {comment.strip()}\n"
                     f"Description: {req.get('description', 'N/A')}"
                 ),
-                tags=["rejection-lesson", "approval-rejected", "feedback-rejected", "learning-extraction"],
+                tags=[
+                    "rejection-lesson",
+                    "approval-rejected",
+                    "feedback-rejected",
+                    "learning-extraction",
+                ],
                 metadata={
                     "request_id": str(request_id),
                     "reviewer": user.display_name or user.email,
@@ -332,7 +288,10 @@ async def daemon_review_action(
                 type="experience",
                 content=f"Review rejection for '{req.get('title', '')}': {comment.strip()}",
                 tags=["rejection-lesson", "learning-extraction", "daemon"],
-                metadata={"request_id": str(request_id), "reviewer": user.display_name or user.email},
+                metadata={
+                    "request_id": str(request_id),
+                    "reviewer": user.display_name or user.email,
+                },
                 user_id=user.id,
                 organization_id=user.organization_id,
             )

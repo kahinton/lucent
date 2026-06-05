@@ -4,6 +4,7 @@ from datetime import datetime
 from uuid import UUID
 
 import pytest
+from pydantic import ValidationError
 
 from lucent.models.memory import (
     CreateMemoryInput,
@@ -172,13 +173,17 @@ class TestMetadataModels:
     def test_technical_metadata(self):
         metadata = TechnicalMetadata(
             language="python",
-            repo="lucent",
+            repo="kahinton/lucent",
             filename="server.py",
             code_snippet="def hello(): pass",
         )
         assert metadata.language == "python"
-        assert metadata.repo == "lucent"
+        assert metadata.repo == "kahinton/lucent"
         assert metadata.filename == "server.py"
+
+    def test_technical_metadata_rejects_bare_repo_name(self):
+        with pytest.raises(ValidationError, match="owner/repo"):
+            TechnicalMetadata(repo="lucent")
 
     def test_procedural_metadata(self):
         metadata = ProceduralMetadata(

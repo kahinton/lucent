@@ -18,8 +18,68 @@ import httpx
 
 from lucent.db.models import ModelRepository
 from lucent.logging import get_logger
+from lucent.secrets import SecretRegistry, SecretScope
 
 logger = get_logger("model_discovery")
+
+
+@dataclass(frozen=True, slots=True)
+class ModelProviderCredentialDefinition:
+    """Credential metadata for one discoverable model provider."""
+
+    provider: str
+    name: str
+    credential_label: str
+    secret_key: str
+    env_vars: tuple[str, ...]
+    help_text: str = ""
+
+
+MODEL_PROVIDER_CREDENTIALS: tuple[ModelProviderCredentialDefinition, ...] = (
+    ModelProviderCredentialDefinition(
+        provider="copilot",
+        name="GitHub Copilot",
+        credential_label="GitHub token",
+        secret_key="model_providers.copilot.github_token",
+        env_vars=("GITHUB_TOKEN",),
+        help_text="Used by the Copilot SDK to discover models and run Copilot-hosted models.",
+    ),
+    ModelProviderCredentialDefinition(
+        provider="openai",
+        name="OpenAI",
+        credential_label="API key",
+        secret_key="model_providers.openai.api_key",
+        env_vars=("OPENAI_API_KEY",),
+    ),
+    ModelProviderCredentialDefinition(
+        provider="anthropic",
+        name="Anthropic",
+        credential_label="API key",
+        secret_key="model_providers.anthropic.api_key",
+        env_vars=("ANTHROPIC_API_KEY",),
+    ),
+    ModelProviderCredentialDefinition(
+        provider="google",
+        name="Google Gemini",
+        credential_label="API key",
+        secret_key="model_providers.google.api_key",
+        env_vars=("GOOGLE_API_KEY", "GEMINI_API_KEY"),
+    ),
+)
+
+_PROVIDER_CREDENTIALS_BY_PROVIDER = {
+    definition.provider: definition for definition in MODEL_PROVIDER_CREDENTIALS
+}
+
+
+def model_provider_credential_definitions() -> list[ModelProviderCredentialDefinition]:
+    """Return provider credential definitions for UI/API configuration surfaces."""
+    return list(MODEL_PROVIDER_CREDENTIALS)
+
+
+def model_provider_secret_scope(organization_id: str) -> SecretScope:
+    """System-managed secret scope for workspace model-provider credentials."""
+    return SecretScope(organization_id=str(organization_id), system_managed=True)
 
 
 @dataclass(slots=True)
@@ -36,6 +96,7 @@ class DiscoveredModel:
     supports_vision: bool = False
     notes: str = ""
     tags: list[str] = field(default_factory=list)
+    reasoning_efforts: list[str] = field(default_factory=list)
     engine: str | None = None
     discovery_metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -96,6 +157,92 @@ def _infer_tags(model_id: str, category: str, *, local: bool = False) -> list[st
     return sorted(tags)
 
 
+_REASONING_EFFORT_METADATA_KEYS = {
+    "reasoningeffort",
+    "reasoningefforts",
+    "reasoningeffortlevels",
+    "supportedreasoningefforts",
+    "supportedreasoningeffortlevels",
+    "thinkinglevel",
+    "thinkinglevels",
+    "supportedthinkinglevels",
+    "effort",
+    "efforts",
+    "effortlevels",
+    "supportedefforts",
+    "supportedeffortlevels",
+}
+
+
+def _metadata_key_name(key: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", key.lower())
+
+
+def _normalize_discovered_reasoning_efforts(value: Any) -> list[str]:
+    """Normalize provider-reported reasoning levels without a Lucent enum.
+
+    Provider catalogs are not standardized. Some expose a direct list, some use
+    ``values``/``options`` wrappers, and some only expose a boolean capability.
+    Boolean support is intentionally ignored here: it tells us a knob exists, not
+    which exact values are accepted for the model.
+    """
+    values: list[str] = []
+
+    def add(raw: Any) -> None:
+        if raw is None or isinstance(raw, bool):
+            return
+        if isinstance(raw, str):
+            for part in raw.split(","):
+                effort = part.strip().lower()
+                if effort and effort not in values:
+                    values.append(effort)
+            return
+        if isinstance(raw, (list, tuple, set)):
+            for item in raw:
+                add(item)
+            return
+        if isinstance(raw, dict):
+            for candidate_key in (
+                "values",
+                "options",
+                "levels",
+                "supported_values",
+                "supportedValues",
+                "enum",
+            ):
+                if candidate_key in raw:
+                    add(raw[candidate_key])
+            return
+
+    add(value)
+    return values
+
+
+def _extract_reasoning_efforts_from_metadata(*metadata_objects: Any) -> list[str]:
+    """Extract selectable reasoning levels from provider-supplied metadata."""
+    efforts: list[str] = []
+
+    def merge(values: list[str]) -> None:
+        for effort in values:
+            if effort not in efforts:
+                efforts.append(effort)
+
+    def walk(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                normalized_key = _metadata_key_name(str(key))
+                if normalized_key in _REASONING_EFFORT_METADATA_KEYS:
+                    merge(_normalize_discovered_reasoning_efforts(nested))
+                walk(nested)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item)
+
+    for metadata in metadata_objects:
+        walk(metadata)
+    return efforts
+
+
 def _is_generation_model(model_id: str) -> bool:
     """Filter out obvious non-chat/generation model families."""
     lowered = model_id.lower()
@@ -131,7 +278,12 @@ class ModelDiscoveryService:
         self.timeout = timeout
 
     def configured_providers(self, providers: list[str] | None = None) -> list[str]:
-        """Return providers with enough local configuration to attempt discovery."""
+        """Return env-configured providers.
+
+        This synchronous method is retained for legacy callers. Discovery itself
+        uses ``configured_providers_async`` so DB-backed provider credentials can
+        participate without requiring process environment variables.
+        """
         requested = [p.strip().lower() for p in providers or [] if p.strip()]
         if requested:
             return requested
@@ -149,16 +301,122 @@ class ModelDiscoveryService:
             out.append("copilot")
         return out
 
-    async def discover(self, providers: list[str] | None = None) -> list[ProviderDiscoveryResult]:
+    async def configured_providers_async(
+        self,
+        providers: list[str] | None = None,
+        *,
+        org_id: str | None = None,
+    ) -> list[str]:
+        """Return providers configured via DB-backed secrets or env fallbacks."""
+        requested = [p.strip().lower() for p in providers or [] if p.strip()]
+        if requested:
+            return requested
+
+        out: list[str] = []
+        for definition in MODEL_PROVIDER_CREDENTIALS:
+            if await self._provider_credential(definition.provider, org_id=org_id):
+                out.append(definition.provider)
+        if os.environ.get("COPILOT_CLI_PATH") and "copilot" not in out:
+            out.append("copilot")
+        if os.environ.get("OLLAMA_HOST"):
+            out.append("ollama")
+        return out
+
+    async def provider_configuration_statuses(
+        self,
+        *,
+        org_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return UI-safe provider configuration status without secret values."""
+        statuses: list[dict[str, Any]] = []
+        for definition in MODEL_PROVIDER_CREDENTIALS:
+            source = "none"
+            configured = False
+            error: str | None = None
+            try:
+                if org_id and await self._provider_secret(definition.provider, org_id=org_id):
+                    source = "database"
+                    configured = True
+                elif any(os.environ.get(env_var) for env_var in definition.env_vars):
+                    source = "environment"
+                    configured = True
+                elif definition.provider == "copilot" and os.environ.get("COPILOT_CLI_PATH"):
+                    source = "environment"
+                    configured = True
+            except Exception:
+                error = "Stored credential could not be read. Save a new credential."
+
+            statuses.append(
+                {
+                    "provider": definition.provider,
+                    "name": definition.name,
+                    "credential_label": definition.credential_label,
+                    "help_text": definition.help_text,
+                    "env_vars": list(definition.env_vars),
+                    "secret_key": definition.secret_key,
+                    "configured": configured,
+                    "source": source,
+                    "error": error,
+                }
+            )
+        if os.environ.get("OLLAMA_HOST"):
+            statuses.append(
+                {
+                    "provider": "ollama",
+                    "name": "Ollama",
+                    "credential_label": "Base URL",
+                    "help_text": "Configured through OLLAMA_HOST for local model discovery.",
+                    "env_vars": ["OLLAMA_HOST"],
+                    "secret_key": "",
+                    "configured": True,
+                    "source": "environment",
+                    "error": None,
+                }
+            )
+        return statuses
+
+    async def _provider_secret(self, provider: str, *, org_id: str | None = None) -> str:
+        definition = _PROVIDER_CREDENTIALS_BY_PROVIDER.get(provider)
+        if not definition or not org_id:
+            return ""
+        try:
+            secret_provider = SecretRegistry.get()
+        except KeyError:
+            return ""
+        value = await secret_provider.get(
+            definition.secret_key,
+            model_provider_secret_scope(org_id),
+        )
+        return (value or "").strip()
+
+    async def _provider_credential(self, provider: str, *, org_id: str | None = None) -> str:
+        definition = _PROVIDER_CREDENTIALS_BY_PROVIDER.get(provider)
+        if not definition:
+            return ""
+        secret = await self._provider_secret(provider, org_id=org_id)
+        if secret:
+            return secret
+        for env_var in definition.env_vars:
+            value = os.environ.get(env_var, "").strip()
+            if value:
+                return value
+        return ""
+
+    async def discover(
+        self,
+        providers: list[str] | None = None,
+        *,
+        org_id: str | None = None,
+    ) -> list[ProviderDiscoveryResult]:
         """Discover models from configured or explicitly requested providers."""
-        provider_ids = self.configured_providers(providers)
+        provider_ids = await self.configured_providers_async(providers, org_id=org_id)
         if not provider_ids:
             return []
 
         results: list[ProviderDiscoveryResult] = []
         for provider in provider_ids:
             try:
-                models = await self._discover_provider(provider)
+                models = await self._discover_provider(provider, org_id=org_id)
                 results.append(
                     ProviderDiscoveryResult(provider=provider, configured=True, models=models)
                 )
@@ -186,7 +444,7 @@ class ModelDiscoveryService:
         ``disable_missing`` only affects rows previously discovered from a
         provider; manual rows are never disabled by provider discovery.
         """
-        results = await self.discover(providers)
+        results = await self.discover(providers, org_id=org_id)
         provider_summaries: list[dict[str, Any]] = []
         total_models = 0
         total_upserted = 0
@@ -224,17 +482,22 @@ class ModelDiscoveryService:
             "synced_at": datetime.now(timezone.utc).isoformat(),
         }
 
-    async def _discover_provider(self, provider: str) -> list[DiscoveredModel]:
+    async def _discover_provider(
+        self,
+        provider: str,
+        *,
+        org_id: str | None = None,
+    ) -> list[DiscoveredModel]:
         if provider == "openai":
-            return await self._discover_openai()
+            return await self._discover_openai(org_id=org_id)
         if provider == "anthropic":
-            return await self._discover_anthropic()
+            return await self._discover_anthropic(org_id=org_id)
         if provider in ("google", "google_genai", "gemini"):
-            return await self._discover_google()
+            return await self._discover_google(org_id=org_id)
         if provider == "ollama":
             return await self._discover_ollama()
         if provider in ("copilot", "github"):
-            return await self._discover_copilot()
+            return await self._discover_copilot(org_id=org_id)
         raise ValueError(f"Unsupported model provider: {provider}")
 
     async def _get_json(
@@ -331,8 +594,8 @@ class ModelDiscoveryService:
             "checked_at": datetime.now(timezone.utc).isoformat(),
         }
 
-    async def _discover_openai(self) -> list[DiscoveredModel]:
-        api_key = os.environ.get("OPENAI_API_KEY", "")
+    async def _discover_openai(self, *, org_id: str | None = None) -> list[DiscoveredModel]:
+        api_key = await self._provider_credential("openai", org_id=org_id)
         if not api_key:
             raise ValueError("OPENAI_API_KEY is not configured")
         data = await self._get_json(
@@ -346,6 +609,8 @@ class ModelDiscoveryService:
             if not model_id or not _is_generation_model(model_id):
                 continue
             category = _infer_category(model_id)
+            tags = _infer_tags(model_id, category)
+            reasoning_efforts = _extract_reasoning_efforts_from_metadata(row)
             models.append(
                 DiscoveredModel(
                     id=model_id,
@@ -359,14 +624,15 @@ class ModelDiscoveryService:
                         "Discovered from OpenAI model catalog. "
                         f"Owner: {row.get('owned_by', 'unknown')}"
                     ),
-                    tags=_infer_tags(model_id, category),
+                    tags=tags,
+                    reasoning_efforts=reasoning_efforts,
                     discovery_metadata=dict(row),
                 )
             )
         return models
 
-    async def _discover_anthropic(self) -> list[DiscoveredModel]:
-        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    async def _discover_anthropic(self, *, org_id: str | None = None) -> list[DiscoveredModel]:
+        api_key = await self._provider_credential("anthropic", org_id=org_id)
         if not api_key:
             raise ValueError("ANTHROPIC_API_KEY is not configured")
         headers = {
@@ -391,8 +657,10 @@ class ModelDiscoveryService:
                     continue
                 name = str(row.get("display_name") or _display_name(model_id))
                 category = _infer_category(model_id, name)
+                tags = _infer_tags(model_id, category)
                 capabilities = row.get("capabilities") or {}
                 image_input = capabilities.get("image_input") or {}
+                reasoning_efforts = _extract_reasoning_efforts_from_metadata(row)
                 models.append(
                     DiscoveredModel(
                         id=model_id,
@@ -404,7 +672,8 @@ class ModelDiscoveryService:
                         supports_tools=True,
                         supports_vision=bool(image_input.get("supported")),
                         notes="Discovered from Anthropic model catalog.",
-                        tags=_infer_tags(model_id, category),
+                        tags=tags,
+                        reasoning_efforts=reasoning_efforts,
                         discovery_metadata=dict(row),
                     )
                 )
@@ -415,8 +684,8 @@ class ModelDiscoveryService:
                 break
         return models
 
-    async def _discover_google(self) -> list[DiscoveredModel]:
-        api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY") or ""
+    async def _discover_google(self, *, org_id: str | None = None) -> list[DiscoveredModel]:
+        api_key = await self._provider_credential("google", org_id=org_id)
         if not api_key:
             raise ValueError("GOOGLE_API_KEY or GEMINI_API_KEY is not configured")
         page_token: str | None = None
@@ -443,6 +712,8 @@ class ModelDiscoveryService:
                     continue
                 name = str(row.get("displayName") or _display_name(model_id))
                 category = _infer_category(model_id, name)
+                tags = _infer_tags(model_id, category)
+                reasoning_efforts = _extract_reasoning_efforts_from_metadata(row)
                 models.append(
                     DiscoveredModel(
                         id=model_id,
@@ -457,7 +728,8 @@ class ModelDiscoveryService:
                             row.get("description")
                             or "Discovered from Google Gemini model catalog."
                         ),
-                        tags=_infer_tags(model_id, category),
+                        tags=tags,
+                        reasoning_efforts=reasoning_efforts,
                         discovery_metadata=dict(row),
                     )
                 )
@@ -535,7 +807,7 @@ class ModelDiscoveryService:
             )
         return models
 
-    async def _discover_copilot(self) -> list[DiscoveredModel]:
+    async def _discover_copilot(self, *, org_id: str | None = None) -> list[DiscoveredModel]:
         try:
             from copilot import CopilotClient, SubprocessConfig
 
@@ -544,7 +816,7 @@ class ModelDiscoveryService:
             raise ValueError("github-copilot-sdk is not installed") from exc
 
         config_kwargs: dict[str, Any] = {"log_level": "warning"}
-        github_token = os.environ.get("GITHUB_TOKEN", "")
+        github_token = await self._provider_credential("copilot", org_id=org_id)
         if github_token:
             config_kwargs["github_token"] = github_token
         cli_path = resolve_copilot_cli_path()
@@ -569,6 +841,8 @@ class ModelDiscoveryService:
             tags = _infer_tags(model_id, category)
             if supports.reasoning_effort:
                 tags.append("reasoning-effort")
+            tags = sorted(set(tags))
+            reasoning_efforts = _extract_reasoning_efforts_from_metadata(metadata)
             models.append(
                 DiscoveredModel(
                     id=model_id,
@@ -582,7 +856,8 @@ class ModelDiscoveryService:
                     supports_tools=True,
                     supports_vision=bool(supports.vision),
                     notes="Discovered from GitHub Copilot SDK model list.",
-                    tags=sorted(set(tags)),
+                    tags=tags,
+                    reasoning_efforts=reasoning_efforts,
                     engine="copilot",
                     discovery_metadata=metadata,
                 )

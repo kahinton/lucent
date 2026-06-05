@@ -3,10 +3,11 @@
 {% block title %}{{ sched.title }} - Lucent{% endblock %}
 
 {% block content %}
+{% set base_path = base_path|default('/schedules') %}
 <!-- Breadcrumb -->
 <div class="mb-4">
     <div class="flex items-center gap-2 text-sm text-gray-500">
-        <a href="/schedules" class="hover:text-gray-900 transition-colors">Schedules</a>
+        <a href="{{ base_path }}" class="hover:text-gray-900 transition-colors">Workflows</a>
         <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" /></svg>
         <span class="text-gray-900">{{ sched.title }}</span>
     </div>
@@ -15,12 +16,16 @@
 <!-- Header with actions -->
 <div class="mb-6">
     {% if sched.is_system %}
-    <!-- System Schedule Banner -->
+    <!-- System Workflow Banner -->
     <div class="mb-4 px-4 py-3 bg-indigo-50 border border-indigo-200 rounded-lg flex items-start gap-3">
         <svg class="w-5 h-5 text-indigo-500 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" /></svg>
         <div>
-            <p class="text-sm font-medium text-indigo-800">System Schedule</p>
-            <p class="text-xs text-indigo-600 mt-0.5">This is a built-in schedule required for Lucent to function. You can adjust its timing, agent, prompt, or disable it &mdash; but it cannot be deleted.</p>
+            <p class="text-sm font-medium text-indigo-800">System Workflow</p>
+            {% if sched.is_server_workflow %}
+            <p class="text-xs text-indigo-600 mt-0.5">This built-in workflow runs directly inside the Lucent API process, not through an agent. Its server-function action is source-defined and results are recorded in run history.</p>
+            {% else %}
+            <p class="text-xs text-indigo-600 mt-0.5">This built-in workflow is required for Lucent to function. You can adjust its timing or disable it &mdash; but it cannot be deleted.</p>
+            {% endif %}
         </div>
     </div>
     {% endif %}
@@ -32,8 +37,17 @@
             {% endif %}
         </div>
         <div class="flex items-center gap-2">
+            <!-- Manual trigger -->
+            <form method="POST" action="{{ base_path }}/{{ sched.id }}/trigger">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <button type="submit" class="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-lg bg-primary-50 text-primary-700 hover:bg-primary-100 transition-colors">
+                    <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M5.25 5.653c0-.856.917-1.398 1.667-.986l11.54 6.348a1.125 1.125 0 010 1.971l-11.54 6.347a1.125 1.125 0 01-1.667-.986V5.653z" /></svg>
+                    Run now
+                </button>
+            </form>
             <!-- Toggle button -->
-            <form method="POST" action="/schedules/{{ sched.id }}/toggle">
+            <form method="POST" action="{{ base_path }}/{{ sched.id }}/toggle">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 {% if sched.enabled %}
                 <button type="submit" class="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-lg bg-gray-100 text-gray-700 hover:bg-gray-200 transition-colors">
                     <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 5.25v13.5m-7.5-13.5v13.5" /></svg>
@@ -46,9 +60,10 @@
                 </button>
                 {% endif %}
             </form>
-            <!-- Delete button (hidden for system schedules) -->
+            <!-- Delete button (hidden for system workflows) -->
             {% if not sched.is_system %}
-            <form method="POST" action="/schedules/{{ sched.id }}/delete" onsubmit="return confirm('Delete this schedule? This cannot be undone.');">
+            <form method="POST" action="{{ base_path }}/{{ sched.id }}/delete" onsubmit="return confirm('Delete this workflow? This cannot be undone.');">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <button type="submit" class="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-lg bg-red-50 text-red-700 hover:bg-red-100 transition-colors">
                     <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" /></svg>
                     Delete
@@ -75,24 +90,147 @@
 </div>
 
 <!-- Warnings -->
-{% if not sched.prompt and (not sched.task_template or sched.task_template == {}) %}
+{% if not sched.prompt and (not sched.task_template or sched.task_template == {}) and not sched.actions %}
 <div class="mb-4 px-4 py-3 bg-amber-50 border border-amber-200 rounded-lg flex items-start gap-3">
     <svg class="w-5 h-5 text-amber-500 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" /></svg>
     <div>
         <p class="text-sm font-medium text-amber-800">No prompt set</p>
-        <p class="text-xs text-amber-600 mt-0.5">This schedule has no prompt. When triggered, the agent will only receive the title and description as context. Add a prompt below to give the agent specific instructions.</p>
+        <p class="text-xs text-amber-600 mt-0.5">This workflow has no prompt or action instructions. When triggered, the agent will only receive the title and description as context.</p>
     </div>
 </div>
 {% endif %}
-{% if sched.agent_type not in active_agents | map(attribute='name') | list %}
+{% if not sched.is_server_workflow and sched.agent_type not in active_agents | map(attribute='name') | list %}
 <div class="mb-4 px-4 py-3 bg-red-50 border border-red-200 rounded-lg flex items-start gap-3">
     <svg class="w-5 h-5 text-red-500 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" /></svg>
     <div>
         <p class="text-sm font-medium text-red-800">Invalid agent type: "{{ sched.agent_type }}"</p>
-        <p class="text-xs text-red-600 mt-0.5">This agent is not active in your system. The schedule will fail when triggered. Select a valid agent below, or <a href="/definitions" class="underline">create and approve</a> one matching this name.</p>
+        <p class="text-xs text-red-600 mt-0.5">This agent is not active in your system. The workflow will fail when triggered. Select a valid agent below, or <a href="/definitions" class="underline">create and approve</a> one matching this name.</p>
     </div>
 </div>
 {% endif %}
+
+<!-- Workflow Flow -->
+{% set trigger_type = sched.trigger_type or 'schedule' %}
+{% set task_actions = sched.actions | selectattr('action_type', 'equalto', 'task') | list if sched.actions else [] %}
+{% set inbox_actions = sched.interaction_actions if sched.interaction_actions is defined else [] %}
+{% set inbox_only_workflow = inbox_actions and not task_actions and not sched.is_server_workflow %}
+<div class="mb-6 rounded-xl border border-gray-200 bg-white shadow-sm">
+    <div class="border-b border-gray-100 px-5 py-4">
+        <h2 class="text-lg font-semibold text-gray-900">Workflow flow</h2>
+        {% if sched.is_server_workflow %}
+        <p class="mt-1 text-sm text-gray-500">This built-in server workflow follows: trigger → API function → schedule run result. It does not create a request or dispatch an agent.</p>
+        {% elif inbox_only_workflow %}
+        <p class="mt-1 text-sm text-gray-500">Every run follows: trigger → handoff to the user → read or reply. It only creates Activity work if a later reply asks Lucent to continue.</p>
+        {% else %}
+        <p class="mt-1 text-sm text-gray-500">Every run follows the same path: trigger → request → task actions → recorded outputs → reviewer decision.</p>
+        {% endif %}
+    </div>
+    <div class="grid gap-3 p-5 lg:grid-cols-5">
+        <div class="rounded-lg border border-blue-100 bg-blue-50 p-4">
+            <p class="text-xs font-semibold uppercase tracking-wide text-blue-700">Trigger</p>
+            <p class="mt-2 text-sm font-semibold text-blue-950">
+                {% if trigger_type == 'schedule' %}
+                    {% if sched.schedule_type == 'interval' %}Every {{ sched.interval_seconds // 60 }} minute{{ 's' if (sched.interval_seconds // 60) != 1 }}{% elif sched.schedule_type == 'cron' %}<span class="font-mono">{{ sched.cron_expression }}</span>{% else %}One-time{% endif %}
+                {% elif trigger_type == 'webhook' %}Incoming webhook
+                {% elif trigger_type == 'manual' %}Manual run
+                {% else %}Connection event
+                {% endif %}
+            </p>
+            {% if trigger_type == 'webhook' %}
+            <p class="mt-2 break-all font-mono text-[11px] text-emerald-700">POST /api/workflows/{{ sched.id }}/webhook</p>
+            <p class="mt-1 text-xs text-emerald-700">Send the shared secret as <span class="font-mono">X-Lucent-Workflow-Token</span>.</p>
+            {% endif %}
+        </div>
+        <div class="rounded-lg border border-indigo-100 bg-indigo-50 p-4">
+            <p class="text-xs font-semibold uppercase tracking-wide text-indigo-700">Request</p>
+            {% if sched.is_server_workflow %}
+            <p class="mt-2 text-sm font-semibold text-indigo-950">No request created</p>
+            <p class="mt-1 text-xs text-indigo-700">This server function writes directly to schedule run history.</p>
+            {% elif inbox_only_workflow %}
+            <p class="mt-2 text-sm font-semibold text-indigo-950">No request created</p>
+            <p class="mt-1 text-xs text-indigo-700">The workflow sends a handoff instead of opening Activity work.</p>
+            {% else %}
+            <p class="mt-2 text-sm font-semibold text-indigo-950">{{ (sched.request_template.title_prefix if sched.request_template else '[Workflow]') }} {{ (sched.request_template.title if sched.request_template else sched.title) }}</p>
+            <p class="mt-1 text-xs text-indigo-700">Runs through Activity with lineage and approvals.</p>
+            {% endif %}
+        </div>
+        <div class="rounded-lg border border-violet-100 bg-violet-50 p-4">
+            <p class="text-xs font-semibold uppercase tracking-wide text-violet-700">Actions</p>
+            {% if sched.is_server_workflow %}
+            <p class="mt-2 text-sm font-semibold text-violet-950">Server function</p>
+            <p class="mt-1 text-xs text-violet-700">Executed in the API process; no agent dispatch.</p>
+            {% elif inbox_only_workflow %}
+            <p class="mt-2 text-sm font-semibold text-violet-950">{{ inbox_actions|length }} handoff action{{ 's' if inbox_actions|length != 1 }}</p>
+            <p class="mt-1 text-xs text-violet-700">Creates a message the user can read or answer.</p>
+            {% else %}
+            <p class="mt-2 text-sm font-semibold text-violet-950">{{ sched.actions|length if sched.actions else 1 }} task action{{ 's' if ((sched.actions|length) if sched.actions else 1) != 1 }}</p>
+            <p class="mt-1 text-xs text-violet-700">Created in order inside the request framework.</p>
+            {% endif %}
+        </div>
+        <div class="rounded-lg border border-emerald-100 bg-emerald-50 p-4">
+            <p class="text-xs font-semibold uppercase tracking-wide text-emerald-700">{% if sched.is_server_workflow %}Result{% elif inbox_only_workflow %}Handoff{% else %}Outputs{% endif %}</p>
+            {% if sched.is_server_workflow %}
+            <p class="mt-2 text-sm font-semibold text-emerald-950">schedule_runs.result</p>
+            <p class="mt-1 text-xs text-emerald-700">Release counts or skip reasons are recorded directly in run history.</p>
+            {% elif inbox_only_workflow %}
+            <p class="mt-2 text-sm font-semibold text-emerald-950">Message to the user</p>
+            <p class="mt-1 text-xs text-emerald-700">Appears in Handoffs with the links the user may need.</p>
+            {% else %}
+            <p class="mt-2 text-sm font-semibold text-emerald-950">Structured artifacts</p>
+            <p class="mt-1 text-xs text-emerald-700">Tasks can record links, PRs, files, docs, memories, deployments, and more.</p>
+            {% endif %}
+        </div>
+        <div class="rounded-lg border border-amber-100 bg-amber-50 p-4">
+            <p class="text-xs font-semibold uppercase tracking-wide text-amber-700">Review</p>
+            {% if sched.is_server_workflow %}
+            <p class="mt-2 text-sm font-semibold text-amber-950">No model review</p>
+            <p class="mt-1 text-xs text-amber-700">Operators validate by inspecting run history and task claim state.</p>
+            {% elif inbox_only_workflow %}
+            <p class="mt-2 text-sm font-semibold text-amber-950">Human response optional</p>
+            <p class="mt-1 text-xs text-amber-700">If the handoff asks a question, Lucent can wait for and resume from the reply.</p>
+            {% else %}
+            <p class="mt-2 text-sm font-semibold text-amber-950">Checklist enforced</p>
+            <p class="mt-1 text-xs text-amber-700">The post-completion reviewer sees this workflow’s success criteria.</p>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+<!-- Actions -->
+<div class="mb-6 rounded-xl border border-gray-200 bg-white shadow-sm">
+    <div class="border-b border-gray-100 px-5 py-4">
+        <h2 class="text-lg font-semibold text-gray-900">Actions</h2>
+        {% if sched.is_server_workflow %}
+        <p class="mt-1 text-sm text-gray-500">This source-defined action runs inside Lucent itself rather than through the request/task dispatcher.</p>
+        {% elif inbox_only_workflow %}
+        <p class="mt-1 text-sm text-gray-500">Each action sends a handoff instead of dispatching task work.</p>
+        {% else %}
+        <p class="mt-1 text-sm text-gray-500">Each action becomes a task when the workflow fires.</p>
+        {% endif %}
+    </div>
+    <div class="divide-y divide-gray-100">
+        {% for action in sched.actions %}
+        <div class="px-5 py-4">
+            <div class="flex items-center gap-2 flex-wrap">
+                <span class="rounded-full bg-gray-100 px-2.5 py-1 text-xs font-medium text-gray-600">#{{ loop.index }}</span>
+                <h3 class="text-sm font-semibold text-gray-900">{{ action.title or sched.title }}</h3>
+                {% if action.action_type == 'server_function' %}
+                <span class="rounded bg-indigo-50 px-2 py-0.5 text-xs text-indigo-700">server function</span>
+                {% if action.function %}<span class="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-600">{{ action.function }}</span>{% endif %}
+                {% elif action.action_type == 'user_interaction' %}
+                <span class="rounded bg-emerald-50 px-2 py-0.5 text-xs text-emerald-700">Handoff</span>
+                <span class="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-600">{{ action.interaction_type or 'message' }}</span>
+                {% if action.requires_response %}<span class="rounded bg-amber-50 px-2 py-0.5 text-xs text-amber-700">waits for reply</span>{% endif %}
+                {% else %}
+                <span class="rounded bg-blue-50 px-2 py-0.5 text-xs text-blue-700">{{ action.agent_type or sched.agent_type }}</span>
+                {% if action.model %}<span class="rounded bg-purple-50 px-2 py-0.5 text-xs text-purple-700">{{ action.model }}</span>{% endif %}
+                {% endif %}
+            </div>
+            {% if action.description %}<p class="mt-2 whitespace-pre-wrap text-sm text-gray-600">{{ action.description }}</p>{% endif %}
+        </div>
+        {% endfor %}
+    </div>
+</div>
 
 <!-- Stats cards -->
 <div class="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
@@ -101,12 +239,19 @@
         <p class="text-2xl font-bold text-gray-900">{{ sched.run_count or 0 }}{% if sched.max_runs %}<span class="text-sm font-normal text-gray-400"> / {{ sched.max_runs }}</span>{% endif %}</p>
     </div>
     <div class="bg-white rounded-lg border border-gray-200 p-4">
-        <p class="text-xs text-gray-500 uppercase tracking-wider">Agent Type</p>
-        <p class="text-lg font-semibold text-gray-900">{{ sched.agent_type }}</p>
+        <p class="text-xs text-gray-500 uppercase tracking-wider">{{ sched.executor_label }}</p>
+        <p class="text-lg font-semibold text-gray-900">{{ sched.executor_detail }}</p>
     </div>
     <div class="bg-white rounded-lg border border-gray-200 p-4">
         <p class="text-xs text-gray-500 uppercase tracking-wider">Model</p>
+        {% if sched.is_server_workflow %}
+        <p class="text-sm font-semibold text-gray-500">not applicable</p>
+        {% else %}
         <p class="text-sm font-semibold text-gray-900">{{ sched.model or 'default' }}</p>
+        {% if sched.reasoning_effort %}
+        <p class="text-xs text-purple-600 mt-1">reasoning: {{ sched.reasoning_effort }}</p>
+        {% endif %}
+        {% endif %}
     </div>
     <div class="bg-white rounded-lg border border-gray-200 p-4">
         <p class="text-xs text-gray-500 uppercase tracking-wider">Next Run</p>
@@ -127,7 +272,8 @@
 </div>
 
 <!-- Editable Configuration Form -->
-<form method="POST" action="/schedules/{{ sched.id }}/edit" class="space-y-6 mb-6">
+<form method="POST" action="{{ base_path }}/{{ sched.id }}/edit" class="space-y-6 mb-6">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <div class="bg-white rounded-lg border border-gray-200">
         <div class="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
             <h2 class="text-lg font-semibold text-gray-900">Configuration</h2>
@@ -151,9 +297,16 @@
                 </div>
             </div>
 
-            <!-- Agent, Model, Schedule Type -->
+            <!-- Agent, Model, Trigger Type -->
             <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
                 <div>
+                    {% if sched.is_server_workflow %}
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Executor</label>
+                    <div class="px-3 py-2 text-sm bg-indigo-50 border border-indigo-100 rounded-lg text-indigo-700">
+                        Server function: {{ sched.executor_detail }}
+                    </div>
+                    <p class="text-xs text-indigo-600 mt-1">Source-defined server action. This workflow is not dispatched to an agent.</p>
+                    {% else %}
                     <label for="agent_type" class="block text-sm font-medium text-gray-700 mb-1">Agent Type</label>
                     <select name="agent_type" id="agent_type"
                         class="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none bg-white">
@@ -165,26 +318,51 @@
                         {% endif %}
                     </select>
                     {% if active_agents | length == 0 %}
-                    <p class="text-xs text-red-500 mt-1">No active agents. Create and approve agents at <a href="/definitions" class="underline">Agents &amp; Skills</a>.</p>
+                    <p class="text-xs text-red-500 mt-1">No active agents. Create and approve agents at <a href="/definitions" class="underline">Agent Composer</a>.</p>
                     {% elif sched.agent_type not in active_agents | map(attribute='name') | list %}
                     <p class="text-xs text-amber-600 mt-1">
                         <svg class="w-3 h-3 inline -mt-0.5" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" /></svg>
-                        "{{ sched.agent_type }}" is not an active agent. This schedule will fail when triggered.
+                        "{{ sched.agent_type }}" is not an active agent. This workflow will fail when triggered.
                     </p>
+                    {% endif %}
                     {% endif %}
                 </div>
                 <div>
                     <label for="model" class="block text-sm font-medium text-gray-700 mb-1">Model</label>
-                    <input type="text" name="model" id="model" value="{{ sched.model or '' }}"
-                        placeholder="default"
-                        class="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none">
+                    {% if sched.is_server_workflow %}
+                    <div class="px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg text-gray-500">not applicable</div>
+                    <p class="text-xs text-gray-400 mt-1">Server functions do not call an LLM.</p>
+                    {% else %}
+                    <select name="model" id="model"
+                        class="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none bg-white">
+                        <option value="" data-reasoning-efforts="" {% if not sched.model %}selected{% endif %}>daemon default</option>
+                        {% for model in available_models %}
+                        <option value="{{ model.id }}" data-reasoning-efforts="{{ (model.reasoning_efforts or [])|join(',') }}" {% if model.id == sched.model %}selected{% endif %}>{{ model.name }} ({{ model.id }})</option>
+                        {% endfor %}
+                        {% if sched.model and sched.model not in available_models | map(attribute='id') | list %}
+                        <option value="{{ sched.model }}" selected>{{ sched.model }} (not found)</option>
+                        {% endif %}
+                    </select>
                     <p class="text-xs text-gray-400 mt-1">Leave blank for daemon default</p>
+                    {% endif %}
                 </div>
                 <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Schedule Type</label>
+                    <label for="reasoning_effort" class="block text-sm font-medium text-gray-700 mb-1">Reasoning</label>
+                    {% if sched.is_server_workflow %}
+                    <div class="px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg text-gray-500">not applicable</div>
+                    {% else %}
+                    <select name="reasoning_effort" id="reasoning_effort" data-current="{{ sched.reasoning_effort or '' }}"
+                        class="w-full px-3 py-2 text-sm border border-purple-200 bg-purple-50 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-purple-500 outline-none">
+                        <option value="">provider default</option>
+                    </select>
+                    <p class="text-xs text-gray-400 mt-1">Shown when the model supports selectable effort.</p>
+                    {% endif %}
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Trigger</label>
                     <div class="px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg text-gray-600">
-                        {{ sched.schedule_type }}
-                        <span class="text-xs text-gray-400 ml-1">(not editable)</span>
+                        {{ sched.trigger_type or 'schedule' }}{% if (sched.trigger_type or 'schedule') == 'schedule' %} / {{ sched.schedule_type }}{% endif %}
+                        <span class="text-xs text-gray-400 ml-1">(edit advanced JSON below)</span>
                     </div>
                 </div>
                 {% if sandbox_template %}
@@ -207,7 +385,7 @@
                 {% endif %}
             </div>
 
-            <!-- Schedule-specific params -->
+            <!-- Time-trigger-specific params -->
             {% if sched.schedule_type == 'interval' %}
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div>
@@ -242,14 +420,42 @@
             </div>
             {% endif %}
 
-            <!-- Prompt -->
+            {% if not sched.actions %}
+            <!-- Compatibility prompt only for legacy workflows without actions -->
             <div>
                 <label for="prompt" class="block text-sm font-medium text-gray-700 mb-1">Prompt</label>
-                <p class="text-xs text-gray-400 mb-2">Instructions sent to the agent when this schedule fires. If empty, the description above is used instead.</p>
+                <p class="text-xs text-gray-400 mb-2">Compatibility instructions used only by legacy workflows that do not have action JSON.</p>
                 <textarea name="prompt" id="prompt" rows="8"
                     class="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none resize-y"
                     placeholder="Tell the agent what to do...">{{ sched.prompt or '' }}</textarea>
             </div>
+            {% endif %}
+
+            <div>
+                <label for="review_instructions" class="block text-sm font-medium text-gray-700 mb-1">Reviewer instructions</label>
+                <p class="text-xs text-gray-400 mb-2">Checklist included in workflow-created requests so the post-completion reviewer knows what “done” means.</p>
+                <textarea name="review_instructions" id="review_instructions" rows="5"
+                    class="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none resize-y"
+                    placeholder="Require recorded outputs, verify external links, check files are committed…">{{ sched.review_instructions or '' }}</textarea>
+            </div>
+
+            <details class="rounded-lg border border-gray-200 bg-gray-50">
+                <summary class="cursor-pointer px-4 py-3 text-sm font-medium text-gray-700">Advanced workflow JSON</summary>
+                <div class="space-y-4 border-t border-gray-200 p-4">
+                    <div>
+                        <label for="request_template_json" class="block text-sm font-medium text-gray-700 mb-1">Request template</label>
+                        <textarea name="request_template_json" id="request_template_json" rows="6" class="w-full font-mono text-xs px-3 py-2 border border-gray-300 rounded-lg">{{ sched.request_template | tojson(indent=2) }}</textarea>
+                    </div>
+                    <div>
+                        <label for="trigger_config_json" class="block text-sm font-medium text-gray-700 mb-1">Trigger config</label>
+                        <textarea name="trigger_config_json" id="trigger_config_json" rows="6" class="w-full font-mono text-xs px-3 py-2 border border-gray-300 rounded-lg">{{ sched.trigger_config | tojson(indent=2) }}</textarea>
+                    </div>
+                    <div>
+                        <label for="actions_json" class="block text-sm font-medium text-gray-700 mb-1">Actions</label>
+                        <textarea name="actions_json" id="actions_json" rows="10" class="w-full font-mono text-xs px-3 py-2 border border-gray-300 rounded-lg">{{ sched.actions | tojson(indent=2) }}</textarea>
+                    </div>
+                </div>
+            </details>
 
             <!-- Metadata (read-only) -->
             <div class="pt-3 border-t border-gray-100">
@@ -271,6 +477,31 @@
     </div>
 </form>
 
+<script nonce="{{ request.state.csp_nonce }}">
+function refreshScheduleReasoning() {
+    const modelSelect = document.getElementById('model');
+    const reasoningSelect = document.getElementById('reasoning_effort');
+    if (!modelSelect || !reasoningSelect) return;
+    const selected = modelSelect.options[modelSelect.selectedIndex];
+    const efforts = ((selected && selected.dataset.reasoningEfforts) || '').split(',').filter(Boolean);
+    const current = reasoningSelect.dataset.current || '';
+    reasoningSelect.innerHTML = '<option value="">provider default</option>';
+    for (const effort of efforts) {
+        const opt = document.createElement('option');
+        opt.value = effort;
+        opt.textContent = effort;
+        if (effort === current) opt.selected = true;
+        reasoningSelect.appendChild(opt);
+    }
+}
+document.getElementById('model')?.addEventListener('change', function() {
+    const reasoningSelect = document.getElementById('reasoning_effort');
+    reasoningSelect.dataset.current = '';
+    refreshScheduleReasoning();
+});
+refreshScheduleReasoning();
+</script>
+
 <!-- Run History -->
 <div class="bg-white rounded-lg border border-gray-200">
     <div class="px-4 py-3 border-b border-gray-100">
@@ -279,7 +510,7 @@
     {% from "partials/pagination.html" import pagination_controls %}
     {% if run_total_count is defined and run_total_count > 0 %}
     <div class="px-4 pt-3">
-        {{ pagination_controls(base_url="/schedules/" ~ sched.id, page=run_page, per_page=run_per_page, total_pages=run_total_pages, total_count=run_total_count, filter_params={}, entity_name="runs") }}
+        {{ pagination_controls(base_url=base_path ~ "/" ~ sched.id, page=run_page, per_page=run_per_page, total_pages=run_total_pages, total_count=run_total_count, filter_params={}, entity_name="runs") }}
     </div>
     {% endif %}
     {% if sched.runs %}
@@ -335,12 +566,12 @@
     </div>
     {% if run_total_pages is defined and run_total_pages > 1 %}
     <div class="px-4 pb-3">
-        {{ pagination_controls(base_url="/schedules/" ~ sched.id, page=run_page, per_page=run_per_page, total_pages=run_total_pages, total_count=run_total_count, filter_params={}, show_per_page=false, entity_name="runs") }}
+        {{ pagination_controls(base_url=base_path ~ "/" ~ sched.id, page=run_page, per_page=run_per_page, total_pages=run_total_pages, total_count=run_total_count, filter_params={}, show_per_page=false, entity_name="runs") }}
     </div>
     {% endif %}
     {% else %}
     <div class="px-4 py-8 text-center text-gray-500 text-sm">
-        No runs yet. This schedule {% if sched.next_run_at and sched.enabled %}will execute at {{ sched.next_run_at.strftime('%Y-%m-%d %H:%M') }}{% else %}is not currently active{% endif %}.
+        No runs yet. This workflow {% if sched.next_run_at and sched.enabled %}will execute at {{ sched.next_run_at.strftime('%Y-%m-%d %H:%M') }}{% else %}is not currently active{% endif %}.
     </div>
     {% endif %}
 </div>

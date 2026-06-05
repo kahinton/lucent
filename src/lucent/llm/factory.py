@@ -9,9 +9,8 @@ local/custom providers (Ollama, etc.) use the LangChain engine.
 
 from __future__ import annotations
 
-import os
-
 from lucent.llm.engine import LLMEngine
+from lucent.settings import github_token, llm_engine_name
 
 _engine: LLMEngine | None = None
 _langchain_engine: LLMEngine | None = None
@@ -23,7 +22,7 @@ _LANGCHAIN_PROVIDERS = {"ollama"}
 
 def get_engine_name() -> str:
     """Get the configured default engine name."""
-    return os.environ.get("LUCENT_LLM_ENGINE", "copilot").lower()
+    return llm_engine_name()
 
 
 def _get_copilot_engine() -> LLMEngine:
@@ -32,8 +31,8 @@ def _get_copilot_engine() -> LLMEngine:
     if _copilot_engine is None:
         from lucent.llm.copilot_engine import CopilotEngine
 
-        github_token = os.environ.get("GITHUB_TOKEN", "")
-        _copilot_engine = CopilotEngine(github_token=github_token or None)
+        token = github_token()
+        _copilot_engine = CopilotEngine(github_token=token or None)
     return _copilot_engine
 
 
