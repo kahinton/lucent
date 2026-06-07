@@ -173,13 +173,20 @@ class TestCreateSchedule:
         assert "error" in result
 
     @pytest.mark.asyncio
-    async def test_with_model(self, mcp, auth_user, monkeypatch):
+    async def test_with_model(self, mcp, auth_user, db_pool, monkeypatch):
         """Known model from hardcoded registry is accepted in strict mode."""
         from lucent import model_registry
         from lucent.model_registry import MODELS
 
         monkeypatch.setattr(model_registry, "_db_models", None)
         monkeypatch.setattr(model_registry, "_MODEL_BY_ID", {m.id: m for m in MODELS})
+        from lucent.access_control import AccessControlService
+
+        await AccessControlService(db_pool).grant_access(
+            resource_type="model", resource_id="claude-sonnet-4.6",
+            org_id=str(auth_user["organization_id"]),
+            principal_type="org", principal_id=None,
+        )
         result = await _call(
             mcp,
             "create_schedule",
@@ -351,6 +358,7 @@ class TestListSchedules:
             title="Listed Schedule",
             org_id=str(test_organization["id"]),
             schedule_type="once",
+            created_by=str(auth_user["id"]),
         )
         result = await _call(mcp, "list_schedules")
         assert isinstance(result, dict)

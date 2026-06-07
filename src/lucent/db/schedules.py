@@ -13,6 +13,8 @@ from zoneinfo import ZoneInfo
 
 from asyncpg import Pool
 
+from lucent.access_control import build_access_clause
+
 ALLOWED_SCHEDULE_COLUMNS = frozenset(
     {
         "title",
@@ -40,6 +42,8 @@ ALLOWED_SCHEDULE_COLUMNS = frozenset(
         "review_instructions",
         "webhook_secret_hash",
         "webhook_last_received_at",
+        "owner_user_id",
+        "owner_group_id",
     }
 )
 
@@ -481,10 +485,10 @@ class ScheduleRepository:
                 """INSERT INTO schedules
                    (title, organization_id, description, agent_type, schedule_type,
                     interval_seconds, cron_expression, next_run_at, priority, prompt,
-                          created_by, is_system, trigger_type, trigger_config,
+                          created_by, is_system, scope, trigger_type, trigger_config,
                           request_template, actions, review_instructions)
                          VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10,
-                              $11::uuid, true, $12, ($13::text)::jsonb,
+                              $11::uuid, true, 'built-in', $12, ($13::text)::jsonb,
                               ($14::text)::jsonb, ($15::text)::jsonb, $16)
                    RETURNING *""",
                 title,
@@ -594,13 +598,14 @@ class ScheduleRepository:
                     reasoning_effort, sandbox_config, sandbox_template_id, schedule_type,
                     cron_expression, interval_seconds, next_run_at, priority, timezone,
                     max_runs, expires_at, created_by, prompt, trigger_type, trigger_config,
-                    request_template, actions, review_instructions, webhook_secret_hash)
+                    request_template, actions, review_instructions, webhook_secret_hash,
+                    owner_user_id)
                    VALUES ($1, $2::uuid, $3, $4, $5, ($6::text)::jsonb, $7,
                        ($8::text)::jsonb,
                        $9::uuid, $10, $11, $12, $13, $14, $15, $16,
                        $17, $18::uuid, $19, $20, ($21::text)::jsonb,
                        ($22::text)::jsonb, ($23::text)::jsonb,
-                       $24, $25)
+                       $24, $25, $18::uuid)
                    RETURNING *""",
                 title,
                 org_id,
@@ -632,13 +637,23 @@ class ScheduleRepository:
             )
             return dict(row)
 
-    async def get_schedule(self, schedule_id: str, org_id: str) -> dict | None:
+    async def get_schedule(
+        self,
+        schedule_id: str,
+        org_id: str,
+        *,
+        requester_user_id: str | None = None,
+        requester_role: str | None = None,
+    ) -> dict | None:
+        query = (
+            "SELECT * FROM schedules WHERE id = $1::uuid AND organization_id = $2::uuid"
+        )
+        params: list[Any] = [schedule_id, org_id]
+        if requester_user_id is not None:
+            params.extend([requester_user_id, requester_role or "member"])
+            query += " AND " + build_access_clause(resource_type="workflow", uid_param=3, role_param=4)
         async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT * FROM schedules WHERE id = $1::uuid AND organization_id = $2::uuid",
-                schedule_id,
-                org_id,
-            )
+            row = await conn.fetchrow(query, *params)
             return dict(row) if row else None
 
     async def get_schedule_by_id(self, schedule_id: str) -> dict | None:
@@ -671,6 +686,9 @@ class ScheduleRepository:
         enabled: bool | None = None,
         limit: int = 25,
         offset: int = 0,
+        *,
+        requester_user_id: str | None = None,
+        requester_role: str | None = None,
     ) -> dict:
         async with self.pool.acquire() as conn:
             conditions = ["organization_id = $1::uuid"]
@@ -685,6 +703,11 @@ class ScheduleRepository:
                 conditions.append(f"enabled = ${idx}")
                 params.append(enabled)
                 idx += 1
+
+            if requester_user_id is not None:
+                params.extend([requester_user_id, requester_role or "member"])
+                conditions.append(build_access_clause(resource_type="workflow", uid_param=idx, role_param=idx + 1))
+                idx += 2
 
             where = " AND ".join(conditions)
             count_row = await conn.fetchrow(
@@ -730,8 +753,8 @@ class ScheduleRepository:
             elif key == "actions":
                 sets.append(f"actions = (${idx}::text)::jsonb")
                 params.append(_jsonb_param(val, default=[]))
-            elif key == "sandbox_template_id":
-                sets.append(f"sandbox_template_id = ${idx}::uuid")
+            elif key in {"sandbox_template_id", "owner_user_id", "owner_group_id"}:
+                sets.append(f"{key} = ${idx}::uuid")
                 params.append(val)
             else:
                 sets.append(f"{key} = ${idx}")
@@ -1245,9 +1268,21 @@ class ScheduleRepository:
                 "has_more": offset + len(rows) < total_count,
             }
 
-    async def get_schedule_with_runs(self, schedule_id: str, org_id: str) -> dict | None:
+    async def get_schedule_with_runs(
+        self,
+        schedule_id: str,
+        org_id: str,
+        *,
+        requester_user_id: str | None = None,
+        requester_role: str | None = None,
+    ) -> dict | None:
         """Load a schedule with its recent run history."""
-        sched = await self.get_schedule(schedule_id, org_id)
+        sched = await self.get_schedule(
+            schedule_id,
+            org_id,
+            requester_user_id=requester_user_id,
+            requester_role=requester_role,
+        )
         if not sched:
             return None
         sched["runs"] = (await self.list_runs(schedule_id))["items"]

@@ -32,6 +32,20 @@
     <div class="flex items-start justify-between">
         <div>
             <h1 class="text-2xl font-bold text-gray-900">{{ sched.title }}</h1>
+            <div class="flex items-center gap-2 flex-wrap mt-2">
+                {% if sched.is_system %}
+                <span class="px-2.5 py-1 rounded text-sm bg-indigo-100 text-indigo-700 font-medium">built-in</span>
+                {% else %}
+                <span class="px-2.5 py-1 rounded text-sm bg-gray-100 text-gray-500">instance</span>
+                {% if sched.owner_user_name %}
+                <span class="px-2.5 py-1 rounded text-sm bg-gray-100 text-gray-600">Owner: {{ sched.owner_user_name }}</span>
+                {% elif sched.owner_group_name %}
+                <span class="px-2.5 py-1 rounded text-sm bg-gray-100 text-gray-600">Owner: {{ sched.owner_group_name }}</span>
+                {% else %}
+                <span class="px-2.5 py-1 rounded text-sm bg-blue-50 text-blue-700">Shared with org</span>
+                {% endif %}
+                {% endif %}
+            </div>
             {% if sched.description %}
             <p class="text-sm text-gray-500 mt-1">{{ sched.description }}</p>
             {% endif %}
@@ -297,6 +311,29 @@
                 </div>
             </div>
 
+            {% if not sched.is_system %}
+            <!-- Ownership -->
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                <div>
+                    <label for="owner_scope" class="block text-sm font-medium text-gray-700 mb-1">Ownership</label>
+                    {% set owner_is_me = sched.owner_user_id and (sched.owner_user_id|string == user.id|string) %}
+                    {% set owner_is_other = sched.owner_user_id and not owner_is_me and not sched.owner_group_id %}
+                    <select name="owner_scope" id="owner_scope"
+                        class="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none bg-white">
+                        {% if owner_is_other %}
+                        <option value="keep" selected>Owner: {{ sched.owner_user_name or 'another user' }} (current)</option>
+                        {% endif %}
+                        <option value="me" {% if owner_is_me %}selected{% endif %}>Me ({{ user.display_name or user.email or 'you' }})</option>
+                        <option value="org" class="font-semibold text-amber-700" {% if not sched.owner_user_id and not sched.owner_group_id %}selected{% endif %}>⚠ Shared with org — visible to everyone</option>
+                        {% for group in owner_groups %}
+                        <option value="group:{{ group.id }}" {% if sched.owner_group_id and sched.owner_group_id|string == group.id|string %}selected{% endif %}>{{ group.name }}</option>
+                        {% endfor %}
+                    </select>
+                    <p class="text-xs text-gray-400 mt-1">Controls who can see and manage this workflow. Only the owner or an admin can change it.</p>
+                </div>
+            </div>
+            {% endif %}
+
             <!-- Agent, Model, Trigger Type -->
             <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
                 <div>
@@ -476,6 +513,12 @@
         </div>
     </div>
 </form>
+
+{% if access %}
+<div class="mb-6">
+    {% include "_access_panel.html" %}
+</div>
+{% endif %}
 
 <script nonce="{{ request.state.csp_nonce }}">
 function refreshScheduleReasoning() {

@@ -13,6 +13,7 @@ from lucent.logging import get_logger
 from lucent.rbac import Role
 
 from ._shared import _check_csrf, _parse_env_vars, get_user_context, templates
+from .access_ui import build_access_context
 
 logger = get_logger("web.routes.definitions")
 
@@ -27,6 +28,34 @@ async def _get_user_groups(pool, user_id: str, org_id: str) -> list[dict]:
 
     repo = GroupRepository(pool)
     return await repo.get_user_groups(user_id, org_id)
+
+
+async def _authorize_web_grant(pool, *, user, agent_id, capability_type, capability_id, override):
+    """Authorize a capability grant for the web layer, returning the GrantDecision."""
+    from lucent.access_control import AccessControlService
+
+    return await AccessControlService(pool).authorize_grant(
+        grantor_id=str(user.id),
+        org_id=str(user.organization_id),
+        actor_type="agent",
+        actor_id=agent_id,
+        capability_type=capability_type,
+        capability_id=capability_id,
+        override=override,
+    )
+
+
+def _grant_redirect(agent_id: str, decision=None) -> RedirectResponse:
+    """Redirect back to the agent detail page, surfacing a grant error if any."""
+    from urllib.parse import quote
+
+    url = f"/definitions/agents/{agent_id}"
+    if decision is not None and not decision.allowed:
+        suffix = f"?grant_error={quote(decision.reason)}"
+        if decision.requires_override:
+            suffix += "&grant_mismatch=1"
+        url += suffix
+    return RedirectResponse(url=url, status_code=303)
 
 
 async def _resolve_owner_maps(pool, items: list[dict]) -> tuple[dict[str, str], dict[str, str]]:
@@ -393,6 +422,12 @@ async def agent_detail_page(request: Request, agent_id: str):
     assigned_hook_ids = {str(h["id"]) for h in assigned_hooks}
     assigned_tool_ids = {str(t["id"]) for t in assigned_tools}
 
+    from lucent.access_control import AccessControlService
+
+    access_warnings = await AccessControlService(pool).scan_agent_grant_mismatches(
+        agent_id, org_id
+    )
+
     return templates.TemplateResponse(
         request,
         "definition_detail.html",
@@ -413,6 +448,13 @@ async def agent_detail_page(request: Request, agent_id: str):
             "granted_mcp_ids": assigned_mcp_ids,
             "granted_hook_ids": assigned_hook_ids,
             "granted_tool_ids": assigned_tool_ids,
+            "grant_error": request.query_params.get("grant_error"),
+            "grant_mismatch": request.query_params.get("grant_mismatch") == "1",
+            "access_warnings": access_warnings,
+            "access": await build_access_context(
+                pool, resource_type="agent", resource_id=agent_id,
+                org_id=org_id, user=user, redirect=request.url.path,
+            ),
             "csrf_token": request.cookies.get(CSRF_COOKIE_NAME, ""),
         },
     )
@@ -447,6 +489,10 @@ async def skill_detail_page(request: Request, skill_id: str):
             "definition": skill,
             "definition_type": "skill",
             "owner_groups": user_groups,
+            "access": await build_access_context(
+                pool, resource_type="skill", resource_id=skill_id,
+                org_id=org_id, user=user, redirect=request.url.path,
+            ),
             "csrf_token": request.cookies.get(CSRF_COOKIE_NAME, ""),
         },
     )
@@ -484,6 +530,10 @@ async def mcp_server_detail_page(request: Request, server_id: str):
             "definition": server,
             "definition_type": "mcp-server",
             "owner_groups": user_groups,
+            "access": await build_access_context(
+                pool, resource_type="mcp_server", resource_id=server_id,
+                org_id=org_id, user=user, redirect=request.url.path,
+            ),
             "csrf_token": request.cookies.get(CSRF_COOKIE_NAME, ""),
         },
     )
@@ -518,6 +568,10 @@ async def hook_detail_page(request: Request, hook_id: str):
             "definition": hook,
             "definition_type": "hook",
             "owner_groups": user_groups,
+            "access": await build_access_context(
+                pool, resource_type="hook", resource_id=hook_id,
+                org_id=org_id, user=user, redirect=request.url.path,
+            ),
             "csrf_token": request.cookies.get(CSRF_COOKIE_NAME, ""),
         },
     )
@@ -560,6 +614,10 @@ async def managed_tool_detail_page(request: Request, tool_id: str):
             "definition": tool,
             "definition_type": "tool",
             "owner_groups": user_groups,
+            "access": await build_access_context(
+                pool, resource_type="managed_tool", resource_id=tool_id,
+                org_id=org_id, user=user, redirect=request.url.path,
+            ),
             "csrf_token": request.cookies.get(CSRF_COOKIE_NAME, ""),
         },
     )
@@ -1253,9 +1311,20 @@ async def grant_skill_web(request: Request, agent_id: str):
 
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     skill_id = str(form.get("skill_id", ""))
+    override = str(form.get("override", "")).lower() in ("1", "true", "on")
+    reason = str(form.get("reason", "")) or None
+    if not skill_id:
+        return _grant_redirect(agent_id)
+    decision = await _authorize_web_grant(
+        pool, user=user, agent_id=agent_id,
+        capability_type="skill", capability_id=skill_id, override=override,
+    )
+    if not decision.allowed:
+        return _grant_redirect(agent_id, decision)
     await repo.grant_skill(
         agent_id, skill_id,
         org_id=str(user.organization_id), user_id=str(user.id),
+        grant_reason=reason, grant_override=decision.requires_override,
     )
     return RedirectResponse(url=f"/definitions/agents/{agent_id}", status_code=303)
 
@@ -1291,10 +1360,19 @@ async def grant_mcp_web(request: Request, agent_id: str):
 
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     server_id = str(form.get("mcp_server_id", "") or form.get("server_id", ""))
+    override = str(form.get("override", "")).lower() in ("1", "true", "on")
+    reason = str(form.get("reason", "")) or None
     if server_id:
+        decision = await _authorize_web_grant(
+            pool, user=user, agent_id=agent_id,
+            capability_type="mcp_server", capability_id=server_id, override=override,
+        )
+        if not decision.allowed:
+            return _grant_redirect(agent_id, decision)
         await repo.grant_mcp_server(
             agent_id, server_id,
             org_id=str(user.organization_id), user_id=str(user.id),
+            grant_reason=reason, grant_override=decision.requires_override,
         )
     return RedirectResponse(url=f"/definitions/agents/{agent_id}", status_code=303)
 
@@ -1330,10 +1408,19 @@ async def grant_hook_web(request: Request, agent_id: str):
 
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     hook_id = str(form.get("hook_id", ""))
+    override = str(form.get("override", "")).lower() in ("1", "true", "on")
+    reason = str(form.get("reason", "")) or None
     if hook_id:
+        decision = await _authorize_web_grant(
+            pool, user=user, agent_id=agent_id,
+            capability_type="hook", capability_id=hook_id, override=override,
+        )
+        if not decision.allowed:
+            return _grant_redirect(agent_id, decision)
         await repo.grant_hook(
             agent_id, hook_id,
             org_id=str(user.organization_id), user_id=str(user.id),
+            grant_reason=reason, grant_override=decision.requires_override,
         )
     return RedirectResponse(url=f"/definitions/agents/{agent_id}", status_code=303)
 
@@ -1351,10 +1438,19 @@ async def grant_managed_tool_web(request: Request, agent_id: str):
 
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     tool_id = str(form.get("tool_id", ""))
+    override = str(form.get("override", "")).lower() in ("1", "true", "on")
+    reason = str(form.get("reason", "")) or None
     if tool_id:
+        decision = await _authorize_web_grant(
+            pool, user=user, agent_id=agent_id,
+            capability_type="managed_tool", capability_id=tool_id, override=override,
+        )
+        if not decision.allowed:
+            return _grant_redirect(agent_id, decision)
         await repo.grant_managed_tool(
             agent_id, tool_id,
             org_id=str(user.organization_id), user_id=str(user.id),
+            grant_reason=reason, grant_override=decision.requires_override,
         )
     return RedirectResponse(url=f"/definitions/agents/{agent_id}", status_code=303)
 

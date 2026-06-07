@@ -1,5 +1,14 @@
 {% extends "base.html" %}
 {% block title %}{{ definition.name }} - Agent Composer - Lucent{% endblock %}
+{% macro grant_override_fields() %}
+<details class="mt-1">
+    <summary class="text-xs text-gray-400 cursor-pointer hover:text-gray-600">Override scope mismatch</summary>
+    <label class="flex items-center gap-1.5 mt-1 text-xs text-gray-600">
+        <input type="checkbox" name="override" value="1" class="rounded border-gray-300"> Override scope mismatch
+    </label>
+    <input type="text" name="reason" placeholder="Reason (required to override)" class="mt-1 w-full px-2 py-1 border border-gray-300 rounded-md text-xs">
+</details>
+{% endmacro %}
 {% block content %}
 <div class="flex items-center gap-2 text-sm text-gray-500 mb-4">
     <a href="/definitions?tab={{ 'agents' if definition_type == 'agent' else ('skills' if definition_type == 'skill' else ('tools' if definition_type == 'tool' else ('hooks' if definition_type == 'hook' else 'tools'))) }}" class="hover:text-gray-700">Agent Composer</a>
@@ -49,7 +58,38 @@
     </div>
 </div>
 
+{% if access %}
+<div class="mb-6">
+    {% include "_access_panel.html" %}
+</div>
+{% endif %}
+
 {% if definition_type == 'agent' %}
+{% if grant_error %}
+<div class="mb-4 rounded-lg border {{ 'border-amber-300 bg-amber-50' if grant_mismatch else 'border-red-300 bg-red-50' }} p-4">
+    <p class="text-sm font-semibold {{ 'text-amber-800' if grant_mismatch else 'text-red-800' }}">
+        {{ 'Scope compatibility warning' if grant_mismatch else 'Grant not allowed' }}
+    </p>
+    <p class="text-sm {{ 'text-amber-700' if grant_mismatch else 'text-red-700' }} mt-1">{{ grant_error }}</p>
+    {% if grant_mismatch %}
+    <p class="text-xs text-amber-600 mt-2">To proceed anyway, expand the grant control below, check "Override scope mismatch", provide a reason, and grant again.</p>
+    {% endif %}
+</div>
+{% endif %}
+{% if access_warnings %}
+<div class="mb-4 rounded-lg border border-amber-300 bg-amber-50 p-4">
+    <p class="text-sm font-semibold text-amber-800">Access warnings ({{ access_warnings | length }})</p>
+    <p class="text-xs text-amber-600 mt-1">Some granted capabilities are more narrowly scoped than this agent. Users who can run the agent may not be able to see or maintain these capabilities.</p>
+    <ul class="mt-2 space-y-1">
+        {% for w in access_warnings %}
+        <li class="text-sm text-amber-700 flex items-start gap-2">
+            <span class="px-1.5 py-0.5 rounded text-xs bg-amber-100 text-amber-800 shrink-0">{{ w.capability_type }}</span>
+            <span><span class="font-medium">{{ w.capability_name }}</span> — {{ w.reason }}{% if w.overridden %} <span class="italic text-amber-500">(override on file)</span>{% endif %}</span>
+        </li>
+        {% endfor %}
+    </ul>
+</div>
+{% endif %}
 <div class="grid grid-cols-1 lg:grid-cols-4 gap-4 mb-6">
     <div class="bg-white rounded-lg border border-gray-200 p-5">
         <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Granted Skills</h2>
@@ -73,13 +113,16 @@
         <p class="text-sm text-gray-400 italic mb-3">No skills granted.</p>
         {% endif %}
         {% if all_skills %}
-        <form method="POST" action="/definitions/agents/{{ definition.id }}/grant-skill" class="flex gap-2">
+        <form method="POST" action="/definitions/agents/{{ definition.id }}/grant-skill">
+            <div class="flex gap-2">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <select name="skill_id" class="flex-1 px-2 py-1.5 border border-gray-300 rounded-md text-sm">
                 <option value="">Add a skill...</option>
                 {% for s in all_skills %}{% if s.id|string not in granted_skill_ids %}<option value="{{ s.id }}">{{ s.name }}</option>{% endif %}{% endfor %}
             </select>
             <button type="submit" class="px-3 py-1.5 text-sm bg-blue-50 text-blue-700 rounded-md hover:bg-blue-100 font-medium">Grant</button>
+            </div>
+            {{ grant_override_fields() }}
         </form>
         {% endif %}
     </div>
@@ -107,13 +150,16 @@
         <p class="text-sm text-gray-400 italic mb-3">No custom tools granted.</p>
         {% endif %}
         {% if all_tools %}
-        <form method="POST" action="/definitions/agents/{{ definition.id }}/grant-tool" class="flex gap-2">
+        <form method="POST" action="/definitions/agents/{{ definition.id }}/grant-tool">
+            <div class="flex gap-2">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <select name="tool_id" class="flex-1 px-2 py-1.5 border border-gray-300 rounded-md text-sm min-w-0">
                 <option value="">Add a tool...</option>
                 {% for t in all_tools %}{% if t.id|string not in granted_tool_ids %}<option value="{{ t.id }}">{{ t.name }} ({{ t.runtime_type }})</option>{% endif %}{% endfor %}
             </select>
             <button type="submit" class="px-3 py-1.5 text-sm bg-orange-50 text-orange-700 rounded-md hover:bg-orange-100 font-medium">Grant</button>
+            </div>
+            {{ grant_override_fields() }}
         </form>
         {% endif %}
     </div>
@@ -141,13 +187,16 @@
         <p class="text-sm text-gray-400 italic mb-3">No hooks granted.</p>
         {% endif %}
         {% if all_hooks %}
-        <form method="POST" action="/definitions/agents/{{ definition.id }}/grant-hook" class="flex gap-2">
+        <form method="POST" action="/definitions/agents/{{ definition.id }}/grant-hook">
+            <div class="flex gap-2">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <select name="hook_id" class="flex-1 px-2 py-1.5 border border-gray-300 rounded-md text-sm min-w-0">
                 <option value="">Add a hook...</option>
                 {% for h in all_hooks %}{% if h.id|string not in granted_hook_ids %}<option value="{{ h.id }}">{{ h.name }} ({{ h.action_type }})</option>{% endif %}{% endfor %}
             </select>
             <button type="submit" class="px-3 py-1.5 text-sm bg-emerald-50 text-emerald-700 rounded-md hover:bg-emerald-100 font-medium">Grant</button>
+            </div>
+            {{ grant_override_fields() }}
         </form>
         {% endif %}
     </div>
@@ -263,13 +312,16 @@
         <p class="text-sm text-gray-400 italic mb-3">No external tool providers granted.</p>
         {% endif %}
         {% if all_mcp %}
-        <form method="POST" action="/definitions/agents/{{ definition.id }}/grant-mcp" class="flex gap-2">
+        <form method="POST" action="/definitions/agents/{{ definition.id }}/grant-mcp">
+            <div class="flex gap-2">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <select name="mcp_server_id" class="flex-1 px-2 py-1.5 border border-gray-300 rounded-md text-sm">
                 <option value="">Add an MCP server...</option>
                 {% for m in all_mcp %}{% if m.id|string not in granted_mcp_ids %}<option value="{{ m.id }}">{{ m.name }} ({{ m.server_type }})</option>{% endif %}{% endfor %}
             </select>
             <button type="submit" class="px-3 py-1.5 text-sm bg-purple-50 text-purple-700 rounded-md hover:bg-purple-100 font-medium">Grant</button>
+            </div>
+            {{ grant_override_fields() }}
         </form>
         {% endif %}
     </div>

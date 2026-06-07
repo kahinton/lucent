@@ -448,6 +448,33 @@ def get_default_model_id(
     return available[0].id
 
 
+def get_default_model_id_for_user(
+    accessible_model_ids: set[str] | None,
+    *,
+    preferred_model: str | None = None,
+    require_tools: bool = False,
+) -> str | None:
+    """Resolve the default model restricted to a user's accessible set.
+
+    Returns the configured/preferred default when the user can access it,
+    otherwise the best accessible model by category preference, otherwise
+    ``None`` when the user has no accessible enabled models. Passing ``None`` for
+    ``accessible_model_ids`` means unrestricted — resolve the global default.
+    """
+    if accessible_model_ids is None:
+        return get_default_model_id(
+            preferred_model=preferred_model, require_tools=require_tools
+        )
+    available = [m for m in _available_models() if m.id in accessible_model_ids]
+    if require_tools:
+        available = [m for m in available if m.supports_tools]
+    if not available:
+        return None
+    return get_default_model_id(
+        available, preferred_model=preferred_model, require_tools=require_tools
+    )
+
+
 def _infer_task_category(
     *,
     agent_type: str | None = None,

@@ -588,6 +588,12 @@ def create_app() -> FastAPI:
 
     app.include_router(definitions.router, prefix="/api", tags=["Definitions"])
 
+    # Include resource access-grant management router (REST counterpart to the
+    # web /access routes and the MCP *_resource_access tools).
+    from lucent.api.routers import resource_access
+
+    app.include_router(resource_access.router, prefix="/api", tags=["Access Grants"])
+
     # Include request tracking router
     from lucent.api.routers import requests as requests_router
     from lucent.api.routers import user_interactions as user_interactions_router

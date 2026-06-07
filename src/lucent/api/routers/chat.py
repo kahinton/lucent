@@ -91,6 +91,45 @@ def _resolve_chat_model(override: str | None = None) -> str:
     return get_default_model_id(preferred_model=chat_model_id())
 
 
+async def _resolve_chat_model_for_user(
+    *,
+    user: dict,
+    pool,
+    explicit: str | None,
+    session_default: str | None = None,
+) -> tuple[str | None, str | None]:
+    """Resolve the chat model for a specific user.
+
+    An explicit per-request model (``body.model``) is returned as-is and remains
+    strictly enforced downstream (a forbidden explicit pick still 403s). When no
+    model is explicitly chosen, resolve a default the user can actually use:
+    honor a stored session default when still accessible, otherwise the
+    configured default when accessible, otherwise the user's best accessible
+    model. Returns ``(None, error)`` when the user has no accessible models.
+    """
+    if explicit:
+        return explicit, None
+    from lucent.access_control import AccessControlService
+    from lucent.model_registry import get_default_model_id_for_user
+
+    acl = AccessControlService(pool)
+    accessible = await acl.accessible_model_ids(
+        str(user["id"]), str(user["organization_id"]), role=user.get("role")
+    )
+    if session_default and session_default in accessible:
+        return session_default, None
+    model_id = get_default_model_id_for_user(
+        accessible, preferred_model=chat_model_id()
+    )
+    if model_id is None:
+        return None, (
+            "No chat models are available to you. "
+            "Ask an administrator to grant model access."
+        )
+    return model_id, None
+
+
+
 def _chat_allowed_tools_for_agent(
     agent_name: str | None = None,
     skill_names: list[str] | None = None,
@@ -956,7 +995,14 @@ async def chat_stream(
         pool=pool,
         session_id=body.session_id,
     )
-    selected_model = _resolve_chat_model(body.model or session_defaults.get("model"))
+    selected_model, model_access_error = await _resolve_chat_model_for_user(
+        user=user,
+        pool=pool,
+        explicit=body.model,
+        session_default=session_defaults.get("model"),
+    )
+    if model_access_error:
+        raise HTTPException(status_code=403, detail=model_access_error)
     reasoning_effort = (
         body.reasoning_effort
         if body.reasoning_effort is not None
@@ -968,6 +1014,15 @@ async def chat_stream(
     effort_error = validate_reasoning_effort(selected_model, reasoning_effort)
     if effort_error:
         raise HTTPException(status_code=400, detail=effort_error)
+
+    from lucent.access_control import enforce_model_access
+
+    access_error = await enforce_model_access(
+        pool, user_id=str(user["id"]), role=user.get("role"),
+        org_id=str(user["organization_id"]), model_id=selected_model,
+    )
+    if access_error:
+        raise HTTPException(status_code=403, detail=access_error)
 
     engine = get_engine_for_model(selected_model)
 
@@ -1098,17 +1153,24 @@ async def chat_stream(
 
 @router.get("/models")
 async def chat_models(request: Request):
-    """List available models for the chat model picker."""
-    # Require a valid session to prevent unauthenticated probing
-    session_token = request.cookies.get(SESSION_COOKIE_NAME)
-    if not session_token:
-        raise HTTPException(status_code=401, detail="Not authenticated")
+    """List available models for the chat model picker (grant-filtered)."""
+    user, pool = await _get_session_user(request)
 
-    from lucent.model_registry import list_models as registry_list_models
+    from lucent.access_control import AccessControlService
+    from lucent.model_registry import (
+        get_default_model_id_for_user,
+        list_models as registry_list_models,
+    )
 
-    models = registry_list_models()
+    acl = AccessControlService(pool)
+    accessible = await acl.accessible_model_ids(
+        str(user["id"]), str(user["organization_id"]), role=user.get("role")
+    )
+    models = [m for m in registry_list_models() if m.id in accessible]
     return {
-        "default": _resolve_chat_model(),
+        "default": get_default_model_id_for_user(
+            accessible, preferred_model=chat_model_id()
+        ),
         "models": [
             {
                 "id": m.id,
@@ -1186,7 +1248,14 @@ async def chat_stream_v2(
         pool=pool,
         session_id=body.session_id,
     )
-    selected_model = _resolve_chat_model(body.model or session_defaults.get("model"))
+    selected_model, model_access_error = await _resolve_chat_model_for_user(
+        user=user,
+        pool=pool,
+        explicit=body.model,
+        session_default=session_defaults.get("model"),
+    )
+    if model_access_error:
+        raise HTTPException(status_code=403, detail=model_access_error)
     reasoning_effort = (
         body.reasoning_effort
         if body.reasoning_effort is not None
@@ -1199,6 +1268,15 @@ async def chat_stream_v2(
     effort_error = validate_reasoning_effort(selected_model, reasoning_effort)
     if effort_error:
         raise HTTPException(status_code=400, detail=effort_error)
+
+    from lucent.access_control import enforce_model_access
+
+    access_error = await enforce_model_access(
+        pool, user_id=str(user["id"]), role=user.get("role"),
+        org_id=str(user["organization_id"]), model_id=selected_model,
+    )
+    if access_error:
+        raise HTTPException(status_code=403, detail=access_error)
 
     engine = get_engine_for_model(selected_model)
 

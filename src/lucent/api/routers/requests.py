@@ -576,6 +576,7 @@ async def create_task(
 
     # Validate model against registry (matches MCP create_task behavior)
     if body.model:
+        from lucent.access_control import enforce_model_access
         from lucent.model_registry import validate_model, validate_reasoning_effort
 
         error = validate_model(body.model, require_tools=True)
@@ -584,6 +585,12 @@ async def create_task(
         effort_error = validate_reasoning_effort(body.model, body.reasoning_effort)
         if effort_error:
             raise HTTPException(422, effort_error)
+        access_error = await enforce_model_access(
+            pool, user_id=str(user.id), role=user.role.value, org_id=org_id,
+            model_id=body.model,
+        )
+        if access_error:
+            raise HTTPException(403, access_error)
     elif body.reasoning_effort:
         raise HTTPException(422, "reasoning_effort requires model")
 
@@ -699,6 +706,7 @@ async def update_task_model(
     repo = RequestRepository(pool)
     task, req = await _get_task_and_request(repo, str(task_id), str(user.organization_id))
     _require_request_mutation(req, user)
+    from lucent.access_control import enforce_model_access
     from lucent.model_registry import validate_model, validate_reasoning_effort
 
     error = validate_model(body.model, require_tools=True)
@@ -707,6 +715,12 @@ async def update_task_model(
     effort_error = validate_reasoning_effort(body.model, body.reasoning_effort)
     if effort_error:
         raise HTTPException(422, effort_error)
+    access_error = await enforce_model_access(
+        pool, user_id=str(user.id), role=user.role.value,
+        org_id=str(user.organization_id), model_id=body.model,
+    )
+    if access_error:
+        raise HTTPException(403, access_error)
 
     result = await repo.update_task_model(str(task_id), body.model)
     if result:
@@ -757,6 +771,7 @@ async def edit_pending_task(
         )
 
     if body.model:
+        from lucent.access_control import enforce_model_access
         from lucent.model_registry import validate_model, validate_reasoning_effort
 
         error = validate_model(body.model, require_tools=True)
@@ -765,6 +780,12 @@ async def edit_pending_task(
         effort_error = validate_reasoning_effort(body.model, body.reasoning_effort)
         if effort_error:
             raise HTTPException(422, effort_error)
+        access_error = await enforce_model_access(
+            pool, user_id=str(user.id), role=user.role.value, org_id=org_id,
+            model_id=body.model,
+        )
+        if access_error:
+            raise HTTPException(403, access_error)
     elif body.reasoning_effort:
         raise HTTPException(422, "reasoning_effort requires model")
 

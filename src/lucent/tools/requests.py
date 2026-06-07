@@ -594,6 +594,8 @@ if the agent type is not approved or the sandbox template is invalid."""
 
         # Validate model against registry
         if model:
+            from lucent.access_control import enforce_model_access
+            from lucent.db import get_pool
             from lucent.model_registry import validate_model, validate_reasoning_effort
 
             error = validate_model(model, require_tools=True)
@@ -602,6 +604,12 @@ if the agent type is not approved or the sandbox template is invalid."""
             effort_error = validate_reasoning_effort(model, reasoning_effort)
             if effort_error:
                 return json.dumps({"error": effort_error})
+            access_error = await enforce_model_access(
+                await get_pool(), user_id=user_id, role=user_role,
+                org_id=org_id, model_id=model,
+            )
+            if access_error:
+                return json.dumps({"error": access_error})
         elif reasoning_effort:
             return json.dumps({"error": "reasoning_effort requires model"})
 

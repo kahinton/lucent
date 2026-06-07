@@ -7,6 +7,7 @@ as does ``from lucent.web.routes import _check_csrf, start_impersonation``.
 from fastapi import APIRouter
 
 from . import (
+    access_ui,
     admin,
     audit,
     auth,
@@ -43,6 +44,7 @@ router.include_router(settings.router)
 router.include_router(user_interactions.router)
 router.include_router(requests_routes.router)
 router.include_router(schedules.router)
+router.include_router(access_ui.router)
 
 # Settings sub-area: members (admin.py), audit, groups, secrets,
 # connections, models — all live under /settings/* for a unified IA.

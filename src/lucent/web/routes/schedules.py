@@ -79,8 +79,15 @@ async def schedules_list(
 
     org_id = str(user.organization_id)
     enabled_filter = True if enabled == "true" else (False if enabled == "false" else None)
+    role_value = user.role if isinstance(user.role, str) else user.role.value
     result = await repo.list_schedules(
-        org_id, status=status, enabled=enabled_filter, limit=per_page, offset=offset
+        org_id,
+        status=status,
+        enabled=enabled_filter,
+        limit=per_page,
+        offset=offset,
+        requester_user_id=str(user.id),
+        requester_role=role_value,
     )
     schedules = result["items"]
     for sched in schedules:
@@ -309,7 +316,13 @@ async def schedule_detail(
     repo = ScheduleRepository(pool)
 
     org_id = str(user.organization_id)
-    sched = await repo.get_schedule(schedule_id, org_id)
+    role_value = user.role if isinstance(user.role, str) else user.role.value
+    sched = await repo.get_schedule(
+        schedule_id,
+        org_id,
+        requester_user_id=str(user.id),
+        requester_role=role_value,
+    )
     if not sched:
         raise HTTPException(404, "Workflow not found")
 
@@ -383,6 +396,27 @@ async def schedule_detail(
             user_role=role_value,
         )
 
+    # Resolve ownership display names + available groups for the ownership control
+    from lucent.web.routes.definitions import _get_user_groups, _resolve_owner_maps
+
+    owner_user_map, owner_group_map = await _resolve_owner_maps(pool, [sched])
+    owner_user_id = str(sched["owner_user_id"]) if sched.get("owner_user_id") else None
+    owner_group_id = str(sched["owner_group_id"]) if sched.get("owner_group_id") else None
+    sched["owner_user_name"] = owner_user_map.get(owner_user_id) if owner_user_id else None
+    sched["owner_group_name"] = owner_group_map.get(owner_group_id) if owner_group_id else None
+    owner_groups = await _get_user_groups(pool, str(user.id), org_id)
+
+    from lucent.web.routes.access_ui import build_access_context
+
+    access = await build_access_context(
+        pool,
+        resource_type="workflow",
+        resource_id=schedule_id,
+        org_id=org_id,
+        user=user,
+        redirect=request.url.path,
+    )
+
     return templates.TemplateResponse(
         request,
         "schedule_detail.html",
@@ -394,7 +428,9 @@ async def schedule_detail(
             ),
             "active_agents": active_agents,
             "available_models": available_models,
+            "owner_groups": owner_groups,
             "sandbox_template": sandbox_template,
+            "access": access,
             "run_page": page,
             "run_per_page": per_page,
             "run_total_pages": run_total_pages,
@@ -576,8 +612,42 @@ async def schedule_edit(request: Request, schedule_id: str):
         effort_error = validate_reasoning_effort(effective_model, effective_effort)
         if effort_error:
             raise HTTPException(422, effort_error)
+        if "model" in updates:
+            from lucent.access_control import enforce_model_access
+
+            role_value = user.role if isinstance(user.role, str) else user.role.value
+            access_error = await enforce_model_access(
+                pool, user_id=str(user.id), role=role_value,
+                org_id=org_id, model_id=effective_model,
+            )
+            if access_error:
+                raise HTTPException(403, access_error)
     elif effective_effort:
         raise HTTPException(422, "reasoning_effort requires model")
+
+    # Ownership reassignment (instance workflows only; built-in/system are not user-owned)
+    if "owner_scope" in form and not sched.get("is_system"):
+        owner_scope = str(form.get("owner_scope", "")).strip()
+        # "keep" is an explicit no-op used when the current owner is a different user.
+        if owner_scope and owner_scope != "keep":
+            role_value = user.role if isinstance(user.role, str) else user.role.value
+            current_owner_id = str(sched["owner_user_id"]) if sched.get("owner_user_id") else None
+            is_admin = role_value in ("admin", "owner")
+            is_current_owner = current_owner_id is not None and current_owner_id == str(user.id)
+            if not (is_admin or is_current_owner):
+                raise HTTPException(
+                    403, "Only the workflow owner or an admin can change ownership."
+                )
+
+            from lucent.web.routes.definitions import _resolve_owner_scope
+
+            owner_user_id, owner_group_id, _shared = await _resolve_owner_scope(form, user, pool)
+            current_group_id = (
+                str(sched["owner_group_id"]) if sched.get("owner_group_id") else None
+            )
+            if owner_user_id != current_owner_id or owner_group_id != current_group_id:
+                updates["owner_user_id"] = owner_user_id
+                updates["owner_group_id"] = owner_group_id
 
     if updates:
         await repo.update_schedule(schedule_id, org_id, **updates)

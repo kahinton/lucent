@@ -514,6 +514,14 @@ async def edit_task(request: Request, task_id: str):
         effort_err = validate_reasoning_effort(model, reasoning_effort)
         if effort_err:
             raise HTTPException(422, effort_err)
+        from lucent.access_control import enforce_model_access
+
+        access_error = await enforce_model_access(
+            pool, user_id=str(user.id), role=user.role.value,
+            org_id=org_id, model_id=model,
+        )
+        if access_error:
+            raise HTTPException(403, access_error)
     elif reasoning_effort:
         raise HTTPException(422, "reasoning_effort requires model")
 

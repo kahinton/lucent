@@ -1,0 +1,32 @@
+{% extends "settings_layout.html" %}
+
+{% set settings_section = "models" %}
+{% set settings_title = "Model Access" %}
+{% set settings_subtitle = "Choose who in your organization may use this model." %}
+
+{% block title %}Model Access - Lucent{% endblock %}
+
+{% block settings_actions %}
+    <a href="/settings/models" class="px-4 py-2 text-sm border border-gray-200 text-gray-700 rounded-md hover:bg-gray-50 font-medium">&larr; Back to Models</a>
+{% endblock %}
+
+{% block settings_content %}
+{% if request.query_params.get('access_error') %}
+<div class="mb-4 bg-red-50 border border-red-200 rounded-xl p-4">
+    <p class="text-sm font-medium text-red-800">{{ request.query_params.get('access_error') }}</p>
+</div>
+{% endif %}
+
+<div class="mb-6">
+    <div class="flex items-center gap-3">
+        <h2 class="text-lg font-semibold text-gray-900">{{ model.name }}</h2>
+        <span class="px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-600 capitalize">{{ model.provider }}</span>
+        {% if model.category %}<span class="px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-600">{{ model.category }}</span>{% endif %}
+    </div>
+    <p class="text-xs text-gray-400 font-mono mt-1">{{ model.id }}</p>
+</div>
+
+<div class="max-w-2xl">
+    {% include "_access_panel.html" %}
+</div>
+{% endblock %}

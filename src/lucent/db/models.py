@@ -8,6 +8,8 @@ from uuid import UUID
 
 import asyncpg
 
+from lucent.access_control import build_access_clause
+
 
 def _jsonb_param(value):
     """Normalize JSONB values, avoiding double-encoded JSON strings."""
@@ -35,6 +37,9 @@ class ModelRepository:
         org_id: str | None = None,
         limit: int = 25,
         offset: int = 0,
+        *,
+        requester_user_id: str | None = None,
+        requester_role: str | None = None,
     ) -> dict:
         base = " FROM models WHERE 1=1"
         params: list = []
@@ -54,6 +59,23 @@ class ModelRepository:
             base += f" AND (organization_id IS NULL OR organization_id = ${idx})"
             params.append(UUID(org_id))
             idx += 1
+
+        if requester_user_id is not None:
+            params.extend([UUID(requester_user_id), requester_role or "member"])
+            uid_idx, role_idx = idx, idx + 1
+            idx += 2
+            # Models are a global, cross-org catalog. Constrain grant matching to
+            # the requester's organization so one org's grants cannot expose a
+            # shared model to another org.
+            org_clause_param = None
+            if org_id:
+                params.append(UUID(org_id))
+                org_clause_param = idx
+                idx += 1
+            base += " AND " + build_access_clause(
+                resource_type="model", uid_param=uid_idx, role_param=role_idx,
+                org_param=org_clause_param,
+            )
 
         count_query = f"SELECT COUNT(*) AS total{base}"
         query = f"SELECT *{base} ORDER BY provider, name LIMIT ${idx} OFFSET ${idx + 1}"

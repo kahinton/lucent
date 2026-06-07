@@ -178,6 +178,8 @@ class UpdateMCPServer(BaseModel):
 
 class GrantAccess(BaseModel):
     target_id: str  # skill_id or mcp_server_id
+    reason: str | None = None  # justification, required when overriding a scope mismatch
+    override: bool = False  # proceed despite a scope-compatibility warning
 
 
 class ImportRequest(BaseModel):
@@ -322,20 +324,34 @@ async def delete_agent(agent_id: str, user: AuthenticatedUser):
 # ── Agent Access Grants ──────────────────────────────────────────────────
 
 
+@router.get("/agents/{agent_id}/access-warnings")
+async def get_agent_access_warnings(agent_id: str, user: AuthenticatedUser):
+    pool = await get_pool()
+    acl = AccessControlService(pool)
+    org_id = str(user.organization_id)
+    if not await acl.can_access(str(user.id), "agent", agent_id, org_id):
+        raise HTTPException(404, "Agent not found")
+    return {"warnings": await acl.scan_agent_grant_mismatches(agent_id, org_id)}
+
+
 @router.post("/agents/{agent_id}/skills")
 async def grant_skill_to_agent(agent_id: str, body: GrantAccess, user: AdminUser):
     pool = await get_pool()
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    acl = AccessControlService(pool)
     org_id = str(user.organization_id)
-    if not await repo.get_agent(
-        agent_id, org_id, requester_user_id=str(user.id), requester_role=user.role.value
+    decision = await acl.authorize_grant(
+        grantor_id=str(user.id), org_id=org_id,
+        actor_type="agent", actor_id=agent_id,
+        capability_type="skill", capability_id=body.target_id,
+        override=body.override,
+    )
+    if not decision.allowed:
+        raise HTTPException(409 if decision.requires_override else 403, decision.reason)
+    if not await repo.grant_skill(
+        agent_id, body.target_id, org_id=org_id, user_id=str(user.id),
+        grant_reason=body.reason, grant_override=decision.requires_override,
     ):
-        raise HTTPException(404, "Agent not found")
-    if not await repo.get_skill(
-        body.target_id, org_id, requester_user_id=str(user.id), requester_role=user.role.value
-    ):
-        raise HTTPException(404, "Skill not found")
-    if not await repo.grant_skill(agent_id, body.target_id, org_id=org_id, user_id=str(user.id)):
         raise HTTPException(400, "Failed to grant skill")
     return {"status": "granted"}
 
@@ -362,13 +378,19 @@ async def revoke_skill_from_agent(agent_id: str, skill_id: str, user: AdminUser)
 async def grant_mcp_to_agent(agent_id: str, body: GrantAccess, user: AdminUser):
     pool = await get_pool()
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    acl = AccessControlService(pool)
     org_id = str(user.organization_id)
-    if not await repo.get_agent(
-        agent_id, org_id, requester_user_id=str(user.id), requester_role=user.role.value
-    ):
-        raise HTTPException(404, "Agent not found")
+    decision = await acl.authorize_grant(
+        grantor_id=str(user.id), org_id=org_id,
+        actor_type="agent", actor_id=agent_id,
+        capability_type="mcp_server", capability_id=body.target_id,
+        override=body.override,
+    )
+    if not decision.allowed:
+        raise HTTPException(409 if decision.requires_override else 403, decision.reason)
     if not await repo.grant_mcp_server(
         agent_id, body.target_id, org_id=org_id, user_id=str(user.id),
+        grant_reason=body.reason, grant_override=decision.requires_override,
     ):
         raise HTTPException(400, "Failed to grant MCP server")
     return {"status": "granted"}
@@ -396,17 +418,25 @@ async def revoke_mcp_from_agent(agent_id: str, server_id: str, user: AdminUser):
 async def grant_hook_to_agent(agent_id: str, body: GrantAccess, user: AdminUser):
     pool = await get_pool()
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    acl = AccessControlService(pool)
     org_id = str(user.organization_id)
-    if not await repo.get_agent(
-        agent_id, org_id, requester_user_id=str(user.id), requester_role=user.role.value
-    ):
-        raise HTTPException(404, "Agent not found")
+    decision = await acl.authorize_grant(
+        grantor_id=str(user.id), org_id=org_id,
+        actor_type="agent", actor_id=agent_id,
+        capability_type="hook", capability_id=body.target_id,
+        override=body.override,
+    )
+    if not decision.allowed:
+        raise HTTPException(409 if decision.requires_override else 403, decision.reason)
     hook = await repo.get_hook(
         body.target_id, org_id, requester_user_id=str(user.id), requester_role=user.role.value
     )
     if not hook or hook.get("status") != "active":
         raise HTTPException(404, "Active hook not found")
-    if not await repo.grant_hook(agent_id, body.target_id, org_id=org_id, user_id=str(user.id)):
+    if not await repo.grant_hook(
+        agent_id, body.target_id, org_id=org_id, user_id=str(user.id),
+        grant_reason=body.reason, grant_override=decision.requires_override,
+    ):
         raise HTTPException(400, "Failed to grant hook")
     return {"status": "granted"}
 
@@ -970,11 +1000,16 @@ async def run_managed_tool_api(tool_id: str, body: RunManagedTool, user: Authent
 async def grant_managed_tool_to_agent(agent_id: str, body: GrantAccess, user: AdminUser):
     pool = await get_pool()
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    acl = AccessControlService(pool)
     org_id = str(user.organization_id)
-    if not await repo.get_agent(
-        agent_id, org_id, requester_user_id=str(user.id), requester_role=user.role.value
-    ):
-        raise HTTPException(404, "Agent not found")
+    decision = await acl.authorize_grant(
+        grantor_id=str(user.id), org_id=org_id,
+        actor_type="agent", actor_id=agent_id,
+        capability_type="managed_tool", capability_id=body.target_id,
+        override=body.override,
+    )
+    if not decision.allowed:
+        raise HTTPException(409 if decision.requires_override else 403, decision.reason)
     tool = await repo.get_managed_tool(
         body.target_id, org_id, requester_user_id=str(user.id), requester_role=user.role.value
     )
@@ -982,6 +1017,7 @@ async def grant_managed_tool_to_agent(agent_id: str, body: GrantAccess, user: Ad
         raise HTTPException(404, "Active managed tool not found")
     if not await repo.grant_managed_tool(
         agent_id, body.target_id, org_id=org_id, user_id=str(user.id),
+        grant_reason=body.reason, grant_override=decision.requires_override,
     ):
         raise HTTPException(400, "Failed to grant managed tool")
     return {"status": "granted"}

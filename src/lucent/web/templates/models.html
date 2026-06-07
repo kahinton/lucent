@@ -98,6 +98,7 @@
                     <th class="text-left text-xs font-medium text-gray-500 uppercase px-4 py-3 hidden lg:table-cell">Reasoning</th>
                     <th class="text-left text-xs font-medium text-gray-500 uppercase px-4 py-3 hidden md:table-cell">Tags</th>
                     <th class="text-left text-xs font-medium text-gray-500 uppercase px-4 py-3">Status</th>
+                    <th class="text-left text-xs font-medium text-gray-500 uppercase px-4 py-3">Access</th>
                     <th class="text-right text-xs font-medium text-gray-500 uppercase px-4 py-3">Actions</th>
                 </tr>
             </thead>
@@ -153,6 +154,19 @@
                         {% if model.discovery_source %}
                         <div class="mt-1 text-[10px] uppercase tracking-wide text-gray-400">{{ model.discovery_source }}</div>
                         {% endif %}
+                    </td>
+                    <td class="px-4 py-3">
+                        <a href="/settings/models/{{ model.id }}/access" class="inline-flex items-center gap-1.5 group">
+                            {% set acc = model.access_summary %}
+                            {% if acc and acc.org %}
+                            <span class="px-2 py-0.5 rounded text-xs bg-blue-50 text-blue-700 group-hover:bg-blue-100">Everyone</span>
+                            {% elif acc and (acc.users or acc.groups) %}
+                            <span class="px-2 py-0.5 rounded text-xs bg-amber-50 text-amber-700 group-hover:bg-amber-100">{{ acc.users }}&nbsp;user{{ '' if acc.users == 1 else 's' }}, {{ acc.groups }}&nbsp;group{{ '' if acc.groups == 1 else 's' }}</span>
+                            {% else %}
+                            <span class="px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-500 group-hover:bg-gray-200">Admins only</span>
+                            {% endif %}
+                            <span class="text-xs text-primary-600 opacity-0 group-hover:opacity-100 transition-opacity">Manage</span>
+                        </a>
                     </td>
                     <td class="px-4 py-3 text-right">
                         <div class="flex items-center justify-end gap-2">

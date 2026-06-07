@@ -720,6 +720,14 @@ async def create_schedule(
         effort_error = validate_reasoning_effort(body.model, body.reasoning_effort)
         if effort_error:
             raise HTTPException(422, effort_error)
+        from lucent.access_control import enforce_model_access
+
+        access_error = await enforce_model_access(
+            pool, user_id=str(user.id), role=user.role.value,
+            org_id=str(user.organization_id), model_id=body.model,
+        )
+        if access_error:
+            raise HTTPException(403, access_error)
     elif body.reasoning_effort:
         raise HTTPException(422, "reasoning_effort requires model")
 
@@ -762,7 +770,13 @@ async def list_schedules(
     from lucent.db.schedules import ScheduleRepository
 
     repo = ScheduleRepository(pool)
-    return await repo.list_schedules(str(user.organization_id), status=status, enabled=enabled)
+    return await repo.list_schedules(
+        str(user.organization_id),
+        status=status,
+        enabled=enabled,
+        requester_user_id=str(user.id),
+        requester_role=user.role.value,
+    )
 
 
 @router.get("/summary")
@@ -786,7 +800,12 @@ async def get_schedule(schedule_id: str, user: AuthenticatedUser, pool=Depends(g
     from lucent.db.schedules import ScheduleRepository
 
     repo = ScheduleRepository(pool)
-    result = await repo.get_schedule_with_runs(schedule_id, str(user.organization_id))
+    result = await repo.get_schedule_with_runs(
+        schedule_id,
+        str(user.organization_id),
+        requester_user_id=str(user.id),
+        requester_role=user.role.value,
+    )
     if not result:
         raise HTTPException(404, "Schedule not found")
     return result
@@ -827,6 +846,15 @@ async def update_schedule(
         effort_error = validate_reasoning_effort(effective_model, effective_effort)
         if effort_error:
             raise HTTPException(422, effort_error)
+        if "model" in fields:
+            from lucent.access_control import enforce_model_access
+
+            access_error = await enforce_model_access(
+                pool, user_id=str(user.id), role=user.role.value,
+                org_id=str(user.organization_id), model_id=effective_model,
+            )
+            if access_error:
+                raise HTTPException(403, access_error)
     elif effective_effort:
         raise HTTPException(422, "reasoning_effort requires model")
     try:
@@ -952,6 +980,14 @@ async def create_workflow(
             )
             if effort_error:
                 raise HTTPException(422, effort_error)
+            from lucent.access_control import enforce_model_access
+
+            access_error = await enforce_model_access(
+                pool, user_id=str(user.id), role=user.role.value,
+                org_id=str(user.organization_id), model_id=action["model"],
+            )
+            if access_error:
+                raise HTTPException(403, access_error)
         elif action.get("reasoning_effort"):
             raise HTTPException(422, "reasoning_effort requires model")
         if action.get("output_contract") and action.get("output_schema"):
@@ -992,7 +1028,13 @@ async def list_workflows(
     from lucent.db.schedules import ScheduleRepository
 
     repo = ScheduleRepository(pool)
-    result = await repo.list_schedules(str(user.organization_id), status=status, enabled=enabled)
+    result = await repo.list_schedules(
+        str(user.organization_id),
+        status=status,
+        enabled=enabled,
+        requester_user_id=str(user.id),
+        requester_role=user.role.value,
+    )
     if trigger_type:
         result["items"] = [
             item for item in result["items"]

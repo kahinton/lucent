@@ -11,14 +11,22 @@ Covers:
 import pytest
 import pytest_asyncio
 
+from lucent.access_control import AccessControlService
 from lucent.db.definitions import DefinitionRepository
 from lucent.db.groups import GroupRepository
+from lucent.db.models import ModelRepository
 from lucent.db.sandbox_template import SandboxTemplateRepository
+from lucent.db.schedules import ScheduleRepository
 
 
 @pytest_asyncio.fixture
 async def def_repo(db_pool):
     return DefinitionRepository(db_pool)
+
+
+@pytest_asyncio.fixture
+async def acl(db_pool):
+    return AccessControlService(db_pool)
 
 
 @pytest_asyncio.fixture
@@ -54,6 +62,22 @@ async def cleanup(db_pool, test_organization, clean_test_data):
     prefix = clean_test_data
     org_id = test_organization["id"]
     async with db_pool.acquire() as conn:
+        # Remove access grants for test resources before deleting parent rows.
+        await conn.execute(
+            "DELETE FROM resource_access_grants WHERE resource_type = 'model' "
+            "AND resource_id LIKE $1",
+            f"{prefix}%",
+        )
+        await conn.execute(
+            "DELETE FROM resource_access_grants WHERE resource_type = 'agent' "
+            "AND resource_id IN (SELECT id::text FROM agent_definitions WHERE name LIKE $1)",
+            f"{prefix}%",
+        )
+        await conn.execute(
+            "DELETE FROM resource_access_grants WHERE resource_type = 'workflow' "
+            "AND resource_id IN (SELECT id::text FROM schedules WHERE title LIKE $1)",
+            f"{prefix}%",
+        )
         await conn.execute(
             "DELETE FROM agent_skills WHERE agent_id IN "
             "(SELECT id FROM agent_definitions WHERE name LIKE $1)",
@@ -68,6 +92,8 @@ async def cleanup(db_pool, test_organization, clean_test_data):
         await conn.execute("DELETE FROM skill_definitions WHERE name LIKE $1", f"{prefix}%")
         await conn.execute("DELETE FROM mcp_server_configs WHERE name LIKE $1", f"{prefix}%")
         await conn.execute("DELETE FROM sandbox_templates WHERE name LIKE $1", f"{prefix}%")
+        await conn.execute("DELETE FROM schedules WHERE title LIKE $1", f"{prefix}%")
+        await conn.execute("DELETE FROM models WHERE id LIKE $1", f"{prefix}%")
         await conn.execute("DELETE FROM groups WHERE organization_id = $1", org_id)
 
 
@@ -85,6 +111,8 @@ class TestMigrationColumns:
                 "skill_definitions",
                 "mcp_server_configs",
                 "sandbox_templates",
+                "schedules",
+                "models",
             ]:
                 cols = await conn.fetch(
                     "SELECT column_name FROM information_schema.columns "
@@ -109,13 +137,18 @@ class TestMigrationColumns:
     async def test_check_constraints_exist(self, db_pool):
         async with db_pool.acquire() as conn:
             constraints = await conn.fetch(
-                "SELECT conname FROM pg_constraint WHERE conname LIKE 'ck_%_owner_%'",
+                "SELECT conname FROM pg_constraint WHERE conname LIKE 'ck_%_single_owner'",
             )
             names = {c["conname"] for c in constraints}
-            assert "ck_agent_def_owner_or_builtin" in names
-            assert "ck_skill_def_owner_or_builtin" in names
-            assert "ck_mcp_cfg_owner_or_builtin" in names
-            assert "ck_sandbox_tpl_owner_or_builtin" in names
+            # Post-077: org-shared rows (NULL/NULL on an instance row) are valid,
+            # so the old owner-or-builtin checks were dropped in favour of
+            # single-owner constraints (a row may not name both a user and a group).
+            assert "ck_agent_def_single_owner" in names
+            assert "ck_skill_def_single_owner" in names
+            assert "ck_mcp_cfg_single_owner" in names
+            assert "ck_sandbox_tpl_single_owner" in names
+            assert "ck_schedules_single_owner" in names
+            assert "ck_models_single_owner" in names
 
 
 # ── CHECK Constraint Tests ────────────────────────────────────────────────
@@ -141,18 +174,43 @@ class TestCheckConstraints:
             await conn.execute("DELETE FROM agent_definitions WHERE id = $1", row["id"])
 
     @pytest.mark.asyncio
-    async def test_instance_requires_owner(self, db_pool, test_organization):
-        """Instance-scoped definitions must have at least one owner set."""
+    async def test_instance_allows_org_shared(self, db_pool, test_organization):
+        """Instance-scoped definitions with NULL owners are valid (org-shared)."""
+        org_id = test_organization["id"]
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "INSERT INTO agent_definitions "
+                "(name, content, status, scope, organization_id) "
+                "VALUES ('_test_org_shared', 'content', 'proposed', 'instance', $1) "
+                "RETURNING id",
+                org_id,
+            )
+            assert row is not None
+            await conn.execute("DELETE FROM agent_definitions WHERE id = $1", row["id"])
+
+    @pytest.mark.asyncio
+    async def test_single_owner_enforced(
+        self, db_pool, group_repo, test_organization, test_user, clean_test_data,
+    ):
+        """A definition may not name both a user owner and a group owner."""
         import asyncpg
 
         org_id = test_organization["id"]
+        group = await group_repo.create_group(
+            name=f"{clean_test_data}single_owner",
+            org_id=str(org_id),
+        )
         async with db_pool.acquire() as conn:
             with pytest.raises(asyncpg.CheckViolationError):
                 await conn.execute(
                     "INSERT INTO agent_definitions "
-                    "(name, content, status, scope, organization_id) "
-                    "VALUES ('_test_no_owner', 'content', 'proposed', 'instance', $1)",
+                    "(name, content, status, scope, organization_id, "
+                    " owner_user_id, owner_group_id) "
+                    "VALUES ('_test_both_owners', 'content', 'proposed', "
+                    " 'instance', $1, $2, $3)",
                     org_id,
+                    test_user["id"],
+                    group["id"],
                 )
 
 
@@ -372,8 +430,8 @@ class TestAccessibleBy:
         assert f"{clean_test_data}my_agent" in names
 
     @pytest.mark.asyncio
-    async def test_user_sees_group_agents(
-        self, def_repo, group_repo, test_organization, test_user,
+    async def test_user_sees_group_granted_agents(
+        self, def_repo, acl, group_repo, test_organization, test_user,
         second_user, clean_test_data,
     ):
         org_id = str(test_organization["id"])
@@ -385,18 +443,30 @@ class TestAccessibleBy:
         )
         await group_repo.add_member(str(group["id"]), user2_id)
 
-        # Agent owned by the group, created by user1
-        await def_repo.create_agent(
+        # Agent created by user1, then shared with the group via a grant.
+        agent = await def_repo.create_agent(
             name=f"{clean_test_data}group_agent",
             description="test",
             content="# agent",
             org_id=org_id,
             created_by=user1_id,
             status="active",
-            owner_group_id=str(group["id"]),
+            owner_user_id=user1_id,
+        )
+        # Before the grant, user2 cannot see it.
+        before = await def_repo.list_agents_accessible_by(user2_id, org_id)
+        assert f"{clean_test_data}group_agent" not in [a["name"] for a in before["items"]]
+
+        await acl.grant_access(
+            resource_type="agent",
+            resource_id=str(agent["id"]),
+            org_id=org_id,
+            principal_type="group",
+            principal_id=str(group["id"]),
+            granted_by=user1_id,
         )
 
-        # user2 is a group member — should see the agent
+        # user2 is a group member with a group grant — should now see the agent.
         result = await def_repo.list_agents_accessible_by(user2_id, org_id)
         names = [a["name"] for a in result["items"]]
         assert f"{clean_test_data}group_agent" in names
@@ -606,3 +676,252 @@ class TestBackfill:
             )
             assert row["owner_user_id"] is None
             assert row["owner_group_id"] is None
+
+
+# ── Workflow (schedules) + Model Ownership ────────────────────────────────
+
+
+class TestWorkflowOwnership:
+    """list_schedules filters by ownership; owners see their own workflows."""
+
+    @pytest.mark.asyncio
+    async def test_list_schedules_respects_ownership(
+        self, db_pool, test_organization, test_user, second_user, clean_test_data,
+    ):
+        repo = ScheduleRepository(db_pool)
+        org_id = str(test_organization["id"])
+        user1_id = str(test_user["id"])
+        user2_id = str(second_user["id"])
+
+        await repo.create_schedule(
+            title=f"{clean_test_data}wf_user1",
+            org_id=org_id,
+            created_by=user1_id,
+            prompt="x",
+        )
+
+        # Owner sees their workflow.
+        owned = await repo.list_schedules(
+            org_id, requester_user_id=user1_id, requester_role="member",
+        )
+        assert f"{clean_test_data}wf_user1" in [s["title"] for s in owned["items"]]
+
+        # A different member does not.
+        other = await repo.list_schedules(
+            org_id, requester_user_id=user2_id, requester_role="member",
+        )
+        assert f"{clean_test_data}wf_user1" not in [s["title"] for s in other["items"]]
+
+        # Admin override sees it.
+        as_admin = await repo.list_schedules(
+            org_id, requester_user_id=user2_id, requester_role="admin",
+        )
+        assert f"{clean_test_data}wf_user1" in [s["title"] for s in as_admin["items"]]
+
+    @pytest.mark.asyncio
+    async def test_get_schedule_blocks_non_owner(
+        self, db_pool, test_organization, test_user, second_user, clean_test_data,
+    ):
+        repo = ScheduleRepository(db_pool)
+        org_id = str(test_organization["id"])
+        user1_id = str(test_user["id"])
+        user2_id = str(second_user["id"])
+
+        sched = await repo.create_schedule(
+            title=f"{clean_test_data}wf_detail",
+            org_id=org_id,
+            created_by=user1_id,
+            prompt="x",
+        )
+        sid = str(sched["id"])
+
+        assert await repo.get_schedule(
+            sid, org_id, requester_user_id=user1_id, requester_role="member",
+        ) is not None
+        assert await repo.get_schedule(
+            sid, org_id, requester_user_id=user2_id, requester_role="member",
+        ) is None
+        # No requester → unscoped (daemon/system path) still resolves.
+        assert await repo.get_schedule(sid, org_id) is not None
+
+
+class TestWorkflowOwnershipReassignment:
+    """update_schedule can move a workflow between personal, group, and org-shared."""
+
+    @pytest.mark.asyncio
+    async def test_reassign_owner_user_to_org_shared_and_back(
+        self, db_pool, acl, test_organization, test_user, clean_test_data,
+    ):
+        repo = ScheduleRepository(db_pool)
+        org_id = str(test_organization["id"])
+        user1_id = str(test_user["id"])
+
+        sched = await repo.create_schedule(
+            title=f"{clean_test_data}wf_reassign",
+            org_id=org_id,
+            created_by=user1_id,
+            prompt="x",
+        )
+        sid = str(sched["id"])
+        assert str(sched["owner_user_id"]) == user1_id
+
+        # Personal -> org-shared (both owners NULL).
+        updated = await repo.update_schedule(
+            sid, org_id, owner_user_id=None, owner_group_id=None,
+        )
+        assert updated["owner_user_id"] is None
+        assert updated["owner_group_id"] is None
+        # Under the grant model, org-shared visibility comes from an org grant,
+        # not from NULL owners. Grant one, then a plain member can see it.
+        await acl.grant_access(
+            resource_type="workflow",
+            resource_id=sid,
+            org_id=org_id,
+            principal_type="org",
+            principal_id=None,
+            granted_by=user1_id,
+        )
+        assert await repo.get_schedule(
+            sid, org_id, requester_user_id=user1_id, requester_role="member",
+        ) is not None
+
+        # Org-shared -> personal again.
+        reverted = await repo.update_schedule(
+            sid, org_id, owner_user_id=user1_id, owner_group_id=None,
+        )
+        assert str(reverted["owner_user_id"]) == user1_id
+
+    @pytest.mark.asyncio
+    async def test_reassign_to_group(
+        self, db_pool, test_organization, test_user, group_repo, clean_test_data,
+    ):
+        repo = ScheduleRepository(db_pool)
+        org_id = str(test_organization["id"])
+        user1_id = str(test_user["id"])
+
+        group = await group_repo.create_group(
+            org_id=org_id, name=f"{clean_test_data}wf_group", created_by=user1_id,
+        )
+        group_id = str(group["id"])
+
+        sched = await repo.create_schedule(
+            title=f"{clean_test_data}wf_group_reassign",
+            org_id=org_id,
+            created_by=user1_id,
+            prompt="x",
+        )
+        sid = str(sched["id"])
+
+        updated = await repo.update_schedule(
+            sid, org_id, owner_user_id=None, owner_group_id=group_id,
+        )
+        assert updated["owner_user_id"] is None
+        assert str(updated["owner_group_id"]) == group_id
+
+
+class TestModelOwnership:
+    """list_models filters by grants; an org grant makes a model visible to all."""
+
+    @pytest.mark.asyncio
+    async def test_list_models_respects_ownership(
+        self, db_pool, acl, test_organization, test_user, second_user, clean_test_data,
+    ):
+        repo = ModelRepository(db_pool)
+        org_id = str(test_organization["id"])
+        user1_id = str(test_user["id"])
+        user2_id = str(second_user["id"])
+
+        # Org-shared model: created, then granted to the whole org.
+        shared_id = f"{clean_test_data}shared_model"
+        await repo.create_model(
+            model_id=shared_id, provider="test", name="Shared", org_id=org_id,
+        )
+        await acl.grant_access(
+            resource_type="model",
+            resource_id=shared_id,
+            org_id=org_id,
+            principal_type="org",
+            principal_id=None,
+            granted_by=user1_id,
+        )
+        # Personal model owned by user1, with no org grant.
+        personal_id = f"{clean_test_data}personal_model"
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO models (id, provider, name, organization_id, "
+                " scope, owner_user_id) "
+                "VALUES ($1, 'test', 'Personal', $2::uuid, 'instance', $3::uuid)",
+                personal_id, org_id, user1_id,
+            )
+
+        def ids(result):
+            return [m["id"] for m in result["items"]]
+
+        as_user1 = await repo.list_models(
+            org_id=org_id, requester_user_id=user1_id, requester_role="member",
+            limit=500,
+        )
+        assert shared_id in ids(as_user1)
+        assert personal_id in ids(as_user1)
+
+        as_user2 = await repo.list_models(
+            org_id=org_id, requester_user_id=user2_id, requester_role="member",
+            limit=500,
+        )
+        # Org grant => everyone sees the shared model; personal stays private.
+        assert shared_id in ids(as_user2)
+        assert personal_id not in ids(as_user2)
+
+        as_admin = await repo.list_models(
+            org_id=org_id, requester_user_id=user2_id, requester_role="admin",
+            limit=500,
+        )
+        assert personal_id in ids(as_admin)
+
+    @pytest.mark.asyncio
+    async def test_user_grant_makes_model_visible(
+        self, db_pool, acl, test_organization, test_user, second_user, clean_test_data,
+    ):
+        repo = ModelRepository(db_pool)
+        org_id = str(test_organization["id"])
+        user1_id = str(test_user["id"])
+        user2_id = str(second_user["id"])
+
+        model_id = f"{clean_test_data}targeted_model"
+        await repo.create_model(
+            model_id=model_id, provider="test", name="Targeted", org_id=org_id,
+        )
+
+        def ids(result):
+            return [m["id"] for m in result["items"]]
+
+        # No grant yet: neither member sees it (default-deny).
+        before = await repo.list_models(
+            org_id=org_id, requester_user_id=user2_id, requester_role="member",
+            limit=500,
+        )
+        assert model_id not in ids(before)
+
+        # Grant to user2 only.
+        await acl.grant_access(
+            resource_type="model",
+            resource_id=model_id,
+            org_id=org_id,
+            principal_type="user",
+            principal_id=user2_id,
+            granted_by=user1_id,
+        )
+
+        as_user2 = await repo.list_models(
+            org_id=org_id, requester_user_id=user2_id, requester_role="member",
+            limit=500,
+        )
+        assert model_id in ids(as_user2)
+
+        # user1 (no grant, not owner) still cannot see it.
+        as_user1 = await repo.list_models(
+            org_id=org_id, requester_user_id=user1_id, requester_role="member",
+            limit=500,
+        )
+        assert model_id not in ids(as_user1)
+

@@ -119,7 +119,14 @@ async def list_models(user: AuthenticatedUser, limit: int = 100, offset: int = 0
     pool = await get_pool()
     repo = ModelRepository(pool)
     org_id = str(user.organization_id) if user.organization_id else None
-    return await repo.list_models(limit=limit, offset=offset, org_id=org_id)
+    role = user.role.value if hasattr(user.role, "value") else str(user.role)
+    return await repo.list_models(
+        limit=limit,
+        offset=offset,
+        org_id=org_id,
+        requester_user_id=str(user.id),
+        requester_role=role,
+    )
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)

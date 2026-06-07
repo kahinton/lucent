@@ -128,11 +128,12 @@ async def client(db_pool, web_user):
 @pytest_asyncio.fixture
 async def schedule(db_pool, web_user):
     """Create a test schedule and return it."""
-    _user, org, _token = web_user
+    user, org, _token = web_user
     repo = ScheduleRepository(db_pool)
     return await repo.create_schedule(
         title="Web Test Schedule",
         org_id=str(org["id"]),
+        created_by=str(user["id"]),
         schedule_type="interval",
         interval_seconds=3600,
         description="Hourly web test",

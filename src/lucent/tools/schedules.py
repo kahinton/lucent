@@ -115,6 +115,8 @@ Returns: JSON with the created schedule including its ID and next_run_at."""
 
         # Validate model against registry
         if model:
+            from lucent.access_control import enforce_model_access
+            from lucent.db import get_pool
             from lucent.model_registry import validate_model, validate_reasoning_effort
 
             error = validate_model(model)
@@ -123,6 +125,12 @@ Returns: JSON with the created schedule including its ID and next_run_at."""
             effort_error = validate_reasoning_effort(model, reasoning_effort)
             if effort_error:
                 return json.dumps({"error": effort_error})
+            access_error = await enforce_model_access(
+                await get_pool(), user_id=user_id, role=user_role,
+                org_id=org_id, model_id=model,
+            )
+            if access_error:
+                return json.dumps({"error": access_error})
         elif reasoning_effort:
             return json.dumps({"error": "reasoning_effort requires model"})
 
@@ -168,6 +176,8 @@ Returns: JSON array of schedules."""
             str(org_id),
             status=status,
             enabled=True if enabled_only else None,
+            requester_user_id=str(user_id) if user_id else None,
+            requester_role=user_role,
         )
         serialized_items = [
             {k: str(v) if hasattr(v, "hex") else str(v) for k, v in s.items()}
@@ -395,7 +405,7 @@ external callers send the secret as X-Lucent-Workflow-Token, Bearer token, or
         enabled_only: bool = False,
         trigger_type: str | None = None,
     ) -> str:
-        user_id, org_id, _, _, _ = await _get_current_user_context()
+        user_id, org_id, user_role, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         repo = await _get_schedule_repository()
@@ -403,6 +413,8 @@ external callers send the secret as X-Lucent-Workflow-Token, Bearer token, or
             str(org_id),
             status=status,
             enabled=True if enabled_only else None,
+            requester_user_id=str(user_id) if user_id else None,
+            requester_role=user_role,
         )
         items = result["items"]
         if trigger_type:

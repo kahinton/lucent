@@ -244,6 +244,13 @@ class TestCreateTask:
                 "test definition",
                 auth_user["id"],
             )
+        from lucent.access_control import AccessControlService
+
+        await AccessControlService(db_pool).grant_access(
+            resource_type="model", resource_id="claude-sonnet-4.6",
+            org_id=str(auth_user["organization_id"]),
+            principal_type="org", principal_id=None,
+        )
         result = await _call(
             mcp,
             "create_task",

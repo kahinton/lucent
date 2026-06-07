@@ -11,6 +11,7 @@ from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from lucent.auth_providers import (
+    CSRF_COOKIE_NAME,
     SECURE_COOKIES,
     SESSION_COOKIE_NAME,
     SESSION_TTL_HOURS,
@@ -615,6 +616,33 @@ async def models_list(request: Request):
     models = [m for m in all_models if m["provider"] in providers]
     enabled_count = sum(1 for m in models if m["is_enabled"])
 
+    # Per-model access summary for THIS org (models are a global catalog; access
+    # is governed by org-scoped grants in resource_access_grants).
+    org_id = str(user.organization_id)
+    async with pool.acquire() as conn:
+        grant_rows = await conn.fetch(
+            "SELECT resource_id, principal_type, COUNT(*) AS n "
+            "FROM resource_access_grants "
+            "WHERE resource_type = 'model' AND organization_id = $1 "
+            "GROUP BY resource_id, principal_type",
+            UUID(org_id),
+        )
+    summary: dict[str, dict] = {}
+    for r in grant_rows:
+        s = summary.setdefault(
+            str(r["resource_id"]), {"org": False, "users": 0, "groups": 0}
+        )
+        if r["principal_type"] == "org":
+            s["org"] = True
+        elif r["principal_type"] == "user":
+            s["users"] += int(r["n"])
+        elif r["principal_type"] == "group":
+            s["groups"] += int(r["n"])
+    for m in models:
+        m["access_summary"] = summary.get(
+            str(m["id"]), {"org": False, "users": 0, "groups": 0}
+        )
+
     return templates.TemplateResponse(
         request,
         "models.html",
@@ -628,6 +656,40 @@ async def models_list(request: Request):
             "all_tags": MODEL_TAGS,
             "all_providers": MODEL_PROVIDERS,
             "provider_statuses": provider_statuses,
+        },
+    )
+
+
+@router.get("/models/{model_id}/access", response_class=HTMLResponse)
+async def model_access_page(request: Request, model_id: str):
+    """Per-model access management (who in this org may use the model)."""
+    from .access_ui import build_access_context
+
+    user = await _require_admin(request)
+    pool = await get_pool()
+    from lucent.db.models import ModelRepository
+
+    repo = ModelRepository(pool)
+    model = await repo.get_model(model_id)
+    if not model:
+        raise HTTPException(status_code=404, detail="Model not found")
+
+    access = await build_access_context(
+        pool,
+        resource_type="model",
+        resource_id=model_id,
+        org_id=str(user.organization_id),
+        user=user,
+        redirect=request.url.path,
+    )
+    return templates.TemplateResponse(
+        request,
+        "model_access.html",
+        {
+            "user": user,
+            "model": model,
+            "access": access,
+            "csrf_token": request.cookies.get(CSRF_COOKIE_NAME, ""),
         },
     )
 

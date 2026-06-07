@@ -94,6 +94,12 @@
                 <button type="submit" class="px-4 py-2 text-sm bg-primary-600 text-white rounded-lg hover:bg-primary-700 font-medium">Save Changes</button>
             </div>
         </form>
+
+        {% if access %}
+        <div class="mt-6 pt-6 border-t">
+            {% include "_access_panel.html" %}
+        </div>
+        {% endif %}
     </div>
 </div>
 {% endblock %}

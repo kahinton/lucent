@@ -79,6 +79,9 @@ async def cleanup_definitions(db_pool, test_organization):
         await conn.execute("DELETE FROM skill_definitions WHERE organization_id = $1", org_id)
         await conn.execute("DELETE FROM mcp_server_configs WHERE organization_id = $1", org_id)
         await conn.execute("DELETE FROM hook_definitions WHERE organization_id = $1", org_id)
+        await conn.execute(
+            "DELETE FROM resource_access_grants WHERE organization_id = $1", org_id
+        )
 
 
 async def _call(mcp, tool_name: str, args: dict | None = None) -> dict | list:
@@ -1070,5 +1073,236 @@ class TestUpdateMcpServerDefinition:
             mcp,
             "update_mcp_server_definition",
             {"server_id": "00000000-0000-0000-0000-000000000000", "description": "x"},
+        )
+        assert "error" in result
+
+
+# ============================================================================
+# Resource access grants: grant_resource_access / revoke_resource_access /
+# list_resource_access (the many-to-many "who may use this" plane)
+# ============================================================================
+
+
+async def _make_second_user(db_pool, org_id: str, suffix: str) -> dict:
+    from lucent.db import UserRepository
+
+    return await UserRepository(db_pool).create(
+        external_id=f"{suffix}-2nd",
+        provider="local",
+        organization_id=org_id,
+        email=f"{suffix}-2nd@test.com",
+        display_name=f"{suffix} Second User",
+    )
+
+
+class TestResourceAccessGrants:
+    @pytest.mark.asyncio
+    async def test_grant_and_list_user(self, mcp, auth_user, repo, db_pool):
+        agent = await repo.create_agent(
+            name="rag-agent",
+            description="",
+            content="# Agent",
+            org_id=str(auth_user["organization_id"]),
+            created_by=str(auth_user["id"]),
+            owner_user_id=str(auth_user["id"]),
+        )
+        other = await _make_second_user(
+            db_pool, str(auth_user["organization_id"]), "raguser"
+        )
+        result = await _call(
+            mcp,
+            "grant_resource_access",
+            {
+                "resource_type": "agent",
+                "resource_id": str(agent["id"]),
+                "principal_type": "user",
+                "principal_id": str(other["id"]),
+            },
+        )
+        assert result["status"] == "granted"
+
+        listed = await _call(
+            mcp,
+            "list_resource_access",
+            {"resource_type": "agent", "resource_id": str(agent["id"])},
+        )
+        principals = {(g["principal_type"], g["principal_id"]) for g in listed["grants"]}
+        assert ("user", str(other["id"])) in principals
+
+    @pytest.mark.asyncio
+    async def test_grant_org_then_revoke(self, mcp, auth_user, repo):
+        agent = await repo.create_agent(
+            name="rag-org-agent",
+            description="",
+            content="# Agent",
+            org_id=str(auth_user["organization_id"]),
+            created_by=str(auth_user["id"]),
+            owner_user_id=str(auth_user["id"]),
+        )
+        grant = await _call(
+            mcp,
+            "grant_resource_access",
+            {
+                "resource_type": "agent",
+                "resource_id": str(agent["id"]),
+                "principal_type": "org",
+            },
+        )
+        assert grant["status"] == "granted"
+        revoke = await _call(
+            mcp,
+            "revoke_resource_access",
+            {
+                "resource_type": "agent",
+                "resource_id": str(agent["id"]),
+                "principal_type": "org",
+            },
+        )
+        assert revoke["status"] == "revoked"
+        listed = await _call(
+            mcp,
+            "list_resource_access",
+            {"resource_type": "agent", "resource_id": str(agent["id"])},
+        )
+        assert all(g["principal_type"] != "org" for g in listed["grants"])
+
+    @pytest.mark.asyncio
+    async def test_unknown_resource_type(self, mcp, auth_user):
+        result = await _call(
+            mcp,
+            "grant_resource_access",
+            {
+                "resource_type": "banana",
+                "resource_id": "x",
+                "principal_type": "org",
+            },
+        )
+        assert result["code"] == 404
+
+    @pytest.mark.asyncio
+    async def test_missing_principal_id(self, mcp, auth_user, repo):
+        agent = await repo.create_agent(
+            name="rag-missing-pid",
+            description="",
+            content="# Agent",
+            org_id=str(auth_user["organization_id"]),
+            created_by=str(auth_user["id"]),
+            owner_user_id=str(auth_user["id"]),
+        )
+        result = await _call(
+            mcp,
+            "grant_resource_access",
+            {
+                "resource_type": "agent",
+                "resource_id": str(agent["id"]),
+                "principal_type": "user",
+            },
+        )
+        assert result["code"] == 400
+
+    @pytest.mark.asyncio
+    async def test_cross_org_principal_rejected(self, mcp, auth_user, repo, db_pool):
+        from lucent.db import OrganizationRepository, UserRepository
+
+        other_org = await OrganizationRepository(db_pool).create(name="rag-foreign-org")
+        foreign = await UserRepository(db_pool).create(
+            external_id="rag-foreign",
+            provider="local",
+            organization_id=other_org["id"],
+            email="rag-foreign@test.com",
+            display_name="Foreign User",
+        )
+        agent = await repo.create_agent(
+            name="rag-crossorg-agent",
+            description="",
+            content="# Agent",
+            org_id=str(auth_user["organization_id"]),
+            created_by=str(auth_user["id"]),
+            owner_user_id=str(auth_user["id"]),
+        )
+        result = await _call(
+            mcp,
+            "grant_resource_access",
+            {
+                "resource_type": "agent",
+                "resource_id": str(agent["id"]),
+                "principal_type": "user",
+                "principal_id": str(foreign["id"]),
+            },
+        )
+        assert result["code"] == 400
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM users WHERE id = $1", foreign["id"]
+            )
+            await conn.execute(
+                "DELETE FROM organizations WHERE id = $1", other_org["id"]
+            )
+
+    @pytest.mark.asyncio
+    async def test_non_owner_member_cannot_manage(self, mcp, auth_user, repo, db_pool):
+        from lucent.auth import set_current_user as _scu
+
+        agent = await repo.create_agent(
+            name="rag-owned-agent",
+            description="",
+            content="# Agent",
+            org_id=str(auth_user["organization_id"]),
+            created_by=str(auth_user["id"]),
+            owner_user_id=str(auth_user["id"]),
+        )
+        member = await _make_second_user(
+            db_pool, str(auth_user["organization_id"]), "ragmember"
+        )
+        _scu(
+            {
+                "id": member["id"],
+                "organization_id": member["organization_id"],
+                "role": "member",
+                "display_name": "Member",
+                "email": "ragmember@test.com",
+            }
+        )
+        result = await _call(
+            mcp,
+            "grant_resource_access",
+            {
+                "resource_type": "agent",
+                "resource_id": str(agent["id"]),
+                "principal_type": "org",
+            },
+        )
+        assert result["code"] == 403
+
+    @pytest.mark.asyncio
+    async def test_scoped_agent_context_cannot_grant(self, mcp, auth_user, repo):
+        agent = await repo.create_agent(
+            name="rag-scoped-agent",
+            description="",
+            content="# Agent",
+            org_id=str(auth_user["organization_id"]),
+            created_by=str(auth_user["id"]),
+            owner_user_id=str(auth_user["id"]),
+        )
+        _set_scoped_admin(auth_user)
+        result = await _call(
+            mcp,
+            "grant_resource_access",
+            {
+                "resource_type": "agent",
+                "resource_id": str(agent["id"]),
+                "principal_type": "org",
+            },
+        )
+        assert result["code"] == 403
+        assert "Human approval required" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_no_auth_returns_error(self, mcp):
+        set_current_user(None)
+        result = await _call(
+            mcp,
+            "list_resource_access",
+            {"resource_type": "agent", "resource_id": "x"},
         )
         assert "error" in result

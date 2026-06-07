@@ -8,6 +8,8 @@ from uuid import UUID
 
 import asyncpg
 
+from lucent.access_control import build_access_clause
+
 
 class SandboxTemplateRepository:
     """CRUD for sandbox environment templates."""
@@ -130,12 +132,7 @@ class SandboxTemplateRepository:
                 FROM sandbox_templates
                 WHERE id = $1
                   AND organization_id = $2
-                  AND (
-                      scope = 'built-in'
-                      OR owner_user_id = $3
-                      OR owner_group_id IN (SELECT group_id FROM user_groups WHERE user_id = $3)
-                      OR $4 IN ('admin', 'owner')
-                  )
+                  AND """ + build_access_clause(resource_type="sandbox_template", uid_param=3, role_param=4) + """
                 """,
                 UUID(template_id),
                 UUID(organization_id),
@@ -269,13 +266,7 @@ class SandboxTemplateRepository:
         base = """
             FROM sandbox_templates
             WHERE organization_id = $1
-            AND (
-                scope = 'built-in'
-                OR owner_user_id = $2
-                OR owner_group_id IN (SELECT group_id FROM user_groups WHERE user_id = $2)
-                OR $3 IN ('admin', 'owner')
-            )
-        """
+            AND """ + build_access_clause(resource_type="sandbox_template", uid_param=2, role_param=3) + "\n"
         async with self.pool.acquire() as conn:
             count_row = await conn.fetchrow(
                 f"SELECT COUNT(*) AS total {base}",

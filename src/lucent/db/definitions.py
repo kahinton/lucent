@@ -11,6 +11,7 @@ from uuid import UUID
 
 from asyncpg import Pool
 
+from lucent.access_control import build_access_clause
 from lucent.db.audit import (
     DEFINITION_APPROVE,
     DEFINITION_CREATE,
@@ -306,16 +307,8 @@ class DefinitionRepository:
         params: list[Any] = [org_id]
         if requester_user_id:
             params.extend([requester_user_id, self._role_value(requester_role)])
-            uid_idx = len(params) - 1
-            role_idx = len(params)
-            base += (
-                f" AND (scope = 'built-in' OR owner_user_id = ${uid_idx} "
-                "OR owner_group_id IN ("
-                f"SELECT group_id FROM user_groups WHERE user_id = ${uid_idx}"
-                ") "
-                "OR (scope = 'instance' AND owner_user_id IS NULL "
-                "AND owner_group_id IS NULL) "
-                f"OR ${role_idx} IN ('admin', 'owner'))"
+            base += " AND " + build_access_clause(
+                resource_type="agent", uid_param=len(params) - 1, role_param=len(params),
             )
         if status:
             params.append(status)
@@ -355,12 +348,8 @@ class DefinitionRepository:
         params: list[Any] = [agent_id, org_id]
         if requester_user_id:
             params.extend([requester_user_id, self._role_value(requester_role)])
-            acl_sql = (
-                " AND (a.scope = 'built-in' OR a.owner_user_id = $3 "
-                "OR a.owner_group_id IN (SELECT group_id FROM user_groups WHERE user_id = $3) "
-                "OR (a.scope = 'instance' AND a.owner_user_id IS NULL "
-                "AND a.owner_group_id IS NULL) "
-                "OR $4 IN ('admin', 'owner'))"
+            acl_sql = " AND " + build_access_clause(
+                resource_type="agent", uid_param=3, role_param=4, alias="a",
             )
         query = """
             SELECT a.*,
@@ -536,16 +525,8 @@ class DefinitionRepository:
         params: list[Any] = [org_id]
         if requester_user_id:
             params.extend([requester_user_id, self._role_value(requester_role)])
-            uid_idx = len(params) - 1
-            role_idx = len(params)
-            base += (
-                f" AND (scope = 'built-in' OR owner_user_id = ${uid_idx} "
-                "OR owner_group_id IN ("
-                f"SELECT group_id FROM user_groups WHERE user_id = ${uid_idx}"
-                ") "
-                "OR (scope = 'instance' AND owner_user_id IS NULL "
-                "AND owner_group_id IS NULL) "
-                f"OR ${role_idx} IN ('admin', 'owner'))"
+            base += " AND " + build_access_clause(
+                resource_type="skill", uid_param=len(params) - 1, role_param=len(params),
             )
         if status:
             params.append(status)
@@ -585,13 +566,7 @@ class DefinitionRepository:
         params: list[Any] = [skill_id, org_id]
         if requester_user_id:
             params.extend([requester_user_id, self._role_value(requester_role)])
-            acl_sql = (
-                " AND (scope = 'built-in' OR owner_user_id = $3 "
-                "OR owner_group_id IN (SELECT group_id FROM user_groups WHERE user_id = $3) "
-                "OR (scope = 'instance' AND owner_user_id IS NULL "
-                "AND owner_group_id IS NULL) "
-                "OR $4 IN ('admin', 'owner'))"
-            )
+            acl_sql = " AND " + build_access_clause(resource_type="skill", uid_param=3, role_param=4)
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT * FROM skill_definitions WHERE id = $1 AND organization_id = $2" + acl_sql,
@@ -709,16 +684,8 @@ class DefinitionRepository:
         params: list[Any] = [org_id]
         if requester_user_id:
             params.extend([requester_user_id, self._role_value(requester_role)])
-            uid_idx = len(params) - 1
-            role_idx = len(params)
-            base += (
-                f" AND (scope = 'built-in' OR owner_user_id = ${uid_idx} "
-                "OR owner_group_id IN ("
-                f"SELECT group_id FROM user_groups WHERE user_id = ${uid_idx}"
-                ") "
-                "OR (scope = 'instance' AND owner_user_id IS NULL "
-                "AND owner_group_id IS NULL) "
-                f"OR ${role_idx} IN ('admin', 'owner'))"
+            base += " AND " + build_access_clause(
+                resource_type="mcp_server", uid_param=len(params) - 1, role_param=len(params),
             )
         if status:
             params.append(status)
@@ -758,13 +725,7 @@ class DefinitionRepository:
         params: list[Any] = [server_id, org_id]
         if requester_user_id:
             params.extend([requester_user_id, self._role_value(requester_role)])
-            acl_sql = (
-                " AND (scope = 'built-in' OR owner_user_id = $3 "
-                "OR owner_group_id IN (SELECT group_id FROM user_groups WHERE user_id = $3) "
-                "OR (scope = 'instance' AND owner_user_id IS NULL "
-                "AND owner_group_id IS NULL) "
-                "OR $4 IN ('admin', 'owner'))"
-            )
+            acl_sql = " AND " + build_access_clause(resource_type="mcp_server", uid_param=3, role_param=4)
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT * FROM mcp_server_configs WHERE id = $1 AND organization_id = $2" + acl_sql,
@@ -790,16 +751,8 @@ class DefinitionRepository:
         params: list[Any] = [org_id]
         if requester_user_id:
             params.extend([requester_user_id, self._role_value(requester_role)])
-            uid_idx = len(params) - 1
-            role_idx = len(params)
-            base += (
-                f" AND (scope = 'built-in' OR owner_user_id = ${uid_idx} "
-                "OR owner_group_id IN ("
-                f"SELECT group_id FROM user_groups WHERE user_id = ${uid_idx}"
-                ") "
-                "OR (scope = 'instance' AND owner_user_id IS NULL "
-                "AND owner_group_id IS NULL) "
-                f"OR ${role_idx} IN ('admin', 'owner'))"
+            base += " AND " + build_access_clause(
+                resource_type="hook", uid_param=len(params) - 1, role_param=len(params),
             )
         if status:
             params.append(status)
@@ -839,13 +792,7 @@ class DefinitionRepository:
         params: list[Any] = [hook_id, org_id]
         if requester_user_id:
             params.extend([requester_user_id, self._role_value(requester_role)])
-            acl_sql = (
-                " AND (scope = 'built-in' OR owner_user_id = $3 "
-                "OR owner_group_id IN (SELECT group_id FROM user_groups WHERE user_id = $3) "
-                "OR (scope = 'instance' AND owner_user_id IS NULL "
-                "AND owner_group_id IS NULL) "
-                "OR $4 IN ('admin', 'owner'))"
-            )
+            acl_sql = " AND " + build_access_clause(resource_type="hook", uid_param=3, role_param=4)
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT * FROM hook_definitions WHERE id = $1 AND organization_id = $2" + acl_sql,
@@ -1029,16 +976,8 @@ class DefinitionRepository:
         params: list[Any] = [org_id]
         if requester_user_id:
             params.extend([requester_user_id, self._role_value(requester_role)])
-            uid_idx = len(params) - 1
-            role_idx = len(params)
-            base += (
-                f" AND (scope = 'built-in' OR owner_user_id = ${uid_idx} "
-                "OR owner_group_id IN ("
-                f"SELECT group_id FROM user_groups WHERE user_id = ${uid_idx}"
-                ") "
-                "OR (scope = 'instance' AND owner_user_id IS NULL "
-                "AND owner_group_id IS NULL) "
-                f"OR ${role_idx} IN ('admin', 'owner'))"
+            base += " AND " + build_access_clause(
+                resource_type="managed_tool", uid_param=len(params) - 1, role_param=len(params),
             )
         if status:
             params.append(status)
@@ -1080,13 +1019,7 @@ class DefinitionRepository:
         params: list[Any] = [tool_id, org_id]
         if requester_user_id:
             params.extend([requester_user_id, self._role_value(requester_role)])
-            acl_sql = (
-                " AND (scope = 'built-in' OR owner_user_id = $3 "
-                "OR owner_group_id IN (SELECT group_id FROM user_groups WHERE user_id = $3) "
-                "OR (scope = 'instance' AND owner_user_id IS NULL "
-                "AND owner_group_id IS NULL) "
-                "OR $4 IN ('admin', 'owner'))"
-            )
+            acl_sql = " AND " + build_access_clause(resource_type="managed_tool", uid_param=3, role_param=4)
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT * FROM managed_tool_definitions "
@@ -1106,13 +1039,7 @@ class DefinitionRepository:
         params: list[Any] = [name, org_id]
         if requester_user_id:
             params.extend([requester_user_id, self._role_value(requester_role)])
-            acl_sql = (
-                " AND (scope = 'built-in' OR owner_user_id = $3 "
-                "OR owner_group_id IN (SELECT group_id FROM user_groups WHERE user_id = $3) "
-                "OR (scope = 'instance' AND owner_user_id IS NULL "
-                "AND owner_group_id IS NULL) "
-                "OR $4 IN ('admin', 'owner'))"
-            )
+            acl_sql = " AND " + build_access_clause(resource_type="managed_tool", uid_param=3, role_param=4)
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT * FROM managed_tool_definitions "
@@ -1341,17 +1268,28 @@ class DefinitionRepository:
         self, agent_id: str, tool_id: str,
         org_id: str | None = None, user_id: str | None = None,
         config_override: dict | None = None,
+        granted_by: str | None = None,
+        grant_reason: str | None = None,
+        grant_override: bool = False,
     ) -> bool:
         try:
             async with self.pool.acquire() as conn:
                 await conn.execute(
-                    "INSERT INTO agent_managed_tools (agent_id, tool_id, config_override) "
-                    "VALUES ($1, $2, $3::text::jsonb) "
+                    "INSERT INTO agent_managed_tools "
+                    "(agent_id, tool_id, config_override, granted_by, "
+                    "grant_reason, grant_override) "
+                    "VALUES ($1, $2, $3::text::jsonb, $4, $5, $6) "
                     "ON CONFLICT (agent_id, tool_id) DO UPDATE "
-                    "SET config_override = EXCLUDED.config_override",
+                    "SET config_override = EXCLUDED.config_override, "
+                    "granted_by = EXCLUDED.granted_by, granted_at = NOW(), "
+                    "grant_reason = EXCLUDED.grant_reason, "
+                    "grant_override = EXCLUDED.grant_override",
                     agent_id,
                     tool_id,
                     json.dumps(config_override) if config_override is not None else None,
+                    granted_by or user_id,
+                    grant_reason,
+                    grant_override,
                 )
             if org_id:
                 await self._audit(
@@ -1567,14 +1505,25 @@ class DefinitionRepository:
     async def grant_skill(
         self, agent_id: str, skill_id: str,
         org_id: str | None = None, user_id: str | None = None,
+        granted_by: str | None = None,
+        grant_reason: str | None = None,
+        grant_override: bool = False,
     ) -> bool:
         try:
             async with self.pool.acquire() as conn:
                 await conn.execute(
-                    "INSERT INTO agent_skills (agent_id, skill_id) "
-                    "VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                    "INSERT INTO agent_skills "
+                    "(agent_id, skill_id, granted_by, grant_reason, grant_override) "
+                    "VALUES ($1, $2, $3, $4, $5) "
+                    "ON CONFLICT (agent_id, skill_id) DO UPDATE SET "
+                    "granted_by = EXCLUDED.granted_by, granted_at = NOW(), "
+                    "grant_reason = EXCLUDED.grant_reason, "
+                    "grant_override = EXCLUDED.grant_override",
                     agent_id,
                     skill_id,
+                    granted_by or user_id,
+                    grant_reason,
+                    grant_override,
                 )
             if org_id:
                 await self._audit(
@@ -1611,14 +1560,25 @@ class DefinitionRepository:
     async def grant_mcp_server(
         self, agent_id: str, mcp_server_id: str,
         org_id: str | None = None, user_id: str | None = None,
+        granted_by: str | None = None,
+        grant_reason: str | None = None,
+        grant_override: bool = False,
     ) -> bool:
         try:
             async with self.pool.acquire() as conn:
                 await conn.execute(
-                    "INSERT INTO agent_mcp_servers (agent_id, mcp_server_id) "
-                    "VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                    "INSERT INTO agent_mcp_servers "
+                    "(agent_id, mcp_server_id, granted_by, grant_reason, grant_override) "
+                    "VALUES ($1, $2, $3, $4, $5) "
+                    "ON CONFLICT (agent_id, mcp_server_id) DO UPDATE SET "
+                    "granted_by = EXCLUDED.granted_by, granted_at = NOW(), "
+                    "grant_reason = EXCLUDED.grant_reason, "
+                    "grant_override = EXCLUDED.grant_override",
                     agent_id,
                     mcp_server_id,
+                    granted_by or user_id,
+                    grant_reason,
+                    grant_override,
                 )
             if org_id:
                 await self._audit(
@@ -1661,17 +1621,28 @@ class DefinitionRepository:
         self, agent_id: str, hook_id: str,
         org_id: str | None = None, user_id: str | None = None,
         config_override: dict | None = None,
+        granted_by: str | None = None,
+        grant_reason: str | None = None,
+        grant_override: bool = False,
     ) -> bool:
         try:
             async with self.pool.acquire() as conn:
                 await conn.execute(
-                    "INSERT INTO agent_hooks (agent_id, hook_id, config_override) "
-                    "VALUES ($1, $2, $3::text::jsonb) "
+                    "INSERT INTO agent_hooks "
+                    "(agent_id, hook_id, config_override, granted_by, "
+                    "grant_reason, grant_override) "
+                    "VALUES ($1, $2, $3::text::jsonb, $4, $5, $6) "
                     "ON CONFLICT (agent_id, hook_id) DO UPDATE "
-                    "SET config_override = EXCLUDED.config_override",
+                    "SET config_override = EXCLUDED.config_override, "
+                    "granted_by = EXCLUDED.granted_by, granted_at = NOW(), "
+                    "grant_reason = EXCLUDED.grant_reason, "
+                    "grant_override = EXCLUDED.grant_override",
                     agent_id,
                     hook_id,
                     json.dumps(config_override) if config_override is not None else None,
+                    granted_by or user_id,
+                    grant_reason,
+                    grant_override,
                 )
             if org_id:
                 await self._audit(
@@ -1986,14 +1957,7 @@ class DefinitionRepository:
         base = """
             FROM agent_definitions
             WHERE organization_id = $1
-            AND (
-                scope = 'built-in'
-                OR owner_user_id = $2
-                OR owner_group_id IN (SELECT group_id FROM user_groups WHERE user_id = $2)
-                OR (scope = 'instance' AND owner_user_id IS NULL AND owner_group_id IS NULL)
-                OR $3 IN ('admin', 'owner')
-            )
-        """
+            AND """ + build_access_clause(resource_type="agent", uid_param=2, role_param=3) + "\n"
         params: list[Any] = [org_id, user_id, role]
         if status:
             params.append(status)
@@ -2027,14 +1991,7 @@ class DefinitionRepository:
         base = """
             FROM skill_definitions
             WHERE organization_id = $1
-            AND (
-                scope = 'built-in'
-                OR owner_user_id = $2
-                OR owner_group_id IN (SELECT group_id FROM user_groups WHERE user_id = $2)
-                OR (scope = 'instance' AND owner_user_id IS NULL AND owner_group_id IS NULL)
-                OR $3 IN ('admin', 'owner')
-            )
-        """
+            AND """ + build_access_clause(resource_type="skill", uid_param=2, role_param=3) + "\n"
         params: list[Any] = [org_id, user_id, role]
         if status:
             params.append(status)
@@ -2068,14 +2025,7 @@ class DefinitionRepository:
         base = """
             FROM mcp_server_configs
             WHERE organization_id = $1
-            AND (
-                scope = 'built-in'
-                OR owner_user_id = $2
-                OR owner_group_id IN (SELECT group_id FROM user_groups WHERE user_id = $2)
-                OR (scope = 'instance' AND owner_user_id IS NULL AND owner_group_id IS NULL)
-                OR $3 IN ('admin', 'owner')
-            )
-        """
+            AND """ + build_access_clause(resource_type="mcp_server", uid_param=2, role_param=3) + "\n"
         params: list[Any] = [org_id, user_id, role]
         if status:
             params.append(status)
@@ -2109,14 +2059,7 @@ class DefinitionRepository:
         base = """
             FROM hook_definitions
             WHERE organization_id = $1
-            AND (
-                scope = 'built-in'
-                OR owner_user_id = $2
-                OR owner_group_id IN (SELECT group_id FROM user_groups WHERE user_id = $2)
-                OR (scope = 'instance' AND owner_user_id IS NULL AND owner_group_id IS NULL)
-                OR $3 IN ('admin', 'owner')
-            )
-        """
+            AND """ + build_access_clause(resource_type="hook", uid_param=2, role_param=3) + "\n"
         params: list[Any] = [org_id, user_id, role]
         if status:
             params.append(status)

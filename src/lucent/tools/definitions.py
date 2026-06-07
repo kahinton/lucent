@@ -6,6 +6,7 @@ from uuid import UUID
 
 from mcp.server.fastmcp import FastMCP
 
+from lucent.access_control import AccessControlService, canonical_resource_type
 from lucent.db import get_pool
 from lucent.db.definitions import BuiltInProtectionError, DefinitionRepository
 from lucent.llm.context import get_llm_context
@@ -36,6 +37,30 @@ async def _can_modify_definition(
         resource_type,
         resource_id,
         org_id,
+    )
+
+
+async def _authorize_grant(
+    *,
+    grantor_id: str,
+    org_id: str,
+    agent_id: str,
+    capability_type: str,
+    capability_id: str,
+    override: bool,
+):
+    """Authorize a capability grant via the central access-control plane."""
+    from lucent.access_control import AccessControlService
+
+    pool = await get_pool()
+    return await AccessControlService(pool).authorize_grant(
+        grantor_id=grantor_id,
+        org_id=org_id,
+        actor_type="agent",
+        actor_id=agent_id,
+        capability_type=capability_type,
+        capability_id=capability_id,
+        override=override,
     )
 
 
@@ -562,6 +587,8 @@ Returns: JSON with status 'granted', or an error if either is not found."""
     async def grant_skill_to_agent(
         agent_id: str,
         skill_id: str,
+        reason: str | None = None,
+        override: bool = False,
     ) -> str:
         user_id, org_id, role, memory_scope, _ = await _get_current_user_context()
         if not org_id:
@@ -577,30 +604,34 @@ Returns: JSON with status 'granted', or an error if either is not found."""
 
         repo = await _get_definition_repository()
 
-        # Verify agent exists and is accessible
         agent = await repo.get_agent(
-            agent_id,
-            str(org_id),
-            requester_user_id=str(user_id),
-            requester_role=role,
+            agent_id, str(org_id), requester_user_id=str(user_id), requester_role=role,
         )
         if not agent:
             return json.dumps({"error": "Agent not found"})
-
-        # Verify skill exists and is accessible
         skill = await repo.get_skill(
-            skill_id,
-            str(org_id),
-            requester_user_id=str(user_id),
-            requester_role=role,
+            skill_id, str(org_id), requester_user_id=str(user_id), requester_role=role,
         )
         if not skill:
             return json.dumps({"error": "Skill not found"})
+
+        decision = await _authorize_grant(
+            grantor_id=str(user_id), org_id=str(org_id), agent_id=agent_id,
+            capability_type="skill", capability_id=skill_id, override=override,
+        )
+        if not decision.allowed:
+            return json.dumps({
+                "error": decision.reason,
+                "code": 409 if decision.requires_override else 403,
+                "requires_override": decision.requires_override,
+            })
 
         success = await repo.grant_skill(
             agent_id, skill_id,
             org_id=str(org_id),
             user_id=str(user_id),
+            grant_reason=reason,
+            grant_override=decision.requires_override,
         )
         if not success:
             return json.dumps({"error": "Failed to grant skill"})
@@ -784,7 +815,12 @@ Args:
 
 Returns: JSON with status 'granted', or an error if not found."""
     )
-    async def grant_mcp_server_to_agent(agent_id: str, definition_id: str) -> str:
+    async def grant_mcp_server_to_agent(
+        agent_id: str,
+        definition_id: str,
+        reason: str | None = None,
+        override: bool = False,
+    ) -> str:
         user_id, org_id, role, memory_scope, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
@@ -799,15 +835,30 @@ Returns: JSON with status 'granted', or an error if not found."""
 
         repo = await _get_definition_repository()
         agent = await repo.get_agent(
-            agent_id, str(org_id),
-            requester_user_id=str(user_id),
-            requester_role=role,
+            agent_id, str(org_id), requester_user_id=str(user_id), requester_role=role,
         )
         if not agent:
             return json.dumps({"error": "Agent not found"})
+        server = await repo.get_mcp_server(
+            definition_id, str(org_id),
+            requester_user_id=str(user_id), requester_role=role,
+        )
+        if not server:
+            return json.dumps({"error": "MCP server not found"})
+        decision = await _authorize_grant(
+            grantor_id=str(user_id), org_id=str(org_id), agent_id=agent_id,
+            capability_type="mcp_server", capability_id=definition_id, override=override,
+        )
+        if not decision.allowed:
+            return json.dumps({
+                "error": decision.reason,
+                "code": 409 if decision.requires_override else 403,
+                "requires_override": decision.requires_override,
+            })
 
         success = await repo.grant_mcp_server(
-            agent_id, definition_id, org_id=str(org_id), user_id=str(user_id)
+            agent_id, definition_id, org_id=str(org_id), user_id=str(user_id),
+            grant_reason=reason, grant_override=decision.requires_override,
         )
         if not success:
             return json.dumps({"error": "Failed to grant MCP server"})
@@ -826,7 +877,12 @@ Args:
 
 Returns: JSON with status 'granted', or an error if either is not found."""
     )
-    async def grant_hook_to_agent(agent_id: str, hook_id: str) -> str:
+    async def grant_hook_to_agent(
+        agent_id: str,
+        hook_id: str,
+        reason: str | None = None,
+        override: bool = False,
+    ) -> str:
         user_id, org_id, role, memory_scope, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
@@ -841,14 +897,10 @@ Returns: JSON with status 'granted', or an error if either is not found."""
 
         repo = await _get_definition_repository()
         agent = await repo.get_agent(
-            agent_id,
-            str(org_id),
-            requester_user_id=str(user_id),
-            requester_role=role,
+            agent_id, str(org_id), requester_user_id=str(user_id), requester_role=role,
         )
         if not agent:
             return json.dumps({"error": "Agent not found"})
-
         hook = await repo.get_hook(
             hook_id,
             str(org_id),
@@ -858,8 +910,20 @@ Returns: JSON with status 'granted', or an error if either is not found."""
         if not hook or hook.get("status") != "active":
             return json.dumps({"error": "Active hook not found"})
 
+        decision = await _authorize_grant(
+            grantor_id=str(user_id), org_id=str(org_id), agent_id=agent_id,
+            capability_type="hook", capability_id=hook_id, override=override,
+        )
+        if not decision.allowed:
+            return json.dumps({
+                "error": decision.reason,
+                "code": 409 if decision.requires_override else 403,
+                "requires_override": decision.requires_override,
+            })
+
         success = await repo.grant_hook(
-            agent_id, hook_id, org_id=str(org_id), user_id=str(user_id)
+            agent_id, hook_id, org_id=str(org_id), user_id=str(user_id),
+            grant_reason=reason, grant_override=decision.requires_override,
         )
         if not success:
             return json.dumps({"error": "Failed to grant hook"})
@@ -878,7 +942,12 @@ Args:
 
 Returns: JSON with status 'granted', or an error if either is not found."""
     )
-    async def grant_tool_to_agent(agent_id: str, tool_id: str) -> str:
+    async def grant_tool_to_agent(
+        agent_id: str,
+        tool_id: str,
+        reason: str | None = None,
+        override: bool = False,
+    ) -> str:
         user_id, org_id, role, memory_scope, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
@@ -893,14 +962,10 @@ Returns: JSON with status 'granted', or an error if either is not found."""
 
         repo = await _get_definition_repository()
         agent = await repo.get_agent(
-            agent_id,
-            str(org_id),
-            requester_user_id=str(user_id),
-            requester_role=role,
+            agent_id, str(org_id), requester_user_id=str(user_id), requester_role=role,
         )
         if not agent:
             return json.dumps({"error": "Agent not found"})
-
         tool = await repo.get_managed_tool(
             tool_id,
             str(org_id),
@@ -910,8 +975,20 @@ Returns: JSON with status 'granted', or an error if either is not found."""
         if not tool or tool.get("status") != "active":
             return json.dumps({"error": "Active managed tool not found"})
 
+        decision = await _authorize_grant(
+            grantor_id=str(user_id), org_id=str(org_id), agent_id=agent_id,
+            capability_type="managed_tool", capability_id=tool_id, override=override,
+        )
+        if not decision.allowed:
+            return json.dumps({
+                "error": decision.reason,
+                "code": 409 if decision.requires_override else 403,
+                "requires_override": decision.requires_override,
+            })
+
         success = await repo.grant_managed_tool(
-            agent_id, tool_id, org_id=str(org_id), user_id=str(user_id)
+            agent_id, tool_id, org_id=str(org_id), user_id=str(user_id),
+            grant_reason=reason, grant_override=decision.requires_override,
         )
         if not success:
             return json.dumps({"error": "Failed to grant managed tool"})
@@ -1513,3 +1590,165 @@ Returns: JSON with the updated server, or an error if not found."""
         if not result:
             return json.dumps({"error": "MCP server not found"})
         return json.dumps(result, default=_serialize)
+
+    # ── Resource access grants (the many-to-many "who may use this" plane) ──
+
+    @mcp.tool(
+        annotations=READ_ONLY,
+        description="""List who has been granted access to a resource.
+
+Shows the explicit access grants (users, groups, or the whole organization)
+on any access-controlled resource. Only the resource's managing owner or an
+org admin/owner may view grants.
+
+Args:
+    resource_type: one of 'agent', 'skill', 'mcp_server', 'hook',
+        'managed_tool', 'sandbox_template', 'workflow', 'model', 'secret'
+    resource_id: ID of the resource
+
+Returns: JSON with the grants array (principal_type, principal_id, name)."""
+    )
+    async def list_resource_access(resource_type: str, resource_id: str) -> str:
+        user_id, org_id, role, memory_scope, _ = await _get_current_user_context()
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+        if not user_id:
+            return json.dumps({"error": "No user context"})
+        if scoped_error := _requires_unscoped_human(memory_scope):
+            return json.dumps({"error": scoped_error, "code": 403})
+        try:
+            rtype = canonical_resource_type(resource_type)
+        except ValueError:
+            return json.dumps({"error": "Unknown resource type", "code": 404})
+        if not await _can_modify_definition(
+            str(user_id), str(org_id), rtype, resource_id,
+        ):
+            return json.dumps({"error": "Permission denied", "code": 403})
+        grants = await AccessControlService(await get_pool()).list_access_grants(
+            rtype, resource_id, str(org_id),
+        )
+        return json.dumps(
+            {"resource_type": rtype, "resource_id": str(resource_id), "grants": grants},
+            default=_serialize,
+        )
+
+    @mcp.tool(
+        description="""Grant a user, group, or the whole org access to use a resource.
+
+This controls *use* of the resource, not management — granted principals may
+use it but cannot edit it or re-share it. Only the resource's managing owner or
+an org admin/owner may grant access. Scoped agent contexts cannot grant access.
+
+Args:
+    resource_type: one of 'agent', 'skill', 'mcp_server', 'hook',
+        'managed_tool', 'sandbox_template', 'workflow', 'model', 'secret'
+    resource_id: ID of the resource
+    principal_type: 'user', 'group', or 'org' (org = everyone in the org)
+    principal_id: user or group ID (omit / ignored for 'org' grants)
+
+Returns: JSON with status 'granted', or an error."""
+    )
+    async def grant_resource_access(
+        resource_type: str,
+        resource_id: str,
+        principal_type: str,
+        principal_id: str | None = None,
+    ) -> str:
+        user_id, org_id, role, memory_scope, _ = await _get_current_user_context()
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+        if not user_id:
+            return json.dumps({"error": "No user context"})
+        if scoped_error := _requires_unscoped_human(memory_scope):
+            return json.dumps({"error": scoped_error, "code": 403})
+        try:
+            rtype = canonical_resource_type(resource_type)
+        except ValueError:
+            return json.dumps({"error": "Unknown resource type", "code": 404})
+        ptype = (principal_type or "").strip().lower()
+        if ptype not in ("user", "group", "org"):
+            return json.dumps(
+                {"error": "principal_type must be 'user', 'group', or 'org'", "code": 400}
+            )
+        if ptype in ("user", "group") and not principal_id:
+            return json.dumps(
+                {"error": "principal_id is required for user/group grants", "code": 400}
+            )
+        if not await _can_modify_definition(
+            str(user_id), str(org_id), rtype, resource_id,
+        ):
+            return json.dumps({"error": "Permission denied", "code": 403})
+        acl = AccessControlService(await get_pool())
+        if not await acl.principal_exists_in_org(
+            principal_type=ptype, principal_id=principal_id, org_id=str(org_id),
+        ):
+            return json.dumps(
+                {"error": "Principal not found in this organization", "code": 400}
+            )
+        await acl.grant_access(
+            resource_type=rtype,
+            resource_id=resource_id,
+            org_id=str(org_id),
+            principal_type=ptype,
+            principal_id=principal_id,
+            granted_by=str(user_id),
+        )
+        return json.dumps(
+            {"status": "granted", "principal_type": ptype, "principal_id": principal_id}
+        )
+
+    @mcp.tool(
+        description="""Revoke a user, group, or org-wide grant from a resource.
+
+Only the resource's managing owner or an org admin/owner may revoke access.
+Scoped agent contexts cannot revoke access.
+
+Args:
+    resource_type: one of 'agent', 'skill', 'mcp_server', 'hook',
+        'managed_tool', 'sandbox_template', 'workflow', 'model', 'secret'
+    resource_id: ID of the resource
+    principal_type: 'user', 'group', or 'org'
+    principal_id: user or group ID (omit / ignored for 'org' grants)
+
+Returns: JSON with status 'revoked', or an error."""
+    )
+    async def revoke_resource_access(
+        resource_type: str,
+        resource_id: str,
+        principal_type: str,
+        principal_id: str | None = None,
+    ) -> str:
+        user_id, org_id, role, memory_scope, _ = await _get_current_user_context()
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+        if not user_id:
+            return json.dumps({"error": "No user context"})
+        if scoped_error := _requires_unscoped_human(memory_scope):
+            return json.dumps({"error": scoped_error, "code": 403})
+        try:
+            rtype = canonical_resource_type(resource_type)
+        except ValueError:
+            return json.dumps({"error": "Unknown resource type", "code": 404})
+        ptype = (principal_type or "").strip().lower()
+        if ptype not in ("user", "group", "org"):
+            return json.dumps(
+                {"error": "principal_type must be 'user', 'group', or 'org'", "code": 400}
+            )
+        if ptype in ("user", "group") and not principal_id:
+            return json.dumps(
+                {"error": "principal_id is required for user/group grants", "code": 400}
+            )
+        if not await _can_modify_definition(
+            str(user_id), str(org_id), rtype, resource_id,
+        ):
+            return json.dumps({"error": "Permission denied", "code": 403})
+        await AccessControlService(await get_pool()).revoke_access(
+            resource_type=rtype,
+            resource_id=resource_id,
+            org_id=str(org_id),
+            principal_type=ptype,
+            principal_id=principal_id,
+        )
+        return json.dumps(
+            {"status": "revoked", "principal_type": ptype, "principal_id": principal_id}
+        )

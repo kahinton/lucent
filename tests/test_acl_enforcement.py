@@ -40,6 +40,12 @@ async def acl_prefix(db_pool):
     prefix = f"test_acl_{test_id}_"
     yield prefix
     async with db_pool.acquire() as conn:
+        # Clean access grants for these agents before deleting the agents
+        await conn.execute(
+            "DELETE FROM resource_access_grants WHERE resource_type = 'agent' "
+            "AND resource_id IN (SELECT id::text FROM agent_definitions WHERE name LIKE $1)",
+            f"{prefix}%",
+        )
         # Clean junction tables
         await conn.execute(
             "DELETE FROM agent_skills WHERE agent_id IN "
@@ -55,6 +61,12 @@ async def acl_prefix(db_pool):
         await conn.execute("DELETE FROM skill_definitions WHERE name LIKE $1", f"{prefix}%")
         await conn.execute("DELETE FROM mcp_server_configs WHERE name LIKE $1", f"{prefix}%")
         await conn.execute("DELETE FROM sandbox_templates WHERE name LIKE $1", f"{prefix}%")
+        await conn.execute(
+            "DELETE FROM resource_access_grants WHERE resource_type = 'model' "
+            "AND resource_id LIKE $1",
+            f"{prefix}%",
+        )
+        await conn.execute("DELETE FROM models WHERE id LIKE $1", f"{prefix}%")
         # Clean user_groups before groups and users
         await conn.execute(
             "DELETE FROM user_groups WHERE user_id IN "
@@ -218,7 +230,7 @@ class TestAgentACLRead:
         group = await group_repo.create_group(f"{acl_prefix}groupX", str(org["id"]))
         await group_repo.add_member(str(group["id"]), str(other["id"]))
 
-        # Create agent owned by a group
+        # Create agent owned by the creator, then share it with the group.
         pool = await get_pool()
         repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
         agent = await repo.create_agent(
@@ -227,15 +239,18 @@ class TestAgentACLRead:
             content="# Group",
             org_id=str(org["id"]),
             created_by=str(owner["id"]),
-            owner_group_id=str(group["id"]),
-            owner_user_id=None,
+            owner_user_id=str(owner["id"]),
         )
-        # Clear the owner_user_id that defaults from created_by
-        await repo.update_agent(
-            str(agent["id"]),
-            str(org["id"]),
-            owner_user_id=None,
-            owner_group_id=str(group["id"]),
+        from lucent.access_control import AccessControlService
+
+        acl = AccessControlService(pool)
+        await acl.grant_access(
+            resource_type="agent",
+            resource_id=str(agent["id"]),
+            org_id=str(org["id"]),
+            principal_type="group",
+            principal_id=str(group["id"]),
+            granted_by=str(owner["id"]),
         )
 
         # Other user (in group) can see it
@@ -252,7 +267,7 @@ class TestAgentACLRead:
         other = org_and_users["other"]
         org = org_and_users["org"]
 
-        # Create group, add other user, create group-owned agent
+        # Create group, add other user, create agent shared with the group
         group_repo = GroupRepository(db_pool)
         group = await group_repo.create_group(f"{acl_prefix}groupY", str(org["id"]))
         await group_repo.add_member(str(group["id"]), str(other["id"]))
@@ -265,14 +280,18 @@ class TestAgentACLRead:
             content="# Revoke",
             org_id=str(org["id"]),
             created_by=str(owner["id"]),
-            owner_group_id=str(group["id"]),
-            owner_user_id=None,
+            owner_user_id=str(owner["id"]),
         )
-        await repo.update_agent(
-            str(agent["id"]),
-            str(org["id"]),
-            owner_user_id=None,
-            owner_group_id=str(group["id"]),
+        from lucent.access_control import AccessControlService
+
+        acl = AccessControlService(pool)
+        await acl.grant_access(
+            resource_type="agent",
+            resource_id=str(agent["id"]),
+            org_id=str(org["id"]),
+            principal_type="group",
+            principal_id=str(group["id"]),
+            granted_by=str(owner["id"]),
         )
 
         # Verify other user can see it
@@ -284,8 +303,6 @@ class TestAgentACLRead:
         await group_repo.remove_member(str(group["id"]), str(other["id"]))
 
         # Invalidate group cache
-        from lucent.access_control import AccessControlService
-
         AccessControlService.invalidate_user_groups(str(other["id"]))
 
         # Now other user CANNOT see it
@@ -834,3 +851,246 @@ class TestAntiSpoofing:
             assert resp.status_code == 403
 
         app.dependency_overrides.clear()
+
+
+# ============================================================================
+# Model Use Enforcement (selection-time access)
+# ============================================================================
+
+
+async def _insert_model(
+    db_pool, model_id, *, org_id=None, owner_user_id=None, scope="instance",
+    is_enabled=True,
+):
+    """Insert a minimal row into the global models catalog."""
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO models (id, provider, name, organization_id, "
+            "owner_user_id, scope, is_enabled, supports_tools) "
+            "VALUES ($1, 'test', $2, $3, $4, $5, $6, true)",
+            model_id,
+            model_id,
+            org_id,
+            owner_user_id,
+            scope,
+            is_enabled,
+        )
+
+
+class TestModelUseAccess:
+    """can_access_model / enforce_model_access gate model SELECTION by grant."""
+
+    async def test_member_without_grant_denied(self, db_pool, acl_prefix, org_and_users):
+        from lucent.access_control import AccessControlService, enforce_model_access
+
+        org = org_and_users["org"]
+        other = org_and_users["other"]
+        model_id = f"{acl_prefix}m_nogrant"
+        await _insert_model(db_pool, model_id, org_id=str(org["id"]))
+
+        acl = AccessControlService(db_pool)
+        allowed = await acl.can_access_model(
+            str(other["id"]), model_id, str(org["id"]), role="member"
+        )
+        assert allowed is False
+
+        err = await enforce_model_access(
+            db_pool, user_id=str(other["id"]), role="member",
+            org_id=str(org["id"]), model_id=model_id,
+        )
+        assert err is not None and model_id in err
+
+    async def test_member_with_user_grant_allowed(self, db_pool, acl_prefix, org_and_users):
+        from lucent.access_control import AccessControlService, enforce_model_access
+
+        org = org_and_users["org"]
+        other = org_and_users["other"]
+        model_id = f"{acl_prefix}m_usergrant"
+        await _insert_model(db_pool, model_id, org_id=str(org["id"]))
+
+        acl = AccessControlService(db_pool)
+        await acl.grant_access(
+            resource_type="model", resource_id=model_id, org_id=str(org["id"]),
+            principal_type="user", principal_id=str(other["id"]),
+        )
+        allowed = await acl.can_access_model(
+            str(other["id"]), model_id, str(org["id"]), role="member"
+        )
+        assert allowed is True
+
+        err = await enforce_model_access(
+            db_pool, user_id=str(other["id"]), role="member",
+            org_id=str(org["id"]), model_id=model_id,
+        )
+        assert err is None
+
+    async def test_member_with_org_grant_allowed(self, db_pool, acl_prefix, org_and_users):
+        from lucent.access_control import AccessControlService
+
+        org = org_and_users["org"]
+        other = org_and_users["other"]
+        model_id = f"{acl_prefix}m_orggrant"
+        await _insert_model(db_pool, model_id, org_id=str(org["id"]))
+
+        acl = AccessControlService(db_pool)
+        await acl.grant_access(
+            resource_type="model", resource_id=model_id, org_id=str(org["id"]),
+            principal_type="org", principal_id=None,
+        )
+        allowed = await acl.can_access_model(
+            str(other["id"]), model_id, str(org["id"]), role="member"
+        )
+        assert allowed is True
+
+    async def test_admin_role_allowed_without_grant(self, db_pool, acl_prefix, org_and_users):
+        from lucent.access_control import AccessControlService
+
+        org = org_and_users["org"]
+        admin = org_and_users["admin"]
+        model_id = f"{acl_prefix}m_admin"
+        await _insert_model(db_pool, model_id, org_id=str(org["id"]))
+
+        acl = AccessControlService(db_pool)
+        allowed = await acl.can_access_model(
+            str(admin["id"]), model_id, str(org["id"]), role="admin"
+        )
+        assert allowed is True
+
+    async def test_owner_user_id_allowed(self, db_pool, acl_prefix, org_and_users):
+        from lucent.access_control import AccessControlService
+
+        org = org_and_users["org"]
+        owner = org_and_users["owner"]
+        model_id = f"{acl_prefix}m_owned"
+        await _insert_model(
+            db_pool, model_id, org_id=str(org["id"]), owner_user_id=str(owner["id"])
+        )
+
+        acl = AccessControlService(db_pool)
+        allowed = await acl.can_access_model(
+            str(owner["id"]), model_id, str(org["id"]), role="member"
+        )
+        assert allowed is True
+
+    async def test_cross_org_grant_does_not_leak(self, db_pool, acl_prefix, org_and_users):
+        """A grant recorded under a different org must not confer access."""
+        from lucent.access_control import AccessControlService
+
+        org = org_and_users["org"]
+        other = org_and_users["other"]
+        other_org = await OrganizationRepository(db_pool).create(name=f"{acl_prefix}org2")
+        model_id = f"{acl_prefix}m_global"
+        # Global (org-NULL) model with a user grant scoped to a foreign org.
+        await _insert_model(db_pool, model_id, org_id=None)
+        acl = AccessControlService(db_pool)
+        await acl.grant_access(
+            resource_type="model", resource_id=model_id, org_id=str(other_org["id"]),
+            principal_type="user", principal_id=str(other["id"]),
+        )
+        allowed = await acl.can_access_model(
+            str(other["id"]), model_id, str(org["id"]), role="member"
+        )
+        assert allowed is False
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM resource_access_grants WHERE resource_id = $1", model_id
+            )
+
+    async def test_accessible_model_ids_respects_grants(
+        self, db_pool, acl_prefix, org_and_users
+    ):
+        """A member's accessible set contains only granted enabled models."""
+        from lucent.access_control import AccessControlService
+
+        org = org_and_users["org"]
+        other = org_and_users["other"]
+        granted = f"{acl_prefix}m_acc_granted"
+        ungranted = f"{acl_prefix}m_acc_ungranted"
+        await _insert_model(db_pool, granted, org_id=str(org["id"]))
+        await _insert_model(db_pool, ungranted, org_id=str(org["id"]))
+
+        acl = AccessControlService(db_pool)
+        await acl.grant_access(
+            resource_type="model", resource_id=granted, org_id=str(org["id"]),
+            principal_type="user", principal_id=str(other["id"]),
+        )
+        ids = await acl.accessible_model_ids(
+            str(other["id"]), str(org["id"]), role="member"
+        )
+        assert granted in ids
+        assert ungranted not in ids
+
+    async def test_accessible_model_ids_admin_bypasses_grants(
+        self, db_pool, acl_prefix, org_and_users
+    ):
+        """Admin role sees ungranted enabled models via the role branch."""
+        from lucent.access_control import AccessControlService
+
+        org = org_and_users["org"]
+        admin = org_and_users["admin"]
+        ungranted = f"{acl_prefix}m_acc_admin"
+        await _insert_model(db_pool, ungranted, org_id=str(org["id"]))
+
+        acl = AccessControlService(db_pool)
+        ids = await acl.accessible_model_ids(
+            str(admin["id"]), str(org["id"]), role="admin"
+        )
+        assert ungranted in ids
+
+    async def test_accessible_model_ids_excludes_disabled(
+        self, db_pool, acl_prefix, org_and_users
+    ):
+        """A granted but disabled model is not in the accessible set."""
+        from lucent.access_control import AccessControlService
+
+        org = org_and_users["org"]
+        other = org_and_users["other"]
+        disabled = f"{acl_prefix}m_acc_disabled"
+        await _insert_model(
+            db_pool, disabled, org_id=str(org["id"]), is_enabled=False
+        )
+
+        acl = AccessControlService(db_pool)
+        await acl.grant_access(
+            resource_type="model", resource_id=disabled, org_id=str(org["id"]),
+            principal_type="user", principal_id=str(other["id"]),
+        )
+        ids = await acl.accessible_model_ids(
+            str(other["id"]), str(org["id"]), role="member"
+        )
+        assert disabled not in ids
+
+
+class TestUserDefaultModelResolution:
+    """get_default_model_id_for_user keeps the chat default within reach."""
+
+    def test_empty_accessible_set_returns_none(self):
+        from lucent.model_registry import get_default_model_id_for_user
+
+        assert get_default_model_id_for_user(set()) is None
+
+    def test_preferred_returned_when_accessible(self):
+        from lucent.model_registry import get_default_model_id_for_user
+
+        assert (
+            get_default_model_id_for_user(
+                {"gpt-5-mini"}, preferred_model="gpt-5-mini"
+            )
+            == "gpt-5-mini"
+        )
+
+    def test_falls_back_to_accessible_when_preferred_denied(self):
+        from lucent.model_registry import get_default_model_id_for_user
+
+        # Preferred model is not in the accessible set: resolve to the model the
+        # user can actually use rather than returning the forbidden default.
+        result = get_default_model_id_for_user(
+            {"gpt-5-mini"}, preferred_model="some-ungranted-model"
+        )
+        assert result == "gpt-5-mini"
+
+    def test_none_means_unrestricted_global_default(self):
+        from lucent.model_registry import get_default_model_id_for_user
+
+        assert get_default_model_id_for_user(None) is not None
+

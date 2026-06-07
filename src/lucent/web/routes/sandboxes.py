@@ -276,6 +276,17 @@ async def edit_template_page(request: Request, template_id: str):
     tpl = _attach_owner_names([tpl], user_map, group_map)[0]
     owner_groups = await _get_user_groups(pool, str(user.id), str(user.organization_id))
 
+    from lucent.web.routes.access_ui import build_access_context
+
+    access = await build_access_context(
+        pool,
+        resource_type="sandbox_template",
+        resource_id=template_id,
+        org_id=str(user.organization_id),
+        user=user,
+        redirect=request.url.path,
+    )
+
     return templates.TemplateResponse(
         request,
         "sandbox_template_edit.html",
@@ -283,6 +294,7 @@ async def edit_template_page(request: Request, template_id: str):
             "template": tpl,
             "user": user,
             "owner_groups": owner_groups,
+            "access": access,
             "csrf_token": request.cookies.get(CSRF_COOKIE_NAME, ""),
         },
     )

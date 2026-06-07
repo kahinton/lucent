@@ -7,7 +7,7 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from lucent.access_control import AccessControlService
+from lucent.access_control import AccessControlService, build_access_clause
 from lucent.auth_providers import CSRF_COOKIE_NAME
 from lucent.db import GroupRepository, get_pool
 from lucent.secrets import SecretRegistry, SecretScope
@@ -39,17 +39,16 @@ async def secrets_page(
     org_id = UUID(str(user.organization_id))
     user_id = UUID(str(user.id))
 
+    _secrets_acl = build_access_clause(
+        resource_type="secret", uid_param=2, group_param=3, role_param=4, alias="s", has_scope=False,
+    )
     async with pool.acquire() as conn:
         count_row = await conn.fetchrow(
-            """
+            f"""
             SELECT COUNT(*) AS total
             FROM secrets s
             WHERE s.organization_id = $1
-              AND (
-                s.owner_user_id = $2
-                OR s.owner_group_id = ANY($3::uuid[])
-                OR $4 IN ('admin', 'owner')
-              )
+              AND {_secrets_acl}
             """,
             org_id,
             user_id,
@@ -58,7 +57,7 @@ async def secrets_page(
         )
         total_count = count_row["total"] if count_row else 0
         rows = await conn.fetch(
-            """
+            f"""
             SELECT
                 s.key,
                 s.owner_user_id,
@@ -70,11 +69,7 @@ async def secrets_page(
             LEFT JOIN users u ON u.id = s.owner_user_id
             LEFT JOIN groups g ON g.id = s.owner_group_id
             WHERE s.organization_id = $1
-              AND (
-                s.owner_user_id = $2
-                OR s.owner_group_id = ANY($3::uuid[])
-                OR $4 IN ('admin', 'owner')
-              )
+              AND {_secrets_acl}
             ORDER BY s.created_at DESC, s.key ASC
             LIMIT $5 OFFSET $6
             """,
