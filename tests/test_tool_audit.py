@@ -130,6 +130,56 @@ def test_classify_tool_result():
     assert classify_tool_result("Tool write_file blocked by hook.")[0] == "blocked"
 
 
+def test_classify_tool_result_distinguishes_auth_403_429():
+    """Pattern 2: 401 vs 403 vs 429 produce distinct failure classes so
+    operators can route them differently (re-mint vs grant vs backoff)."""
+    s, fc, _ = classify_tool_result(
+        "Error calling tool search_memories: Unauthorized: Invalid or expired credentials"
+    )
+    assert (s, fc) == ("failed", "auth_error")
+
+    s, fc, _ = classify_tool_result("Error calling tool x: HTTP 403 Forbidden")
+    assert (s, fc) == ("failed", "forbidden")
+
+    s, fc, _ = classify_tool_result(
+        "Error calling tool x: status_code=429 Too Many Requests"
+    )
+    assert (s, fc) == ("failed", "rate_limited")
+
+
+def test_classify_tool_result_bash_exit_zero_is_not_auth_error():
+    """Pattern 2 / Fix F: investigative bash scripts often print other tools'
+    error corpora — substrings like 'Unauthorized' in stdout must NOT be
+    classified as auth_error when the runner reports success (exit 0)."""
+    output = (
+        "Investigating failures... found row: "
+        "{'error': 'Unauthorized: Invalid or expired credentials', 'http': 401}"
+    )
+    # exit 0 — NOT a failure
+    s, fc, _ = classify_tool_result(output, tool_name="bash", exit_code=0)
+    assert (s, fc) == ("success", None)
+    # status='failed' from runner overrides
+    s, fc, _ = classify_tool_result(
+        output, tool_name="bash", exit_code=0, runner_status="failed"
+    )
+    assert (s, fc) == ("failed", "auth_error")
+    # exit != 0 — real bash failure
+    s, fc, _ = classify_tool_result(output, tool_name="bash", exit_code=1)
+    assert (s, fc) == ("failed", "auth_error")
+    # Non-bash tools unchanged — same string still classifies as auth_error
+    s, fc, _ = classify_tool_result(output, tool_name="search_memories")
+    assert (s, fc) == ("failed", "auth_error")
+
+
+def test_classify_tool_result_bash_rate_limited_only_on_failure():
+    """Pattern 2: 429 substrings in bash stdout are also gated on exit code."""
+    output = "Rate limit hit: HTTP 429 Too Many Requests"
+    s, fc, _ = classify_tool_result(output, tool_name="bash", exit_code=0)
+    assert (s, fc) == ("success", None)
+    s, fc, _ = classify_tool_result(output, tool_name="bash", exit_code=1)
+    assert (s, fc) == ("failed", "rate_limited")
+
+
 @pytest.mark.asyncio
 async def test_tool_audit_analyzes_repeated_agent_tool_failures(db_pool, test_user):
     repo = ToolAuditRepository(db_pool)

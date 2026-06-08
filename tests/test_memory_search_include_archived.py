@@ -53,7 +53,7 @@ class _CapturePool:
     def __init__(self, conn: _CaptureConn) -> None:
         self._conn = conn
 
-    def acquire(self) -> _AcquireCM:
+    def acquire(self, *, timeout: float | None = None) -> _AcquireCM:  # noqa: ARG002
         return _AcquireCM(self._conn)
 
 

@@ -3,7 +3,9 @@
 Handles CRUD operations for memories including search functionality.
 """
 
+import asyncio
 import logging
+import os
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
@@ -15,6 +17,35 @@ from uuid import UUID
 import asyncpg
 from asyncpg import Pool
 
+
+def _search_pool_acquire_timeout() -> float:
+    """Bounded pool acquire timeout for search paths (seconds).
+
+    Set via ``LUCENT_SEARCH_POOL_ACQUIRE_TIMEOUT`` (default 5s). Read at call
+    time so tests and operators can tune without restart.
+    """
+    try:
+        return float(os.environ.get("LUCENT_SEARCH_POOL_ACQUIRE_TIMEOUT", "5"))
+    except (TypeError, ValueError):
+        return 5.0
+
+
+class PoolAcquireTimeoutError(Exception):
+    """Raised when a search query cannot acquire a DB connection in time.
+
+    This is distinct from asyncpg/asyncio TimeoutError raised mid-query —
+    surfacing it separately lets the MCP layer label the failure class as
+    ``DBPoolAcquireTimeout`` instead of a generic timeout, which is what
+    ``analyze_tool_failure_patterns`` keys on.
+    """
+
+    def __init__(self, op: str, timeout: float):
+        self.op = op
+        self.timeout = timeout
+        super().__init__(
+            f"DB pool acquire timeout after {timeout:.1f}s during {op}"
+        )
+
 from lucent.metrics import metrics
 from lucent.models.repo_names import normalize_repository_full_name
 from lucent.settings import (
@@ -25,6 +56,10 @@ from lucent.settings import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Re-exported so callers (MCP tool layer, tests) can ``except`` on it without
+# pulling the helper module directly.
+__all_extra__ = ["PoolAcquireTimeoutError"]
 
 
 @dataclass(slots=True, frozen=True)
@@ -1115,7 +1150,13 @@ class MemoryRepository:
 
         # Build the query with optional fuzzy matching
         if query:
-            # Use pg_trgm similarity for fuzzy search
+            # Use pg_trgm similarity for fuzzy search.
+            # NOTE (Pattern 1, Fix C): the legacy form combined ``content % $N``
+            # with ``content ILIKE '%'||$N||'%'`` via OR. The ILIKE branch
+            # disables the gin_trgm_ops index in most plans and was the
+            # dominant contributor to the search_memories timeout cluster.
+            # We rely on the trigram operator only; ``set_limit`` on each
+            # connection (see ``db.pool._init_connection``) controls recall.
             similarity_param = param_idx
             params.append(query)
             param_idx += 1
@@ -1132,8 +1173,7 @@ class MemoryRepository:
                                 * (COALESCE(vitality_score, 0.5) - 0.5)) AS final_rank
                     FROM memories
                     WHERE {where_clause}
-                      AND (content % ${similarity_param}
-                           OR content ILIKE '%' || ${similarity_param} || '%')
+                      AND content % ${similarity_param}
                     ORDER BY final_rank DESC, importance DESC, created_at DESC
                     LIMIT ${param_idx} OFFSET ${param_idx + 1}
                 """
@@ -1143,8 +1183,7 @@ class MemoryRepository:
                            similarity(content, ${similarity_param}) as sim_score
                     FROM memories
                     WHERE {where_clause}
-                      AND (content % ${similarity_param}
-                           OR content ILIKE '%' || ${similarity_param} || '%')
+                      AND content % ${similarity_param}
                     ORDER BY sim_score DESC, importance DESC, created_at DESC
                     LIMIT ${param_idx} OFFSET ${param_idx + 1}
                 """
@@ -1153,8 +1192,7 @@ class MemoryRepository:
                 SELECT COUNT(*) as total
                 FROM memories
                 WHERE {where_clause}
-                  AND (content % ${similarity_param}
-                       OR content ILIKE '%' || ${similarity_param} || '%')
+                  AND content % ${similarity_param}
             """
         else:
             search_query = f"""
@@ -1174,14 +1212,28 @@ class MemoryRepository:
 
         params.extend([limit, offset])
 
-        async with self.pool.acquire() as conn:
-            # Get total count
-            count_params = params[:-2]  # Exclude limit and offset
-            count_row = await conn.fetchrow(count_query, *count_params)
-            total_count = count_row["total"] if count_row else 0
+        acquire_timeout = _search_pool_acquire_timeout()
+        try:
+            async with self.pool.acquire(timeout=acquire_timeout) as conn:
+                # Get total count
+                count_params = params[:-2]  # Exclude limit and offset
+                count_row = await conn.fetchrow(count_query, *count_params)
+                total_count = count_row["total"] if count_row else 0
 
-            # Get results
-            rows = await conn.fetch(search_query, *params)
+                # Get results
+                rows = await conn.fetch(search_query, *params)
+        except (asyncio.TimeoutError, asyncpg.exceptions.InterfaceError) as exc:
+            # asyncpg raises asyncio.TimeoutError from acquire(timeout=...).
+            # Wrap as a typed error so the MCP layer can classify it distinctly
+            # from a query-execution timeout.
+            if isinstance(exc, asyncpg.exceptions.InterfaceError) and (
+                "pool" not in str(exc).lower()
+            ):
+                raise
+            logger.warning(
+                "search: pool acquire timed out after %.1fs", acquire_timeout
+            )
+            raise PoolAcquireTimeoutError("search", acquire_timeout) from exc
 
         memories = [self._row_to_search_dict(row) for row in rows]
 
@@ -1312,7 +1364,9 @@ class MemoryRepository:
         params.append(query)
         param_idx += 1
 
-        # Search across content, array_to_string(tags), and metadata::text
+        # Search across content, array_to_string(tags), and metadata::text.
+        # NOTE (Pattern 1, Fix C): ILIKE branches dropped — trigram operator
+        # only, so the gin_trgm_ops indexes can be used.
         if boost_enabled:
             boost_alpha_param = param_idx
             params.append(boost_alpha)
@@ -1333,11 +1387,9 @@ class MemoryRepository:
                 FROM memories
                 WHERE {where_clause}
                   AND (
-                      content % ${query_param} OR content ILIKE '%' || ${query_param} || '%'
+                      content % ${query_param}
                       OR array_to_string(tags, ' ') % ${query_param}
-                      OR array_to_string(tags, ' ') ILIKE '%' || ${query_param} || '%'
                       OR metadata::text % ${query_param}
-                      OR metadata::text ILIKE '%' || ${query_param} || '%'
                   )
                 ORDER BY final_rank DESC, importance DESC, created_at DESC
                 LIMIT ${param_idx} OFFSET ${param_idx + 1}
@@ -1353,11 +1405,9 @@ class MemoryRepository:
                 FROM memories
                 WHERE {where_clause}
                   AND (
-                      content % ${query_param} OR content ILIKE '%' || ${query_param} || '%'
+                      content % ${query_param}
                       OR array_to_string(tags, ' ') % ${query_param}
-                      OR array_to_string(tags, ' ') ILIKE '%' || ${query_param} || '%'
                       OR metadata::text % ${query_param}
-                      OR metadata::text ILIKE '%' || ${query_param} || '%'
                   )
                 ORDER BY sim_score DESC, importance DESC, created_at DESC
                 LIMIT ${param_idx} OFFSET ${param_idx + 1}
@@ -1368,22 +1418,31 @@ class MemoryRepository:
             FROM memories
             WHERE {where_clause}
               AND (
-                  content % ${query_param} OR content ILIKE '%' || ${query_param} || '%'
+                  content % ${query_param}
                   OR array_to_string(tags, ' ') % ${query_param}
-                  OR array_to_string(tags, ' ') ILIKE '%' || ${query_param} || '%'
                   OR metadata::text % ${query_param}
-                  OR metadata::text ILIKE '%' || ${query_param} || '%'
               )
         """
 
         params.extend([limit, offset])
 
-        async with self.pool.acquire() as conn:
-            count_params = params[:-2]
-            count_row = await conn.fetchrow(count_query, *count_params)
-            total_count = count_row["total"] if count_row else 0
+        acquire_timeout = _search_pool_acquire_timeout()
+        try:
+            async with self.pool.acquire(timeout=acquire_timeout) as conn:
+                count_params = params[:-2]
+                count_row = await conn.fetchrow(count_query, *count_params)
+                total_count = count_row["total"] if count_row else 0
 
-            rows = await conn.fetch(search_query, *params)
+                rows = await conn.fetch(search_query, *params)
+        except (asyncio.TimeoutError, asyncpg.exceptions.InterfaceError) as exc:
+            if isinstance(exc, asyncpg.exceptions.InterfaceError) and (
+                "pool" not in str(exc).lower()
+            ):
+                raise
+            logger.warning(
+                "search_full: pool acquire timed out after %.1fs", acquire_timeout
+            )
+            raise PoolAcquireTimeoutError("search_full", acquire_timeout) from exc
 
         memories = [self._row_to_search_dict(row) for row in rows]
 

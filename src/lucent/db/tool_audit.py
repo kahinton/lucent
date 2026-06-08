@@ -8,11 +8,29 @@ which models/agents/sessions, and with what redacted inputs/results.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Any
 from uuid import UUID
 
 from asyncpg import Pool
+
+logger = logging.getLogger(__name__)
+
+# Failure classes that map directly to the Pattern 1 / Pattern 2 remediation work
+# on the memory-server. Emitting a structured log line for these — in addition to
+# the audit row insert — gives operators a grep-friendly signal that
+# `analyze_tool_failure_patterns` will surface on its next pass.
+_REMEDIATION_FAILURE_CLASSES = frozenset(
+    {
+        "mcp_timeout",
+        "db_pool_acquire_timeout",
+        "auth_error",
+        "forbidden",
+        "rate_limited",
+        "invalid_input",
+    }
+)
 
 _SECRET_KEY_RE = re.compile(
     r"(authorization|api[_-]?key|token|secret|password|cookie|credential)",
@@ -213,6 +231,29 @@ class ToolAuditRepository:
                 else None,
                 json.dumps(_redact_json(metadata or {})),
             )
+        # Observability hook (Patterns 1 + 2): emit a single structured line
+        # whenever the audit row records a remediation-relevant failure. The
+        # audit table itself is the source of truth for
+        # ``analyze_tool_failure_patterns``; this log line gives operators a
+        # grep-friendly signal in stdout/journalctl when regressions reappear.
+        if status != "ok" and failure_class in _REMEDIATION_FAILURE_CLASSES:
+            logger.warning(
+                "tool_audit_failure tool=%s failure_class=%s status=%s "
+                "duration_ms=%s source=%s",
+                tool_name,
+                failure_class,
+                status,
+                duration_ms,
+                source,
+                extra={
+                    "event": "tool_audit_failure",
+                    "tool_name": tool_name,
+                    "failure_class": failure_class,
+                    "status": status,
+                    "duration_ms": duration_ms,
+                    "source": source,
+                },
+            )
         return dict(row) if row else {}
 
     async def analyze_failure_patterns(
@@ -331,19 +372,72 @@ class ToolAuditRepository:
         }
 
 
-def classify_tool_result(result_text: str | None) -> tuple[str, str | None, str | None]:
-    """Classify a tool result string into audit status/failure metadata."""
+def classify_tool_result(
+    result_text: str | None,
+    *,
+    tool_name: str | None = None,
+    exit_code: int | None = None,
+    runner_status: str | None = None,
+) -> tuple[str, str | None, str | None]:
+    """Classify a tool result string into audit status/failure metadata.
+
+    Pattern 2 hardening:
+      * For ``tool_name='bash'`` (and other shell-runner tools), auth-class
+        substrings in *stdout* are not by themselves a failure — investigative
+        scripts routinely print other tools' error corpora (e.g. JSON of
+        previous failures) which would otherwise trigger false-positive
+        ``auth_error`` rows. Require ``exit_code != 0`` (or
+        ``runner_status='failed'``) before labelling bash output as auth/rate
+        failures.
+      * Distinguish HTTP 401 (``auth_error``), 403 (``forbidden``), and 429
+        (``rate_limited``) so ``analyze_tool_failure_patterns`` and operators
+        can act on them differently (re-mint vs. permission gap vs. backoff).
+    """
     if not result_text:
         return "success", None, None
     text = str(result_text)
     lower = text.lower()
+    is_shell_tool = (tool_name or "").lower() in {"bash", "shell", "sh", "powershell"}
+    shell_failed = exit_code not in (None, 0) or (runner_status or "").lower() == "failed"
     if lower.startswith("error calling tool") or lower.startswith("error:"):
+        # Pattern 1: typed timeout / pool / validation errors.
+        if "mcptimeouterror" in lower or "timed out after" in lower:
+            return "failed", "mcp_timeout", text[:_MAX_TEXT]
+        if "dbpoolacquiretimeout" in lower or "pool acquire timeout" in lower:
+            return "failed", "db_pool_acquire_timeout", text[:_MAX_TEXT]
+        if "invalid input:" in lower:
+            return "failed", "invalid_input", text[:_MAX_TEXT]
+        # Pattern 2: distinct HTTP-status classes inside an MCP error envelope.
+        if "status_code=429" in lower or "http 429" in lower or "too many requests" in lower:
+            return "failed", "rate_limited", text[:_MAX_TEXT]
+        if "status_code=403" in lower or "http 403" in lower or "forbidden" in lower:
+            return "failed", "forbidden", text[:_MAX_TEXT]
+        if (
+            "unauthorized" in lower
+            or "status_code=401" in lower
+            or "http 401" in lower
+            or "invalid or expired credentials" in lower
+        ):
+            return "failed", "auth_error", text[:_MAX_TEXT]
         return "failed", "tool_error", text[:_MAX_TEXT]
     if "unexpected user permission response" in lower:
         return "failed", "permission_protocol_error", text[:_MAX_TEXT]
     if "failed to fetch" in lower or "typeerror: fetch failed" in lower:
         return "failed", "fetch_error", text[:_MAX_TEXT]
-    if "unauthorized" in lower or "status_code=401" in lower or "http 401" in lower:
+    # Pattern 2 — bash false-positive guard. Only classify keyword-bearing
+    # stdout as a real failure when the runner itself reported failure.
+    if is_shell_tool and not shell_failed:
+        return "success", None, None
+    if "status_code=429" in lower or "http 429" in lower or "too many requests" in lower:
+        return "failed", "rate_limited", text[:_MAX_TEXT]
+    if "status_code=403" in lower or "http 403" in lower:
+        return "failed", "forbidden", text[:_MAX_TEXT]
+    if (
+        "unauthorized" in lower
+        or "status_code=401" in lower
+        or "http 401" in lower
+        or "invalid or expired credentials" in lower
+    ):
         return "failed", "auth_error", text[:_MAX_TEXT]
     if "tool is not allowed" in lower or "blocked by hook" in lower:
         return "blocked", "blocked", text[:_MAX_TEXT]

@@ -79,6 +79,13 @@ async def init_db(database_url: str | None = None) -> Pool:
 
     Returns:
         The initialized connection pool.
+
+    Pool sizing is read from the environment so operators can tune for
+    contention without code changes:
+
+    - ``LUCENT_DB_POOL_MIN_SIZE`` (default ``5``)
+    - ``LUCENT_DB_POOL_MAX_SIZE`` (default ``25``)
+    - ``LUCENT_DB_COMMAND_TIMEOUT`` (default ``60`` seconds)
     """
     global _pool
 
@@ -92,21 +99,45 @@ async def init_db(database_url: str | None = None) -> Pool:
     # Instrument asyncpg before pool creation so all connections are traced
     _instrument_asyncpg()
 
+    min_size = _env_int("LUCENT_DB_POOL_MIN_SIZE", 5)
+    max_size = _env_int("LUCENT_DB_POOL_MAX_SIZE", 25)
+    if max_size < min_size:
+        max_size = min_size
+    command_timeout = _env_int("LUCENT_DB_COMMAND_TIMEOUT", 60)
+
     # Create the connection pool
     _pool = await asyncpg.create_pool(
         url,
-        min_size=2,
-        max_size=10,
-        command_timeout=60,
+        min_size=min_size,
+        max_size=max_size,
+        command_timeout=command_timeout,
         init=_init_connection,
     )
 
-    logger.info("Database connection pool created (min=2, max=10)")
+    logger.info(
+        "Database connection pool created (min=%d, max=%d, command_timeout=%ds)",
+        min_size,
+        max_size,
+        command_timeout,
+    )
 
     # Run migrations
     await _run_migrations(_pool)
 
     return _pool
+
+
+def _env_int(name: str, default: int) -> int:
+    """Read a positive integer environment variable, falling back to default."""
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        logger.warning("Invalid value for %s=%r; using default %d", name, raw, default)
+        return default
+    return value if value > 0 else default
 
 
 async def _init_connection(conn: Connection) -> None:
@@ -125,6 +156,22 @@ async def _init_connection(conn: Connection) -> None:
         decoder=json.loads,
         schema="pg_catalog",
     )
+    # Pattern 1, Fix E: set pg_trgm similarity threshold per-connection.
+    # The previous migration-time ``SET pg_trgm.similarity_threshold`` was a
+    # no-op (session-scoped). Applying ``set_limit`` per connection makes the
+    # fuzzy search predicate (``content % $1``) actually match at the intended
+    # threshold and pick up the gin_trgm_ops index. Default 0.1 matches the
+    # informal threshold the OR-ILIKE branch was masking.
+    try:
+        threshold = float(os.environ.get("LUCENT_PG_TRGM_SIMILARITY_THRESHOLD", "0.1"))
+    except (TypeError, ValueError):
+        threshold = 0.1
+    try:
+        await conn.execute("SELECT set_limit($1)", threshold)
+    except Exception as exc:  # pragma: no cover - logged but non-fatal
+        # If pg_trgm is not installed (older test DBs) we still want the pool
+        # to come up. Search just falls back to default threshold (0.3).
+        logger.debug("set_limit(%s) failed: %s", threshold, exc)
 
 
 async def _run_migrations(pool: Pool) -> None:

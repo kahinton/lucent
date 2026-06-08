@@ -1485,9 +1485,21 @@ async def chat_stream_v2(
                 from lucent.db.tool_audit import ToolAuditRepository, classify_tool_result
 
                 output = event.tool_output or payload.get("output") or ""
-                status, failure_class, error_message = classify_tool_result(output)
-                audit = ToolAuditRepository(pool)
                 tool_name = payload.get("tool") or event.tool_name or "unknown"
+                # Pattern 2: pass tool_name so the classifier can suppress
+                # bash auth_error false positives (only flag when the runner
+                # itself reports failure via exit_code/status).
+                exit_code = payload.get("exit_code")
+                if exit_code is None and isinstance(event.tool_output, dict):
+                    exit_code = event.tool_output.get("exit_code")
+                runner_status = payload.get("status") or payload.get("runner_status")
+                status, failure_class, error_message = classify_tool_result(
+                    output,
+                    tool_name=tool_name,
+                    exit_code=exit_code if isinstance(exit_code, int) else None,
+                    runner_status=runner_status if isinstance(runner_status, str) else None,
+                )
+                audit = ToolAuditRepository(pool)
                 await audit.log_tool_call(
                     tool_name=tool_name,
                     status=status,

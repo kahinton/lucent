@@ -87,7 +87,7 @@ class TestInitDb:
         assert result is existing_pool
 
     async def test_pool_config_parameters(self):
-        """Test that pool is created with expected config."""
+        """Test that pool is created with expected default config (Pattern 1: 5/25)."""
         mock_pool = _make_mock_pool()
         create_pool = AsyncMock(return_value=mock_pool)
         with patch("lucent.db.pool.asyncpg.create_pool", create_pool):
@@ -95,9 +95,53 @@ class TestInitDb:
                 await init_db("postgresql://test:test@localhost/test")
 
         kwargs = create_pool.call_args[1]
-        assert kwargs["min_size"] == 2
-        assert kwargs["max_size"] == 10
+        assert kwargs["min_size"] == 5
+        assert kwargs["max_size"] == 25
         assert kwargs["command_timeout"] == 60
+
+    async def test_pool_sizing_honors_env_vars(self, monkeypatch):
+        """Operators can tune pool sizing via env (Pattern 1, Fix B)."""
+        monkeypatch.setenv("LUCENT_DB_POOL_MIN_SIZE", "8")
+        monkeypatch.setenv("LUCENT_DB_POOL_MAX_SIZE", "40")
+        monkeypatch.setenv("LUCENT_DB_COMMAND_TIMEOUT", "90")
+        mock_pool = _make_mock_pool()
+        create_pool = AsyncMock(return_value=mock_pool)
+        with patch("lucent.db.pool.asyncpg.create_pool", create_pool):
+            with patch("lucent.db.pool._run_migrations", new_callable=AsyncMock):
+                await init_db("postgresql://test:test@localhost/test")
+
+        kwargs = create_pool.call_args[1]
+        assert kwargs["min_size"] == 8
+        assert kwargs["max_size"] == 40
+        assert kwargs["command_timeout"] == 90
+
+    async def test_pool_max_size_floors_at_min_size(self, monkeypatch):
+        """Misconfigured max < min must not produce an invalid asyncpg pool."""
+        monkeypatch.setenv("LUCENT_DB_POOL_MIN_SIZE", "10")
+        monkeypatch.setenv("LUCENT_DB_POOL_MAX_SIZE", "2")
+        mock_pool = _make_mock_pool()
+        create_pool = AsyncMock(return_value=mock_pool)
+        with patch("lucent.db.pool.asyncpg.create_pool", create_pool):
+            with patch("lucent.db.pool._run_migrations", new_callable=AsyncMock):
+                await init_db("postgresql://test:test@localhost/test")
+
+        kwargs = create_pool.call_args[1]
+        assert kwargs["min_size"] == 10
+        assert kwargs["max_size"] == 10
+
+    async def test_pool_sizing_falls_back_on_garbage_env(self, monkeypatch):
+        """Non-integer values fall back to defaults without crashing init."""
+        monkeypatch.setenv("LUCENT_DB_POOL_MIN_SIZE", "not-a-number")
+        monkeypatch.setenv("LUCENT_DB_POOL_MAX_SIZE", "")
+        mock_pool = _make_mock_pool()
+        create_pool = AsyncMock(return_value=mock_pool)
+        with patch("lucent.db.pool.asyncpg.create_pool", create_pool):
+            with patch("lucent.db.pool._run_migrations", new_callable=AsyncMock):
+                await init_db("postgresql://test:test@localhost/test")
+
+        kwargs = create_pool.call_args[1]
+        assert kwargs["min_size"] == 5  # default
+        assert kwargs["max_size"] == 25  # default
 
     async def test_runs_migrations_after_pool_creation(self):
         """Test that migrations are run after pool is created."""
@@ -212,6 +256,38 @@ class TestInitConnection:
         decoder = jsonb_call[1]["decoder"]
 
         assert decoder('{"key": "value"}') == {"key": "value"}
+
+    async def test_init_connection_applies_pg_trgm_set_limit(self):
+        """Pattern 1 Fix E — every connection gets ``set_limit($1)`` applied
+        so the fuzzy search predicate (``content % $1``) matches at the
+        configured threshold instead of the postgres default (0.3)."""
+        mock_conn = AsyncMock()
+        await _init_connection(mock_conn)
+
+        # First positional arg of execute() is the SQL.
+        execute_calls = mock_conn.execute.call_args_list
+        set_limit_calls = [c for c in execute_calls if "set_limit" in c.args[0]]
+        assert set_limit_calls, "expected SELECT set_limit($1) on each connection"
+        # Default threshold is 0.1 per the Pattern 1 fix.
+        assert set_limit_calls[0].args[1] == pytest.approx(0.1)
+
+    async def test_init_connection_set_limit_honors_env(self, monkeypatch):
+        monkeypatch.setenv("LUCENT_PG_TRGM_SIMILARITY_THRESHOLD", "0.25")
+        mock_conn = AsyncMock()
+        await _init_connection(mock_conn)
+
+        set_limit_calls = [
+            c for c in mock_conn.execute.call_args_list if "set_limit" in c.args[0]
+        ]
+        assert set_limit_calls[0].args[1] == pytest.approx(0.25)
+
+    async def test_init_connection_tolerates_missing_pg_trgm(self):
+        """If pg_trgm is not installed, set_limit() will fail — the pool must
+        still come up. The exception must be swallowed (logged at debug)."""
+        mock_conn = AsyncMock()
+        mock_conn.execute.side_effect = Exception("pg_trgm not installed")
+        # Should NOT raise.
+        await _init_connection(mock_conn)
 
 
 class TestRunMigrations:

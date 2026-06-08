@@ -6,10 +6,13 @@ and wraps each as a LangChain tool that the LLM can call.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import os
 import time
 from contextlib import AsyncExitStack
+from datetime import timedelta
 from typing import Any
 
 from lucent.url_validation import validate_url
@@ -32,6 +35,59 @@ MEMORY_TOOL_NAMES = frozenset({
     "get_tag_suggestions",
     "export_memories",
 })
+
+# Pattern 1, Fix D: explicit per-request read timeout for MCP tool calls.
+# Read at call time so operators can tune via env without restarting agents.
+# Default 120s covers tail-latency searches without letting a hung server
+# block a model turn indefinitely.
+_DEFAULT_MCP_REQUEST_TIMEOUT_SECONDS = 120
+
+# Memory-tool read paths (search_memories / search_memories_full / get_*) are
+# idempotent and safe to retry once on transient timeout. Pattern 1 evidence
+# showed timeout → retry → success as the dominant recovery pattern.
+_RETRYABLE_MEMORY_TOOLS = frozenset({
+    "search_memories",
+    "search_memories_full",
+    "get_memory",
+    "get_memories",
+    "get_existing_tags",
+    "get_tag_suggestions",
+    "get_current_user_context",
+})
+
+
+def _mcp_request_timeout_seconds() -> int:
+    raw = os.environ.get("LUCENT_MCP_REQUEST_TIMEOUT_SECONDS")
+    if not raw:
+        return _DEFAULT_MCP_REQUEST_TIMEOUT_SECONDS
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "Invalid LUCENT_MCP_REQUEST_TIMEOUT_SECONDS=%r; using default %ds",
+            raw,
+            _DEFAULT_MCP_REQUEST_TIMEOUT_SECONDS,
+        )
+        return _DEFAULT_MCP_REQUEST_TIMEOUT_SECONDS
+    return value if value > 0 else _DEFAULT_MCP_REQUEST_TIMEOUT_SECONDS
+
+
+def _mcp_retry_backoff_seconds() -> float:
+    raw = os.environ.get("LUCENT_MCP_RETRY_BACKOFF_SECONDS")
+    if not raw:
+        return 0.5
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return 0.5
+
+
+class MCPTimeoutError(TimeoutError):
+    """Raised when an MCP tool call exceeds the per-request read timeout.
+
+    Distinct subclass so the tool-audit classifier can label these as
+    ``mcp_timeout`` instead of a generic ``tool_error``.
+    """
 
 
 class MCPToolBridge:
@@ -151,9 +207,26 @@ class MCPToolBridge:
 
         Returns:
             The tool result as a string.
+
+        Pattern 1 hardening:
+        - Passes an explicit ``read_timeout_seconds`` on every call (default
+          120s, ``LUCENT_MCP_REQUEST_TIMEOUT_SECONDS``) so the SDK's per-call
+          deadline is bounded even when the server hangs after the SSE
+          handshake.
+        - For idempotent memory read tools (``search_memories``,
+          ``search_memories_full``, ``get_memory*``, ``get_*_tags``,
+          ``get_current_user_context``), a single timeout failure is retried
+          once after ``LUCENT_MCP_RETRY_BACKOFF_SECONDS`` (default 0.5s).
+          Non-idempotent tools (create/update/delete) are NOT retried.
+        - Timeout failures surface as a structured ``Error calling tool ...:
+          MCPTimeoutError`` string with an ``mcp_timeout`` failure class hint
+          in the audit row, instead of the generic ``tool_error``.
         """
         is_memory_tool = tool_name in MEMORY_TOOL_NAMES
+        is_retryable = tool_name in _RETRYABLE_MEMORY_TOOLS
         start = time.monotonic()
+        timeout_seconds = _mcp_request_timeout_seconds()
+        read_timeout = timedelta(seconds=timeout_seconds)
 
         try:
             if not self._is_tool_allowed(tool_name):
@@ -167,7 +240,39 @@ class MCPToolBridge:
                 return result_text
 
             session = await self._ensure_session()
-            result = await session.call_tool(tool_name, arguments or {})
+            attempts = 2 if is_retryable else 1
+            last_exc: BaseException | None = None
+            result = None
+            for attempt in range(1, attempts + 1):
+                try:
+                    result = await self._invoke_with_timeout(
+                        session, tool_name, arguments or {}, read_timeout
+                    )
+                    last_exc = None
+                    break
+                except (asyncio.TimeoutError, TimeoutError) as exc:
+                    last_exc = exc
+                    if attempt >= attempts:
+                        break
+                    backoff = _mcp_retry_backoff_seconds()
+                    logger.warning(
+                        "mcp.timeout tool=%s attempt=%d/%d backoff=%.2fs",
+                        tool_name,
+                        attempt,
+                        attempts,
+                        backoff,
+                    )
+                    if backoff > 0:
+                        await asyncio.sleep(backoff)
+
+            if last_exc is not None:
+                # Convert to a typed exception so audit/classification picks it
+                # up as ``MCPTimeoutError`` rather than a bare TimeoutError.
+                raise MCPTimeoutError(
+                    f"MCP tool {tool_name} timed out after {timeout_seconds}s "
+                    f"({attempts} attempt(s))"
+                ) from last_exc
+
             result_text = _call_result_to_text(result)
             await self._audit_tool_call(
                 tool_name=tool_name,
@@ -199,14 +304,41 @@ class MCPToolBridge:
                 elapsed_ms = (time.monotonic() - start) * 1000
                 log_params = _summarize_memory_tool_params(tool_name, arguments)
                 logger.warning(
-                    "mcp.memory_tool tool=%s params={%s} status=error duration_ms=%.0f error=%s",
+                    "mcp.memory_tool tool=%s params={%s} status=error "
+                    "duration_ms=%.0f error_class=%s error=%s",
                     tool_name,
                     log_params,
                     elapsed_ms,
+                    e.__class__.__name__,
                     e,
                 )
             logger.error("Error calling MCP tool %s", tool_name, exc_info=e)
             return f"Error calling tool {tool_name}: {e}"
+
+    async def _invoke_with_timeout(
+        self,
+        session: Any,
+        tool_name: str,
+        arguments: dict[str, Any],
+        read_timeout: timedelta,
+    ) -> Any:
+        """Call ``session.call_tool`` with an explicit per-call read timeout.
+
+        Older fakes/mock sessions may not accept the ``read_timeout_seconds``
+        keyword, so we fall back to a positional call and wrap it in
+        ``asyncio.wait_for`` to preserve the bound.
+        """
+        try:
+            return await session.call_tool(
+                tool_name, arguments, read_timeout_seconds=read_timeout
+            )
+        except TypeError:
+            # Session.call_tool signature did not accept the kwarg. Enforce
+            # the bound externally so the timeout contract still holds.
+            return await asyncio.wait_for(
+                session.call_tool(tool_name, arguments),
+                timeout=read_timeout.total_seconds(),
+            )
 
     async def _audit_tool_call(
         self,
@@ -244,7 +376,36 @@ class MCPToolBridge:
                 failure_class = exception.__class__.__name__
                 error_message = str(exception)
             else:
-                status, failure_class, error_message = classify_tool_result(result_text)
+                status, failure_class, error_message = classify_tool_result(
+                    result_text, tool_name=tool_name
+                )
+
+            # Observability hook (Patterns 1 + 2): emit a structured warning
+            # whenever an MCP tool call ends in a remediation-relevant failure
+            # class so future regressions surface in log aggregation alongside
+            # the tool_call_audit_log row that feeds analyze_tool_failure_patterns.
+            _OBSERVED_FAILURE_CLASSES = {
+                "mcp_timeout",
+                "db_pool_acquire_timeout",
+                "auth_error",
+                "forbidden",
+                "rate_limited",
+                "invalid_input",
+            }
+            if status != "ok" and failure_class in _OBSERVED_FAILURE_CLASSES:
+                logger.warning(
+                    "mcp_tool_failure tool=%s failure_class=%s duration_ms=%d",
+                    tool_name,
+                    failure_class,
+                    int(duration_ms),
+                    extra={
+                        "tool_name": tool_name,
+                        "failure_class": failure_class,
+                        "duration_ms": int(duration_ms),
+                        "mcp_url": self._mcp_url,
+                        "event": "mcp_tool_failure",
+                    },
+                )
 
             pool = await init_db()
             repo = ToolAuditRepository(pool)

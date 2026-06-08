@@ -20,6 +20,7 @@ can run simultaneously, contributing to the same intelligence.
 import asyncio
 import contextlib
 import json
+import math
 import os
 import platform
 import re
@@ -1068,12 +1069,31 @@ async def _revoke_current_key() -> None:
         _current_key_expires_at = None
 
 
+def _scoped_key_ttl_minutes() -> int:
+    """Compute the scoped sub-agent API key TTL in minutes.
+
+    Pattern 2 / Fix G1: the previous hard-coded 60-minute TTL was exactly
+    equal to ``daemon.session_timeout_seconds`` (3600s), so any sub-agent
+    whose first MCP call happened after the model's thinking preamble was
+    served by an already-expired key and returned
+    ``Unauthorized: Invalid or expired credentials``. Derive TTL from the
+    session budget with a 15-minute headroom so the key strictly outlives
+    any tool call the session can emit, and auto-tracks operator changes
+    to ``LUCENT_SESSION_TIMEOUT``.
+    """
+    try:
+        session_seconds = max(0, int(SESSION_TOTAL_TIMEOUT or 0))
+    except Exception:
+        session_seconds = 3600
+    return max(60, math.ceil(session_seconds / 60) + 15)
+
+
 async def _mint_scoped_api_key(
     *,
     memory_scope: str,  # 'user' or 'org_shared_only'
     memory_scope_user_id: str | None = None,
     org_id: str,
-    ttl_minutes: int = 60,
+    ttl_minutes: int | None = None,
 ) -> str | None:
     """Mint a temporary scoped API key for per-user memory operations.
 
@@ -1089,6 +1109,9 @@ async def _mint_scoped_api_key(
 
     import asyncpg
     import bcrypt
+
+    if ttl_minutes is None or ttl_minutes <= 0:
+        ttl_minutes = _scoped_key_ttl_minutes()
 
     try:
         conn = await asyncpg.connect(DATABASE_URL)
@@ -1118,7 +1141,7 @@ async def _mint_scoped_api_key(
         scope_suffix = memory_scope_user_id[:8] if memory_scope_user_id else "shared"
         key_name = f"scoped-{memory_scope}-{scope_suffix}-{secrets.token_hex(4)}"
 
-        await conn.fetchrow(
+        row = await conn.fetchrow(
             "INSERT INTO api_keys "
             "(user_id, organization_id, name, key_prefix, key_hash, scopes, "
             " expires_at, memory_scope, memory_scope_user_id) "
@@ -1134,8 +1157,14 @@ async def _mint_scoped_api_key(
             memory_scope,
             memory_scope_user_id,
         )
+        expires_at = row["expires_at"] if row is not None else None
+        # Fix G3: log expires_at so audit/log analysis can correlate
+        # subsequent ``Unauthorized: Invalid or expired credentials`` MCP
+        # responses against the actual expiry time, not just the mint time.
+        _mint_scoped_api_key.last_expires_at = expires_at  # type: ignore[attr-defined]
         log(f"Minted {memory_scope} scoped key (prefix: {key_prefix}, "
-            f"scope_user: {scope_suffix}, ttl: {ttl_minutes}m)")
+            f"scope_user: {scope_suffix}, ttl: {ttl_minutes}m, "
+            f"expires_at: {expires_at.isoformat() if expires_at else 'unknown'})")
         return plain_key
 
     except Exception as e:
@@ -3449,7 +3478,7 @@ class LucentDaemon:
                     memory_scope="user",
                     memory_scope_user_id=user_id,
                     org_id=org_id,
-                    ttl_minutes=60,
+                    ttl_minutes=_scoped_key_ttl_minutes(),
                 )
                 if not scoped_key:
                     raise RuntimeError("scoped key minting failed")
@@ -4064,7 +4093,7 @@ class LucentDaemon:
                         memory_scope="user",
                         memory_scope_user_id=owner_user_id,
                         org_id=org_id,
-                        ttl_minutes=30,
+                        ttl_minutes=_scoped_key_ttl_minutes(),
                     )
                     if not scoped_key:
                         raise RuntimeError("scoped key minting failed")
@@ -5379,7 +5408,7 @@ class LucentDaemon:
                     memory_scope=_scope_type,
                     memory_scope_user_id=_scope_user,
                     org_id=org_id,
-                    ttl_minutes=60,
+                    ttl_minutes=_scoped_key_ttl_minutes(),
                 )
                 if _scoped_key:
                     task_mcp_config["memory-server"] = {
@@ -5404,8 +5433,13 @@ class LucentDaemon:
                         ):
                             if tool_name not in task_mcp_config["memory-server"]["tools"]:
                                 task_mcp_config["memory-server"]["tools"].append(tool_name)
+                    _expires_at = getattr(
+                        _mint_scoped_api_key, "last_expires_at", None
+                    )
                     log(f"Task {task_id[:8]} using {_scope_type} scoped key"
-                        f" (user: {_scope_user[:8] if _scope_user else 'shared'})")
+                        f" (user: {_scope_user[:8] if _scope_user else 'shared'},"
+                        f" expires_at: "
+                        f"{_expires_at.isoformat() if _expires_at else 'unknown'})")
                 else:
                     # Mint failure is a security-sensitive event — refuse to
                     # dispatch rather than silently fall back to a key with

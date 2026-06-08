@@ -836,6 +836,89 @@ _RUNTIME_SETTING_DEFINITIONS: tuple[RuntimeSettingDefinition, ...] = (
         editable=False,
         read_only_reason="Database passwords are never stored in runtime_settings.",
     ),
+    # ------------------------------------------------------------------ #
+    # Pattern 1 (search_memories tool_error) hardening: MCP request/timeout
+    # tuning and DB pool sizing are exposed as runtime settings so operators
+    # can adjust them without code changes. Read by lucent.llm.mcp_bridge
+    # and lucent.db.pool / lucent.db.memory respectively.
+    # ------------------------------------------------------------------ #
+    RuntimeSettingDefinition(
+        key="mcp.request_timeout_seconds",
+        env_var="LUCENT_MCP_REQUEST_TIMEOUT_SECONDS",
+        value_type="integer",
+        default=120,
+        title="MCP per-request read timeout",
+        section="MCP",
+        description=(
+            "Bounded read_timeout_seconds passed to every MCP tool call. "
+            "Memory read tools (search_memories, get_memory*) retry once on "
+            "timeout before surfacing MCPTimeoutError."
+        ),
+        min_value=5,
+        requires_restart=True,
+    ),
+    RuntimeSettingDefinition(
+        key="mcp.retry_backoff_seconds",
+        env_var="LUCENT_MCP_RETRY_BACKOFF_SECONDS",
+        value_type="float",
+        default=0.5,
+        title="MCP retry backoff",
+        section="MCP",
+        description="Sleep between the first and second attempt for idempotent memory read tools.",
+        min_value=0.0,
+        requires_restart=True,
+    ),
+    RuntimeSettingDefinition(
+        key="database.pool_min_size",
+        env_var="LUCENT_DB_POOL_MIN_SIZE",
+        value_type="integer",
+        default=5,
+        title="DB pool minimum size",
+        section="Database",
+        description="Lower bound on asyncpg pool size (default 5; was 2 prior to Pattern 1 fix).",
+        min_value=1,
+        requires_restart=True,
+    ),
+    RuntimeSettingDefinition(
+        key="database.pool_max_size",
+        env_var="LUCENT_DB_POOL_MAX_SIZE",
+        value_type="integer",
+        default=25,
+        title="DB pool maximum size",
+        section="Database",
+        description="Upper bound on asyncpg pool size (default 25; was 10 prior to Pattern 1 fix).",
+        min_value=1,
+        requires_restart=True,
+    ),
+    RuntimeSettingDefinition(
+        key="database.search_pool_acquire_timeout_seconds",
+        env_var="LUCENT_SEARCH_POOL_ACQUIRE_TIMEOUT",
+        value_type="float",
+        default=5.0,
+        title="Search pool acquire timeout",
+        section="Database",
+        description=(
+            "Bounded ``pool.acquire(timeout=...)`` used by MemoryDB.search/"
+            "search_full. Failures raise PoolAcquireTimeoutError so callers can "
+            "distinguish pool exhaustion from query-execution timeouts."
+        ),
+        min_value=0.5,
+        requires_restart=False,
+    ),
+    RuntimeSettingDefinition(
+        key="database.pg_trgm_similarity_threshold",
+        env_var="LUCENT_PG_TRGM_SIMILARITY_THRESHOLD",
+        value_type="float",
+        default=0.1,
+        title="pg_trgm similarity threshold",
+        section="Database",
+        description=(
+            "set_limit() applied per asyncpg connection. Controls fuzzy "
+            "search recall after the ILIKE fallback was removed."
+        ),
+        min_value=0.0,
+        requires_restart=True,
+    ),
 )
 
 _SETTING_DEFINITIONS_BY_KEY = {d.key: d for d in _RUNTIME_SETTING_DEFINITIONS}

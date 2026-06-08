@@ -18,6 +18,7 @@ from lucent.db import (
     get_pool,
     init_db,
 )
+from lucent.db.memory import PoolAcquireTimeoutError
 from lucent.integrations.github_repo_access_service import GitHubRepoAccessService
 from lucent.logging import get_logger
 from lucent.mode import is_team_mode
@@ -748,6 +749,12 @@ Returns:
 
         except ValueError as e:
             return _error_response(f"Invalid input: {str(e)}")
+        except PoolAcquireTimeoutError as e:
+            # Pattern 1: surface DB-pool exhaustion distinctly so the audit
+            # layer classifies as ``db_pool_acquire_timeout`` instead of a
+            # generic tool_error. The client/agent can retry safely.
+            logger.warning("search_memories: %s", e)
+            return _error_response(f"DBPoolAcquireTimeout: {e}")
         except Exception as e:
             logger.error("search_memories failed", exc_info=e)
             return _error_response(f"Search failed: {str(e)}")
@@ -849,6 +856,9 @@ Returns:
 
         except ValueError as e:
             return _error_response(f"Invalid input: {str(e)}")
+        except PoolAcquireTimeoutError as e:
+            logger.warning("search_memories_full: %s", e)
+            return _error_response(f"DBPoolAcquireTimeout: {e}")
         except Exception as e:
             logger.error("search_memories_full failed", exc_info=e)
             return _error_response(f"Full search failed: {str(e)}")
