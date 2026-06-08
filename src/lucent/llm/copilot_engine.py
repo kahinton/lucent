@@ -646,6 +646,7 @@ class CopilotEngine(LLMEngine):
             )
 
         client = None
+        event_callback_error: Exception | None = None
         try:
             github_token = await self._provider_github_token(audit_context)
             client = self._make_client(github_token)
@@ -674,7 +675,7 @@ class CopilotEngine(LLMEngine):
 
             def _on_sdk_event(event: Any) -> None:
                 """Translate Copilot SDK events to normalized SessionEvents."""
-                nonlocal last_activity
+                nonlocal event_callback_error, last_activity
                 last_activity = time.monotonic()
 
                 etype = event.type.value if hasattr(event.type, "value") else str(event.type)
@@ -791,7 +792,11 @@ class CopilotEngine(LLMEngine):
                     )
 
                 if on_event:
-                    on_event(normalized)
+                    try:
+                        on_event(normalized)
+                    except Exception as exc:
+                        event_callback_error = exc
+                        done.set()
 
             session.on(_on_sdk_event)
             await session.send(prompt)
@@ -821,6 +826,8 @@ class CopilotEngine(LLMEngine):
                     await asyncio.wait_for(done.wait(), timeout=max(wait_time, 0.1))
                 except asyncio.TimeoutError:
                     # Check if we got activity during the wait
+                    if event_callback_error:
+                        break
                     idle_elapsed = time.monotonic() - last_activity
                     if idle_elapsed >= idle_timeout:
                         logger.warning(
@@ -839,11 +846,16 @@ class CopilotEngine(LLMEngine):
             except Exception:
                 logger.debug("Failed to destroy Copilot streaming session", exc_info=True)
 
+            if event_callback_error:
+                raise event_callback_error
+
             return "\n".join(response_parts) if response_parts else None
 
         except Exception as e:
             # Detect model-not-available JSON-RPC errors (-32603) and raise
             # a specific exception instead of silently returning None.
+            if event_callback_error is e:
+                raise
             error_msg = str(e)
             if re.search(r"Model\s+\S+\s+is not available", error_msg) or (
                 "-32603" in error_msg and "not available" in error_msg.lower()

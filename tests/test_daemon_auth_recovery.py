@@ -58,7 +58,7 @@ async def test_run_session_recovers_once_after_auth_failure(monkeypatch):
     call_count = {"n": 0}
     seen_headers: list[str] = []
 
-    async def _inner(_name, _system, _prompt, model=None, mcp_config_override=None):
+    async def _inner(_name, _system, _prompt, model=None, mcp_config_override=None, **_kwargs):
         call_count["n"] += 1
         if mcp_config_override and mcp_config_override.get("memory-server"):
             seen_headers.append(
@@ -107,11 +107,71 @@ async def test_run_session_recovers_once_after_auth_failure(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_run_session_does_not_replace_task_scoped_key_with_daemon_key(monkeypatch):
+    daemon = LucentDaemon()
+    daemon.instance_id = "instance-task-scope"
+    daemon_module.MCP_CONFIG = {
+        "memory-server": {
+            "type": "http",
+            "url": "http://mcp",
+            "headers": {"Authorization": "Bearer daemon-key"},
+            "tools": ["*"],
+        }
+    }
+
+    call_count = {"n": 0}
+    seen_headers: list[str] = []
+
+    async def _inner(_name, _system, _prompt, model=None, mcp_config_override=None, **_kwargs):
+        call_count["n"] += 1
+        seen_headers.append(
+            mcp_config_override["memory-server"]["headers"]["Authorization"]
+        )
+        if call_count["n"] == 1:
+            raise AuthFailureDetectedError("Unauthorized: Invalid or expired credentials")
+        return "ok"
+
+    async def _recover(_instance_id: str, *, force_rotate: bool = False) -> bool:
+        daemon_module.MCP_CONFIG = {
+            "memory-server": {
+                "type": "http",
+                "url": "http://mcp",
+                "headers": {"Authorization": "Bearer new-daemon-key"},
+                "tools": ["*"],
+            }
+        }
+        return True
+
+    monkeypatch.setattr(daemon, "_run_session_inner", _inner)
+    monkeypatch.setattr(daemon_module, "_handle_auth_failure", _recover)
+
+    result = await daemon.run_session(
+        "task-scoped-auth-recovery-test",
+        "system",
+        "prompt",
+        mcp_config_override={
+            "memory-server": {
+                "type": "http",
+                "url": "http://mcp",
+                "headers": {
+                    "Authorization": "Bearer scoped-key",
+                    "X-Lucent-Task-Id": "task-123",
+                },
+                "tools": ["*"],
+            },
+        },
+    )
+
+    assert result == "ok"
+    assert seen_headers == ["Bearer scoped-key", "Bearer scoped-key"]
+
+
+@pytest.mark.asyncio
 async def test_run_session_auth_retry_guard_prevents_infinite_loop(monkeypatch):
     daemon = LucentDaemon()
     daemon.instance_id = "instance-guard"
 
-    async def _inner(_name, _system, _prompt, model=None, mcp_config_override=None):
+    async def _inner(_name, _system, _prompt, model=None, mcp_config_override=None, **_kwargs):
         raise AuthFailureDetectedError("Unauthorized: Invalid or expired credentials")
 
     recover_calls = {"n": 0}

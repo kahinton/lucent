@@ -1,6 +1,7 @@
 """Tests for the LLM engine abstraction layer."""
 
 import os
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -233,6 +234,76 @@ class TestCopilotEngine:
         assert parsed.message == "pong: lucent"
         assert parsed.timestamp == 1780059855613
         assert parsed.protocolVersion == 1
+
+    @pytest.mark.asyncio
+    async def test_streaming_reraises_event_callback_errors(self, monkeypatch):
+        from lucent.llm import copilot_engine
+        from lucent.llm.copilot_engine import CopilotEngine
+
+        class FakeSession:
+            def __init__(self):
+                self._handler = None
+
+            def on(self, handler):
+                self._handler = handler
+
+            async def send(self, _prompt):
+                self._handler(
+                    SimpleNamespace(
+                        type="tool.execution_complete",
+                        data=SimpleNamespace(
+                            tool_call_id="tool-1",
+                            tool_name="memory-server-create_memory",
+                            result=SimpleNamespace(
+                                content="Unauthorized: Invalid or expired credentials"
+                            ),
+                            error=None,
+                        ),
+                    )
+                )
+
+            async def disconnect(self):
+                pass
+
+        class FakeClient:
+            async def start(self):
+                pass
+
+        async def fake_provider_github_token(self, audit_context=None):
+            return None
+
+        async def fake_open_session(
+            self, client, session_kwargs, provider_session_id=None, resume=False
+        ):
+            return FakeSession()
+
+        monkeypatch.setattr(copilot_engine, "_ensure_sdk", lambda: True)
+        monkeypatch.setattr(
+            CopilotEngine,
+            "_provider_github_token",
+            fake_provider_github_token,
+        )
+        monkeypatch.setattr(CopilotEngine, "_make_client", lambda self, github_token=None: FakeClient())
+        monkeypatch.setattr(
+            CopilotEngine,
+            "_open_session",
+            fake_open_session,
+        )
+
+        engine = CopilotEngine()
+
+        def on_event(_event):
+            raise RuntimeError("callback auth failure")
+
+        with pytest.raises(RuntimeError, match="callback auth failure"):
+            await engine.run_session_streaming(
+                model="gpt-5-mini",
+                system_message="system",
+                prompt="prompt",
+                on_event=on_event,
+                timeout=1,
+                idle_timeout=1,
+            )
 
 
 class TestLangChainEngine:

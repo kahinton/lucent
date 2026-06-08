@@ -910,6 +910,18 @@ def _build_auth_config(api_key: str) -> tuple[dict, dict]:
     return mcp_config, api_headers
 
 
+def _is_task_scoped_mcp_config(mcp_config: dict | None) -> bool:
+    """Return True when an MCP config carries per-task scoped auth headers."""
+    if not mcp_config:
+        return False
+    headers = (mcp_config.get("memory-server") or {}).get("headers") or {}
+    return bool(
+        headers.get("X-Lucent-Task-Id")
+        or headers.get("X-Lucent-Agent-Definition-Id")
+        or headers.get("X-Lucent-Request-Id")
+    )
+
+
 # ============================================================================
 # API Key Provisioning
 # ============================================================================
@@ -4412,7 +4424,13 @@ class LucentDaemon:
                     retried_after_auth_failure = True
                     if mcp_config_override:
                         refreshed = dict(mcp_config_override)
-                        if MCP_CONFIG.get("memory-server"):
+                        if _is_task_scoped_mcp_config(mcp_config_override):
+                            log(
+                                f"Session '{name}' kept task-scoped MCP credentials after "
+                                "daemon key recovery",
+                                "WARN",
+                            )
+                        elif MCP_CONFIG.get("memory-server"):
                             refreshed["memory-server"] = MCP_CONFIG["memory-server"]
                         mcp_config_override = refreshed
                     log(f"Session '{name}' recovered MCP credentials; retrying once", "INFO")
