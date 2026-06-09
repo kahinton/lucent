@@ -166,8 +166,8 @@ Requests go through a two-stage gate:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LUCENT_ALLOW_GIT_COMMIT` | `false` | Allow the daemon to create git commits |
-| `LUCENT_ALLOW_GIT_PUSH` | `false` | Allow the daemon to push to remote (requires `LUCENT_ALLOW_GIT_COMMIT=true`) |
+| `LUCENT_ALLOW_GIT_COMMIT` | `true` | Allow the daemon to create git commits when a task requires durable repository changes |
+| `LUCENT_ALLOW_GIT_PUSH` | `true` | Allow the daemon to push to remote when a task explicitly requires remote persistence and the target repo/branch is verified (requires `LUCENT_ALLOW_GIT_COMMIT=true`) |
 
 ## Connections & Feature Flags
 

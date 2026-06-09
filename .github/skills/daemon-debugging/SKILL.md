@@ -191,8 +191,8 @@ find pending tasks → get memory details → atomic claim (tag swap) → run_se
 | `MAX_CONCURRENT_SESSIONS` | 3 | Limits parallel task execution |
 | `REQUIRE_APPROVAL` | false | Tasks need human review if true |
 | `REVIEW_MODELS` | "" | Comma-separated models for multi-model review |
-| `ALLOW_GIT_COMMIT` | false | Blocks commit if false |
-| `ALLOW_GIT_PUSH` | false | Blocks push if false |
+| `ALLOW_GIT_COMMIT` | true | Allows task-required git commits; set false to block commits |
+| `ALLOW_GIT_PUSH` | true | Allows explicit task-required git pushes; set false to block pushes |
 
 ## Example: Good Debugging Session
 

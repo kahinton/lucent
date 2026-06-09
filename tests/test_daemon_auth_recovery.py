@@ -55,6 +55,18 @@ def test_recoverable_mcp_auth_failure_requires_memory_server_tool():
     assert daemon._is_recoverable_mcp_auth_failure("create_memory", payload) is True
 
 
+def test_git_operation_guardrails_allow_task_required_commit_and_push(monkeypatch):
+    monkeypatch.setattr(daemon_module, "ALLOW_GIT_COMMIT", True)
+    monkeypatch.setattr(daemon_module, "ALLOW_GIT_PUSH", True)
+
+    commit_rule, push_rule = daemon_module._git_operation_guardrails()
+
+    assert "Git commit is ALLOWED" in commit_rule
+    assert "task asks for durable repository changes" in commit_rule
+    assert "Git push is ALLOWED" in push_rule
+    assert "task explicitly requires remote repository persistence" in push_rule
+
+
 def test_scoped_mcp_headers_can_defer_authorization_until_jit_mint():
     headers = daemon_module._scoped_mcp_headers(
         memory_scope="user",

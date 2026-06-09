@@ -255,3 +255,170 @@ async def test_definition_proposals_preserve_review_evidence(db_pool, test_user)
         proposal_evidence = json.loads(proposal_evidence)
     assert proposal_evidence["tool_name"] == "run_tests"
     assert proposal_evidence["failure_count"] == 4
+
+
+# -- analyze_failure_patterns evidence capping ------------------------------
+
+def test_cap_analyze_evidence_text_truncates_long_strings():
+    from lucent.db.tool_audit import _cap_analyze_evidence_text
+
+    huge = "x" * 5000
+    out = _cap_analyze_evidence_text(huge)
+    assert isinstance(out, str)
+    # Truncated to ~2 KB + small marker suffix
+    assert len(out) <= 2048 + len("...[truncated]")
+    assert out.endswith("...[truncated]")
+    # Short strings pass through unchanged
+    assert _cap_analyze_evidence_text("ok") == "ok"
+    # Non-strings unchanged
+    assert _cap_analyze_evidence_text(None) is None
+    assert _cap_analyze_evidence_text(42) == 42
+
+
+def test_cap_analyze_evidence_text_strips_nested_analyze_output():
+    from lucent.db.tool_audit import (
+        _ANALYZE_NESTED_MARKER,
+        _cap_analyze_evidence_text,
+    )
+
+    nested = (
+        '{"since_days": 14, "min_failures": 3, '
+        '"total_failed_rows_scanned": 137, "patterns": []}'
+    )
+    assert _cap_analyze_evidence_text(nested) == _ANALYZE_NESTED_MARKER
+    # Sentinel detection takes precedence over length-only truncation
+    nested_long = "x" * 100 + "total_failed_rows_scanned" + "y" * 5000
+    assert _cap_analyze_evidence_text(nested_long) == _ANALYZE_NESTED_MARKER
+
+
+@pytest.mark.asyncio
+async def test_analyze_failure_patterns_caps_samples_and_truncates(
+    db_pool, test_user
+):
+    repo = ToolAuditRepository(db_pool)
+    big_err = "boom " * 600  # >2 KB
+    for idx in range(5):
+        await repo.log_tool_call(
+            tool_name="cap_demo_tool",
+            status="failed",
+            source="test",
+            input_payload={"i": idx},
+            output_payload=big_err,
+            failure_class="tool_error",
+            error_message=big_err,
+            context={
+                "organization_id": str(test_user["organization_id"]),
+                "user_id": str(test_user["id"]),
+                "agent_type": "code",
+                "skill_names": ["dev-workflow"],
+                "model": "gpt-5.1",
+            },
+        )
+
+    result = await repo.analyze_failure_patterns(
+        org_id=test_user["organization_id"],
+        since_days=7,
+        min_failures=3,
+    )
+    pattern = next(
+        p for p in result["patterns"] if p["tool_name"] == "cap_demo_tool"
+    )
+    # Cap (b): only 3 samples retained even though 5 failures recorded
+    assert len(pattern["sample_failures"]) == 3
+    assert pattern["failure_count"] == 5
+    # Cap (a): per-sample error_message / output_preview <= ~2 KB
+    for sample in pattern["sample_failures"]:
+        assert len(sample["error_message"]) <= 2048 + len("...[truncated]")
+        if sample["output_preview"]:
+            assert (
+                len(sample["output_preview"])
+                <= 2048 + len("...[truncated]")
+            )
+
+
+@pytest.mark.asyncio
+async def test_analyze_failure_patterns_strips_nested_analyze_output(
+    db_pool, test_user
+):
+    repo = ToolAuditRepository(db_pool)
+    nested = (
+        '{"since_days": 7, "total_failed_rows_scanned": 42, "patterns": []}'
+    )
+    for idx in range(3):
+        await repo.log_tool_call(
+            tool_name="nested_demo_tool",
+            status="failed",
+            source="test",
+            input_payload={"i": idx},
+            output_payload="nope",
+            failure_class="tool_error",
+            error_message=nested,
+            context={
+                "organization_id": str(test_user["organization_id"]),
+                "user_id": str(test_user["id"]),
+                "agent_type": "reflection",
+                "model": "claude-opus-4.7",
+            },
+        )
+
+    result = await repo.analyze_failure_patterns(
+        org_id=test_user["organization_id"],
+        since_days=7,
+        min_failures=3,
+    )
+    pattern = next(
+        p for p in result["patterns"] if p["tool_name"] == "nested_demo_tool"
+    )
+    for sample in pattern["sample_failures"]:
+        assert sample["error_message"] == (
+            "<prior analyze_tool_failure_patterns output omitted>"
+        )
+
+
+@pytest.mark.asyncio
+async def test_analyze_failure_patterns_summary_only_omits_evidence(
+    db_pool, test_user
+):
+    repo = ToolAuditRepository(db_pool)
+    for idx in range(3):
+        await repo.log_tool_call(
+            tool_name="summary_demo_tool",
+            status="failed",
+            source="test",
+            input_payload={"i": idx},
+            output_payload="err",
+            failure_class="tool_error",
+            error_message="err",
+            context={
+                "organization_id": str(test_user["organization_id"]),
+                "user_id": str(test_user["id"]),
+                "agent_type": "code",
+                "model": "gpt-5.1",
+            },
+        )
+
+    result = await repo.analyze_failure_patterns(
+        org_id=test_user["organization_id"],
+        since_days=7,
+        min_failures=3,
+        summary_only=True,
+    )
+    assert result.get("summary_only") is True
+    pattern = next(
+        p for p in result["patterns"] if p["tool_name"] == "summary_demo_tool"
+    )
+    # Summary keeps counts + identity, drops per-failure evidence and
+    # supporting evidence blobs.
+    assert pattern["failure_count"] == 3
+    assert "pattern_key" in pattern
+    for evidence_field in (
+        "sample_failures",
+        "proposal_evidence",
+        "sample_request_ids",
+        "sample_task_ids",
+        "affected_models",
+        "recommended_action",
+    ):
+        assert evidence_field not in pattern, (
+            f"summary_only must omit {evidence_field}"
+        )

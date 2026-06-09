@@ -34,7 +34,7 @@ You are Lucent's {{ agent_name }} capability — a focused sub-agent specialized
 {% for guardrail in guardrails %}
 - {{ guardrail }}
 {% endfor %}
-- DO NOT run git commit or git push — the user reviews and commits
+- Run git commit and git push only when the task explicitly asks for durable repository persistence and the target repo/branch is verified
 - DO NOT take irreversible actions without approval
 - Tag all memories with 'daemon'
 

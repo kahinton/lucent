@@ -41,6 +41,29 @@ _MAX_JSON_TEXT = 1000
 _MAX_LIST_ITEMS = 20
 _MAX_DICT_ITEMS = 40
 
+# Cap each sample evidence field at ~2 KB when surfaced in
+# ``analyze_failure_patterns`` results to avoid runaway payloads. Also strip
+# nested ``analyze_tool_failure_patterns`` dumps that get embedded in
+# error_message fields via prior failures (recursive amplification).
+_ANALYZE_EVIDENCE_TEXT_LIMIT = 2048
+_ANALYZE_NESTED_MARKER = "<prior analyze_tool_failure_patterns output omitted>"
+_ANALYZE_NESTED_SENTINEL = "total_failed_rows_scanned"
+_ANALYZE_MAX_SAMPLES = 3
+
+
+def _cap_analyze_evidence_text(value: Any) -> Any:
+    """Truncate a single evidence string and strip nested analyze output.
+
+    Returns ``value`` unchanged for non-string inputs (including ``None``).
+    """
+    if not isinstance(value, str):
+        return value
+    if _ANALYZE_NESTED_SENTINEL in value:
+        return _ANALYZE_NESTED_MARKER
+    if len(value) > _ANALYZE_EVIDENCE_TEXT_LIMIT:
+        return value[:_ANALYZE_EVIDENCE_TEXT_LIMIT] + "...[truncated]"
+    return value
+
 
 def _uuid_or_none(value: Any) -> UUID | None:
     if value in (None, ""):
@@ -263,6 +286,7 @@ class ToolAuditRepository:
         since_days: int = 7,
         min_failures: int = 3,
         limit: int = 20,
+        summary_only: bool = False,
     ) -> dict[str, Any]:
         """Aggregate repeated tool failures into improvement candidates."""
         since_days = max(1, min(int(since_days or 7), 90))
@@ -312,15 +336,15 @@ class ToolAuditRepository:
                     "id": str(i["id"]),
                     "created_at": i["created_at"].isoformat(),
                     "status": i.get("status"),
-                    "error_message": i.get("error_message"),
-                    "input_preview": i.get("input_preview"),
-                    "output_preview": i.get("output_preview"),
+                    "error_message": _cap_analyze_evidence_text(i.get("error_message")),
+                    "input_preview": _cap_analyze_evidence_text(i.get("input_preview")),
+                    "output_preview": _cap_analyze_evidence_text(i.get("output_preview")),
                     "model": i.get("model"),
                     "agent_type": i.get("agent_type"),
                     "request_id": str(i["request_id"]) if i.get("request_id") else None,
                     "task_id": str(i["task_id"]) if i.get("task_id") else None,
                 }
-                for i in items[:3]
+                for i in items[:_ANALYZE_MAX_SAMPLES]
             ]
             recommended_action = _recommended_action_for_pattern(
                 dimension=dimension,
@@ -364,11 +388,33 @@ class ToolAuditRepository:
             key=lambda p: (p["failure_count"], len(p["sample_task_ids"])),
             reverse=True,
         )
+        capped = patterns[:limit]
+        if summary_only:
+            summarized = [
+                {
+                    "pattern_key": p["pattern_key"],
+                    "dimension": p["dimension"],
+                    "target": p["target"],
+                    "tool_name": p["tool_name"],
+                    "failure_class": p["failure_class"],
+                    "failure_count": p["failure_count"],
+                    "first_seen_at": p["first_seen_at"],
+                    "last_seen_at": p["last_seen_at"],
+                }
+                for p in capped
+            ]
+            return {
+                "since_days": since_days,
+                "min_failures": min_failures,
+                "total_failed_rows_scanned": len(rows),
+                "summary_only": True,
+                "patterns": summarized,
+            }
         return {
             "since_days": since_days,
             "min_failures": min_failures,
             "total_failed_rows_scanned": len(rows),
-            "patterns": patterns[:limit],
+            "patterns": capped,
         }
 
 

@@ -56,6 +56,9 @@ Args:
     since_days: Lookback window in days (default 7, max 90)
     min_failures: Minimum repeated failures before reporting a pattern (default 3)
     limit: Max patterns to return (default 20)
+    summary_only: When True, return counts + pattern keys only (no per-failure
+        evidence). Use this when the caller only needs the pattern list — e.g.
+        to keep the response well under tool-call ingestion limits.
 
 Returns: JSON containing repeated failure patterns, evidence, and recommended actions."""
     )
@@ -63,6 +66,7 @@ Returns: JSON containing repeated failure patterns, evidence, and recommended ac
         since_days: int = 7,
         min_failures: int = 3,
         limit: int = 20,
+        summary_only: bool = False,
     ) -> str:
         _user_id, org_id, _role, _memory_scope, _ = await _get_current_user_context()
         if not org_id:
@@ -74,6 +78,7 @@ Returns: JSON containing repeated failure patterns, evidence, and recommended ac
             since_days=since_days,
             min_failures=min_failures,
             limit=limit,
+            summary_only=summary_only,
         )
         result["note"] = (
             "Use propose_definition_improvement for patterns with enough evidence. "

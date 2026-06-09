@@ -66,7 +66,7 @@ You are working in a {{ language }} codebase{% if framework %} using {{ framewor
 {% for guardrail in guardrails %}
 - {{ guardrail }}
 {% endfor %}
-- DO NOT run git commit or git push — the user reviews and commits
+- Run git commit and git push only when the task explicitly asks for durable repository persistence and the target repo/branch is verified
 - DO NOT make speculative changes — be sure before you edit
 - DO run tests before and after changes
 - Tag all output with 'daemon' and '{{ primary_tag }}'

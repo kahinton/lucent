@@ -682,6 +682,23 @@ def _truncate_for_context(text: str, limit: int, *, label: str = "content") -> s
 ALLOW_GIT_COMMIT = runtime_settings.daemon_git_commit_allowed()
 ALLOW_GIT_PUSH = runtime_settings.daemon_git_push_allowed()
 
+
+def _git_operation_guardrails() -> list[str]:
+    """Return daemon prompt guardrails for git commit/push behavior."""
+    commit_rule = (
+        "Git commit is ALLOWED — commit meaningful changes with clear messages "
+        "when the task asks for durable repository changes"
+        if ALLOW_GIT_COMMIT
+        else "DO NOT run git commit"
+    )
+    push_rule = (
+        "Git push is ALLOWED only when the task explicitly requires remote "
+        "repository persistence and the target repo, remote, and branch are verified"
+        if ALLOW_GIT_PUSH
+        else "DO NOT run git push"
+    )
+    return [commit_rule, push_rule]
+
 # Paths
 DAEMON_DIR = Path(__file__).parent
 COGNITIVE_PROMPT_PATH = DAEMON_DIR / "cognitive.md"
@@ -2806,13 +2823,9 @@ Use `record_task_output` instead for durable artifacts that belong on the
 Activity request page, such as PRs, files, documents, deployments, or links.
 
 --- GUARDRAILS ---
-- {
-        "Git commit is ALLOWED — commit meaningful changes with clear messages"
-        if ALLOW_GIT_COMMIT
-        else "DO NOT run git commit"
-    }
-- {"Git push is ALLOWED only when this task explicitly requires remote repository persistence and the target repo/branch is verified" if ALLOW_GIT_PUSH else "DO NOT run git push"}
-- DO NOT take irreversible actions without approval
+- {_git_operation_guardrails()[0]}
+- {_git_operation_guardrails()[1]}
+- DO NOT take irreversible actions unless the task explicitly requires them or the user has approved them
 - Tag all memories with 'daemon' so activity is visible
 - When creating memories that need human review or approval, also tag with 'needs-review'
   (NOT 'awaiting-approval' or other variants — 'needs-review' is the canonical tag)

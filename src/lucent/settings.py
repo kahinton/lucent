@@ -362,13 +362,13 @@ _RUNTIME_SETTING_DEFINITIONS: tuple[RuntimeSettingDefinition, ...] = (
         key="daemon.allow_git_commit",
         env_var="LUCENT_ALLOW_GIT_COMMIT",
         value_type="boolean",
-        default=False,
+        default=True,
         title="Allow daemon git commits",
         section="Daemon",
         description="Let daemon task sessions create local git commits when a task requires it.",
         help_text=(
-            "Keep off unless autonomous tasks are allowed to make durable "
-            "repository commits."
+            "Disable only when autonomous tasks must leave all repository changes "
+            "uncommitted for an operator to handle manually."
         ),
         requires_restart=True,
     ),
@@ -376,13 +376,14 @@ _RUNTIME_SETTING_DEFINITIONS: tuple[RuntimeSettingDefinition, ...] = (
         key="daemon.allow_git_push",
         env_var="LUCENT_ALLOW_GIT_PUSH",
         value_type="boolean",
-        default=False,
+        default=True,
         title="Allow daemon git pushes",
         section="Daemon",
         description="Let daemon task sessions push committed changes to a remote repository.",
         help_text=(
-            "Requires daemon git commits to be enabled too. Leave off unless tasks may publish "
-            "changes to remotes without additional operator action."
+            "Only applies when daemon git commits are enabled. Agents are still instructed "
+            "to push only when the task explicitly requires remote persistence and the "
+            "target repo/branch has been verified."
         ),
         requires_restart=True,
     ),

@@ -438,3 +438,15 @@ def test_runtime_daemon_git_flags_registered(monkeypatch):
         ) is not None
     finally:
         runtime_settings.clear_runtime_setting_cache()
+
+
+def test_runtime_daemon_git_flags_default_to_allowed(monkeypatch):
+    runtime_settings.clear_runtime_setting_cache()
+    monkeypatch.delenv("LUCENT_ALLOW_GIT_COMMIT", raising=False)
+    monkeypatch.delenv("LUCENT_ALLOW_GIT_PUSH", raising=False)
+
+    try:
+        assert runtime_settings.daemon_git_commit_allowed() is True
+        assert runtime_settings.daemon_git_push_allowed() is True
+    finally:
+        runtime_settings.clear_runtime_setting_cache()
