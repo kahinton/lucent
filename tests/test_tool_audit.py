@@ -171,6 +171,16 @@ def test_classify_tool_result_bash_exit_zero_is_not_auth_error():
     assert (s, fc) == ("failed", "auth_error")
 
 
+def test_classify_tool_result_bash_error_text_without_exit_code_is_not_auth_error():
+    output = "Error: Unauthorized: Invalid or expired credentials"
+
+    s, fc, _ = classify_tool_result(output, tool_name="bash")
+    assert (s, fc) == ("success", None)
+
+    s, fc, _ = classify_tool_result(output, tool_name="bash", runner_status="failed")
+    assert (s, fc) == ("failed", "auth_error")
+
+
 def test_classify_tool_result_bash_rate_limited_only_on_failure():
     """Pattern 2: 429 substrings in bash stdout are also gated on exit code."""
     output = "Rate limit hit: HTTP 429 Too Many Requests"

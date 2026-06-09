@@ -64,10 +64,9 @@ def test_scoped_key_ttl_handles_garbage_session_timeout(monkeypatch):
 
 def test_no_hardcoded_short_ttls_remain_at_call_sites():
     """Guardrail: lock in the textual removal of ``ttl_minutes=60`` and
-    ``ttl_minutes=30`` literals at the three dispatch/planning/decomposition
-    call sites. The mint function itself still accepts an explicit override
-    so tests can pin TTL — that's expected; this guard targets the daemon
-    *call sites* only."""
+    ``ttl_minutes=30`` literals. The mint function itself still accepts an
+    explicit override so tests can pin TTL — that's expected; this guard
+    targets production call sites only."""
     source = (
         daemon_module.__file__
         and open(daemon_module.__file__, encoding="utf-8").read()
@@ -78,9 +77,10 @@ def test_no_hardcoded_short_ttls_remain_at_call_sites():
     # means a regression has slipped in.
     assert "                    ttl_minutes=60,\n" not in source
     assert "                        ttl_minutes=30,\n" not in source
-    # And the computed helper must be wired in at least three places
-    # (main dispatch, planning, decomposition).
-    assert source.count("ttl_minutes=_scoped_key_ttl_minutes()") >= 3
+    # JIT task-scoped minting goes through the shared refresh helper instead
+    # of minting separately in dispatch/decomposition. Keep the computed TTL
+    # wired in there so all task-scoped keys inherit the headroom math.
+    assert "ttl_minutes=_scoped_key_ttl_minutes()" in source
 
 
 def test_scoped_key_ttl_math_uses_ceiling(monkeypatch):

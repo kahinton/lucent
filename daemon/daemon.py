@@ -922,6 +922,100 @@ def _is_task_scoped_mcp_config(mcp_config: dict | None) -> bool:
     )
 
 
+def _scoped_mcp_headers(
+    *,
+    api_key: str | None = None,
+    memory_scope: str,
+    memory_scope_user_id: str | None,
+    org_id: str,
+    agent_definition_id: str | None = None,
+    task_id: str | None = None,
+    request_id: str | None = None,
+) -> dict[str, str]:
+    """Build MCP headers carrying enough scope metadata for scoped-key refresh."""
+    headers = {
+        "X-Lucent-Memory-Scope": memory_scope,
+        "X-Lucent-Org-Id": org_id,
+    }
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    if memory_scope_user_id:
+        headers["X-Lucent-Memory-Scope-User-Id"] = memory_scope_user_id
+    if agent_definition_id:
+        headers["X-Lucent-Agent-Definition-Id"] = agent_definition_id
+    if task_id:
+        headers["X-Lucent-Task-Id"] = task_id
+    if request_id:
+        headers["X-Lucent-Request-Id"] = request_id
+    return headers
+
+
+def _task_scoped_refresh_params(
+    mcp_config: dict | None,
+) -> tuple[str, str | None, str] | None:
+    """Extract scoped-key refresh parameters from a task MCP config."""
+    if not _is_task_scoped_mcp_config(mcp_config):
+        return None
+    memory_server = (mcp_config or {}).get("memory-server") or {}
+    headers = memory_server.get("headers") or {}
+    memory_scope = str(headers.get("X-Lucent-Memory-Scope") or "").strip()
+    org_id = str(headers.get("X-Lucent-Org-Id") or "").strip()
+    memory_scope_user_id = str(
+        headers.get("X-Lucent-Memory-Scope-User-Id") or ""
+    ).strip() or None
+
+    if memory_scope not in {"user", "org_shared_only"} or not org_id:
+        return None
+    if memory_scope == "user" and not memory_scope_user_id:
+        return None
+    if memory_scope == "org_shared_only":
+        memory_scope_user_id = None
+    return memory_scope, memory_scope_user_id, org_id
+
+
+async def _refresh_task_scoped_mcp_config(mcp_config: dict | None) -> dict | None:
+    """Mint a fresh scoped memory-server key and return an updated MCP config."""
+    params = _task_scoped_refresh_params(mcp_config)
+    if params is None:
+        return None
+    memory_scope, memory_scope_user_id, org_id = params
+    scoped_key = await _mint_scoped_api_key(
+        memory_scope=memory_scope,
+        memory_scope_user_id=memory_scope_user_id,
+        org_id=org_id,
+        ttl_minutes=_scoped_key_ttl_minutes(),
+    )
+    if not scoped_key:
+        return None
+
+    refreshed = dict(mcp_config or {})
+    memory_server = dict(refreshed.get("memory-server") or {})
+    headers = dict(memory_server.get("headers") or {})
+    headers["Authorization"] = f"Bearer {scoped_key}"
+    memory_server["headers"] = headers
+    refreshed["memory-server"] = memory_server
+    return refreshed
+
+
+def _task_scoped_mcp_config_has_credentials(mcp_config: dict | None) -> bool:
+    """Return True when a task-scoped MCP config already has a bearer token."""
+    if not _is_task_scoped_mcp_config(mcp_config):
+        return False
+    headers = ((mcp_config or {}).get("memory-server") or {}).get("headers") or {}
+    return bool(str(headers.get("Authorization") or "").strip())
+
+
+async def _ensure_task_scoped_mcp_config_credentials(
+    mcp_config: dict | None,
+) -> dict | None:
+    """Mint task-scoped MCP credentials only when a session is about to need them."""
+    if not _is_task_scoped_mcp_config(mcp_config):
+        return mcp_config
+    if _task_scoped_mcp_config_has_credentials(mcp_config):
+        return mcp_config
+    return await _refresh_task_scoped_mcp_config(mcp_config)
+
+
 # ============================================================================
 # API Key Provisioning
 # ============================================================================
@@ -4101,20 +4195,16 @@ class LucentDaemon:
                         )
                         continue
 
-                    scoped_key = await _mint_scoped_api_key(
-                        memory_scope="user",
-                        memory_scope_user_id=owner_user_id,
-                        org_id=org_id,
-                        ttl_minutes=_scoped_key_ttl_minutes(),
-                    )
-                    if not scoped_key:
-                        raise RuntimeError("scoped key minting failed")
-
                     scoped_mcp = dict(MCP_CONFIG)
                     scoped_mcp["memory-server"] = {
                         "type": "http",
                         "url": MCP_URL,
-                        "headers": {"Authorization": f"Bearer {scoped_key}"},
+                        "headers": _scoped_mcp_headers(
+                            memory_scope="user",
+                            memory_scope_user_id=owner_user_id,
+                            org_id=org_id,
+                            request_id=request_id,
+                        ),
                         "tools": ["*"],
                     }
 
@@ -4386,6 +4476,23 @@ class LucentDaemon:
                         inner_kwargs["audit_context"] = audit_context
                     if reasoning_effort:
                         inner_kwargs["reasoning_effort"] = reasoning_effort
+                    if _is_task_scoped_mcp_config(mcp_config_override):
+                        mcp_config_override = await _ensure_task_scoped_mcp_config_credentials(
+                            mcp_config_override
+                        )
+                        if not mcp_config_override:
+                            status = "error"
+                            log(
+                                f"Session '{name}' could not mint task-scoped MCP credentials",
+                                "ERROR",
+                            )
+                            if span:
+                                span.set_attribute(
+                                    "daemon.session.error",
+                                    "task_scoped_auth_mint_failed",
+                                )
+                            return None
+                        inner_kwargs["mcp_config_override"] = mcp_config_override
                     result = await asyncio.wait_for(
                         self._run_session_inner(
                             name,
@@ -4408,6 +4515,36 @@ class LucentDaemon:
                         if span:
                             span.set_attribute("daemon.session.error", "auth_recovery_failed")
                         return None
+
+                    if _is_task_scoped_mcp_config(mcp_config_override):
+                        log(
+                            f"Session '{name}' detected task-scoped MCP auth failure; "
+                            "re-minting scoped credentials and retrying once",
+                            "WARN",
+                        )
+                        refreshed = await _refresh_task_scoped_mcp_config(
+                            mcp_config_override
+                        )
+                        if not refreshed:
+                            status = "error"
+                            log(
+                                f"Session '{name}' could not re-mint task-scoped MCP credentials",
+                                "ERROR",
+                            )
+                            if span:
+                                span.set_attribute(
+                                    "daemon.session.error",
+                                    "task_scoped_auth_recovery_failed",
+                                )
+                            return None
+
+                        retried_after_auth_failure = True
+                        mcp_config_override = refreshed
+                        log(
+                            f"Session '{name}' refreshed task-scoped MCP credentials; retrying once",
+                            "INFO",
+                        )
+                        continue
 
                     log(
                         f"Session '{name}' detected MCP auth failure; attempting key recovery and single retry",
@@ -4526,6 +4663,15 @@ class LucentDaemon:
             or "http 401" in text
         )
 
+    @classmethod
+    def _is_recoverable_mcp_auth_failure(
+        cls,
+        tool_name: str | None,
+        message: str | None,
+    ) -> bool:
+        """Return True when daemon credential recovery can plausibly fix the failure."""
+        return _is_memory_server_tool(tool_name) and cls._is_mcp_auth_failure_message(message)
+
     async def _run_via_engine(
         self,
         name: str,
@@ -4561,7 +4707,8 @@ class LucentDaemon:
                     from lucent.db.tool_audit import ToolAuditRepository, classify_tool_result
 
                     status, failure_class, error_message = classify_tool_result(
-                        event.tool_output
+                        event.tool_output,
+                        tool_name=event.tool_name,
                     )
                     pool = await init_db()
                     repo = ToolAuditRepository(pool)
@@ -4622,7 +4769,10 @@ class LucentDaemon:
                         "STREAM",
                     )
                     audit_tasks.append(asyncio.create_task(audit_stream_tool_result(event)))
-                    if self._is_mcp_auth_failure_message(event.tool_output):
+                    if self._is_recoverable_mcp_auth_failure(
+                        event.tool_name,
+                        event.tool_output,
+                    ):
                         raise AuthFailureDetectedError(
                             f"MCP auth failure on tool '{event.tool_name}' in session '{name}'"
                         )
@@ -4733,21 +4883,24 @@ class LucentDaemon:
                         done.set()
                     else:
                         detail = ""
+                        tool_name = None
                         if hasattr(event.data, "tool_name"):
-                            detail = f" tool={event.data.tool_name}"
+                            tool_name = event.data.tool_name
+                            detail = f" tool={tool_name}"
                         elif hasattr(event.data, "name"):
-                            detail = f" name={event.data.name}"
+                            tool_name = event.data.name
+                            detail = f" name={tool_name}"
                         if hasattr(event.data, "output"):
                             output = str(event.data.output)[:300]
                             detail += f" output={output}"
-                            if self._is_mcp_auth_failure_message(output):
+                            if self._is_recoverable_mcp_auth_failure(tool_name, output):
                                 raise AuthFailureDetectedError(
                                     f"MCP auth failure in tool output for session '{name}'"
                                 )
                         elif hasattr(event.data, "result"):
                             result_str = str(event.data.result)[:300]
                             detail += f" result={result_str}"
-                            if self._is_mcp_auth_failure_message(result_str):
+                            if self._is_recoverable_mcp_auth_failure(tool_name, result_str):
                                 raise AuthFailureDetectedError(
                                     f"MCP auth failure in tool result for session '{name}'"
                                 )
@@ -5422,54 +5575,32 @@ class LucentDaemon:
                 _scope_user = requesting_user_id
 
             if MCP_CONFIG.get("memory-server"):
-                _scoped_key = await _mint_scoped_api_key(
-                    memory_scope=_scope_type,
-                    memory_scope_user_id=_scope_user,
-                    org_id=org_id,
-                    ttl_minutes=_scoped_key_ttl_minutes(),
-                )
-                if _scoped_key:
-                    task_mcp_config["memory-server"] = {
-                        "type": "http",
-                        "url": MCP_URL,
-                        "headers": {
-                            "Authorization": f"Bearer {_scoped_key}",
-                            "X-Lucent-Agent-Definition-Id": str(agent_data["id"]),
-                            "X-Lucent-Task-Id": str(task_id),
-                            "X-Lucent-Request-Id": str(request_id) if request_id else "",
-                        },
-                        "tools": _memory_server_tools_for_task(
-                            agent_type,
-                            title,
-                            _request_title,
-                            description,
-                        ),
-                    }
-                    if managed_tools:
-                        for tool_name in (
-                            "list_tool_definitions", "get_tool_definition", "run_managed_tool",
-                        ):
-                            if tool_name not in task_mcp_config["memory-server"]["tools"]:
-                                task_mcp_config["memory-server"]["tools"].append(tool_name)
-                    _expires_at = getattr(
-                        _mint_scoped_api_key, "last_expires_at", None
-                    )
-                    log(f"Task {task_id[:8]} using {_scope_type} scoped key"
-                        f" (user: {_scope_user[:8] if _scope_user else 'shared'},"
-                        f" expires_at: "
-                        f"{_expires_at.isoformat() if _expires_at else 'unknown'})")
-                else:
-                    # Mint failure is a security-sensitive event — refuse to
-                    # dispatch rather than silently fall back to a key with
-                    # broader access than the user is entitled to.
-                    reason = (
-                        f"Failed to mint {_scope_type} scoped key for "
-                        f"requesting user {requesting_user_id[:8]}"
-                    )
-                    log(reason, "ERROR")
-                    await _fail_owned(task_id, reason)
-                    await RequestAPI.add_event(task_id, "dispatch_denied", reason)
-                    continue
+                task_mcp_config["memory-server"] = {
+                    "type": "http",
+                    "url": MCP_URL,
+                    "headers": _scoped_mcp_headers(
+                        memory_scope=_scope_type,
+                        memory_scope_user_id=_scope_user,
+                        org_id=org_id,
+                        agent_definition_id=str(agent_data["id"]),
+                        task_id=str(task_id),
+                        request_id=str(request_id) if request_id else None,
+                    ),
+                    "tools": _memory_server_tools_for_task(
+                        agent_type,
+                        title,
+                        _request_title,
+                        description,
+                    ),
+                }
+                if managed_tools:
+                    for tool_name in (
+                        "list_tool_definitions", "get_tool_definition", "run_managed_tool",
+                    ):
+                        if tool_name not in task_mcp_config["memory-server"]["tools"]:
+                            task_mcp_config["memory-server"]["tools"].append(tool_name)
+                log(f"Task {task_id[:8]} using JIT {_scope_type} scoped key"
+                    f" (user: {_scope_user[:8] if _scope_user else 'shared'})")
 
             # Mark running only after requester-scoped resources resolve successfully
             await _start_owned(task_id)

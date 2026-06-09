@@ -400,6 +400,19 @@ def classify_tool_result(
     is_shell_tool = (tool_name or "").lower() in {"bash", "shell", "sh", "powershell"}
     shell_failed = exit_code not in (None, 0) or (runner_status or "").lower() == "failed"
     if lower.startswith("error calling tool") or lower.startswith("error:"):
+        if is_shell_tool and not shell_failed and (
+            "status_code=429" in lower
+            or "http 429" in lower
+            or "too many requests" in lower
+            or "status_code=403" in lower
+            or "http 403" in lower
+            or "forbidden" in lower
+            or "unauthorized" in lower
+            or "status_code=401" in lower
+            or "http 401" in lower
+            or "invalid or expired credentials" in lower
+        ):
+            return "success", None, None
         # Pattern 1: typed timeout / pool / validation errors.
         if "mcptimeouterror" in lower or "timed out after" in lower:
             return "failed", "mcp_timeout", text[:_MAX_TEXT]

@@ -42,6 +42,33 @@ def test_detects_mcp_auth_failure_from_tool_error_response():
     assert daemon._is_mcp_auth_failure_message("tool failed with timeout") is False
 
 
+def test_recoverable_mcp_auth_failure_requires_memory_server_tool():
+    daemon = LucentDaemon()
+    payload = "Error: Unauthorized: Invalid or expired credentials"
+
+    assert daemon._is_recoverable_mcp_auth_failure("bash", payload) is False
+    assert daemon._is_recoverable_mcp_auth_failure("view", payload) is False
+    assert daemon._is_recoverable_mcp_auth_failure(
+        "memory-server-create_memory",
+        payload,
+    ) is True
+    assert daemon._is_recoverable_mcp_auth_failure("create_memory", payload) is True
+
+
+def test_scoped_mcp_headers_can_defer_authorization_until_jit_mint():
+    headers = daemon_module._scoped_mcp_headers(
+        memory_scope="user",
+        memory_scope_user_id="user-123",
+        org_id="org-123",
+        task_id="task-123",
+    )
+
+    assert "Authorization" not in headers
+    assert headers["X-Lucent-Memory-Scope"] == "user"
+    assert headers["X-Lucent-Memory-Scope-User-Id"] == "user-123"
+    assert headers["X-Lucent-Org-Id"] == "org-123"
+
+
 @pytest.mark.asyncio
 async def test_run_session_recovers_once_after_auth_failure(monkeypatch):
     daemon = LucentDaemon()
@@ -107,7 +134,7 @@ async def test_run_session_recovers_once_after_auth_failure(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_run_session_does_not_replace_task_scoped_key_with_daemon_key(monkeypatch):
+async def test_run_session_remints_task_scoped_key_without_daemon_fallback(monkeypatch):
     daemon = LucentDaemon()
     daemon.instance_id = "instance-task-scope"
     daemon_module.MCP_CONFIG = {
@@ -121,6 +148,8 @@ async def test_run_session_does_not_replace_task_scoped_key_with_daemon_key(monk
 
     call_count = {"n": 0}
     seen_headers: list[str] = []
+    daemon_recovery_calls = {"n": 0}
+    minted: list[tuple[str, str | None, str, int | None]] = []
 
     async def _inner(_name, _system, _prompt, model=None, mcp_config_override=None, **_kwargs):
         call_count["n"] += 1
@@ -132,18 +161,18 @@ async def test_run_session_does_not_replace_task_scoped_key_with_daemon_key(monk
         return "ok"
 
     async def _recover(_instance_id: str, *, force_rotate: bool = False) -> bool:
-        daemon_module.MCP_CONFIG = {
-            "memory-server": {
-                "type": "http",
-                "url": "http://mcp",
-                "headers": {"Authorization": "Bearer new-daemon-key"},
-                "tools": ["*"],
-            }
-        }
+        daemon_recovery_calls["n"] += 1
         return True
+
+    async def _mint_scoped_api_key(
+        *, memory_scope, memory_scope_user_id=None, org_id, ttl_minutes=None
+    ):
+        minted.append((memory_scope, memory_scope_user_id, org_id, ttl_minutes))
+        return "hs_refreshed-scoped-key"
 
     monkeypatch.setattr(daemon, "_run_session_inner", _inner)
     monkeypatch.setattr(daemon_module, "_handle_auth_failure", _recover)
+    monkeypatch.setattr(daemon_module, "_mint_scoped_api_key", _mint_scoped_api_key)
 
     result = await daemon.run_session(
         "task-scoped-auth-recovery-test",
@@ -156,6 +185,9 @@ async def test_run_session_does_not_replace_task_scoped_key_with_daemon_key(monk
                 "headers": {
                     "Authorization": "Bearer scoped-key",
                     "X-Lucent-Task-Id": "task-123",
+                    "X-Lucent-Memory-Scope": "user",
+                    "X-Lucent-Memory-Scope-User-Id": "user-123",
+                    "X-Lucent-Org-Id": "org-123",
                 },
                 "tools": ["*"],
             },
@@ -163,7 +195,54 @@ async def test_run_session_does_not_replace_task_scoped_key_with_daemon_key(monk
     )
 
     assert result == "ok"
-    assert seen_headers == ["Bearer scoped-key", "Bearer scoped-key"]
+    assert seen_headers == ["Bearer scoped-key", "Bearer hs_refreshed-scoped-key"]
+    assert daemon_recovery_calls["n"] == 0
+    assert minted == [("user", "user-123", "org-123", daemon_module._scoped_key_ttl_minutes())]
+
+
+@pytest.mark.asyncio
+async def test_run_session_mints_task_scoped_key_just_in_time(monkeypatch):
+    daemon = LucentDaemon()
+    daemon.instance_id = "instance-jit"
+
+    seen_headers: list[dict] = []
+    minted: list[tuple[str, str | None, str, int | None]] = []
+
+    async def _inner(_name, _system, _prompt, model=None, mcp_config_override=None, **_kwargs):
+        seen_headers.append(dict(mcp_config_override["memory-server"]["headers"]))
+        return "ok"
+
+    async def _mint_scoped_api_key(
+        *, memory_scope, memory_scope_user_id=None, org_id, ttl_minutes=None
+    ):
+        minted.append((memory_scope, memory_scope_user_id, org_id, ttl_minutes))
+        return "hs_jit-scoped-key"
+
+    monkeypatch.setattr(daemon, "_run_session_inner", _inner)
+    monkeypatch.setattr(daemon_module, "_mint_scoped_api_key", _mint_scoped_api_key)
+
+    result = await daemon.run_session(
+        "task-scoped-jit-test",
+        "system",
+        "prompt",
+        mcp_config_override={
+            "memory-server": {
+                "type": "http",
+                "url": "http://mcp",
+                "headers": {
+                    "X-Lucent-Task-Id": "task-123",
+                    "X-Lucent-Memory-Scope": "user",
+                    "X-Lucent-Memory-Scope-User-Id": "user-123",
+                    "X-Lucent-Org-Id": "org-123",
+                },
+                "tools": ["*"],
+            },
+        },
+    )
+
+    assert result == "ok"
+    assert seen_headers[0]["Authorization"] == "Bearer hs_jit-scoped-key"
+    assert minted == [("user", "user-123", "org-123", daemon_module._scoped_key_ttl_minutes())]
 
 
 @pytest.mark.asyncio
