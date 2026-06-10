@@ -46,6 +46,17 @@ search_memories(query="<specific area to analyze>", limit=20)
 log_task_event(task_id, "progress", "Gathered N task results, M feedback items, K prior reflections. Analyzing...")
 ```
 
+### 1.5. Check Existing Work Before Proposing Follow-up
+
+Before creating any request, proposal, or work recommendation from the evidence, check whether the same issue is already being handled or has just been resolved:
+
+```
+list_active_work()
+search_memories(query="<issue keywords>", tags=["feedback-rejected", "rejection-lesson", "validated"], limit=10)
+```
+
+Compare against active, pending approval, rejected/rejection-processing, and recently completed requests. If an existing request covers the same failure pattern, do not create a parallel request; cite the existing request and, if needed, recommend updating or retrying it. If rejection feedback says the issue was fixed or is obsolete, treat the pattern as closed unless fresh post-fix evidence shows a distinct remaining failure.
+
 ### 2. Identify Patterns
 
 Follow the **self-improvement** skill's Step 2 (Identify the Pattern):

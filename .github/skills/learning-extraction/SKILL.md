@@ -47,6 +47,17 @@ Cap at 10 per run. Skip runtime heartbeat or telemetry records if legacy records
 | **Discovery** | New information about the domain or tools | Find the related memory and add the new knowledge |
 | **Routine** | Normal completion, nothing notable | Mark as extracted, move on |
 
+## Step 2.1: Duplicate Work Gate for Follow-up Requests
+
+If extraction or reflection identifies a failure pattern that might need a new request, do not create or recommend that request until you have checked for overlapping work:
+
+```
+list_active_work()
+search_memories(query="<failure pattern keywords>", tags=["feedback-rejected", "rejection-lesson", "validated"], limit=10)
+```
+
+Treat active, pending-approval, rejection-processing, and recently completed requests as candidates for deduplication. If a similar request already exists, reference it instead of creating another one. If rejection feedback or a validated memory says the issue has been fixed or made obsolete, do not recreate the request unless there is fresh post-fix evidence showing a distinct remaining failure. When in doubt, create a concise note on the existing request or memory rather than opening parallel work.
+
 ## Step 2.5: Lesson Qualification Gate (Required)
 
 Before adding `lesson-extracted`, verify the candidate is a real lesson.
