@@ -146,7 +146,7 @@ export GITHUB_TOKEN=your_github_token_here
 
 # Required: MCP connection details
 export LUCENT_MCP_URL=http://localhost:8766/mcp
-export LUCENT_MCP_API_KEY=hs_your_api_key_here  # Same key from step 2
+export LUCENT_API_KEY=hs_your_api_key_here  # Same key from step 2
 
 # Run the daemon
 python -m daemon.daemon
@@ -155,7 +155,7 @@ python -m daemon.daemon
 Or use the multi-daemon Docker profile:
 
 ```bash
-# Set your API key in .env first: LUCENT_MCP_API_KEY=hs_...
+# Set your API key in .env first: LUCENT_API_KEY=hs_...
 docker compose --profile multi-daemon up -d
 ```
 

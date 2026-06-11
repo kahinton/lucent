@@ -4,8 +4,8 @@ import asyncio
 import os
 import time
 
-if "LUCENT_MCP_API_KEY" not in os.environ:
-    raise RuntimeError("LUCENT_MCP_API_KEY environment variable must be set")
+if "LUCENT_API_KEY" not in os.environ:
+    raise RuntimeError("LUCENT_API_KEY environment variable must be set")
 
 import sys
 

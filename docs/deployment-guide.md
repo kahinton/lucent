@@ -245,7 +245,7 @@ docker run --rm -v lucent_data:/data -v $(pwd):/backup alpine \
 | `LUCENT_DAEMON_MODEL` | *(model registry default)* | Optional override for daemon sessions |
 | `LUCENT_DAEMON_ROLES` | `all` | Loops to enable: `cognitive`, `dispatcher`, `scheduler`, `autonomic` (comma-separated) |
 | `LUCENT_MCP_URL` | `http://localhost:8766/mcp` | MCP endpoint URL |
-| `LUCENT_MCP_API_KEY` | — | API key for daemon MCP access |
+| `LUCENT_API_KEY` | — | API key for daemon MCP access |
 | `LUCENT_REVIEW_MODELS` | — | Comma-separated models for multi-model task review |
 | `GITHUB_TOKEN` | — | GitHub token for Copilot SDK access |
 
@@ -348,7 +348,7 @@ python -m daemon.daemon --once
 ```
 
 The daemon requires:
-- `LUCENT_MCP_API_KEY` — an API key for accessing Lucent's MCP endpoint
+- `LUCENT_API_KEY` — an API key for accessing Lucent's MCP endpoint
 - `GITHUB_TOKEN` — a GitHub token with Copilot access for LLM sessions
 
 The daemon auto-restarts when source files change (file watcher) and includes a watchdog that kills the process if the event loop freezes for >15 minutes.
@@ -370,7 +370,7 @@ export DATABASE_URL=postgresql://lucent:password@localhost:5432/lucent
 lucent
 
 # In another terminal, start the daemon (optional)
-export LUCENT_MCP_API_KEY=hs_your_key_here
+export LUCENT_API_KEY=hs_your_key_here
 python -m daemon.daemon
 ```
 

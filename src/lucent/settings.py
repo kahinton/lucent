@@ -348,7 +348,7 @@ _RUNTIME_SETTING_DEFINITIONS: tuple[RuntimeSettingDefinition, ...] = (
     ),
     RuntimeSettingDefinition(
         key="daemon.mcp_api_key",
-        env_var="LUCENT_MCP_API_KEY",
+        env_var="LUCENT_API_KEY",
         value_type="string",
         default="",
         title="Daemon MCP API key",

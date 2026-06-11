@@ -257,7 +257,7 @@ services:
         condition: service_healthy
     environment:
       LUCENT_MCP_URL: http://lucent:8766/mcp
-      LUCENT_MCP_API_KEY: ${LUCENT_MCP_API_KEY:-}
+      LUCENT_API_KEY: ${LUCENT_API_KEY:-}
       LUCENT_DEFAULT_MODEL: ${LUCENT_DEFAULT_MODEL:-}
       LUCENT_DAEMON_INTERVAL: ${LUCENT_DAEMON_INTERVAL:-15}
       LUCENT_DAEMON_MODEL: ${LUCENT_DAEMON_MODEL:-}
@@ -284,7 +284,7 @@ services:
         condition: service_healthy
     environment:
       LUCENT_MCP_URL: http://lucent:8766/mcp
-      LUCENT_MCP_API_KEY: ${LUCENT_MCP_API_KEY:-}
+      LUCENT_API_KEY: ${LUCENT_API_KEY:-}
       LUCENT_DEFAULT_MODEL: ${LUCENT_DEFAULT_MODEL:-}
       LUCENT_DAEMON_INTERVAL: ${LUCENT_DAEMON_INTERVAL:-15}
       LUCENT_DAEMON_MODEL: ${LUCENT_DAEMON_MODEL:-}

@@ -9,7 +9,7 @@ import httpx
 
 async def test_mcp():
     url = "http://localhost:8766/mcp"
-    key = os.environ["LUCENT_MCP_API_KEY"]
+    key = os.environ["LUCENT_API_KEY"]
     headers = {
         "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",

@@ -280,10 +280,10 @@ Verify prerequisites:
 echo $GITHUB_TOKEN
 
 # Check MCP API key is set
-echo $LUCENT_MCP_API_KEY
+echo $LUCENT_API_KEY
 
 # Test connectivity to the server
-curl -H "Authorization: Bearer $LUCENT_MCP_API_KEY" http://localhost:8766/api/health
+curl -H "Authorization: Bearer $LUCENT_API_KEY" http://localhost:8766/api/health
 ```
 
 ### Tasks Stuck in "pending" or "claimed"

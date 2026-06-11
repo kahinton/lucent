@@ -3,7 +3,7 @@
     "memory-server": {
       "url": "http://localhost:8766/mcp",
       "headers": {
-        "Authorization": "Bearer ${env:LUCENT_MCP_API_KEY}"
+        "Authorization": "Bearer ${env:LUCENT_API_KEY}"
       }
     }
   }
