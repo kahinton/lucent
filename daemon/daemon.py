@@ -210,6 +210,27 @@ _CAPABILITY_ACTIVATION_AGENT_TYPES = frozenset(
     {"assessment", "definition-engineer", "lucent", "planning", "reflection"}
 )
 
+# Tools required for memory-maintenance work (consolidation, dedup, retirement,
+# curation). The memory agent's skills (memory-management) instruct calling
+# `delete_memory` to soft-retire absorbed/duplicate records; without granting it
+# explicitly the MCP bridge filters the tool out and the agent sees a
+# "Tool 'memory-server-delete_memory' does not exist" error even though the
+# tool is registered on the server.
+_MEMORY_MAINTENANCE_TOOLS = frozenset({"delete_memory"})
+
+# Substrings in a task's title/description that indicate memory maintenance
+# work, even for agents other than `memory` (e.g. ad-hoc consolidation tasks
+# dispatched to reflection or planning).
+_MEMORY_MAINTENANCE_SIGNALS = (
+    "consolidat",
+    "deduplicat",
+    "merge duplicate",
+    "retire",
+    "retirement",
+    "curate",
+    "delete_memory",
+)
+
 _HANDOFF_TOOL_REQUIRED_SIGNALS = frozenset(
     {
         "send_handoff",
@@ -234,6 +255,7 @@ _TASK_MEMORY_SERVER_TOOLS = sorted(
     set(_BASE_TASK_MEMORY_SERVER_TOOLS)
     | set(_DEFINITION_ACTIVATION_TOOLS)
     | set(_WORK_ACTIVATION_TOOLS)
+    | set(_MEMORY_MAINTENANCE_TOOLS)
 )
 
 
@@ -283,6 +305,13 @@ def _memory_server_tools_for_task(
     )
     if work_planning_task:
         tools.update(_WORK_ACTIVATION_TOOLS)
+
+    memory_maintenance_task = (
+        normalized_agent == "memory"
+        or any(signal in text for signal in _MEMORY_MAINTENANCE_SIGNALS)
+    )
+    if memory_maintenance_task:
+        tools.update(_MEMORY_MAINTENANCE_TOOLS)
 
     return sorted(tools)
 

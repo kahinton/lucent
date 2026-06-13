@@ -198,3 +198,57 @@ class TestMemoryServerToolSelection:
         assert "exec_sandbox_command" not in tools
         assert "send_handoff" in tools
         assert "create_memory" in tools
+
+    def test_memory_agent_gets_delete_memory_tool(self):
+        """Regression: memory agent must be granted `delete_memory`.
+
+        The memory-management skill instructs calling `delete_memory` to
+        soft-retire absorbed records during consolidation. If the daemon's
+        allowed-tools list omits it, the MCP bridge filters it out and the
+        agent observes a misleading "Tool 'memory-server-delete_memory'
+        does not exist" error. Lock in the grant so that regression does
+        not recur.
+        """
+        tools = set(
+            _memory_server_tools_for_task(
+                "memory",
+                "Consolidate validated patterns",
+                "Memory maintenance",
+                "Dedupe and retire absorbed memories",
+            )
+        )
+        assert "delete_memory" in tools
+        assert "update_memory" in tools
+        assert "search_memories" in tools
+
+    def test_consolidation_signal_grants_delete_memory_for_other_agents(self):
+        tools = set(
+            _memory_server_tools_for_task(
+                "reflection",
+                "Consolidate duplicate technical memories",
+                None,
+                "Merge duplicate and retire absorbed records",
+            )
+        )
+        assert "delete_memory" in tools
+
+    def test_plain_research_does_not_get_delete_memory(self):
+        tools = set(_memory_server_tools_for_task("research", "Summarize market data"))
+        assert "delete_memory" not in tools
+
+
+class TestRegisteredMCPTools:
+    """Lock in that `delete_memory` is registered as an MCP tool."""
+
+    def test_delete_memory_is_registered_on_memory_server(self):
+        from mcp.server.fastmcp import FastMCP
+
+        from lucent.tools.memories import register_tools as register_memory_tools
+
+        mcp = FastMCP("test")
+        register_memory_tools(mcp)
+        tool_names = set(mcp._tool_manager._tools)  # noqa: SLF001
+        assert "delete_memory" in tool_names, (
+            "delete_memory MCP tool must remain registered — the memory "
+            "agent's memory-management skill depends on it."
+        )
