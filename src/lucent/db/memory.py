@@ -1101,7 +1101,11 @@ class MemoryRepository:
             param_idx += 1
 
         if tags:
-            conditions.append(f"tags @> ${param_idx}")
+            # Explicit ::text[] cast helps the planner pick the GIN index
+            # idx_memories_tags (and the partial idx_memories_tags_active
+            # added in migration 091) instead of treating $N as an
+            # unknown-type value and falling back to a btree+filter plan.
+            conditions.append(f"tags @> ${param_idx}::text[]")
             params.append(tags)
             param_idx += 1
 
@@ -1195,20 +1199,49 @@ class MemoryRepository:
                   AND content % ${similarity_param}
             """
         else:
-            search_query = f"""
-                SELECT {self._SEARCH_COLUMNS},
-                       NULL::float as sim_score
-                FROM memories
-                WHERE {where_clause}
-                ORDER BY importance DESC, created_at DESC
-                LIMIT ${param_idx} OFFSET ${param_idx + 1}
-            """
+            # Pattern 2 (search_memories MCP timeout cluster, 2026-05-30+):
+            # When the caller filters by `tags` and supplies no fuzzy text
+            # query, force the planner to evaluate the GIN tag filter first
+            # by materializing the selected rows in a CTE *before* the
+            # ORDER BY/LIMIT. Without this, Postgres can prefer one of the
+            # partial btree access-control indexes (e.g. idx_memories_org_id)
+            # and run `tags @> ...` as an inline filter — fine on tiny
+            # tenants, catastrophic on large ones, which is what produced
+            # the recurring -32001 timeouts on inputs like
+            # ``{"limit": 10, "tags": ["validated"]}``.
+            if tags:
+                search_query = f"""
+                    WITH tag_filtered AS MATERIALIZED (
+                        SELECT {self._SEARCH_COLUMNS}
+                        FROM memories
+                        WHERE {where_clause}
+                    )
+                    SELECT *, NULL::float as sim_score
+                    FROM tag_filtered
+                    ORDER BY importance DESC, created_at DESC
+                    LIMIT ${param_idx} OFFSET ${param_idx + 1}
+                """
 
-            count_query = f"""
-                SELECT COUNT(*) as total
-                FROM memories
-                WHERE {where_clause}
-            """
+                count_query = f"""
+                    SELECT COUNT(*) as total
+                    FROM memories
+                    WHERE {where_clause}
+                """
+            else:
+                search_query = f"""
+                    SELECT {self._SEARCH_COLUMNS},
+                           NULL::float as sim_score
+                    FROM memories
+                    WHERE {where_clause}
+                    ORDER BY importance DESC, created_at DESC
+                    LIMIT ${param_idx} OFFSET ${param_idx + 1}
+                """
+
+                count_query = f"""
+                    SELECT COUNT(*) as total
+                    FROM memories
+                    WHERE {where_clause}
+                """
 
         params.extend([limit, offset])
 
@@ -1666,7 +1699,11 @@ class MemoryRepository:
             param_idx += 1
 
         if tags:
-            conditions.append(f"tags @> ${param_idx}")
+            # Explicit ::text[] cast helps the planner pick the GIN index
+            # idx_memories_tags (and the partial idx_memories_tags_active
+            # added in migration 091) instead of treating $N as an
+            # unknown-type value and falling back to a btree+filter plan.
+            conditions.append(f"tags @> ${param_idx}::text[]")
             params.append(tags)
             param_idx += 1
 
