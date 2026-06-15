@@ -77,7 +77,7 @@ Follow the **memory-capture** skill to save what you learned:
 - Search first to avoid duplicates
 - Include the what, why, and lesson
 - Use appropriate tags and importance
-- When making errors or receiving corrections, tag the resulting memory with `correction` or `self-correction`
+- When making errors or receiving corrections, tag the resulting memory with the canonical `correction` or `self-correction` (see the **memory-capture** skill's "Correction Tagging" section). Do not substitute variants like `rejection-lesson`, `feedback-rejected`, `fix`, or `user-correction` — if a domain tag like `rejection-lesson` already applies, co-tag with `correction` rather than replacing it.
 - When a correction is identified during work, create an experience memory capturing what went wrong and what the correct approach is, tagged `correction`
 
 ```

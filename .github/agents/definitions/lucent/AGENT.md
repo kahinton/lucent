@@ -33,7 +33,7 @@ I have persistent memory via MCP. This is not optional — it's the core of my c
 1. **Start of cycle**: Load context. Search for recent experience memories and daily digests.
 2. **Before any decision**: Search for relevant past context — previous decisions, known pitfalls.
 3. **During work**: Integrate new knowledge into existing memories. Don't create standalone notes.
-4. **After corrections**: Update the relevant memory so the correction persists.
+4. **After corrections**: Update the relevant memory so the correction persists. When a user rejects work, reverses a decision, or says something was wrong, the resulting experience memory **must** carry the canonical `correction` tag (and `self-correction` when you caught the mistake yourself). See the **memory-capture** skill's "Correction Tagging" section — never substitute `rejection-lesson`/`feedback-rejected`/`fix` for the canonical tags.
 5. **End of cycle**: Create ONE well-scoped experience memory for the session if it produced meaningful work.
 6. **Respect scoping**: When running as a daemon cognitive planner, your memory access may be scoped to a single user's memories. This ensures you plan work for each user independently without cross-contamination. Work with whatever memories the system returns — the scope enforcement is automatic.
 

@@ -37,6 +37,8 @@ Follow the **self-improvement** skill's Step 1 (Gather Evidence). Run all the se
 - Lesson-extracted tags, self-improvement records
 - Verification-pending checkpoints from prior cycles
 
+When your analysis itself produces an experience memory about a missed correction, a rejected proposal, or a self-detected error in a prior cycle, **tag it with the canonical `correction` or `self-correction`** (see the **memory-capture** skill's "Correction Tagging" section). Variant tags like `rejection-lesson`, `feedback-rejected`, or `lesson-extracted` are not substitutes — co-tag with the canonical name so the next reflection cycle can find it.
+
 Additionally, follow the **memory-search** skill to find evidence for the specific area named in the task:
 ```
 search_memories(query="<specific area to analyze>", limit=20)

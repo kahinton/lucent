@@ -35,19 +35,33 @@ The test: **Would future-me benefit from knowing this in a different conversatio
 
 ### Correction Tagging
 
-When capturing a memory after a **user correction**, add the `correction` tag:
+The canonical tag names are exactly **`correction`** and **`self-correction`** — singular, hyphenated, no prefix. These are the only strings the reflection agent and self-improvement skill search for. Do not invent variants.
+
+**Rejected variants — never use these in place of the canonical tags:**
+
+| Variant | Use instead |
+|---|---|
+| `corrections` (plural) | `correction` |
+| `user-correction`, `user_correction` | `correction` |
+| `fix`, `bugfix`, `bug-fix` | `correction` (only if it was triggered by a user rejection or self-detected error) |
+| `rejection-lesson`, `feedback-rejected`, `approval-rejected` | Keep these if produced by the rejection-learning pipeline, **but always co-tag with `correction`** |
+| `lesson-extracted` (from tool-failure analysis) | Keep, **but co-tag with `self-correction`** |
+| `self_correction`, `selfcorrection`, `auto-correction` | `self-correction` |
+
+When capturing a memory after a **user correction**, the tag list **must include `correction`**:
 - User explicitly says something was wrong ("No, don't do X", "That's incorrect", "Actually...")
-- User reverts or rejects a change you made
+- User reverts or rejects a change you made (request rejection, PR rejection, decision reversal)
 - User provides the correct approach after pointing out an error
 
-When capturing a memory after **self-detecting an error**, add the `self-correction` tag:
+When capturing a memory after a **self-detected error**, the tag list **must include `self-correction`**:
 - You notice your own mistake before the user does
-- Test results reveal an error in your approach
+- Test results, validation failures, or retries reveal an error in your approach
 - You realize a previous assumption was wrong
 
+If the memory already carries a domain-specific tag like `rejection-lesson` or `lesson-extracted`, **add the canonical tag alongside it** — do not substitute.
+
 **Why this matters**
-The reflection agent and self-improvement skill search for these tags to identify behavioral patterns.
-Without them, the self-improvement loop has no input data — verified 0 memories with these tags have ever been created.
+The reflection agent and self-improvement skill search exclusively for `correction` and `self-correction`. A correction-shaped memory tagged only `rejection-lesson` is invisible to the self-improvement loop. Baseline audit (2026-06-12) found ~30 correction-shaped memories per week, zero of them tagged `correction`. The taxonomy must converge.
 
 ## Do Not Capture
 
