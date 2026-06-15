@@ -1335,6 +1335,77 @@ class TestDeleteMemory:
         assert "not accessible" in result["error"].lower() or "Permission denied" in result["error"]
         set_current_user(None)
 
+    async def test_delete_refuses_pinned_memory(
+        self, mcp_tools, auth_user, clean_test_data
+    ):
+        """delete_memory refuses memories tagged 'pinned' with structured error."""
+        prefix = clean_test_data
+        created = await _call(
+            mcp_tools,
+            "create_memory",
+            {
+                "type": "experience",
+                "content": f"{prefix} pinned memory to protect",
+                "username": f"{prefix}user",
+                "tags": ["pinned"],
+            },
+        )
+        memory_id = created["id"]
+
+        result = await _call(
+            mcp_tools,
+            "delete_memory",
+            {"memory_id": memory_id},
+        )
+
+        assert "error" in result
+        assert result.get("code") == "memory_protected"
+        assert result.get("protected_tag") == "pinned"
+
+        # Memory still retrievable (not deleted)
+        get_result = await _call(mcp_tools, "get_memory", {"memory_id": memory_id})
+        assert "error" not in get_result
+
+    async def test_delete_refuses_do_not_consolidate_memory(
+        self, mcp_tools, auth_user, clean_test_data
+    ):
+        """delete_memory refuses memories tagged 'do_not_consolidate'."""
+        prefix = clean_test_data
+        created = await _call(
+            mcp_tools,
+            "create_memory",
+            {
+                "type": "experience",
+                "content": f"{prefix} do_not_consolidate memory",
+                "username": f"{prefix}user",
+                "tags": ["do_not_consolidate"],
+            },
+        )
+        memory_id = created["id"]
+
+        result = await _call(
+            mcp_tools,
+            "delete_memory",
+            {"memory_id": memory_id},
+        )
+
+        assert "error" in result
+        assert result.get("code") == "memory_protected"
+        assert result.get("protected_tag") == "do_not_consolidate"
+
+        get_result = await _call(mcp_tools, "get_memory", {"memory_id": memory_id})
+        assert "error" not in get_result
+
+    async def test_delete_missing_memory_id(self, mcp_tools, auth_user):
+        """delete_memory rejects empty memory_id with a clear error."""
+        result = await _call(
+            mcp_tools,
+            "delete_memory",
+            {"memory_id": ""},
+        )
+        assert "error" in result
+        assert "memory id" in result["error"].lower() or "invalid" in result["error"].lower()
+
 
 # ============================================================================
 # get_existing_tags

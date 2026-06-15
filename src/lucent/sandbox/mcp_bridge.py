@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # Memory-server tools tracked for observability
 _MEMORY_TOOL_NAMES = frozenset({
-    "create_memory", "search_memories", "update_memory",
+    "create_memory", "search_memories", "update_memory", "delete_memory",
 })
 
 
@@ -79,6 +79,26 @@ def _tool_specs() -> list[dict[str, Any]]:
             },
         },
         {
+            "name": "delete_memory",
+            "description": (
+                "Soft-delete a memory in Lucent. ACL: only the owner or a "
+                "daemon-role caller in the same organization may delete. "
+                "Memories tagged 'pinned' or 'do_not_consolidate' are "
+                "server-side refused."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "memory_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "UUID of the memory to delete.",
+                    },
+                },
+                "required": ["memory_id"],
+            },
+        },
+        {
             "name": "log_task_event",
             "description": "Log an event on a tracked task",
             "inputSchema": {
@@ -132,6 +152,11 @@ class BridgeServer:
                     raise ValueError("memory_id is required")
                 payload = {k: v for k, v in arguments.items() if k != "memory_id"}
                 result = self._proxy("PATCH", f"/memories/{memory_id}", payload)
+            elif name == "delete_memory":
+                memory_id = arguments.get("memory_id")
+                if not memory_id:
+                    raise ValueError("memory_id is required")
+                result = self._proxy("DELETE", f"/memories/{memory_id}", {})
             elif name == "log_task_event":
                 task_id = self._resolve_task_id(arguments)
                 payload = {

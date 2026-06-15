@@ -1168,6 +1168,10 @@ Returns:
     async def delete_memory(memory_id: str) -> str:
         """Delete a memory (soft delete - can be recovered).
 
+        ACL: only the owner of the memory, or a daemon-role caller in the same
+        organization, may delete. Memories tagged ``pinned`` or
+        ``do_not_consolidate`` are server-side refused (regardless of caller).
+
         NOTE: Individual memories cannot be deleted via this tool - they are
         automatically deleted when users are removed from the system.
 
@@ -1175,7 +1179,10 @@ Returns:
             memory_id: The UUID of the memory to delete.
 
         Returns:
-            JSON string indicating success or failure.
+            JSON string indicating success or failure. On a protected-tag
+            refusal, returns ``{"error": ..., "code": "memory_protected",
+            "protected_tag": "pinned"|"do_not_consolidate"}`` so callers can
+            recognize the structured refusal.
         """
         try:
             uuid_id = UUID(memory_id)
@@ -1196,14 +1203,17 @@ Returns:
             if old_memory is None:
                 return _error_response(f"Memory not found or not accessible: {memory_id}")
 
-            # Check ownership OR MEMORY_DELETE_ANY permission
+            # ACL identical to update_memory: owner, or daemon role in same org.
             if old_memory.get("user_id") != user_id:
-                from lucent.rbac import Permission, Role, has_permission
-
-                role = Role.from_string(user_role or "member")
-                if not has_permission(role, Permission.MEMORY_DELETE_ANY):
+                is_daemon_same_org = (
+                    user_role == "daemon"
+                    and org_id is not None
+                    and old_memory.get("organization_id") == org_id
+                )
+                if not is_daemon_same_org:
                     return _error_response(
-                        "Permission denied: only the owner can delete this memory"
+                        "Permission denied: only the owner (or a daemon-role"
+                        " caller in the same organization) can delete this memory"
                     )
 
             # Individual memories cannot be deleted via MCP
@@ -1214,6 +1224,36 @@ Returns:
                     " They are automatically deleted when users"
                     " are removed from the system."
                 )
+
+            # Server-side refusal for protected tags. The agent must explicitly
+            # unpin / strip the ``do_not_consolidate`` tag before a delete can
+            # succeed. Returned as a structured error so callers can detect it.
+            # NOTE: tag normalization elsewhere may store either underscore or
+            # hyphen form, so we match both spellings.
+            existing_tags = set(old_memory.get("tags") or [])
+            protected_tag_aliases = {
+                "pinned": ("pinned",),
+                "do_not_consolidate": ("do_not_consolidate", "do-not-consolidate"),
+            }
+            for canonical, aliases in protected_tag_aliases.items():
+                if existing_tags.intersection(aliases):
+                    logger.info(
+                        "delete_memory refused: id=%s protected_tag=%s",
+                        memory_id,
+                        canonical,
+                    )
+                    return json.dumps(
+                        {
+                            "error": (
+                                f"Memory is protected by tag '{canonical}'"
+                                " and cannot be deleted. Remove the tag first"
+                                " (e.g. unpin_memory) if deletion is intended."
+                            ),
+                            "code": "memory_protected",
+                            "protected_tag": canonical,
+                            "memory_id": memory_id,
+                        }
+                    )
 
             success = await repo.delete(
                 uuid_id,

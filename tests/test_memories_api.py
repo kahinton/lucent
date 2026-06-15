@@ -607,6 +607,35 @@ class TestDeleteMemory:
         resp = await mem_client.delete(f"/api/memories/{memory['id']}")
         assert resp.status_code == 404
 
+    async def test_delete_refuses_pinned_memory(self, mem_client, mem_prefix):
+        """DELETE refuses memories tagged 'pinned' with 409 and structured payload."""
+        create_resp = await _create_memory(mem_client, mem_prefix, tags=["pinned"])
+        memory_id = create_resp.json()["id"]
+
+        resp = await mem_client.delete(f"/api/memories/{memory_id}")
+        assert resp.status_code == 409
+        body = resp.json()
+        detail = body.get("detail", body)
+        assert detail.get("code") == "memory_protected"
+        assert detail.get("protected_tag") == "pinned"
+
+        # Memory not deleted
+        get_resp = await mem_client.get(f"/api/memories/{memory_id}")
+        assert get_resp.status_code == 200
+
+    async def test_delete_refuses_do_not_consolidate_memory(self, mem_client, mem_prefix):
+        """DELETE refuses memories tagged 'do_not_consolidate'."""
+        create_resp = await _create_memory(
+            mem_client, mem_prefix, tags=["do_not_consolidate"]
+        )
+        memory_id = create_resp.json()["id"]
+
+        resp = await mem_client.delete(f"/api/memories/{memory_id}")
+        assert resp.status_code == 409
+        detail = resp.json().get("detail", {})
+        assert detail.get("code") == "memory_protected"
+        assert detail.get("protected_tag") == "do_not_consolidate"
+
 
 # ============================================================================
 # Share / Unshare

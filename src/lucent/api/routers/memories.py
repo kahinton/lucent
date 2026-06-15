@@ -561,6 +561,32 @@ async def delete_memory(
             detail="You can only delete your own memories",
         )
 
+    # Server-side refusal for protected tags. Returned as 409 with a
+    # structured payload so MCP/API clients can detect the refusal and act
+    # (e.g. unpin first) instead of treating it as a generic failure.
+    # NOTE: match both underscore and hyphen forms since tag normalization
+    # elsewhere in the codebase is inconsistent.
+    existing_tags = set(existing.get("tags") or [])
+    protected_tag_aliases = {
+        "pinned": ("pinned",),
+        "do_not_consolidate": ("do_not_consolidate", "do-not-consolidate"),
+    }
+    for canonical, aliases in protected_tag_aliases.items():
+        if existing_tags.intersection(aliases):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "error": (
+                        f"Memory is protected by tag '{canonical}' and"
+                        " cannot be deleted. Remove the tag first if deletion"
+                        " is intended."
+                    ),
+                    "code": "memory_protected",
+                    "protected_tag": canonical,
+                    "memory_id": str(memory_id),
+                },
+            )
+
     success = await repo.delete(memory_id)
 
     if not success:
