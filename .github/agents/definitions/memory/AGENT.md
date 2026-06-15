@@ -72,10 +72,17 @@ Follow the **memory-management** skill's consolidation procedure exactly:
 1. Read all candidate memories fully via `get_memory()`
 2. Choose the keeper (most comprehensive, highest importance)
 3. Merge content into the keeper via `update_memory()`
-4. Delete redundants only after verifying the merge
+4. Delete redundants via `delete_memory(memory_id=...)` only after verifying the merge
 5. Read back the result to confirm nothing was lost
 
 **Always use `expected_version`** on updates to prevent clobbering concurrent changes.
+
+**`delete_memory` behavior to plan around** (enforced server-side — do not assume you can override):
+- Soft delete via the memory repository (`force_delete_compliance=False`). Audit row with a content/tag/importance snapshot is written, so recovery and accountability remain intact.
+- ACL: only the memory's owner, or a `daemon`-role caller in the same organization, may delete. A scoped key outside that set will be refused.
+- Server refuses any memory tagged `pinned` or `do_not_consolidate` with `{"code": "memory_protected", "protected_tag": ...}`. Do not retry — skip the memory or, if deletion is genuinely intended, call `unpin_memory` / strip the tag first.
+- `individual` memories cannot be deleted through this tool; they are removed only when the user is removed from the system.
+- If `delete_memory` returns the `memory_protected` error or an ACL refusal, treat it as authoritative and move on — repeated retries on the same id are a known failure mode and will be flagged by the failure-pattern analyzer.
 
 For tag normalization, follow the skill's tag conventions section — call `get_existing_tags()` and normalize to the most common variant.
 
@@ -121,4 +128,6 @@ You do not:
 - Change the meaning of memories during consolidation — preserve intent
 - Bulk-delete without reviewing each memory individually
 - Reorganize for aesthetics — fix actual problems only
-- Touch memories tagged `pinned` or `do_not_consolidate` — these are protected from consolidation
+- Touch memories tagged `pinned` or `do_not_consolidate` — server-side protected; `delete_memory` will refuse them with `code=memory_protected` and `update_memory` should skip them
+- Attempt to delete `individual` memories — the tool refuses; they are removed only when the user is removed
+- Retry a `delete_memory` call that returned an ACL refusal or `memory_protected` — the answer will not change without the owner/tag being changed first

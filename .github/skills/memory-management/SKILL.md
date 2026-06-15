@@ -33,7 +33,7 @@ Memory maintenance may run under a **scoped API key** that restricts access:
 
 The system enforces scoping at the database layer — you cannot accidentally access out-of-scope memories. Just work with what your searches return.
 
-**Protected tags**: Skip any memory tagged `pinned` or `do_not_consolidate` during maintenance. These are exempt from consolidation, deduplication, and deletion. The `pinned` exemption is also enforced automatically inside the vitality scorer (`_hard_exemption_reason`) — pinned memories short-circuit to the EXEMPT action with reason `hard-exempt-pinned` and never appear in archive/cleanup candidate sets, parallel to the existing `individual` and active-goal exemptions. Toggle the tag via the `pin_memory(memory_id)` / `unpin_memory(memory_id)` MCP tools (idempotent, owner-only ACL, version-bumping).
+**Protected tags**: Skip any memory tagged `pinned` or `do_not_consolidate` during maintenance. These are exempt from consolidation, deduplication, and deletion. The `pinned` exemption is also enforced automatically inside the vitality scorer (`_hard_exemption_reason`) — pinned memories short-circuit to the EXEMPT action with reason `hard-exempt-pinned` and never appear in archive/cleanup candidate sets, parallel to the existing `individual` and active-goal exemptions. Toggle the tag via the `pin_memory(memory_id)` / `unpin_memory(memory_id)` MCP tools (idempotent, owner-only ACL, version-bumping). `delete_memory` additionally refuses these tags server-side and returns `{"code": "memory_protected", "protected_tag": ...}` — if you see that response, do not retry; skip the memory or remove the protective tag first when deletion is genuinely intended.
 
 ## Maintenance Procedure
 
@@ -102,6 +102,15 @@ The merged content should read as if it was always a single well-written memory.
 delete_memory(memory_id="<absorbed_id>")
 ```
 
+`delete_memory` is a **soft delete** via the memory repository: the row is marked deleted and an audit event (`action_type="delete"`) is written with a content/tag/importance snapshot for recovery. Constraints enforced server-side:
+
+- **ACL**: only the owner, or a `daemon`-role caller in the same organization, may delete. Other callers receive a permission-denied error.
+- **Protected tags**: `pinned` and `do_not_consolidate` are refused with `{"code": "memory_protected", "protected_tag": ...}`. Do not retry — unpin / strip the tag first when deletion is genuinely intended, otherwise skip the memory.
+- **Type protection**: `individual` memories cannot be deleted via this tool. They are removed when the user is removed from the system.
+- **Unknown/inaccessible id**: returned as a not-found error — do not loop on the same id.
+
+Treat any of those refusals as authoritative. Repeated `delete_memory` retries on the same id are tracked by the failure-pattern analyzer.
+
 ### 7. Verify
 ```
 get_memories(memory_ids=["<keeper_id>"])
@@ -138,3 +147,4 @@ When updating, reassess importance. Did this turn out more or less critical than
 - Consolidating memories that are related but cover genuinely different aspects
 - Creating a new tag when a synonym already exists (`bug-fix` when `bugs` exists)
 - Changing the meaning of a memory during consolidation — preserve intent
+- Retrying `delete_memory` after a `memory_protected` or ACL refusal — the server answer will not change without the tag or ownership changing first
