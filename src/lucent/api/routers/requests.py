@@ -577,7 +577,7 @@ async def create_task(
 
     requesting_user_id = str(req["created_by"]) if req.get("created_by") else None
     if body.requesting_user_id:
-        if not _can_administer_requests(user):
+        if not _is_privileged_request_actor(user):
             raise HTTPException(403, "Only admins/owners/daemon can set requesting_user_id")
         async with pool.acquire() as conn:
             target_user_exists = await conn.fetchval(

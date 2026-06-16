@@ -185,6 +185,7 @@ Returns paginated results with skill metadata (no content field).
 
 Args:
     status: Optional filter — 'proposed', 'active', or 'rejected'
+    search: Optional search term matched against skill name, description, or content
     limit: Max results to return (default 25, max 100)
     offset: Pagination offset (default 0)
 
@@ -192,6 +193,7 @@ Returns: JSON with items array, total_count, and pagination info."""
     )
     async def list_skill_definitions(
         status: str | None = None,
+        search: str | None = None,
         limit: int = 25,
         offset: int = 0,
     ) -> str:
@@ -203,6 +205,7 @@ Returns: JSON with items array, total_count, and pagination info."""
         result = await repo.list_skills(
             str(org_id),
             status=status,
+            search=search,
             limit=min(limit, 100),
             offset=offset,
             requester_user_id=str(user_id) if user_id else None,

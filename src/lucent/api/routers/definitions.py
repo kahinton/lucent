@@ -436,12 +436,14 @@ async def revoke_hook_from_agent(agent_id: str, hook_id: str, user: AdminUser):
 async def list_skills(
     user: AuthenticatedUser,
     status: Literal["proposed", "active", "rejected"] | None = None,
+    search: str | None = None,
 ):
     pool = await get_pool()
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     return await repo.list_skills(
         str(user.organization_id),
         status=status,
+        search=search,
         requester_user_id=str(user.id),
         requester_role=user.role.value,
     )
