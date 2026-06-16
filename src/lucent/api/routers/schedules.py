@@ -480,16 +480,16 @@ async def _trigger_schedule_execution(
     server_actions = [a for a in actions if a.get("action_type") == "server_function"]
     if server_actions:
         function_name = str(server_actions[0].get("function") or "")
-        if function_name != "release_stale_tasks":
-            raise HTTPException(422, f"Unsupported server workflow function: {function_name}")
-        from lucent.api.system_schedules import execute_stale_task_reaper_schedule
+        if function_name == "release_stale_tasks":
+            from lucent.api.system_schedules import execute_stale_task_reaper_schedule
 
-        result = await execute_stale_task_reaper_schedule(
-            sched,
-            force=force,
-            advance_schedule=advance_schedule,
-        )
-        return result or {"schedule": sched, "workflow": sched, "already_fired": True}
+            result = await execute_stale_task_reaper_schedule(
+                sched,
+                force=force,
+                advance_schedule=advance_schedule,
+            )
+            return result or {"schedule": sched, "workflow": sched, "already_fired": True}
+        raise HTTPException(422, f"Unsupported server workflow function: {function_name}")
     task_actions = [a for a in actions if a.get("action_type", "task") == "task"]
     interaction_actions = [
         a for a in actions if a.get("action_type") == "user_interaction"

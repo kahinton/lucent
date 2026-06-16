@@ -2971,20 +2971,6 @@ class LucentDaemon:
                         "prompt": EXPERIENCE_COMPRESSION_PROMPT,
                     },
                     {
-                        "title": "Memory Vitality Scoring",
-                        "description": (
-                            "Compute and persist memory vitality scores and lifecycle stages "
-                            "for shadow-mode observability. No search behavior changes. "
-                            "Short-circuits with schedule.skipped when no memories need missing "
-                            "or stale vitality computation."
-                        ),
-                        "agent_type": "memory",
-                        "schedule_type": "interval",
-                        "interval_seconds": VITALITY_SCORING_MINUTES * 60,
-                        "priority": "low",
-                        "prompt": MEMORY_VITALITY_SCORING_PROMPT,
-                    },
-                    {
                         "title": "Shadow Forget Scoring",
                         "description": (
                             "Run Candidate-A graph-centrality pruning as shadow-only scoring. "

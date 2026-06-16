@@ -28,7 +28,6 @@ BUILT_IN_MODEL_BACKED_SCHEDULES = [
     ("Experience Compression", "memory"),
     ("Learning Extraction", "reflection"),
     ("Procedural Consolidation", "memory"),
-    ("Memory Vitality Scoring", "memory"),
     ("Shadow Forget Scoring", "memory"),
     ("Cognitive Planning", "planning"),
 ]

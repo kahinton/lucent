@@ -16,10 +16,13 @@ import pytest_asyncio
 
 from lucent.api.system_schedules import (
     STALE_TASK_REAPER_TITLE,
+    VITALITY_SCORING_TITLE,
     ensure_server_system_schedules,
+    run_vitality_scoring_background_once,
     run_server_system_schedules_once,
 )
 from lucent.db.requests import RequestRepository
+from lucent.db.schedules import ScheduleRepository
 
 # ── Fixtures ─────────────────────────────────────────────────────────────
 
@@ -71,6 +74,17 @@ async def cleanup_reaper_test_data(db_pool, test_organization):
         await conn.execute(
             "DELETE FROM schedules WHERE organization_id = $1", org_uuid
         )
+        memory_ids = [
+            r["id"]
+            for r in await conn.fetch(
+                "SELECT id FROM memories WHERE organization_id = $1", org_uuid
+            )
+        ]
+        if memory_ids:
+            await conn.execute(
+                "DELETE FROM memory_access_log WHERE memory_id = ANY($1)", memory_ids
+            )
+            await conn.execute("DELETE FROM memories WHERE id = ANY($1)", memory_ids)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -86,8 +100,8 @@ async def _make_task(repo: RequestRepository, request_id: str, org_id: str):
     )
 
 
-async def _force_schedule_due(db_pool, org_id):
-    """Make the reaper schedule due for immediate firing."""
+async def _force_schedule_due(db_pool, org_id, title=STALE_TASK_REAPER_TITLE):
+    """Make a server-side schedule due for immediate firing."""
     async with db_pool.acquire() as conn:
         await conn.execute(
             """UPDATE schedules
@@ -96,7 +110,7 @@ async def _force_schedule_due(db_pool, org_id):
                  AND title = $2
                  AND is_system = true""",
             org_id,
-            STALE_TASK_REAPER_TITLE,
+            title,
         )
 
 
@@ -139,6 +153,39 @@ class TestScheduleSeeding:
             trigger_config = json.loads(trigger_config)
         assert trigger_config["execution_mode"] == "server_side"
 
+    async def test_retired_vitality_scoring_workflow_is_removed(
+        self,
+        db_pool,
+        test_organization,
+    ):
+        """Vitality scoring is background maintenance, not a visible workflow."""
+        org_id = str(test_organization["id"])
+        repo = ScheduleRepository(db_pool)
+        await repo.ensure_system_schedule(
+            title=VITALITY_SCORING_TITLE,
+            org_id=org_id,
+            description="retired vitality workflow",
+            agent_type="memory",
+            schedule_type="interval",
+            interval_seconds=3600,
+            actions=[{"action_type": "server_function", "function": "compute_vitality_scores"}],
+        )
+
+        await ensure_server_system_schedules()
+
+        async with db_pool.acquire() as conn:
+            count = await conn.fetchval(
+                """SELECT COUNT(*)
+                   FROM schedules
+                   WHERE organization_id = $1
+                     AND title = $2
+                     AND is_system = true""",
+                test_organization["id"],
+                VITALITY_SCORING_TITLE,
+            )
+
+        assert count == 0
+
     async def test_seeding_is_idempotent(self, db_pool, test_organization):
         """Calling ensure twice should not create duplicate schedules."""
         await ensure_server_system_schedules()
@@ -154,6 +201,78 @@ class TestScheduleSeeding:
                 STALE_TASK_REAPER_TITLE,
             )
         assert count == 1
+
+    async def test_background_vitality_scoring_runs_without_workflow_or_requests(
+        self,
+        db_pool,
+        test_organization,
+    ):
+        """Vitality scoring runs as deterministic backend work."""
+        org_id = str(test_organization["id"])
+        await ensure_server_system_schedules()
+
+        async with db_pool.acquire() as conn:
+            memory_id = await conn.fetchval(
+                """INSERT INTO memories
+                   (username, type, content, tags, importance, organization_id, shared)
+                   VALUES ('server-vitality-test', 'technical',
+                           'server vitality test memory', ARRAY['test'], 5,
+                           $1::uuid, true)
+                   RETURNING id""",
+                org_id,
+            )
+            before_requests = await conn.fetchval(
+                "SELECT COUNT(*) FROM requests WHERE organization_id = $1::uuid",
+                org_id,
+            )
+            before_tasks = await conn.fetchval(
+                "SELECT COUNT(*) FROM tasks WHERE organization_id = $1::uuid",
+                org_id,
+            )
+
+        executed = await run_vitality_scoring_background_once(force=True)
+        assert executed >= 1
+
+        async with db_pool.acquire() as conn:
+            memory = await conn.fetchrow(
+                "SELECT vitality_score, vitality_computed_at FROM memories WHERE id = $1",
+                memory_id,
+            )
+            after_requests = await conn.fetchval(
+                "SELECT COUNT(*) FROM requests WHERE organization_id = $1::uuid",
+                org_id,
+            )
+            after_tasks = await conn.fetchval(
+                "SELECT COUNT(*) FROM tasks WHERE organization_id = $1::uuid",
+                org_id,
+            )
+            schedule_count = await conn.fetchval(
+                """SELECT COUNT(*) FROM schedules
+                   WHERE organization_id = $1::uuid
+                     AND title = $2
+                     AND is_system = true""",
+                org_id,
+                VITALITY_SCORING_TITLE,
+            )
+            stale_count = await conn.fetchval(
+                """SELECT COUNT(*)
+                   FROM memories
+                   WHERE organization_id = $1::uuid
+                     AND deleted_at IS NULL
+                     AND COALESCE(lifecycle_stage, 'active') != 'forgotten'
+                     AND (
+                         vitality_computed_at IS NULL
+                         OR vitality_computed_at < updated_at
+                         OR vitality_computed_at < now() - interval '6 hours'
+                     )""",
+                org_id,
+            )
+
+        assert memory["vitality_score"] is not None
+        assert memory["vitality_computed_at"] is not None
+        assert (after_requests, after_tasks) == (before_requests, before_tasks)
+        assert schedule_count == 0
+        assert stale_count == 0
 
 
 class TestServerSystemSchedulePreflight:

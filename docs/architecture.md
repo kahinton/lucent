@@ -534,6 +534,10 @@ These execute directly in the API process and write their outcome to
 reviews. `Stale Task Reaper` uses this mode so expired task claims can be
 released even when the daemon is unavailable.
 
+Memory vitality scoring is lower-level background maintenance, not a visible
+workflow. The API process periodically calls the repository scorer directly and
+startup cleanup removes retired `Memory Vitality Scoring` workflow rows.
+
 Time-based workflows keep timezone-aware cron, interval, once, max-run,
 expiration, model override, and sandbox-template behavior. Existing critical
 built-in schedules are migrated in place; their IDs and run history are not
@@ -550,7 +554,6 @@ Operators should treat `schedule.skipped` with `candidate_count: 0` as a healthy
 | Cognitive Planning | No open requests, pending approvals, due non-planning schedules, daemon messages/feedback/rejection lessons, proposed definitions/MCP servers, or planning targets. |
 | Learning Extraction | No recent active result/feedback/rejection memory has learning-source tags without `lesson-extracted`. |
 | Experience Compression | No active non-protected experience memory was created before today. |
-| Memory Vitality Scoring | No non-forgotten memory has missing or stale vitality computation. |
 | Shadow Forget Scoring | Shadow forgetting is disabled, or every non-forgotten memory already has a fresh `gcp-v1` sidecar score. |
 | Stale Task Reaper | No claimed/running task has an expired claim, stale claim age, or stale/dead owning daemon instance. |
 | Request Decomposition Backfill | No old non-terminal pending/approved request remains without tasks after in-process and retry-backoff filtering. |

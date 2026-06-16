@@ -1799,7 +1799,12 @@ class MemoryRepository:
             "total": len(memories),
         }
 
-    async def compute_vitality_scores(self, batch_size: int = 500) -> dict[str, Any]:
+    async def compute_vitality_scores(
+        self,
+        batch_size: int = 500,
+        *,
+        organization_id: str | None = None,
+    ) -> dict[str, Any]:
         """Compute and persist vitality scores for all non-deleted, non-forgotten memories."""
         from lucent.memory.decay import DecayConfig, MemoryDecayInput, compute_memory_vitality
 
@@ -1811,6 +1816,12 @@ class MemoryRepository:
         offset = 0
 
         while True:
+            org_condition = ""
+            params: list[Any] = [batch_size, offset]
+            if organization_id:
+                org_condition = "AND organization_id = $3::uuid"
+                params.append(organization_id)
+
             async with self.pool.acquire() as conn:
                 rows = await conn.fetch(
                     f"""
@@ -1818,11 +1829,11 @@ class MemoryRepository:
                     FROM memories
                     WHERE deleted_at IS NULL
                       AND lifecycle_stage != 'forgotten'
+                      {org_condition}
                     ORDER BY created_at ASC
                     LIMIT $1 OFFSET $2
                     """,
-                    batch_size,
-                    offset,
+                    *params,
                 )
 
             if not rows:
@@ -1863,14 +1874,13 @@ class MemoryRepository:
                         """
                         UPDATE memories
                         SET vitality_score = $2,
-                            vitality_computed_at = $3,
-                            lifecycle_stage = $4
+                            vitality_computed_at = NOW(),
+                            lifecycle_stage = $3
                         WHERE id = $1
                           AND deleted_at IS NULL
                         """,
                         str(mem["id"]),
                         score_result.score,
-                        now,
                         computed_stage,
                     )
 

@@ -9,16 +9,20 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from datetime import UTC, datetime
 from typing import Any
 
 from lucent.db import get_pool
+from lucent.db.memory import MemoryRepository
 from lucent.db.requests import RequestRepository
 from lucent.db.schedules import ScheduleRepository
 from lucent.logging import get_logger
+from lucent.settings import daemon_vitality_scoring_minutes
 
 logger = get_logger("api.system_schedules")
 
 STALE_TASK_REAPER_TITLE = "Stale Task Reaper"
+VITALITY_SCORING_TITLE = "Memory Vitality Scoring"
 STALE_TASK_REAPER_INTERVAL_SECONDS = int(
     os.environ.get("LUCENT_STALE_REAPER_INTERVAL_SECONDS", "120")
 )
@@ -30,6 +34,10 @@ SYSTEM_SCHEDULE_CHECK_SECONDS = int(
 )
 SYSTEM_SCHEDULE_STARTUP_DELAY_SECONDS = int(
     os.environ.get("LUCENT_SYSTEM_SCHEDULE_STARTUP_DELAY_SECONDS", "15")
+)
+VITALITY_SCORING_INTERVAL_SECONDS = daemon_vitality_scoring_minutes() * 60
+VITALITY_SCORING_BATCH_SIZE = int(
+    os.environ.get("LUCENT_VITALITY_SCORING_BATCH_SIZE", "500")
 )
 
 STALE_TASK_REAPER_ACTION = {
@@ -48,6 +56,45 @@ STALE_TASK_REAPER_ACTION = {
 }
 
 _system_schedule_runner_task: asyncio.Task | None = None
+_last_vitality_scoring_at_by_org: dict[str, datetime] = {}
+
+
+async def retire_vitality_scoring_workflow_schedules() -> int:
+    """Remove retired built-in vitality workflows from the visible workflow table."""
+    pool = await get_pool()
+    if pool is None:
+        return 0
+
+    async with pool.acquire() as conn:
+        schedule_ids = [
+            str(row["id"])
+            for row in await conn.fetch(
+                """SELECT id FROM schedules
+                   WHERE title = $1
+                     AND is_system = true""",
+                VITALITY_SCORING_TITLE,
+            )
+        ]
+        if not schedule_ids:
+            return 0
+        await conn.execute(
+            "DELETE FROM schedule_runs WHERE schedule_id = ANY($1::uuid[])",
+            schedule_ids,
+        )
+        deleted = await conn.fetchval(
+            """WITH deleted AS (
+                   DELETE FROM schedules
+                   WHERE id = ANY($1::uuid[])
+                   RETURNING id
+               )
+               SELECT COUNT(*) FROM deleted""",
+            schedule_ids,
+        )
+
+    count = int(deleted or 0)
+    if count:
+        logger.info("Retired %d Memory Vitality Scoring workflow schedule(s)", count)
+    return count
 
 
 async def ensure_server_system_schedules() -> int:
@@ -55,6 +102,8 @@ async def ensure_server_system_schedules() -> int:
     pool = await get_pool()
     if pool is None:
         return 0
+
+    await retire_vitality_scoring_workflow_schedules()
 
     async with pool.acquire() as conn:
         repo = ScheduleRepository(pool)
@@ -71,54 +120,67 @@ async def ensure_server_system_schedules() -> int:
             """
         )
 
-    for row in rows:
-        async with pool.acquire() as conn:
-            existing = await conn.fetchval(
-                """SELECT 1 FROM schedules
-                   WHERE title = $1
-                     AND organization_id = $2::uuid
-                     AND is_system = true""",
-                STALE_TASK_REAPER_TITLE,
-                row["organization_id"],
-            )
-        sched = await repo.ensure_system_schedule(
-            title=STALE_TASK_REAPER_TITLE,
-            org_id=row["organization_id"],
-            description=(
+    schedule_specs = [
+        {
+            "title": STALE_TASK_REAPER_TITLE,
+            "description": (
                 "Server-side stale-claim reaper. Releases expired task claims "
                 "without depending on daemon availability. Short-circuits with "
                 "schedule.skipped when there are no stale claims to release."
             ),
-            agent_type="lucent",
-            schedule_type="interval",
-            interval_seconds=STALE_TASK_REAPER_INTERVAL_SECONDS,
-            priority="low",
-            prompt="",
-            trigger_config={
-                "schedule_type": "interval",
-                "interval_seconds": STALE_TASK_REAPER_INTERVAL_SECONDS,
-                "timezone": "UTC",
-                "execution_mode": "server_side",
-                "runner": "api_process",
-                "preflight": "stale_task_reaper_has_work",
-            },
-            request_template={
-                "title_prefix": "[Server Workflow]",
-                "title": STALE_TASK_REAPER_TITLE,
-                "description": (
-                    "Server-side maintenance workflow. No request is created; "
-                    "results are recorded on schedule_runs."
-                ),
-            },
-            actions=[STALE_TASK_REAPER_ACTION],
-            review_instructions=(
+            "agent_type": "lucent",
+            "interval_seconds": STALE_TASK_REAPER_INTERVAL_SECONDS,
+            "preflight": "stale_task_reaper_has_work",
+            "actions": [STALE_TASK_REAPER_ACTION],
+            "review_instructions": (
                 "No model review applies. Verify by checking schedule_runs.result "
                 "and task claim state if this workflow reports released tasks."
             ),
-            created_by=row["daemon_user_id"],
-        )
-        if not existing and sched:
-            created += 1
+        },
+    ]
+
+    for row in rows:
+        for spec in schedule_specs:
+            async with pool.acquire() as conn:
+                existing = await conn.fetchval(
+                    """SELECT 1 FROM schedules
+                       WHERE title = $1
+                         AND organization_id = $2::uuid
+                         AND is_system = true""",
+                    spec["title"],
+                    row["organization_id"],
+                )
+            sched = await repo.ensure_system_schedule(
+                title=spec["title"],
+                org_id=row["organization_id"],
+                description=spec["description"],
+                agent_type=spec["agent_type"],
+                schedule_type="interval",
+                interval_seconds=spec["interval_seconds"],
+                priority="low",
+                prompt="",
+                trigger_config={
+                    "schedule_type": "interval",
+                    "interval_seconds": spec["interval_seconds"],
+                    "timezone": "UTC",
+                    "execution_mode": "server_side",
+                    "runner": "api_process",
+                    "preflight": spec["preflight"],
+                },
+                request_template={
+                    "title_prefix": "[Server Workflow]",
+                    "title": spec["title"],
+                    "description": (
+                        "Server-side maintenance workflow. No request is created; "
+                        "results are recorded on schedule_runs."
+                    ),
+                },
+                actions=spec["actions"],
+                review_instructions=spec["review_instructions"],
+                created_by=row["daemon_user_id"],
+            )
+            if not existing and sched:
+                created += 1
 
     if created:
         logger.info("Seeded %d server system schedule(s)", created)
@@ -194,6 +256,59 @@ async def execute_stale_task_reaper_schedule(
         raise
 
 
+async def run_vitality_scoring_background_once(*, force: bool = False) -> int:
+    """Run deterministic vitality scoring for due organizations without a workflow row."""
+    pool = await get_pool()
+    if pool is None:
+        return 0
+
+    sched_repo = ScheduleRepository(pool)
+    memory_repo = MemoryRepository(pool)
+    now = datetime.now(UTC)
+    executed = 0
+
+    async with pool.acquire() as conn:
+        org_ids = [str(row["id"]) for row in await conn.fetch("SELECT id FROM organizations")]
+
+    for org_id in org_ids:
+        last_run_at = _last_vitality_scoring_at_by_org.get(org_id)
+        if not force and last_run_at is not None:
+            elapsed = (now - last_run_at).total_seconds()
+            if elapsed < VITALITY_SCORING_INTERVAL_SECONDS:
+                continue
+
+        try:
+            if not await sched_repo.memory_vitality_scoring_has_work(org_id):
+                _last_vitality_scoring_at_by_org[org_id] = now
+                continue
+
+            score_result = await memory_repo.compute_vitality_scores(
+                batch_size=VITALITY_SCORING_BATCH_SIZE,
+                organization_id=org_id,
+            )
+            _last_vitality_scoring_at_by_org[org_id] = now
+            executed += 1
+            logger.info(
+                json.dumps(
+                    {
+                        "event_type": "background.vitality_scoring.completed",
+                        "organization_id": org_id,
+                        "processed": score_result.get("processed", 0),
+                        "updated": score_result.get("updated", 0),
+                        "stage_transitions": score_result.get("stage_transitions", 0),
+                        "computed_at": score_result.get("computed_at").isoformat()
+                        if score_result.get("computed_at")
+                        else None,
+                    },
+                    sort_keys=True,
+                )
+            )
+        except Exception:
+            logger.exception("Background vitality scoring failed for org=%s", org_id)
+
+    return executed
+
+
 async def run_server_system_schedules_once() -> int:
     """Execute due server-side built-in schedules once."""
     pool = await get_pool()
@@ -235,6 +350,7 @@ async def _server_system_schedule_loop() -> None:
     while True:
         try:
             await run_server_system_schedules_once()
+            await run_vitality_scoring_background_once()
         except asyncio.CancelledError:
             break
         except Exception:

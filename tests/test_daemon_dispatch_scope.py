@@ -49,7 +49,6 @@ class TestRequiredMemoryScope:
         for title in (
             "Experience Compression",
             "Learning Extraction",
-            "Memory Vitality Scoring",
         ):
             assert (
                 _get_required_memory_scope("Some task", f"[Scheduled] {title}")

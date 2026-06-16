@@ -145,6 +145,8 @@ class TestPhase1VitalityComputation:
         assert stale_after["vitality_score"] is not None
         assert fresh_after["vitality_computed_at"] is not None
         assert stale_after["vitality_computed_at"] is not None
+        assert fresh_after["vitality_computed_at"] >= fresh_after["updated_at"]
+        assert stale_after["vitality_computed_at"] >= stale_after["updated_at"]
         assert fresh_after["vitality_score"] > stale_after["vitality_score"]
 
     async def test_handles_no_access_history_edge_case(self, db_pool, test_user, clean_test_data):
