@@ -1549,6 +1549,7 @@ class RequestAPI:
         sequence_order: int = 0,
         model: str | None = None,
         reasoning_effort: str | None = None,
+        requesting_user_id: str | None = None,
         output_contract: dict | None = None,
     ) -> dict | None:
         body = {"title": title, "priority": priority, "sequence_order": sequence_order}
@@ -1560,6 +1561,8 @@ class RequestAPI:
             body["model"] = model
         if reasoning_effort:
             body["reasoning_effort"] = reasoning_effort
+        if requesting_user_id:
+            body["requesting_user_id"] = requesting_user_id
         if output_contract:
             body["output_contract"] = output_contract
         try:
@@ -6301,6 +6304,58 @@ class LucentDaemon:
 
         return None, "none"
 
+    async def _resolve_review_requesting_user_id(
+        self,
+        *,
+        org_id: str,
+        requester_user_id: str,
+    ) -> str:
+        """Route daemon-owned review work to a human owner/admin for Handoffs."""
+        import asyncpg
+
+        try:
+            conn = await asyncpg.connect(DATABASE_URL)
+        except Exception as e:
+            log(f"Review requester resolution DB connect failed: {e}", "WARN")
+            return requester_user_id
+
+        try:
+            requester = await conn.fetchrow(
+                """SELECT id::text AS id, role, external_id
+                   FROM users
+                   WHERE id = $1::uuid AND organization_id = $2::uuid""",
+                requester_user_id,
+                org_id,
+            )
+            if not requester:
+                return requester_user_id
+            if requester["role"] != "daemon" and requester["external_id"] != "daemon-service":
+                return requester_user_id
+
+            human = await conn.fetchrow(
+                """SELECT id::text AS id
+                   FROM users
+                   WHERE organization_id = $1::uuid
+                     AND is_active = true
+                     AND role IN ('owner', 'admin')
+                     AND COALESCE(external_id, '') <> 'daemon-service'
+                   ORDER BY CASE role WHEN 'owner' THEN 0 ELSE 1 END, created_at
+                   LIMIT 1""",
+                org_id,
+            )
+            if human:
+                log(
+                    f"Review request owned by daemon user {requester_user_id[:8]}; "
+                    f"routing review/Handoffs to human {human['id'][:8]}",
+                )
+                return str(human["id"])
+            return requester_user_id
+        except Exception as e:
+            log(f"Review requester resolution failed: {e}", "WARN")
+            return requester_user_id
+        finally:
+            await conn.close()
+
     async def _create_request_review_task(self, request_id: str, request_data: dict) -> dict | None:
         """Create a review task when a request enters review state."""
         tasks = request_data.get("tasks", []) or []
@@ -6343,7 +6398,10 @@ class LucentDaemon:
                 "WARN",
             )
             return None
-        requesting_user_id = str(requester)
+        requesting_user_id = await self._resolve_review_requesting_user_id(
+            org_id=org_id,
+            requester_user_id=str(requester),
+        )
 
         agent_type, mode = await self._find_review_agent_type(org_id, requesting_user_id)
         if not agent_type:
@@ -6513,13 +6571,37 @@ class LucentDaemon:
             "If you cannot identify the missing deliverable precisely, return "
             "NEEDS_REWORK and ask the task agent to record the output.\n"
             "=== END OUTPUT ARTIFACT REVIEW ===\n\n"
+            "=== SETUP/CONFIGURATION BLOCKER HANDOFFS ===\n"
+            "Before deciding APPROVED or NEEDS_REWORK, check whether task output "
+            "reports a legitimate environment, setup, credential, permission, dependency, "
+            "or configuration blocker that prevented useful completion. Examples include "
+            "missing API keys, inaccessible services, invalid local configuration, "
+            "unavailable MCP servers, sandbox provisioning failures, missing repo "
+            "permissions, or dependency installation failures that the task agent could "
+            "not reasonably fix.\n"
+            "When a task was blocked by a user- or environment-actionable issue and "
+            "reported what was attempted clearly, call `send_handoff` before emitting "
+            "REQUEST_REVIEW_DECISION. The handoff must explain what was attempted, what "
+            "blocked progress, why Lucent could not resolve it autonomously, and exactly "
+            "what the user may need to configure or verify next. Include request/task "
+            "references when IDs are available, set `requires_response=true` only if "
+            "Lucent needs an answer before continuing, and use a stable `dedupe_key` like "
+            "`review-blocker:<request-id>:<task-id-or-topic>`. A narrative-only handoff "
+            "section in your final output is not enough; you must call `send_handoff` so "
+            "the user sees a Handoffs item.\n"
+            "Approve with a blocker handoff only when the blocker is external and the "
+            "task's report is clear enough for the user to act on. Return NEEDS_REWORK "
+            "when the task merely blames setup/configuration without evidence, attempted "
+            "actions, or actionable remediation detail.\n"
+            "=== END SETUP/CONFIGURATION BLOCKER HANDOFFS ===\n\n"
             "Return your decision in this exact machine-readable shape "
             "(emit it ONLY after completing all mandatory memory updates above):\n"
             "REQUEST_REVIEW_DECISION: APPROVED|NEEDS_REWORK\n"
             "TASK_IDS_TO_REWORK: <comma-separated task ids, optional when approved>\n"
             "FEEDBACK: <actionable rationale and correction guidance>\n"
             "MEMORIES_UPDATED: <comma-separated memory IDs you called update_memory on; "
-            "use \"none\" only when no Linked Memories section was provided>"
+            "use \"none\" only when no Linked Memories section was provided>\n"
+            "HANDOFF_SENT: <handoff URL/id if you called send_handoff, or \"none\">"
         )
 
         review_model, review_model_reason = _select_model_for_task(
@@ -6537,6 +6619,7 @@ class LucentDaemon:
             priority=request_data.get("priority", "medium"),
             sequence_order=10_000_000,
             model=review_model,
+            requesting_user_id=requesting_user_id,
         )
         if review_task:
             log(

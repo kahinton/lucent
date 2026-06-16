@@ -324,7 +324,15 @@ class TestReviewOutputGuidance:
         async def fake_find_review_agent_type(_org_id, _requesting_user_id):
             return "request-review", "primary"
 
+        async def fake_resolve_review_requesting_user_id(*, org_id, requester_user_id):
+            return requester_user_id
+
         monkeypatch.setattr(daemon, "_find_review_agent_type", fake_find_review_agent_type)
+        monkeypatch.setattr(
+            daemon,
+            "_resolve_review_requesting_user_id",
+            fake_resolve_review_requesting_user_id,
+        )
 
         await daemon._create_request_review_task(
             "11111111-1111-1111-1111-111111111111",
@@ -385,7 +393,15 @@ class TestReviewOutputGuidance:
         async def fake_find_review_agent_type(_org_id, _requesting_user_id):
             return "request-review", "primary"
 
+        async def fake_resolve_review_requesting_user_id(*, org_id, requester_user_id):
+            return requester_user_id
+
         monkeypatch.setattr(daemon, "_find_review_agent_type", fake_find_review_agent_type)
+        monkeypatch.setattr(
+            daemon,
+            "_resolve_review_requesting_user_id",
+            fake_resolve_review_requesting_user_id,
+        )
 
         await daemon._create_request_review_task(
             "11111111-1111-1111-1111-111111111111",
@@ -416,3 +432,65 @@ class TestReviewOutputGuidance:
         assert "START" in description
         assert "END_SENTINEL" in description
         assert "truncated" not in description.lower()
+
+    @pytest.mark.asyncio
+    async def test_review_task_for_daemon_request_targets_human_handoff_user(self, monkeypatch):
+        from daemon.daemon import LucentDaemon
+
+        captured: dict = {}
+        human_user_id = "77777777-7777-7777-7777-777777777777"
+
+        async def fake_get_request_memories(_request_id):
+            return []
+
+        async def fake_create_task(**kwargs):
+            captured.update(kwargs)
+            return {"id": "review-task-id", **kwargs}
+
+        monkeypatch.setattr(
+            "daemon.daemon.RequestAPI.get_request_memories",
+            fake_get_request_memories,
+        )
+        monkeypatch.setattr("daemon.daemon.RequestAPI.create_task", fake_create_task)
+
+        daemon = LucentDaemon()
+
+        async def fake_find_review_agent_type(_org_id, _requesting_user_id):
+            assert _requesting_user_id == human_user_id
+            return "request-review", "primary"
+
+        async def fake_resolve_review_requesting_user_id(*, org_id, requester_user_id):
+            assert requester_user_id == "33333333-3333-3333-3333-333333333333"
+            return human_user_id
+
+        monkeypatch.setattr(daemon, "_find_review_agent_type", fake_find_review_agent_type)
+        monkeypatch.setattr(
+            daemon,
+            "_resolve_review_requesting_user_id",
+            fake_resolve_review_requesting_user_id,
+        )
+
+        await daemon._create_request_review_task(
+            "11111111-1111-1111-1111-111111111111",
+            {
+                "id": "11111111-1111-1111-1111-111111111111",
+                "title": "Review daemon-owned blocker",
+                "description": "A cognitive request hit a setup blocker",
+                "organization_id": "22222222-2222-2222-2222-222222222222",
+                "created_by": "33333333-3333-3333-3333-333333333333",
+                "priority": "medium",
+                "tasks": [
+                    {
+                        "id": "44444444-4444-4444-4444-444444444444",
+                        "status": "completed",
+                        "title": "Blocked task",
+                        "result": "BLOCKED: missing admin configuration.",
+                        "outputs": [],
+                    }
+                ],
+            },
+        )
+
+        assert captured["requesting_user_id"] == human_user_id
+        assert "user_id=" not in captured["description"]
+        assert "SETUP/CONFIGURATION BLOCKER HANDOFFS" in captured["description"]

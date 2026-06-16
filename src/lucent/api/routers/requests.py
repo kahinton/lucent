@@ -146,6 +146,7 @@ class TaskCreate(BaseModel):
     reasoning_effort: str | None = Field(default=None, max_length=64)
     sandbox_template_id: str | None = None  # Reference a saved sandbox template
     sandbox_config: dict | None = None  # Or inline sandbox config (template takes precedence)
+    requesting_user_id: str | None = None
     output_contract: dict | None = None  # Optional structured output contract (JSON Schema)
     output_schema: dict | None = None  # Backwards-compatible alias for output_contract.json_schema
 
@@ -574,6 +575,23 @@ async def create_task(
         raise HTTPException(404, "Request not found")
     _require_request_mutation(req, user)
 
+    requesting_user_id = str(req["created_by"]) if req.get("created_by") else None
+    if body.requesting_user_id:
+        if not _can_administer_requests(user):
+            raise HTTPException(403, "Only admins/owners/daemon can set requesting_user_id")
+        async with pool.acquire() as conn:
+            target_user_exists = await conn.fetchval(
+                """SELECT 1 FROM users
+                   WHERE id = $1::uuid
+                     AND organization_id = $2::uuid
+                     AND is_active = true""",
+                body.requesting_user_id,
+                org_id,
+            )
+        if not target_user_exists:
+            raise HTTPException(422, "requesting_user_id must be an active user in this org")
+        requesting_user_id = body.requesting_user_id
+
     # Validate model against registry (matches MCP create_task behavior)
     if body.model:
         from lucent.model_registry import validate_model, validate_reasoning_effort
@@ -645,7 +663,7 @@ async def create_task(
             reasoning_effort=body.reasoning_effort,
             sandbox_template_id=body.sandbox_template_id,
             sandbox_config=body.sandbox_config,
-            requesting_user_id=str(req["created_by"]) if req.get("created_by") else None,
+            requesting_user_id=requesting_user_id,
             output_contract=output_contract,
         )
     except ValueError as exc:
