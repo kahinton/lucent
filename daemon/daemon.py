@@ -1145,6 +1145,47 @@ async def _mint_scoped_api_key(
         await conn.close()
 
 
+async def _refresh_scoped_memory_server_config(
+    mcp_config: dict | None,
+) -> dict | None:
+    """Re-mint the memory-server key for a task-scoped MCP config.
+
+    Task sessions must never recover from a scoped-key auth failure by copying
+    the daemon's global MCP credentials. The scope headers are internal retry
+    metadata that let us recreate the same security boundary with a fresh key.
+    """
+    if not mcp_config or not isinstance(mcp_config, dict):
+        return None
+    memory_server = mcp_config.get("memory-server")
+    if not isinstance(memory_server, dict):
+        return None
+    headers = dict(memory_server.get("headers") or {})
+    memory_scope = headers.get("X-Lucent-Memory-Scope")
+    org_id = headers.get("X-Lucent-Org-Id")
+    if memory_scope not in {"user", "org_shared_only"} or not org_id:
+        return None
+    memory_scope_user_id = headers.get("X-Lucent-Memory-Scope-User-Id") or None
+    if memory_scope == "user" and not memory_scope_user_id:
+        return None
+
+    scoped_key = await _mint_scoped_api_key(
+        memory_scope=memory_scope,
+        memory_scope_user_id=memory_scope_user_id,
+        org_id=org_id,
+        ttl_minutes=60,
+    )
+    if not scoped_key:
+        return None
+
+    refreshed_headers = dict(headers)
+    refreshed_headers["Authorization"] = f"Bearer {scoped_key}"
+    refreshed_memory_server = dict(memory_server)
+    refreshed_memory_server["headers"] = refreshed_headers
+    refreshed = dict(mcp_config)
+    refreshed["memory-server"] = refreshed_memory_server
+    return refreshed
+
+
 # Schedule titles that require org-shared-only processing.
 # Technical memory consolidation is retired; model-backed schedules now default
 # to per-user memory scope unless a future org-wide maintenance task is added.
@@ -4062,7 +4103,13 @@ class LucentDaemon:
                     scoped_mcp["memory-server"] = {
                         "type": "http",
                         "url": MCP_URL,
-                        "headers": {"Authorization": f"Bearer {scoped_key}"},
+                        "headers": {
+                            "Authorization": f"Bearer {scoped_key}",
+                            "X-Lucent-Memory-Scope": "user",
+                            "X-Lucent-Memory-Scope-User-Id": str(owner_user_id),
+                            "X-Lucent-Org-Id": str(org_id),
+                            "X-Lucent-Request-Id": str(request_id),
+                        },
                         "tools": ["*"],
                     }
 
@@ -4361,20 +4408,31 @@ class LucentDaemon:
                         f"Session '{name}' detected MCP auth failure; attempting key recovery and single retry",
                         "WARN",
                     )
-                    recovered = await _handle_auth_failure(self.instance_id)
-                    if not recovered:
-                        status = "error"
-                        log(f"Session '{name}' could not recover MCP credentials", "ERROR")
-                        if span:
-                            span.set_attribute("daemon.session.error", "auth_recovery_failed")
-                        return None
-
                     retried_after_auth_failure = True
                     if mcp_config_override:
-                        refreshed = dict(mcp_config_override)
-                        if MCP_CONFIG.get("memory-server"):
-                            refreshed["memory-server"] = MCP_CONFIG["memory-server"]
+                        refreshed = await _refresh_scoped_memory_server_config(
+                            mcp_config_override
+                        )
+                        if not refreshed:
+                            status = "error"
+                            log(
+                                f"Session '{name}' could not refresh scoped memory-server credentials",
+                                "ERROR",
+                            )
+                            if span:
+                                span.set_attribute(
+                                    "daemon.session.error", "scoped_auth_recovery_failed"
+                                )
+                            return None
                         mcp_config_override = refreshed
+                    else:
+                        recovered = await _handle_auth_failure(self.instance_id)
+                        if not recovered:
+                            status = "error"
+                            log(f"Session '{name}' could not recover MCP credentials", "ERROR")
+                            if span:
+                                span.set_attribute("daemon.session.error", "auth_recovery_failed")
+                            return None
                     log(f"Session '{name}' recovered MCP credentials; retrying once", "INFO")
                     continue
                 except asyncio.TimeoutError:
@@ -5376,6 +5434,9 @@ class LucentDaemon:
                         "url": MCP_URL,
                         "headers": {
                             "Authorization": f"Bearer {_scoped_key}",
+                            "X-Lucent-Memory-Scope": _scope_type,
+                            "X-Lucent-Memory-Scope-User-Id": _scope_user or "",
+                            "X-Lucent-Org-Id": str(org_id),
                             "X-Lucent-Agent-Definition-Id": str(agent_data["id"]),
                             "X-Lucent-Task-Id": str(task_id),
                             "X-Lucent-Request-Id": str(request_id) if request_id else "",

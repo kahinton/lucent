@@ -304,6 +304,110 @@ async def test_dispatch_fails_gracefully_when_no_accessible_agent(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_dispatch_memory_server_config_carries_user_scope_headers(monkeypatch):
+    import daemon.daemon as daemon_module
+
+    daemon = LucentDaemon()
+    task_id = "11111111-1111-1111-1111-111111111111"
+    request_id = "22222222-2222-2222-2222-222222222222"
+    org_id = "33333333-3333-3333-3333-333333333333"
+    user_id = "44444444-4444-4444-4444-444444444444"
+    agent_id = "55555555-5555-5555-5555-555555555555"
+    captured_mcp: dict = {}
+
+    async def _noop_ensure_reviews():
+        return None
+
+    async def _pending():
+        return [
+            {
+                "id": UUID(task_id),
+                "request_id": UUID(request_id),
+                "organization_id": UUID(org_id),
+                "title": "Send user handoff",
+                "description": "Use send_handoff to ask the user for configuration.",
+                "agent_type": "research",
+                "requesting_user_id": UUID(user_id),
+            }
+        ]
+
+    async def _claim(claim_task_id, _instance_id):
+        return {"id": claim_task_id}
+
+    async def _update_model_settings(_task_id, **_kwargs):
+        return {"ok": True}
+
+    async def _ctx(_request_id):
+        return "", ""
+
+    async def _request(_request_id):
+        return {"id": _request_id, "title": "User owned request"}
+
+    async def _event(task_id, event_type, detail=None, metadata=None):
+        return {"id": task_id, "event_type": event_type, "metadata": metadata}
+
+    async def _start(task_id):
+        return {"id": task_id}
+
+    async def _complete(task_id, result, **_kwargs):
+        return {"id": task_id, "result": result}
+
+    async def _agent(**_kwargs):
+        return {"id": agent_id, "name": "research", "content": "agent"}
+
+    async def _empty(*_args, **_kwargs):
+        return []
+
+    async def _prompt(*_args, **_kwargs):
+        return "system prompt"
+
+    async def _mint(**_kwargs):
+        return "hs_task_scoped"
+
+    async def _run_session(*_args, **kwargs):
+        captured_mcp.update(kwargs["mcp_config_override"])
+        return "completed task output"
+
+    monkeypatch.setattr(daemon, "_ensure_request_review_tasks", _noop_ensure_reviews)
+    monkeypatch.setattr(daemon, "_get_technical_context_for_request", _ctx)
+    monkeypatch.setattr(daemon, "_validate_task_result", lambda *_args, **_kwargs: (True, ""))
+    monkeypatch.setattr(daemon, "run_session", _run_session)
+    monkeypatch.setattr("daemon.daemon.RequestAPI.get_pending_tasks", _pending)
+    monkeypatch.setattr("daemon.daemon.RequestAPI.claim_task", _claim)
+    monkeypatch.setattr("daemon.daemon.RequestAPI.update_task_model_settings", _update_model_settings)
+    monkeypatch.setattr("daemon.daemon.RequestAPI.get_request_context", _ctx)
+    monkeypatch.setattr("daemon.daemon.RequestAPI.get_request", _request)
+    monkeypatch.setattr("daemon.daemon.RequestAPI.add_event", _event)
+    monkeypatch.setattr("daemon.daemon.RequestAPI.start_task", _start)
+    monkeypatch.setattr("daemon.daemon.RequestAPI.complete_task", _complete)
+    monkeypatch.setattr("daemon.daemon.load_accessible_agent", _agent)
+    monkeypatch.setattr("daemon.daemon.load_accessible_skills_for_agent", _empty)
+    monkeypatch.setattr("daemon.daemon.load_accessible_mcp_servers_for_agent", _empty)
+    monkeypatch.setattr("daemon.daemon.load_accessible_hooks_for_agent", _empty)
+    monkeypatch.setattr("daemon.daemon.load_accessible_managed_tools_for_agent", _empty)
+    monkeypatch.setattr("daemon.daemon.build_subagent_prompt", _prompt)
+    monkeypatch.setattr("daemon.daemon._mint_scoped_api_key", _mint)
+    daemon_module.MCP_CONFIG = {
+        "memory-server": {
+            "type": "http",
+            "url": "http://mcp",
+            "headers": {"Authorization": "Bearer daemon-key"},
+            "tools": ["*"],
+        }
+    }
+
+    await daemon._dispatch_tracked_tasks(max_tasks=1)
+
+    headers = captured_mcp["memory-server"]["headers"]
+    assert headers["Authorization"] == "Bearer hs_task_scoped"
+    assert headers["X-Lucent-Memory-Scope"] == "user"
+    assert headers["X-Lucent-Memory-Scope-User-Id"] == user_id
+    assert headers["X-Lucent-Org-Id"] == org_id
+    assert headers["X-Lucent-Task-Id"] == task_id
+    assert headers["X-Lucent-Request-Id"] == request_id
+
+
+@pytest.mark.asyncio
 async def test_dispatch_log_line_includes_task_request_and_user_context(monkeypatch):
     import daemon.daemon as daemon_module
 

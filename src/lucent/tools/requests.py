@@ -269,6 +269,19 @@ async def _create_handoff_interaction_response(
     if not org_id:
         return json.dumps({"error": "No organization context"})
     target_user_id = user_id or str(current_user_id)
+    if (
+        user_role == "daemon"
+        and memory_scope != "user"
+        and str(target_user_id) == str(current_user_id)
+    ):
+        return json.dumps(
+            {
+                "error": (
+                    "send_handoff requires a user-scoped MCP key or explicit "
+                    "human target; refusing to create a daemon-owned Handoff"
+                )
+            }
+        )
     if memory_scope == "user" and memory_scope_user_id is not None:
         if target_user_id and str(target_user_id) != str(memory_scope_user_id):
             return json.dumps({"error": "API key is scoped to a different user"})
