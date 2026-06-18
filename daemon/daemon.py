@@ -388,6 +388,15 @@ def _build_mcp_tool_summary(tracker: list[dict]) -> str:
     )
     return summary
 from lucent.auth import set_current_user
+from lucent.memory_scope import (
+    MEMORY_SCOPE_HEADER,
+    MEMORY_SCOPE_ORG_SHARED_ONLY,
+    MEMORY_SCOPE_USER,
+    MEMORY_SCOPE_USER_ID_HEADER,
+    ORG_ID_HEADER,
+    VALID_MEMORY_SCOPES,
+    build_memory_scope_headers,
+)
 from lucent.secrets import SecretRegistry, initialize_secret_provider
 from lucent.secrets.utils import is_secret_reference, resolve_secret_reference
 from lucent.secrets.utils import resolve_env_vars as resolve_secret_env_vars
@@ -1145,6 +1154,52 @@ async def _mint_scoped_api_key(
         await conn.close()
 
 
+def _build_scoped_memory_server_config(
+    *,
+    scoped_key: str,
+    memory_scope: str,
+    org_id: str,
+    memory_scope_user_id: str | None = None,
+    tools: list[str],
+    extra_headers: dict[str, str] | None = None,
+) -> dict:
+    """Build a task-scoped ``memory-server`` MCP config.
+
+    Every scoped session carries the same shape: a bearer credential plus the
+    scope retry-metadata headers (see ``lucent.memory_scope``). Centralizing
+    construction here guarantees the scope headers are always attached, so
+    ``_refresh_scoped_memory_server_config`` can re-mint an equivalent key after
+    an auth failure without ever copying the daemon's global credentials.
+
+    Args:
+        scoped_key: The freshly minted ``hs_`` scoped key.
+        memory_scope: ``'user'`` or ``'org_shared_only'``.
+        org_id: The organization the key belongs to.
+        memory_scope_user_id: The user the key is scoped to (None for shared).
+        tools: The memory-server tool allowlist (used as-is; callers may append).
+        extra_headers: Optional task/request/agent identifiers to include.
+
+    Returns:
+        A ready-to-use MCP server config dict.
+    """
+    headers = {
+        "Authorization": f"Bearer {scoped_key}",
+        **build_memory_scope_headers(
+            memory_scope,
+            org_id=org_id,
+            memory_scope_user_id=memory_scope_user_id,
+        ),
+    }
+    if extra_headers:
+        headers.update(extra_headers)
+    return {
+        "type": "http",
+        "url": MCP_URL,
+        "headers": headers,
+        "tools": tools,
+    }
+
+
 async def _refresh_scoped_memory_server_config(
     mcp_config: dict | None,
 ) -> dict | None:
@@ -1160,12 +1215,12 @@ async def _refresh_scoped_memory_server_config(
     if not isinstance(memory_server, dict):
         return None
     headers = dict(memory_server.get("headers") or {})
-    memory_scope = headers.get("X-Lucent-Memory-Scope")
-    org_id = headers.get("X-Lucent-Org-Id")
-    if memory_scope not in {"user", "org_shared_only"} or not org_id:
+    memory_scope = headers.get(MEMORY_SCOPE_HEADER)
+    org_id = headers.get(ORG_ID_HEADER)
+    if memory_scope not in VALID_MEMORY_SCOPES or not org_id:
         return None
-    memory_scope_user_id = headers.get("X-Lucent-Memory-Scope-User-Id") or None
-    if memory_scope == "user" and not memory_scope_user_id:
+    memory_scope_user_id = headers.get(MEMORY_SCOPE_USER_ID_HEADER) or None
+    if memory_scope == MEMORY_SCOPE_USER and not memory_scope_user_id:
         return None
 
     scoped_key = await _mint_scoped_api_key(
@@ -4100,18 +4155,14 @@ class LucentDaemon:
                         raise RuntimeError("scoped key minting failed")
 
                     scoped_mcp = dict(MCP_CONFIG)
-                    scoped_mcp["memory-server"] = {
-                        "type": "http",
-                        "url": MCP_URL,
-                        "headers": {
-                            "Authorization": f"Bearer {scoped_key}",
-                            "X-Lucent-Memory-Scope": "user",
-                            "X-Lucent-Memory-Scope-User-Id": str(owner_user_id),
-                            "X-Lucent-Org-Id": str(org_id),
-                            "X-Lucent-Request-Id": str(request_id),
-                        },
-                        "tools": ["*"],
-                    }
+                    scoped_mcp["memory-server"] = _build_scoped_memory_server_config(
+                        scoped_key=scoped_key,
+                        memory_scope=MEMORY_SCOPE_USER,
+                        org_id=str(org_id),
+                        memory_scope_user_id=str(owner_user_id),
+                        tools=["*"],
+                        extra_headers={"X-Lucent-Request-Id": str(request_id)},
+                    )
 
                     prompt = self._build_decomposition_prompt(req)
                     decomposition_model, decomposition_model_reason = _select_model_for_task(
@@ -5409,16 +5460,16 @@ class LucentDaemon:
             _scope_type: str | None
             _scope_user: str | None
             _override_scope = _get_required_memory_scope(title, _request_title)
-            if _override_scope == "org_shared_only":
+            if _override_scope == MEMORY_SCOPE_ORG_SHARED_ONLY:
                 # System maintenance task — operates on shared org memories only.
-                _scope_type = "org_shared_only"
+                _scope_type = MEMORY_SCOPE_ORG_SHARED_ONLY
                 _scope_user = None
             else:
                 # Default and overwhelmingly the common case: scope to the
                 # request's owning user. This holds even for auto-created
                 # post-completion review tasks, which previously bypassed
                 # scoping and ran with daemon org-wide access.
-                _scope_type = "user"
+                _scope_type = MEMORY_SCOPE_USER
                 _scope_user = requesting_user_id
 
             if MCP_CONFIG.get("memory-server"):
@@ -5429,25 +5480,23 @@ class LucentDaemon:
                     ttl_minutes=60,
                 )
                 if _scoped_key:
-                    task_mcp_config["memory-server"] = {
-                        "type": "http",
-                        "url": MCP_URL,
-                        "headers": {
-                            "Authorization": f"Bearer {_scoped_key}",
-                            "X-Lucent-Memory-Scope": _scope_type,
-                            "X-Lucent-Memory-Scope-User-Id": _scope_user or "",
-                            "X-Lucent-Org-Id": str(org_id),
-                            "X-Lucent-Agent-Definition-Id": str(agent_data["id"]),
-                            "X-Lucent-Task-Id": str(task_id),
-                            "X-Lucent-Request-Id": str(request_id) if request_id else "",
-                        },
-                        "tools": _memory_server_tools_for_task(
+                    task_mcp_config["memory-server"] = _build_scoped_memory_server_config(
+                        scoped_key=_scoped_key,
+                        memory_scope=_scope_type,
+                        org_id=str(org_id),
+                        memory_scope_user_id=_scope_user,
+                        tools=_memory_server_tools_for_task(
                             agent_type,
                             title,
                             _request_title,
                             description,
                         ),
-                    }
+                        extra_headers={
+                            "X-Lucent-Agent-Definition-Id": str(agent_data["id"]),
+                            "X-Lucent-Task-Id": str(task_id),
+                            "X-Lucent-Request-Id": str(request_id) if request_id else "",
+                        },
+                    )
                     if managed_tools:
                         for tool_name in (
                             "list_tool_definitions", "get_tool_definition", "run_managed_tool",

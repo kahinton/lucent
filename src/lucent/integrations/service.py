@@ -20,10 +20,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
 
-import bcrypt
 from asyncpg import Pool
 
 from lucent.auth import set_current_user
+from lucent.db.api_key import ApiKeyRepository
 from lucent.db.audit import (
     CHANNEL_NOT_ALLOWED,
     IDENTITY_RESOLVED,
@@ -42,6 +42,7 @@ from lucent.integrations.repositories import (
     UserLinkRepo,
 )
 from lucent.llm.mcp_bridge import MCPToolBridge
+from lucent.memory_scope import MEMORY_SCOPE_USER, build_memory_scope_headers
 from lucent.rate_limit import RateLimiter, get_rate_limiter
 from lucent.rbac import Permission, has_permission
 
@@ -599,9 +600,11 @@ class IntegrationService:
             mcp_url=self._mcp_url,
             headers={
                 "Authorization": f"Bearer {scoped_key}",
-                "X-Lucent-Memory-Scope": "user",
-                "X-Lucent-Memory-Scope-User-Id": str(user["id"]),
-                "X-Lucent-Org-Id": str(user["organization_id"]),
+                **build_memory_scope_headers(
+                    MEMORY_SCOPE_USER,
+                    org_id=str(user["organization_id"]),
+                    memory_scope_user_id=str(user["id"]),
+                ),
             },
             skip_url_validation=True,  # Internal URL, not user-controllable
         )
@@ -629,31 +632,18 @@ class IntegrationService:
         if not user_id or not org_id:
             return None, None
 
-        plain_key = f"hs_{secrets.token_urlsafe(32)}"
-        key_prefix = plain_key[:11]
-        key_hash = bcrypt.hashpw(plain_key.encode(), bcrypt.gensalt()).decode()
-        expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
-        key_name = f"integration-mcp-{secrets.token_hex(4)}"
-
         try:
-            async with self._pool.acquire() as conn:
-                row = await conn.fetchrow(
-                    """
-                    INSERT INTO api_keys
-                        (user_id, organization_id, name, key_prefix, key_hash, scopes,
-                         expires_at, memory_scope, memory_scope_user_id)
-                    VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, 'user', $1::uuid)
-                    RETURNING id
-                    """,
-                    user_id,
-                    org_id,
-                    key_name,
-                    key_prefix,
-                    key_hash,
-                    ["read"],
-                    expires_at,
-                )
-            return row["id"], plain_key
+            repo = ApiKeyRepository(self._pool)
+            record, plain_key = await repo.create(
+                user_id=UUID(user_id),
+                organization_id=UUID(org_id),
+                name=f"integration-mcp-{secrets.token_hex(4)}",
+                scopes=["read"],
+                expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
+                memory_scope_user_id=UUID(user_id),
+                memory_scope=MEMORY_SCOPE_USER,
+            )
+            return record["id"], plain_key
         except Exception:
             logger.exception("Failed to create integration MCP scoped key")
             return None, None

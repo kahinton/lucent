@@ -12,8 +12,9 @@ from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 import asyncpg
-import bcrypt
 
+from lucent.db.api_key import ApiKeyRepository
+from lucent.memory_scope import MEMORY_SCOPE_USER
 from lucent.sandbox.backend import SandboxBackend
 from lucent.sandbox.models import (
     ExecResult,
@@ -373,35 +374,20 @@ class SandboxManager:
         expires_at = datetime.now(timezone.utc) + timedelta(seconds=config.timeout_seconds + 600)
 
         daemon_user = await self._ensure_daemon_service_user(config.organization_id)
-        user_id = str(daemon_user["id"])
-        org_id = str(daemon_user["organization_id"]) if daemon_user.get("organization_id") else None
+        org_id = daemon_user.get("organization_id")
 
-        key_name = f"sandbox-task-{config.task_id}-{secrets.token_hex(4)}"
-        raw_key = secrets.token_urlsafe(32)
-        plain_key = f"hs_{raw_key}"
-        key_prefix = plain_key[:11]
-        key_hash = bcrypt.hashpw(plain_key.encode(), bcrypt.gensalt()).decode()
-
-        async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                INSERT INTO api_keys
-                    (user_id, organization_id, name, key_prefix, key_hash, scopes, expires_at,
-                     memory_scope_user_id, memory_scope)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                RETURNING id
-                """,
-                user_id,
-                org_id,
-                key_name,
-                key_prefix,
-                key_hash,
-                ["sandbox-memory", "sandbox-task-events"],
-                expires_at,
-                config.requesting_user_id,
-                "user" if config.requesting_user_id else None,
-            )
-        return row["id"], plain_key
+        record, plain_key = await ApiKeyRepository(pool).create(
+            user_id=UUID(str(daemon_user["id"])),
+            organization_id=UUID(str(org_id)) if org_id else None,
+            name=f"sandbox-task-{config.task_id}-{secrets.token_hex(4)}",
+            scopes=["sandbox-memory", "sandbox-task-events"],
+            expires_at=expires_at,
+            memory_scope_user_id=(
+                UUID(str(config.requesting_user_id)) if config.requesting_user_id else None
+            ),
+            memory_scope=MEMORY_SCOPE_USER if config.requesting_user_id else None,
+        )
+        return record["id"], plain_key
 
     async def _revoke_api_key(self, key_id: UUID) -> None:
         pool = await self._pool()
