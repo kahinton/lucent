@@ -73,6 +73,32 @@ def _value(value: Any) -> str:
     return str(getattr(value, "value", value) or "")
 
 
+def _copilot_attachments(attachments: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
+    """Convert normalized attachments into Copilot SDK BlobAttachment dicts.
+
+    Returns None when there are no attachments so the SDK default applies.
+    """
+    if not attachments:
+        return None
+    from lucent.llm.attachments import to_copilot_blobs
+
+    return to_copilot_blobs(attachments) or None
+
+
+def _copilot_prompt(prompt: str, attachments: list[dict[str, Any]] | None) -> str:
+    """Inline text-document attachments into the prompt for Copilot.
+
+    Copilot models read image/PDF blobs but not text blobs, so text documents
+    are appended to the prompt text instead.
+    """
+    if not attachments:
+        return prompt
+    from lucent.llm.attachments import inline_text_documents
+
+    return inline_text_documents(prompt, attachments)
+
+
+
 def _permission_compat_mode() -> str:
     return os.environ.get("LUCENT_COPILOT_MCP_PERMISSION_COMPAT", "auto").strip().lower()
 
@@ -551,6 +577,7 @@ class CopilotEngine(LLMEngine):
         audit_context: dict[str, Any] | None = None,
         enable_config_discovery: bool = False,
         approve_permissions: bool = True,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> str | None:
         """Run a blocking session using send_and_wait (chat pattern)."""
         if not _ensure_sdk():
@@ -581,7 +608,8 @@ class CopilotEngine(LLMEngine):
             )
 
             response = await session.send_and_wait(
-                prompt,
+                _copilot_prompt(prompt, attachments),
+                attachments=_copilot_attachments(attachments),
                 timeout=timeout,
             )
 
@@ -632,6 +660,7 @@ class CopilotEngine(LLMEngine):
         audit_context: dict[str, Any] | None = None,
         enable_config_discovery: bool = False,
         approve_permissions: bool = True,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> str | None:
         """Run a streaming session using send + event callbacks (daemon pattern).
 
@@ -794,7 +823,10 @@ class CopilotEngine(LLMEngine):
                     on_event(normalized)
 
             session.on(_on_sdk_event)
-            await session.send(prompt)
+            await session.send(
+                _copilot_prompt(prompt, attachments),
+                attachments=_copilot_attachments(attachments),
+            )
 
             # Activity-based timeout loop: keep waiting as long as events arrive
             start_time = time.monotonic()

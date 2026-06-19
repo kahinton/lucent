@@ -144,6 +144,10 @@
         align-items: center;
         padding-bottom: 0;
     }
+    .chat-input-area.drag-active .input-glow {
+        border-color: #818cf8;
+        box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.25);
+    }
     .chat-container.empty-mode .chat-input-area {
         flex: none;
         border-top: none;
@@ -285,6 +289,13 @@
             </div>
             
             <form class="input-glow flex items-end gap-3 rounded-2xl border border-gray-200 bg-white px-4 py-3 transition-all">
+                <input type="file" id="attach-input" class="hidden" multiple
+                    accept="image/png,image/jpeg,image/webp,image/gif,application/pdf,text/plain,text/markdown,text/csv" />
+                <button type="button" id="attach-btn" class="w-8 h-8 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 flex items-center justify-center transition-colors disabled:opacity-30 disabled:cursor-not-allowed shrink-0" title="Attach images or documents">
+                    <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M18.375 12.739l-7.693 7.693a4.5 4.5 0 01-6.364-6.364l10.94-10.94A3 3 0 1119.5 7.372L8.552 18.32m.009-.01l-.01.01m5.699-9.941l-7.81 7.81a1.5 1.5 0 002.112 2.13" />
+                    </svg>
+                </button>
                 <textarea
                     id="chat-input"
                     rows="1"
@@ -303,6 +314,8 @@
                     </button>
                 </div>
             </form>
+            <!-- Pending attachment previews -->
+            <div id="attachment-previews" class="hidden flex flex-wrap gap-2 mt-2 px-1"></div>
             <!-- Controls toolbar below input -->
             <div class="relative flex items-center gap-3 mt-2 px-1">
                 <select id="agent-select" class="config-select text-xs rounded-lg border border-gray-200 bg-white px-2 py-1 text-gray-500 focus:border-primary-300 focus:ring-1 focus:ring-primary-100 focus:outline-none cursor-pointer">
@@ -365,7 +378,129 @@ const state = {
     streamedText: '',   // Current streaming text
     msgCount: 0,
     modelsById: {},
+    pendingAttachments: [],
 };
+
+// ═══════════════════════════════════════════════════════════════════
+// Attachments (multimodal input)
+// ═══════════════════════════════════════════════════════════════════
+
+const ATTACH_LIMITS = {
+    maxCount: 8,
+    image: { bytes: 5 * 1024 * 1024, mimes: ['image/png', 'image/jpeg', 'image/webp', 'image/gif'] },
+    document: { bytes: 10 * 1024 * 1024, mimes: ['application/pdf', 'text/plain', 'text/markdown', 'text/csv'] },
+};
+
+function attachmentKindForMime(mime) {
+    return ATTACH_LIMITS.image.mimes.includes(mime) ? 'image' : 'document';
+}
+
+function selectedModelSupportsVision() {
+    const model = state.modelsById[document.getElementById('model-select').value];
+    return !!(model && model.supports_vision);
+}
+
+function updateAttachAvailability() {
+    const btn = document.getElementById('attach-btn');
+    if (!btn) return;
+    const supported = selectedModelSupportsVision();
+    btn.disabled = !supported;
+    btn.title = supported
+        ? 'Attach images or documents'
+        : 'The selected model does not support attachments';
+    if (!supported && state.pendingAttachments.length) {
+        state.pendingAttachments = [];
+        renderAttachmentPreviews();
+        updateButtons();
+    }
+}
+
+function readFileAsAttachment(file) {
+    return new Promise((resolve, reject) => {
+        const allMimes = [...ATTACH_LIMITS.image.mimes, ...ATTACH_LIMITS.document.mimes];
+        if (!allMimes.includes(file.type)) {
+            reject(new Error(`Unsupported file type: ${file.type || file.name}`));
+            return;
+        }
+        const kind = attachmentKindForMime(file.type);
+        if (file.size > ATTACH_LIMITS[kind].bytes) {
+            const mb = Math.round(ATTACH_LIMITS[kind].bytes / (1024 * 1024));
+            reject(new Error(`${file.name} exceeds the ${mb} MB limit`));
+            return;
+        }
+        const reader = new FileReader();
+        reader.onload = () => {
+            const dataUrl = String(reader.result || '');
+            const base64 = dataUrl.includes(',') ? dataUrl.slice(dataUrl.indexOf(',') + 1) : dataUrl;
+            resolve({
+                kind,
+                mime_type: file.type,
+                name: file.name,
+                size: file.size,
+                data: base64,
+                dataUrl,
+            });
+        };
+        reader.onerror = () => reject(new Error(`Failed to read ${file.name}`));
+        reader.readAsDataURL(file);
+    });
+}
+
+async function addPendingFiles(fileList) {
+    if (!selectedModelSupportsVision()) return;
+    const files = Array.from(fileList || []);
+    for (const file of files) {
+        if (state.pendingAttachments.length >= ATTACH_LIMITS.maxCount) {
+            showStatus(`Up to ${ATTACH_LIMITS.maxCount} attachments`);
+            setTimeout(hideStatus, 1800);
+            break;
+        }
+        try {
+            const attachment = await readFileAsAttachment(file);
+            state.pendingAttachments.push(attachment);
+        } catch (err) {
+            showStatus(err.message || 'Could not attach file');
+            setTimeout(hideStatus, 2400);
+        }
+    }
+    renderAttachmentPreviews();
+    updateButtons();
+}
+
+function removePendingAttachment(index) {
+    state.pendingAttachments.splice(index, 1);
+    renderAttachmentPreviews();
+    updateButtons();
+}
+
+function renderAttachmentPreviews() {
+    const container = document.getElementById('attachment-previews');
+    if (!container) return;
+    container.innerHTML = '';
+    if (!state.pendingAttachments.length) {
+        container.classList.add('hidden');
+        return;
+    }
+    container.classList.remove('hidden');
+    state.pendingAttachments.forEach((att, index) => {
+        const chip = document.createElement('div');
+        chip.className = 'relative flex items-center gap-2 rounded-lg border border-gray-200 bg-gray-50 pl-2 pr-7 py-1.5 text-xs text-gray-700 max-w-[220px]';
+        const thumb = att.kind === 'image'
+            ? `<img src="${att.dataUrl}" alt="${escapeHtml(att.name)}" class="w-8 h-8 rounded object-cover shrink-0" />`
+            : `<span class="w-8 h-8 rounded bg-gray-200 flex items-center justify-center shrink-0"><svg class="w-4 h-4 text-gray-500" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" /></svg></span>`;
+        chip.innerHTML = `${thumb}<span class="truncate">${escapeHtml(att.name)}</span>
+            <button type="button" data-remove-attachment="${index}" class="absolute top-1 right-1 w-4 h-4 rounded-full bg-gray-300 hover:bg-gray-400 text-white flex items-center justify-center" title="Remove">
+                <svg class="w-2.5 h-2.5" fill="none" viewBox="0 0 24 24" stroke-width="3" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+            </button>`;
+        container.appendChild(chip);
+    });
+}
+
+function pendingAttachmentsForRequest() {
+    return state.pendingAttachments.map(({ kind, mime_type, name, size, data }) => ({
+        kind, mime_type, name, size, data,
+    }));
+}
 
 function updateReasoningOptions() {
     const modelSelect = document.getElementById('model-select');
@@ -427,6 +562,7 @@ function applySessionConfig(session) {
     } else {
         document.getElementById('agent-select').value = '';
     }
+    updateAttachAvailability();
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -459,7 +595,9 @@ function applySessionConfig(session) {
             select.appendChild(group);
         }
         select.addEventListener('change', updateReasoningOptions);
+        select.addEventListener('change', updateAttachAvailability);
         updateReasoningOptions();
+        updateAttachAvailability();
     } catch(e) {
         document.getElementById('model-select').innerHTML = '<option value="">Unavailable</option>';
     }
@@ -583,8 +721,12 @@ function renderSessionMessages(messages) {
     document.getElementById('chat-root').classList.remove('empty-mode');
     for (const msg of visible) {
         state.messages.push({ role: msg.role, content: msg.content || '' });
-        if (msg.role === 'user') appendUserMessage(msg.content || '');
-        else appendAssistantMessage(msg.content || '');
+        if (msg.role === 'user') {
+            const att = msg.metadata && msg.metadata.attachments;
+            appendUserMessage(msg.content || '', att);
+        } else {
+            appendAssistantMessage(msg.content || '');
+        }
     }
     hideStatus();
     updateButtons();
@@ -604,7 +746,8 @@ async function sendMessage(e) {
     e.preventDefault();
     const input = document.getElementById('chat-input');
     const text = input.value.trim();
-    if (!text || state.streaming) return;
+    const outgoingAttachments = state.pendingAttachments.slice();
+    if ((!text && !outgoingAttachments.length) || state.streaming) return;
     
     // Hide empty state and switch to conversation mode
     const emptyState = document.getElementById('empty-state');
@@ -612,10 +755,16 @@ async function sendMessage(e) {
     document.getElementById('chat-root').classList.remove('empty-mode');
     
     // Add user message
-    state.messages.push({ role: 'user', content: text });
-    appendUserMessage(text);
+    const userMessage = { role: 'user', content: text };
+    if (outgoingAttachments.length) {
+        userMessage.attachments = pendingAttachmentsForRequest();
+    }
+    state.messages.push(userMessage);
+    appendUserMessage(text, outgoingAttachments);
     input.value = '';
     input.style.height = 'auto';
+    state.pendingAttachments = [];
+    renderAttachmentPreviews();
     updateButtons();
     
     // Start streaming
@@ -641,7 +790,11 @@ async function sendMessage(e) {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                messages: state.messages,
+                messages: state.messages.map((m, i) =>
+                    i === state.messages.length - 1
+                        ? m
+                        : { role: m.role, content: m.content }
+                ),
                 session_id: state.sessionId,
                 surface: 'chat',
                 model: selectedModel || null,
@@ -798,15 +951,42 @@ function stopStreaming() {
 // Message Rendering
 // ═══════════════════════════════════════════════════════════════════
 
-function appendUserMessage(text) {
+function attachmentDataUrl(att) {
+    if (att.dataUrl) return att.dataUrl;
+    if (att.data && att.mime_type) return `data:${att.mime_type};base64,${att.data}`;
+    return '';
+}
+
+function renderMessageAttachmentsHtml(attachments) {
+    if (!attachments || !attachments.length) return '';
+    const items = attachments.map(att => {
+        const kind = att.kind || (att.mime_type && att.mime_type.startsWith('image/') ? 'image' : 'document');
+        if (kind === 'image') {
+            const url = attachmentDataUrl(att);
+            return `<a href="${url}" target="_blank" rel="noopener" class="block">
+                <img src="${url}" alt="${escapeHtml(att.name || 'image')}" class="max-h-44 max-w-[220px] rounded-lg border border-white/20 object-cover" />
+            </a>`;
+        }
+        return `<div class="flex items-center gap-2 rounded-lg bg-white/15 px-2.5 py-1.5 text-xs">
+            <svg class="w-4 h-4 shrink-0 opacity-90" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" /></svg>
+            <span class="truncate max-w-[180px]">${escapeHtml(att.name || 'document')}</span>
+        </div>`;
+    }).join('');
+    return `<div class="flex flex-wrap gap-2 justify-end mb-2">${items}</div>`;
+}
+
+function appendUserMessage(text, attachments) {
     const msgs = document.getElementById('messages');
     const div = document.createElement('div');
     div.className = 'msg-enter px-6 py-4';
+    const attachmentsHtml = renderMessageAttachmentsHtml(attachments);
+    const textHtml = text
+        ? `<div class="chat-user-bubble max-w-[75%] bg-primary-600 text-white rounded-2xl rounded-br-sm px-4 py-3 text-sm leading-relaxed shadow-sm">${escapeHtml(text)}</div>`
+        : '';
     div.innerHTML = `
-        <div class="max-w-3xl mx-auto flex justify-end">
-            <div class="chat-user-bubble max-w-[75%] bg-primary-600 text-white rounded-2xl rounded-br-sm px-4 py-3 text-sm leading-relaxed shadow-sm">
-                ${escapeHtml(text)}
-            </div>
+        <div class="max-w-3xl mx-auto flex flex-col items-end gap-1">
+            ${attachmentsHtml}
+            ${textHtml}
         </div>`;
     msgs.appendChild(div);
     scrollToBottom();
@@ -1008,6 +1188,8 @@ function clearConversation(options = {}) {
     state.messages = [];
     state.toolCalls = [];
     state.streamedText = '';
+    state.pendingAttachments = [];
+    renderAttachmentPreviews();
     if (!options.keepSession) {
         state.sessionId = '';
         history.replaceState(null, '', '/chat');
@@ -1068,7 +1250,7 @@ function updateButtons() {
     const stopBtn = document.getElementById('stop-btn');
     const input = document.getElementById('chat-input');
     
-    sendBtn.disabled = !input.value.trim() || state.streaming;
+    sendBtn.disabled = (!input.value.trim() && !state.pendingAttachments.length) || state.streaming;
     sendBtn.style.display = state.streaming ? 'none' : 'flex';
     stopBtn.style.display = state.streaming ? 'flex' : 'none';
     stopBtn.classList.toggle('hidden', !state.streaming);
@@ -1212,6 +1394,12 @@ document.addEventListener('click', function(e) {
         toggleReasoning(reasoningBtn);
         return;
     }
+
+    const removeAttachBtn = e.target.closest('[data-remove-attachment]');
+    if (removeAttachBtn) {
+        removePendingAttachment(parseInt(removeAttachBtn.dataset.removeAttachment, 10));
+        return;
+    }
 });
 
 // Form submit
@@ -1227,6 +1415,54 @@ chatInput.addEventListener('keydown', function(e) {
 chatInput.addEventListener('input', function() {
     autoResize(this);
 });
+
+// Attachment controls
+const attachBtn = document.getElementById('attach-btn');
+const attachInput = document.getElementById('attach-input');
+attachBtn.addEventListener('click', function() {
+    if (!attachBtn.disabled) attachInput.click();
+});
+attachInput.addEventListener('change', function() {
+    addPendingFiles(this.files);
+    this.value = '';
+});
+
+// Paste images directly into the composer
+chatInput.addEventListener('paste', function(e) {
+    if (!selectedModelSupportsVision()) return;
+    const items = (e.clipboardData && e.clipboardData.items) || [];
+    const files = [];
+    for (const item of items) {
+        if (item.kind === 'file') {
+            const file = item.getAsFile();
+            if (file) files.push(file);
+        }
+    }
+    if (files.length) {
+        e.preventDefault();
+        addPendingFiles(files);
+    }
+});
+
+// Drag & drop onto the input area
+const inputArea = document.querySelector('.chat-input-area');
+if (inputArea) {
+    ['dragover', 'dragenter'].forEach(evt => inputArea.addEventListener(evt, function(e) {
+        if (!selectedModelSupportsVision()) return;
+        e.preventDefault();
+        inputArea.classList.add('drag-active');
+    }));
+    ['dragleave', 'drop'].forEach(evt => inputArea.addEventListener(evt, function(e) {
+        e.preventDefault();
+        if (evt === 'dragleave' && inputArea.contains(e.relatedTarget)) return;
+        inputArea.classList.remove('drag-active');
+    }));
+    inputArea.addEventListener('drop', function(e) {
+        if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) {
+            addPendingFiles(e.dataTransfer.files);
+        }
+    });
+}
 
 // Stop button
 document.getElementById('stop-btn').addEventListener('click', function() {

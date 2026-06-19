@@ -115,9 +115,24 @@ def _chat_allowed_tools_for_agent(
     return tools
 
 
+class ChatAttachment(BaseModel):
+    """A multimodal attachment (image or document) on a user message.
+
+    ``data`` may be raw base64 or a ``data:`` URL; both are normalized and
+    validated server-side in ``lucent.llm.attachments``.
+    """
+
+    mime_type: str | None = Field(default=None, max_length=128)
+    data: str
+    name: str | None = Field(default=None, max_length=256)
+    kind: str | None = Field(default=None, pattern=r"^(image|document)$")
+    size: int | None = None
+
+
 class ChatMessage(BaseModel):
     role: str = Field(..., pattern=r"^(user|assistant)$")
     content: str
+    attachments: list[ChatAttachment] | None = None
 
 
 class ChatRequest(BaseModel):
@@ -246,9 +261,30 @@ def _message_history_for_engine(messages: list[dict[str, Any]]) -> list[dict[str
     ]
 
 
-def _chat_message_to_dict(message: ChatMessage) -> dict[str, str]:
+def _chat_message_to_dict(message: ChatMessage) -> dict[str, Any]:
     """Pydantic v1/v2 compatible ChatMessage serialization."""
-    return {"role": message.role, "content": message.content}
+    result: dict[str, Any] = {"role": message.role, "content": message.content}
+    if message.attachments:
+        result["attachments"] = [a.model_dump(exclude_none=True) for a in message.attachments]
+    return result
+
+
+def _normalize_last_attachments(messages: list[ChatMessage]) -> list[dict[str, Any]]:
+    """Validate and normalize attachments on the final user message.
+
+    Returns an empty list when there are none. Raises HTTP 400 on invalid
+    payloads so the client gets a clear error instead of a silent failure.
+    """
+    if not messages or not messages[-1].attachments:
+        return []
+    from lucent.llm.attachments import AttachmentError, normalize_attachments
+
+    raw = [a.model_dump(exclude_none=True) for a in messages[-1].attachments]
+    try:
+        return normalize_attachments(raw)
+    except AttachmentError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
 
 
 def _event_raw(event) -> dict[str, Any]:
@@ -391,6 +427,7 @@ async def _prepare_persistent_chat_session(
     reasoning_effort: str | None,
     agent_id: str | None = None,
     last_message: str = "",
+    attachments: list[dict[str, Any]] | None = None,
 ) -> PersistentChatSession:
     """Create/load a DB-backed chat session and persist the current user turn.
 
@@ -452,14 +489,23 @@ async def _prepare_persistent_chat_session(
         )
 
         user_message_id = None
-        if last_message:
+        if last_message or attachments:
+            user_metadata: dict[str, Any] = {
+                "surface": kind,
+                "model": model,
+                "agent_id": agent_id,
+            }
+            if attachments:
+                from lucent.llm.attachments import get_attachment_store
+
+                user_metadata["attachments"] = await get_attachment_store().persist(attachments)
             user_message = await repo.add_message(
                 session_id,
                 role="user",
                 content=last_message,
                 org_id=org_id,
                 turn_id=turn_id,
-                metadata={"surface": kind, "model": model, "agent_id": agent_id},
+                metadata=user_metadata,
             )
             user_message_id = str(user_message["id"])
 
@@ -974,6 +1020,7 @@ async def chat_stream(
     system_prompt = await _build_system_prompt(user, pool, body.page_context)
     agent_hooks = await _load_agent_hooks(pool, None)
     last_message = body.messages[-1].content if body.messages else ""
+    attachments = _normalize_last_attachments(body.messages)
     chat_session = await _prepare_persistent_chat_session(
         user=user,
         pool=pool,
@@ -983,6 +1030,7 @@ async def chat_stream(
         model=selected_model,
         reasoning_effort=reasoning_effort,
         last_message=last_message,
+        attachments=attachments,
     )
     await _mirror_handoff_user_turn(
         user=user,
@@ -1039,6 +1087,7 @@ async def chat_stream(
             message_history=message_history,
             hooks=agent_hooks,
             approve_permissions=False,
+            attachments=attachments,
             audit_context={
                 "source": "chat.stream",
                 "organization_id": str(user["organization_id"]),
@@ -1116,6 +1165,7 @@ async def chat_models(request: Request):
                 "provider": m.provider,
                 "category": m.category,
                 "reasoning_efforts": m.reasoning_efforts,
+                "supports_vision": m.supports_vision,
             }
             for m in models
         ],
@@ -1315,6 +1365,7 @@ async def chat_stream_v2(
     agent_hooks = await _load_agent_hooks(pool, agent_id)
 
     last_message = body.messages[-1].content if body.messages else ""
+    attachments = _normalize_last_attachments(body.messages)
     chat_session = await _prepare_persistent_chat_session(
         user=user,
         pool=pool,
@@ -1325,6 +1376,7 @@ async def chat_stream_v2(
         reasoning_effort=reasoning_effort,
         agent_id=agent_id,
         last_message=last_message,
+        attachments=attachments,
     )
     await _mirror_handoff_user_turn(
         user=user,
@@ -1515,6 +1567,7 @@ async def chat_stream_v2(
                 message_history=message_history,
                 hooks=agent_hooks,
                 approve_permissions=False,
+                attachments=attachments,
                 audit_context={
                     "source": "chat.stream_v2",
                     "organization_id": str(user["organization_id"]),

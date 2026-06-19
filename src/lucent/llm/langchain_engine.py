@@ -277,6 +277,7 @@ class LangChainEngine(LLMEngine):
         audit_context: dict[str, Any] | None = None,
         enable_config_discovery: bool = False,
         approve_permissions: bool = True,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> str | None:
         """Run a blocking session (chat pattern)."""
         try:
@@ -291,6 +292,7 @@ class LangChainEngine(LLMEngine):
                 message_history=message_history,
                 hooks=hooks,
                 audit_context=audit_context,
+                attachments=attachments,
             )
         except Exception as e:
             logger.error("LangChain session failed: %s", e)
@@ -313,6 +315,7 @@ class LangChainEngine(LLMEngine):
         audit_context: dict[str, Any] | None = None,
         enable_config_discovery: bool = False,
         approve_permissions: bool = True,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> str | None:
         """Run a streaming session with event callbacks (daemon pattern)."""
         try:
@@ -327,6 +330,7 @@ class LangChainEngine(LLMEngine):
                 message_history=message_history,
                 hooks=hooks,
                 audit_context=audit_context,
+                attachments=attachments,
             )
         except Exception as e:
             logger.error("LangChain streaming session failed: %s", e)
@@ -346,6 +350,7 @@ class LangChainEngine(LLMEngine):
         message_history: list[dict[str, Any]] | None = None,
         hooks: list[dict[str, Any]] | None = None,
         audit_context: dict[str, Any] | None = None,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> str | None:
         """Core implementation: run model with MCP tool loop.
 
@@ -400,7 +405,12 @@ class LangChainEngine(LLMEngine):
                     messages.append(HumanMessage(content=content))
                 elif role == "assistant":
                     messages.append(AIMessage(content=content))
-            messages.append(HumanMessage(content=prompt))
+            if attachments:
+                from lucent.llm.attachments import to_langchain_blocks
+
+                messages.append(HumanMessage(content=to_langchain_blocks(prompt, attachments)))
+            else:
+                messages.append(HumanMessage(content=prompt))
 
             # Tool-calling loop
             full_response_parts: list[str] = []
