@@ -157,17 +157,6 @@ _RUNTIME_SETTING_DEFINITIONS: tuple[RuntimeSettingDefinition, ...] = (
         help_text="Separate from automatic post-completion review; this is a human sign-off gate.",
     ),
     RuntimeSettingDefinition(
-        key="requests.review_models",
-        env_var="LUCENT_REVIEW_MODELS",
-        value_type="string",
-        default="",
-        title="Task review models",
-        section="Requests",
-        description="Comma-separated model IDs used for extra task-output review.",
-        help_text="Leave blank to use the normal single-review flow.",
-        requires_restart=True,
-    ),
-    RuntimeSettingDefinition(
         key="requests.review_model",
         env_var="LUCENT_REQUEST_REVIEW_MODEL",
         value_type="string",
@@ -176,7 +165,6 @@ _RUNTIME_SETTING_DEFINITIONS: tuple[RuntimeSettingDefinition, ...] = (
         section="Requests",
         description="Model override for request-level post-completion review.",
         help_text="Leave blank to use the daemon/default model selector.",
-        requires_restart=True,
     ),
     RuntimeSettingDefinition(
         key="requests.review_agent_type",
@@ -186,7 +174,6 @@ _RUNTIME_SETTING_DEFINITIONS: tuple[RuntimeSettingDefinition, ...] = (
         title="Request review agent type",
         section="Requests",
         description="Preferred agent type for request-level post-completion review tasks.",
-        requires_restart=True,
     ),
     RuntimeSettingDefinition(
         key="requests.review_fallback_agent_type",
@@ -196,7 +183,6 @@ _RUNTIME_SETTING_DEFINITIONS: tuple[RuntimeSettingDefinition, ...] = (
         title="Request review fallback agent type",
         section="Requests",
         description="Fallback agent type when the dedicated review agent is unavailable.",
-        requires_restart=True,
     ),
     RuntimeSettingDefinition(
         key="models.default_model",
@@ -1299,11 +1285,6 @@ def github_token(*, organization_id: Any | None = None) -> str:
 
 def completion_human_approval_required(*, organization_id: Any | None = None) -> bool:
     return _setting_bool("requests.require_completion_approval", organization_id=organization_id)
-
-
-def review_model_ids(*, organization_id: Any | None = None) -> list[str]:
-    raw = _setting_string("requests.review_models", organization_id=organization_id)
-    return [item.strip() for item in raw.split(",") if item.strip()]
 
 
 def request_review_model_id(*, organization_id: Any | None = None) -> str | None:

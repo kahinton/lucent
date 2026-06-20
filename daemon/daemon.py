@@ -633,13 +633,6 @@ SHADOW_FORGET_SCORING_PROMPT = (
 # When disabled, tasks complete immediately after successful execution.
 REQUIRE_APPROVAL = runtime_settings.completion_human_approval_required()
 
-# Multi-model review: comma-separated list of models to use for reviewing task output.
-# When set, completed tasks are re-evaluated by each model before final completion.
-# The cognitive model can be pinned by LUCENT_DAEMON_MODEL. When unset, the
-# daemon uses the model registry's enabled default instead of a hardcoded model.
-# these are for sub-agent review.
-REVIEW_MODELS = runtime_settings.review_model_ids()
-
 # Request-level post-completion review configuration.
 REQUEST_REVIEW_AGENT_TYPE = runtime_settings.request_review_agent_type()
 REQUEST_REVIEW_FALLBACK_AGENT_TYPE = runtime_settings.request_review_fallback_agent_type()
@@ -709,7 +702,7 @@ def _refresh_config_from_runtime_settings() -> None:
     global SCHEDULER_CHECK_SECONDS, AUTONOMIC_MINUTES, LEARNING_MINUTES
     global VITALITY_SCORING_MINUTES, SHADOW_FORGET_SCORING_MINUTES
     global SHADOW_FORGET_OFFSET_MINUTES, COMPRESSION_MINUTES
-    global REQUIRE_APPROVAL, REVIEW_MODELS
+    global REQUIRE_APPROVAL
     global REQUEST_REVIEW_AGENT_TYPE, REQUEST_REVIEW_FALLBACK_AGENT_TYPE
     global REQUEST_REVIEW_MODEL, ALLOW_GIT_COMMIT, ALLOW_GIT_PUSH, MCP_URL, MCP_API_KEY
 
@@ -733,7 +726,6 @@ def _refresh_config_from_runtime_settings() -> None:
     SHADOW_FORGET_OFFSET_MINUTES = runtime_settings.daemon_shadow_forget_offset_minutes()
     COMPRESSION_MINUTES = runtime_settings.daemon_compression_minutes()
     REQUIRE_APPROVAL = runtime_settings.completion_human_approval_required()
-    REVIEW_MODELS = runtime_settings.review_model_ids()
     REQUEST_REVIEW_AGENT_TYPE = runtime_settings.request_review_agent_type()
     REQUEST_REVIEW_FALLBACK_AGENT_TYPE = runtime_settings.request_review_fallback_agent_type()
     REQUEST_REVIEW_MODEL = runtime_settings.request_review_model_id() or ""
@@ -2820,6 +2812,12 @@ class LucentDaemon:
         self._listen_lock = asyncio.Lock()
         self._task_ready = asyncio.Event()
         self._request_ready = asyncio.Event()
+
+        # Live runtime-settings refresh: re-read DB-backed settings so admin
+        # changes take effect without a daemon restart. Throttled to avoid
+        # hammering the DB on every dispatch poll.
+        self._settings_reload_lock = asyncio.Lock()
+        self._settings_reloaded_at = 0.0
 
         # MCP memory-tool usage tracking per session (for observability)
         self._session_mcp_trackers: dict[str, list[dict]] = {}
@@ -4931,6 +4929,34 @@ class LucentDaemon:
             f"for domain '{summary.get('domain', 'unknown')}' — awaiting human approval"
         )
 
+    async def _reload_runtime_settings(self, *, min_interval_seconds: float = 15.0) -> None:
+        """Re-read DB-backed runtime settings so admin changes apply live.
+
+        The daemon copies DB settings into module globals at startup. Without
+        this refresh, settings changed via the web UI (which only updates the
+        server process's cache) never reach the running daemon, forcing a
+        restart. Re-reading here keeps values like the request-review model
+        live. Throttled so frequent dispatch polls don't hammer the DB.
+        """
+        now = time.monotonic()
+        if now - self._settings_reloaded_at < min_interval_seconds:
+            return
+        async with self._settings_reload_lock:
+            now = time.monotonic()
+            if now - self._settings_reloaded_at < min_interval_seconds:
+                return
+            try:
+                from lucent.db import get_pool
+                from lucent.settings import load_runtime_settings_from_db
+
+                pool = await get_pool()
+                await load_runtime_settings_from_db(pool)
+                _refresh_config_from_runtime_settings()
+                self.roles = self._parse_roles(DAEMON_ROLES_STR)
+                self._settings_reloaded_at = now
+            except Exception as exc:
+                log(f"Runtime settings reload failed: {exc}", "WARN")
+
     async def run_cognitive_cycle(self):
         """Run one cognitive cycle — perceive, reason, decide, act via tools.
 
@@ -4938,6 +4964,7 @@ class LucentDaemon:
         reviews state, and creates requests/tasks. It does NOT dispatch tasks —
         that is handled by the dispatch loop.
         """
+        await self._reload_runtime_settings()
         self.cycle_count += 1
         log(f"=== Cognitive cycle #{self.cycle_count} (instance: {self.instance_id}) ===")
 
@@ -5858,16 +5885,6 @@ class LucentDaemon:
                         output_result["result_structured"] = None
                         log(f"Task {task_id[:8]}: validation failed, using text fallback", "WARN")
 
-                # Multi-model review if configured
-                if REVIEW_MODELS:
-                    review_passed = await self._multi_model_review(
-                        task_id, agent_type, description, result
-                    )
-                    if not review_passed:
-                        log(f"Tracked task {task_id[:8]} failed multi-model review", "WARN")
-                        await _fail_owned(task_id, "Failed multi-model review")
-                        continue
-
                 await _complete_owned(
                     task_id,
                     result,
@@ -6225,64 +6242,6 @@ class LucentDaemon:
         except Exception as e:
             log(f"Failed to resolve sandbox template {template_id[:8]}: {e}", "WARN")
             return None
-
-    async def _multi_model_review(
-        self, memory_id: str, agent_type: str, task_content: str, result: str
-    ) -> bool:
-        """Run the task result through multiple models for review.
-
-        Each review model evaluates the result independently. All must approve
-        for the review to pass. Returns True if all models approve.
-        """
-        review_prompt = (
-            "You are reviewing work produced by an AI sub-agent. "
-            "Evaluate the quality and correctness of the output."
-            f"\n\nTASK THAT WAS ASSIGNED:\n{task_content[:2000]}"
-            f"\n\nOUTPUT PRODUCED:\n{result[:4000]}"
-            "\n\nEvaluate:\n"
-            "1. Does the output actually address the task?\n"
-            "2. Is the reasoning sound?\n"
-            "3. Are there any errors, hallucinations, "
-            "or problematic assumptions?\n"
-            "4. Is the output actionable and useful?\n\n"
-            "Respond with EXACTLY one of:\n"
-            "- APPROVE: [brief reason] — if the work is good\n"
-            "- REJECT: [brief reason] — if there are "
-            "significant issues"
-        )
-
-        approvals = 0
-        rejections = 0
-
-        for review_model in REVIEW_MODELS:
-            log(f"  Review of task {memory_id[:8]} by {review_model}...")
-            review_result = await self.run_session(
-                f"review-{memory_id[:8]}-{review_model.split('/')[-1][:10]}",
-                "You are a quality reviewer. Be concise and decisive.",
-                review_prompt,
-                model=review_model,
-            )
-
-            if review_result and "APPROVE" in review_result.upper():
-                approvals += 1
-                log(f"  Review by {review_model}: APPROVED")
-            else:
-                rejections += 1
-                reason = review_result[:200] if review_result else "no response"
-                log(f"  Review by {review_model}: REJECTED — {reason}", "WARN")
-
-        total = approvals + rejections
-        if total == 0:
-            log(f"No review models responded for task {memory_id[:8]}", "WARN")
-            return True  # Don't block on review failures
-
-        passed = rejections == 0
-        log(
-            f"Multi-model review for {memory_id[:8]}: "
-            f"{approvals}/{total} approved "
-            f"— {'PASSED' if passed else 'FAILED'}"
-        )
-        return passed
 
     def _is_request_review_task(self, task: dict) -> bool:
         """Identify daemon-created post-completion review tasks.
@@ -7139,6 +7098,10 @@ class LucentDaemon:
                 if self.draining:
                     await asyncio.sleep(5)
                     continue
+
+                # Pick up live runtime-settings changes (e.g. review model)
+                # before dispatching or creating review tasks.
+                await self._reload_runtime_settings()
 
                 # Dispatch all available tasks
                 await self._dispatch_tracked_tasks()

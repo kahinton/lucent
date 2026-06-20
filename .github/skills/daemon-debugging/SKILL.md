@@ -126,8 +126,7 @@ find pending tasks → get memory details → atomic claim (tag swap) → run_se
    "failed to", "i don't have", "i do not have",
    "no context", "cannot complete", "error occurred"
    ```
-3. If multi-model review is enabled (`REVIEW_MODELS` env var), each review model must also approve. Check `_multi_model_review()` output in logs.
-4. If `REQUIRE_APPROVAL=true`, tasks go to `needs-review` instead of `completed` — they need human approval via feedback memories.
+3. If `REQUIRE_APPROVAL=true`, tasks go to `needs-review` instead of `completed` — they need human approval via feedback memories.
 
 ### 5. Cognitive Cycle Produces No Work
 
@@ -190,7 +189,6 @@ find pending tasks → get memory details → atomic claim (tag swap) → run_se
 | `WATCHDOG_TIMEOUT` | 900 | Idle time before process kill |
 | `MAX_CONCURRENT_SESSIONS` | 3 | Limits parallel task execution |
 | `REQUIRE_APPROVAL` | false | Tasks need human review if true |
-| `REVIEW_MODELS` | "" | Comma-separated models for multi-model review |
 | `ALLOW_GIT_COMMIT` | false | Blocks commit if false |
 | `ALLOW_GIT_PUSH` | false | Blocks push if false |
 
