@@ -249,6 +249,159 @@ class TestLangChainEngine:
         engine = LangChainEngine()
         await engine.cleanup()  # Should not raise
 
+    @pytest.mark.asyncio
+    async def test_builtin_tools_are_bound_and_executed(self, tmp_path, monkeypatch):
+        """LangChain engine binds built-in tools and runs them with no MCP config."""
+        from langchain_core.messages import AIMessage
+
+        from lucent.llm import langchain_engine
+        from lucent.llm.langchain_engine import LangChainEngine
+
+        monkeypatch.setenv("LUCENT_LANGCHAIN_TOOLS_ROOT", str(tmp_path))
+
+        bound_schemas: dict = {}
+
+        class FakeChatModel:
+            def __init__(self):
+                self._call = 0
+
+            def bind_tools(self, schemas):
+                bound_schemas["names"] = {s["function"]["name"] for s in schemas}
+                return self
+
+            async def ainvoke(self, messages):
+                self._call += 1
+                if self._call == 1:
+                    return AIMessage(
+                        content="",
+                        tool_calls=[
+                            {
+                                "name": "create_file",
+                                "args": {"path": "out.txt", "content": "hi"},
+                                "id": "call_1",
+                            }
+                        ],
+                    )
+                return AIMessage(content="done")
+
+        async def fake_get_chat_model(*_args, **_kwargs):
+            return FakeChatModel()
+
+        monkeypatch.setattr(langchain_engine, "_get_chat_model", fake_get_chat_model)
+
+        engine = LangChainEngine()
+        result = await engine.run_session(
+            model="qwen3.6:latest",
+            system_message="sys",
+            prompt="make a file",
+            mcp_config=None,
+        )
+
+        assert result == "done"
+        # Built-in tools were bound even without any MCP config.
+        assert "create_file" in bound_schemas["names"]
+        assert "web_fetch" in bound_schemas["names"]
+        # The tool actually executed against the confined root.
+        assert (tmp_path / "out.txt").read_text() == "hi"
+
+    @pytest.mark.asyncio
+    async def test_failed_mcp_bridge_does_not_abort_session(self, tmp_path, monkeypatch):
+        """An SSRF-blocked/unreachable MCP server is skipped, not fatal.
+
+        Built-in tools must still run so the task can complete.
+        """
+        from langchain_core.messages import AIMessage
+
+        from lucent.llm import langchain_engine, mcp_bridge
+        from lucent.llm.langchain_engine import LangChainEngine
+        from lucent.url_validation import SSRFError
+
+        monkeypatch.setenv("LUCENT_LANGCHAIN_TOOLS_ROOT", str(tmp_path))
+
+        # Simulate the real failure: bridge construction rejects the URL.
+        def boom(*_args, **_kwargs):
+            raise SSRFError("blocked address 127.0.0.1")
+
+        monkeypatch.setattr(mcp_bridge, "MCPToolBridge", boom)
+
+        class FakeChatModel:
+            def __init__(self):
+                self._call = 0
+
+            def bind_tools(self, schemas):
+                return self
+
+            async def ainvoke(self, messages):
+                self._call += 1
+                if self._call == 1:
+                    return AIMessage(
+                        content="",
+                        tool_calls=[
+                            {"name": "create_file", "args": {"path": "z.txt", "content": "ok"}, "id": "c1"}
+                        ],
+                    )
+                return AIMessage(content="done")
+
+        async def fake_get_chat_model(*_args, **_kwargs):
+            return FakeChatModel()
+
+        monkeypatch.setattr(langchain_engine, "_get_chat_model", fake_get_chat_model)
+
+        engine = LangChainEngine()
+        result = await engine.run_session(
+            model="qwen3.6:latest",
+            system_message="sys",
+            prompt="make a file",
+            mcp_config={
+                "memory-server": {
+                    "type": "http",
+                    "url": "http://localhost:8765/mcp",
+                    "headers": {},
+                    "tools": ["*"],
+                }
+            },
+        )
+
+        assert result == "done"
+        # The blocked bridge did not abort the session; built-in tool ran.
+        assert (tmp_path / "z.txt").read_text() == "ok"
+
+    @pytest.mark.asyncio
+    async def test_builtin_tools_excluded_for_restricted_web_chat(self, monkeypatch):
+        """approve_permissions=False (restricted web chat) binds no built-ins."""
+        from langchain_core.messages import AIMessage
+
+        from lucent.llm import langchain_engine
+        from lucent.llm.langchain_engine import LangChainEngine
+
+        bound: dict = {"called": False}
+
+        class FakeChatModel:
+            def bind_tools(self, schemas):
+                bound["called"] = True
+                return self
+
+            async def ainvoke(self, messages):
+                return AIMessage(content="ok")
+
+        async def fake_get_chat_model(*_args, **_kwargs):
+            return FakeChatModel()
+
+        monkeypatch.setattr(langchain_engine, "_get_chat_model", fake_get_chat_model)
+
+        engine = LangChainEngine()
+        result = await engine.run_session(
+            model="qwen3.6:latest",
+            system_message="sys",
+            prompt="hi",
+            mcp_config=None,
+            approve_permissions=False,
+        )
+        assert result == "ok"
+        # No tools to bind → bind_tools never called.
+        assert bound["called"] is False
+
+
 
 class TestModelResolve:
     def test_resolve_anthropic(self):
