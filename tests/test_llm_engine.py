@@ -424,17 +424,23 @@ class TestLangChainEngine:
 
     @pytest.mark.asyncio
     async def test_builtin_tools_excluded_for_restricted_web_chat(self, monkeypatch):
-        """approve_permissions=False (restricted web chat) binds no built-ins."""
+        """approve_permissions=False (restricted web chat) binds only web tools.
+
+        Filesystem and shell built-ins are excluded, but read-only network
+        tools (web_fetch, web_search) are bound so chat models can search.
+        """
         from langchain_core.messages import AIMessage
 
         from lucent.llm import langchain_engine
         from lucent.llm.langchain_engine import LangChainEngine
 
-        bound: dict = {"called": False}
+        bound: dict = {"names": None}
 
         class FakeChatModel:
             def bind_tools(self, schemas):
-                bound["called"] = True
+                bound["names"] = {
+                    s["function"]["name"] for s in schemas if "function" in s
+                }
                 return self
 
             async def ainvoke(self, messages):
@@ -454,8 +460,8 @@ class TestLangChainEngine:
             approve_permissions=False,
         )
         assert result == "ok"
-        # No tools to bind → bind_tools never called.
-        assert bound["called"] is False
+        # Only read-only network tools are bound; no filesystem/shell tools.
+        assert bound["names"] == {"web_fetch", "web_search"}
 
 
 

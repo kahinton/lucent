@@ -85,11 +85,13 @@ class BuiltinToolset:
         self,
         *,
         root_dir: str | os.PathLike[str] | None = None,
+        allow_filesystem: bool = True,
         allow_shell: bool = True,
         allow_network: bool = True,
         max_output_chars: int = _DEFAULT_MAX_OUTPUT,
     ) -> None:
         self.root = Path(root_dir or os.getcwd()).resolve()
+        self.allow_filesystem = allow_filesystem
         self.allow_shell = allow_shell
         self.allow_network = allow_network
         self.max_output = max_output_chars
@@ -123,7 +125,9 @@ class BuiltinToolset:
 
     @property
     def tool_names(self) -> set[str]:
-        names = {"view", "create_file", "str_replace", "list_directory", "grep"}
+        names: set[str] = set()
+        if self.allow_filesystem:
+            names |= {"view", "create_file", "str_replace", "list_directory", "grep"}
         if self.allow_shell:
             names.add("run_shell")
         if self.allow_network:
@@ -144,7 +148,7 @@ class BuiltinToolset:
                 },
             }
 
-        schemas: list[dict[str, Any]] = [
+        _file_schemas: list[dict[str, Any]] = [
             fn(
                 "view",
                 "Read a UTF-8 text file and return its contents. Paths are "
@@ -214,6 +218,7 @@ class BuiltinToolset:
                 },
             ),
         ]
+        schemas: list[dict[str, Any]] = list(_file_schemas) if self.allow_filesystem else []
         if self.allow_shell:
             schemas.append(
                 fn(
@@ -277,16 +282,19 @@ class BuiltinToolset:
         """Execute a built-in tool. Mirrors ``MCPToolBridge.call_tool``."""
         args = arguments or {}
         try:
-            if tool_name == "view":
-                return self._view(args)
-            if tool_name == "create_file":
-                return self._create_file(args)
-            if tool_name == "str_replace":
-                return self._str_replace(args)
-            if tool_name == "list_directory":
-                return self._list_directory(args)
-            if tool_name == "grep":
-                return self._grep(args)
+            if tool_name in {"view", "create_file", "str_replace", "list_directory", "grep"}:
+                if not self.allow_filesystem:
+                    return f"Error: {tool_name} is disabled in this session."
+                if tool_name == "view":
+                    return self._view(args)
+                if tool_name == "create_file":
+                    return self._create_file(args)
+                if tool_name == "str_replace":
+                    return self._str_replace(args)
+                if tool_name == "list_directory":
+                    return self._list_directory(args)
+                if tool_name == "grep":
+                    return self._grep(args)
             if tool_name == "run_shell":
                 if not self.allow_shell:
                     return "Error: run_shell is disabled in this session."
@@ -548,17 +556,26 @@ def _env_flag(name: str, default: bool) -> bool:
 def build_default_toolset(*, approve_permissions: bool = True) -> BuiltinToolset | None:
     """Build the engine's built-in toolset from environment settings.
 
-    Returns ``None`` when built-in tools are disabled, or when
-    ``approve_permissions`` is False (restricted web chat, which must use only
-    explicitly configured MCP tools — mirroring the Copilot engine's
-    ``excluded_tools`` behavior).
+    Returns ``None`` when built-in tools are disabled entirely.
+
+    When ``approve_permissions`` is False (restricted web chat), only read-only
+    network tools (``web_fetch``, ``web_search``) are exposed — no filesystem or
+    shell access. This mirrors the Copilot engine, which excludes file/shell
+    built-ins via ``excluded_tools`` but still allows web tools in chat.
     """
-    if not approve_permissions:
-        return None
     if not _env_flag("LUCENT_LANGCHAIN_BUILTIN_TOOLS", True):
         return None
+    allow_network = _env_flag("LUCENT_LANGCHAIN_ALLOW_NETWORK", True)
+    if not approve_permissions:
+        if not allow_network:
+            return None
+        return BuiltinToolset(
+            allow_filesystem=False,
+            allow_shell=False,
+            allow_network=True,
+        )
     return BuiltinToolset(
         root_dir=os.environ.get("LUCENT_LANGCHAIN_TOOLS_ROOT") or None,
         allow_shell=_env_flag("LUCENT_LANGCHAIN_ALLOW_SHELL", True),
-        allow_network=_env_flag("LUCENT_LANGCHAIN_ALLOW_NETWORK", True),
+        allow_network=allow_network,
     )

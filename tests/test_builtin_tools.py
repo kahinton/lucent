@@ -206,7 +206,22 @@ async def test_web_search_disabled(tmp_path):
 # -- factory toggles -------------------------------------------------------
 
 
-def test_build_default_toolset_disabled_for_web_chat():
+def test_build_default_toolset_web_chat_is_network_only(monkeypatch):
+    monkeypatch.delenv("LUCENT_LANGCHAIN_BUILTIN_TOOLS", raising=False)
+    monkeypatch.delenv("LUCENT_LANGCHAIN_ALLOW_NETWORK", raising=False)
+    ts = build_default_toolset(approve_permissions=False)
+    assert ts is not None
+    # Restricted chat: read-only network tools only, no filesystem or shell.
+    assert ts.tool_names == {"web_fetch", "web_search"}
+
+
+def test_build_default_toolset_web_chat_none_when_network_off(monkeypatch):
+    monkeypatch.setenv("LUCENT_LANGCHAIN_ALLOW_NETWORK", "0")
+    assert build_default_toolset(approve_permissions=False) is None
+
+
+def test_build_default_toolset_web_chat_none_when_builtins_off(monkeypatch):
+    monkeypatch.setenv("LUCENT_LANGCHAIN_BUILTIN_TOOLS", "0")
     assert build_default_toolset(approve_permissions=False) is None
 
 
