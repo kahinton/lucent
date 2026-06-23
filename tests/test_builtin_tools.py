@@ -21,12 +21,14 @@ def test_schemas_cover_expected_tools(toolset):
     assert {"view", "create_file", "str_replace", "list_directory", "grep"} <= names
     assert "run_shell" in names
     assert "web_fetch" in names
+    assert "web_search" in names
 
 
 def test_tool_names_respects_toggles(tmp_path):
     ts = BuiltinToolset(root_dir=tmp_path, allow_shell=False, allow_network=False)
     assert "run_shell" not in ts.tool_names
     assert "web_fetch" not in ts.tool_names
+    assert "web_search" not in ts.tool_names
     assert "view" in ts.tool_names
 
 
@@ -155,6 +157,49 @@ async def test_web_fetch_blocks_non_http_scheme(toolset):
 async def test_web_fetch_disabled(tmp_path):
     ts = BuiltinToolset(root_dir=tmp_path, allow_network=False)
     out = await ts.call_tool("web_fetch", {"url": "https://example.com"})
+    assert "disabled" in out
+
+
+# -- web_search ------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_web_search_parses_results(toolset, monkeypatch):
+    html = (
+        '<a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fpage">'
+        "Example &amp; Title</a>"
+        '<a class="result__snippet">A <b>snippet</b> of text.</a>'
+    )
+
+    class FakeResp:
+        text = html
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, *a, **k):
+            return FakeResp()
+
+    import httpx
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    out = await toolset.call_tool("web_search", {"query": "example", "max_results": 3})
+    assert "Example & Title" in out  # HTML unescaped, tags stripped
+    assert "https://example.com/page" in out  # uddg redirect unwrapped
+    assert "A snippet of text." in out
+
+
+@pytest.mark.asyncio
+async def test_web_search_disabled(tmp_path):
+    ts = BuiltinToolset(root_dir=tmp_path, allow_network=False)
+    out = await ts.call_tool("web_search", {"query": "anything"})
     assert "disabled" in out
 
 

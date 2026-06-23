@@ -16,9 +16,9 @@ built-ins which also run in the daemon's working directory):
 - **Path confinement**: file tools resolve every path against a root directory
   and reject anything that escapes it (``..`` traversal, absolute paths outside
   root, or symlinks pointing outside root).
-- **SSRF protection**: ``web_fetch`` validates every URL — including each
-  redirect hop — with :func:`lucent.url_validation.validate_url`, blocking
-  private/loopback/link-local ranges and cloud metadata endpoints.
+- **SSRF protection**: ``web_fetch`` and ``web_search`` validate every URL —
+  including each redirect hop — with :func:`lucent.url_validation.validate_url`,
+  blocking private/loopback/link-local ranges and cloud metadata endpoints.
 - **Command blocklist**: ``run_shell`` blocks a small set of clearly
   destructive / exfiltration patterns and reads of secret files, and always
   runs with a timeout and bounded output.
@@ -29,7 +29,8 @@ Toggles (environment variables):
 
 - ``LUCENT_LANGCHAIN_BUILTIN_TOOLS`` (default ``1``): master switch.
 - ``LUCENT_LANGCHAIN_ALLOW_SHELL`` (default ``1``): enable ``run_shell``.
-- ``LUCENT_LANGCHAIN_ALLOW_NETWORK`` (default ``1``): enable ``web_fetch``.
+- ``LUCENT_LANGCHAIN_ALLOW_NETWORK`` (default ``1``): enable ``web_fetch`` and
+  ``web_search``.
 - ``LUCENT_LANGCHAIN_TOOLS_ROOT`` (default: process CWD): file/shell root.
 """
 
@@ -127,6 +128,7 @@ class BuiltinToolset:
             names.add("run_shell")
         if self.allow_network:
             names.add("web_fetch")
+            names.add("web_search")
         return names
 
     def schemas(self) -> list[dict[str, Any]]:
@@ -250,6 +252,23 @@ class BuiltinToolset:
                     },
                 )
             )
+            schemas.append(
+                fn(
+                    "web_search",
+                    "Search the web for a query and return a ranked list of "
+                    "result titles, URLs, and snippets. Use this to discover "
+                    "relevant pages, then call web_fetch on a result URL to read "
+                    "its full contents.",
+                    {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "Search query."},
+                            "max_results": {"type": "integer", "description": "Max results to return (default 5, max 10)."},
+                        },
+                        "required": ["query"],
+                    },
+                )
+            )
         return schemas
 
     # -- execution ---------------------------------------------------------
@@ -276,6 +295,10 @@ class BuiltinToolset:
                 if not self.allow_network:
                     return "Error: web_fetch is disabled in this session."
                 return await self._web_fetch(args)
+            if tool_name == "web_search":
+                if not self.allow_network:
+                    return "Error: web_search is disabled in this session."
+                return await self._web_search(args)
             return f"Error calling tool {tool_name}: unknown built-in tool"
         except ValueError as e:
             return f"Error calling tool {tool_name}: {e}"
@@ -441,6 +464,78 @@ class BuiltinToolset:
                 status_line = f"HTTP {resp.status_code} {resp.reason_phrase} ({current})\n"
                 return _truncate(status_line + text, self.max_output)
         return f"Error: too many redirects (>{_MAX_REDIRECTS})."
+
+    async def _web_search(self, args: dict) -> str:
+        import html as _html
+        from urllib.parse import parse_qs, unquote, urlparse
+
+        import httpx
+
+        query = args.get("query")
+        if not query or not isinstance(query, str):
+            raise ValueError("query is required")
+        max_results = min(max(int(args.get("max_results", 5) or 5), 1), 10)
+
+        # DuckDuckGo HTML endpoint — no API key required, so web search works
+        # out of the box. The endpoint host is public; result URLs are returned
+        # as text (not fetched here), so there is no SSRF concern.
+        endpoint = "https://html.duckduckgo.com/html/"
+        validate_url(endpoint, purpose="web_search")
+        try:
+            async with httpx.AsyncClient(
+                timeout=_DEFAULT_FETCH_TIMEOUT, follow_redirects=True
+            ) as client:
+                resp = await client.post(
+                    endpoint,
+                    data={"q": query},
+                    headers={"User-Agent": "Mozilla/5.0 (compatible; Lucent/1.0)"},
+                )
+        except httpx.HTTPError as e:
+            return f"Error: web search request failed: {e}"
+
+        body = resp.text
+        # Result anchors: <a class="result__a" href="...">title</a>
+        anchor = re.compile(
+            r'<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
+            re.DOTALL | re.IGNORECASE,
+        )
+        snippet = re.compile(
+            r'<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</a>',
+            re.DOTALL | re.IGNORECASE,
+        )
+        tags = re.compile(r"<[^>]+>")
+
+        def clean(s: str) -> str:
+            return _html.unescape(tags.sub("", s)).strip()
+
+        def resolve(href: str) -> str:
+            # DDG wraps results in /l/?uddg=<encoded-target>; unwrap it.
+            href = _html.unescape(href)
+            if href.startswith("//"):
+                href = "https:" + href
+            parsed = urlparse(href)
+            if "duckduckgo.com" in parsed.netloc and parsed.path.startswith("/l/"):
+                target = parse_qs(parsed.query).get("uddg")
+                if target:
+                    return unquote(target[0])
+            return href
+
+        hrefs = anchor.findall(body)
+        snippets = snippet.findall(body)
+        if not hrefs:
+            return f"No web results found for {query!r}."
+
+        lines: list[str] = [f"Web search results for {query!r}:"]
+        for i, (href, title) in enumerate(hrefs[:max_results]):
+            url = resolve(href)
+            title_text = clean(title) or url
+            line = f"\n{i + 1}. {title_text}\n   {url}"
+            if i < len(snippets):
+                snip = clean(snippets[i])
+                if snip:
+                    line += f"\n   {snip}"
+            lines.append(line)
+        return _truncate("\n".join(lines), self.max_output)
 
 
 def _env_flag(name: str, default: bool) -> bool:
