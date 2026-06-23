@@ -156,6 +156,7 @@ _BASE_TASK_MEMORY_SERVER_TOOLS = sorted(
         "get_existing_tags",
         "get_memory",
         "get_memories",
+        "get_skill_definition",
         "get_tag_suggestions",
         "search_memories",
         "search_memories_full",
@@ -256,6 +257,7 @@ def _memory_server_tools_for_task(
         return sorted({
             "create_memory",
             "fetch_open_meteo_forecast",
+            "get_skill_definition",
             "log_task_event",
             "send_handoff",
         })
@@ -2631,6 +2633,11 @@ async def build_subagent_prompt(
         db_agent = await load_instance_agent(agent_type)
 
     if db_agent:
+        from lucent.llm.agent_composition import (
+            render_managed_tools_section,
+            render_skills_section,
+        )
+
         raw_agent_content = db_agent.get("content", "")
         agent_name = db_agent.get("name", agent_type)
         agent_def = (
@@ -2638,55 +2645,37 @@ async def build_subagent_prompt(
             f"{raw_agent_content}\n"
             f"</agent_definition>"
         )
-        # Load skills granted to this agent
+        # Resolve skills granted to this agent. Skills are listed (name/id/
+        # description) and loaded on demand via get_skill_definition, the same
+        # way the chat path and cognitive identity reference them.
         skill_names = db_agent.get("skill_names", [])
+        granted_skills: list[dict] = []
         if resolved_skills is not None:
-            for skill in resolved_skills:
-                if skill.get("name") in skill_names and skill.get("content"):
-                    sname = skill["name"]
-                    skills_context += (
-                        f'\n\n<skill_content name="{sname}">\n'
-                        f'{skill["content"]}\n'
-                        f"</skill_content>"
-                    )
+            granted_skills = [
+                skill for skill in resolved_skills if skill.get("name") in skill_names
+            ]
         elif skill_names:
             try:
                 async with httpx.AsyncClient(timeout=10) as client:
-                    for skill_name in skill_names:
-                        resp = await client.get(
-                            f"{API_BASE}/definitions/skills",
-                            params={"status": "active"},
-                            headers=API_HEADERS,
-                        )
-                        if resp.status_code == 200:
-                            data = resp.json()
-                            skills = data.get("items", data) if isinstance(data, dict) else data
-                            for skill in skills:
-                                if skill.get("name") in skill_names and skill.get("content"):
-                                    sname = skill["name"]
-                                    skills_context += (
-                                        f'\n\n<skill_content name="{sname}">\n'
-                                        f'{skill["content"]}\n'
-                                        f"</skill_content>"
-                                    )
-                            break  # Only need one request for all skills
+                    resp = await client.get(
+                        f"{API_BASE}/definitions/skills",
+                        params={"status": "active"},
+                        headers=API_HEADERS,
+                    )
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        skills = data.get("items", data) if isinstance(data, dict) else data
+                        granted_skills = [
+                            skill for skill in skills if skill.get("name") in skill_names
+                        ]
             except Exception:
                 log(f"Failed to load skills for agent '{agent_type}'", "DEBUG")
+        skills_section = render_skills_section(granted_skills)
+        if skills_section:
+            skills_context = "\n\n" + skills_section
         log(f"Using approved DB definition for '{agent_type}' agent (id: {str(db_agent['id'])[:8]})")
         if resolved_tools:
-            tool_lines = []
-            for tool in resolved_tools:
-                tool_lines.append(
-                    f"- {tool.get('name')}: {tool.get('description') or ''}\n"
-                    f"  input_schema: {json.dumps(tool.get('input_schema') or {}, default=str)}"
-                )
-            tools_context = (
-                "--- MANAGED TOOLS ---\n"
-                "The following managed tools are granted to this agent. Use "
-                "`run_managed_tool` with one of these tool names when a task needs "
-                "the capability. Lucent enforces access, grants, and sandbox policy.\n"
-                + "\n".join(tool_lines)
-            )
+            tools_context = render_managed_tools_section(resolved_tools)
     else:
         raise AgentNotFoundError(
             f"No approved agent definition found for '{agent_type}'. "
