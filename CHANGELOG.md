@@ -43,6 +43,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - First-login/session setup flow now preserves the intended target path and handles authenticated redirects more consistently.
 - Daemon dispatch and request-scoped planning now carry per-user/request context through task creation, LLM sessions, workflow runs, and handoff references.
 - Secret resolution supports system-managed values and safer reference handling across providers.
+- Shipped seed models are now disabled by default so the chat model picker no longer surfaces default offerings from providers that have not been configured. Completes the opt-in model policy (provider-discovered rows were already opt-in) — admins enable specific models explicitly. **Migration 088**.
 
 ### Documentation
 - Added/updated API, architecture, configuration, security, troubleshooting, workflow, runtime settings, and managed tools documentation for the v5 surfaces.
