@@ -31,6 +31,21 @@ RESTRICTED_WEB_CHAT_EXCLUDED_TOOLS = [
     "run_in_terminal",
 ]
 
+
+def _strip_internal_markers(mcp_config: dict) -> dict:
+    """Return a copy of *mcp_config* with Lucent-only ``internal`` markers removed.
+
+    The ``internal`` flag tells Lucent's own LangChain bridge to skip SSRF
+    validation for its trusted MCP endpoint. It is not part of the Copilot SDK's
+    MCP server schema, so strip it before handing the config to the SDK.
+    """
+    cleaned: dict = {}
+    for name, conf in mcp_config.items():
+        if isinstance(conf, dict) and "internal" in conf:
+            conf = {k: v for k, v in conf.items() if k != "internal"}
+        cleaned[name] = conf
+    return cleaned
+
 # Lazy import — only loaded when this engine is actually used
 _CopilotClient: Any = None
 _PermissionHandler: Any = None
@@ -507,7 +522,7 @@ class CopilotEngine(LLMEngine):
         """Build create_session kwargs."""
         kwargs: dict[str, Any] = {
             "model": model,
-            "mcp_servers": mcp_config or {},
+            "mcp_servers": _strip_internal_markers(mcp_config or {}),
         }
         if reasoning_effort:
             kwargs["reasoning_effort"] = reasoning_effort

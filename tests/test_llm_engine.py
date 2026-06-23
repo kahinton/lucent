@@ -367,6 +367,62 @@ class TestLangChainEngine:
         assert (tmp_path / "z.txt").read_text() == "ok"
 
     @pytest.mark.asyncio
+    async def test_internal_mcp_config_bypasses_ssrf_validation(self, monkeypatch):
+        """Lucent's own MCP endpoint (internal=True) must skip SSRF validation.
+
+        On a clean install the endpoint defaults to a loopback URL
+        (http://localhost:8766/mcp). With no allowlist configured that host
+        would be SSRF-blocked, the bridge would be skipped, and tools like
+        get_skill_definition would never load — so the model just emits raw
+        tool-call JSON. The internal flag is what keeps it working out of the
+        box; external (user-supplied) servers must still be validated.
+        """
+        from lucent.llm.langchain_engine import LangChainEngine
+
+        # Ensure no allowlist is set, mirroring a clean `docker-compose up`.
+        monkeypatch.delenv("LUCENT_MCP_URL_ALLOWLIST", raising=False)
+
+        captured: list[tuple[str, bool]] = []
+
+        class FakeBridge:
+            def __init__(self, *, mcp_url, skip_url_validation=False, **_kwargs):
+                captured.append((mcp_url, skip_url_validation))
+
+            async def discover_tools(self):
+                return []
+
+            async def close(self):
+                return None
+
+        import lucent.llm.mcp_bridge as mcp_bridge
+
+        monkeypatch.setattr(mcp_bridge, "MCPToolBridge", FakeBridge)
+
+        engine = LangChainEngine()
+        await engine._create_bridges(
+            {
+                "memory-server": {
+                    "type": "http",
+                    "url": "http://localhost:8766/mcp",
+                    "headers": {},
+                    "tools": ["*"],
+                    "internal": True,
+                },
+                "external": {
+                    "type": "http",
+                    "url": "https://example.com/mcp",
+                    "headers": {},
+                    "tools": ["*"],
+                },
+            }
+        )
+
+        by_url = dict(captured)
+        # Internal endpoint skips validation; external one does not.
+        assert by_url["http://localhost:8766/mcp"] is True
+        assert by_url["https://example.com/mcp"] is False
+
+    @pytest.mark.asyncio
     async def test_builtin_tools_excluded_for_restricted_web_chat(self, monkeypatch):
         """approve_permissions=False (restricted web chat) binds no built-ins."""
         from langchain_core.messages import AIMessage

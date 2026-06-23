@@ -234,6 +234,10 @@ def _build_mcp_config(
             "url": chat_mcp_url(),
             "headers": headers,
             "tools": list(tools or CHAT_ALLOWED_TOOLS),
+            # Lucent's own MCP endpoint — trusted internal connection, exempt
+            # from SSRF allowlist checks so it works out of the box even when
+            # the URL is loopback (the default http://localhost:8766/mcp).
+            "internal": True,
         },
     }
 

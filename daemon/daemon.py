@@ -903,6 +903,10 @@ def _build_auth_config(api_key: str) -> tuple[dict, dict]:
                 "url": MCP_URL,
                 "headers": {"Authorization": f"Bearer {api_key}"},
                 "tools": ["*"],
+                # Lucent's own MCP endpoint — trusted internal connection,
+                # exempt from SSRF allowlist checks so it works out of the box
+                # even when the URL is loopback (default localhost:8766/mcp).
+                "internal": True,
             },
         }
         if api_key
@@ -1191,6 +1195,9 @@ def _build_scoped_memory_server_config(
         "url": MCP_URL,
         "headers": headers,
         "tools": tools,
+        # Lucent's own MCP endpoint — trusted internal connection, exempt from
+        # SSRF allowlist checks (default loopback URL would otherwise block).
+        "internal": True,
     }
 
 

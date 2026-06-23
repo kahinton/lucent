@@ -627,11 +627,17 @@ class LangChainEngine(LLMEngine):
                 # the server is unreachable) must not abort the whole session.
                 # The model may still complete the task with built-in tools or
                 # other bridges, so log and skip the failed server.
+                #
+                # Entries flagged ``internal`` are Lucent's own MCP endpoint
+                # (operator-configured, not user-supplied), so they bypass SSRF
+                # validation — otherwise the default loopback URL
+                # (http://localhost:8766/mcp) is blocked and tools never load.
                 try:
                     bridge = MCPToolBridge(
                         mcp_url=server_conf["url"],
                         headers=server_conf.get("headers"),
                         allowed_tools=server_conf.get("tools"),
+                        skip_url_validation=bool(server_conf.get("internal")),
                         audit_context={**(audit_context or {}), "mcp_server": server_name},
                     )
                     discovered = await bridge.discover_tools()
