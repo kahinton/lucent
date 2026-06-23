@@ -257,3 +257,81 @@ class TestSyncSkillNames:
             )
             assert row["scope"] == "instance"
             assert row["description"] == "user agent"
+
+
+class TestSyncForAllRealOrgs:
+    """sync_built_in_definitions_for_all_real_orgs targets only real orgs.
+
+    Regression for the clean-DB bug: built-ins must seed every org that has a
+    user, and must never touch the internal __lucent_system__ org or userless
+    orgs (which would waste work and, on a clean DB, land built-ins where no
+    user can see them).
+    """
+
+    @pytest.mark.asyncio
+    async def test_only_orgs_with_users_excluding_system(
+        self, db_pool, sync_prefix, monkeypatch
+    ):
+        import lucent.builtin_definitions as bid
+
+        # Org with a user -> should be synced.
+        # System org -> must be excluded by name.
+        # Userless org -> must be excluded (no user joined).
+        async with db_pool.acquire() as conn:
+            real = await conn.fetchrow(
+                "INSERT INTO organizations (name) VALUES ($1) RETURNING id",
+                f"{sync_prefix}real",
+            )
+            system = await conn.fetchrow(
+                "INSERT INTO organizations (name) VALUES ($1) RETURNING id",
+                bid.SYSTEM_ORG_NAME,
+            )
+            userless = await conn.fetchrow(
+                "INSERT INTO organizations (name) VALUES ($1) RETURNING id",
+                f"{sync_prefix}userless",
+            )
+        real_id = str(real["id"])
+        system_id = str(system["id"])
+        userless_id = str(userless["id"])
+
+        try:
+            # Give the real and system orgs a user each; leave userless empty.
+            user_repo = UserRepository(db_pool)
+            await user_repo.create(
+                external_id=f"{sync_prefix}real-user",
+                provider="local",
+                organization_id=real_id,
+                email=f"{sync_prefix}real-user@test.com",
+                display_name="Real User",
+                role="admin",
+            )
+            await user_repo.create(
+                external_id=f"{sync_prefix}sys-user",
+                provider="local",
+                organization_id=system_id,
+                email=f"{sync_prefix}sys-user@test.com",
+                display_name="System User",
+                role="admin",
+            )
+
+            synced: list[str] = []
+
+            async def _fake_sync(pool, org_id):
+                synced.append(org_id)
+                return {}
+
+            monkeypatch.setattr(bid, "sync_built_in_definitions_for_org", _fake_sync)
+
+            await bid.sync_built_in_definitions_for_all_real_orgs(db_pool)
+
+            assert real_id in synced
+            assert system_id not in synced
+            assert userless_id not in synced
+        finally:
+            async with db_pool.acquire() as conn:
+                await conn.execute(
+                    "DELETE FROM users WHERE organization_id = $1", system_id
+                )
+                await conn.execute(
+                    "DELETE FROM organizations WHERE id = $1", system_id
+                )

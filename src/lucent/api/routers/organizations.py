@@ -124,6 +124,16 @@ async def create_organization(
             detail="Organization with this name already exists",
         )
 
+    # Seed the new org with built-in skills, agents, hooks, and sandbox templates.
+    try:
+        from lucent.builtin_definitions import sync_built_in_definitions_for_org
+
+        await sync_built_in_definitions_for_org(pool, str(org["id"]))
+    except Exception:
+        logger.warning(
+            "Failed to seed built-in definitions for new org %s", org["id"], exc_info=True
+        )
+
     logger.info("Organization created: id=%s, name=%s, by=%s", org["id"], data.name, user.id)
     return _org_to_response(org)
 
