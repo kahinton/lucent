@@ -738,13 +738,15 @@ def _refresh_config_from_runtime_settings() -> None:
 
 
 def _resolve_default_model(preferred_model: str | None = None) -> str:
-    """Resolve the current enabled default model from the model registry."""
-    try:
-        from lucent.model_registry import get_default_model_id
+    """Resolve the current enabled default model from the model registry.
 
-        return get_default_model_id(preferred_model=(preferred_model or MODEL or None))
-    except Exception:
-        return preferred_model or MODEL
+    Never invents a fallback model. If no enabled model exists,
+    ``NoModelsAvailableError`` propagates so the daemon fails loudly instead of
+    routing work to an arbitrary, possibly-unconfigured model.
+    """
+    from lucent.model_registry import get_default_model_id
+
+    return get_default_model_id(preferred_model=(preferred_model or MODEL or None))
 
 
 def _select_model_for_task(
@@ -2898,7 +2900,13 @@ class LucentDaemon:
             from lucent.db.pool import init_db as _init_db
             # The daemon uses DAEMON_DATABASE_URL (or falls back to DATABASE_URL).
             # Pass explicitly so init_db uses the same connection the daemon does.
-            _pool = await _init_db(database_url=DATABASE_URL)
+            # run_migrations=False: the daemon connects with the least-privilege
+            # lucent_daemon role which intentionally lacks DDL (CREATE on schema
+            # public). Migrations are the server's responsibility — attempting them
+            # here fails with "permission denied for schema public" and aborts pool
+            # init, which would silently strand runtime settings, the model registry,
+            # and role parsing on hardcoded defaults.
+            _pool = await _init_db(database_url=DATABASE_URL, run_migrations=False)
             try:
                 from lucent.settings import load_runtime_settings_from_db
 
@@ -3000,12 +3008,36 @@ class LucentDaemon:
                     "SELECT id, organization_id FROM users "
                     "WHERE external_id = 'daemon-service' AND is_active = true"
                 )
-                if not user or not user["organization_id"]:
+                if not user:
                     log("Cannot seed system schedules — no daemon-service user", "WARN")
                     return
 
+                org_id = str(user["organization_id"]) if user["organization_id"] else None
+                if not org_id:
+                    # Migration 017 creates the daemon-service user, but on a fresh
+                    # instance the organization may not exist yet at migration time,
+                    # leaving organization_id NULL. Resolve the first available org
+                    # now (post-onboarding) and backfill the user so future startups
+                    # and key provisioning find it directly.
+                    org = await conn.fetchrow(
+                        "SELECT id FROM organizations ORDER BY created_at LIMIT 1"
+                    )
+                    if not org:
+                        log(
+                            "Cannot seed system schedules — no organization exists yet "
+                            "(will retry once an organization is created)",
+                            "WARN",
+                        )
+                        return
+                    org_id = str(org["id"])
+                    await conn.execute(
+                        "UPDATE users SET organization_id = $1::uuid, updated_at = NOW() "
+                        "WHERE external_id = 'daemon-service'",
+                        org_id,
+                    )
+                    log(f"Backfilled daemon-service user organization ({org_id})")
+
                 user_id = str(user["id"])
-                org_id = str(user["organization_id"])
 
                 await conn.execute(
                     """UPDATE schedules

@@ -682,6 +682,27 @@ class TestModelRegistry:
 
         assert get_default_model_id() == "balanced-default"
 
+    def test_default_model_raises_when_no_models_enabled(self, monkeypatch):
+        import pytest
+
+        from lucent import model_registry
+        from lucent.model_registry import (
+            ModelInfo,
+            NoModelsAvailableError,
+            get_default_model_id,
+        )
+
+        # DB models loaded, but every row is disabled (none in the enabled set).
+        models = [
+            ModelInfo(id="seed-disabled", provider="x", name="Seed", category="general"),
+        ]
+        monkeypatch.setattr(model_registry, "_db_models", models)
+        monkeypatch.setattr(model_registry, "_db_enabled_ids", set())
+        monkeypatch.setattr(model_registry, "_MODEL_BY_ID", {m.id: m for m in models})
+
+        with pytest.raises(NoModelsAvailableError):
+            get_default_model_id()
+
     def test_task_selection_uses_default_without_clear_specialized_need(self, monkeypatch):
         from lucent import model_registry
         from lucent.model_registry import ModelInfo, select_model_for_task

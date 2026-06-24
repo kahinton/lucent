@@ -71,11 +71,18 @@ def _uninstrument_asyncpg() -> None:
         logger.warning("OTEL: Failed to uninstrument asyncpg: %s", e)
 
 
-async def init_db(database_url: str | None = None) -> Pool:
+async def init_db(
+    database_url: str | None = None, *, run_migrations: bool = True
+) -> Pool:
     """Initialize the database connection pool and run migrations.
 
     Args:
         database_url: PostgreSQL connection URL. If not provided, uses DATABASE_URL env var.
+        run_migrations: Whether to apply schema migrations. Defaults to True so the
+            server applies migrations on startup. The daemon passes False — it connects
+            with the least-privilege ``lucent_daemon`` role that intentionally lacks DDL
+            (CREATE on schema public), so attempting to run migrations would fail with
+            "permission denied for schema public". Migrations are the server's job.
 
     Returns:
         The initialized connection pool.
@@ -103,8 +110,9 @@ async def init_db(database_url: str | None = None) -> Pool:
 
     logger.info("Database connection pool created (min=2, max=10)")
 
-    # Run migrations
-    await _run_migrations(_pool)
+    # Run migrations (server only — the daemon's restricted role cannot do DDL)
+    if run_migrations:
+        await _run_migrations(_pool)
 
     return _pool
 
