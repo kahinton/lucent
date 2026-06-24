@@ -268,6 +268,13 @@ services:
       LUCENT_LLM_ENGINE: ${LUCENT_LLM_ENGINE:-copilot}
       LUCENT_MAX_SESSIONS: ${LUCENT_MAX_SESSIONS:-3}
       LUCENT_STALE_HEARTBEAT_MINUTES: ${LUCENT_STALE_HEARTBEAT_MINUTES:-30}
+      # Container logging: the daemon defaults to file-only logging for the host
+      # launch pattern (nohup ... >> daemon/daemon.log 2>&1). Inside a container
+      # that hides all output from `docker logs`, so send logs to stdout/stderr
+      # and disable the file handler instead.
+      PYTHONUNBUFFERED: "1"
+      LUCENT_LOG_STDERR: "true"
+      LUCENT_LOG_FILE: ""
       # Restricted DB connection for API key provisioning only.
       # Uses lucent_daemon role with least-privilege grants (see migration 017).
       DAEMON_DATABASE_URL: postgresql://lucent_daemon:${DAEMON_DB_PASSWORD:-change-me-insecure-daemon-password}@postgres:5432/lucent
@@ -294,6 +301,10 @@ services:
       LUCENT_MCP_URL_ALLOWLIST: ${LUCENT_MCP_URL_ALLOWLIST:-}
       LUCENT_MAX_SESSIONS: ${LUCENT_MAX_SESSIONS:-3}
       LUCENT_STALE_HEARTBEAT_MINUTES: ${LUCENT_STALE_HEARTBEAT_MINUTES:-30}
+      # Container logging: send logs to stdout/stderr (see daemon-1 note).
+      PYTHONUNBUFFERED: "1"
+      LUCENT_LOG_STDERR: "true"
+      LUCENT_LOG_FILE: ""
       DAEMON_DATABASE_URL: postgresql://lucent_daemon:${DAEMON_DB_PASSWORD:-change-me-insecure-daemon-password}@postgres:5432/lucent
     volumes:
       - ./daemon:/app/daemon:cached
