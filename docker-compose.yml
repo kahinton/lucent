@@ -246,12 +246,15 @@ services:
         condition: service_started
     restart: unless-stopped
 
-  # Multi-instance daemon example (use with: docker compose --profile multi-daemon up)
+  # Daemon worker examples. daemon-1 belongs to both the single-daemon and
+  # multi-daemon profiles, so it runs alone or alongside daemon-2:
+  #   docker compose --profile single-daemon up   # daemon-1 only
+  #   docker compose --profile multi-daemon up     # daemon-1 + daemon-2
   daemon-1:
     build:
       context: .
       dockerfile: Dockerfile.dev
-    profiles: ["multi-daemon"]
+    profiles: ["single-daemon", "multi-daemon"]
     depends_on:
       lucent:
         condition: service_healthy
