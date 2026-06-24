@@ -140,6 +140,10 @@ services:
       LUCENT_DEFAULT_MODEL: ${LUCENT_DEFAULT_MODEL:-}
       LUCENT_CHAT_MODEL: ${LUCENT_CHAT_MODEL:-}
       LUCENT_MCP_URL_ALLOWLIST: ${LUCENT_MCP_URL_ALLOWLIST:-}
+      # MCP DNS-rebinding allowlist. The MCP SDK rejects non-loopback Host
+      # headers with HTTP 421; the daemon reaches the server as http://lucent:8766/mcp,
+      # so the in-network service name must be allowed. Override for custom hostnames/ingress.
+      LUCENT_MCP_ALLOWED_HOSTS: ${LUCENT_MCP_ALLOWED_HOSTS:-lucent}
       # LLM Engine: "copilot" (default, uses GitHub Copilot SDK) or "langchain"
       LUCENT_LLM_ENGINE: ${LUCENT_LLM_ENGINE:-copilot}
       # Provider API keys (only needed when LUCENT_LLM_ENGINE=langchain)

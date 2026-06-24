@@ -124,6 +124,10 @@ services:
       LUCENT_DEFAULT_MODEL: ${LUCENT_DEFAULT_MODEL:-}
       LUCENT_CHAT_MODEL: ${LUCENT_CHAT_MODEL:-}
       LUCENT_LLM_ENGINE: ${LUCENT_LLM_ENGINE:-copilot}
+      # MCP DNS-rebinding allowlist (comma-separated host or host:port). Loopback
+      # is always allowed; set this when MCP clients reach the server by a custom
+      # service name or ingress hostname (otherwise the SDK returns HTTP 421).
+      LUCENT_MCP_ALLOWED_HOSTS: ${LUCENT_MCP_ALLOWED_HOSTS:-}
       # Secret storage
       LUCENT_SECRET_PROVIDER: ${LUCENT_SECRET_PROVIDER:-builtin}
       LUCENT_SECRET_KEY: ${LUCENT_SECRET_KEY:?LUCENT_SECRET_KEY is required}

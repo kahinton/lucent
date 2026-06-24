@@ -8,9 +8,11 @@ This module provides a single unified server that handles:
 
 import os
 import sys
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from lucent.auth import set_current_api_key_id, set_current_user
@@ -31,8 +33,72 @@ load_dotenv()
 HOST = os.environ.get("LUCENT_HOST", "0.0.0.0")
 PORT = int(os.environ.get("LUCENT_PORT", "8766"))
 
+
+def _build_mcp_transport_security() -> TransportSecuritySettings:
+    """Build the MCP DNS-rebinding-protection allowlist for this deployment.
+
+    Recent MCP SDK versions auto-enable DNS-rebinding protection on FastMCP and,
+    by default, only permit loopback ``Host``/``Origin`` headers
+    (``localhost``/``127.0.0.1``/``[::1]``). Lucent's ``/mcp`` endpoint, however,
+    is reached over the container/service network — e.g. the daemon connects to
+    ``http://lucent:8766/mcp`` — so the default allowlist rejects those requests
+    with HTTP 421 Misdirected Request. (That 421 then surfaces as an
+    "Attempted to exit cancel scope in a different task" error when the MCP
+    client's anyio transport unwinds.)
+
+    Protection stays enabled; we extend the allowlist with the hostnames this
+    deployment is actually served as, derived from configuration:
+    - loopback (host-mode daemon, local browser, health checks),
+    - the host of ``LUCENT_MCP_URL`` / ``LUCENT_PUBLIC_URL`` when set,
+    - any extra hosts listed in ``LUCENT_MCP_ALLOWED_HOSTS`` (comma-separated
+      ``host`` or ``host:port`` values, e.g. ``lucent,lucent.internal:8766``).
+    """
+    allowed_hosts = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+    allowed_origins = [
+        "http://127.0.0.1:*",
+        "http://localhost:*",
+        "http://[::1]:*",
+        "https://127.0.0.1:*",
+        "https://localhost:*",
+        "https://[::1]:*",
+    ]
+
+    def _host_from_url(url: str | None) -> str | None:
+        if not url:
+            return None
+        netloc = urlsplit(url if "://" in url else f"//{url}").netloc
+        return netloc or None
+
+    extra_hosts: list[str] = []
+    for url in (os.environ.get("LUCENT_MCP_URL"), os.environ.get("LUCENT_PUBLIC_URL")):
+        host = _host_from_url(url)
+        if host:
+            extra_hosts.append(host)
+    extra_hosts += [
+        h.strip()
+        for h in os.environ.get("LUCENT_MCP_ALLOWED_HOSTS", "").split(",")
+        if h.strip()
+    ]
+
+    for host in extra_hosts:
+        bare = host.split(":", 1)[0]
+        for pattern in (host, bare, f"{bare}:*"):
+            if pattern not in allowed_hosts:
+                allowed_hosts.append(pattern)
+        for scheme in ("http", "https"):
+            for origin in (f"{scheme}://{host}", f"{scheme}://{bare}", f"{scheme}://{bare}:*"):
+                if origin not in allowed_origins:
+                    allowed_origins.append(origin)
+
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=allowed_hosts,
+        allowed_origins=allowed_origins,
+    )
+
+
 # Create the MCP server
-mcp = FastMCP("Lucent")
+mcp = FastMCP("Lucent", transport_security=_build_mcp_transport_security())
 
 # Register all memory tools
 register_tools(mcp)
