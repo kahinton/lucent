@@ -69,6 +69,17 @@ class CurrentUser:
         """Check if this user is being impersonated by another user."""
         return self.impersonator_id is not None
 
+    @property
+    def is_daemon_service(self) -> bool:
+        """Whether this user is a daemon-service system account.
+
+        Daemon-service users are provisioned per organization with an
+        ``external_id`` of ``daemon-service:{org_id}``. The bare legacy
+        ``daemon-service`` id (from migration 017) is still recognized.
+        """
+        ext = self.external_id or ""
+        return ext == "daemon-service" or ext.startswith("daemon-service:")
+
     def has_permission(self, permission: Permission) -> bool:
         """Check if this user has a specific permission."""
         return has_permission(self.role, permission)

@@ -14,7 +14,20 @@ from daemon.daemon import LucentDaemon
 async def test_seed_system_schedules_excludes_retired_procedure_cleanup(monkeypatch):
     inserted_rows: list[tuple] = []
 
+    monkeypatch.setattr(daemon_module, "_resolved_daemon_org", None, raising=False)
+    monkeypatch.setattr(daemon_module, "DAEMON_ORG", "", raising=False)
+
     class FakeConn:
+        async def fetch(self, query, *args):
+            if "FROM organizations" in query:
+                return [
+                    {
+                        "id": UUID("22222222-2222-2222-2222-222222222222"),
+                        "name": "Test Org",
+                    }
+                ]
+            return []
+
         async def fetchrow(self, query, *args):
             if "FROM users" in query:
                 return {
@@ -63,7 +76,20 @@ async def test_seed_system_schedules_excludes_retired_procedure_cleanup(monkeypa
 async def test_seed_system_schedules_refreshes_existing_prompts(monkeypatch):
     updates: list[tuple] = []
 
+    monkeypatch.setattr(daemon_module, "_resolved_daemon_org", None, raising=False)
+    monkeypatch.setattr(daemon_module, "DAEMON_ORG", "", raising=False)
+
     class FakeConn:
+        async def fetch(self, query, *args):
+            if "FROM organizations" in query:
+                return [
+                    {
+                        "id": UUID("22222222-2222-2222-2222-222222222222"),
+                        "name": "Test Org",
+                    }
+                ]
+            return []
+
         async def fetchrow(self, query, *args):
             if "FROM users" in query:
                 return {

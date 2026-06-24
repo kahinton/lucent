@@ -22,7 +22,7 @@ def _can_review_request(user) -> bool:
     return (
         role >= Role.ADMIN
         or role == Role.DAEMON
-        or user.external_id == "daemon-service"
+        or getattr(user, "is_daemon_service", False)
     )
 
 

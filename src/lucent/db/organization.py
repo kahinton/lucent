@@ -19,12 +19,24 @@ class OrganizationRepository:
     async def create(self, name: str) -> dict[str, Any]:
         """Create a new organization.
 
+        Every real organization is provisioned with its own ``daemon-service``
+        system user in the same transaction, so the org is self-sufficient from
+        the moment it is created: a daemon bound to this org has an identity to
+        authenticate as, register instances under, and seed system schedules
+        with — all scoped to this org. The hidden system org
+        (``__lucent_system__``, used only for secret storage) is excluded; it
+        never gets a daemon-service user.
+
         Args:
             name: The organization name.
 
         Returns:
             The created organization record.
         """
+        # Imported lazily to avoid a module-load cycle (builtin_definitions
+        # pulls in higher-level modules).
+        from lucent.builtin_definitions import SYSTEM_ORG_NAME
+
         query = """
             INSERT INTO organizations (name)
             VALUES ($1)
@@ -32,9 +44,28 @@ class OrganizationRepository:
         """
 
         async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(query, name)
+            async with conn.transaction():
+                row = await conn.fetchrow(query, name)
+                org = self._row_to_dict(row)
 
-        return self._row_to_dict(row)
+                if name != SYSTEM_ORG_NAME:
+                    # Per-org daemon-service identity. The external_id is scoped
+                    # by org id so the global UNIQUE(provider, external_id)
+                    # constraint allows one per organization.
+                    await conn.execute(
+                        """
+                        INSERT INTO users
+                            (external_id, provider, organization_id,
+                             email, display_name, role)
+                        VALUES ($1, 'local', $2, 'daemon@lucent.local',
+                                'Lucent Daemon', 'daemon')
+                        ON CONFLICT (provider, external_id) DO NOTHING
+                        """,
+                        f"daemon-service:{org['id']}",
+                        str(org["id"]),
+                    )
+
+        return org
 
     async def get_by_id(self, org_id: UUID) -> dict[str, Any] | None:
         """Get an organization by ID.

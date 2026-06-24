@@ -881,6 +881,104 @@ def _resolve_daemon_database_url() -> str:
 
 DATABASE_URL = _resolve_daemon_database_url()
 
+# The hidden system org is secrets-only and is never a daemon target.
+SYSTEM_ORG_NAME = "__lucent_system__"
+
+# A daemon is single-tenant: it operates on exactly one organization. The bound
+# org is resolved once and cached. Operators can pin it explicitly with
+# LUCENT_DAEMON_ORG (org id or name); otherwise the daemon auto-binds to the
+# single real org (the "just works" local / docker-compose case) and refuses to
+# guess when multiple real orgs exist.
+DAEMON_ORG = os.environ.get("LUCENT_DAEMON_ORG", "").strip()
+_resolved_daemon_org: tuple[str, str] | None = None  # (org_id, org_name)
+
+
+async def _resolve_daemon_org(conn) -> tuple[str, str] | None:
+    """Resolve the single organization this daemon operates on.
+
+    Returns (org_id, org_name), or None if it cannot be determined yet.
+    Never selects the hidden system org. Resolution order:
+
+    1. LUCENT_DAEMON_ORG — explicit operator binding (matched by id or name).
+    2. The single real org, if exactly one exists (auto-bind, local default).
+    3. Otherwise None — zero real orgs (nothing to do yet) or multiple real
+       orgs with no explicit binding (ambiguous; refuse and tell the operator).
+    """
+    global _resolved_daemon_org
+    if _resolved_daemon_org is not None:
+        return _resolved_daemon_org
+
+    if DAEMON_ORG:
+        row = await conn.fetchrow(
+            "SELECT id, name FROM organizations "
+            "WHERE id::text = $1 OR name = $1 LIMIT 1",
+            DAEMON_ORG,
+        )
+        if not row:
+            log(
+                f"LUCENT_DAEMON_ORG={DAEMON_ORG!r} matches no organization; "
+                "cannot bind daemon to an org.",
+                "ERROR",
+            )
+            return None
+        _resolved_daemon_org = (str(row["id"]), row["name"])
+        log(f"Daemon bound to organization '{row['name']}' (explicit LUCENT_DAEMON_ORG)")
+        return _resolved_daemon_org
+
+    rows = await conn.fetch(
+        "SELECT id, name FROM organizations WHERE name <> $1 ORDER BY created_at",
+        SYSTEM_ORG_NAME,
+    )
+    if not rows:
+        return None
+    if len(rows) > 1:
+        names = ", ".join(r["name"] for r in rows[:6])
+        log(
+            f"Found {len(rows)} organizations but no LUCENT_DAEMON_ORG binding; "
+            f"a daemon serves a single org. Set LUCENT_DAEMON_ORG to one of: {names}",
+            "ERROR",
+        )
+        return None
+    _resolved_daemon_org = (str(rows[0]["id"]), rows[0]["name"])
+    log(f"Daemon auto-bound to the single organization '{rows[0]['name']}'")
+    return _resolved_daemon_org
+
+
+async def _ensure_daemon_service_user(conn, org_id: str) -> dict | None:
+    """Get (or self-heal) the org-scoped daemon-service user for ``org_id``.
+
+    Real orgs get this user at creation time (OrganizationRepository.create).
+    For orgs created before that change, the daemon provisions it on first run
+    using its users INSERT grant. Direct SQL avoids the app-layer side effect of
+    creating an individual memory for a system account.
+    """
+    external_id = f"daemon-service:{org_id}"
+    user = await conn.fetchrow(
+        "SELECT id, organization_id FROM users "
+        "WHERE external_id = $1 AND provider = 'local' AND is_active = true",
+        external_id,
+    )
+    if user:
+        return user
+    try:
+        user = await conn.fetchrow(
+            "INSERT INTO users "
+            "  (external_id, provider, organization_id, email, display_name, role) "
+            "VALUES ($1, 'local', $2::uuid, 'daemon@lucent.local', "
+            "  'Lucent Daemon', 'daemon') "
+            "ON CONFLICT (provider, external_id) DO UPDATE "
+            "  SET organization_id = EXCLUDED.organization_id "
+            "RETURNING id, organization_id",
+            external_id,
+            org_id,
+        )
+        log(f"Provisioned daemon-service user for org {org_id} (self-heal)")
+        return user
+    except Exception as e:
+        log(f"Could not provision daemon-service user for org {org_id}: {e}", "ERROR")
+        return None
+
+
 # Key expiry — daemon keys auto-expire and are refreshed each cycle
 KEY_TTL_HOURS = 24
 PROACTIVE_KEY_ROTATION_MINUTES = 60
@@ -941,10 +1039,10 @@ def _get_key_lock() -> asyncio.Lock:
 async def _provision_daemon_api_key(instance_id: str) -> str | None:
     """Provision an instance-scoped API key with a 24-hour expiry.
 
-    Uses the restricted lucent_daemon DB role which can only touch api_keys,
-    users (SELECT), and organizations (SELECT).  The daemon service user is
-    pre-created by migration 017; if it doesn't exist yet, we fall back to
-    creating it (works when connected as the full-privilege lucent role).
+    Uses the restricted lucent_daemon DB role which can manage api_keys and
+    has SELECT on users/organizations plus INSERT on users for self-heal. The
+    key is scoped to the daemon-service user of the single org this daemon is
+    bound to (see _resolve_daemon_org) — never the hidden system org.
 
     Returns the plain-text hs_ key, or None on failure.
     """
@@ -962,38 +1060,22 @@ async def _provision_daemon_api_key(instance_id: str) -> str | None:
         return None
 
     try:
-        # Look up the daemon service user (created by migration 017)
-        user = await conn.fetchrow(
-            "SELECT id, organization_id FROM users "
-            "WHERE external_id = 'daemon-service' AND is_active = true"
-        )
+        bound = await _resolve_daemon_org(conn)
+        if not bound:
+            log(
+                "Cannot provision daemon API key: no organization to bind to. "
+                "Create an organization (sign in) or set LUCENT_DAEMON_ORG.",
+                "WARN",
+            )
+            return None
+        org_id, _org_name = bound
+
+        user = await _ensure_daemon_service_user(conn, org_id)
         if not user:
-            # Fallback: create the user if we have sufficient privileges
-            # (only works with the full lucent role, not lucent_daemon)
-            try:
-                org = await conn.fetchrow(
-                    "SELECT id FROM organizations ORDER BY created_at LIMIT 1"
-                )
-                org_id = str(org["id"]) if org else None
-                user = await conn.fetchrow(
-                    "INSERT INTO users (external_id, provider, organization_id, "
-                    "  email, display_name, role) "
-                    "VALUES ('daemon-service', 'local', $1, "
-                    "  'daemon@lucent.local', 'Lucent Daemon', 'daemon') "
-                    "RETURNING id, organization_id",
-                    org_id,
-                )
-                log("Created daemon service user (fallback path)")
-            except Exception as e:
-                log(
-                    f"Daemon service user not found and cannot create: {e}. "
-                    "Run migration 017 or use the full DATABASE_URL.",
-                    "ERROR",
-                )
-                return None
+            return None
 
         user_id = str(user["id"])
-        org_id = str(user["organization_id"]) if user["organization_id"] else None
+        org_id = str(user["organization_id"]) if user["organization_id"] else org_id
 
         # Instance-specific key name prevents collisions between daemon instances
         key_name = f"daemon-{instance_id}"
@@ -1106,11 +1188,8 @@ async def _mint_scoped_api_key(
         return None
 
     try:
-        # Look up the daemon service user
-        user = await conn.fetchrow(
-            "SELECT id, organization_id FROM users "
-            "WHERE external_id = 'daemon-service' AND is_active = true"
-        )
+        # Look up the daemon service user for the target org
+        user = await _ensure_daemon_service_user(conn, org_id)
         if not user:
             log("Cannot mint scoped key — no daemon-service user", "WARN")
             return None
@@ -2798,6 +2877,10 @@ class LucentDaemon:
         self.running = False
         self.draining = False  # True = stop new work, wait for in-flight sessions
         self.cycle_count = 0
+        # Whether built-in system schedules have been seeded for the bound org.
+        # Starts False; set once seeding succeeds (may defer on brand-new
+        # instances until an organization exists — the scheduler loop retries).
+        self._schedules_seeded = False
         # Unique instance ID for distributed coordination
         hostname = platform.node() or "unknown"
         self.instance_id = f"{hostname}-{os.getpid()}-{int(datetime.now(timezone.utc).timestamp())}"
@@ -2944,12 +3027,21 @@ class LucentDaemon:
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, self._handle_shutdown)
 
-        engine_name = get_engine_name() if _LLM_ENGINE_AVAILABLE else "copilot-direct"
+        # Report the engine that the resolved default model actually routes to
+        # (per-model routing), not the global default — they can differ.
+        _default_model = _resolve_default_model()
+        if _LLM_ENGINE_AVAILABLE:
+            try:
+                engine_name = get_engine_for_model(_default_model).name
+            except Exception:
+                engine_name = get_engine_name()
+        else:
+            engine_name = "copilot-direct"
         log(
             f"Daemon ready. Instance: {self.instance_id}, "
             f"Roles: {','.join(sorted(self.roles))}, "
             f"Engine: {engine_name} (multi-engine routing enabled), "
-            f"Model: {_resolve_default_model()}, Max sessions: {MAX_CONCURRENT_SESSIONS}"
+            f"Model: {_default_model}, Max sessions: {MAX_CONCURRENT_SESSIONS}"
         )
 
         # Populate LLM engine model registry from DB (for Ollama/custom providers)
@@ -2986,8 +3078,11 @@ class LucentDaemon:
         except Exception as e:
             log(f"Startup recovery failed (non-fatal): {e}", "WARN")
 
-        # Seed system schedules — built-in schedules that drive autonomous work
-        await self._seed_system_schedules()
+        # Seed system schedules — built-in schedules that drive autonomous work.
+        # On a brand-new instance no real organization may exist yet (the user
+        # hasn't signed up). Seeding then defers; the scheduler loop retries it
+        # so schedules appear as soon as the org is created — no restart needed.
+        self._schedules_seeded = await self._seed_system_schedules()
 
     async def _seed_system_schedules(self):
         """Ensure built-in system schedules exist for this organization.
@@ -3004,38 +3099,22 @@ class LucentDaemon:
         try:
             conn = await asyncpg.connect(DATABASE_URL)
             try:
-                user = await conn.fetchrow(
-                    "SELECT id, organization_id FROM users "
-                    "WHERE external_id = 'daemon-service' AND is_active = true"
-                )
+                bound = await _resolve_daemon_org(conn)
+                if not bound:
+                    log(
+                        "Cannot seed system schedules — no organization to bind to "
+                        "(will retry once an organization is created or "
+                        "LUCENT_DAEMON_ORG is set)",
+                        "WARN",
+                    )
+                    return False
+                org_id, _org_name = bound
+
+                user = await _ensure_daemon_service_user(conn, org_id)
                 if not user:
                     log("Cannot seed system schedules — no daemon-service user", "WARN")
-                    return
+                    return False
 
-                org_id = str(user["organization_id"]) if user["organization_id"] else None
-                if not org_id:
-                    # Migration 017 creates the daemon-service user, but on a fresh
-                    # instance the organization may not exist yet at migration time,
-                    # leaving organization_id NULL. Resolve the first available org
-                    # now (post-onboarding) and backfill the user so future startups
-                    # and key provisioning find it directly.
-                    org = await conn.fetchrow(
-                        "SELECT id FROM organizations ORDER BY created_at LIMIT 1"
-                    )
-                    if not org:
-                        log(
-                            "Cannot seed system schedules — no organization exists yet "
-                            "(will retry once an organization is created)",
-                            "WARN",
-                        )
-                        return
-                    org_id = str(org["id"])
-                    await conn.execute(
-                        "UPDATE users SET organization_id = $1::uuid, updated_at = NOW() "
-                        "WHERE external_id = 'daemon-service'",
-                        org_id,
-                    )
-                    log(f"Backfilled daemon-service user organization ({org_id})")
 
                 user_id = str(user["id"])
 
@@ -3227,12 +3306,14 @@ class LucentDaemon:
                     log(f"Refreshed {updated} existing system schedule definition(s)")
                 if not created and not updated:
                     log("System schedules verified (all exist)")
+                return True
 
             finally:
                 await conn.close()
 
         except Exception as e:
             log(f"System schedule seeding failed (non-fatal): {e}", "WARN")
+            return False
 
     def _build_cognitive_schedule_prompt(self) -> str:
         """Build the prompt used by the scheduled cognitive planning task."""
@@ -6412,7 +6493,13 @@ class LucentDaemon:
             )
             if not requester:
                 return requester_user_id
-            if requester["role"] != "daemon" and requester["external_id"] != "daemon-service":
+            req_ext = requester["external_id"] or ""
+            req_is_daemon = (
+                requester["role"] == "daemon"
+                or req_ext == "daemon-service"
+                or req_ext.startswith("daemon-service:")
+            )
+            if not req_is_daemon:
                 return requester_user_id
 
             human = await conn.fetchrow(
@@ -7198,6 +7285,11 @@ class LucentDaemon:
                     await asyncio.sleep(30)
                     continue
 
+                # Retry deferred schedule seeding (brand-new instance where the
+                # org did not exist at startup). Idempotent once it succeeds.
+                if not getattr(self, "_schedules_seeded", False):
+                    self._schedules_seeded = await self._seed_system_schedules()
+
                 await self._check_due_schedules()
 
                 # Decomposition backfill: any non-terminal request older
@@ -7222,7 +7314,7 @@ class LucentDaemon:
             await asyncio.sleep(SCHEDULER_CHECK_SECONDS)
 
     async def _get_daemon_org_id(self) -> str | None:
-        """Return the daemon-service user's organization id (cached after first lookup)."""
+        """Return the daemon's bound organization id (cached after first lookup)."""
         cached = getattr(self, "_cached_daemon_org_id", None)
         if cached:
             return cached
@@ -7234,13 +7326,10 @@ class LucentDaemon:
         except Exception:
             return None
         try:
-            row = await conn.fetchrow(
-                "SELECT organization_id FROM users "
-                "WHERE external_id = 'daemon-service' AND is_active = true"
-            )
-            if not row or not row["organization_id"]:
+            bound = await _resolve_daemon_org(conn)
+            if not bound:
                 return None
-            org_id = str(row["organization_id"])
+            org_id = bound[0]
             self._cached_daemon_org_id = org_id
             return org_id
         finally:

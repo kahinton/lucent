@@ -159,7 +159,7 @@ async def daemon_review_action(
     if (
         user.role < Role.ADMIN
         and user.role != Role.DAEMON
-        and user.external_id != "daemon-service"
+        and not getattr(user, "is_daemon_service", False)
     ):
         raise HTTPException(status_code=403, detail="Admin or owner role required")
     if len(comment) > 10000:

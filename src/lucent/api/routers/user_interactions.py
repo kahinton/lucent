@@ -71,7 +71,7 @@ def _target_user_id(user: AuthenticatedUser, requested: UUID | None) -> UUID | N
 
 def _require_daemon_interaction_scope(user: AuthenticatedUser) -> None:
     """Creation is for daemon/workflow producers, not arbitrary read-only keys."""
-    if user.role >= Role.ADMIN or user.external_id == "daemon-service":
+    if user.role >= Role.ADMIN or user.is_daemon_service:
         return
     user.require_scope("daemon-tasks")
 

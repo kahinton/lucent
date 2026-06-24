@@ -106,7 +106,7 @@ async def create_review(
     if (
         user.role < Role.ADMIN
         and user.role != Role.DAEMON
-        and user.external_id != "daemon-service"
+        and not user.is_daemon_service
     ):
         raise HTTPException(403, "Admin or owner role required")
 
@@ -138,7 +138,7 @@ async def create_review(
         raise HTTPException(422, "Comments are required when rejecting")
 
     # Server-side source derivation to prevent spoofing
-    if user.external_id == "daemon-service" or user.role == Role.DAEMON:
+    if user.is_daemon_service or user.role == Role.DAEMON:
         resolved_source = "daemon"
     elif user.auth_method in ("session", "oauth"):
         resolved_source = "human"

@@ -115,7 +115,8 @@ async def ensure_server_system_schedules() -> int:
             FROM organizations o
             LEFT JOIN users u
               ON u.organization_id = o.id
-             AND u.external_id = 'daemon-service'
+             AND (u.external_id = 'daemon-service'
+                  OR u.external_id = 'daemon-service:' || o.id::text)
              AND u.is_active = true
             """
         )

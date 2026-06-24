@@ -344,8 +344,10 @@ Returns:
 
             # Detect daemon caller for auto-sharing and auto-tagging
             current_user = get_current_user()
+            _ext_id = (current_user or {}).get("external_id") or ""
             is_daemon = bool(
-                current_user and current_user.get("external_id") == "daemon-service"
+                current_user
+                and (_ext_id == "daemon-service" or _ext_id.startswith("daemon-service:"))
             )
 
             # Normalize tags: replace prohibited tags, auto-tag daemon content

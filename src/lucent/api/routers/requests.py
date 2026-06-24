@@ -19,7 +19,7 @@ _deprecation_logger = logging.getLogger(f"{__name__}.deprecation")
 
 
 def _is_daemon_user(user: AuthenticatedUser) -> bool:
-    return user.role == Role.DAEMON or user.external_id == "daemon-service"
+    return user.role == Role.DAEMON or user.is_daemon_service
 
 
 def _is_privileged_request_actor(user: AuthenticatedUser) -> bool:
@@ -450,7 +450,7 @@ async def approve_request_review(
     if (
         user.role < Role.ADMIN
         and user.role != Role.DAEMON
-        and user.external_id != "daemon-service"
+        and not user.is_daemon_service
     ):
         raise HTTPException(403, "Admin or owner role required")
 
@@ -513,7 +513,7 @@ async def reject_request_review(
     if (
         user.role < Role.ADMIN
         and user.role != Role.DAEMON
-        and user.external_id != "daemon-service"
+        and not user.is_daemon_service
     ):
         raise HTTPException(403, "Admin or owner role required")
 
