@@ -291,6 +291,16 @@ services:
       # OLLAMA_HOST as the server; without it local-model calls fail with
       # "OLLAMA_HOST is not configured".
       OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
+      # Secret storage — the daemon resolves model-provider credentials itself
+      # (e.g. the Copilot github_token) when running LLM sessions. Those secrets
+      # are encrypted with the same provider the server used (OpenBao Transit,
+      # ciphertext prefixed `vault:v1:`). Without matching VAULT_ADDR /
+      # VAULT_TOKEN_FILE the daemon falls back to the builtin provider, cannot
+      # decrypt them, and every Copilot session fails with "Session was not
+      # created with authentication info or custom provider".
+      LUCENT_SECRET_PROVIDER: ${LUCENT_SECRET_PROVIDER:-auto}
+      VAULT_ADDR: http://openbao:8200
+      VAULT_TOKEN_FILE: /shared/vault-token
     extra_hosts:
       # Required so host.docker.internal resolves on Linux hosts (Docker Desktop
       # provides it automatically, plain Docker Engine does not).
@@ -298,6 +308,9 @@ services:
     volumes:
       - ./daemon:/app/daemon:cached
       - ./src:/app/src:cached
+      # Read-only access to the OpenBao token written by openbao-init, so the
+      # Transit secret provider can authenticate to decrypt provider secrets.
+      - ./.openbao/shared:/shared:ro
     command: ["python", "-m", "daemon.daemon"]
     restart: unless-stopped
 
@@ -331,12 +344,19 @@ services:
       # local-model discovery/sessions; without it calls fail with
       # "OLLAMA_HOST is not configured".
       OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
+      # Secret storage — see daemon-1 note. Required so the daemon can decrypt
+      # transit-encrypted model-provider credentials when running LLM sessions.
+      LUCENT_SECRET_PROVIDER: ${LUCENT_SECRET_PROVIDER:-auto}
+      VAULT_ADDR: http://openbao:8200
+      VAULT_TOKEN_FILE: /shared/vault-token
     extra_hosts:
       # Required so host.docker.internal resolves on Linux hosts.
       - "host.docker.internal:host-gateway"
     volumes:
       - ./daemon:/app/daemon:cached
       - ./src:/app/src:cached
+      # Read-only access to the OpenBao token (see daemon-1 note).
+      - ./.openbao/shared:/shared:ro
     command: ["python", "-m", "daemon.daemon"]
     restart: unless-stopped
 

@@ -3008,6 +3008,22 @@ class LucentDaemon:
         except Exception as e:
             log(f"Failed to initialize Lucent DB pool: {e}", "WARN")
 
+        # Initialize the secret provider so org-scoped model-provider
+        # credentials (e.g. the Copilot github_token) can be resolved during
+        # LLM sessions. The API server does this at startup; the daemon runs its
+        # own LLM sessions, so it must too. Without it SecretRegistry stays empty
+        # and the Copilot engine silently falls back to no credentials, failing
+        # with "Session was not created with authentication info or custom
+        # provider" on container daemons whose Copilot CLI is not logged in.
+        try:
+            from lucent.db import get_pool as _get_secret_pool
+
+            _secret_pool = await _get_secret_pool()
+            await initialize_secret_provider(_secret_pool)
+            log("Secret provider initialized")
+        except Exception as secret_exc:
+            log(f"Failed to initialize secret provider: {secret_exc}", "WARN")
+
         # Ensure we have a valid API key before anything else
         await ensure_valid_api_key(self.instance_id)
         await RequestAPI.register_instance(
@@ -4499,6 +4515,19 @@ class LucentDaemon:
         if len(self.active_sessions) >= MAX_CONCURRENT_SESSIONS:
             log(f"Skipping '{name}' — at session limit ({MAX_CONCURRENT_SESSIONS})", "WARN")
             return None
+
+        # Ensure the daemon's bound organization is available to the engine so
+        # it can resolve org-scoped model-provider credentials (e.g. the Copilot
+        # github_token). Container daemons whose Copilot CLI is not interactively
+        # logged in rely on this stored token; without an organization_id the
+        # engine cannot load it and the session fails with "Session was not
+        # created with authentication info or custom provider". Only fill it in
+        # when a caller (e.g. a per-task session) has not already supplied org
+        # context, so we never override an explicit scope.
+        if audit_context is None or not audit_context.get("organization_id"):
+            bound_org_id = await self._get_daemon_org_id()
+            if bound_org_id:
+                audit_context = {**(audit_context or {}), "organization_id": bound_org_id}
 
         selected_model = _resolve_default_model(model)
         effort_label = f", reasoning_effort: {reasoning_effort}" if reasoning_effort else ""
