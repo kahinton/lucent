@@ -286,6 +286,15 @@ services:
       # Restricted DB connection for API key provisioning only.
       # Uses lucent_daemon role with least-privilege grants (see migration 017).
       DAEMON_DATABASE_URL: postgresql://lucent_daemon:${DAEMON_DB_PASSWORD:-change-me-insecure-daemon-password}@postgres:5432/lucent
+      # Ollama (local models) — host.docker.internal points to the host machine.
+      # The daemon runs its own model discovery/sessions, so it needs the same
+      # OLLAMA_HOST as the server; without it local-model calls fail with
+      # "OLLAMA_HOST is not configured".
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
+    extra_hosts:
+      # Required so host.docker.internal resolves on Linux hosts (Docker Desktop
+      # provides it automatically, plain Docker Engine does not).
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./daemon:/app/daemon:cached
       - ./src:/app/src:cached
@@ -318,6 +327,13 @@ services:
       LUCENT_LOG_STDERR: "true"
       LUCENT_LOG_FILE: ""
       DAEMON_DATABASE_URL: postgresql://lucent_daemon:${DAEMON_DB_PASSWORD:-change-me-insecure-daemon-password}@postgres:5432/lucent
+      # Ollama (local models) — see daemon-1 note. Needs OLLAMA_HOST to run
+      # local-model discovery/sessions; without it calls fail with
+      # "OLLAMA_HOST is not configured".
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
+    extra_hosts:
+      # Required so host.docker.internal resolves on Linux hosts.
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./daemon:/app/daemon:cached
       - ./src:/app/src:cached
