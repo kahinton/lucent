@@ -161,6 +161,7 @@ _BASE_TASK_MEMORY_SERVER_TOOLS = sorted(
         "search_memories",
         "search_memories_full",
         "update_memory",
+        "delete_memory",
         "create_review",
         "get_memory_versions",
         "get_request_details",
