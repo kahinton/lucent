@@ -3625,6 +3625,100 @@ class LucentDaemon:
 
         return "created", req
 
+    async def _process_user_rejections(
+        self,
+        *,
+        user_id: str,
+        org_id: str,
+        scoped_key: str,
+        system_message: str,
+    ) -> int:
+        """Run a scoped LLM session to process a user's rejected requests.
+
+        Rejected requests land in ``rejection_processing`` and need the
+        feedback loop closed: read the rejection reason, update the linked
+        goal memory, then move the request to ``cancelled`` via
+        ``mark_rejection_processed``. This requires LLM reasoning, so we
+        fan it out under the user's scoped key. Returns the number of
+        rejected requests handed to the session.
+        """
+        import asyncpg
+
+        try:
+            conn = await asyncpg.connect(DATABASE_URL)
+        except Exception as e:
+            log(f"Rejection processing DB connect failed: {e}", "WARN")
+            return 0
+        try:
+            rows = await conn.fetch(
+                """
+                SELECT id::text AS id, title, approval_comment
+                FROM requests
+                WHERE organization_id = $1::uuid
+                  AND created_by = $2::uuid
+                  AND status = 'rejection_processing'
+                ORDER BY created_at
+                """,
+                org_id,
+                user_id,
+            )
+        except Exception as e:
+            log(f"Rejection processing query failed: {e}", "WARN")
+            return 0
+        finally:
+            await conn.close()
+
+        if not rows:
+            return 0
+
+        lines = []
+        for r in rows:
+            comment = r.get("approval_comment") or "No reason given"
+            lines.append(
+                f"- **{r.get('title') or '(untitled)'}** (id: {r['id']})\n"
+                f"  Rejection reason: {comment}"
+            )
+        rejection_block = "\n".join(lines)
+
+        prompt = (
+            "You are closing the feedback loop on requests the user "
+            "rejected. The following requests are in 'rejection_processing' "
+            "and you MUST process each one:\n\n"
+            f"{rejection_block}\n\n"
+            "For EACH request above:\n"
+            "1. Read the rejection reason carefully.\n"
+            "2. Call get_request_details(request_id) to find the linked "
+            "goal memories.\n"
+            "3. Update each linked goal memory based on the feedback:\n"
+            "   - If the goal itself is obsolete/already done → set "
+            "metadata.status to 'abandoned' with the reason.\n"
+            "   - If only the approach was wrong → add the rejection "
+            "feedback to the goal's content/progress notes.\n"
+            "4. Call mark_rejection_processed(request_id, note=...) to move "
+            "the request to 'cancelled'.\n\n"
+            "Do NOT create new requests for these goals. Return a brief "
+            "summary of what you changed for each request."
+        )
+
+        scoped_mcp = dict(MCP_CONFIG)
+        scoped_mcp["memory-server"] = _build_scoped_memory_server_config(
+            scoped_key=scoped_key,
+            memory_scope=MEMORY_SCOPE_USER,
+            org_id=str(org_id),
+            memory_scope_user_id=str(user_id),
+            tools=["*"],
+        )
+
+        model, _reason = _select_model_for_task(agent_type="planning")
+        await self.run_session(
+            f"rejections-{user_id[:8]}",
+            system_message,
+            prompt,
+            model=model,
+            mcp_config_override=scoped_mcp,
+        )
+        return len(rows)
+
     async def _run_cognitive_planning_fanout(
         self,
         *,
@@ -3662,6 +3756,33 @@ class LucentDaemon:
                 if not scoped_key:
                     raise RuntimeError("scoped key minting failed")
 
+                # Process any rejected requests for this user FIRST. Rejection
+                # handling needs LLM reasoning (interpret the feedback, update
+                # the linked goal memory, close the loop) so it runs a scoped
+                # session. This must happen even when there are no planning
+                # targets — otherwise rejected requests sit in
+                # rejection_processing forever.
+                rejections_pending = int(user_row.get("rejections_pending") or 0)
+                if rejections_pending > 0:
+                    try:
+                        processed = await self._process_user_rejections(
+                            user_id=user_id,
+                            org_id=org_id,
+                            scoped_key=scoped_key,
+                            system_message=system_message,
+                        )
+                        summaries.append(
+                            f"user={user_id[:8]} rejections={rejections_pending} "
+                            f"processed={processed}"
+                        )
+                    except Exception as rej_err:
+                        errors.append(f"rejection processing: {rej_err}")
+                        log(
+                            f"Rejection processing failed for user "
+                            f"{user_id[:8]}: {rej_err}",
+                            "WARN",
+                        )
+
                 # Fetch the planning targets server-side BEFORE invoking
                 # the planner. The endpoint scopes results to this user
                 # automatically because the key is user-scoped. If there
@@ -3678,10 +3799,11 @@ class LucentDaemon:
                         "plannable targets — skipping LLM call",
                         "INFO",
                     )
-                    summaries.append(
-                        f"user={user_id[:8]} goals={goals_scanned} "
-                        f"targets=0 requests=0 (no work)"
-                    )
+                    if rejections_pending == 0:
+                        summaries.append(
+                            f"user={user_id[:8]} goals={goals_scanned} "
+                            f"targets=0 requests=0 (no work)"
+                        )
                     continue
 
                 # Create requests directly from authoritative planning targets.
