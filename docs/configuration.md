@@ -119,7 +119,6 @@ levels only for complex analysis where extra latency/cost is justified.
 | `LUCENT_DAEMON_ROLES` | `all` | Enable specific loops: `cognitive`, `dispatcher`, `scheduler`, `autonomic` (comma-separated, or `all`) |
 | `LUCENT_MCP_URL` | `http://localhost:8766/mcp` | MCP server URL for memory access |
 | `LUCENT_MCP_API_KEY` | — | API key for MCP authentication |
-| `LUCENT_REVIEW_MODELS` | — | Comma-separated models for multi-model review (optional) |
 | `LUCENT_STALE_HEARTBEAT_MINUTES` | `30` | Minutes before a daemon heartbeat is considered stale |
 | `DAEMON_DATABASE_URL` | — | Restricted DB connection for daemon API key provisioning (uses `lucent_daemon` role) |
 

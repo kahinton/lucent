@@ -1690,6 +1690,51 @@ class TestListPlanningTargets:
         # (since all milestones are now done). So gid should NOT be plannable.
         assert gid not in ids
 
+    async def test_milestone_advances_when_request_completed_via_review(
+        self, repo, test_organization, db_pool
+    ):
+        """Completing a goal-milestone request through the review/approval
+        flow (ReviewRepository.mark_request_completed) must advance the goal
+        the same way the direct update_request_status path does. Regression
+        for milestone progression stalling when work goes through review."""
+        from lucent.db.reviews import ReviewRepository
+
+        org_id = str(test_organization["id"])
+        gid = await self._make_goal(db_pool, org_id, milestones=[
+            {"description": "a", "status": "active"},
+            {"description": "b", "status": "active"},
+        ])
+        r = await repo.create_request(
+            title="milestone 1 work", org_id=org_id, source="cognitive",
+            goal_id=gid, goal_milestone_index=1,
+        )
+        # Drive the request into 'review' so the review-approval path applies.
+        await repo.update_request_status(str(r["id"]), "review", org_id=org_id)
+
+        review_repo = ReviewRepository(db_pool)
+        completed = await review_repo.mark_request_completed(str(r["id"]), org_id)
+        assert completed is not None
+        assert completed["status"] == "completed"
+
+        # Milestone 1 should now be marked completed on the goal memory.
+        async with db_pool.acquire() as conn:
+            meta = await conn.fetchval(
+                "SELECT metadata FROM memories WHERE id = $1::uuid", gid
+            )
+        import json
+
+        if isinstance(meta, str):
+            meta = json.loads(meta)
+        statuses = [m["status"] for m in meta["milestones"]]
+        assert statuses[0] == "completed"
+        assert statuses[1] == "active"
+
+        # And the planner should now surface milestone 2 as the next target.
+        targets = await repo.list_planning_targets(org_id)
+        target = next((t for t in targets if t["goal_id"] == gid), None)
+        assert target is not None
+        assert target["next_milestone_index"] == 2
+
     async def test_open_ended_goal_with_no_milestones_is_plannable(
         self, repo, test_organization, db_pool
     ):

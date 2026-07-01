@@ -31,6 +31,21 @@ RESTRICTED_WEB_CHAT_EXCLUDED_TOOLS = [
     "run_in_terminal",
 ]
 
+
+def _strip_internal_markers(mcp_config: dict) -> dict:
+    """Return a copy of *mcp_config* with Lucent-only ``internal`` markers removed.
+
+    The ``internal`` flag tells Lucent's own LangChain bridge to skip SSRF
+    validation for its trusted MCP endpoint. It is not part of the Copilot SDK's
+    MCP server schema, so strip it before handing the config to the SDK.
+    """
+    cleaned: dict = {}
+    for name, conf in mcp_config.items():
+        if isinstance(conf, dict) and "internal" in conf:
+            conf = {k: v for k, v in conf.items() if k != "internal"}
+        cleaned[name] = conf
+    return cleaned
+
 # Lazy import — only loaded when this engine is actually used
 _CopilotClient: Any = None
 _PermissionHandler: Any = None
@@ -71,6 +86,32 @@ def _coerce_copilot_timestamp_ms(value: Any) -> int:
 
 def _value(value: Any) -> str:
     return str(getattr(value, "value", value) or "")
+
+
+def _copilot_attachments(attachments: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
+    """Convert normalized attachments into Copilot SDK BlobAttachment dicts.
+
+    Returns None when there are no attachments so the SDK default applies.
+    """
+    if not attachments:
+        return None
+    from lucent.llm.attachments import to_copilot_blobs
+
+    return to_copilot_blobs(attachments) or None
+
+
+def _copilot_prompt(prompt: str, attachments: list[dict[str, Any]] | None) -> str:
+    """Inline text-document attachments into the prompt for Copilot.
+
+    Copilot models read image/PDF blobs but not text blobs, so text documents
+    are appended to the prompt text instead.
+    """
+    if not attachments:
+        return prompt
+    from lucent.llm.attachments import inline_text_documents
+
+    return inline_text_documents(prompt, attachments)
+
 
 
 def _permission_compat_mode() -> str:
@@ -481,7 +522,7 @@ class CopilotEngine(LLMEngine):
         """Build create_session kwargs."""
         kwargs: dict[str, Any] = {
             "model": model,
-            "mcp_servers": mcp_config or {},
+            "mcp_servers": _strip_internal_markers(mcp_config or {}),
         }
         if reasoning_effort:
             kwargs["reasoning_effort"] = reasoning_effort
@@ -551,6 +592,7 @@ class CopilotEngine(LLMEngine):
         audit_context: dict[str, Any] | None = None,
         enable_config_discovery: bool = False,
         approve_permissions: bool = True,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> str | None:
         """Run a blocking session using send_and_wait (chat pattern)."""
         if not _ensure_sdk():
@@ -581,7 +623,8 @@ class CopilotEngine(LLMEngine):
             )
 
             response = await session.send_and_wait(
-                prompt,
+                _copilot_prompt(prompt, attachments),
+                attachments=_copilot_attachments(attachments),
                 timeout=timeout,
             )
 
@@ -632,6 +675,7 @@ class CopilotEngine(LLMEngine):
         audit_context: dict[str, Any] | None = None,
         enable_config_discovery: bool = False,
         approve_permissions: bool = True,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> str | None:
         """Run a streaming session using send + event callbacks (daemon pattern).
 
@@ -794,7 +838,10 @@ class CopilotEngine(LLMEngine):
                     on_event(normalized)
 
             session.on(_on_sdk_event)
-            await session.send(prompt)
+            await session.send(
+                _copilot_prompt(prompt, attachments),
+                attachments=_copilot_attachments(attachments),
+            )
 
             # Activity-based timeout loop: keep waiting as long as events arrive
             start_time = time.monotonic()

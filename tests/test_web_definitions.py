@@ -353,6 +353,41 @@ class TestDefinitionsList:
         resp = await client.get("/definitions", params={"tab": "skills"})
         assert resp.status_code == 200
 
+    async def test_skill_search_filters_before_pagination(self, db_pool, web_user):
+        user, org, _token = web_user
+        repo = DefinitionRepository(db_pool)
+        for idx in range(30):
+            await repo.create_skill(
+                name=f"AAA Pagination Filler {idx:02d}",
+                description="Filler skill that should not match the target query",
+                content="# Filler skill",
+                org_id=str(org["id"]),
+                created_by=str(user["id"]),
+                status="active",
+            )
+        await repo.create_skill(
+            name="ZZZ Needle Skill",
+            description="Unique skill found by search after the first page",
+            content="# needle-skill-content",
+            org_id=str(org["id"]),
+            created_by=str(user["id"]),
+            status="active",
+        )
+
+        result = await repo.list_skills(
+            str(org["id"]),
+            status="active",
+            search="Needle",
+            limit=1,
+            offset=0,
+            requester_user_id=str(user["id"]),
+            requester_role="owner",
+        )
+
+        assert result["total_count"] == 1
+        assert [skill["name"] for skill in result["items"]] == ["ZZZ Needle Skill"]
+        assert result["has_more"] is False
+
     async def test_sidebar_agent_composer_badge_counts_pending_definitions(
         self, client, db_pool, web_user
     ):

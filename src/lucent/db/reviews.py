@@ -5,12 +5,15 @@ on requests and tasks. All queries enforce organization_id scoping for
 multi-tenant isolation.
 """
 
+import logging
 from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
 from asyncpg import Connection
 from asyncpg import Pool
+
+logger = logging.getLogger(__name__)
 
 
 class ReviewRepository:
@@ -142,6 +145,31 @@ class ReviewRepository:
                 row = await acquired.fetchrow(query, *params)
         else:
             row = await conn.fetchrow(query, *params)
+
+        # Milestone-completion side effect: completing a goal-milestone
+        # request via the review/approval flow must advance the goal just
+        # like the direct RequestRepository.update_request_status path does.
+        # Without this, requests that finish through review never mark their
+        # milestone 'completed', so the planner keeps seeing the same
+        # milestone as active and never creates work for the next one.
+        if row and row.get("goal_memory_id") and row.get("goal_milestone_index"):
+            try:
+                from lucent.db.requests import RequestRepository
+
+                await RequestRepository(self.pool)._mark_milestone_completed(
+                    str(row["goal_memory_id"]),
+                    int(row["goal_milestone_index"]),
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to mark milestone %s of goal %s completed for "
+                    "request %s after review approval: %s",
+                    row.get("goal_milestone_index"),
+                    row.get("goal_memory_id"),
+                    request_id,
+                    e,
+                )
+
         return dict(row) if row else None
 
     async def get_review(

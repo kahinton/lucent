@@ -207,6 +207,7 @@ async def definitions_page(
     tab: str = "composer",
     page: int = 1,
     per_page: int = 25,
+    search: str = "",
 ):
     """Agent and skill definitions management page."""
     user = await get_user_context(request)
@@ -236,6 +237,7 @@ async def definitions_page(
     )
     skills_result = await repo.list_skills(
         org_id,
+        search=search if tab == "skills" else None,
         limit=per_page if tab == "skills" else 1000,
         offset=offset if tab == "skills" else 0,
         requester_user_id=str(user.id),
@@ -324,6 +326,7 @@ async def definitions_page(
             "total_pages": total_pages,
             "total_count": total_count,
             "csrf_token": request.cookies.get(CSRF_COOKIE_NAME, ""),
+            "search": search,
         },
     )
 
@@ -354,6 +357,7 @@ async def agent_detail_page(request: Request, agent_id: str):
         await repo.list_skills(
             org_id,
             status="active",
+            limit=1000,
             requester_user_id=str(user.id),
             requester_role=role_value,
         )

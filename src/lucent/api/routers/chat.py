@@ -104,6 +104,12 @@ def _chat_allowed_tools_for_agent(
     tools = list(CHAT_ALLOWED_TOOLS)
     normalized_agent = (agent_name or "").strip().lower()
     normalized_skills = {name.strip().lower() for name in (skill_names or [])}
+    # Any agent with granted skills must be able to load skill instructions
+    # on demand (skills are listed, not inlined, in the system prompt).
+    if skill_names:
+        for tool in ("get_skill_definition", "list_skill_definitions"):
+            if tool not in tools:
+                tools.append(tool)
     if normalized_agent == "definition-engineer" or "definition-engineering" in normalized_skills:
         for tool in DEFINITION_COMPOSER_TOOLS:
             if tool not in tools:
@@ -115,9 +121,24 @@ def _chat_allowed_tools_for_agent(
     return tools
 
 
+class ChatAttachment(BaseModel):
+    """A multimodal attachment (image or document) on a user message.
+
+    ``data`` may be raw base64 or a ``data:`` URL; both are normalized and
+    validated server-side in ``lucent.llm.attachments``.
+    """
+
+    mime_type: str | None = Field(default=None, max_length=128)
+    data: str
+    name: str | None = Field(default=None, max_length=256)
+    kind: str | None = Field(default=None, pattern=r"^(image|document)$")
+    size: int | None = None
+
+
 class ChatMessage(BaseModel):
     role: str = Field(..., pattern=r"^(user|assistant)$")
     content: str
+    attachments: list[ChatAttachment] | None = None
 
 
 class ChatRequest(BaseModel):
@@ -213,6 +234,10 @@ def _build_mcp_config(
             "url": chat_mcp_url(),
             "headers": headers,
             "tools": list(tools or CHAT_ALLOWED_TOOLS),
+            # Lucent's own MCP endpoint — trusted internal connection, exempt
+            # from SSRF allowlist checks so it works out of the box even when
+            # the URL is loopback (the default http://localhost:8766/mcp).
+            "internal": True,
         },
     }
 
@@ -246,9 +271,30 @@ def _message_history_for_engine(messages: list[dict[str, Any]]) -> list[dict[str
     ]
 
 
-def _chat_message_to_dict(message: ChatMessage) -> dict[str, str]:
+def _chat_message_to_dict(message: ChatMessage) -> dict[str, Any]:
     """Pydantic v1/v2 compatible ChatMessage serialization."""
-    return {"role": message.role, "content": message.content}
+    result: dict[str, Any] = {"role": message.role, "content": message.content}
+    if message.attachments:
+        result["attachments"] = [a.model_dump(exclude_none=True) for a in message.attachments]
+    return result
+
+
+def _normalize_last_attachments(messages: list[ChatMessage]) -> list[dict[str, Any]]:
+    """Validate and normalize attachments on the final user message.
+
+    Returns an empty list when there are none. Raises HTTP 400 on invalid
+    payloads so the client gets a clear error instead of a silent failure.
+    """
+    if not messages or not messages[-1].attachments:
+        return []
+    from lucent.llm.attachments import AttachmentError, normalize_attachments
+
+    raw = [a.model_dump(exclude_none=True) for a in messages[-1].attachments]
+    try:
+        return normalize_attachments(raw)
+    except AttachmentError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
 
 
 def _event_raw(event) -> dict[str, Any]:
@@ -391,6 +437,7 @@ async def _prepare_persistent_chat_session(
     reasoning_effort: str | None,
     agent_id: str | None = None,
     last_message: str = "",
+    attachments: list[dict[str, Any]] | None = None,
 ) -> PersistentChatSession:
     """Create/load a DB-backed chat session and persist the current user turn.
 
@@ -452,14 +499,23 @@ async def _prepare_persistent_chat_session(
         )
 
         user_message_id = None
-        if last_message:
+        if last_message or attachments:
+            user_metadata: dict[str, Any] = {
+                "surface": kind,
+                "model": model,
+                "agent_id": agent_id,
+            }
+            if attachments:
+                from lucent.llm.attachments import get_attachment_store
+
+                user_metadata["attachments"] = await get_attachment_store().persist(attachments)
             user_message = await repo.add_message(
                 session_id,
                 role="user",
                 content=last_message,
                 org_id=org_id,
                 turn_id=turn_id,
-                metadata={"surface": kind, "model": model, "agent_id": agent_id},
+                metadata=user_metadata,
             )
             user_message_id = str(user_message["id"])
 
@@ -833,6 +889,25 @@ async def _build_system_prompt(user: dict, pool, page_context: dict | None) -> s
     return "\n".join(parts)
 
 
+async def _load_default_chat_agent(repo, org_id: str) -> dict | None:
+    """Resolve the default chat persona to the built-in `lucent` identity agent.
+
+    When a user does not pick an agent, the chat should still be composed from
+    the same definition the daemon uses for its core identity — so the default
+    persona has the lucent agent's skills, managed tools, and hooks. Returns the
+    full agent dict, or None if no active `lucent` agent exists.
+    """
+    try:
+        result = await repo.list_agents(org_id, status="active")
+        items = result.get("items", result) if isinstance(result, dict) else result
+        for candidate in items or []:
+            if (candidate.get("name") or "").strip().lower() == "lucent":
+                return await repo.get_agent(str(candidate["id"]), org_id)
+    except Exception:
+        logger.debug("Failed to resolve default lucent chat agent", exc_info=True)
+    return None
+
+
 async def _load_agent_hooks(pool, agent_id: str | None) -> list[dict[str, Any]]:
     """Load active hook definitions granted to an agent, if any."""
     if not agent_id:
@@ -974,6 +1049,7 @@ async def chat_stream(
     system_prompt = await _build_system_prompt(user, pool, body.page_context)
     agent_hooks = await _load_agent_hooks(pool, None)
     last_message = body.messages[-1].content if body.messages else ""
+    attachments = _normalize_last_attachments(body.messages)
     chat_session = await _prepare_persistent_chat_session(
         user=user,
         pool=pool,
@@ -983,6 +1059,7 @@ async def chat_stream(
         model=selected_model,
         reasoning_effort=reasoning_effort,
         last_message=last_message,
+        attachments=attachments,
     )
     await _mirror_handoff_user_turn(
         user=user,
@@ -1039,6 +1116,7 @@ async def chat_stream(
             message_history=message_history,
             hooks=agent_hooks,
             approve_permissions=False,
+            attachments=attachments,
             audit_context={
                 "source": "chat.stream",
                 "organization_id": str(user["organization_id"]),
@@ -1116,6 +1194,7 @@ async def chat_models(request: Request):
                 "provider": m.provider,
                 "category": m.category,
                 "reasoning_efforts": m.reasoning_efforts,
+                "supports_vision": m.supports_vision,
             }
             for m in models
         ],
@@ -1202,52 +1281,52 @@ async def chat_stream_v2(
 
     engine = get_engine_for_model(selected_model)
 
-    # Build system prompt — optionally load agent definition
+    # Build system prompt — load the agent definition (skills, managed tools).
+    # When no agent is explicitly selected, fall back to the built-in `lucent`
+    # identity so the default chat persona is composed from the same definition
+    # the daemon uses (agents are built the same way in chat and the daemon).
     system_prompt_parts = []
     agent_name = None
     agent_skill_names: list[str] = []
     agent_managed_tool_names: list[str] = []
+    # The agent actually composed for this turn (may be the lucent default even
+    # when the user did not pick one). Used for hooks, managed-tool grants, and
+    # tool allow-listing so the default persona has full parity.
+    effective_agent_id = agent_id
 
-    if agent_id:
-        try:
-            from lucent.db.definitions import DefinitionRepository
+    try:
+        from lucent.db.definitions import DefinitionRepository
+        from lucent.llm.agent_composition import (
+            render_managed_tools_section,
+            render_skills_section,
+        )
 
-            repo = DefinitionRepository(pool)
+        repo = DefinitionRepository(pool)
+        agent = None
+        if agent_id:
             agent = await repo.get_agent(agent_id, str(user["organization_id"]))
-            if agent:
-                system_prompt_parts.append(agent.get("content", ""))
-                agent_name = agent.get("name", "Lucent")
-                # Load granted skills
-                skills = await repo.get_agent_skills(agent_id)
-                for skill in skills:
-                    if skill.get("name"):
-                        agent_skill_names.append(str(skill["name"]))
-                    system_prompt_parts.append(
-                        f"\n## Skill: {skill.get('name', '')}\n"
-                        f"{skill.get('content', '')}"
-                    )
-                managed_tools = await repo.get_agent_managed_tools(agent_id)
-                for tool in managed_tools:
-                    if tool.get("name"):
-                        agent_managed_tool_names.append(str(tool["name"]))
-                if managed_tools:
-                    tool_lines = []
-                    for tool in managed_tools:
-                        input_schema_text = json.dumps(
-                            tool.get("input_schema") or {}, default=str
-                        )
-                        tool_lines.append(
-                            f"- {tool.get('name')}: {tool.get('description') or ''}\n"
-                            f"  input_schema: {input_schema_text}"
-                        )
-                    system_prompt_parts.append(
-                        "\n## Granted Managed Tools\n"
-                        "Use `run_managed_tool` only for the tools listed here. "
-                        "Lucent enforces the grant and runs each call in a sandbox.\n"
-                        + "\n".join(tool_lines)
-                    )
-        except Exception:
-            logger.debug("Failed to load agent definition for chat", exc_info=True)
+        else:
+            agent = await _load_default_chat_agent(repo, str(user["organization_id"]))
+        if agent:
+            effective_agent_id = str(agent["id"])
+            system_prompt_parts.append(agent.get("content", ""))
+            agent_name = agent.get("name", "Lucent")
+            # Skills are listed (name/id/description); the agent loads full
+            # instructions on demand via get_skill_definition.
+            skills = await repo.get_agent_skills(effective_agent_id)
+            agent_skill_names = [str(s["name"]) for s in skills if s.get("name")]
+            skills_section = render_skills_section(skills)
+            if skills_section:
+                system_prompt_parts.append(skills_section)
+            managed_tools = await repo.get_agent_managed_tools(effective_agent_id)
+            agent_managed_tool_names = [
+                str(t["name"]) for t in managed_tools if t.get("name")
+            ]
+            tools_section = render_managed_tools_section(managed_tools)
+            if tools_section:
+                system_prompt_parts.append(tools_section)
+    except Exception:
+        logger.debug("Failed to load agent definition for chat", exc_info=True)
 
     if not system_prompt_parts:
         # Default Lucent system prompt
@@ -1312,9 +1391,10 @@ async def chat_stream_v2(
             )
 
     system_prompt = "\n\n".join(system_prompt_parts)
-    agent_hooks = await _load_agent_hooks(pool, agent_id)
+    agent_hooks = await _load_agent_hooks(pool, effective_agent_id)
 
     last_message = body.messages[-1].content if body.messages else ""
+    attachments = _normalize_last_attachments(body.messages)
     chat_session = await _prepare_persistent_chat_session(
         user=user,
         pool=pool,
@@ -1325,6 +1405,7 @@ async def chat_stream_v2(
         reasoning_effort=reasoning_effort,
         agent_id=agent_id,
         last_message=last_message,
+        attachments=attachments,
     )
     await _mirror_handoff_user_turn(
         user=user,
@@ -1358,7 +1439,7 @@ async def chat_stream_v2(
             llm_session_id=chat_session.session_id,
             llm_turn_id=chat_session.turn_id,
             llm_message_id=chat_session.user_message_id,
-            agent_definition_id=agent_id,
+            agent_definition_id=effective_agent_id,
             tools=allowed_tools,
         )
         if session_token
@@ -1428,7 +1509,7 @@ async def chat_stream_v2(
                         "model": selected_model,
                         "reasoning_effort": reasoning_effort,
                         "engine": engine.name,
-                        "agent_definition_id": agent_id,
+                        "agent_definition_id": effective_agent_id,
                         "skill_names": agent_skill_names,
                     },
                 )
@@ -1515,6 +1596,7 @@ async def chat_stream_v2(
                 message_history=message_history,
                 hooks=agent_hooks,
                 approve_permissions=False,
+                attachments=attachments,
                 audit_context={
                     "source": "chat.stream_v2",
                     "organization_id": str(user["organization_id"]),
@@ -1525,7 +1607,7 @@ async def chat_stream_v2(
                     "model": selected_model,
                     "reasoning_effort": reasoning_effort,
                     "engine": engine.name,
-                    "agent_definition_id": agent_id,
+                    "agent_definition_id": effective_agent_id,
                     "skill_names": agent_skill_names,
                 },
             )

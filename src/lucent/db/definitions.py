@@ -524,6 +524,7 @@ class DefinitionRepository:
         self,
         org_id: str,
         status: str | None = None,
+        search: str | None = None,
         limit: int = 25,
         offset: int = 0,
         requester_user_id: str | None = None,
@@ -550,6 +551,15 @@ class DefinitionRepository:
         if status:
             params.append(status)
             base += f" AND status = ${len(params)}"
+        if search:
+            term = search.strip()
+            if term:
+                params.append(f"%{term}%")
+                base += (
+                    f" AND (name ILIKE ${len(params)} "
+                    f"OR description ILIKE ${len(params)} "
+                    f"OR content ILIKE ${len(params)})"
+                )
 
         count_query = f"SELECT COUNT(*) AS total {base}"
         query = f"""

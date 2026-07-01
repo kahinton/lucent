@@ -43,7 +43,7 @@ def test_detects_mcp_auth_failure_from_tool_error_response():
 
 
 @pytest.mark.asyncio
-async def test_run_session_recovers_once_after_auth_failure(monkeypatch):
+async def test_run_session_remints_scoped_memory_key_after_auth_failure(monkeypatch):
     daemon = LucentDaemon()
     daemon.instance_id = "instance-retry-once"
     daemon_module.MCP_CONFIG = {
@@ -57,12 +57,19 @@ async def test_run_session_recovers_once_after_auth_failure(monkeypatch):
 
     call_count = {"n": 0}
     seen_headers: list[str] = []
+    seen_scope_headers: list[dict[str, str]] = []
 
-    async def _inner(_name, _system, _prompt, model=None, mcp_config_override=None):
+    async def _inner(_name, _system, _prompt, model=None, mcp_config_override=None, **_kwargs):
         call_count["n"] += 1
         if mcp_config_override and mcp_config_override.get("memory-server"):
-            seen_headers.append(
-                mcp_config_override["memory-server"]["headers"]["Authorization"]
+            headers = mcp_config_override["memory-server"]["headers"]
+            seen_headers.append(headers["Authorization"])
+            seen_scope_headers.append(
+                {
+                    "scope": headers.get("X-Lucent-Memory-Scope"),
+                    "scope_user": headers.get("X-Lucent-Memory-Scope-User-Id"),
+                    "org_id": headers.get("X-Lucent-Org-Id"),
+                }
             )
         if call_count["n"] == 1:
             raise AuthFailureDetectedError("Unauthorized: Invalid or expired credentials")
@@ -82,8 +89,15 @@ async def test_run_session_recovers_once_after_auth_failure(monkeypatch):
         }
         return True
 
+    mint_calls: list[dict[str, object]] = []
+
+    async def _mint(**kwargs):
+        mint_calls.append(kwargs)
+        return "hs_scoped_new"
+
     monkeypatch.setattr(daemon, "_run_session_inner", _inner)
     monkeypatch.setattr(daemon_module, "_handle_auth_failure", _recover)
+    monkeypatch.setattr(daemon_module, "_mint_scoped_api_key", _mint)
 
     result = await daemon.run_session(
         "auth-recovery-test",
@@ -93,7 +107,12 @@ async def test_run_session_recovers_once_after_auth_failure(monkeypatch):
             "memory-server": {
                 "type": "http",
                 "url": "http://mcp",
-                "headers": {"Authorization": "Bearer old-key"},
+                "headers": {
+                    "Authorization": "Bearer old-key",
+                    "X-Lucent-Memory-Scope": "user",
+                    "X-Lucent-Memory-Scope-User-Id": "user-1",
+                    "X-Lucent-Org-Id": "org-1",
+                },
                 "tools": ["*"],
             },
             "other": {"type": "http", "url": "http://other"},
@@ -102,8 +121,61 @@ async def test_run_session_recovers_once_after_auth_failure(monkeypatch):
 
     assert result == "ok"
     assert call_count["n"] == 2
-    assert recover_calls["n"] == 1
-    assert seen_headers == ["Bearer old-key", "Bearer new-key"]
+    assert recover_calls["n"] == 0
+    assert seen_headers == ["Bearer old-key", "Bearer hs_scoped_new"]
+    assert seen_scope_headers == [
+        {"scope": "user", "scope_user": "user-1", "org_id": "org-1"},
+        {"scope": "user", "scope_user": "user-1", "org_id": "org-1"},
+    ]
+    assert mint_calls == [
+        {
+            "memory_scope": "user",
+            "memory_scope_user_id": "user-1",
+            "org_id": "org-1",
+            "ttl_minutes": 60,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_run_session_refuses_unscoped_memory_override_after_auth_failure(
+    monkeypatch,
+):
+    daemon = LucentDaemon()
+    daemon.instance_id = "instance-refuse-unscoped"
+
+    call_count = {"n": 0}
+
+    async def _inner(_name, _system, _prompt, model=None, mcp_config_override=None, **_kwargs):
+        call_count["n"] += 1
+        raise AuthFailureDetectedError("Unauthorized: Invalid or expired credentials")
+
+    recover_calls = {"n": 0}
+
+    async def _recover(_instance_id: str, *, force_rotate: bool = False) -> bool:
+        recover_calls["n"] += 1
+        return True
+
+    monkeypatch.setattr(daemon, "_run_session_inner", _inner)
+    monkeypatch.setattr(daemon_module, "_handle_auth_failure", _recover)
+
+    result = await daemon.run_session(
+        "auth-unscoped-override-test",
+        "system",
+        "prompt",
+        mcp_config_override={
+            "memory-server": {
+                "type": "http",
+                "url": "http://mcp",
+                "headers": {"Authorization": "Bearer old-key"},
+                "tools": ["*"],
+            }
+        },
+    )
+
+    assert result is None
+    assert call_count["n"] == 1
+    assert recover_calls["n"] == 0
 
 
 @pytest.mark.asyncio
@@ -111,7 +183,7 @@ async def test_run_session_auth_retry_guard_prevents_infinite_loop(monkeypatch):
     daemon = LucentDaemon()
     daemon.instance_id = "instance-guard"
 
-    async def _inner(_name, _system, _prompt, model=None, mcp_config_override=None):
+    async def _inner(_name, _system, _prompt, model=None, mcp_config_override=None, **_kwargs):
         raise AuthFailureDetectedError("Unauthorized: Invalid or expired credentials")
 
     recover_calls = {"n": 0}

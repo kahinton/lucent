@@ -277,6 +277,7 @@ class LangChainEngine(LLMEngine):
         audit_context: dict[str, Any] | None = None,
         enable_config_discovery: bool = False,
         approve_permissions: bool = True,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> str | None:
         """Run a blocking session (chat pattern)."""
         try:
@@ -291,6 +292,8 @@ class LangChainEngine(LLMEngine):
                 message_history=message_history,
                 hooks=hooks,
                 audit_context=audit_context,
+                attachments=attachments,
+                approve_permissions=approve_permissions,
             )
         except Exception as e:
             logger.error("LangChain session failed: %s", e)
@@ -313,6 +316,7 @@ class LangChainEngine(LLMEngine):
         audit_context: dict[str, Any] | None = None,
         enable_config_discovery: bool = False,
         approve_permissions: bool = True,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> str | None:
         """Run a streaming session with event callbacks (daemon pattern)."""
         try:
@@ -327,6 +331,8 @@ class LangChainEngine(LLMEngine):
                 message_history=message_history,
                 hooks=hooks,
                 audit_context=audit_context,
+                attachments=attachments,
+                approve_permissions=approve_permissions,
             )
         except Exception as e:
             logger.error("LangChain streaming session failed: %s", e)
@@ -346,12 +352,19 @@ class LangChainEngine(LLMEngine):
         message_history: list[dict[str, Any]] | None = None,
         hooks: list[dict[str, Any]] | None = None,
         audit_context: dict[str, Any] | None = None,
+        attachments: list[dict[str, Any]] | None = None,
+        approve_permissions: bool = True,
     ) -> str | None:
         """Core implementation: run model with MCP tool loop.
 
         Implements the tool-calling loop: invoke model → check for tool_calls
-        → execute via MCP bridge → feed results back → repeat.
+        → execute via MCP bridge or built-in tool → feed results back → repeat.
+
+        Tools come from two sources: MCP bridges (memory/requests/etc.) and the
+        engine's built-in toolset (file/shell/web), which gives local/LangChain
+        models parity with the Copilot SDK's provider-native built-ins.
         """
+        from lucent.llm.builtin_tools import build_default_toolset
         from langchain_core.messages import (
             AIMessage,
             HumanMessage,
@@ -383,6 +396,36 @@ class LangChainEngine(LLMEngine):
             )
         hook_manager = HookManager(hooks)
 
+        # Built-in tools (file/shell/web) give LangChain models parity with the
+        # Copilot SDK's provider-native built-ins. Disabled for restricted web
+        # chat (approve_permissions=False) so it uses only configured MCP tools.
+        builtin_toolset = build_default_toolset(approve_permissions=approve_permissions)
+        builtin_names: set[str] = set()
+        if builtin_toolset is not None:
+            for schema in builtin_toolset.schemas():
+                name = _schema_tool_name(schema)
+                if not name:
+                    continue
+                if name in tool_to_bridge or name in builtin_names:
+                    logger.warning(
+                        "Built-in tool %s shadowed by an MCP tool; skipping built-in", name
+                    )
+                    continue
+                builtin_names.add(name)
+                tool_schemas.append(schema)
+
+        async def _dispatch_tool(name: str, arguments: dict) -> str | None:
+            """Route a tool call to a built-in tool or an MCP bridge.
+
+            Returns None when the named tool exists in neither source.
+            """
+            if name in builtin_names and builtin_toolset is not None:
+                return await builtin_toolset.call_tool(name, arguments)
+            bridge = tool_to_bridge.get(name)
+            if bridge is not None:
+                return await bridge.call_tool(name, arguments)
+            return None
+
         try:
             # Bind tools to model if available
             model_with_tools = chat_model
@@ -400,7 +443,12 @@ class LangChainEngine(LLMEngine):
                     messages.append(HumanMessage(content=content))
                 elif role == "assistant":
                     messages.append(AIMessage(content=content))
-            messages.append(HumanMessage(content=prompt))
+            if attachments:
+                from lucent.llm.attachments import to_langchain_blocks
+
+                messages.append(HumanMessage(content=to_langchain_blocks(prompt, attachments)))
+            else:
+                messages.append(HumanMessage(content=prompt))
 
             # Tool-calling loop
             full_response_parts: list[str] = []
@@ -468,8 +516,8 @@ class LangChainEngine(LLMEngine):
                         )
 
                 # Check for tool calls
-                if not ai_msg.tool_calls or not tool_to_bridge:
-                    # No tool calls or no bridge — we're done
+                if not ai_msg.tool_calls or (not tool_to_bridge and not builtin_names):
+                    # No tool calls, or no tools available at all — we're done
                     break
 
                 messages.append(ai_msg)
@@ -479,8 +527,7 @@ class LangChainEngine(LLMEngine):
                     tool_name = tool_call["name"]
                     tool_args = tool_call["args"]
                     tool_id = tool_call.get("id", "")
-                    bridge = tool_to_bridge.get(tool_name)
-                    if bridge is None:
+                    if tool_name not in builtin_names and tool_name not in tool_to_bridge:
                         result = f"Error calling tool {tool_name}: tool is not available"
                         messages.append(ToolMessage(content=result, tool_call_id=tool_id))
                         continue
@@ -504,7 +551,9 @@ class LangChainEngine(LLMEngine):
                         result = before_tool.block_message or f"Tool {tool_name} blocked by hook."
                         after_tool = None
                     else:
-                        result = await bridge.call_tool(tool_name, effective_args)
+                        result = await _dispatch_tool(tool_name, effective_args or {})
+                        if result is None:
+                            result = f"Error calling tool {tool_name}: tool is not available"
                         after_tool = await hook_manager.after_tool_call(
                             tool_name=tool_name,
                             arguments=effective_args or {},
@@ -574,13 +623,29 @@ class LangChainEngine(LLMEngine):
         # MCP config format: {"server-name": {"type": "http", "url": "...", "headers": {...}}}
         for server_name, server_conf in mcp_config.items():
             if isinstance(server_conf, dict) and server_conf.get("url"):
-                bridge = MCPToolBridge(
-                    mcp_url=server_conf["url"],
-                    headers=server_conf.get("headers"),
-                    allowed_tools=server_conf.get("tools"),
-                    audit_context={**(audit_context or {}), "mcp_server": server_name},
-                )
-                discovered = await bridge.discover_tools()
+                # A single MCP server failing (e.g. URL fails SSRF validation, or
+                # the server is unreachable) must not abort the whole session.
+                # The model may still complete the task with built-in tools or
+                # other bridges, so log and skip the failed server.
+                #
+                # Entries flagged ``internal`` are Lucent's own MCP endpoint
+                # (operator-configured, not user-supplied), so they bypass SSRF
+                # validation — otherwise the default loopback URL
+                # (http://localhost:8766/mcp) is blocked and tools never load.
+                try:
+                    bridge = MCPToolBridge(
+                        mcp_url=server_conf["url"],
+                        headers=server_conf.get("headers"),
+                        allowed_tools=server_conf.get("tools"),
+                        skip_url_validation=bool(server_conf.get("internal")),
+                        audit_context={**(audit_context or {}), "mcp_server": server_name},
+                    )
+                    discovered = await bridge.discover_tools()
+                except Exception as e:
+                    logger.warning(
+                        "Skipping MCP server %s: bridge setup failed: %s", server_name, e
+                    )
+                    continue
                 if not discovered:
                     await bridge.close()
                     continue

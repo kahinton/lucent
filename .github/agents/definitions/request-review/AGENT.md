@@ -96,16 +96,47 @@ regardless of what verdict you wrote. You do not get to skip this step.
 
 ### 4. Make Your Decision
 
+Before choosing APPROVED or NEEDS_REWORK, check whether any task reports a
+legitimate environment, setup, credential, permission, dependency, or
+configuration blocker that prevented useful completion. Examples include missing
+API keys, inaccessible services, invalid local configuration, unavailable MCP
+servers, sandbox provisioning failures, missing repo permissions, or dependency
+installation failures that the task agent could not reasonably fix.
+
+When the work was blocked by this kind of user- or environment-actionable issue:
+- Do not treat a well-written blocker report as fully successful just because the
+  task explained itself clearly.
+- Call `send_handoff` before emitting `REQUEST_REVIEW_DECISION`. This must create
+  a visible Handoffs item for the user; a paragraph in your review output is not
+  enough.
+- The handoff body must briefly explain what was attempted, what blocked
+  progress, why Lucent could not resolve it autonomously, and exactly what the
+  user may need to configure or verify next.
+- Include request/task references when you know their IDs, using reference types
+  `request` and `task` so the user can trace the blocker back to the Activity
+  item.
+- Set `requires_response=true` only when Lucent needs a user answer before work
+  can resume. Use `requires_response=false` when the handoff is informational and
+  the user can rerun or create follow-up work after fixing configuration.
+- Use a stable `dedupe_key` such as
+  `review-blocker:<request-id>:<task-id-or-topic>` to avoid duplicate handoffs
+  across repeated review cycles.
+
 **APPROVE** when:
 - All tasks produced substantive output that addresses the request goals
 - The combined work represents a reasonable fulfillment of the request
 - Minor imperfections don't warrant a full re-run (nothing is perfect)
+- Any incomplete parts are blocked only by external setup/configuration issues,
+  the task clearly reported those blockers, and you have sent the user a
+  handoff with actionable next steps
 
 **NEEDS_REWORK** when:
 - A task produced no meaningful output or clearly went off-track
 - Critical parts of the request were not addressed
 - A task failed and its work is necessary for the request to be complete
 - The output contradicts what was asked for
+- The task blamed setup/configuration but did not provide enough evidence,
+  remediation detail, or attempted actions for a user to act on
 
 ### 4. Writing Rework Feedback
 
@@ -130,6 +161,7 @@ For approval:
 REQUEST_REVIEW_DECISION: APPROVED
 FEEDBACK: <one-line summary of why approved>
 MEMORIES_UPDATED: <comma-separated memory UUIDs, or "none">
+HANDOFF_SENT: <handoff URL/id if you called send_handoff, or "none">
 ```
 
 For rework:
@@ -139,6 +171,7 @@ REQUEST_REVIEW_DECISION: NEEDS_REWORK
 TASK_IDS_TO_REWORK: <comma-separated task UUIDs>
 FEEDBACK: <specific, actionable guidance for the rework>
 MEMORIES_UPDATED: <comma-separated memory UUIDs, or "none">
+HANDOFF_SENT: <handoff URL/id if you called send_handoff, or "none">
 ```
 
 Note: even when sending back for rework, you should still update linked

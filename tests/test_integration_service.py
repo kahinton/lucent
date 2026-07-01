@@ -773,6 +773,51 @@ class TestHandleEventExceptionHandling:
         assert result.success is False
 
 
+@pytest.mark.asyncio
+async def test_dispatch_to_mcp_uses_user_scoped_bearer_key(monkeypatch):
+    user_id = str(uuid4())
+    org_id = str(uuid4())
+    key_id = uuid4()
+    captured: dict[str, Any] = {}
+
+    class FakeBridge:
+        def __init__(self, *, mcp_url, headers, skip_url_validation, **_kwargs):
+            captured["mcp_url"] = mcp_url
+            captured["headers"] = headers
+            captured["skip_url_validation"] = skip_url_validation
+
+        async def call_tool(self, tool_name, payload):
+            captured["tool_name"] = tool_name
+            captured["payload"] = payload
+            return "matched memory"
+
+        async def close(self):
+            captured["closed"] = True
+
+    pool = _make_pool()
+    svc = _make_service(pool)
+    svc._create_user_scoped_mcp_key = AsyncMock(return_value=(key_id, "hs_scoped_user"))
+    svc._revoke_mcp_key = AsyncMock()
+    monkeypatch.setattr("lucent.integrations.service.MCPToolBridge", FakeBridge)
+
+    result = await svc._dispatch_to_mcp(
+        "find my context",
+        {"id": user_id, "organization_id": org_id},
+    )
+
+    assert result == "matched memory"
+    assert captured["headers"] == {
+        "Authorization": "Bearer hs_scoped_user",
+        "X-Lucent-Memory-Scope": "user",
+        "X-Lucent-Memory-Scope-User-Id": user_id,
+        "X-Lucent-Org-Id": org_id,
+    }
+    assert captured["tool_name"] == "search_memories"
+    assert captured["payload"] == {"query": "find my context", "limit": 5}
+    assert captured["closed"] is True
+    svc._revoke_mcp_key.assert_awaited_once_with(key_id)
+
+
 class TestSanitizeInput:
     """Tests for IntegrationService._sanitize_input static method."""
 

@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 def _is_daemon_user(user: AuthenticatedUser) -> bool:
-    return user.role == Role.DAEMON or user.external_id == "daemon-service"
+    return user.role == Role.DAEMON or user.is_daemon_service
 
 
 def _can_manage_schedule(sched: dict, user: AuthenticatedUser) -> bool:
@@ -48,10 +48,13 @@ async def _schedule_owner_context(
 
         owner = await UserRepository(pool).get_by_id(owner_id)
         if owner and owner.get("role"):
-            if (
-                not sched.get("is_system")
-                and (owner.get("role") == "daemon" or owner.get("external_id") == "daemon-service")
-            ):
+            owner_ext = owner.get("external_id") or ""
+            owner_is_daemon = (
+                owner.get("role") == "daemon"
+                or owner_ext == "daemon-service"
+                or owner_ext.startswith("daemon-service:")
+            )
+            if not sched.get("is_system") and owner_is_daemon:
                 if fallback_user is not None and not _is_daemon_user(fallback_user):
                     return str(fallback_user.id), str(fallback_user.role)
                 async with pool.acquire() as conn:
@@ -60,7 +63,7 @@ async def _schedule_owner_context(
                            FROM users
                            WHERE organization_id = $1::uuid
                              AND role <> 'daemon'
-                             AND COALESCE(external_id, '') <> 'daemon-service'
+                             AND COALESCE(external_id, '') NOT LIKE 'daemon-service%'
                            ORDER BY CASE role
                                WHEN 'owner' THEN 0
                                WHEN 'admin' THEN 1
@@ -480,16 +483,16 @@ async def _trigger_schedule_execution(
     server_actions = [a for a in actions if a.get("action_type") == "server_function"]
     if server_actions:
         function_name = str(server_actions[0].get("function") or "")
-        if function_name != "release_stale_tasks":
-            raise HTTPException(422, f"Unsupported server workflow function: {function_name}")
-        from lucent.api.system_schedules import execute_stale_task_reaper_schedule
+        if function_name == "release_stale_tasks":
+            from lucent.api.system_schedules import execute_stale_task_reaper_schedule
 
-        result = await execute_stale_task_reaper_schedule(
-            sched,
-            force=force,
-            advance_schedule=advance_schedule,
-        )
-        return result or {"schedule": sched, "workflow": sched, "already_fired": True}
+            result = await execute_stale_task_reaper_schedule(
+                sched,
+                force=force,
+                advance_schedule=advance_schedule,
+            )
+            return result or {"schedule": sched, "workflow": sched, "already_fired": True}
+        raise HTTPException(422, f"Unsupported server workflow function: {function_name}")
     task_actions = [a for a in actions if a.get("action_type", "task") == "task"]
     interaction_actions = [
         a for a in actions if a.get("action_type") == "user_interaction"

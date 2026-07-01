@@ -63,6 +63,63 @@ class TestServerConfig:
 
 
 # ============================================================================
+# MCP Transport Security (DNS-rebinding allowlist)
+# ============================================================================
+
+
+def _validate_host(settings, host: str) -> bool:
+    """Mirror the MCP SDK's TransportSecurityMiddleware host check."""
+    if host in settings.allowed_hosts:
+        return True
+    for allowed in settings.allowed_hosts:
+        if allowed.endswith(":*") and host.startswith(allowed[:-2] + ":"):
+            return True
+    return False
+
+
+class TestMcpTransportSecurity:
+    """Regression tests for the MCP DNS-rebinding allowlist.
+
+    MCP SDK >=1.27 auto-enables DNS-rebinding protection and, by default, only
+    permits loopback Host headers. Lucent clients (the daemon) reach the server
+    by service name (e.g. http://lucent:8766/mcp), which the default allowlist
+    rejects with HTTP 421. These tests pin the configurable allowlist behavior.
+    """
+
+    def _build(self, env: dict[str, str]):
+        import importlib
+
+        with patch.dict(os.environ, env, clear=False):
+            for key in ("LUCENT_MCP_ALLOWED_HOSTS", "LUCENT_MCP_URL", "LUCENT_PUBLIC_URL"):
+                if key not in env:
+                    os.environ.pop(key, None)
+            import lucent.server as srv
+
+            importlib.reload(srv)
+            return srv._build_mcp_transport_security()
+
+    def test_loopback_always_allowed(self):
+        settings = self._build({})
+        assert settings.enable_dns_rebinding_protection is True
+        assert _validate_host(settings, "localhost:8766")
+        assert _validate_host(settings, "127.0.0.1:8766")
+
+    def test_service_name_allowed_via_env(self):
+        settings = self._build({"LUCENT_MCP_ALLOWED_HOSTS": "lucent"})
+        # The daemon's in-network host must be accepted (was 421 before the fix).
+        assert _validate_host(settings, "lucent:8766")
+        assert _validate_host(settings, "lucent")
+
+    def test_host_derived_from_mcp_url(self):
+        settings = self._build({"LUCENT_MCP_URL": "http://lucent:8766/mcp"})
+        assert _validate_host(settings, "lucent:8766")
+
+    def test_unknown_host_rejected(self):
+        settings = self._build({"LUCENT_MCP_ALLOWED_HOSTS": "lucent"})
+        assert not _validate_host(settings, "evil.example:8766")
+
+
+# ============================================================================
 # Tool Registration
 # ============================================================================
 

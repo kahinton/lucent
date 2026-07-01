@@ -75,58 +75,18 @@ def _instrument_otel(app: FastAPI) -> None:
 
 
 async def _sync_built_in_definitions():
-    """Sync built-in skills and agents from .github/ into the database."""
+    """Sync built-in skills and agents from .github/ into the database.
+
+    Targets every real (user-facing) organization, not an arbitrarily-selected
+    first row. On a clean database this no-ops until a user registers, at which
+    point registration seeds that org directly.
+    """
     try:
+        from lucent.builtin_definitions import sync_built_in_definitions_for_all_real_orgs
         from lucent.db import get_pool
 
         pool = await get_pool()
-        from lucent.db.definitions import DefinitionRepository
-
-        repo = DefinitionRepository(pool)
-        # Get any org to sync into (there's typically one)
-        async with pool.acquire() as conn:
-            row = await conn.fetchrow("SELECT id FROM organizations LIMIT 1")
-        if not row:
-            return
-        org_id = str(row["id"])
-        # Sync skills from .github/skills/
-        for candidate in [
-            Path("/app/.github/skills"),
-            Path(__file__).resolve().parents[3] / ".github" / "skills",
-        ]:
-            if candidate.is_dir():
-                count = await repo.sync_built_in_skills(org_id, str(candidate))
-                if count:
-                    logger.info(f"Synced {count} built-in skill definitions")
-                break
-        # Sync agents from .github/agents/definitions/
-        for candidate in [
-            Path("/app/.github/agents/definitions"),
-            Path(__file__).resolve().parents[3] / ".github" / "agents" / "definitions",
-        ]:
-            if candidate.is_dir():
-                count = await repo.sync_built_in_agents(org_id, str(candidate))
-                if count:
-                    logger.info(f"Synced {count} built-in agent definitions")
-                break
-
-        hook_count = await repo.sync_built_in_hooks(org_id)
-        if hook_count:
-            logger.info(f"Synced {hook_count} built-in hook definitions")
-
-        # Sync sandbox templates from .github/sandbox-templates/
-        from lucent.db.sandbox_template import SandboxTemplateRepository
-
-        tpl_repo = SandboxTemplateRepository(pool)
-        for candidate in [
-            Path("/app/.github/sandbox-templates"),
-            Path(__file__).resolve().parents[3] / ".github" / "sandbox-templates",
-        ]:
-            if candidate.is_dir():
-                count = await tpl_repo.sync_built_in_templates(org_id, str(candidate))
-                if count:
-                    logger.info(f"Synced {count} built-in sandbox templates")
-                break
+        await sync_built_in_definitions_for_all_real_orgs(pool)
     except Exception as e:
         logger.warning(f"Failed to sync built-in definitions: {e}")
 

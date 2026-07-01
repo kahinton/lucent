@@ -246,7 +246,6 @@ docker run --rm -v lucent_data:/data -v $(pwd):/backup alpine \
 | `LUCENT_DAEMON_ROLES` | `all` | Loops to enable: `cognitive`, `dispatcher`, `scheduler`, `autonomic` (comma-separated) |
 | `LUCENT_MCP_URL` | `http://localhost:8766/mcp` | MCP endpoint URL |
 | `LUCENT_MCP_API_KEY` | — | API key for daemon MCP access |
-| `LUCENT_REVIEW_MODELS` | — | Comma-separated models for multi-model task review |
 | `GITHUB_TOKEN` | — | GitHub token for Copilot SDK access |
 
 ### Sandbox (Optional)

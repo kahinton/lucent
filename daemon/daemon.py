@@ -156,10 +156,12 @@ _BASE_TASK_MEMORY_SERVER_TOOLS = sorted(
         "get_existing_tags",
         "get_memory",
         "get_memories",
+        "get_skill_definition",
         "get_tag_suggestions",
         "search_memories",
         "search_memories_full",
         "update_memory",
+        "delete_memory",
         "create_review",
         "get_memory_versions",
         "get_request_details",
@@ -256,6 +258,7 @@ def _memory_server_tools_for_task(
         return sorted({
             "create_memory",
             "fetch_open_meteo_forecast",
+            "get_skill_definition",
             "log_task_event",
             "send_handoff",
         })
@@ -388,6 +391,15 @@ def _build_mcp_tool_summary(tracker: list[dict]) -> str:
     )
     return summary
 from lucent.auth import set_current_user
+from lucent.memory_scope import (
+    MEMORY_SCOPE_HEADER,
+    MEMORY_SCOPE_ORG_SHARED_ONLY,
+    MEMORY_SCOPE_USER,
+    MEMORY_SCOPE_USER_ID_HEADER,
+    ORG_ID_HEADER,
+    VALID_MEMORY_SCOPES,
+    build_memory_scope_headers,
+)
 from lucent.secrets import SecretRegistry, initialize_secret_provider
 from lucent.secrets.utils import is_secret_reference, resolve_secret_reference
 from lucent.secrets.utils import resolve_env_vars as resolve_secret_env_vars
@@ -624,13 +636,6 @@ SHADOW_FORGET_SCORING_PROMPT = (
 # When disabled, tasks complete immediately after successful execution.
 REQUIRE_APPROVAL = runtime_settings.completion_human_approval_required()
 
-# Multi-model review: comma-separated list of models to use for reviewing task output.
-# When set, completed tasks are re-evaluated by each model before final completion.
-# The cognitive model can be pinned by LUCENT_DAEMON_MODEL. When unset, the
-# daemon uses the model registry's enabled default instead of a hardcoded model.
-# these are for sub-agent review.
-REVIEW_MODELS = runtime_settings.review_model_ids()
-
 # Request-level post-completion review configuration.
 REQUEST_REVIEW_AGENT_TYPE = runtime_settings.request_review_agent_type()
 REQUEST_REVIEW_FALLBACK_AGENT_TYPE = runtime_settings.request_review_fallback_agent_type()
@@ -700,7 +705,7 @@ def _refresh_config_from_runtime_settings() -> None:
     global SCHEDULER_CHECK_SECONDS, AUTONOMIC_MINUTES, LEARNING_MINUTES
     global VITALITY_SCORING_MINUTES, SHADOW_FORGET_SCORING_MINUTES
     global SHADOW_FORGET_OFFSET_MINUTES, COMPRESSION_MINUTES
-    global REQUIRE_APPROVAL, REVIEW_MODELS
+    global REQUIRE_APPROVAL
     global REQUEST_REVIEW_AGENT_TYPE, REQUEST_REVIEW_FALLBACK_AGENT_TYPE
     global REQUEST_REVIEW_MODEL, ALLOW_GIT_COMMIT, ALLOW_GIT_PUSH, MCP_URL, MCP_API_KEY
 
@@ -724,7 +729,6 @@ def _refresh_config_from_runtime_settings() -> None:
     SHADOW_FORGET_OFFSET_MINUTES = runtime_settings.daemon_shadow_forget_offset_minutes()
     COMPRESSION_MINUTES = runtime_settings.daemon_compression_minutes()
     REQUIRE_APPROVAL = runtime_settings.completion_human_approval_required()
-    REVIEW_MODELS = runtime_settings.review_model_ids()
     REQUEST_REVIEW_AGENT_TYPE = runtime_settings.request_review_agent_type()
     REQUEST_REVIEW_FALLBACK_AGENT_TYPE = runtime_settings.request_review_fallback_agent_type()
     REQUEST_REVIEW_MODEL = runtime_settings.request_review_model_id() or ""
@@ -735,13 +739,15 @@ def _refresh_config_from_runtime_settings() -> None:
 
 
 def _resolve_default_model(preferred_model: str | None = None) -> str:
-    """Resolve the current enabled default model from the model registry."""
-    try:
-        from lucent.model_registry import get_default_model_id
+    """Resolve the current enabled default model from the model registry.
 
-        return get_default_model_id(preferred_model=(preferred_model or MODEL or None))
-    except Exception:
-        return preferred_model or MODEL
+    Never invents a fallback model. If no enabled model exists,
+    ``NoModelsAvailableError`` propagates so the daemon fails loudly instead of
+    routing work to an arbitrary, possibly-unconfigured model.
+    """
+    from lucent.model_registry import get_default_model_id
+
+    return get_default_model_id(preferred_model=(preferred_model or MODEL or None))
 
 
 def _select_model_for_task(
@@ -876,6 +882,104 @@ def _resolve_daemon_database_url() -> str:
 
 DATABASE_URL = _resolve_daemon_database_url()
 
+# The hidden system org is secrets-only and is never a daemon target.
+SYSTEM_ORG_NAME = "__lucent_system__"
+
+# A daemon is single-tenant: it operates on exactly one organization. The bound
+# org is resolved once and cached. Operators can pin it explicitly with
+# LUCENT_DAEMON_ORG (org id or name); otherwise the daemon auto-binds to the
+# single real org (the "just works" local / docker-compose case) and refuses to
+# guess when multiple real orgs exist.
+DAEMON_ORG = os.environ.get("LUCENT_DAEMON_ORG", "").strip()
+_resolved_daemon_org: tuple[str, str] | None = None  # (org_id, org_name)
+
+
+async def _resolve_daemon_org(conn) -> tuple[str, str] | None:
+    """Resolve the single organization this daemon operates on.
+
+    Returns (org_id, org_name), or None if it cannot be determined yet.
+    Never selects the hidden system org. Resolution order:
+
+    1. LUCENT_DAEMON_ORG — explicit operator binding (matched by id or name).
+    2. The single real org, if exactly one exists (auto-bind, local default).
+    3. Otherwise None — zero real orgs (nothing to do yet) or multiple real
+       orgs with no explicit binding (ambiguous; refuse and tell the operator).
+    """
+    global _resolved_daemon_org
+    if _resolved_daemon_org is not None:
+        return _resolved_daemon_org
+
+    if DAEMON_ORG:
+        row = await conn.fetchrow(
+            "SELECT id, name FROM organizations "
+            "WHERE id::text = $1 OR name = $1 LIMIT 1",
+            DAEMON_ORG,
+        )
+        if not row:
+            log(
+                f"LUCENT_DAEMON_ORG={DAEMON_ORG!r} matches no organization; "
+                "cannot bind daemon to an org.",
+                "ERROR",
+            )
+            return None
+        _resolved_daemon_org = (str(row["id"]), row["name"])
+        log(f"Daemon bound to organization '{row['name']}' (explicit LUCENT_DAEMON_ORG)")
+        return _resolved_daemon_org
+
+    rows = await conn.fetch(
+        "SELECT id, name FROM organizations WHERE name <> $1 ORDER BY created_at",
+        SYSTEM_ORG_NAME,
+    )
+    if not rows:
+        return None
+    if len(rows) > 1:
+        names = ", ".join(r["name"] for r in rows[:6])
+        log(
+            f"Found {len(rows)} organizations but no LUCENT_DAEMON_ORG binding; "
+            f"a daemon serves a single org. Set LUCENT_DAEMON_ORG to one of: {names}",
+            "ERROR",
+        )
+        return None
+    _resolved_daemon_org = (str(rows[0]["id"]), rows[0]["name"])
+    log(f"Daemon auto-bound to the single organization '{rows[0]['name']}'")
+    return _resolved_daemon_org
+
+
+async def _ensure_daemon_service_user(conn, org_id: str) -> dict | None:
+    """Get (or self-heal) the org-scoped daemon-service user for ``org_id``.
+
+    Real orgs get this user at creation time (OrganizationRepository.create).
+    For orgs created before that change, the daemon provisions it on first run
+    using its users INSERT grant. Direct SQL avoids the app-layer side effect of
+    creating an individual memory for a system account.
+    """
+    external_id = f"daemon-service:{org_id}"
+    user = await conn.fetchrow(
+        "SELECT id, organization_id FROM users "
+        "WHERE external_id = $1 AND provider = 'local' AND is_active = true",
+        external_id,
+    )
+    if user:
+        return user
+    try:
+        user = await conn.fetchrow(
+            "INSERT INTO users "
+            "  (external_id, provider, organization_id, email, display_name, role) "
+            "VALUES ($1, 'local', $2::uuid, 'daemon@lucent.local', "
+            "  'Lucent Daemon', 'daemon') "
+            "ON CONFLICT (provider, external_id) DO UPDATE "
+            "  SET organization_id = EXCLUDED.organization_id "
+            "RETURNING id, organization_id",
+            external_id,
+            org_id,
+        )
+        log(f"Provisioned daemon-service user for org {org_id} (self-heal)")
+        return user
+    except Exception as e:
+        log(f"Could not provision daemon-service user for org {org_id}: {e}", "ERROR")
+        return None
+
+
 # Key expiry — daemon keys auto-expire and are refreshed each cycle
 KEY_TTL_HOURS = 24
 PROACTIVE_KEY_ROTATION_MINUTES = 60
@@ -900,6 +1004,10 @@ def _build_auth_config(api_key: str) -> tuple[dict, dict]:
                 "url": MCP_URL,
                 "headers": {"Authorization": f"Bearer {api_key}"},
                 "tools": ["*"],
+                # Lucent's own MCP endpoint — trusted internal connection,
+                # exempt from SSRF allowlist checks so it works out of the box
+                # even when the URL is loopback (default localhost:8766/mcp).
+                "internal": True,
             },
         }
         if api_key
@@ -932,10 +1040,10 @@ def _get_key_lock() -> asyncio.Lock:
 async def _provision_daemon_api_key(instance_id: str) -> str | None:
     """Provision an instance-scoped API key with a 24-hour expiry.
 
-    Uses the restricted lucent_daemon DB role which can only touch api_keys,
-    users (SELECT), and organizations (SELECT).  The daemon service user is
-    pre-created by migration 017; if it doesn't exist yet, we fall back to
-    creating it (works when connected as the full-privilege lucent role).
+    Uses the restricted lucent_daemon DB role which can manage api_keys and
+    has SELECT on users/organizations plus INSERT on users for self-heal. The
+    key is scoped to the daemon-service user of the single org this daemon is
+    bound to (see _resolve_daemon_org) — never the hidden system org.
 
     Returns the plain-text hs_ key, or None on failure.
     """
@@ -953,38 +1061,22 @@ async def _provision_daemon_api_key(instance_id: str) -> str | None:
         return None
 
     try:
-        # Look up the daemon service user (created by migration 017)
-        user = await conn.fetchrow(
-            "SELECT id, organization_id FROM users "
-            "WHERE external_id = 'daemon-service' AND is_active = true"
-        )
+        bound = await _resolve_daemon_org(conn)
+        if not bound:
+            log(
+                "Cannot provision daemon API key: no organization to bind to. "
+                "Create an organization (sign in) or set LUCENT_DAEMON_ORG.",
+                "WARN",
+            )
+            return None
+        org_id, _org_name = bound
+
+        user = await _ensure_daemon_service_user(conn, org_id)
         if not user:
-            # Fallback: create the user if we have sufficient privileges
-            # (only works with the full lucent role, not lucent_daemon)
-            try:
-                org = await conn.fetchrow(
-                    "SELECT id FROM organizations ORDER BY created_at LIMIT 1"
-                )
-                org_id = str(org["id"]) if org else None
-                user = await conn.fetchrow(
-                    "INSERT INTO users (external_id, provider, organization_id, "
-                    "  email, display_name, role) "
-                    "VALUES ('daemon-service', 'local', $1, "
-                    "  'daemon@lucent.local', 'Lucent Daemon', 'daemon') "
-                    "RETURNING id, organization_id",
-                    org_id,
-                )
-                log("Created daemon service user (fallback path)")
-            except Exception as e:
-                log(
-                    f"Daemon service user not found and cannot create: {e}. "
-                    "Run migration 017 or use the full DATABASE_URL.",
-                    "ERROR",
-                )
-                return None
+            return None
 
         user_id = str(user["id"])
-        org_id = str(user["organization_id"]) if user["organization_id"] else None
+        org_id = str(user["organization_id"]) if user["organization_id"] else org_id
 
         # Instance-specific key name prevents collisions between daemon instances
         key_name = f"daemon-{instance_id}"
@@ -1097,11 +1189,8 @@ async def _mint_scoped_api_key(
         return None
 
     try:
-        # Look up the daemon service user
-        user = await conn.fetchrow(
-            "SELECT id, organization_id FROM users "
-            "WHERE external_id = 'daemon-service' AND is_active = true"
-        )
+        # Look up the daemon service user for the target org
+        user = await _ensure_daemon_service_user(conn, org_id)
         if not user:
             log("Cannot mint scoped key — no daemon-service user", "WARN")
             return None
@@ -1143,6 +1232,96 @@ async def _mint_scoped_api_key(
         return None
     finally:
         await conn.close()
+
+
+def _build_scoped_memory_server_config(
+    *,
+    scoped_key: str,
+    memory_scope: str,
+    org_id: str,
+    memory_scope_user_id: str | None = None,
+    tools: list[str],
+    extra_headers: dict[str, str] | None = None,
+) -> dict:
+    """Build a task-scoped ``memory-server`` MCP config.
+
+    Every scoped session carries the same shape: a bearer credential plus the
+    scope retry-metadata headers (see ``lucent.memory_scope``). Centralizing
+    construction here guarantees the scope headers are always attached, so
+    ``_refresh_scoped_memory_server_config`` can re-mint an equivalent key after
+    an auth failure without ever copying the daemon's global credentials.
+
+    Args:
+        scoped_key: The freshly minted ``hs_`` scoped key.
+        memory_scope: ``'user'`` or ``'org_shared_only'``.
+        org_id: The organization the key belongs to.
+        memory_scope_user_id: The user the key is scoped to (None for shared).
+        tools: The memory-server tool allowlist (used as-is; callers may append).
+        extra_headers: Optional task/request/agent identifiers to include.
+
+    Returns:
+        A ready-to-use MCP server config dict.
+    """
+    headers = {
+        "Authorization": f"Bearer {scoped_key}",
+        **build_memory_scope_headers(
+            memory_scope,
+            org_id=org_id,
+            memory_scope_user_id=memory_scope_user_id,
+        ),
+    }
+    if extra_headers:
+        headers.update(extra_headers)
+    return {
+        "type": "http",
+        "url": MCP_URL,
+        "headers": headers,
+        "tools": tools,
+        # Lucent's own MCP endpoint — trusted internal connection, exempt from
+        # SSRF allowlist checks (default loopback URL would otherwise block).
+        "internal": True,
+    }
+
+
+async def _refresh_scoped_memory_server_config(
+    mcp_config: dict | None,
+) -> dict | None:
+    """Re-mint the memory-server key for a task-scoped MCP config.
+
+    Task sessions must never recover from a scoped-key auth failure by copying
+    the daemon's global MCP credentials. The scope headers are internal retry
+    metadata that let us recreate the same security boundary with a fresh key.
+    """
+    if not mcp_config or not isinstance(mcp_config, dict):
+        return None
+    memory_server = mcp_config.get("memory-server")
+    if not isinstance(memory_server, dict):
+        return None
+    headers = dict(memory_server.get("headers") or {})
+    memory_scope = headers.get(MEMORY_SCOPE_HEADER)
+    org_id = headers.get(ORG_ID_HEADER)
+    if memory_scope not in VALID_MEMORY_SCOPES or not org_id:
+        return None
+    memory_scope_user_id = headers.get(MEMORY_SCOPE_USER_ID_HEADER) or None
+    if memory_scope == MEMORY_SCOPE_USER and not memory_scope_user_id:
+        return None
+
+    scoped_key = await _mint_scoped_api_key(
+        memory_scope=memory_scope,
+        memory_scope_user_id=memory_scope_user_id,
+        org_id=org_id,
+        ttl_minutes=60,
+    )
+    if not scoped_key:
+        return None
+
+    refreshed_headers = dict(headers)
+    refreshed_headers["Authorization"] = f"Bearer {scoped_key}"
+    refreshed_memory_server = dict(memory_server)
+    refreshed_memory_server["headers"] = refreshed_headers
+    refreshed = dict(mcp_config)
+    refreshed["memory-server"] = refreshed_memory_server
+    return refreshed
 
 
 # Schedule titles that require org-shared-only processing.
@@ -1549,6 +1728,7 @@ class RequestAPI:
         sequence_order: int = 0,
         model: str | None = None,
         reasoning_effort: str | None = None,
+        requesting_user_id: str | None = None,
         output_contract: dict | None = None,
     ) -> dict | None:
         body = {"title": title, "priority": priority, "sequence_order": sequence_order}
@@ -1560,6 +1740,8 @@ class RequestAPI:
             body["model"] = model
         if reasoning_effort:
             body["reasoning_effort"] = reasoning_effort
+        if requesting_user_id:
+            body["requesting_user_id"] = requesting_user_id
         if output_contract:
             body["output_contract"] = output_contract
         try:
@@ -2540,6 +2722,11 @@ async def build_subagent_prompt(
         db_agent = await load_instance_agent(agent_type)
 
     if db_agent:
+        from lucent.llm.agent_composition import (
+            render_managed_tools_section,
+            render_skills_section,
+        )
+
         raw_agent_content = db_agent.get("content", "")
         agent_name = db_agent.get("name", agent_type)
         agent_def = (
@@ -2547,55 +2734,37 @@ async def build_subagent_prompt(
             f"{raw_agent_content}\n"
             f"</agent_definition>"
         )
-        # Load skills granted to this agent
+        # Resolve skills granted to this agent. Skills are listed (name/id/
+        # description) and loaded on demand via get_skill_definition, the same
+        # way the chat path and cognitive identity reference them.
         skill_names = db_agent.get("skill_names", [])
+        granted_skills: list[dict] = []
         if resolved_skills is not None:
-            for skill in resolved_skills:
-                if skill.get("name") in skill_names and skill.get("content"):
-                    sname = skill["name"]
-                    skills_context += (
-                        f'\n\n<skill_content name="{sname}">\n'
-                        f'{skill["content"]}\n'
-                        f"</skill_content>"
-                    )
+            granted_skills = [
+                skill for skill in resolved_skills if skill.get("name") in skill_names
+            ]
         elif skill_names:
             try:
                 async with httpx.AsyncClient(timeout=10) as client:
-                    for skill_name in skill_names:
-                        resp = await client.get(
-                            f"{API_BASE}/definitions/skills",
-                            params={"status": "active"},
-                            headers=API_HEADERS,
-                        )
-                        if resp.status_code == 200:
-                            data = resp.json()
-                            skills = data.get("items", data) if isinstance(data, dict) else data
-                            for skill in skills:
-                                if skill.get("name") in skill_names and skill.get("content"):
-                                    sname = skill["name"]
-                                    skills_context += (
-                                        f'\n\n<skill_content name="{sname}">\n'
-                                        f'{skill["content"]}\n'
-                                        f"</skill_content>"
-                                    )
-                            break  # Only need one request for all skills
+                    resp = await client.get(
+                        f"{API_BASE}/definitions/skills",
+                        params={"status": "active"},
+                        headers=API_HEADERS,
+                    )
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        skills = data.get("items", data) if isinstance(data, dict) else data
+                        granted_skills = [
+                            skill for skill in skills if skill.get("name") in skill_names
+                        ]
             except Exception:
                 log(f"Failed to load skills for agent '{agent_type}'", "DEBUG")
+        skills_section = render_skills_section(granted_skills)
+        if skills_section:
+            skills_context = "\n\n" + skills_section
         log(f"Using approved DB definition for '{agent_type}' agent (id: {str(db_agent['id'])[:8]})")
         if resolved_tools:
-            tool_lines = []
-            for tool in resolved_tools:
-                tool_lines.append(
-                    f"- {tool.get('name')}: {tool.get('description') or ''}\n"
-                    f"  input_schema: {json.dumps(tool.get('input_schema') or {}, default=str)}"
-                )
-            tools_context = (
-                "--- MANAGED TOOLS ---\n"
-                "The following managed tools are granted to this agent. Use "
-                "`run_managed_tool` with one of these tool names when a task needs "
-                "the capability. Lucent enforces access, grants, and sandbox policy.\n"
-                + "\n".join(tool_lines)
-            )
+            tools_context = render_managed_tools_section(resolved_tools)
     else:
         raise AgentNotFoundError(
             f"No approved agent definition found for '{agent_type}'. "
@@ -2709,6 +2878,10 @@ class LucentDaemon:
         self.running = False
         self.draining = False  # True = stop new work, wait for in-flight sessions
         self.cycle_count = 0
+        # Whether built-in system schedules have been seeded for the bound org.
+        # Starts False; set once seeding succeeds (may defer on brand-new
+        # instances until an organization exists — the scheduler loop retries).
+        self._schedules_seeded = False
         # Unique instance ID for distributed coordination
         hostname = platform.node() or "unknown"
         self.instance_id = f"{hostname}-{os.getpid()}-{int(datetime.now(timezone.utc).timestamp())}"
@@ -2721,6 +2894,12 @@ class LucentDaemon:
         self._listen_lock = asyncio.Lock()
         self._task_ready = asyncio.Event()
         self._request_ready = asyncio.Event()
+
+        # Live runtime-settings refresh: re-read DB-backed settings so admin
+        # changes take effect without a daemon restart. Throttled to avoid
+        # hammering the DB on every dispatch poll.
+        self._settings_reload_lock = asyncio.Lock()
+        self._settings_reloaded_at = 0.0
 
         # MCP memory-tool usage tracking per session (for observability)
         self._session_mcp_trackers: dict[str, list[dict]] = {}
@@ -2805,7 +2984,13 @@ class LucentDaemon:
             from lucent.db.pool import init_db as _init_db
             # The daemon uses DAEMON_DATABASE_URL (or falls back to DATABASE_URL).
             # Pass explicitly so init_db uses the same connection the daemon does.
-            _pool = await _init_db(database_url=DATABASE_URL)
+            # run_migrations=False: the daemon connects with the least-privilege
+            # lucent_daemon role which intentionally lacks DDL (CREATE on schema
+            # public). Migrations are the server's responsibility — attempting them
+            # here fails with "permission denied for schema public" and aborts pool
+            # init, which would silently strand runtime settings, the model registry,
+            # and role parsing on hardcoded defaults.
+            _pool = await _init_db(database_url=DATABASE_URL, run_migrations=False)
             try:
                 from lucent.settings import load_runtime_settings_from_db
 
@@ -2823,6 +3008,22 @@ class LucentDaemon:
             log("Lucent DB pool initialized")
         except Exception as e:
             log(f"Failed to initialize Lucent DB pool: {e}", "WARN")
+
+        # Initialize the secret provider so org-scoped model-provider
+        # credentials (e.g. the Copilot github_token) can be resolved during
+        # LLM sessions. The API server does this at startup; the daemon runs its
+        # own LLM sessions, so it must too. Without it SecretRegistry stays empty
+        # and the Copilot engine silently falls back to no credentials, failing
+        # with "Session was not created with authentication info or custom
+        # provider" on container daemons whose Copilot CLI is not logged in.
+        try:
+            from lucent.db import get_pool as _get_secret_pool
+
+            _secret_pool = await _get_secret_pool()
+            await initialize_secret_provider(_secret_pool)
+            log("Secret provider initialized")
+        except Exception as secret_exc:
+            log(f"Failed to initialize secret provider: {secret_exc}", "WARN")
 
         # Ensure we have a valid API key before anything else
         await ensure_valid_api_key(self.instance_id)
@@ -2843,12 +3044,21 @@ class LucentDaemon:
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, self._handle_shutdown)
 
-        engine_name = get_engine_name() if _LLM_ENGINE_AVAILABLE else "copilot-direct"
+        # Report the engine that the resolved default model actually routes to
+        # (per-model routing), not the global default — they can differ.
+        _default_model = _resolve_default_model()
+        if _LLM_ENGINE_AVAILABLE:
+            try:
+                engine_name = get_engine_for_model(_default_model).name
+            except Exception:
+                engine_name = get_engine_name()
+        else:
+            engine_name = "copilot-direct"
         log(
             f"Daemon ready. Instance: {self.instance_id}, "
             f"Roles: {','.join(sorted(self.roles))}, "
             f"Engine: {engine_name} (multi-engine routing enabled), "
-            f"Model: {_resolve_default_model()}, Max sessions: {MAX_CONCURRENT_SESSIONS}"
+            f"Model: {_default_model}, Max sessions: {MAX_CONCURRENT_SESSIONS}"
         )
 
         # Populate LLM engine model registry from DB (for Ollama/custom providers)
@@ -2885,8 +3095,11 @@ class LucentDaemon:
         except Exception as e:
             log(f"Startup recovery failed (non-fatal): {e}", "WARN")
 
-        # Seed system schedules — built-in schedules that drive autonomous work
-        await self._seed_system_schedules()
+        # Seed system schedules — built-in schedules that drive autonomous work.
+        # On a brand-new instance no real organization may exist yet (the user
+        # hasn't signed up). Seeding then defers; the scheduler loop retries it
+        # so schedules appear as soon as the org is created — no restart needed.
+        self._schedules_seeded = await self._seed_system_schedules()
 
     async def _seed_system_schedules(self):
         """Ensure built-in system schedules exist for this organization.
@@ -2903,16 +3116,24 @@ class LucentDaemon:
         try:
             conn = await asyncpg.connect(DATABASE_URL)
             try:
-                user = await conn.fetchrow(
-                    "SELECT id, organization_id FROM users "
-                    "WHERE external_id = 'daemon-service' AND is_active = true"
-                )
-                if not user or not user["organization_id"]:
+                bound = await _resolve_daemon_org(conn)
+                if not bound:
+                    log(
+                        "Cannot seed system schedules — no organization to bind to "
+                        "(will retry once an organization is created or "
+                        "LUCENT_DAEMON_ORG is set)",
+                        "WARN",
+                    )
+                    return False
+                org_id, _org_name = bound
+
+                user = await _ensure_daemon_service_user(conn, org_id)
+                if not user:
                     log("Cannot seed system schedules — no daemon-service user", "WARN")
-                    return
+                    return False
+
 
                 user_id = str(user["id"])
-                org_id = str(user["organization_id"])
 
                 await conn.execute(
                     """UPDATE schedules
@@ -2966,20 +3187,6 @@ class LucentDaemon:
                         "cron_expression": "0 4 * * *",
                         "priority": "low",
                         "prompt": EXPERIENCE_COMPRESSION_PROMPT,
-                    },
-                    {
-                        "title": "Memory Vitality Scoring",
-                        "description": (
-                            "Compute and persist memory vitality scores and lifecycle stages "
-                            "for shadow-mode observability. No search behavior changes. "
-                            "Short-circuits with schedule.skipped when no memories need missing "
-                            "or stale vitality computation."
-                        ),
-                        "agent_type": "memory",
-                        "schedule_type": "interval",
-                        "interval_seconds": VITALITY_SCORING_MINUTES * 60,
-                        "priority": "low",
-                        "prompt": MEMORY_VITALITY_SCORING_PROMPT,
                     },
                     {
                         "title": "Shadow Forget Scoring",
@@ -3116,12 +3323,14 @@ class LucentDaemon:
                     log(f"Refreshed {updated} existing system schedule definition(s)")
                 if not created and not updated:
                     log("System schedules verified (all exist)")
+                return True
 
             finally:
                 await conn.close()
 
         except Exception as e:
             log(f"System schedule seeding failed (non-fatal): {e}", "WARN")
+            return False
 
     def _build_cognitive_schedule_prompt(self) -> str:
         """Build the prompt used by the scheduled cognitive planning task."""
@@ -3417,6 +3626,100 @@ class LucentDaemon:
 
         return "created", req
 
+    async def _process_user_rejections(
+        self,
+        *,
+        user_id: str,
+        org_id: str,
+        scoped_key: str,
+        system_message: str,
+    ) -> int:
+        """Run a scoped LLM session to process a user's rejected requests.
+
+        Rejected requests land in ``rejection_processing`` and need the
+        feedback loop closed: read the rejection reason, update the linked
+        goal memory, then move the request to ``cancelled`` via
+        ``mark_rejection_processed``. This requires LLM reasoning, so we
+        fan it out under the user's scoped key. Returns the number of
+        rejected requests handed to the session.
+        """
+        import asyncpg
+
+        try:
+            conn = await asyncpg.connect(DATABASE_URL)
+        except Exception as e:
+            log(f"Rejection processing DB connect failed: {e}", "WARN")
+            return 0
+        try:
+            rows = await conn.fetch(
+                """
+                SELECT id::text AS id, title, approval_comment
+                FROM requests
+                WHERE organization_id = $1::uuid
+                  AND created_by = $2::uuid
+                  AND status = 'rejection_processing'
+                ORDER BY created_at
+                """,
+                org_id,
+                user_id,
+            )
+        except Exception as e:
+            log(f"Rejection processing query failed: {e}", "WARN")
+            return 0
+        finally:
+            await conn.close()
+
+        if not rows:
+            return 0
+
+        lines = []
+        for r in rows:
+            comment = r.get("approval_comment") or "No reason given"
+            lines.append(
+                f"- **{r.get('title') or '(untitled)'}** (id: {r['id']})\n"
+                f"  Rejection reason: {comment}"
+            )
+        rejection_block = "\n".join(lines)
+
+        prompt = (
+            "You are closing the feedback loop on requests the user "
+            "rejected. The following requests are in 'rejection_processing' "
+            "and you MUST process each one:\n\n"
+            f"{rejection_block}\n\n"
+            "For EACH request above:\n"
+            "1. Read the rejection reason carefully.\n"
+            "2. Call get_request_details(request_id) to find the linked "
+            "goal memories.\n"
+            "3. Update each linked goal memory based on the feedback:\n"
+            "   - If the goal itself is obsolete/already done → set "
+            "metadata.status to 'abandoned' with the reason.\n"
+            "   - If only the approach was wrong → add the rejection "
+            "feedback to the goal's content/progress notes.\n"
+            "4. Call mark_rejection_processed(request_id, note=...) to move "
+            "the request to 'cancelled'.\n\n"
+            "Do NOT create new requests for these goals. Return a brief "
+            "summary of what you changed for each request."
+        )
+
+        scoped_mcp = dict(MCP_CONFIG)
+        scoped_mcp["memory-server"] = _build_scoped_memory_server_config(
+            scoped_key=scoped_key,
+            memory_scope=MEMORY_SCOPE_USER,
+            org_id=str(org_id),
+            memory_scope_user_id=str(user_id),
+            tools=["*"],
+        )
+
+        model, _reason = _select_model_for_task(agent_type="planning")
+        await self.run_session(
+            f"rejections-{user_id[:8]}",
+            system_message,
+            prompt,
+            model=model,
+            mcp_config_override=scoped_mcp,
+        )
+        return len(rows)
+
     async def _run_cognitive_planning_fanout(
         self,
         *,
@@ -3454,6 +3757,33 @@ class LucentDaemon:
                 if not scoped_key:
                     raise RuntimeError("scoped key minting failed")
 
+                # Process any rejected requests for this user FIRST. Rejection
+                # handling needs LLM reasoning (interpret the feedback, update
+                # the linked goal memory, close the loop) so it runs a scoped
+                # session. This must happen even when there are no planning
+                # targets — otherwise rejected requests sit in
+                # rejection_processing forever.
+                rejections_pending = int(user_row.get("rejections_pending") or 0)
+                if rejections_pending > 0:
+                    try:
+                        processed = await self._process_user_rejections(
+                            user_id=user_id,
+                            org_id=org_id,
+                            scoped_key=scoped_key,
+                            system_message=system_message,
+                        )
+                        summaries.append(
+                            f"user={user_id[:8]} rejections={rejections_pending} "
+                            f"processed={processed}"
+                        )
+                    except Exception as rej_err:
+                        errors.append(f"rejection processing: {rej_err}")
+                        log(
+                            f"Rejection processing failed for user "
+                            f"{user_id[:8]}: {rej_err}",
+                            "WARN",
+                        )
+
                 # Fetch the planning targets server-side BEFORE invoking
                 # the planner. The endpoint scopes results to this user
                 # automatically because the key is user-scoped. If there
@@ -3470,10 +3800,11 @@ class LucentDaemon:
                         "plannable targets — skipping LLM call",
                         "INFO",
                     )
-                    summaries.append(
-                        f"user={user_id[:8]} goals={goals_scanned} "
-                        f"targets=0 requests=0 (no work)"
-                    )
+                    if rejections_pending == 0:
+                        summaries.append(
+                            f"user={user_id[:8]} goals={goals_scanned} "
+                            f"targets=0 requests=0 (no work)"
+                        )
                     continue
 
                 # Create requests directly from authoritative planning targets.
@@ -4070,12 +4401,14 @@ class LucentDaemon:
                         raise RuntimeError("scoped key minting failed")
 
                     scoped_mcp = dict(MCP_CONFIG)
-                    scoped_mcp["memory-server"] = {
-                        "type": "http",
-                        "url": MCP_URL,
-                        "headers": {"Authorization": f"Bearer {scoped_key}"},
-                        "tools": ["*"],
-                    }
+                    scoped_mcp["memory-server"] = _build_scoped_memory_server_config(
+                        scoped_key=scoped_key,
+                        memory_scope=MEMORY_SCOPE_USER,
+                        org_id=str(org_id),
+                        memory_scope_user_id=str(owner_user_id),
+                        tools=["*"],
+                        extra_headers={"X-Lucent-Request-Id": str(request_id)},
+                    )
 
                     prompt = self._build_decomposition_prompt(req)
                     decomposition_model, decomposition_model_reason = _select_model_for_task(
@@ -4306,6 +4639,19 @@ class LucentDaemon:
             log(f"Skipping '{name}' — at session limit ({MAX_CONCURRENT_SESSIONS})", "WARN")
             return None
 
+        # Ensure the daemon's bound organization is available to the engine so
+        # it can resolve org-scoped model-provider credentials (e.g. the Copilot
+        # github_token). Container daemons whose Copilot CLI is not interactively
+        # logged in rely on this stored token; without an organization_id the
+        # engine cannot load it and the session fails with "Session was not
+        # created with authentication info or custom provider". Only fill it in
+        # when a caller (e.g. a per-task session) has not already supplied org
+        # context, so we never override an explicit scope.
+        if audit_context is None or not audit_context.get("organization_id"):
+            bound_org_id = await self._get_daemon_org_id()
+            if bound_org_id:
+                audit_context = {**(audit_context or {}), "organization_id": bound_org_id}
+
         selected_model = _resolve_default_model(model)
         effort_label = f", reasoning_effort: {reasoning_effort}" if reasoning_effort else ""
         log(f"Starting session: {name} (model: {selected_model}{effort_label})")
@@ -4372,20 +4718,31 @@ class LucentDaemon:
                         f"Session '{name}' detected MCP auth failure; attempting key recovery and single retry",
                         "WARN",
                     )
-                    recovered = await _handle_auth_failure(self.instance_id)
-                    if not recovered:
-                        status = "error"
-                        log(f"Session '{name}' could not recover MCP credentials", "ERROR")
-                        if span:
-                            span.set_attribute("daemon.session.error", "auth_recovery_failed")
-                        return None
-
                     retried_after_auth_failure = True
                     if mcp_config_override:
-                        refreshed = dict(mcp_config_override)
-                        if MCP_CONFIG.get("memory-server"):
-                            refreshed["memory-server"] = MCP_CONFIG["memory-server"]
+                        refreshed = await _refresh_scoped_memory_server_config(
+                            mcp_config_override
+                        )
+                        if not refreshed:
+                            status = "error"
+                            log(
+                                f"Session '{name}' could not refresh scoped memory-server credentials",
+                                "ERROR",
+                            )
+                            if span:
+                                span.set_attribute(
+                                    "daemon.session.error", "scoped_auth_recovery_failed"
+                                )
+                            return None
                         mcp_config_override = refreshed
+                    else:
+                        recovered = await _handle_auth_failure(self.instance_id)
+                        if not recovered:
+                            status = "error"
+                            log(f"Session '{name}' could not recover MCP credentials", "ERROR")
+                            if span:
+                                span.set_attribute("daemon.session.error", "auth_recovery_failed")
+                            return None
                     log(f"Session '{name}' recovered MCP credentials; retrying once", "INFO")
                     continue
                 except asyncio.TimeoutError:
@@ -4833,6 +5190,34 @@ class LucentDaemon:
             f"for domain '{summary.get('domain', 'unknown')}' — awaiting human approval"
         )
 
+    async def _reload_runtime_settings(self, *, min_interval_seconds: float = 15.0) -> None:
+        """Re-read DB-backed runtime settings so admin changes apply live.
+
+        The daemon copies DB settings into module globals at startup. Without
+        this refresh, settings changed via the web UI (which only updates the
+        server process's cache) never reach the running daemon, forcing a
+        restart. Re-reading here keeps values like the request-review model
+        live. Throttled so frequent dispatch polls don't hammer the DB.
+        """
+        now = time.monotonic()
+        if now - self._settings_reloaded_at < min_interval_seconds:
+            return
+        async with self._settings_reload_lock:
+            now = time.monotonic()
+            if now - self._settings_reloaded_at < min_interval_seconds:
+                return
+            try:
+                from lucent.db import get_pool
+                from lucent.settings import load_runtime_settings_from_db
+
+                pool = await get_pool()
+                await load_runtime_settings_from_db(pool)
+                _refresh_config_from_runtime_settings()
+                self.roles = self._parse_roles(DAEMON_ROLES_STR)
+                self._settings_reloaded_at = now
+            except Exception as exc:
+                log(f"Runtime settings reload failed: {exc}", "WARN")
+
     async def run_cognitive_cycle(self):
         """Run one cognitive cycle — perceive, reason, decide, act via tools.
 
@@ -4840,6 +5225,7 @@ class LucentDaemon:
         reviews state, and creates requests/tasks. It does NOT dispatch tasks —
         that is handled by the dispatch loop.
         """
+        await self._reload_runtime_settings()
         self.cycle_count += 1
         log(f"=== Cognitive cycle #{self.cycle_count} (instance: {self.instance_id}) ===")
 
@@ -5362,16 +5748,16 @@ class LucentDaemon:
             _scope_type: str | None
             _scope_user: str | None
             _override_scope = _get_required_memory_scope(title, _request_title)
-            if _override_scope == "org_shared_only":
+            if _override_scope == MEMORY_SCOPE_ORG_SHARED_ONLY:
                 # System maintenance task — operates on shared org memories only.
-                _scope_type = "org_shared_only"
+                _scope_type = MEMORY_SCOPE_ORG_SHARED_ONLY
                 _scope_user = None
             else:
                 # Default and overwhelmingly the common case: scope to the
                 # request's owning user. This holds even for auto-created
                 # post-completion review tasks, which previously bypassed
                 # scoping and ran with daemon org-wide access.
-                _scope_type = "user"
+                _scope_type = MEMORY_SCOPE_USER
                 _scope_user = requesting_user_id
 
             if MCP_CONFIG.get("memory-server"):
@@ -5382,22 +5768,23 @@ class LucentDaemon:
                     ttl_minutes=60,
                 )
                 if _scoped_key:
-                    task_mcp_config["memory-server"] = {
-                        "type": "http",
-                        "url": MCP_URL,
-                        "headers": {
-                            "Authorization": f"Bearer {_scoped_key}",
-                            "X-Lucent-Agent-Definition-Id": str(agent_data["id"]),
-                            "X-Lucent-Task-Id": str(task_id),
-                            "X-Lucent-Request-Id": str(request_id) if request_id else "",
-                        },
-                        "tools": _memory_server_tools_for_task(
+                    task_mcp_config["memory-server"] = _build_scoped_memory_server_config(
+                        scoped_key=_scoped_key,
+                        memory_scope=_scope_type,
+                        org_id=str(org_id),
+                        memory_scope_user_id=_scope_user,
+                        tools=_memory_server_tools_for_task(
                             agent_type,
                             title,
                             _request_title,
                             description,
                         ),
-                    }
+                        extra_headers={
+                            "X-Lucent-Agent-Definition-Id": str(agent_data["id"]),
+                            "X-Lucent-Task-Id": str(task_id),
+                            "X-Lucent-Request-Id": str(request_id) if request_id else "",
+                        },
+                    )
                     if managed_tools:
                         for tool_name in (
                             "list_tool_definitions", "get_tool_definition", "run_managed_tool",
@@ -5759,16 +6146,6 @@ class LucentDaemon:
                         output_result["result_structured"] = None
                         log(f"Task {task_id[:8]}: validation failed, using text fallback", "WARN")
 
-                # Multi-model review if configured
-                if REVIEW_MODELS:
-                    review_passed = await self._multi_model_review(
-                        task_id, agent_type, description, result
-                    )
-                    if not review_passed:
-                        log(f"Tracked task {task_id[:8]} failed multi-model review", "WARN")
-                        await _fail_owned(task_id, "Failed multi-model review")
-                        continue
-
                 await _complete_owned(
                     task_id,
                     result,
@@ -6127,64 +6504,6 @@ class LucentDaemon:
             log(f"Failed to resolve sandbox template {template_id[:8]}: {e}", "WARN")
             return None
 
-    async def _multi_model_review(
-        self, memory_id: str, agent_type: str, task_content: str, result: str
-    ) -> bool:
-        """Run the task result through multiple models for review.
-
-        Each review model evaluates the result independently. All must approve
-        for the review to pass. Returns True if all models approve.
-        """
-        review_prompt = (
-            "You are reviewing work produced by an AI sub-agent. "
-            "Evaluate the quality and correctness of the output."
-            f"\n\nTASK THAT WAS ASSIGNED:\n{task_content[:2000]}"
-            f"\n\nOUTPUT PRODUCED:\n{result[:4000]}"
-            "\n\nEvaluate:\n"
-            "1. Does the output actually address the task?\n"
-            "2. Is the reasoning sound?\n"
-            "3. Are there any errors, hallucinations, "
-            "or problematic assumptions?\n"
-            "4. Is the output actionable and useful?\n\n"
-            "Respond with EXACTLY one of:\n"
-            "- APPROVE: [brief reason] — if the work is good\n"
-            "- REJECT: [brief reason] — if there are "
-            "significant issues"
-        )
-
-        approvals = 0
-        rejections = 0
-
-        for review_model in REVIEW_MODELS:
-            log(f"  Review of task {memory_id[:8]} by {review_model}...")
-            review_result = await self.run_session(
-                f"review-{memory_id[:8]}-{review_model.split('/')[-1][:10]}",
-                "You are a quality reviewer. Be concise and decisive.",
-                review_prompt,
-                model=review_model,
-            )
-
-            if review_result and "APPROVE" in review_result.upper():
-                approvals += 1
-                log(f"  Review by {review_model}: APPROVED")
-            else:
-                rejections += 1
-                reason = review_result[:200] if review_result else "no response"
-                log(f"  Review by {review_model}: REJECTED — {reason}", "WARN")
-
-        total = approvals + rejections
-        if total == 0:
-            log(f"No review models responded for task {memory_id[:8]}", "WARN")
-            return True  # Don't block on review failures
-
-        passed = rejections == 0
-        log(
-            f"Multi-model review for {memory_id[:8]}: "
-            f"{approvals}/{total} approved "
-            f"— {'PASSED' if passed else 'FAILED'}"
-        )
-        return passed
-
     def _is_request_review_task(self, task: dict) -> bool:
         """Identify daemon-created post-completion review tasks.
 
@@ -6301,6 +6620,64 @@ class LucentDaemon:
 
         return None, "none"
 
+    async def _resolve_review_requesting_user_id(
+        self,
+        *,
+        org_id: str,
+        requester_user_id: str,
+    ) -> str:
+        """Route daemon-owned review work to a human owner/admin for Handoffs."""
+        import asyncpg
+
+        try:
+            conn = await asyncpg.connect(DATABASE_URL)
+        except Exception as e:
+            log(f"Review requester resolution DB connect failed: {e}", "WARN")
+            return requester_user_id
+
+        try:
+            requester = await conn.fetchrow(
+                """SELECT id::text AS id, role, external_id
+                   FROM users
+                   WHERE id = $1::uuid AND organization_id = $2::uuid""",
+                requester_user_id,
+                org_id,
+            )
+            if not requester:
+                return requester_user_id
+            req_ext = requester["external_id"] or ""
+            req_is_daemon = (
+                requester["role"] == "daemon"
+                or req_ext == "daemon-service"
+                or req_ext.startswith("daemon-service:")
+            )
+            if not req_is_daemon:
+                return requester_user_id
+
+            human = await conn.fetchrow(
+                """SELECT id::text AS id
+                   FROM users
+                   WHERE organization_id = $1::uuid
+                     AND is_active = true
+                     AND role IN ('owner', 'admin')
+                     AND COALESCE(external_id, '') <> 'daemon-service'
+                   ORDER BY CASE role WHEN 'owner' THEN 0 ELSE 1 END, created_at
+                   LIMIT 1""",
+                org_id,
+            )
+            if human:
+                log(
+                    f"Review request owned by daemon user {requester_user_id[:8]}; "
+                    f"routing review/Handoffs to human {human['id'][:8]}",
+                )
+                return str(human["id"])
+            return requester_user_id
+        except Exception as e:
+            log(f"Review requester resolution failed: {e}", "WARN")
+            return requester_user_id
+        finally:
+            await conn.close()
+
     async def _create_request_review_task(self, request_id: str, request_data: dict) -> dict | None:
         """Create a review task when a request enters review state."""
         tasks = request_data.get("tasks", []) or []
@@ -6343,7 +6720,10 @@ class LucentDaemon:
                 "WARN",
             )
             return None
-        requesting_user_id = str(requester)
+        requesting_user_id = await self._resolve_review_requesting_user_id(
+            org_id=org_id,
+            requester_user_id=str(requester),
+        )
 
         agent_type, mode = await self._find_review_agent_type(org_id, requesting_user_id)
         if not agent_type:
@@ -6513,13 +6893,37 @@ class LucentDaemon:
             "If you cannot identify the missing deliverable precisely, return "
             "NEEDS_REWORK and ask the task agent to record the output.\n"
             "=== END OUTPUT ARTIFACT REVIEW ===\n\n"
+            "=== SETUP/CONFIGURATION BLOCKER HANDOFFS ===\n"
+            "Before deciding APPROVED or NEEDS_REWORK, check whether task output "
+            "reports a legitimate environment, setup, credential, permission, dependency, "
+            "or configuration blocker that prevented useful completion. Examples include "
+            "missing API keys, inaccessible services, invalid local configuration, "
+            "unavailable MCP servers, sandbox provisioning failures, missing repo "
+            "permissions, or dependency installation failures that the task agent could "
+            "not reasonably fix.\n"
+            "When a task was blocked by a user- or environment-actionable issue and "
+            "reported what was attempted clearly, call `send_handoff` before emitting "
+            "REQUEST_REVIEW_DECISION. The handoff must explain what was attempted, what "
+            "blocked progress, why Lucent could not resolve it autonomously, and exactly "
+            "what the user may need to configure or verify next. Include request/task "
+            "references when IDs are available, set `requires_response=true` only if "
+            "Lucent needs an answer before continuing, and use a stable `dedupe_key` like "
+            "`review-blocker:<request-id>:<task-id-or-topic>`. A narrative-only handoff "
+            "section in your final output is not enough; you must call `send_handoff` so "
+            "the user sees a Handoffs item.\n"
+            "Approve with a blocker handoff only when the blocker is external and the "
+            "task's report is clear enough for the user to act on. Return NEEDS_REWORK "
+            "when the task merely blames setup/configuration without evidence, attempted "
+            "actions, or actionable remediation detail.\n"
+            "=== END SETUP/CONFIGURATION BLOCKER HANDOFFS ===\n\n"
             "Return your decision in this exact machine-readable shape "
             "(emit it ONLY after completing all mandatory memory updates above):\n"
             "REQUEST_REVIEW_DECISION: APPROVED|NEEDS_REWORK\n"
             "TASK_IDS_TO_REWORK: <comma-separated task ids, optional when approved>\n"
             "FEEDBACK: <actionable rationale and correction guidance>\n"
             "MEMORIES_UPDATED: <comma-separated memory IDs you called update_memory on; "
-            "use \"none\" only when no Linked Memories section was provided>"
+            "use \"none\" only when no Linked Memories section was provided>\n"
+            "HANDOFF_SENT: <handoff URL/id if you called send_handoff, or \"none\">"
         )
 
         review_model, review_model_reason = _select_model_for_task(
@@ -6537,6 +6941,7 @@ class LucentDaemon:
             priority=request_data.get("priority", "medium"),
             sequence_order=10_000_000,
             model=review_model,
+            requesting_user_id=requesting_user_id,
         )
         if review_task:
             log(
@@ -6961,6 +7366,10 @@ class LucentDaemon:
                     await asyncio.sleep(5)
                     continue
 
+                # Pick up live runtime-settings changes (e.g. review model)
+                # before dispatching or creating review tasks.
+                await self._reload_runtime_settings()
+
                 # Dispatch all available tasks
                 await self._dispatch_tracked_tasks()
 
@@ -7028,6 +7437,11 @@ class LucentDaemon:
                     await asyncio.sleep(30)
                     continue
 
+                # Retry deferred schedule seeding (brand-new instance where the
+                # org did not exist at startup). Idempotent once it succeeds.
+                if not getattr(self, "_schedules_seeded", False):
+                    self._schedules_seeded = await self._seed_system_schedules()
+
                 await self._check_due_schedules()
 
                 # Decomposition backfill: any non-terminal request older
@@ -7052,7 +7466,7 @@ class LucentDaemon:
             await asyncio.sleep(SCHEDULER_CHECK_SECONDS)
 
     async def _get_daemon_org_id(self) -> str | None:
-        """Return the daemon-service user's organization id (cached after first lookup)."""
+        """Return the daemon's bound organization id (cached after first lookup)."""
         cached = getattr(self, "_cached_daemon_org_id", None)
         if cached:
             return cached
@@ -7064,13 +7478,10 @@ class LucentDaemon:
         except Exception:
             return None
         try:
-            row = await conn.fetchrow(
-                "SELECT organization_id FROM users "
-                "WHERE external_id = 'daemon-service' AND is_active = true"
-            )
-            if not row or not row["organization_id"]:
+            bound = await _resolve_daemon_org(conn)
+            if not bound:
                 return None
-            org_id = str(row["organization_id"])
+            org_id = bound[0]
             self._cached_daemon_org_id = org_id
             return org_id
         finally:

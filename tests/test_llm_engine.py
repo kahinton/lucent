@@ -249,6 +249,221 @@ class TestLangChainEngine:
         engine = LangChainEngine()
         await engine.cleanup()  # Should not raise
 
+    @pytest.mark.asyncio
+    async def test_builtin_tools_are_bound_and_executed(self, tmp_path, monkeypatch):
+        """LangChain engine binds built-in tools and runs them with no MCP config."""
+        from langchain_core.messages import AIMessage
+
+        from lucent.llm import langchain_engine
+        from lucent.llm.langchain_engine import LangChainEngine
+
+        monkeypatch.setenv("LUCENT_LANGCHAIN_TOOLS_ROOT", str(tmp_path))
+
+        bound_schemas: dict = {}
+
+        class FakeChatModel:
+            def __init__(self):
+                self._call = 0
+
+            def bind_tools(self, schemas):
+                bound_schemas["names"] = {s["function"]["name"] for s in schemas}
+                return self
+
+            async def ainvoke(self, messages):
+                self._call += 1
+                if self._call == 1:
+                    return AIMessage(
+                        content="",
+                        tool_calls=[
+                            {
+                                "name": "create_file",
+                                "args": {"path": "out.txt", "content": "hi"},
+                                "id": "call_1",
+                            }
+                        ],
+                    )
+                return AIMessage(content="done")
+
+        async def fake_get_chat_model(*_args, **_kwargs):
+            return FakeChatModel()
+
+        monkeypatch.setattr(langchain_engine, "_get_chat_model", fake_get_chat_model)
+
+        engine = LangChainEngine()
+        result = await engine.run_session(
+            model="qwen3.6:latest",
+            system_message="sys",
+            prompt="make a file",
+            mcp_config=None,
+        )
+
+        assert result == "done"
+        # Built-in tools were bound even without any MCP config.
+        assert "create_file" in bound_schemas["names"]
+        assert "web_fetch" in bound_schemas["names"]
+        # The tool actually executed against the confined root.
+        assert (tmp_path / "out.txt").read_text() == "hi"
+
+    @pytest.mark.asyncio
+    async def test_failed_mcp_bridge_does_not_abort_session(self, tmp_path, monkeypatch):
+        """An SSRF-blocked/unreachable MCP server is skipped, not fatal.
+
+        Built-in tools must still run so the task can complete.
+        """
+        from langchain_core.messages import AIMessage
+
+        from lucent.llm import langchain_engine, mcp_bridge
+        from lucent.llm.langchain_engine import LangChainEngine
+        from lucent.url_validation import SSRFError
+
+        monkeypatch.setenv("LUCENT_LANGCHAIN_TOOLS_ROOT", str(tmp_path))
+
+        # Simulate the real failure: bridge construction rejects the URL.
+        def boom(*_args, **_kwargs):
+            raise SSRFError("blocked address 127.0.0.1")
+
+        monkeypatch.setattr(mcp_bridge, "MCPToolBridge", boom)
+
+        class FakeChatModel:
+            def __init__(self):
+                self._call = 0
+
+            def bind_tools(self, schemas):
+                return self
+
+            async def ainvoke(self, messages):
+                self._call += 1
+                if self._call == 1:
+                    return AIMessage(
+                        content="",
+                        tool_calls=[
+                            {"name": "create_file", "args": {"path": "z.txt", "content": "ok"}, "id": "c1"}
+                        ],
+                    )
+                return AIMessage(content="done")
+
+        async def fake_get_chat_model(*_args, **_kwargs):
+            return FakeChatModel()
+
+        monkeypatch.setattr(langchain_engine, "_get_chat_model", fake_get_chat_model)
+
+        engine = LangChainEngine()
+        result = await engine.run_session(
+            model="qwen3.6:latest",
+            system_message="sys",
+            prompt="make a file",
+            mcp_config={
+                "memory-server": {
+                    "type": "http",
+                    "url": "http://localhost:8765/mcp",
+                    "headers": {},
+                    "tools": ["*"],
+                }
+            },
+        )
+
+        assert result == "done"
+        # The blocked bridge did not abort the session; built-in tool ran.
+        assert (tmp_path / "z.txt").read_text() == "ok"
+
+    @pytest.mark.asyncio
+    async def test_internal_mcp_config_bypasses_ssrf_validation(self, monkeypatch):
+        """Lucent's own MCP endpoint (internal=True) must skip SSRF validation.
+
+        On a clean install the endpoint defaults to a loopback URL
+        (http://localhost:8766/mcp). With no allowlist configured that host
+        would be SSRF-blocked, the bridge would be skipped, and tools like
+        get_skill_definition would never load — so the model just emits raw
+        tool-call JSON. The internal flag is what keeps it working out of the
+        box; external (user-supplied) servers must still be validated.
+        """
+        from lucent.llm.langchain_engine import LangChainEngine
+
+        # Ensure no allowlist is set, mirroring a clean `docker-compose up`.
+        monkeypatch.delenv("LUCENT_MCP_URL_ALLOWLIST", raising=False)
+
+        captured: list[tuple[str, bool]] = []
+
+        class FakeBridge:
+            def __init__(self, *, mcp_url, skip_url_validation=False, **_kwargs):
+                captured.append((mcp_url, skip_url_validation))
+
+            async def discover_tools(self):
+                return []
+
+            async def close(self):
+                return None
+
+        import lucent.llm.mcp_bridge as mcp_bridge
+
+        monkeypatch.setattr(mcp_bridge, "MCPToolBridge", FakeBridge)
+
+        engine = LangChainEngine()
+        await engine._create_bridges(
+            {
+                "memory-server": {
+                    "type": "http",
+                    "url": "http://localhost:8766/mcp",
+                    "headers": {},
+                    "tools": ["*"],
+                    "internal": True,
+                },
+                "external": {
+                    "type": "http",
+                    "url": "https://example.com/mcp",
+                    "headers": {},
+                    "tools": ["*"],
+                },
+            }
+        )
+
+        by_url = dict(captured)
+        # Internal endpoint skips validation; external one does not.
+        assert by_url["http://localhost:8766/mcp"] is True
+        assert by_url["https://example.com/mcp"] is False
+
+    @pytest.mark.asyncio
+    async def test_builtin_tools_excluded_for_restricted_web_chat(self, monkeypatch):
+        """approve_permissions=False (restricted web chat) binds only web tools.
+
+        Filesystem and shell built-ins are excluded, but read-only network
+        tools (web_fetch, web_search) are bound so chat models can search.
+        """
+        from langchain_core.messages import AIMessage
+
+        from lucent.llm import langchain_engine
+        from lucent.llm.langchain_engine import LangChainEngine
+
+        bound: dict = {"names": None}
+
+        class FakeChatModel:
+            def bind_tools(self, schemas):
+                bound["names"] = {
+                    s["function"]["name"] for s in schemas if "function" in s
+                }
+                return self
+
+            async def ainvoke(self, messages):
+                return AIMessage(content="ok")
+
+        async def fake_get_chat_model(*_args, **_kwargs):
+            return FakeChatModel()
+
+        monkeypatch.setattr(langchain_engine, "_get_chat_model", fake_get_chat_model)
+
+        engine = LangChainEngine()
+        result = await engine.run_session(
+            model="qwen3.6:latest",
+            system_message="sys",
+            prompt="hi",
+            mcp_config=None,
+            approve_permissions=False,
+        )
+        assert result == "ok"
+        # Only read-only network tools are bound; no filesystem/shell tools.
+        assert bound["names"] == {"web_fetch", "web_search"}
+
+
 
 class TestModelResolve:
     def test_resolve_anthropic(self):
@@ -466,6 +681,27 @@ class TestModelRegistry:
         monkeypatch.setattr(model_registry, "_MODEL_BY_ID", {m.id: m for m in models})
 
         assert get_default_model_id() == "balanced-default"
+
+    def test_default_model_raises_when_no_models_enabled(self, monkeypatch):
+        import pytest
+
+        from lucent import model_registry
+        from lucent.model_registry import (
+            ModelInfo,
+            NoModelsAvailableError,
+            get_default_model_id,
+        )
+
+        # DB models loaded, but every row is disabled (none in the enabled set).
+        models = [
+            ModelInfo(id="seed-disabled", provider="x", name="Seed", category="general"),
+        ]
+        monkeypatch.setattr(model_registry, "_db_models", models)
+        monkeypatch.setattr(model_registry, "_db_enabled_ids", set())
+        monkeypatch.setattr(model_registry, "_MODEL_BY_ID", {m.id: m for m in models})
+
+        with pytest.raises(NoModelsAvailableError):
+            get_default_model_id()
 
     def test_task_selection_uses_default_without_clear_specialized_need(self, monkeypatch):
         from lucent import model_registry

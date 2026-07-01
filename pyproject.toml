@@ -36,7 +36,14 @@ dependencies = [
     "langchain-openai>=1.1.14",
     "langchain-google-genai>=4.0.0",
     "langchain-ollama>=1.0.0",
-    "github-copilot-sdk>=0.3.0",
+    # Pin below 1.0: the 1.x SDK removed top-level `SubprocessConfig` and
+    # reworked the runtime-connection API, which the copilot engine in
+    # src/lucent/llm/copilot_engine.py (`from copilot import CopilotClient,
+    # SubprocessConfig`) is not compatible with. An unbounded `>=0.3.0` let
+    # Docker images pull 1.0.2, breaking every copilot LLM session inside the
+    # daemon container ("Copilot engine requires the github-copilot-sdk
+    # package") so cognitive requests could never decompose.
+    "github-copilot-sdk>=0.3.0,<1.0",
     "jsonschema>=4.23.0",
     "PyYAML>=6.0",
     "langsmith>=0.7.31",

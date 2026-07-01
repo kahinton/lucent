@@ -231,6 +231,45 @@ async def test_send_handoff_mcp_tool_creates_handoff(db_pool, interaction_user):
 
 
 @pytest.mark.asyncio
+async def test_send_handoff_refuses_unscoped_daemon_default_target(
+    db_pool,
+    interaction_user,
+):
+    mcp = FastMCP("test-handoffs-daemon-guard")
+    register_request_tools(mcp)
+    daemon_user_id = str(uuid4())
+    set_current_user(
+        {
+            "id": daemon_user_id,
+            "organization_id": interaction_user["organization_id"],
+            "role": "daemon",
+            "display_name": "Lucent Daemon",
+            "external_id": "daemon-service",
+        }
+    )
+    try:
+        result = await _call_mcp_tool(
+            mcp,
+            "send_handoff",
+            {
+                "title": "Hidden daemon handoff",
+                "body": "This should not be created for the daemon user.",
+            },
+        )
+    finally:
+        set_current_user(None)
+
+    assert "error" in result
+    assert "user-scoped MCP key" in result["error"]
+    async with db_pool.acquire() as conn:
+        count = await conn.fetchval(
+            "SELECT COUNT(*) FROM user_interactions WHERE title = $1",
+            "Hidden daemon handoff",
+        )
+    assert count == 0
+
+
+@pytest.mark.asyncio
 async def test_send_handoff_mcp_tool_adds_task_request_workflow_context(
     db_pool,
     interaction_user,

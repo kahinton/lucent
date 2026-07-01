@@ -13,14 +13,17 @@ from __future__ import annotations
 import logging
 import os
 import re
+import secrets
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
 
 from asyncpg import Pool
 
 from lucent.auth import set_current_user
+from lucent.db.api_key import ApiKeyRepository
 from lucent.db.audit import (
     CHANNEL_NOT_ALLOWED,
     IDENTITY_RESOLVED,
@@ -39,6 +42,7 @@ from lucent.integrations.repositories import (
     UserLinkRepo,
 )
 from lucent.llm.mcp_bridge import MCPToolBridge
+from lucent.memory_scope import MEMORY_SCOPE_USER, build_memory_scope_headers
 from lucent.rate_limit import RateLimiter, get_rate_limiter
 from lucent.rbac import Permission, has_permission
 
@@ -587,11 +591,20 @@ class IntegrationService:
         Phase 1 implementation: routes text to ``search_memories``.
         Future phases will use a full LLM-backed conversation loop.
         """
+        key_id, scoped_key = await self._create_user_scoped_mcp_key(user)
+        if not scoped_key:
+            logger.error("Could not create user-scoped MCP key for integration dispatch")
+            return _MSG_INTERNAL_ERROR
+
         bridge = MCPToolBridge(
             mcp_url=self._mcp_url,
             headers={
-                "X-User-Id": str(user["id"]),
-                "X-Organization-Id": str(user["organization_id"]),
+                "Authorization": f"Bearer {scoped_key}",
+                **build_memory_scope_headers(
+                    MEMORY_SCOPE_USER,
+                    org_id=str(user["organization_id"]),
+                    memory_scope_user_id=str(user["id"]),
+                ),
             },
             skip_url_validation=True,  # Internal URL, not user-controllable
         )
@@ -606,6 +619,48 @@ class IntegrationService:
             return _MSG_INTERNAL_ERROR
         finally:
             await bridge.close()
+            if key_id:
+                await self._revoke_mcp_key(key_id)
+
+    async def _create_user_scoped_mcp_key(
+        self,
+        user: dict[str, Any],
+    ) -> tuple[UUID | None, str | None]:
+        """Create a short-lived key for MCP calls scoped to one user's memory view."""
+        user_id = str(user.get("id") or "")
+        org_id = str(user.get("organization_id") or "")
+        if not user_id or not org_id:
+            return None, None
+
+        try:
+            repo = ApiKeyRepository(self._pool)
+            record, plain_key = await repo.create(
+                user_id=UUID(user_id),
+                organization_id=UUID(org_id),
+                name=f"integration-mcp-{secrets.token_hex(4)}",
+                scopes=["read"],
+                expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
+                memory_scope_user_id=UUID(user_id),
+                memory_scope=MEMORY_SCOPE_USER,
+            )
+            return record["id"], plain_key
+        except Exception:
+            logger.exception("Failed to create integration MCP scoped key")
+            return None, None
+
+    async def _revoke_mcp_key(self, key_id: UUID) -> None:
+        try:
+            async with self._pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE api_keys
+                    SET is_active = false, revoked_at = NOW()
+                    WHERE id = $1
+                    """,
+                    key_id,
+                )
+        except Exception:
+            logger.debug("Failed to revoke integration MCP key", exc_info=True)
 
     async def _send_ephemeral_safe(
         self,

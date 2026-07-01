@@ -9,6 +9,16 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 
+class NoModelsAvailableError(RuntimeError):
+    """Raised when model selection is attempted but no enabled model exists.
+
+    The system never invents a hardcoded default. If an administrator has not
+    enabled at least one model (capable of the required features), callers must
+    fail loudly rather than silently fall back to an arbitrary model that the
+    provider may not even be configured for.
+    """
+
+
 @dataclass(frozen=True)
 class ModelInfo:
     """Metadata for a single LLM model."""
@@ -426,10 +436,16 @@ def get_default_model_id(
     if require_tools:
         available = [m for m in available if m.supports_tools]
     if not available:
-        # No enabled DB models. Return a known general-purpose static model so
-        # downstream validation can emit the clearer "disabled/no models" error.
-        fallback_models = [m for m in MODELS if not require_tools or m.supports_tools]
-        return _first_model_id(fallback_models, category="general") or fallback_models[0].id
+        # No enabled model satisfies the request. Never invent a default — an
+        # admin must explicitly enable a model. Fail loudly so the daemon crashes
+        # at startup and chat/API surfaces a clear error instead of routing to an
+        # arbitrary, possibly-unconfigured provider.
+        raise NoModelsAvailableError(
+            "No enabled models are available"
+            + (" that support tool calling" if require_tools else "")
+            + ". Enable at least one model in the model registry "
+            "(Settings → Models) before running model-dependent work."
+        )
 
     available_by_id = {m.id: m for m in available}
     from lucent.settings import default_model_id

@@ -1,5 +1,6 @@
 """MCP tools for memory CRUD operations."""
 
+import asyncio
 import json
 import os
 from datetime import datetime
@@ -200,6 +201,40 @@ async def _get_access_repository() -> AccessRepository:
     return AccessRepository(pool)
 
 
+async def _safe_log_batch_access(
+    *,
+    memory_ids: list[UUID],
+    access_type: str,
+    user_id: UUID | None,
+    organization_id: UUID | None,
+    context: dict[str, Any] | None = None,
+    log_label: str = "log_batch_access",
+) -> None:
+    """Best-effort access-log writer for fire-and-forget background use.
+
+    The access log (`memory_access_log` + `memories.last_accessed_at` UPDATE)
+    takes row-level write locks on the hot `memories` table. Awaiting it on
+    the read response path (e.g. `search_memories`) lets a single concurrent
+    writer (consolidation, vitality scoring, `update_memory`) pin the search
+    response for tens of seconds and trip the upstream MCP 60s timeout
+    (`-32001`). The log is already best-effort; this helper preserves that
+    semantic while moving it off the request path.
+
+    See `docs/investigations/2026-06-search-memories-tag-timeout.md` Fix 1.
+    """
+    try:
+        access_repo = await _get_access_repository()
+        await access_repo.log_batch_access(
+            memory_ids=memory_ids,
+            access_type=access_type,
+            user_id=user_id,
+            organization_id=organization_id,
+            context=context,
+        )
+    except Exception:
+        logger.debug("Background %s failed", log_label, exc_info=True)
+
+
 async def _get_memory_access_service(user_role: str | None = None) -> MemoryAccessService:
     repo = await _get_repository()
     try:
@@ -309,8 +344,10 @@ Returns:
 
             # Detect daemon caller for auto-sharing and auto-tagging
             current_user = get_current_user()
+            _ext_id = (current_user or {}).get("external_id") or ""
             is_daemon = bool(
-                current_user and current_user.get("external_id") == "daemon-service"
+                current_user
+                and (_ext_id == "daemon-service" or _ext_id.startswith("daemon-service:"))
             )
 
             # Normalize tags: replace prohibited tags, auto-tag daemon content
@@ -508,7 +545,6 @@ Returns:
                 return _error_response(f"Invalid memory ID format: {e}")
 
             memory_access = await _get_memory_access_service()
-            access_repo = await _get_access_repository()
 
             # Get current user context for access control
             user_id, org_id, user_role, memory_scope, memory_scope_user_id = await _get_current_user_context()
@@ -538,19 +574,19 @@ Returns:
                     memories.append(_serialize_memory(result))
                     accessed_ids.append(uuid_id)
 
-            # Log access in a single batch — emits per-memory audit log rows
-            # but issues ONE UPDATE statement to refresh last_accessed_at and
-            # reactivate any qualifying lifecycle stages (M9 Phase 2).
+            # Log access in a single batch — fire-and-forget so the response
+            # is not held by row-level write locks taken by the access log.
+            # See docs/investigations/2026-06-search-memories-tag-timeout.md.
             if accessed_ids:
-                try:
-                    await access_repo.log_batch_access(
+                asyncio.create_task(
+                    _safe_log_batch_access(
                         memory_ids=accessed_ids,
                         access_type="view",
                         user_id=user_id,
                         organization_id=org_id,
+                        log_label="get_memories access log",
                     )
-                except Exception:
-                    logger.debug("Batch access log failed for get_memories", exc_info=True)
+                )
 
             return json.dumps(
                 {
@@ -716,12 +752,14 @@ Returns:
                 include_archived=include_archived,
             )
 
-            # Log access for returned memories
+            # Log access for returned memories — fire-and-forget so search
+            # latency is not held by access-log row locks. The log is already
+            # best-effort (see Fix 1 in
+            # docs/investigations/2026-06-search-memories-tag-timeout.md).
             if result["memories"]:
-                try:
-                    access_repo = await _get_access_repository()
-                    memory_ids_accessed = [m["id"] for m in result["memories"]]
-                    await access_repo.log_batch_access(
+                memory_ids_accessed = [m["id"] for m in result["memories"]]
+                asyncio.create_task(
+                    _safe_log_batch_access(
                         memory_ids=memory_ids_accessed,
                         access_type="search_result",
                         user_id=user_id,
@@ -731,9 +769,9 @@ Returns:
                             "type": search_input.type.value if search_input.type else None,
                             "tags": search_input.tags,
                         },
+                        log_label="search_memories access log",
                     )
-                except Exception:
-                    logger.debug("Access log failed for search_memories", exc_info=True)
+                )
 
             # Serialize the results
             serialized = {
@@ -818,12 +856,12 @@ Returns:
                 include_archived=include_archived,
             )
 
-            # Log access for returned memories
+            # Log access for returned memories — fire-and-forget (see Fix 1
+            # in docs/investigations/2026-06-search-memories-tag-timeout.md).
             if result["memories"]:
-                try:
-                    access_repo = await _get_access_repository()
-                    memory_ids_accessed = [m["id"] for m in result["memories"]]
-                    await access_repo.log_batch_access(
+                memory_ids_accessed = [m["id"] for m in result["memories"]]
+                asyncio.create_task(
+                    _safe_log_batch_access(
                         memory_ids=memory_ids_accessed,
                         access_type="search_result",
                         user_id=user_id,
@@ -833,9 +871,9 @@ Returns:
                             "search_type": "full",
                             "type": memory_type.value if memory_type else None,
                         },
+                        log_label="search_memories_full access log",
                     )
-                except Exception:
-                    logger.debug("Access log failed for search_memories_full", exc_info=True)
+                )
 
             serialized = {
                 "memories": [_serialize_truncated_memory(m) for m in result["memories"]],

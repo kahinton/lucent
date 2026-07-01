@@ -14,7 +14,20 @@ from daemon.daemon import LucentDaemon
 async def test_seed_system_schedules_excludes_retired_procedure_cleanup(monkeypatch):
     inserted_rows: list[tuple] = []
 
+    monkeypatch.setattr(daemon_module, "_resolved_daemon_org", None, raising=False)
+    monkeypatch.setattr(daemon_module, "DAEMON_ORG", "", raising=False)
+
     class FakeConn:
+        async def fetch(self, query, *args):
+            if "FROM organizations" in query:
+                return [
+                    {
+                        "id": UUID("22222222-2222-2222-2222-222222222222"),
+                        "name": "Test Org",
+                    }
+                ]
+            return []
+
         async def fetchrow(self, query, *args):
             if "FROM users" in query:
                 return {
@@ -48,12 +61,7 @@ async def test_seed_system_schedules_excludes_retired_procedure_cleanup(monkeypa
     assert retired_cleanup == []
 
     vitality = [row for row in inserted_rows if row[0] == "Memory Vitality Scoring"]
-    assert len(vitality) == 1
-    vit_row = vitality[0]
-    assert vit_row[3] == "memory"  # agent_type
-    assert vit_row[4] == "interval"  # schedule_type
-    assert vit_row[5] == daemon_module.VITALITY_SCORING_MINUTES * 60
-    assert vit_row[9] == daemon_module.MEMORY_VITALITY_SCORING_PROMPT
+    assert vitality == []
 
     shadow = [row for row in inserted_rows if row[0] == "Shadow Forget Scoring"]
     assert len(shadow) == 1
@@ -62,15 +70,26 @@ async def test_seed_system_schedules_excludes_retired_procedure_cleanup(monkeypa
     assert shadow_row[4] == "interval"
     assert shadow_row[5] == daemon_module.SHADOW_FORGET_SCORING_MINUTES * 60
     assert shadow_row[9] == daemon_module.SHADOW_FORGET_SCORING_PROMPT
-    offset_seconds = (shadow_row[7] - vit_row[7]).total_seconds()
-    assert offset_seconds >= (daemon_module.SHADOW_FORGET_OFFSET_MINUTES * 60) - 5
 
 
 @pytest.mark.asyncio
 async def test_seed_system_schedules_refreshes_existing_prompts(monkeypatch):
     updates: list[tuple] = []
 
+    monkeypatch.setattr(daemon_module, "_resolved_daemon_org", None, raising=False)
+    monkeypatch.setattr(daemon_module, "DAEMON_ORG", "", raising=False)
+
     class FakeConn:
+        async def fetch(self, query, *args):
+            if "FROM organizations" in query:
+                return [
+                    {
+                        "id": UUID("22222222-2222-2222-2222-222222222222"),
+                        "name": "Test Org",
+                    }
+                ]
+            return []
+
         async def fetchrow(self, query, *args):
             if "FROM users" in query:
                 return {
@@ -103,3 +122,6 @@ async def test_seed_system_schedules_refreshes_existing_prompts(monkeypatch):
 
     learning_updates = [row for row in updates if row[2].startswith("Process recent work results")]
     assert len(learning_updates) == 1
+
+    vitality_updates = [row for row in updates if row[2].startswith("Server-side memory vitality scorer")]
+    assert vitality_updates == []

@@ -143,7 +143,7 @@ async def create_memory(
     username = await _effective_memory_username(user, pool)
 
     # Detect daemon caller for auto-sharing and auto-tagging
-    is_daemon = user.external_id == "daemon-service" and not user.is_memory_scoped
+    is_daemon = user.is_daemon_service and not user.is_memory_scoped
 
     # Daemon-created memories must always be shared so org members can see
     # them in the review queue and search results (workflow-audit/phase-4)

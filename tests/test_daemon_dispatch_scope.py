@@ -49,7 +49,6 @@ class TestRequiredMemoryScope:
         for title in (
             "Experience Compression",
             "Learning Extraction",
-            "Memory Vitality Scoring",
         ):
             assert (
                 _get_required_memory_scope("Some task", f"[Scheduled] {title}")
@@ -191,6 +190,15 @@ class TestMemoryServerToolSelection:
         assert "resolve_handoff" in tools
         assert "create_skill_definition" not in tools
         assert "create_request" not in tools
+
+    def test_memory_curation_tasks_get_delete_memory(self):
+        # Consolidation, learning extraction, and experience compression all
+        # instruct agents to call delete_memory; it must be exposed on the
+        # base memory-server tool surface or the call fails "tool does not exist".
+        for agent in ("memory", "reflection", "research"):
+            tools = set(_memory_server_tools_for_task(agent, "Consolidate duplicates"))
+            assert "delete_memory" in tools, agent
+            assert "update_memory" in tools, agent
 
     def test_weather_advisor_gets_weather_tool_without_requiring_sandbox_only(self):
         tools = set(_memory_server_tools_for_task("weather-advisor", "Daily weather outfit"))

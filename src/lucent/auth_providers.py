@@ -586,6 +586,20 @@ async def create_initial_user(
         name=key_name,
     )
 
+    # Seed the new organization with built-in skills, agents, hooks, and
+    # sandbox templates so a freshly-registered org is usable immediately,
+    # rather than waiting for the next server restart's startup sync.
+    try:
+        from lucent.builtin_definitions import sync_built_in_definitions_for_org
+
+        await sync_built_in_definitions_for_org(pool, str(org["id"]))
+    except Exception:
+        logger.warning(
+            "Failed to seed built-in definitions for new org %s",
+            org["id"],
+            exc_info=True,
+        )
+
     logger.info(f"Initial user created: {display_name} (owner)")
 
     return user, raw_key

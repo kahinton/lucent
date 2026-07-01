@@ -71,6 +71,7 @@ class LLMEngine(ABC):
         audit_context: dict[str, Any] | None = None,
         enable_config_discovery: bool = False,
         approve_permissions: bool = True,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> str | None:
         """Run a single LLM session and return the full response text.
 
@@ -93,6 +94,9 @@ class LLMEngine(ABC):
             approve_permissions: Whether provider-native built-in tools should
                 be permissioned for execution. Web chat sets this false so only
                 configured MCP tools are available.
+            attachments: Optional normalized multimodal attachments (images and
+                documents) for the current user turn. See
+                ``lucent.llm.attachments`` for the normalized shape.
 
         Returns:
             The assistant's response text, or None on error.
@@ -116,6 +120,7 @@ class LLMEngine(ABC):
         audit_context: dict[str, Any] | None = None,
         enable_config_discovery: bool = False,
         approve_permissions: bool = True,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> str | None:
         """Run an LLM session with event streaming.
 
@@ -145,6 +150,9 @@ class LLMEngine(ABC):
             approve_permissions: Whether provider-native built-in tools should
                 be permissioned for execution. Web chat sets this false so only
                 configured MCP tools are available.
+            attachments: Optional normalized multimodal attachments (images and
+                documents) for the current user turn. See
+                ``lucent.llm.attachments`` for the normalized shape.
 
         Returns:
             The assistant's full response text, or None on error.

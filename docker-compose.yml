@@ -140,6 +140,10 @@ services:
       LUCENT_DEFAULT_MODEL: ${LUCENT_DEFAULT_MODEL:-}
       LUCENT_CHAT_MODEL: ${LUCENT_CHAT_MODEL:-}
       LUCENT_MCP_URL_ALLOWLIST: ${LUCENT_MCP_URL_ALLOWLIST:-}
+      # MCP DNS-rebinding allowlist. The MCP SDK rejects non-loopback Host
+      # headers with HTTP 421; the daemon reaches the server as http://lucent:8766/mcp,
+      # so the in-network service name must be allowed. Override for custom hostnames/ingress.
+      LUCENT_MCP_ALLOWED_HOSTS: ${LUCENT_MCP_ALLOWED_HOSTS:-lucent}
       # LLM Engine: "copilot" (default, uses GitHub Copilot SDK) or "langchain"
       LUCENT_LLM_ENGINE: ${LUCENT_LLM_ENGINE:-copilot}
       # Provider API keys (only needed when LUCENT_LLM_ENGINE=langchain)
@@ -246,12 +250,15 @@ services:
         condition: service_started
     restart: unless-stopped
 
-  # Multi-instance daemon example (use with: docker compose --profile multi-daemon up)
+  # Daemon worker examples. daemon-1 belongs to both the single-daemon and
+  # multi-daemon profiles, so it runs alone or alongside daemon-2:
+  #   docker compose --profile single-daemon up   # daemon-1 only
+  #   docker compose --profile multi-daemon up     # daemon-1 + daemon-2
   daemon-1:
     build:
       context: .
       dockerfile: Dockerfile.dev
-    profiles: ["multi-daemon"]
+    profiles: ["single-daemon", "multi-daemon"]
     depends_on:
       lucent:
         condition: service_healthy
@@ -265,12 +272,45 @@ services:
       LUCENT_LLM_ENGINE: ${LUCENT_LLM_ENGINE:-copilot}
       LUCENT_MAX_SESSIONS: ${LUCENT_MAX_SESSIONS:-3}
       LUCENT_STALE_HEARTBEAT_MINUTES: ${LUCENT_STALE_HEARTBEAT_MINUTES:-30}
+      # A daemon is single-tenant. Leave unset to auto-bind to the single real
+      # org (the default for local / docker-compose). Set to an org id or name
+      # to pin the daemon when multiple organizations exist.
+      LUCENT_DAEMON_ORG: ${LUCENT_DAEMON_ORG:-}
+      # Container logging: the daemon defaults to file-only logging for the host
+      # launch pattern (nohup ... >> daemon/daemon.log 2>&1). Inside a container
+      # that hides all output from `docker logs`, so send logs to stdout/stderr
+      # and disable the file handler instead.
+      PYTHONUNBUFFERED: "1"
+      LUCENT_LOG_STDERR: "true"
+      LUCENT_LOG_FILE: ""
       # Restricted DB connection for API key provisioning only.
       # Uses lucent_daemon role with least-privilege grants (see migration 017).
       DAEMON_DATABASE_URL: postgresql://lucent_daemon:${DAEMON_DB_PASSWORD:-change-me-insecure-daemon-password}@postgres:5432/lucent
+      # Ollama (local models) — host.docker.internal points to the host machine.
+      # The daemon runs its own model discovery/sessions, so it needs the same
+      # OLLAMA_HOST as the server; without it local-model calls fail with
+      # "OLLAMA_HOST is not configured".
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
+      # Secret storage — the daemon resolves model-provider credentials itself
+      # (e.g. the Copilot github_token) when running LLM sessions. Those secrets
+      # are encrypted with the same provider the server used (OpenBao Transit,
+      # ciphertext prefixed `vault:v1:`). Without matching VAULT_ADDR /
+      # VAULT_TOKEN_FILE the daemon falls back to the builtin provider, cannot
+      # decrypt them, and every Copilot session fails with "Session was not
+      # created with authentication info or custom provider".
+      LUCENT_SECRET_PROVIDER: ${LUCENT_SECRET_PROVIDER:-auto}
+      VAULT_ADDR: http://openbao:8200
+      VAULT_TOKEN_FILE: /shared/vault-token
+    extra_hosts:
+      # Required so host.docker.internal resolves on Linux hosts (Docker Desktop
+      # provides it automatically, plain Docker Engine does not).
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./daemon:/app/daemon:cached
       - ./src:/app/src:cached
+      # Read-only access to the OpenBao token written by openbao-init, so the
+      # Transit secret provider can authenticate to decrypt provider secrets.
+      - ./.openbao/shared:/shared:ro
     command: ["python", "-m", "daemon.daemon"]
     restart: unless-stopped
 
@@ -291,10 +331,32 @@ services:
       LUCENT_MCP_URL_ALLOWLIST: ${LUCENT_MCP_URL_ALLOWLIST:-}
       LUCENT_MAX_SESSIONS: ${LUCENT_MAX_SESSIONS:-3}
       LUCENT_STALE_HEARTBEAT_MINUTES: ${LUCENT_STALE_HEARTBEAT_MINUTES:-30}
+      # A daemon is single-tenant. Leave unset to auto-bind to the single real
+      # org (the default for local / docker-compose). Set to an org id or name
+      # to pin the daemon when multiple organizations exist.
+      LUCENT_DAEMON_ORG: ${LUCENT_DAEMON_ORG:-}
+      # Container logging: send logs to stdout/stderr (see daemon-1 note).
+      PYTHONUNBUFFERED: "1"
+      LUCENT_LOG_STDERR: "true"
+      LUCENT_LOG_FILE: ""
       DAEMON_DATABASE_URL: postgresql://lucent_daemon:${DAEMON_DB_PASSWORD:-change-me-insecure-daemon-password}@postgres:5432/lucent
+      # Ollama (local models) — see daemon-1 note. Needs OLLAMA_HOST to run
+      # local-model discovery/sessions; without it calls fail with
+      # "OLLAMA_HOST is not configured".
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
+      # Secret storage — see daemon-1 note. Required so the daemon can decrypt
+      # transit-encrypted model-provider credentials when running LLM sessions.
+      LUCENT_SECRET_PROVIDER: ${LUCENT_SECRET_PROVIDER:-auto}
+      VAULT_ADDR: http://openbao:8200
+      VAULT_TOKEN_FILE: /shared/vault-token
+    extra_hosts:
+      # Required so host.docker.internal resolves on Linux hosts.
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./daemon:/app/daemon:cached
       - ./src:/app/src:cached
+      # Read-only access to the OpenBao token (see daemon-1 note).
+      - ./.openbao/shared:/shared:ro
     command: ["python", "-m", "daemon.daemon"]
     restart: unless-stopped
 
