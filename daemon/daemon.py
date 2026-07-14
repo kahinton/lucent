@@ -19,6 +19,7 @@ can run simultaneously, contributing to the same intelligence.
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import os
 import platform
@@ -3883,6 +3884,12 @@ class LucentDaemon:
             "the available model list gives a concrete reason to specialize. Set "
             "sequence_order so dependent tasks come after their prerequisites (0 for "
             "the first batch, 1 for the next, etc.).\n"
+            "   When two or more sequential tasks need the same isolated workspace, "
+            "call list_sandbox_templates() and use the same approved "
+            "sandbox_template_id for each task with "
+            "sandbox_overrides={\"reuse_within_request\": true}. They MUST use "
+            "strictly increasing sequence_order values; parallel tasks must never "
+            "share a sandbox.\n"
             "   If the request has target_repo or asks for docs/files/reports that belong "
             "in a repository, every relevant task description MUST name the exact target "
             "repo/path(s), require durable file persistence, require reporting paths plus "
@@ -5469,6 +5476,7 @@ class LucentDaemon:
             task_commit_approved = bool(task.get("commit_approved", False))
             sandbox_template_id = task.get("sandbox_template_id")
             sandbox_id = None
+            task_sandbox_reused = False
             task_sandbox_runtime_config = None
 
             # Resolve sandbox_template_id → sandbox_config
@@ -5747,12 +5755,19 @@ class LucentDaemon:
                         sandbox_id,
                         task_sandbox_runtime_config,
                         sandbox_failure_meta,
+                        task_sandbox_reused,
                     ) = await self._create_task_sandbox(
                         task_id,
                         sandbox_config,
                         request_id=request_id,
                         requesting_user_id=requesting_user_id,
                         org_id=org_id,
+                        sequence_order=int(task.get("sequence_order") or 0),
+                        sandbox_template_id=(
+                            str(task.get("sandbox_template_id"))
+                            if task.get("sandbox_template_id")
+                            else None
+                        ),
                     )
                     if not sandbox_id:
                         detail = (
@@ -5764,17 +5779,23 @@ class LucentDaemon:
                         # Inject sandbox context into the task description
                         description = (
                             f"{description}\n\n"
-                            f"[SANDBOX] This task runs in sandbox {sandbox_id[:12]}. "
+                            f"[SANDBOX] This task {'reuses' if task_sandbox_reused else 'runs in'} "
+                            f"sandbox {sandbox_id[:12]}. "
                             f"Use the sandbox exec API at POST /api/sandboxes/{sandbox_id}/exec "
                             f"to run commands. Working directory: "
                             f"{sandbox_config.get('working_dir', '/workspace')}"
                         )
                         await RequestAPI.add_event(
                             task_id,
-                            "sandbox_created",
-                            f"Sandbox {sandbox_id[:12]} created for task",
+                            "sandbox_reused" if task_sandbox_reused else "sandbox_created",
+                            (
+                                f"Sandbox {sandbox_id[:12]} reused for task"
+                                if task_sandbox_reused
+                                else f"Sandbox {sandbox_id[:12]} created for task"
+                            ),
                             {
                                 "sandbox_id": sandbox_id,
+                                "reused": task_sandbox_reused,
                                 "image": sandbox_config.get("image"),
                                 "repo_url": sandbox_config.get("repo_url"),
                                 "branch": sandbox_config.get("branch"),
@@ -5925,12 +5946,29 @@ class LucentDaemon:
                                 output_result.detail,
                                 {"mode": output_result.mode, **(output_result.metadata or {})},
                             )
-                    await self._destroy_task_sandbox(sandbox_id)
-                    await RequestAPI.add_event(
-                        task_id,
-                        "sandbox_destroyed",
-                        f"Sandbox {sandbox_id[:12]} destroyed after task completion",
+                    retain_sandbox = (
+                        bool(task_sandbox_runtime_config and task_sandbox_runtime_config.reuse_within_request)
+                        and bool(request_id)
+                        and await self._request_has_later_reusable_sandbox_task(
+                            request_id,
+                            task_id,
+                            int(task.get("sequence_order") or 0),
+                        )
                     )
+                    if retain_sandbox:
+                        await RequestAPI.add_event(
+                            task_id,
+                            "sandbox_retained",
+                            f"Sandbox {sandbox_id[:12]} retained for a later request task",
+                            {"sandbox_id": sandbox_id, "request_id": request_id},
+                        )
+                    else:
+                        await self._destroy_task_sandbox(sandbox_id)
+                        await RequestAPI.add_event(
+                            task_id,
+                            "sandbox_destroyed",
+                            f"Sandbox {sandbox_id[:12]} destroyed after task completion",
+                        )
                 except Exception as e:
                     log(f"Sandbox cleanup failed for {sandbox_id[:12]}: {e}", "WARN")
 
@@ -6088,10 +6126,12 @@ class LucentDaemon:
         request_id: str | None = None,
         requesting_user_id: str,
         org_id: str,
-    ) -> tuple[str | None, "SandboxConfig | None", dict | None]:
+        sequence_order: int = 0,
+        sandbox_template_id: str | None = None,
+    ) -> tuple[str | None, "SandboxConfig | None", dict | None, bool]:
         """Create a sandbox for a task.
 
-        Returns ``(sandbox_id, resolved_config, failure)`` where ``failure``
+        Returns ``(sandbox_id, resolved_config, failure, reused)`` where ``failure``
         is ``None`` on success, or a dict ``{"stage": str, "detail": str}``
         describing what went wrong so the caller can surface it to the task's
         error field and a task event.
@@ -6195,6 +6235,23 @@ class LucentDaemon:
                 "dl-cdn.alpinelinux.org",
             ]
 
+        reuse_enabled = bool(sandbox_config.get("reuse_within_request", False))
+        reuse_key = sandbox_config.get("reuse_key") or sandbox_template_id
+        if reuse_enabled and not reuse_key:
+            # Inline/schedule configurations have no template UUID. Derive a
+            # deterministic key from workspace-affecting, non-secret settings
+            # so compatible later tasks can still reuse the same container.
+            reuse_shape = {
+                key: sandbox_config.get(key)
+                for key in (
+                    "image", "repo_url", "branch", "setup_commands", "working_dir",
+                    "memory_limit", "cpu_limit", "network_mode", "allowed_hosts",
+                )
+            }
+            reuse_key = "config-" + hashlib.sha256(
+                json.dumps(reuse_shape, sort_keys=True, default=str).encode("utf-8")
+            ).hexdigest()[:24]
+
         config = SandboxConfig(
             name=sandbox_config.get("name", f"task-{task_id[:12]}"),
             image=sandbox_config.get("image", "lucent-sandbox:base"),
@@ -6209,6 +6266,9 @@ class LucentDaemon:
             network_mode=sandbox_config.get("network_mode", default_network_mode),
             allowed_hosts=sandbox_config.get("allowed_hosts", default_allowed_hosts),
             timeout_seconds=sandbox_config.get("timeout_seconds", 1800),
+            reuse_within_request=reuse_enabled,
+            reuse_key=reuse_key,
+            reuse_sequence_order=sequence_order,
             output_mode=sandbox_config.get("output_mode"),
             commit_approved=bool(sandbox_config.get("commit_approved", False)),
             task_id=task_id,
@@ -6217,10 +6277,14 @@ class LucentDaemon:
             requesting_user_id=requesting_user_id,
         )
         manager = get_sandbox_manager()
-        info = await manager.create(config)
-        if info.status.value == "ready":
-            log(f"Sandbox {info.id[:12]} created for task {task_id[:8]}")
-            return info.id, config, None
+        info, reused = await manager.get_or_create_for_request(
+            config,
+            sequence_order=sequence_order,
+        )
+        if info.status.value in {"ready", "running"}:
+            action = "reused" if reused else "created"
+            log(f"Sandbox {info.id[:12]} {action} for task {task_id[:8]}")
+            return info.id, config, None, reused
         else:
             err = info.error or "Sandbox creation failed without a specific error"
             log(
@@ -6238,7 +6302,32 @@ class LucentDaemon:
                 "network_mode": config.network_mode,
                 "allowed_hosts": list(config.allowed_hosts or []),
                 "working_dir": config.working_dir,
-            }
+            }, False
+
+    async def _request_has_later_reusable_sandbox_task(
+        self,
+        request_id: str,
+        task_id: str,
+        sequence_order: int,
+    ) -> bool:
+        """Return whether a later unfinished task will reuse this request sandbox."""
+        from lucent.db import get_pool
+
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            return bool(await conn.fetchval(
+                """SELECT EXISTS (
+                       SELECT 1 FROM tasks
+                       WHERE request_id = $1::uuid
+                         AND id != $2::uuid
+                         AND sequence_order > $3
+                         AND status IN ('pending', 'planned', 'running', 'needs_review')
+                         AND COALESCE((sandbox_config->>'reuse_within_request')::boolean, false)
+                   )""",
+                request_id,
+                task_id,
+                sequence_order,
+            ))
 
     async def _destroy_task_sandbox(self, sandbox_id: str) -> None:
         """Destroy a task's sandbox."""

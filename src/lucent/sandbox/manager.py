@@ -152,6 +152,43 @@ class SandboxManager:
 
         return info
 
+    async def get_or_create_for_request(
+        self,
+        config: SandboxConfig,
+        *,
+        sequence_order: int,
+    ) -> tuple[SandboxInfo, bool]:
+        """Return a compatible live sandbox for a later request task or create one.
+
+        A sandbox is reusable only when the caller opts in, supplies request and
+        organization linkage, and is at a later sequence level than the task
+        that created it. This preserves a single mutable workspace without
+        allowing parallel task batches to race inside the same container.
+        """
+        if (
+            config.reuse_within_request
+            and config.request_id
+            and config.organization_id
+            and config.reuse_key
+        ):
+            try:
+                repo = await self._repo()
+                existing = await repo.find_reusable_for_request(
+                    request_id=config.request_id,
+                    organization_id=config.organization_id,
+                    reuse_key=config.reuse_key,
+                    before_sequence_order=sequence_order,
+                )
+                if existing:
+                    sandbox_id = str(existing["id"])
+                    live = await self.get_live(sandbox_id)
+                    if live and live.status in {SandboxStatus.READY, SandboxStatus.RUNNING}:
+                        self._touch(sandbox_id)
+                        return live, True
+            except Exception as exc:
+                logger.warning("Failed to look up reusable request sandbox: %s", exc)
+        return await self.create(config), False
+
     async def exec(
         self,
         sandbox_id: str,

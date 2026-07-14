@@ -125,6 +125,57 @@ def _make_manager(backend: AsyncMock | None = None) -> SandboxManager:
 
 
 # ===========================================================================
+# Request-scoped reuse
+# ===========================================================================
+
+
+class TestRequestSandboxReuse:
+    @pytest.mark.asyncio
+    async def test_reuses_live_sandbox_for_later_request_task(self):
+        backend = _make_backend_mock(info=_ready_info("shared-sandbox"))
+        manager = _make_manager(backend)
+        repo = AsyncMock()
+        repo.find_reusable_for_request.return_value = {"id": "shared-sandbox"}
+        manager._repo = AsyncMock(return_value=repo)
+
+        info, reused = await manager.get_or_create_for_request(
+            SandboxConfig(
+                request_id=str(uuid4()),
+                organization_id=str(uuid4()),
+                reuse_within_request=True,
+                reuse_key="template-1",
+            ),
+            sequence_order=1,
+        )
+
+        assert info.id == "shared-sandbox"
+        assert reused is True
+        backend.create.assert_not_called()
+        repo.find_reusable_for_request.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_does_not_reuse_without_explicit_opt_in(self):
+        backend = _make_backend_mock(info=_ready_info("new-sandbox"))
+        manager = _make_manager(backend)
+        repo = AsyncMock()
+        manager._repo = AsyncMock(return_value=repo)
+
+        info, reused = await manager.get_or_create_for_request(
+            SandboxConfig(
+                request_id=str(uuid4()),
+                organization_id=str(uuid4()),
+                reuse_key="template-1",
+            ),
+            sequence_order=1,
+        )
+
+        assert info.id == "new-sandbox"
+        assert reused is False
+        backend.create.assert_awaited_once()
+        repo.find_reusable_for_request.assert_not_called()
+
+
+# ===========================================================================
 # 1. Docker sandbox lifecycle
 # ===========================================================================
 

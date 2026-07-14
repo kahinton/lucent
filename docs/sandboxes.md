@@ -54,6 +54,25 @@ curl -X POST http://localhost:8766/api/sandboxes/templates/{template_id}/launch 
 
 Templates can be referenced by tasks and schedules via the `sandbox_template_id` field.
 
+### Reusing a Sandbox Across Request Tasks
+
+By default, every daemon task gets an isolated sandbox. For a multi-step request
+whose later tasks intentionally build on the same workspace, assign the same
+approved `sandbox_template_id` to each task and set
+`sandbox_overrides={"reuse_within_request": true}`.
+
+The tasks must use strictly increasing `sequence_order` values. Lucent only
+reuses a live sandbox created by an earlier sequence level, so tasks in the same
+parallel batch never share a mutable container. The sandbox is retained while a
+later reusable task remains and is destroyed after the final task finishes.
+
+```text
+task 1: sequence_order=0, sandbox_template_id=<template>,
+        sandbox_overrides={"reuse_within_request": true}
+task 2: sequence_order=1, sandbox_template_id=<same template>,
+        sandbox_overrides={"reuse_within_request": true}
+```
+
 ---
 
 ## Devcontainer Support

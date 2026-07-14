@@ -52,6 +52,11 @@ class SandboxConfig:
     # Lifecycle
     timeout_seconds: int = 1800  # Max lifetime (30 min default)
     idle_timeout_seconds: int = 300  # Destroy after idle (5 min default)
+    # Reuse an existing compatible sandbox for later, sequential tasks in the
+    # same request. Disabled by default for callers that need isolated state.
+    reuse_within_request: bool = False
+    reuse_key: str | None = None
+    reuse_sequence_order: int = 0
     mcp_bridge_port: int = 8765
     output_mode: Literal["diff", "pr", "review", "commit"] | None = None
     commit_approved: bool = False
