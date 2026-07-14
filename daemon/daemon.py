@@ -33,6 +33,15 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
+from lucent.mcp_config import build_internal_mcp_server, build_scoped_internal_mcp_server
+from lucent.tool_policy import (
+    BASE_TASK_MEMORY_SERVER_TOOLS,
+    CAPABILITY_ACTIVATION_AGENT_TYPES,
+    DEFINITION_ACTIVATION_TOOLS,
+    WORK_ACTIVATION_TOOLS,
+    memory_server_tools_for_task,
+)
+
 if TYPE_CHECKING:
     import asyncpg
 
@@ -149,68 +158,10 @@ def _is_operational_tool_call(entry: dict) -> bool:
     tool = _normalize_tool_name(entry.get("tool") or entry.get("raw_tool"))
     return bool(tool and tool not in _NON_OPERATIONAL_TOOL_NAMES)
 
-_BASE_TASK_MEMORY_SERVER_TOOLS = sorted(
-    {
-        "create_memory",
-        "get_current_user_context",
-        "get_existing_tags",
-        "get_memory",
-        "get_memories",
-        "get_skill_definition",
-        "get_tag_suggestions",
-        "search_memories",
-        "search_memories_full",
-        "update_memory",
-        "delete_memory",
-        "create_review",
-        "get_memory_versions",
-        "get_request_details",
-        "link_request_memory",
-        "link_task_memory",
-        "list_handoffs",
-        "get_handoff",
-        "resolve_handoff",
-        "list_available_models",
-        "log_task_event",
-        "exec_sandbox_command",
-        "send_handoff",
-        "analyze_tool_failure_patterns",
-        "propose_definition_improvement",
-    }
-)
-
-_DEFINITION_ACTIVATION_TOOLS = sorted(
-    {
-        "list_agent_definitions",
-        "get_agent_definition",
-        "list_skill_definitions",
-        "get_skill_definition",
-        "list_proposals",
-        "create_agent_definition",
-        "create_skill_definition",
-        "create_tool_definition",
-        "list_tool_definitions",
-        "get_tool_definition",
-        "create_hook_definition",
-        "list_hook_definitions",
-        "get_hook_definition",
-        "list_mcp_server_definitions",
-        "create_mcp_server_definition",
-    }
-)
-
-_WORK_ACTIVATION_TOOLS = sorted(
-    {
-        "create_request",
-        "create_task",
-        "list_sandbox_templates",
-        "propose_sandbox_template",
-    }
-)
-
-_CAPABILITY_ACTIVATION_AGENT_TYPES = frozenset(
-    {"assessment", "definition-engineer", "lucent", "planning", "reflection"}
-)
+_BASE_TASK_MEMORY_SERVER_TOOLS = sorted(BASE_TASK_MEMORY_SERVER_TOOLS)
+_DEFINITION_ACTIVATION_TOOLS = sorted(DEFINITION_ACTIVATION_TOOLS)
+_WORK_ACTIVATION_TOOLS = sorted(WORK_ACTIVATION_TOOLS)
+_CAPABILITY_ACTIVATION_AGENT_TYPES = CAPABILITY_ACTIVATION_AGENT_TYPES
 
 _HANDOFF_TOOL_REQUIRED_SIGNALS = frozenset(
     {
@@ -252,42 +203,7 @@ def _memory_server_tools_for_task(
     mutating definition/request tools so they can activate system changes
     instead of merely recording lessons in memory.
     """
-    normalized_agent = (agent_type or "").strip().lower()
-    text = "\n".join(part or "" for part in (title, request_title, description)).lower()
-    if normalized_agent == "weather-advisor":
-        return sorted({
-            "create_memory",
-            "fetch_open_meteo_forecast",
-            "get_skill_definition",
-            "log_task_event",
-            "send_handoff",
-        })
-
-    tools = set(_BASE_TASK_MEMORY_SERVER_TOOLS)
-
-    capability_task = (
-        normalized_agent in _CAPABILITY_ACTIVATION_AGENT_TYPES
-        or "learning extraction" in text
-        or "self-improvement" in text
-        or "definition" in text
-        or ("agent" in text and "skill" in text)
-        or "capability" in text
-    )
-    if capability_task:
-        tools.update(_DEFINITION_ACTIVATION_TOOLS)
-
-    work_planning_task = (
-        normalized_agent in _CAPABILITY_ACTIVATION_AGENT_TYPES
-        or "learning extraction" in text
-        or "create request" in text
-        or "create task" in text
-        or ("plan" in text and "task" in text)
-        or "capability" in text
-    )
-    if work_planning_task:
-        tools.update(_WORK_ACTIVATION_TOOLS)
-
-    return sorted(tools)
+    return memory_server_tools_for_task(agent_type, title, request_title, description)
 
 
 def _summarize_memory_tool_params(tool_name: str, arguments: dict) -> str:
@@ -398,7 +314,6 @@ from lucent.memory_scope import (
     MEMORY_SCOPE_USER_ID_HEADER,
     ORG_ID_HEADER,
     VALID_MEMORY_SCOPES,
-    build_memory_scope_headers,
 )
 from lucent.secrets import SecretRegistry, initialize_secret_provider
 from lucent.secrets.utils import is_secret_reference, resolve_secret_reference
@@ -953,27 +868,10 @@ async def _ensure_daemon_service_user(conn, org_id: str) -> dict | None:
     using its users INSERT grant. Direct SQL avoids the app-layer side effect of
     creating an individual memory for a system account.
     """
-    external_id = f"daemon-service:{org_id}"
-    user = await conn.fetchrow(
-        "SELECT id, organization_id FROM users "
-        "WHERE external_id = $1 AND provider = 'local' AND is_active = true",
-        external_id,
-    )
-    if user:
-        return user
     try:
-        user = await conn.fetchrow(
-            "INSERT INTO users "
-            "  (external_id, provider, organization_id, email, display_name, role) "
-            "VALUES ($1, 'local', $2::uuid, 'daemon@lucent.local', "
-            "  'Lucent Daemon', 'daemon') "
-            "ON CONFLICT (provider, external_id) DO UPDATE "
-            "  SET organization_id = EXCLUDED.organization_id "
-            "RETURNING id, organization_id",
-            external_id,
-            org_id,
-        )
-        log(f"Provisioned daemon-service user for org {org_id} (self-heal)")
+        from lucent.daemon_identity import ensure_daemon_service_user
+
+        user = await ensure_daemon_service_user(conn, org_id)
         return user
     except Exception as e:
         log(f"Could not provision daemon-service user for org {org_id}: {e}", "ERROR")
@@ -999,16 +897,11 @@ def _build_auth_config(api_key: str) -> tuple[dict, dict]:
     """Build MCP_CONFIG and API_HEADERS from a valid API key."""
     mcp_config = (
         {
-            "memory-server": {
-                "type": "http",
-                "url": MCP_URL,
-                "headers": {"Authorization": f"Bearer {api_key}"},
-                "tools": ["*"],
-                # Lucent's own MCP endpoint — trusted internal connection,
-                # exempt from SSRF allowlist checks so it works out of the box
-                # even when the URL is loopback (default localhost:8766/mcp).
-                "internal": True,
-            },
+            "memory-server": build_internal_mcp_server(
+                url=MCP_URL,
+                bearer_token=api_key,
+                tools=["*"],
+            ),
         }
         if api_key
         else {}
@@ -1262,25 +1155,15 @@ def _build_scoped_memory_server_config(
     Returns:
         A ready-to-use MCP server config dict.
     """
-    headers = {
-        "Authorization": f"Bearer {scoped_key}",
-        **build_memory_scope_headers(
-            memory_scope,
-            org_id=org_id,
-            memory_scope_user_id=memory_scope_user_id,
-        ),
-    }
-    if extra_headers:
-        headers.update(extra_headers)
-    return {
-        "type": "http",
-        "url": MCP_URL,
-        "headers": headers,
-        "tools": tools,
-        # Lucent's own MCP endpoint — trusted internal connection, exempt from
-        # SSRF allowlist checks (default loopback URL would otherwise block).
-        "internal": True,
-    }
+    return build_scoped_internal_mcp_server(
+        url=MCP_URL,
+        bearer_token=scoped_key,
+        memory_scope=memory_scope,
+        organization_id=org_id,
+        memory_scope_user_id=memory_scope_user_id,
+        tools=tools,
+        extra_headers=extra_headers,
+    )
 
 
 async def _refresh_scoped_memory_server_config(

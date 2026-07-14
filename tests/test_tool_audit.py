@@ -128,6 +128,9 @@ def test_classify_tool_result():
     assert failure_class == "tool_error"
     assert "search_memories" in message
     assert classify_tool_result("Tool write_file blocked by hook.")[0] == "blocked"
+    assert classify_tool_result(
+        '{"result": "The task describes a tool that was blocked by hook."}'
+    ) == ("success", None, None)
 
 
 @pytest.mark.asyncio

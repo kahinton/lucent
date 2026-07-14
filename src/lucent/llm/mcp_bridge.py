@@ -64,6 +64,11 @@ class MCPToolBridge:
     def _is_tool_allowed(self, tool_name: str) -> bool:
         return "*" in self._allowed_tools or tool_name in self._allowed_tools
 
+    @staticmethod
+    def _is_terminated_session_error(error: Exception) -> bool:
+        """Return whether an MCP client stream was closed before a tool call."""
+        return "session terminated" in str(error).lower()
+
     async def _ensure_session(self) -> Any:
         """Open an MCP streamable HTTP session if one is not already active."""
         if self._session is not None:
@@ -167,7 +172,22 @@ class MCPToolBridge:
                 return result_text
 
             session = await self._ensure_session()
-            result = await session.call_tool(tool_name, arguments or {})
+            try:
+                result = await session.call_tool(tool_name, arguments or {})
+            except Exception as error:
+                if not self._is_terminated_session_error(error):
+                    raise
+                # Streamable HTTP sessions can be closed by the peer between
+                # otherwise valid tool calls. Recreate the session once rather
+                # than turning an available MCP tool into a false capability
+                # failure for the running agent.
+                logger.warning(
+                    "MCP session terminated while calling %s; reconnecting once",
+                    tool_name,
+                )
+                await self.close()
+                session = await self._ensure_session()
+                result = await session.call_tool(tool_name, arguments or {})
             result_text = _call_result_to_text(result)
             await self._audit_tool_call(
                 tool_name=tool_name,

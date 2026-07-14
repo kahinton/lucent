@@ -345,7 +345,12 @@ def classify_tool_result(result_text: str | None) -> tuple[str, str | None, str 
         return "failed", "fetch_error", text[:_MAX_TEXT]
     if "unauthorized" in lower or "status_code=401" in lower or "http 401" in lower:
         return "failed", "auth_error", text[:_MAX_TEXT]
-    if "tool is not allowed" in lower or "blocked by hook" in lower:
+    # These phrases can occur in successful agent output (for example, an
+    # investigation that describes a formerly blocked tool). Treat them as a
+    # failure only when the tool response itself is the denial.
+    if lower.startswith("tool is not allowed") or re.match(
+        r"^tool\s+\S+\s+blocked by hook[.!]?$", lower
+    ):
         return "blocked", "blocked", text[:_MAX_TEXT]
     return "success", None, None
 

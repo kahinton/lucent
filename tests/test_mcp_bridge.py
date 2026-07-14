@@ -36,11 +36,13 @@ class _FakeToolList:
 
 class _FakeClientSession:
     last = None
+    instances = []
 
     def __init__(self, *_args, **_kwargs):
         self.initialized = False
         self.calls = []
         _FakeClientSession.last = self
+        _FakeClientSession.instances.append(self)
 
     async def __aenter__(self):
         return self
@@ -107,3 +109,43 @@ async def test_bridge_uses_streamable_http_session(monkeypatch):
     assert _FakeClientSession.last is not None
     assert _FakeClientSession.last.initialized is True
     assert _FakeClientSession.last.calls == [("search_memories", {"query": "project notes"})]
+
+
+@pytest.mark.asyncio
+async def test_bridge_reconnects_once_after_session_termination(monkeypatch):
+    import mcp
+    import mcp.client.streamable_http
+
+    class _TerminatingFirstSession(_FakeClientSession):
+        async def call_tool(self, name, arguments):
+            self.calls.append((name, arguments))
+            if len(_FakeClientSession.instances) == 1:
+                raise RuntimeError("Session terminated")
+            return _FakeCallResult()
+
+    _FakeClientSession.instances = []
+    monkeypatch.setattr(mcp, "ClientSession", _TerminatingFirstSession)
+    monkeypatch.setattr(
+        mcp.client.streamable_http,
+        "streamablehttp_client",
+        _fake_streamable_client,
+    )
+
+    bridge = MCPToolBridge(
+        "http://localhost:8766/mcp",
+        allowed_tools=["search_memories"],
+        skip_url_validation=True,
+    )
+    try:
+        result = await bridge.call_tool("search_memories", {"query": "project notes"})
+    finally:
+        await bridge.close()
+
+    assert result == '{"ok": true}'
+    assert len(_FakeClientSession.instances) == 2
+    assert _FakeClientSession.instances[0].calls == [
+        ("search_memories", {"query": "project notes"})
+    ]
+    assert _FakeClientSession.instances[1].calls == [
+        ("search_memories", {"query": "project notes"})
+    ]

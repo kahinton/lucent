@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 from lucent.auth_providers import SESSION_COOKIE_NAME, validate_session
 from lucent.db import get_pool
 from lucent.logging import get_logger
+from lucent.mcp_config import build_internal_mcp_server
 from lucent.settings import (
     chat_mcp_url,
     chat_model_id,
@@ -28,6 +29,10 @@ from lucent.settings import (
     session_experience_model_id,
     session_experience_summary_enabled,
     session_experience_timeout_seconds,
+)
+from lucent.tool_policy import (
+    CHAT_ALLOWED_TOOLS,
+    chat_allowed_tools_for_agent,
 )
 
 logger = get_logger("chat")
@@ -40,48 +45,6 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 SESSION_EXPERIENCE_SUMMARY_ENABLED = session_experience_summary_enabled()
 SESSION_EXPERIENCE_MODEL = session_experience_model_id()
 SESSION_EXPERIENCE_TIMEOUT = session_experience_timeout_seconds()
-
-CHAT_ALLOWED_TOOLS = [
-    "get_current_user_context",
-    "search_memories",
-    "search_memories_full",
-    "get_memory",
-    "get_memories",
-    "create_memory",
-    "update_memory",
-    "delete_memory",
-    "get_existing_tags",
-    "get_tag_suggestions",
-    "create_request",
-    "list_active_work",
-    "list_pending_requests",
-    "list_pending_tasks",
-    "get_request_details",
-    "list_available_models",
-]
-DEFINITION_COMPOSER_TOOLS = [
-    "list_agent_definitions",
-    "get_agent_definition",
-    "list_skill_definitions",
-    "get_skill_definition",
-    "list_mcp_server_definitions",
-    "list_hook_definitions",
-    "list_tool_definitions",
-    "get_tool_definition",
-    "list_proposals",
-    "create_agent_definition",
-    "create_skill_definition",
-    "create_tool_definition",
-]
-WORKFLOW_COMPOSER_TOOLS = [
-    "list_workflows",
-    "get_workflow_details",
-    "create_workflow",
-    "list_agent_definitions",
-    "list_skill_definitions",
-    "list_available_models",
-]
-
 
 def _resolve_chat_model(override: str | None = None) -> str:
     from lucent.model_registry import get_default_model_id
@@ -101,24 +64,7 @@ def _chat_allowed_tools_for_agent(
     added only when the selected chat agent is an approved composer role (or an
     equivalent agent explicitly granted the corresponding skill).
     """
-    tools = list(CHAT_ALLOWED_TOOLS)
-    normalized_agent = (agent_name or "").strip().lower()
-    normalized_skills = {name.strip().lower() for name in (skill_names or [])}
-    # Any agent with granted skills must be able to load skill instructions
-    # on demand (skills are listed, not inlined, in the system prompt).
-    if skill_names:
-        for tool in ("get_skill_definition", "list_skill_definitions"):
-            if tool not in tools:
-                tools.append(tool)
-    if normalized_agent == "definition-engineer" or "definition-engineering" in normalized_skills:
-        for tool in DEFINITION_COMPOSER_TOOLS:
-            if tool not in tools:
-                tools.append(tool)
-    if normalized_agent == "workflow-composer" or "workflow-design" in normalized_skills:
-        for tool in WORKFLOW_COMPOSER_TOOLS:
-            if tool not in tools:
-                tools.append(tool)
-    return tools
+    return chat_allowed_tools_for_agent(agent_name, skill_names)
 
 
 class ChatAttachment(BaseModel):
@@ -218,7 +164,7 @@ def _build_mcp_config(
     The MCPAuthMiddleware accepts session tokens via Bearer auth,
     so the user's own identity flows through to MCP operations.
     """
-    headers = {"Authorization": f"Bearer {session_token}"}
+    headers = {}
     if llm_session_id:
         headers["X-Lucent-LLM-Session-Id"] = llm_session_id
     if llm_turn_id:
@@ -229,16 +175,12 @@ def _build_mcp_config(
         headers["X-Lucent-Agent-Definition-Id"] = agent_definition_id
 
     return {
-        "memory-server": {
-            "type": "http",
-            "url": chat_mcp_url(),
-            "headers": headers,
-            "tools": list(tools or CHAT_ALLOWED_TOOLS),
-            # Lucent's own MCP endpoint — trusted internal connection, exempt
-            # from SSRF allowlist checks so it works out of the box even when
-            # the URL is loopback (the default http://localhost:8766/mcp).
-            "internal": True,
-        },
+        "memory-server": build_internal_mcp_server(
+            url=chat_mcp_url(),
+            bearer_token=session_token,
+            tools=tools or CHAT_ALLOWED_TOOLS,
+            extra_headers=headers,
+        ),
     }
 
 

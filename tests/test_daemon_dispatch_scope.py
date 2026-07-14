@@ -155,54 +155,15 @@ class TestRequiredToolUsage:
 
 
 class TestMemoryServerToolSelection:
-    def test_learning_extraction_gets_definition_activation_tools(self):
-        tools = set(
-            _memory_server_tools_for_task(
-                "reflection",
-                "Learning Extraction",
-                "[Scheduled] Learning Extraction",
-                "Run the learning extraction pipeline",
-            )
-        )
-        assert "analyze_tool_failure_patterns" in tools
-        assert "create_skill_definition" in tools
-        assert "create_agent_definition" in tools
-        assert "create_request" in tools
-        assert "update_skill_definition" not in tools
-        assert "update_agent_definition" not in tools
-        assert "grant_skill_to_agent" not in tools
-        assert "grant_hook_to_agent" not in tools
-
-    def test_definition_engineer_gets_capability_tools(self):
-        tools = set(_memory_server_tools_for_task("definition-engineer", "Define roles"))
-        assert "create_skill_definition" in tools
-        assert "create_agent_definition" in tools
-        assert "create_request" in tools
-        assert "grant_skill_to_agent" not in tools
-        assert "grant_hook_to_agent" not in tools
-
-    def test_plain_research_keeps_small_tool_surface(self):
-        tools = set(_memory_server_tools_for_task("research", "Summarize market data"))
-        assert "search_memories" in tools
-        assert "send_handoff" in tools
-        assert "list_handoffs" in tools
-        assert "get_handoff" in tools
-        assert "resolve_handoff" in tools
-        assert "create_skill_definition" not in tools
-        assert "create_request" not in tools
-
-    def test_memory_curation_tasks_get_delete_memory(self):
-        # Consolidation, learning extraction, and experience compression all
-        # instruct agents to call delete_memory; it must be exposed on the
-        # base memory-server tool surface or the call fails "tool does not exist".
-        for agent in ("memory", "reflection", "research"):
-            tools = set(_memory_server_tools_for_task(agent, "Consolidate duplicates"))
-            assert "delete_memory" in tools, agent
-            assert "update_memory" in tools, agent
-
-    def test_weather_advisor_gets_weather_tool_without_requiring_sandbox_only(self):
-        tools = set(_memory_server_tools_for_task("weather-advisor", "Daily weather outfit"))
-        assert "fetch_open_meteo_forecast" in tools
-        assert "exec_sandbox_command" not in tools
-        assert "send_handoff" in tools
-        assert "create_memory" in tools
+    def test_all_task_agents_receive_unrestricted_internal_mcp_tools(self):
+        # Autonomous task execution must not be constrained by a static
+        # per-agent allow-list. The requester-scoped API key, not tool discovery,
+        # enforces data authorization.
+        for agent, title in (
+            ("reflection", "Learning Extraction"),
+            ("definition-engineer", "Define roles"),
+            ("research", "Summarize market data"),
+            ("memory", "Consolidate duplicates"),
+            ("weather-advisor", "Daily weather outfit"),
+        ):
+            assert _memory_server_tools_for_task(agent, title) == ["*"]
