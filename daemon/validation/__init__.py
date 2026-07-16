@@ -1,0 +1,1 @@
+"""Daemon task-result validation."""

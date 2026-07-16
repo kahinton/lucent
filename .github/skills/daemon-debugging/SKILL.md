@@ -31,8 +31,8 @@ This skill is for **diagnosing and fixing failures** — crashes, stuck tasks, d
 | File | Purpose |
 |------|---------|
 | `daemon/daemon.py` | Main orchestrator — `LucentDaemon`, `MemoryAPI`, task dispatch |
-| `daemon/cognitive.md` | PRDA protocol (Perceive → Reason → Decide → Act) |
-| `daemon/adaptation.py` | Environment assessment and `AdaptationPipeline` |
+| `daemon/prompts/cognitive.md` | PRDA protocol (Perceive → Reason → Decide → Act) |
+| `daemon/adaptation/pipeline.py` | Environment assessment and `AdaptationPipeline` |
 | `daemon/templates/agents/` | Jinja2 templates for generating new agent definitions |
 | `daemon/daemon.log` | Runtime log (rotates at 10 MB, keeps 5 backups) |
 

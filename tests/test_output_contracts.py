@@ -264,16 +264,10 @@ class TestMigrationColumns:
 
 
 class TestValidateContractSchema:
-    """Tests for validate_contract_schema() in output_validation.py."""
+    """Tests for validate_contract_schema()."""
 
     def _import(self):
-        import sys
-        import os
-
-        daemon_path = os.path.join(os.path.dirname(__file__), "..", "daemon")
-        if daemon_path not in sys.path:
-            sys.path.insert(0, daemon_path)
-        from output_validation import validate_contract_schema
+        from daemon.validation.output import validate_contract_schema
 
         return validate_contract_schema
 
@@ -347,16 +341,10 @@ class TestValidateContractSchema:
 
 
 class TestProcessTaskOutput:
-    """Tests for process_task_output() in output_validation.py."""
+    """Tests for process_task_output()."""
 
     def _import(self):
-        import sys
-        import os
-
-        daemon_path = os.path.join(os.path.dirname(__file__), "..", "daemon")
-        if daemon_path not in sys.path:
-            sys.path.insert(0, daemon_path)
-        from output_validation import process_task_output
+        from daemon.validation.output import process_task_output
 
         return process_task_output
 
@@ -553,13 +541,7 @@ class TestValidateConsolidationExecution:
     """Tests for consolidation-specific execution validation."""
 
     def _import(self):
-        import os
-        import sys
-
-        daemon_path = os.path.join(os.path.dirname(__file__), "..", "daemon")
-        if daemon_path not in sys.path:
-            sys.path.insert(0, daemon_path)
-        from output_validation import validate_consolidation_execution
+        from daemon.validation.output import validate_consolidation_execution
 
         return validate_consolidation_execution
 

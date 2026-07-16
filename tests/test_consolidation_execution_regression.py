@@ -7,24 +7,14 @@ Background (2026-04-16):
     validator accepted the lengthy analysis text without checking whether
     any writes actually happened, creating an infinite review loop.
 
-These tests verify the guardrail added in ``daemon/output_validation.py``
+These tests verify the guardrail in ``daemon/validation/output.py``
 (``validate_consolidation_execution``) and its integration through the
 daemon's ``_validate_task_result`` pipeline.
 """
 
-import os
-import sys
-
 import pytest
 
-# ---------------------------------------------------------------------------
-# Import helper — daemon/ lives outside the standard package tree
-# ---------------------------------------------------------------------------
-_daemon_path = os.path.join(os.path.dirname(__file__), "..", "daemon")
-if _daemon_path not in sys.path:
-    sys.path.insert(0, _daemon_path)
-
-from output_validation import validate_consolidation_execution  # noqa: E402
+from daemon.validation.output import validate_consolidation_execution
 
 
 # ---------------------------------------------------------------------------

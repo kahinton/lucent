@@ -29,7 +29,7 @@ from jinja2 import Environment, FileSystemLoader
 logger = logging.getLogger(__name__)
 
 # Paths
-DAEMON_DIR = Path(__file__).parent
+DAEMON_DIR = Path(__file__).parent.parent
 REPO_ROOT = DAEMON_DIR.parent
 TEMPLATES_DIR = DAEMON_DIR / "templates"
 AGENTS_DIR = DAEMON_DIR / "agents"
