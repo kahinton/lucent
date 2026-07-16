@@ -454,6 +454,77 @@ class TestSetupPage:
         assert resp.status_code == 303
         assert resp.headers.get("location") == "/setup"
 
+    async def test_setup_lists_discovered_models_for_explicit_selection(self, monkeypatch):
+        import lucent.web.routes.auth as auth_routes
+
+        async def first_run(_pool):
+            return True
+
+        async def get_pool():
+            return object()
+
+        async def list_setup_models(_repo):
+            return [
+                {
+                    "id": "ollama:test-model",
+                    "name": "Test Model",
+                    "provider": "ollama",
+                    "is_enabled": False,
+                }
+            ]
+
+        monkeypatch.setattr(auth_routes, "is_first_run", first_run)
+        monkeypatch.setattr(auth_routes, "get_pool", get_pool)
+        monkeypatch.setattr(
+            auth_routes.ModelRepository,
+            "list_initial_setup_models",
+            list_setup_models,
+        )
+
+        app = create_app()
+        transport = ASGITransport(app=app, raise_app_exceptions=False)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/setup")
+
+        assert resp.status_code == 200
+        assert 'name="enabled_models"' in resp.text
+        assert 'value="ollama:test-model"' in resp.text
+        assert "Select at least one model" in resp.text
+
+    async def test_setup_retries_discovery_when_no_models_are_available(self, monkeypatch):
+        import lucent.model_discovery as model_discovery
+        import lucent.web.routes.auth as auth_routes
+
+        list_calls = 0
+        discovery_calls = 0
+
+        async def list_setup_models(_repo):
+            nonlocal list_calls
+            list_calls += 1
+            if list_calls == 1:
+                return []
+            return [{"id": "ollama:new-model"}]
+
+        class FakeDiscoveryService:
+            def __init__(self, _pool):
+                pass
+
+            async def sync(self):
+                nonlocal discovery_calls
+                discovery_calls += 1
+
+        monkeypatch.setattr(
+            auth_routes.ModelRepository,
+            "list_initial_setup_models",
+            list_setup_models,
+        )
+        monkeypatch.setattr(model_discovery, "ModelDiscoveryService", FakeDiscoveryService)
+
+        models = await auth_routes._list_initial_setup_models(object())
+
+        assert models == [{"id": "ollama:new-model"}]
+        assert discovery_calls == 1
+
 
 # ============================================================================
 # POST /setup
@@ -596,6 +667,129 @@ class TestSetupSubmit:
                 follow_redirects=False,
             )
             assert resp.status_code == 400
+
+    async def test_setup_requires_at_least_one_model(self, monkeypatch):
+        import lucent.web.routes.auth as auth_routes
+
+        account_created = False
+
+        async def first_run(_pool):
+            return True
+
+        async def get_pool():
+            return object()
+
+        async def list_setup_models(_repo):
+            return [
+                {
+                    "id": "ollama:test-model",
+                    "name": "Test Model",
+                    "provider": "ollama",
+                    "is_enabled": False,
+                }
+            ]
+
+        async def create_user(*_args):
+            nonlocal account_created
+            account_created = True
+            raise AssertionError("Account creation must wait for a model selection")
+
+        monkeypatch.setattr(auth_routes, "is_first_run", first_run)
+        monkeypatch.setattr(auth_routes, "get_pool", get_pool)
+        monkeypatch.setattr(auth_routes, "create_initial_user", create_user)
+        monkeypatch.setattr(
+            auth_routes.ModelRepository,
+            "list_initial_setup_models",
+            list_setup_models,
+        )
+
+        csrf = "setup-model-required"
+        app = create_app()
+        transport = ASGITransport(app=app, raise_app_exceptions=False)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+            cookies={CSRF_COOKIE_NAME: csrf},
+        ) as c:
+            resp = await c.post(
+                "/setup",
+                data={
+                    CSRF_FIELD_NAME: csrf,
+                    "display_name": "Admin",
+                    "password": "ValidPass1",
+                    "password_confirm": "ValidPass1",
+                },
+            )
+
+        assert resp.status_code == 400
+        assert "Select at least one model to continue" in resp.text
+        assert account_created is False
+
+    async def test_setup_enables_selected_model_before_creating_account(self, monkeypatch):
+        import lucent.web.routes.auth as auth_routes
+
+        enabled_model_ids: list[str] = []
+
+        async def first_run(_pool):
+            return True
+
+        async def get_pool():
+            return object()
+
+        async def list_setup_models(_repo):
+            return [
+                {
+                    "id": "ollama:test-model",
+                    "name": "Test Model",
+                    "provider": "ollama",
+                    "is_enabled": False,
+                }
+            ]
+
+        async def enable_models(_repo, model_ids):
+            enabled_model_ids.extend(model_ids)
+            return set(model_ids)
+
+        async def create_user(*_args):
+            assert enabled_model_ids == ["ollama:test-model"]
+            return {"id": uuid4()}, "hs_setup_test_key"
+
+        async def create_user_session(*_args):
+            return "setup-session-token"
+
+        monkeypatch.setattr(auth_routes, "is_first_run", first_run)
+        monkeypatch.setattr(auth_routes, "get_pool", get_pool)
+        monkeypatch.setattr(auth_routes, "create_initial_user", create_user)
+        monkeypatch.setattr(auth_routes, "create_session", create_user_session)
+        monkeypatch.setattr(
+            auth_routes.ModelRepository,
+            "list_initial_setup_models",
+            list_setup_models,
+        )
+        monkeypatch.setattr(auth_routes.ModelRepository, "enable_models", enable_models)
+
+        csrf = "setup-model-selected"
+        app = create_app()
+        transport = ASGITransport(app=app, raise_app_exceptions=False)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+            cookies={CSRF_COOKIE_NAME: csrf},
+        ) as c:
+            resp = await c.post(
+                "/setup",
+                data={
+                    CSRF_FIELD_NAME: csrf,
+                    "display_name": "Admin",
+                    "password": "ValidPass1",
+                    "password_confirm": "ValidPass1",
+                    "enabled_models": "ollama:test-model",
+                },
+            )
+
+        assert resp.status_code == 200
+        assert "Account created successfully" in resp.text
+        assert enabled_model_ids == ["ollama:test-model"]
 
 
 # ============================================================================

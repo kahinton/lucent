@@ -76,6 +76,43 @@ class ModelRepository:
             row = await conn.fetchrow("SELECT * FROM models WHERE id = $1", model_id)
         return dict(row) if row else None
 
+    async def list_initial_setup_models(self) -> list[dict]:
+        """Return global models that are valid choices during first-run setup.
+
+        Disabled seed rows represent providers that have not been configured and
+        must not appear as usable choices. Provider-discovered and manually
+        configured models are safe to present, along with anything already
+        enabled by an operator before setup.
+        """
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT * FROM models
+                   WHERE organization_id IS NULL
+                     AND (
+                         is_enabled = true
+                         OR discovery_source IN ('provider', 'manual')
+                         OR is_custom = true
+                     )
+                   ORDER BY is_enabled DESC, provider, name"""
+            )
+        return [dict(row) for row in rows]
+
+    async def enable_models(self, model_ids: list[str]) -> set[str]:
+        """Enable model rows and return the IDs that were updated."""
+        if not model_ids:
+            return set()
+        now = datetime.now(timezone.utc)
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """UPDATE models
+                   SET is_enabled = true, updated_at = $1
+                   WHERE id = ANY($2::text[])
+                   RETURNING id""",
+                now,
+                model_ids,
+            )
+        return {row["id"] for row in rows}
+
     async def create_model(
         self,
         model_id: str,

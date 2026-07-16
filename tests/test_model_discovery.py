@@ -291,6 +291,48 @@ async def test_sync_inserts_provider_model(db_pool, discovery_prefix):
 
 
 @pytest.mark.asyncio
+async def test_initial_setup_models_exclude_unconfigured_seeds_and_can_be_enabled(
+    db_pool,
+    discovery_prefix,
+):
+    from lucent.db.models import ModelRepository
+
+    seed_id = f"{discovery_prefix}setup-seed"
+    provider_id = f"{discovery_prefix}setup-provider"
+    repo = ModelRepository(db_pool)
+    try:
+        await repo.create_model(
+            model_id=seed_id,
+            provider="openai",
+            name="Unconfigured Seed",
+            is_enabled=False,
+            discovery_source="seed",
+            is_custom=False,
+        )
+        await repo.create_model(
+            model_id=provider_id,
+            provider="ollama",
+            name="Discovered Local Model",
+            is_enabled=False,
+            discovery_source="provider",
+            is_custom=False,
+        )
+
+        setup_models = await repo.list_initial_setup_models()
+        setup_ids = {model["id"] for model in setup_models}
+        enabled_ids = await repo.enable_models([provider_id])
+        provider_model = await repo.get_model(provider_id)
+
+        assert seed_id not in setup_ids
+        assert provider_id in setup_ids
+        assert enabled_ids == {provider_id}
+        assert provider_model["is_enabled"] is True
+    finally:
+        await repo.delete_model(seed_id)
+        await repo.delete_model(provider_id)
+
+
+@pytest.mark.asyncio
 async def test_sync_replaces_stale_provider_reasoning_efforts(db_pool, discovery_prefix):
     from lucent.db.models import ModelRepository
 

@@ -23,7 +23,10 @@ This starts PostgreSQL, OpenBao (secret storage), and the Lucent server. All ser
 Open **http://localhost:8766** in your browser. On first run you'll see a setup page where you:
 
 1. Create your user account (username, password)
-2. Receive your MCP API key (shown once — **copy it!**)
+2. Select at least one discovered AI model to enable
+3. Receive your MCP API key (shown once — **copy it!**)
+
+Lucent discovers models from configured providers before setup. For a local Ollama installation, make sure Ollama is running and has at least one model installed (`ollama list`) before opening the setup page. If no models are available, setup explains what is missing and waits until one can be selected.
 
 You can generate additional API keys later at http://localhost:8766/settings.
 

@@ -20,6 +20,7 @@ from lucent.auth_providers import (
     validate_password_complexity,
 )
 from lucent.db import get_pool
+from lucent.db.models import ModelRepository
 
 from ._shared import (
     _check_csrf,
@@ -31,6 +32,77 @@ from ._shared import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+async def _list_initial_setup_models(pool) -> list[dict]:
+    """List setup choices, retrying discovery when the catalog is empty."""
+    repo = ModelRepository(pool)
+    models = await repo.list_initial_setup_models()
+    if models:
+        return models
+
+    try:
+        from lucent.model_discovery import ModelDiscoveryService
+
+        await ModelDiscoveryService(pool).sync()
+    except Exception:
+        logger.warning("Model discovery failed while rendering initial setup", exc_info=True)
+    return await repo.list_initial_setup_models()
+
+
+async def _render_setup_page(
+    request: Request,
+    pool,
+    *,
+    error: str | None = None,
+    status_code: int = 200,
+    display_name: str = "",
+    email: str = "",
+    selected_model_ids: set[str] | None = None,
+):
+    """Render setup with the currently available model choices."""
+    models = await _list_initial_setup_models(pool)
+    selected_ids = selected_model_ids
+    if selected_ids is None:
+        selected_ids = {model["id"] for model in models if model.get("is_enabled")}
+    csrf_token = _get_csrf_for_request(request)
+    response = templates.TemplateResponse(
+        request,
+        "setup.html",
+        {
+            "error": error,
+            "csrf_token": csrf_token,
+            "csrf_field_name": CSRF_FIELD_NAME,
+            "models": models,
+            "selected_model_ids": selected_ids,
+            "display_name": display_name,
+            "email": email,
+        },
+        status_code=status_code,
+    )
+    _set_csrf_cookie(response, csrf_token)
+    return response
+
+
+async def _enable_initial_setup_models(pool, selected_model_ids: list[str]) -> str | None:
+    """Validate and enable the models explicitly selected during setup."""
+    selected_ids = set(selected_model_ids)
+    if not selected_ids:
+        return "Select at least one model to continue."
+
+    repo = ModelRepository(pool)
+    available_models = await _list_initial_setup_models(pool)
+    available_ids = {model["id"] for model in available_models}
+    if not selected_ids.issubset(available_ids):
+        return "One or more selected models are no longer available. Refresh and try again."
+
+    enabled_ids = await repo.enable_models(sorted(selected_ids))
+    if not selected_ids.issubset(enabled_ids):
+        return "The selected models could not be enabled. Refresh and try again."
+    from lucent.model_registry import load_models_from_db
+
+    await load_models_from_db(pool)
+    return None
 
 
 # =============================================================================
@@ -196,18 +268,7 @@ async def setup_page(request: Request, error: str | None = None):
     if not first_run:
         return RedirectResponse(url="/login", status_code=303)
 
-    csrf_token = generate_csrf_token()
-    response = templates.TemplateResponse(
-        request,
-        "setup.html",
-        {
-            "error": error,
-            "csrf_token": csrf_token,
-            "csrf_field_name": CSRF_FIELD_NAME,
-        },
-    )
-    _set_csrf_cookie(response, csrf_token)
-    return response
+    return await _render_setup_page(request, pool, error=error)
 
 
 @router.post("/setup")
@@ -224,64 +285,91 @@ async def setup_submit(request: Request):
     email = str(form.get("email", "")).strip() or None
     password = str(form.get("password", ""))
     password_confirm = str(form.get("password_confirm", ""))
+    selected_model_ids = [str(value) for value in form.getlist("enabled_models")]
+    selected_model_set = set(selected_model_ids)
 
     if not display_name:
-        return templates.TemplateResponse(
+        return await _render_setup_page(
             request,
-            "setup.html",
-            {"error": "Display name is required."},
+            pool,
+            error="Display name is required.",
             status_code=400,
+            email=email or "",
+            selected_model_ids=selected_model_set,
         )
 
     if len(password) < 8:
-        return templates.TemplateResponse(
+        return await _render_setup_page(
             request,
-            "setup.html",
-            {"error": "Password must be at least 8 characters."},
+            pool,
+            error="Password must be at least 8 characters.",
             status_code=400,
+            display_name=display_name,
+            email=email or "",
+            selected_model_ids=selected_model_set,
         )
 
     complexity_error = validate_password_complexity(password)
     if complexity_error:
-        return templates.TemplateResponse(
+        return await _render_setup_page(
             request,
-            "setup.html",
-            {"error": complexity_error},
+            pool,
+            error=complexity_error,
             status_code=400,
+            display_name=display_name,
+            email=email or "",
+            selected_model_ids=selected_model_set,
         )
 
     if password != password_confirm:
-        return templates.TemplateResponse(
+        return await _render_setup_page(
             request,
-            "setup.html",
-            {"error": "Passwords do not match."},
+            pool,
+            error="Passwords do not match.",
             status_code=400,
+            display_name=display_name,
+            email=email or "",
+            selected_model_ids=selected_model_set,
+        )
+
+    model_error = await _enable_initial_setup_models(pool, selected_model_ids)
+    if model_error:
+        return await _render_setup_page(
+            request,
+            pool,
+            error=model_error,
+            status_code=400,
+            display_name=display_name,
+            email=email or "",
+            selected_model_ids=selected_model_set,
         )
 
     try:
         user, api_key = await create_initial_user(pool, display_name, email, password)
     except Exception:
         logger.exception("Error during initial user setup")
-        return templates.TemplateResponse(
+        return await _render_setup_page(
             request,
-            "setup.html",
-            {
-                "error": "Setup failed due to an unexpected error. Please try again.",
-            },
+            pool,
+            error="Setup failed due to an unexpected error. Please try again.",
             status_code=500,
+            display_name=display_name,
+            email=email or "",
+            selected_model_ids=selected_model_set,
         )
 
     try:
         token = await create_session(pool, user["id"])
     except Exception:
         logger.exception("Error creating session after setup")
-        return templates.TemplateResponse(
+        return await _render_setup_page(
             request,
-            "setup.html",
-            {
-                "error": "Account created but session failed. Please log in manually.",
-            },
+            pool,
+            error="Account created but session failed. Please log in manually.",
             status_code=500,
+            display_name=display_name,
+            email=email or "",
+            selected_model_ids=selected_model_set,
         )
 
     response = templates.TemplateResponse(

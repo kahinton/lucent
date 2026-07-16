@@ -76,9 +76,12 @@ class RuntimeConfigurationMixin:
                 return
             try:
                 from lucent.db import get_pool
+                from lucent.model_registry import load_models_from_db
                 from lucent.settings import load_runtime_settings_from_db
 
-                await load_runtime_settings_from_db(await get_pool())
+                pool = await get_pool()
+                await load_runtime_settings_from_db(pool)
+                await load_models_from_db(pool)
                 runtime._refresh_config_from_runtime_settings()
                 self.roles = self._parse_roles(runtime.DAEMON_ROLES_STR)
                 self._settings_reloaded_at = now
