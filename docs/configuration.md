@@ -230,7 +230,11 @@ For observability setup details, see [Observability](observability.md).
 
 ### Multi-Daemon
 
-Enable with `docker compose --profile multi-daemon up`:
+Plain `docker compose up` starts `daemon-1` by default. Enable the multi-daemon profile to add `daemon-2`:
+
+```bash
+docker compose --profile multi-daemon up
+```
 
 Uses the same daemon environment variables listed above. See `docker-compose.yml` for the `daemon-1` and `daemon-2` service definitions.
 
@@ -238,7 +242,7 @@ Uses the same daemon environment variables listed above. See `docker-compose.yml
 
 ### Full Stack
 
-Run PostgreSQL, OpenBao, and the Lucent server:
+Run PostgreSQL, OpenBao, the Lucent server, and one daemon worker:
 
 ```bash
 docker compose up -d

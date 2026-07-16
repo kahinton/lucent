@@ -16,7 +16,7 @@ cd lucent
 docker compose up -d
 ```
 
-This starts PostgreSQL, OpenBao (secret storage), and the Lucent server. All services run behind a single port (default `8766`).
+This starts PostgreSQL, OpenBao (secret storage), the Lucent server, and one daemon worker. All user-facing services run behind a single port (default `8766`).
 
 ## 2. Create Your Account
 
@@ -137,9 +137,11 @@ Once running, the web UI at http://localhost:8766 provides:
 | `/users` | User management (admin) |
 | `/settings` | API keys, password, profile |
 
-## 5. Run the Daemon (Optional)
+## 5. Daemon Options
 
-The Lucent server provides persistent memory and the web dashboard. The **daemon** adds autonomous capabilities — cognitive reasoning, task dispatch, scheduled work, and background learning.
+The default Docker Compose stack already runs one **daemon** for cognitive reasoning, task dispatch, scheduled work, and background learning. No profile flag is required.
+
+To run the daemon directly on the host instead, stop the Compose worker and provide its connection settings:
 
 The daemon connects to the server over MCP and requires a GitHub token for LLM access via the Copilot SDK:
 
@@ -151,11 +153,11 @@ export GITHUB_TOKEN=your_github_token_here
 export LUCENT_MCP_URL=http://localhost:8766/mcp
 export LUCENT_MCP_API_KEY=hs_your_api_key_here  # Same key from step 2
 
-# Run the daemon
+# Run the daemon on the host
 python -m daemon.daemon
 ```
 
-Or use the multi-daemon Docker profile:
+For additional worker capacity, enable the multi-daemon profile. This keeps the default worker and adds a second:
 
 ```bash
 # Set your API key in .env first: LUCENT_MCP_API_KEY=hs_...

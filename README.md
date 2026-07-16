@@ -46,7 +46,7 @@ The goal is not unchecked autonomy. It is **accountable autonomy**: an AI teamma
 
 ## How it works
 
-Lucent runs as an application server plus an optional long-running agent process.
+Lucent runs as an application server plus a long-running agent process. The default Docker Compose stack starts one agent process; additional workers remain opt-in.
 
 ```text
 ┌─────────────────────────────────────────────────────┐
@@ -91,7 +91,7 @@ Lucent is designed for teams that need AI work to fit existing enterprise expect
 **Prerequisites:** [Docker](https://docs.docker.com/get-docker/) and [Docker Compose](https://docs.docker.com/compose/install/) v2+.
 
 ```bash
-# 1. Clone and start
+# 1. Clone and start the server plus one daemon worker
 git clone https://github.com/kahinton/lucent.git
 cd lucent
 docker compose up -d
