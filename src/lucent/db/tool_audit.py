@@ -331,28 +331,78 @@ class ToolAuditRepository:
         }
 
 
-def classify_tool_result(result_text: str | None) -> tuple[str, str | None, str | None]:
-    """Classify a tool result string into audit status/failure metadata."""
+def classify_tool_result(
+    result_text: str | None,
+    *,
+    is_error: bool = False,
+) -> tuple[str, str | None, str | None]:
+    """Classify a direct tool error without treating quoted error text as failure."""
     if not result_text:
         return "success", None, None
     text = str(result_text)
-    lower = text.lower()
-    if lower.startswith("error calling tool") or lower.startswith("error:"):
-        return "failed", "tool_error", text[:_MAX_TEXT]
+    error_text = _direct_tool_error_text(text, is_error=is_error)
+    if error_text is None:
+        return "success", None, None
+
+    lower = error_text.lower()
+    if "unauthorized" in lower or "status_code=401" in lower or "http 401" in lower:
+        return "failed", "auth_error", text[:_MAX_TEXT]
     if "unexpected user permission response" in lower:
         return "failed", "permission_protocol_error", text[:_MAX_TEXT]
     if "failed to fetch" in lower or "typeerror: fetch failed" in lower:
         return "failed", "fetch_error", text[:_MAX_TEXT]
-    if "unauthorized" in lower or "status_code=401" in lower or "http 401" in lower:
-        return "failed", "auth_error", text[:_MAX_TEXT]
-    # These phrases can occur in successful agent output (for example, an
-    # investigation that describes a formerly blocked tool). Treat them as a
-    # failure only when the tool response itself is the denial.
     if lower.startswith("tool is not allowed") or re.match(
         r"^tool\s+\S+\s+blocked by hook[.!]?$", lower
     ):
         return "blocked", "blocked", text[:_MAX_TEXT]
-    return "success", None, None
+    return "failed", "tool_error", text[:_MAX_TEXT]
+
+
+def _direct_tool_error_text(text: str, *, is_error: bool) -> str | None:
+    """Return the direct error body, excluding errors merely quoted in output."""
+    stripped = text.strip()
+    if not stripped:
+        return None
+    if is_error:
+        return stripped
+
+    lower = stripped.lower()
+    for prefix_pattern in (
+        r"^error calling tool\s+[^:]+:\s*",
+        r"^error:\s*",
+    ):
+        match = re.match(prefix_pattern, lower)
+        if match:
+            return stripped[match.end():]
+
+    if lower.startswith((
+        "unauthorized",
+        "http 401",
+        "status_code=401",
+        "tool is not allowed",
+        "unexpected user permission response",
+        "failed to fetch",
+        "typeerror: fetch failed",
+    )) or re.match(r"^tool\s+\S+\s+blocked by hook[.!]?$", lower):
+        return stripped
+
+    try:
+        payload = json.loads(stripped)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    error = payload.get("error")
+    if error is None and payload.get("isError") is not True and payload.get("is_error") is not True:
+        return None
+    if error is None:
+        return stripped
+    if isinstance(error, str):
+        return error
+    if isinstance(error, dict):
+        return str(error.get("message") or json.dumps(error, default=str))
+    return str(error)
 
 
 def _recommended_action_for_pattern(

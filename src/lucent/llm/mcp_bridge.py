@@ -194,6 +194,7 @@ class MCPToolBridge:
                 arguments=arguments or {},
                 result_text=result_text,
                 duration_ms=(time.monotonic() - start) * 1000,
+                result_is_error=_call_result_is_error(result),
             )
 
             if is_memory_tool:
@@ -236,6 +237,7 @@ class MCPToolBridge:
         result_text: str,
         duration_ms: float,
         exception: Exception | None = None,
+        result_is_error: bool = False,
     ) -> None:
         """Best-effort operational audit logging for MCP tool execution."""
         try:
@@ -264,7 +266,10 @@ class MCPToolBridge:
                 failure_class = exception.__class__.__name__
                 error_message = str(exception)
             else:
-                status, failure_class, error_message = classify_tool_result(result_text)
+                status, failure_class, error_message = classify_tool_result(
+                    result_text,
+                    is_error=result_is_error,
+                )
 
             pool = await init_db()
             repo = ToolAuditRepository(pool)
@@ -343,6 +348,13 @@ def _call_result_to_text(result: Any) -> str:
     if hasattr(result, "model_dump"):
         return json.dumps(result.model_dump(mode="json"), default=str)
     return json.dumps(result, default=str)
+
+
+def _call_result_is_error(result: Any) -> bool:
+    """Return the MCP protocol-level error flag without inspecting result prose."""
+    if isinstance(result, dict):
+        return result.get("isError") is True or result.get("is_error") is True
+    return bool(getattr(result, "isError", False) or getattr(result, "is_error", False))
 
 
 def _summarize_memory_tool_params(tool_name: str, arguments: dict[str, Any]) -> str:
