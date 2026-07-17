@@ -34,6 +34,31 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+async def _render_login_page(
+    request: Request,
+    *,
+    error: str | None = None,
+    status_code: int = 200,
+):
+    """Render login with a synchronized CSRF form token and cookie."""
+    csrf_token = _get_csrf_for_request(request)
+    provider = await get_auth_provider()
+    response = templates.TemplateResponse(
+        request,
+        "login.html",
+        {
+            "error": error,
+            "csrf_token": csrf_token,
+            "csrf_field_name": CSRF_FIELD_NAME,
+            "fields": provider.get_login_fields(),
+            "session_warning": "Logging in will end any other active sessions.",
+        },
+        status_code=status_code,
+    )
+    _set_csrf_cookie(response, csrf_token)
+    return response
+
+
 async def _list_initial_setup_models(pool) -> list[dict]:
     """List setup choices, retrying discovery when the catalog is empty."""
     repo = ModelRepository(pool)
@@ -127,22 +152,7 @@ async def login_page(request: Request, error: str | None = None):
         if user:
             return RedirectResponse("/", status_code=303)
 
-    csrf_token = _get_csrf_for_request(request)
-
-    provider = await get_auth_provider()
-    response = templates.TemplateResponse(
-        request,
-        "login.html",
-        {
-            "error": error,
-            "csrf_token": csrf_token,
-            "csrf_field_name": CSRF_FIELD_NAME,
-            "fields": provider.get_login_fields(),
-            "session_warning": "Logging in will end any other active sessions.",
-        },
-    )
-    _set_csrf_cookie(response, csrf_token)
-    return response
+    return await _render_login_page(request, error=error)
 
 
 @router.post("/login")
@@ -159,16 +169,10 @@ async def login_submit(request: Request):
     limiter = get_login_limiter()
     allowed, retry_after = limiter.check(client_ip)
     if not allowed:
-        provider = await get_auth_provider()
         logger.warning("Login rate limit exceeded for IP %s", client_ip)
-        return templates.TemplateResponse(
+        return await _render_login_page(
             request,
-            "login.html",
-            {
-                "fields": provider.get_login_fields(),
-                "error": f"Too many login attempts. Please try again in {retry_after} seconds.",
-                "session_warning": "Logging in will end any other active sessions.",
-            },
+            error=f"Too many login attempts. Please try again in {retry_after} seconds.",
             status_code=429,
         )
 
@@ -181,14 +185,9 @@ async def login_submit(request: Request):
         user = await provider.authenticate(credentials)
     except Exception:
         logger.exception("Error during authentication")
-        return templates.TemplateResponse(
+        return await _render_login_page(
             request,
-            "login.html",
-            {
-                "fields": provider.get_login_fields(),
-                "error": "An unexpected error occurred. Please try again later.",
-                "session_warning": "Logging in will end any other active sessions.",
-            },
+            error="An unexpected error occurred. Please try again later.",
             status_code=500,
         )
 
@@ -198,14 +197,9 @@ async def login_submit(request: Request):
             client_ip,
             credentials.get("username", credentials.get("email", "unknown")),
         )
-        return templates.TemplateResponse(
+        return await _render_login_page(
             request,
-            "login.html",
-            {
-                "fields": provider.get_login_fields(),
-                "error": "Invalid credentials. Please try again.",
-                "session_warning": "Logging in will end any other active sessions.",
-            },
+            error="Invalid credentials. Please try again.",
             status_code=401,
         )
 
@@ -214,14 +208,9 @@ async def login_submit(request: Request):
         token = await create_session(pool, user["id"])
     except Exception:
         logger.exception("Error creating session")
-        return templates.TemplateResponse(
+        return await _render_login_page(
             request,
-            "login.html",
-            {
-                "fields": provider.get_login_fields(),
-                "error": "An unexpected error occurred. Please try again later.",
-                "session_warning": "Logging in will end any other active sessions.",
-            },
+            error="An unexpected error occurred. Please try again later.",
             status_code=500,
         )
 
