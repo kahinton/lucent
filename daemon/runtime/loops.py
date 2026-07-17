@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import sys
 import time
@@ -16,6 +17,7 @@ class RuntimeLoopsMixin:
     async def _setup_listen(self):
         """Establish the persistent PostgreSQL LISTEN connection."""
         import asyncpg
+
         from daemon.runtime.module_proxy import runtime
 
         async with self._listen_lock:
@@ -49,6 +51,39 @@ class RuntimeLoopsMixin:
 
     def _on_request_ready(self, conn, pid, channel, payload):
         self._request_ready.set()
+        try:
+            decoded = json.loads(payload)
+            request_id = (
+                decoded.get("request_id") if isinstance(decoded, dict) else decoded
+            )
+        except (json.JSONDecodeError, TypeError):
+            request_id = payload
+        if request_id:
+            self._decomposition_request_ids.add(str(request_id))
+        self._decomposition_ready.set()
+
+    def _take_decomposition_request_ids(self) -> set[str]:
+        """Atomically drain request IDs queued by synchronous PG callbacks."""
+        request_ids = set(self._decomposition_request_ids)
+        self._decomposition_request_ids.clear()
+        return request_ids
+
+    async def _run_decomposition_pass(self, org_id: str) -> int:
+        """Immediately decompose notified requests, or run the aged fallback."""
+        request_ids = self._take_decomposition_request_ids()
+        if not request_ids:
+            return await self._backfill_pending_decomposition(
+                org_id=org_id, min_age_seconds=300
+            )
+
+        attempted = 0
+        for request_id in sorted(request_ids):
+            attempted += await self._backfill_pending_decomposition(
+                org_id=org_id,
+                min_age_seconds=0,
+                request_id=request_id,
+            )
+        return attempted
 
     async def _dispatch_loop(self):
         """Claim and execute queued tasks, using polling as a NOTIFY fallback."""
@@ -122,7 +157,7 @@ class RuntimeLoopsMixin:
             self._request_ready.clear()
 
     async def _scheduler_loop(self):
-        """Fire schedules and repair requests that have no task decomposition."""
+        """Fire due system and user-defined schedules."""
         from daemon.runtime.module_proxy import runtime
 
         runtime.log(
@@ -136,23 +171,48 @@ class RuntimeLoopsMixin:
                 if not getattr(self, "_schedules_seeded", False):
                     self._schedules_seeded = await self._seed_system_schedules()
                 await self._check_due_schedules()
-                try:
-                    org_id = await self._get_daemon_org_id()
-                    if org_id:
-                        await self._backfill_pending_decomposition(
-                            org_id=org_id, min_age_seconds=300
-                        )
-                except Exception as error:
-                    runtime.log(f"Decomp backfill loop error: {error}", "WARN")
             except asyncio.CancelledError:
                 break
             except Exception as error:
                 runtime.log(f"Scheduler loop error: {error}", "ERROR")
             await asyncio.sleep(runtime.SCHEDULER_CHECK_SECONDS)
 
+    async def _decomposition_loop(self):
+        """Decompose new requests on NOTIFY, with an aged polling fallback."""
+        from daemon.runtime.module_proxy import runtime
+
+        runtime.log(
+            "Request decomposition loop started "
+            f"(poll fallback: {runtime.SCHEDULER_CHECK_SECONDS}s)"
+        )
+        await self._setup_listen()
+        while self.running:
+            try:
+                if not await runtime._verify_and_provision_key(self.instance_id):
+                    await asyncio.sleep(30)
+                    continue
+                org_id = await self._get_daemon_org_id()
+                if org_id:
+                    await self._run_decomposition_pass(org_id)
+            except asyncio.CancelledError:
+                break
+            except Exception as error:
+                runtime.log(f"Request decomposition loop error: {error}", "WARN")
+
+            try:
+                await asyncio.wait_for(
+                    self._decomposition_ready.wait(),
+                    timeout=runtime.SCHEDULER_CHECK_SECONDS,
+                )
+                runtime.log("Request decomposition woke immediately: request_ready")
+            except asyncio.TimeoutError:
+                pass
+            self._decomposition_ready.clear()
+
     async def _get_daemon_org_id(self) -> str | None:
         """Return the daemon's bound organization id."""
         import asyncpg
+
         from daemon.runtime.module_proxy import runtime
 
         if cached := getattr(self, "_cached_daemon_org_id", None):

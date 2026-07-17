@@ -1436,10 +1436,11 @@ class LucentDaemon(
 ):
     """Orchestrates Lucent's cognitive architecture.
 
-    Runs two core loops:
+        Runs three core loops:
       - dispatcher:  event-driven task execution (PG LISTEN + polling)
       - scheduler:   checks and fires due schedules (including system schedules
                      for cognitive planning, memory maintenance, and learning)
+            - decomposition: immediately turns new requests into tasks
     """
 
     ALL_ROLES = frozenset({"dispatcher", "scheduler"})
@@ -1465,6 +1466,8 @@ class LucentDaemon(
         self._listen_lock = asyncio.Lock()
         self._task_ready = asyncio.Event()
         self._request_ready = asyncio.Event()
+        self._decomposition_ready = asyncio.Event()
+        self._decomposition_request_ids: set[str] = set()
 
         # Live runtime-settings refresh: re-read DB-backed settings so admin
         # changes take effect without a daemon restart. Throttled to avoid
@@ -2443,6 +2446,7 @@ class LucentDaemon(
         *,
         org_id: str,
         min_age_seconds: int,
+        request_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Return non-terminal requests with zero tasks older than min_age_seconds.
 
@@ -2472,18 +2476,19 @@ class LucentDaemon(
                        r.target_paths,
                        r.priority,
                        r.source,
-                                             r.approval_status,
-                                             r.goal_memory_id::text AS goal_memory_id,
-                                             r.goal_milestone_index,
-                                             CASE
-                                                 WHEN r.goal_memory_id IS NOT NULL
-                                                            AND r.goal_milestone_index IS NOT NULL
-                                                 THEN gm.metadata->'milestones'->(r.goal_milestone_index - 1)->>'description'
-                                                 ELSE NULL
-                                             END AS goal_milestone_description
+                       r.approval_status,
+                       r.goal_memory_id::text AS goal_memory_id,
+                       r.goal_milestone_index,
+                       CASE
+                           WHEN r.goal_memory_id IS NOT NULL
+                                AND r.goal_milestone_index IS NOT NULL
+                           THEN gm.metadata->'milestones'->(r.goal_milestone_index - 1)->>'description'
+                           ELSE NULL
+                       END AS goal_milestone_description
                 FROM requests r
-                                LEFT JOIN memories gm ON gm.id = r.goal_memory_id
+                LEFT JOIN memories gm ON gm.id = r.goal_memory_id
                 WHERE r.organization_id = $1::uuid
+                  AND ($3::uuid IS NULL OR r.id = $3::uuid)
                   AND r.approval_status IN (
                       'pending_approval', 'auto_approved', 'approved'
                   )
@@ -2498,6 +2503,7 @@ class LucentDaemon(
                 """,
                 org_id,
                 min_age_seconds,
+                request_id,
             )
             return [dict(r) for r in rows]
         except Exception as e:
@@ -2568,6 +2574,7 @@ class LucentDaemon(
         *,
         org_id: str,
         min_age_seconds: int = 300,
+        request_id: str | None = None,
     ) -> int:
         """Decompose any non-terminal request older than min_age_seconds with no tasks.
 
@@ -2613,7 +2620,9 @@ class LucentDaemon(
             self._decomposition_backoff = {}
 
         candidates = await self._list_undecomposed_pending_approval_requests(
-            org_id=org_id, min_age_seconds=min_age_seconds
+            org_id=org_id,
+            min_age_seconds=min_age_seconds,
+            request_id=request_id,
         )
         now_mono = time.monotonic()
         filtered: list[dict[str, Any]] = []
@@ -4301,9 +4310,10 @@ class LucentDaemon(
     async def run_forever(self):
         """Run enabled daemon loops concurrently.
 
-        The daemon has two core loops:
+                The daemon has three core loops:
           - dispatcher:  event-driven task execution (PG LISTEN + polling)
           - scheduler:   fires due schedules (system + user-defined)
+                    - decomposition: immediately turns new requests into tasks
 
         Cognitive planning, memory maintenance, and learning extraction
         are all system schedules — they flow through the scheduler and
@@ -4321,6 +4331,11 @@ class LucentDaemon(
                 loops.append(asyncio.create_task(self._dispatch_loop(), name="dispatch"))
             if "scheduler" in self.roles:
                 loops.append(asyncio.create_task(self._scheduler_loop(), name="scheduler"))
+                loops.append(
+                    asyncio.create_task(
+                        self._decomposition_loop(), name="request-decomposition"
+                    )
+                )
 
             # File watcher for auto-reload (always runs)
             loops.append(asyncio.create_task(self._reload_watcher(), name="reload-watcher"))

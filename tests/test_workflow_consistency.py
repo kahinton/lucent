@@ -1,5 +1,7 @@
 """Workflow consistency tests for Phase 4 critical paths."""
 
+import asyncio
+import json
 from uuid import uuid4
 
 import httpx
@@ -1208,12 +1210,7 @@ class TestFeedbackProcessing:
 
 
 class TestWakeSignal:
-    """Test pg_notify fires on request creation (via trigger).
-
-    Note: Direct testing of pg_notify from the feedback route requires a
-    full web UI session, so we test the trigger-based notification on the
-    requests table which fires for INSERT.
-    """
+    """Test pg_notify fires on every request creation source."""
 
     @pytest.mark.asyncio
     async def test_request_insert_trigger_exists(self, db_pool):
@@ -1226,30 +1223,32 @@ class TestWakeSignal:
         assert row is not None, "request_created_notify trigger should exist"
 
     @pytest.mark.asyncio
-    async def test_pg_notify_fires_on_request_insert(self, db_pool, wf_org):
-        """Listen for request_ready notifications when a request is inserted."""
+    @pytest.mark.parametrize(
+        "source", ["user", "api", "cognitive", "schedule", "daemon"]
+    )
+    async def test_pg_notify_fires_for_every_request_source(
+        self, db_pool, wf_org, source
+    ):
+        """Every request source emits an actionable request_ready payload."""
         org = str(wf_org["id"])
-        from lucent.db.requests import RequestRepository
-
         repo = RequestRepository(db_pool)
+        notifications = asyncio.Queue()
+
+        def on_notify(connection, pid, channel, payload):
+            notifications.put_nowait(json.loads(payload))
 
         async with db_pool.acquire() as listener_conn:
-            await listener_conn.execute("LISTEN request_ready")
-
-            # Create request in separate connection
-            await repo.create_request(title="Notify test", org_id=org)
-
-            # Check for notification (short timeout)
-            import asyncio
-
+            await listener_conn.add_listener("request_ready", on_notify)
             try:
-                await asyncio.wait_for(
-                    listener_conn.fetchrow("SELECT 1"),  # dummy to flush
-                    timeout=0.5,
+                request = await repo.create_request(
+                    title=f"Notify test: {source}",
+                    org_id=org,
+                    source=source,
                 )
-            except asyncio.TimeoutError:
-                pass
+                payload = await asyncio.wait_for(notifications.get(), timeout=1)
+            finally:
+                await listener_conn.remove_listener("request_ready", on_notify)
 
-            # The trigger should have fired — check via pg_notification_queue
-            # or just verify the trigger exists (done above)
-            await listener_conn.execute("UNLISTEN request_ready")
+        assert payload["request_id"] == str(request["id"])
+        assert payload["organization_id"] == org
+        assert payload["source"] == source
