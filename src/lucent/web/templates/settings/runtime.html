@@ -71,29 +71,28 @@
                     {% if d.editable %}
                     <div class="mt-3 flex flex-col sm:flex-row gap-2">
                         <form action="/settings/runtime/{{ d.key }}" method="post" class="flex-1 flex gap-2" data-runtime-form="save">
-                            {% if d.choices %}
+                            {% if item.control_type in ('select', 'model') %}
                             <select name="value" class="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-500">
-                                {% for choice in d.choices %}
-                                <option value="{{ choice }}" {% if item.form_value == choice %}selected{% endif %}>{{ choice }}</option>
+                                {% for option in item.options %}
+                                <option value="{{ option.value }}" {% if item.form_value == option.value|string %}selected{% endif %}>{{ option.label }}</option>
                                 {% endfor %}
                             </select>
-                            {% elif d.value_type == 'boolean' %}
-                            <select name="value" class="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-500">
-                                <option value="true" {% if item.form_value == 'true' %}selected{% endif %}>Enabled</option>
-                                <option value="false" {% if item.form_value == 'false' %}selected{% endif %}>Disabled</option>
-                            </select>
-                            {% elif d.value_type == 'integer' %}
-                            <input type="number" name="value" value="{{ item.form_value }}" step="1"
-                                {% if d.min_value is not none %}min="{{ d.min_value }}"{% endif %}
-                                {% if d.max_value is not none %}max="{{ d.max_value }}"{% endif %}
-                                class="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-500">
-                            {% elif d.value_type == 'float' %}
-                            <input type="number" name="value" value="{{ item.form_value }}" step="0.01"
+                            {% elif item.control_type == 'toggle' %}
+                            <label class="flex-1 inline-flex items-center justify-between gap-3 rounded-lg border border-gray-300 bg-white px-3 py-2 cursor-pointer">
+                                <span class="text-sm font-medium text-gray-700" data-runtime-toggle-label>{{ 'Enabled' if item.value else 'Disabled' }}</span>
+                                <span class="relative inline-flex h-6 w-11 flex-shrink-0">
+                                    <input type="checkbox" name="value" value="true" class="peer sr-only" data-runtime-toggle {% if item.value %}checked{% endif %}>
+                                    <span class="absolute inset-0 rounded-full bg-gray-300 transition peer-checked:bg-primary-600 peer-focus:ring-2 peer-focus:ring-primary-500 peer-focus:ring-offset-2"></span>
+                                    <span class="absolute left-1 top-1 h-4 w-4 rounded-full bg-white shadow transition-transform peer-checked:translate-x-5"></span>
+                                </span>
+                            </label>
+                            {% elif item.control_type == 'number' %}
+                            <input type="number" name="value" value="{{ item.form_value }}" step="{{ '1' if d.value_type == 'integer' else 'any' }}"
                                 {% if d.min_value is not none %}min="{{ d.min_value }}"{% endif %}
                                 {% if d.max_value is not none %}max="{{ d.max_value }}"{% endif %}
                                 class="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-500">
                             {% else %}
-                            <input type="text" name="value" value="{{ item.form_value }}"
+                            <input type="{{ 'url' if item.control_type == 'url' else 'text' }}" name="value" value="{{ item.form_value }}"
                                 class="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-500">
                             {% endif %}
                             <button type="submit" class="px-3 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 text-sm font-medium whitespace-nowrap">Save</button>
@@ -166,7 +165,16 @@ document.addEventListener('DOMContentLoaded', function() {
     function updateFormControl(card, formValue) {
         const control = card.querySelector('[data-runtime-form="save"] [name="value"]');
         if (control && formValue !== undefined && formValue !== null) {
-            control.value = String(formValue);
+            if (control.matches('[data-runtime-toggle]')) {
+                control.checked = String(formValue).toLowerCase() === 'true';
+                const label = card.querySelector('[data-runtime-toggle-label]');
+                if (label) label.textContent = control.checked ? 'Enabled' : 'Disabled';
+            } else {
+                if (control.tagName === 'SELECT' && !Array.from(control.options).some(function(option) { return option.value === String(formValue); })) {
+                    control.add(new Option(String(formValue) + ' (currently unavailable)', String(formValue)));
+                }
+                control.value = String(formValue);
+            }
         }
     }
 
@@ -222,6 +230,13 @@ document.addEventListener('DOMContentLoaded', function() {
 
     document.querySelectorAll('[data-runtime-form]').forEach(function(form) {
         form.addEventListener('submit', submitRuntimeForm);
+    });
+    document.querySelectorAll('[data-runtime-toggle]').forEach(function(toggle) {
+        toggle.addEventListener('change', function() {
+            const card = toggle.closest('[data-runtime-setting-card]');
+            const label = card && card.querySelector('[data-runtime-toggle-label]');
+            if (label) label.textContent = toggle.checked ? 'Enabled' : 'Disabled';
+        });
     });
 });
 </script>

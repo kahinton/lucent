@@ -71,7 +71,20 @@ class RuntimeSettingsRepository:
         value_type: str,
         user_id: UUID | str | None,
     ) -> dict[str, Any]:
-        """Create or update a runtime setting row."""
+        """Create or update a runtime setting row after catalog validation."""
+        from lucent.settings import (
+            get_runtime_setting_definition,
+            validate_runtime_setting_value,
+        )
+
+        definition = get_runtime_setting_definition(key)
+        if not definition or not definition.editable:
+            raise ValueError("Unknown or read-only runtime setting.")
+        if value_type != definition.value_type:
+            raise ValueError(
+                f"Runtime setting {key} requires value_type={definition.value_type}."
+            )
+        value = validate_runtime_setting_value(key, value)
         query = """
             INSERT INTO runtime_settings
                 (organization_id, key, value, value_type, created_by, updated_by)

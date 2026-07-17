@@ -8,6 +8,7 @@ Tests:
 
 from uuid import uuid4
 
+import asyncpg
 import httpx
 import pytest
 import pytest_asyncio
@@ -24,6 +25,7 @@ from lucent.auth_providers import (
 )
 from lucent.db import (
     ApiKeyRepository,
+    ModelRepository,
     OrganizationRepository,
     RuntimeSettingsRepository,
     UserRepository,
@@ -52,6 +54,11 @@ async def web_prefix(db_pool):
         await conn.execute(
             "DELETE FROM api_keys WHERE user_id IN "
             "(SELECT id FROM users WHERE external_id LIKE $1)",
+            f"{prefix}%",
+        )
+        await conn.execute(
+            "DELETE FROM models WHERE organization_id IN "
+            "(SELECT id FROM organizations WHERE name LIKE $1)",
             f"{prefix}%",
         )
         await conn.execute("DELETE FROM users WHERE external_id LIKE $1", f"{prefix}%")
@@ -220,6 +227,7 @@ async def test_runtime_settings_page_shows_env_fallback(
     assert "Chat model" in resp.text
     assert "GitHub token" in resp.text
     assert "Locked" in resp.text
+    assert 'data-runtime-toggle' in resp.text
 
 
 @pytest.mark.asyncio
@@ -265,10 +273,17 @@ async def test_runtime_default_model_drives_model_registry(
     user, org, _token = web_user
     await _promote_web_user(db_pool, web_user)
     runtime_settings.clear_runtime_setting_cache()
+    model_id = f"test-default-{org['id']}"
+    await ModelRepository(db_pool).create_model(
+        model_id,
+        "test",
+        "DB Default",
+        org_id=str(org["id"]),
+    )
 
     resp = await client.post(
         "/settings/runtime/models.default_model",
-        data=_csrf_data(client, {"value": "test-default-model"}),
+        data=_csrf_data(client, {"value": model_id}),
         follow_redirects=False,
     )
 
@@ -284,7 +299,7 @@ async def test_runtime_default_model_drives_model_registry(
                     category="general",
                 ),
                 ModelInfo(
-                    id="test-default-model",
+                    id=model_id,
                     provider="test",
                     name="DB Default",
                     category="general",
@@ -293,7 +308,7 @@ async def test_runtime_default_model_drives_model_registry(
         )
     finally:
         set_current_user(None)
-    assert selected == "test-default-model"
+    assert selected == model_id
 
 
 @pytest.mark.asyncio
@@ -341,10 +356,17 @@ async def test_runtime_setting_update_json_response(
     _user, org, _token = web_user
     await _promote_web_user(db_pool, web_user)
     runtime_settings.clear_runtime_setting_cache()
+    model_id = f"gpt-4.1-{org['id']}"
+    await ModelRepository(db_pool).create_model(
+        model_id,
+        "test",
+        "GPT 4.1",
+        org_id=str(org["id"]),
+    )
 
     resp = await client.post(
         "/settings/runtime/models.chat_model",
-        data=_csrf_data(client, {"value": "gpt-4.1"}),
+        data=_csrf_data(client, {"value": model_id}),
         headers={"Accept": "application/json", "X-Requested-With": "fetch"},
         follow_redirects=False,
     )
@@ -356,8 +378,139 @@ async def test_runtime_setting_update_json_response(
     assert payload["setting"]["key"] == "models.chat_model"
     assert payload["setting"]["source"] == "database"
     assert payload["setting"]["source_label"] == "Saved in DB"
-    assert payload["setting"]["display_value"] == "gpt-4.1"
-    assert runtime_settings.chat_model_id(organization_id=org["id"]) == "gpt-4.1"
+    assert payload["setting"]["display_value"] == model_id
+    assert runtime_settings.chat_model_id(organization_id=org["id"]) == model_id
+
+
+@pytest.mark.asyncio
+async def test_runtime_model_setting_renders_typed_selector(
+    client,
+    db_pool,
+    web_user,
+):
+    _user, org, _token = web_user
+    await _promote_web_user(db_pool, web_user)
+    model_id = f"typed-selector-{org['id']}"
+    await ModelRepository(db_pool).create_model(
+        model_id,
+        "test-provider",
+        "Typed Selector",
+        org_id=str(org["id"]),
+    )
+
+    resp = await client.get("/settings/runtime")
+
+    assert resp.status_code == 200
+    assert f'<option value="{model_id}"' in resp.text
+    assert "Typed Selector — test-provider" in resp.text
+
+
+@pytest.mark.asyncio
+async def test_runtime_model_setting_rejects_unknown_model(
+    client,
+    db_pool,
+    web_user,
+):
+    _user, org, _token = web_user
+    await _promote_web_user(db_pool, web_user)
+
+    resp = await client.post(
+        "/settings/runtime/models.chat_model",
+        data=_csrf_data(client, {"value": "not-a-registered-model"}),
+        headers={"Accept": "application/json", "X-Requested-With": "fetch"},
+    )
+
+    assert resp.status_code == 400
+    assert "Select an available value" in resp.json()["error"]
+    assert await RuntimeSettingsRepository(db_pool).get_setting(
+        org["id"], "models.chat_model"
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_runtime_boolean_toggle_round_trips_native_boolean(
+    client,
+    db_pool,
+    web_user,
+):
+    _user, org, _token = web_user
+    await _promote_web_user(db_pool, web_user)
+    key = "memory.search_exclude_archived_enabled"
+
+    enabled = await client.post(
+        f"/settings/runtime/{key}",
+        data=_csrf_data(client, {"value": "true"}),
+    )
+    assert enabled.status_code == 303
+    assert (await RuntimeSettingsRepository(db_pool).get_setting(org["id"], key))[
+        "value"
+    ] is True
+
+    disabled = await client.post(
+        f"/settings/runtime/{key}",
+        data=_csrf_data(client),
+    )
+    assert disabled.status_code == 303
+    assert (await RuntimeSettingsRepository(db_pool).get_setting(org["id"], key))[
+        "value"
+    ] is False
+
+
+@pytest.mark.asyncio
+async def test_runtime_url_setting_rejects_incomplete_url(
+    client,
+    db_pool,
+    web_user,
+):
+    _user, org, _token = web_user
+    await _promote_web_user(db_pool, web_user)
+
+    resp = await client.post(
+        "/settings/runtime/chat.mcp_url",
+        data=_csrf_data(client, {"value": "not-a-url"}),
+        headers={"Accept": "application/json", "X-Requested-With": "fetch"},
+    )
+
+    assert resp.status_code == 400
+    assert "complete HTTP or HTTPS URL" in resp.json()["error"]
+    assert await RuntimeSettingsRepository(db_pool).get_setting(
+        org["id"], "chat.mcp_url"
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_runtime_settings_repository_rejects_wrong_declared_type(
+    db_pool,
+    web_user,
+):
+    user, org, _token = web_user
+    with pytest.raises(ValueError, match="requires value_type=float"):
+        await RuntimeSettingsRepository(db_pool).upsert_setting(
+            organization_id=org["id"],
+            key="memory.search_vitality_boost_alpha",
+            value="0.2",
+            value_type="string",
+            user_id=user["id"],
+        )
+
+
+@pytest.mark.asyncio
+async def test_runtime_settings_database_rejects_mismatched_json_shape(
+    db_pool,
+    web_user,
+):
+    user, org, _token = web_user
+    with pytest.raises(asyncpg.CheckViolationError):
+        async with db_pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute(
+                    """INSERT INTO runtime_settings
+                       (organization_id, key, value, value_type, created_by, updated_by)
+                       VALUES ($1, 'test.invalid_shape', $2::jsonb, 'boolean', $3, $3)""",
+                    org["id"],
+                    '"not-a-boolean"',
+                    user["id"],
+                )
 
 
 @pytest.mark.asyncio
@@ -371,10 +524,17 @@ async def test_runtime_setting_reset_json_response(
     await _promote_web_user(db_pool, web_user)
     monkeypatch.setenv("LUCENT_CHAT_MODEL", "env-chat-model")
     runtime_settings.clear_runtime_setting_cache()
+    model_id = f"db-chat-{org['id']}"
+    await ModelRepository(db_pool).create_model(
+        model_id,
+        "test",
+        "DB Chat Model",
+        org_id=str(org["id"]),
+    )
 
     await client.post(
         "/settings/runtime/models.chat_model",
-        data=_csrf_data(client, {"value": "db-chat-model"}),
+        data=_csrf_data(client, {"value": model_id}),
         headers={"Accept": "application/json", "X-Requested-With": "fetch"},
         follow_redirects=False,
     )

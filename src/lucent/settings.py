@@ -15,9 +15,12 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from typing import Any, Literal
+from urllib.parse import urlparse
 
 RuntimeSettingType = Literal["boolean", "integer", "float", "string", "json"]
 RuntimeSettingSource = Literal["database", "environment", "default"]
+RuntimeSettingControl = Literal["auto", "toggle", "select", "model", "url", "text"]
+RuntimeSettingOptionSource = Literal["models"]
 
 
 @dataclass(frozen=True)
@@ -39,6 +42,9 @@ class RuntimeSettingDefinition:
     sensitive: bool = False
     requires_restart: bool = False
     read_only_reason: str = ""
+    control: RuntimeSettingControl = "auto"
+    option_source: RuntimeSettingOptionSource | None = None
+    allow_empty: bool = False
 
 
 _RUNTIME_SETTING_DEFINITIONS: tuple[RuntimeSettingDefinition, ...] = (
@@ -165,6 +171,9 @@ _RUNTIME_SETTING_DEFINITIONS: tuple[RuntimeSettingDefinition, ...] = (
         section="Requests",
         description="Model override for request-level post-completion review.",
         help_text="Leave blank to use the daemon/default model selector.",
+        control="model",
+        option_source="models",
+        allow_empty=True,
     ),
     RuntimeSettingDefinition(
         key="requests.review_agent_type",
@@ -196,6 +205,9 @@ _RUNTIME_SETTING_DEFINITIONS: tuple[RuntimeSettingDefinition, ...] = (
             "model registry."
         ),
         help_text="Leave blank to let Lucent choose the first enabled general-purpose model.",
+        control="model",
+        option_source="models",
+        allow_empty=True,
     ),
     RuntimeSettingDefinition(
         key="models.chat_model",
@@ -206,6 +218,9 @@ _RUNTIME_SETTING_DEFINITIONS: tuple[RuntimeSettingDefinition, ...] = (
         section="Models & LLM",
         description="Preferred default model for chat sessions.",
         help_text="Leave blank to use the workspace default model.",
+        control="model",
+        option_source="models",
+        allow_empty=True,
     ),
     RuntimeSettingDefinition(
         key="models.daemon_model",
@@ -217,6 +232,9 @@ _RUNTIME_SETTING_DEFINITIONS: tuple[RuntimeSettingDefinition, ...] = (
         description="Preferred default model for daemon sessions and autonomous work.",
         help_text="Leave blank to use the workspace default model.",
         requires_restart=True,
+        control="model",
+        option_source="models",
+        allow_empty=True,
     ),
     RuntimeSettingDefinition(
         key="models.llm_engine",
@@ -247,6 +265,7 @@ _RUNTIME_SETTING_DEFINITIONS: tuple[RuntimeSettingDefinition, ...] = (
         title="Chat MCP URL",
         section="Chat",
         description="MCP server URL used by chat sessions for tool access.",
+        control="url",
     ),
     RuntimeSettingDefinition(
         key="chat.timeout_seconds",
@@ -276,6 +295,9 @@ _RUNTIME_SETTING_DEFINITIONS: tuple[RuntimeSettingDefinition, ...] = (
         section="Chat",
         description="Optional model override for writing chat-session experience summaries.",
         help_text="Leave blank to use the chat/default model.",
+        control="model",
+        option_source="models",
+        allow_empty=True,
     ),
     RuntimeSettingDefinition(
         key="chat.session_experience_timeout_seconds",
@@ -331,6 +353,7 @@ _RUNTIME_SETTING_DEFINITIONS: tuple[RuntimeSettingDefinition, ...] = (
         section="Daemon",
         description="MCP server URL used by daemon-run sessions.",
         requires_restart=True,
+        control="url",
     ),
     RuntimeSettingDefinition(
         key="daemon.mcp_api_key",
@@ -943,6 +966,33 @@ def validate_runtime_setting_value(key: str, raw: Any) -> Any:
     return _coerce_runtime_value(definition, raw, clamp_bounds=False)
 
 
+def validate_runtime_setting_semantics(
+    key: str,
+    value: Any,
+    option_sets: dict[str, list[dict[str, Any]]],
+) -> None:
+    """Validate semantic controls and dynamic options after primitive coercion."""
+    definition = get_runtime_setting_definition(key)
+    if not definition:
+        return
+    if definition.control == "url":
+        parsed = urlparse(str(value))
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("Enter a complete HTTP or HTTPS URL.")
+    if not definition.option_source:
+        return
+    if definition.allow_empty and value == "":
+        return
+    valid_values = {
+        str(option["value"])
+        for option in option_sets.get(definition.option_source, [])
+        if option.get("value") is not None and not option.get("unavailable", False)
+    }
+    if str(value) not in valid_values:
+        source_label = definition.option_source.replace("_", " ")
+        raise ValueError(f"Select an available value from {source_label}.")
+
+
 def _fallback_value(definition: RuntimeSettingDefinition) -> tuple[Any, RuntimeSettingSource]:
     raw = os.environ.get(definition.env_var)
     if raw is None:
@@ -1063,9 +1113,63 @@ async def load_runtime_settings_from_db(
         set_runtime_setting_cache(row.get("organization_id"), key, row.get("value"))
 
 
-def runtime_setting_snapshots(organization_id: Any) -> list[dict[str, Any]]:
+def _setting_control_type(definition: RuntimeSettingDefinition) -> str:
+    if definition.control != "auto":
+        return definition.control
+    if definition.choices:
+        return "select"
+    if definition.value_type == "boolean":
+        return "toggle"
+    if definition.value_type in {"integer", "float"}:
+        return "number"
+    return "text"
+
+
+def _choice_label(value: str) -> str:
+    return value.replace("_", " ").replace("-", " ").title()
+
+
+def _setting_options(
+    definition: RuntimeSettingDefinition,
+    value: Any,
+    option_sets: dict[str, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    options: list[dict[str, Any]] = []
+    if definition.option_source:
+        options = [dict(option) for option in option_sets.get(definition.option_source, [])]
+    elif definition.choices:
+        options = [
+            {"value": choice, "label": _choice_label(choice)}
+            for choice in definition.choices
+        ]
+
+    if definition.allow_empty:
+        options.insert(0, {"value": "", "label": "Use automatic/default selection"})
+
+    string_value = str(value)
+    option_missing = all(
+        str(option.get("value")) != string_value for option in options
+    )
+    if string_value and options and option_missing:
+        options.insert(
+            0,
+            {
+                "value": string_value,
+                "label": f"{string_value} (currently unavailable)",
+                "unavailable": True,
+            },
+        )
+    return options
+
+
+def runtime_setting_snapshots(
+    organization_id: Any,
+    *,
+    option_sets: dict[str, list[dict[str, Any]]] | None = None,
+) -> list[dict[str, Any]]:
     """Return UI-friendly setting snapshots for one organization."""
     snapshots: list[dict[str, Any]] = []
+    resolved_option_sets = option_sets or {}
     org_id, cached = _org_cache(organization_id)
     for definition in _RUNTIME_SETTING_DEFINITIONS:
         value = get_runtime_setting(definition.key, organization_id=org_id)
@@ -1083,15 +1187,21 @@ def runtime_setting_snapshots(organization_id: Any) -> list[dict[str, Any]]:
                 "env_raw": "***" if definition.sensitive and env_raw else env_raw,
                 "default_value": definition.default,
                 "default_display": _display_value(definition, definition.default),
+                "control_type": _setting_control_type(definition),
+                "options": _setting_options(definition, value, resolved_option_sets),
             }
         )
     return snapshots
 
 
-def runtime_settings_by_section(organization_id: Any) -> dict[str, list[dict[str, Any]]]:
+def runtime_settings_by_section(
+    organization_id: Any,
+    *,
+    option_sets: dict[str, list[dict[str, Any]]] | None = None,
+) -> dict[str, list[dict[str, Any]]]:
     """Return setting snapshots grouped by display section."""
     grouped: dict[str, list[dict[str, Any]]] = {}
-    for snapshot in runtime_setting_snapshots(organization_id):
+    for snapshot in runtime_setting_snapshots(organization_id, option_sets=option_sets):
         section = snapshot["definition"].section
         grouped.setdefault(section, []).append(snapshot)
     return grouped
@@ -1106,6 +1216,8 @@ def _format_form_value(value: Any) -> str:
 def _display_value(definition: RuntimeSettingDefinition, value: Any) -> str:
     if definition.sensitive:
         return "Configured (hidden)" if value else "Not configured"
+    if definition.value_type == "boolean":
+        return "Enabled" if value else "Disabled"
     if value == "":
         return "Not set"
     return str(value)
