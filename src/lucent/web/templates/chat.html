@@ -1032,91 +1032,15 @@ function appendAssistantMessage(text) {
 // ═══════════════════════════════════════════════════════════════════
 
 function appendToolCall(container, toolName, input) {
-    const toolId = `tool-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-    const div = document.createElement('div');
-    div.className = 'tool-chip-wrapper';
-    div.dataset.tool = toolName;
-    div.dataset.toolId = toolId;
-    
-    // Pretty-format tool name
-    const displayName = toolName.replace(/^mcp_memory-server_/, '').replace(/_/g, ' ');
-    
-    // Parse input for display
-    let inputPreview = '';
-    try {
-        const parsed = JSON.parse(input);
-        const keys = Object.entries(parsed).filter(([_, v]) => v != null);
-        inputPreview = keys.map(([k, v]) => {
-            const val = typeof v === 'string' ? v : JSON.stringify(v);
-            return `<span class="text-gray-500">${escapeHtml(k)}:</span> <span class="text-gray-700">${escapeHtml(val.slice(0, 60))}</span>`;
-        }).join(', ');
-    } catch(e) {
-        inputPreview = escapeHtml((input || '').slice(0, 80));
-    }
-    
-    div.innerHTML = `
-        <button data-tool-toggle="${toolId}" class="tool-chip flex items-center gap-2 w-full text-left px-3 py-2 rounded-lg border border-gray-200 bg-gray-50 hover:bg-gray-100 transition-colors text-xs group">
-            <div class="tool-status-icon w-4 h-4 shrink-0">
-                <svg class="w-4 h-4 text-amber-500 animate-pulse" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M11.42 15.17L17.25 21A2.652 2.652 0 0021 17.25l-5.877-5.877M11.42 15.17l2.496-3.03c.317-.384.74-.626 1.208-.766M11.42 15.17l-4.655 5.653a2.548 2.548 0 11-3.586-3.586l6.837-5.63m5.108-.233c.55-.164 1.163-.188 1.743-.14a4.5 4.5 0 004.486-6.336l-3.276 3.277a3.004 3.004 0 01-2.25-2.25l3.276-3.276a4.5 4.5 0 00-6.336 4.486c.049.58.025 1.194-.14 1.743" />
-                </svg>
-            </div>
-            <div class="flex-1 min-w-0">
-                <span class="font-medium text-gray-900">${escapeHtml(displayName)}</span>
-                <span class="tool-inline-detail ml-1.5 text-gray-400">${inputPreview ? `· ${inputPreview}` : ''}</span>
-            </div>
-            <svg class="w-3 h-3 text-gray-400 transition-transform group-hover:text-gray-600 tool-chevron" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
-            </svg>
-        </button>
-        <div id="details-${toolId}" class="tool-details">
-            <div class="tool-details-content mt-1 ml-6 p-3 rounded-lg border border-gray-100 bg-gray-50 text-xs font-mono">
-                <div class="mb-2">
-                    <span class="text-gray-500 font-sans text-[10px] uppercase tracking-wide">Input</span>
-                    <pre class="mt-1 text-gray-700 whitespace-pre-wrap break-words">${escapeHtml(formatJSON(input))}</pre>
-                </div>
-                <div class="tool-output-section hidden">
-                    <span class="text-gray-500 font-sans text-[10px] uppercase tracking-wide">Output</span>
-                    <pre class="tool-output mt-1 text-green-700 whitespace-pre-wrap break-words max-h-48 overflow-y-auto"></pre>
-                </div>
-            </div>
-        </div>`;
-    container.appendChild(div);
+    return LucentChatMessageUI.appendToolCall(container, toolName, input);
 }
 
 function updateToolResult(container, toolName, output) {
-    // Find the last tool chip for this tool that doesn't have a result yet
-    const chips = container.querySelectorAll(`.tool-chip-wrapper[data-tool="${toolName}"]`);
-    for (let i = chips.length - 1; i >= 0; i--) {
-        const chip = chips[i];
-        const outputSection = chip.querySelector('.tool-output-section');
-        if (outputSection && outputSection.classList.contains('hidden')) {
-            // Update to completed hammer icon
-            const icon = chip.querySelector('.tool-status-icon');
-            icon.innerHTML = '<svg class="w-4 h-4 text-green-600" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M11.42 15.17L17.25 21A2.652 2.652 0 0021 17.25l-5.877-5.877M11.42 15.17l2.496-3.03c.317-.384.74-.626 1.208-.766M11.42 15.17l-4.655 5.653a2.548 2.548 0 11-3.586-3.586l6.837-5.63m5.108-.233c.55-.164 1.163-.188 1.743-.14a4.5 4.5 0 004.486-6.336l-3.276 3.277a3.004 3.004 0 01-2.25-2.25l3.276-3.276a4.5 4.5 0 00-6.336 4.486c.049.58.025 1.194-.14 1.743" /></svg>';
-            
-            // Show inline output preview in the chip header
-            const inlineDetail = chip.querySelector('.tool-inline-detail');
-            if (inlineDetail && output) {
-                const preview = (output || '').replace(/[\n\r]+/g, ' ').slice(0, 120);
-                inlineDetail.innerHTML = `· <span class="text-green-600">${escapeHtml(preview)}${output.length > 120 ? '…' : ''}</span>`;
-            }
-            
-            // Show full output in expandable details
-            outputSection.classList.remove('hidden');
-            const outputEl = chip.querySelector('.tool-output');
-            outputEl.textContent = formatJSON(output);
-            return;
-        }
-    }
+    LucentChatMessageUI.updateToolResult(container, toolName, output);
 }
 
 function toggleToolDetails(toolId) {
-    const details = document.getElementById(`details-${toolId}`);
-    const chip = details.closest('.tool-chip-wrapper');
-    const chevron = chip.querySelector('.tool-chevron');
-    details.classList.toggle('open');
-    chevron.style.transform = details.classList.contains('open') ? 'rotate(90deg)' : '';
+    LucentChatMessageUI.toggleToolDetails(toolId);
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1164,12 +1088,7 @@ function collapseReasoningBlock(wrapper) {
 }
 
 function finalizeToolCalls(container) {
-    // Mark any tool calls still showing spinners as completed
-    const spinners = container.querySelectorAll('.tool-status-icon .animate-pulse');
-    spinners.forEach(spinner => {
-        const icon = spinner.closest('.tool-status-icon');
-        icon.innerHTML = '<svg class="w-4 h-4 text-green-600" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M11.42 15.17L17.25 21A2.652 2.652 0 0021 17.25l-5.877-5.877M11.42 15.17l2.496-3.03c.317-.384.74-.626 1.208-.766M11.42 15.17l-4.655 5.653a2.548 2.548 0 11-3.586-3.586l6.837-5.63m5.108-.233c.55-.164 1.163-.188 1.743-.14a4.5 4.5 0 004.486-6.336l-3.276 3.277a3.004 3.004 0 01-2.25-2.25l3.276-3.276a4.5 4.5 0 00-6.336 4.486c.049.58.025 1.194-.14 1.743" /></svg>';
-    });
+    LucentChatMessageUI.finalizeToolCalls(container);
 }
 
 function toggleReasoning(btn) {
@@ -1305,50 +1224,7 @@ function formatJSON(text) {
 // ═══════════════════════════════════════════════════════════════════
 
 function renderMarkdown(text) {
-    if (!text) return '';
-    
-    // Code blocks
-    text = text.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
-        const langLabel = lang ? `<span class="absolute top-2 right-2 text-[10px] text-gray-500 font-sans">${escapeHtml(lang)}</span>` : '';
-        return `<div class="relative my-3"><pre class="bg-gray-900 text-gray-100 rounded-xl p-4 overflow-x-auto text-xs leading-relaxed">${langLabel}<code>${escapeHtml(code.trim())}</code></pre></div>`;
-    });
-    // Inline code
-    text = text.replace(/`([^`]+)`/g, (_, code) =>
-        `<code class="bg-gray-100 text-primary-700 px-1.5 py-0.5 rounded-md text-xs font-medium">${escapeHtml(code)}</code>`
-    );
-    // Bold
-    text = text.replace(/\*\*([^*]+)\*\*/g, '<strong class="font-semibold text-gray-900">$1</strong>');
-    // Italic
-    text = text.replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, '<em>$1</em>');
-    // Headers
-    text = text.replace(/^### (.+)$/gm, '<h4 class="font-semibold text-gray-900 mt-3 mb-1 text-sm">$1</h4>');
-    text = text.replace(/^## (.+)$/gm, '<h3 class="font-semibold text-gray-900 mt-4 mb-1.5">$1</h3>');
-    text = text.replace(/^# (.+)$/gm, '<h2 class="font-bold text-gray-900 mt-4 mb-2 text-lg">$1</h2>');
-    // Horizontal rules
-    text = text.replace(/^---$/gm, '<hr class="my-4 border-gray-200">');
-    // Unordered lists
-    text = text.replace(/^- (.+)$/gm, '<li class="ml-4 list-disc text-gray-700">$1</li>');
-    text = text.replace(/(<li[^>]*>.*<\/li>\n?)+/g, '<ul class="my-2 space-y-0.5">$&</ul>');
-    // Ordered lists
-    text = text.replace(/^\d+\. (.+)$/gm, '<li class="ml-4 list-decimal text-gray-700">$1</li>');
-    // Links
-    text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, label, url) => {
-        const safeUrl = url.trim();
-        if (/^(https?:\/\/|\/|#|mailto:)/i.test(safeUrl)) {
-            return `<a href="${escapeHtml(safeUrl)}" class="text-primary-600 hover:text-primary-700 underline decoration-primary-300" target="_blank" rel="noopener">${escapeHtml(label)}</a>`;
-        }
-        return escapeHtml(label);
-    });
-    // Paragraphs
-    text = text.replace(/\n\n/g, '</p><p class="mt-2">');
-    text = '<p>' + text + '</p>';
-    text = text.replace(/<p>\s*<\/p>/g, '');
-    
-    // Sanitize
-    if (typeof DOMPurify !== 'undefined') {
-        text = DOMPurify.sanitize(text);
-    }
-    return text;
+    return LucentChatMessageUI.renderMarkdown(text);
 }
 
 // ═══════════════════════════════════════════════════════════════════

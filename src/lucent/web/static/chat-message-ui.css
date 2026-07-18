@@ -1,0 +1,29 @@
+.tool-details {
+    max-height: 0;
+    overflow: hidden;
+    transition: max-height 0.3s ease-out;
+}
+
+.tool-details.open {
+    max-height: 500px;
+}
+
+.chat-streaming-cursor::after {
+    content: '\258a';
+    animation: chat-cursor-blink 0.8s step-end infinite;
+    color: #6366f1;
+    font-weight: 200;
+}
+
+@keyframes chat-cursor-blink {
+    50% { opacity: 0; }
+}
+
+@keyframes chat-message-fade-up {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.chat-message-enter {
+    animation: chat-message-fade-up 0.25s ease-out;
+}

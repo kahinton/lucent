@@ -39,12 +39,14 @@
         </div>
     </div>
     {% if workflow_composer_agent %}
-    <div id="workflow-composer-messages" class="flex-1 space-y-3 overflow-y-auto bg-gray-50/60 p-4">
-        <div class="flex gap-2.5">
-            <div class="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary-100 text-primary-700">
+    <div id="workflow-composer-messages" class="flex-1 overflow-y-auto bg-white px-4 py-2">
+        <div class="px-2 py-4">
+            <div class="mx-auto flex max-w-3xl gap-3">
+            <div class="mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary-100 text-primary-700">
                 <svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09Z" /></svg>
             </div>
-            <div class="max-w-[85%] rounded-2xl rounded-tl-sm bg-white px-3.5 py-2.5 text-sm text-gray-700 shadow-sm ring-1 ring-gray-100">What workflow should we automate? Tell me the trigger, what should happen, and what proof you want reviewers to see. I’ll draft first and only create it after you confirm.</div>
+            <div class="min-w-0 flex-1 text-sm leading-relaxed text-gray-800">What workflow should we automate? Tell me the trigger, what should happen, and what proof you want reviewers to see. I’ll draft first and only create it after you confirm.</div>
+            </div>
         </div>
     </div>
     <div class="border-t border-gray-100 bg-white px-4 py-3">
@@ -356,45 +358,50 @@
         sendBtn.disabled = state.streaming || !input.value.trim() || !agentId;
     }
 
-    function bubbleClasses(role) {
-        if (role === 'user') {
-            return 'max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-tr-sm bg-primary-600 px-3.5 py-2.5 text-sm text-white shadow-sm';
-        }
-        return 'max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-tl-sm bg-white px-3.5 py-2.5 text-sm text-gray-700 shadow-sm ring-1 ring-gray-100';
-    }
-
     function appendMessage(role, text) {
         if (!messagesEl) return null;
         const row = document.createElement('div');
-        row.className = role === 'user' ? 'flex justify-end' : 'flex gap-2.5';
+        row.className = 'chat-message-enter px-2 py-4';
+        const inner = document.createElement('div');
+        inner.className = role === 'user'
+            ? 'mx-auto flex max-w-3xl justify-end'
+            : 'mx-auto flex max-w-3xl gap-3';
 
-        if (role !== 'user') {
-            const avatar = document.createElement('div');
-            avatar.className = 'mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary-100 text-primary-700';
-            avatar.innerHTML = '<svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09Z" /></svg>';
-            row.appendChild(avatar);
+        if (role === 'user') {
+            const bubble = document.createElement('div');
+            bubble.className = 'max-w-[75%] whitespace-pre-wrap rounded-2xl rounded-br-sm bg-primary-600 px-4 py-3 text-sm leading-relaxed text-white shadow-sm';
+            bubble.textContent = text;
+            inner.appendChild(bubble);
+            row.appendChild(inner);
+            messagesEl.appendChild(row);
+            scrollMessages();
+            return { row, content: bubble, tools: null };
         }
 
-        const bubble = document.createElement('div');
-        bubble.className = bubbleClasses(role);
-        bubble.textContent = text;
-        row.appendChild(bubble);
+        const avatar = document.createElement('div');
+        avatar.className = 'mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary-100 text-primary-700';
+        avatar.innerHTML = '<svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09Z" /></svg>';
+        const body = document.createElement('div');
+        body.className = 'min-w-0 flex-1';
+        const tools = document.createElement('div');
+        tools.className = 'tools-container mb-3 space-y-2';
+        const content = document.createElement('div');
+        content.className = 'assistant-content prose prose-sm prose-gray max-w-none text-sm leading-relaxed text-gray-800';
+        content.innerHTML = text
+            ? LucentChatMessageUI.renderMarkdown(text)
+            : '<span class="inline-flex gap-1.5"><span class="h-2 w-2 animate-pulse rounded-full bg-gray-300"></span><span class="h-2 w-2 animate-pulse rounded-full bg-gray-300"></span><span class="h-2 w-2 animate-pulse rounded-full bg-gray-300"></span></span>';
+        body.appendChild(tools);
+        body.appendChild(content);
+        inner.appendChild(avatar);
+        inner.appendChild(body);
+        row.appendChild(inner);
         messagesEl.appendChild(row);
         scrollMessages();
-        return bubble;
-    }
-
-    function appendToolNote(text) {
-        if (!messagesEl) return;
-        const note = document.createElement('div');
-        note.className = 'mx-10 rounded-full bg-white px-3 py-1 text-center text-[11px] text-gray-500 ring-1 ring-gray-100';
-        note.textContent = text;
-        messagesEl.appendChild(note);
-        scrollMessages();
+        return { row, content, tools };
     }
 
     function shortToolName(tool) {
-        return String(tool || 'tool').replace(/^memory-server-/, '').replace(/^mcp_memory-server_/, '');
+        return LucentChatMessageUI.displayToolName(tool);
     }
 
     function resetComposerChat() {
@@ -414,33 +421,6 @@
         updateSendButton();
     }
 
-    function toolResultNote(tool, output) {
-        const name = shortToolName(tool);
-        if (name === 'create_workflow') {
-            let label = 'Created workflow. Open the Workflows list to review and test it.';
-            const rawOutput = String(output || '');
-            const lowerOutput = rawOutput.toLowerCase();
-            if (lowerOutput.includes('permission denied') || lowerOutput.includes('error')) {
-                label = 'create_workflow returned an error: ' + rawOutput.slice(0, 180);
-                return label;
-            }
-            try {
-                const parsed = JSON.parse(rawOutput || '{}');
-                if (parsed && parsed.error) {
-                    label = 'create_workflow returned an error: ' + parsed.error;
-                } else if (parsed && parsed.id) {
-                    label = 'Created workflow ' + String(parsed.id).slice(0, 8) + '. Open it from the Workflows list.';
-                }
-            } catch (_err) {
-                // Keep generic label.
-            }
-            return label;
-        }
-        if (name === 'list_workflows') return 'Checked existing workflows.';
-        if (name === 'get_workflow_details') return 'Loaded workflow details.';
-        return 'Finished ' + name + '.';
-    }
-
     async function sendComposerMessage(e) {
         e.preventDefault();
         if (!input || !agentId || state.streaming) return;
@@ -456,7 +436,9 @@
         updateSendButton();
         setStatus('Thinking…', 'active');
 
-        const assistantBubble = appendMessage('assistant', '');
+        const assistantMessage = appendMessage('assistant', '');
+        const assistantContent = assistantMessage?.content;
+        const toolsContainer = assistantMessage?.tools;
         let assistantText = '';
         let gotDeltas = false;
 
@@ -500,35 +482,64 @@
                     } else if (event.type === 'text_delta') {
                         gotDeltas = true;
                         assistantText += event.text || '';
-                        if (assistantBubble) assistantBubble.textContent = assistantText;
+                        if (assistantContent) {
+                            assistantContent.innerHTML = LucentChatMessageUI.renderMarkdown(assistantText);
+                            assistantContent.classList.add('chat-streaming-cursor');
+                        }
                         setStatus('Writing…', 'active');
                         scrollMessages();
                     } else if (event.type === 'message') {
                         if (!gotDeltas) assistantText = event.text || '';
-                        if (assistantBubble) assistantBubble.textContent = assistantText;
+                        if (assistantContent) {
+                            assistantContent.innerHTML = LucentChatMessageUI.renderMarkdown(assistantText);
+                            assistantContent.classList.remove('chat-streaming-cursor');
+                        }
                         scrollMessages();
                     } else if (event.type === 'tool_call') {
                         setStatus('Using ' + shortToolName(event.tool) + '…', 'active');
-                        appendToolNote('Using ' + shortToolName(event.tool) + '…');
+                        if (toolsContainer) {
+                            LucentChatMessageUI.appendToolCall(
+                                toolsContainer,
+                                event.tool,
+                                event.input,
+                            );
+                        }
+                        scrollMessages();
                     } else if (event.type === 'tool_result') {
-                        appendToolNote(toolResultNote(event.tool, event.output));
+                        if (toolsContainer) {
+                            LucentChatMessageUI.updateToolResult(
+                                toolsContainer,
+                                event.tool,
+                                event.output,
+                            );
+                        }
                         setStatus('Thinking…', 'active');
+                        scrollMessages();
                     } else if (event.type === 'error') {
                         throw new Error(event.error || 'The workflow assistant hit an error');
+                    } else if (event.type === 'done') {
+                        assistantContent?.classList.remove('chat-streaming-cursor');
+                        if (toolsContainer) LucentChatMessageUI.finalizeToolCalls(toolsContainer);
                     }
                 }
             }
 
             if (!assistantText.trim()) {
                 assistantText = 'No response came back. Try again, or check the chat/model configuration.';
-                if (assistantBubble) assistantBubble.textContent = assistantText;
+                if (assistantContent) {
+                    assistantContent.innerHTML = LucentChatMessageUI.renderMarkdown(assistantText);
+                }
             }
             state.messages.push({ role: 'assistant', content: assistantText });
             setStatus('Ready', 'success');
         } catch (err) {
             if (err.name !== 'AbortError') {
                 const message = 'Workflow Assistant error: ' + (err.message || 'unknown error');
-                if (assistantBubble) assistantBubble.textContent = message;
+                if (assistantContent) {
+                    assistantContent.textContent = message;
+                    assistantContent.classList.add('text-red-600');
+                    assistantContent.classList.remove('chat-streaming-cursor');
+                }
                 setStatus('Error', 'error');
             }
         } finally {
@@ -551,6 +562,12 @@
 
     if (form) form.addEventListener('submit', sendComposerMessage);
     if (resetBtn) resetBtn.addEventListener('click', resetComposerChat);
+    root.addEventListener('click', event => {
+        const toolToggle = event.target.closest('[data-tool-toggle]');
+        if (toolToggle) {
+            LucentChatMessageUI.toggleToolDetails(toolToggle.dataset.toolToggle);
+        }
+    });
     if (input) {
         input.addEventListener('input', () => {
             input.style.height = 'auto';
