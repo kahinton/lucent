@@ -281,8 +281,15 @@ class TestDashboard:
         self, client, db_pool, web_user, web_prefix, monkeypatch
     ):
         user, org, _token = web_user
+        other_user = await UserRepository(db_pool).create(
+            external_id=f"{web_prefix}other_user",
+            provider="basic",
+            organization_id=org["id"],
+            email=f"{web_prefix}other@test.com",
+            display_name=f"{web_prefix}Other User",
+        )
 
-        # Create a request that needs approval (cognitive source + auto-approve off)
+        # Each member has one pending request; the sidebar must count only the viewer's.
         monkeypatch.setenv("LUCENT_AUTO_APPROVE", "false")
         from lucent.db.requests import RequestRepository
         req_repo = RequestRepository(db_pool)
@@ -290,13 +297,24 @@ class TestDashboard:
             title="Needs approval test",
             org_id=str(org["id"]),
             source="cognitive",
+            created_by=str(user["id"]),
+        )
+        await req_repo.create_request(
+            title="Other user's pending request",
+            org_id=str(org["id"]),
+            source="cognitive",
+            created_by=str(other_user["id"]),
         )
 
         resp = await client.get("/")
         assert resp.status_code == 200
-        assert 'href="/daemon/review"' in resp.text
-        assert "Needs Approval" in resp.text
-        assert re.search(r'bg-amber-100[^>]*>\s*\d+\s*</span>', resp.text, re.S)
+        badge = re.search(
+            r'href="/activity"(?:(?!</a>).)*title="Requests awaiting approval"[^>]*>'
+            r"\s*(\d+)\s*</span>",
+            resp.text,
+            re.S,
+        )
+        assert badge and badge.group(1) == "1"
 
     @pytest.mark.asyncio
     async def test_dashboard_owner_sees_admin_operations(

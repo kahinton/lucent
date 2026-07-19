@@ -39,6 +39,15 @@ async def _schedule_owner_context(
     fallback_user: AuthenticatedUser | None,
 ) -> tuple[str, str]:
     """Return (owner_user_id, owner_role) for work created by a schedule."""
+    if sched.get("is_system"):
+        from lucent.daemon_identity import ensure_daemon_service_user
+
+        async with pool.acquire() as conn:
+            daemon_user = await ensure_daemon_service_user(
+                conn, str(sched["organization_id"])
+            )
+        return str(daemon_user["id"]), "daemon"
+
     owner_id = str(sched.get("created_by") or (fallback_user.id if fallback_user else ""))
     if not owner_id:
         raise RuntimeError("Workflow has no owner user to create request work")

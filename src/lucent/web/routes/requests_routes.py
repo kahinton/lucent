@@ -16,10 +16,16 @@ router = APIRouter()
 ALLOWED_PER_PAGE = {10, 25, 50, 100}
 
 
-def _can_review_request(user) -> bool:
-    """Return whether the current web user can approve/reject request gates."""
+def request_visibility_context(user) -> tuple[str, bool]:
+    """Return requester identity and whether daemon system work is visible."""
     role = user.role if isinstance(user.role, Role) else Role.from_string(str(user.role))
-    return (
+    return str(user.id), role in (Role.ADMIN, Role.OWNER)
+
+
+def can_review_request(user, req: dict) -> bool:
+    """Allow owners of a request or privileged system actors to review it."""
+    role = user.role if isinstance(user.role, Role) else Role.from_string(str(user.role))
+    return str(req.get("created_by")) == str(user.id) or (
         role >= Role.ADMIN
         or role == Role.DAEMON
         or getattr(user, "is_daemon_service", False)
@@ -105,18 +111,24 @@ async def activity_list(
         source = "user,cognitive,daemon"
 
     org_id = str(user.organization_id)
+    requester_user_id, include_system = request_visibility_context(user)
     # Hide cancelled requests by default unless explicitly filtered
     exclude_status = None if status else "cancelled"
     requests_result = await repo.list_requests(
         org_id, status=status, source=source, limit=per_page, offset=offset,
         exclude_status=exclude_status, viewer_user_id=str(user.id),
+        requester_user_id=requester_user_id, include_system=include_system,
     )
     requests_data = requests_result["items"]
     total_count = requests_result["total_count"]
     total_pages = ceil(total_count / per_page) if total_count > 0 else 1
     page = min(page, total_pages)
 
-    summary = await repo.get_active_summary(org_id)
+    summary = await repo.get_active_summary(
+        org_id,
+        requester_user_id=requester_user_id,
+        include_system=include_system,
+    )
 
     approval_requests = [req for req in requests_data if _needs_prework_approval(req)]
     running_requests = [
@@ -128,15 +140,11 @@ async def activity_list(
         if not _needs_prework_approval(req) and req.get("tasks_running", 0) <= 0
     ]
 
-    # Count pending approvals for the badge (exclude cancelled)
-    async with pool.acquire() as conn:
-        pending_approval_count = await conn.fetchval(
-            """SELECT COUNT(*) FROM requests
-               WHERE organization_id = $1
-                 AND approval_status = 'pending_approval'
-                 AND status NOT IN ('cancelled', 'rejection_processing')""",
-            user.organization_id,
-        ) or 0
+    pending_approval_count = await repo.count_pending_approvals(
+        org_id,
+        requester_user_id=requester_user_id,
+        include_system=include_system,
+    )
 
     template_ctx = {
         "user": user,
@@ -148,7 +156,7 @@ async def activity_list(
         "filter_status": status,
         "filter_source": source,
         "pending_approval_count": pending_approval_count,
-        "can_review_request": _can_review_request(user),
+        "can_review_request": lambda req: can_review_request(user, req),
         "page": page,
         "per_page": per_page,
         "total_pages": total_pages,
@@ -188,7 +196,13 @@ async def request_detail(request: Request, request_id: str):
 
     repo = RequestRepository(pool)
 
-    req = await repo.get_request_with_tasks(request_id, str(user.organization_id))
+    requester_user_id, include_system = request_visibility_context(user)
+    req = await repo.get_request_with_tasks(
+        request_id,
+        str(user.organization_id),
+        requester_user_id=requester_user_id,
+        include_system=include_system,
+    )
     if not req:
         raise HTTPException(404, "Request not found")
 
@@ -413,7 +427,7 @@ async def request_detail(request: Request, request_id: str):
             "goal_info": goal_info,
             "origin_session": origin_session,
             "origin_sessions": origin_sessions,
-            "can_review_request": _can_review_request(user),
+            "can_review_request": can_review_request(user, req),
             "csrf_token": request.cookies.get(CSRF_COOKIE_NAME, ""),
         },
     )
@@ -429,8 +443,6 @@ async def request_approval_action(
     """Approve or reject a request that is waiting at the pre-work approval gate."""
     await _check_csrf(request)
     user = await get_user_context(request)
-    if not _can_review_request(user):
-        raise HTTPException(status_code=403, detail="Admin or owner role required")
     if action not in ("approve", "reject"):
         raise HTTPException(status_code=400, detail=f"Unknown action: {action}")
     if len(comment) > 10000:
@@ -443,9 +455,17 @@ async def request_approval_action(
 
     repo = RequestRepository(pool)
     org_id = str(user.organization_id)
-    req = await repo.get_request(request_id, org_id)
+    requester_user_id, include_system = request_visibility_context(user)
+    req = await repo.get_request(
+        request_id,
+        org_id,
+        requester_user_id=requester_user_id,
+        include_system=include_system,
+    )
     if not req:
         raise HTTPException(status_code=404, detail="Request not found")
+    if not can_review_request(user, req):
+        raise HTTPException(status_code=403, detail="You cannot review this request")
     if req.get("approval_status") != "pending_approval":
         raise HTTPException(status_code=409, detail="Request is not awaiting approval")
 

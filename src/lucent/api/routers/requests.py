@@ -57,18 +57,20 @@ def _is_matching_sandbox_task_actor(task_id: str, user: AuthenticatedUser) -> bo
     )
 
 
-async def _get_task_and_request(repo, task_id: str, org_id: str) -> tuple[dict, dict]:
+async def _get_task_and_request(
+    repo, task_id: str, org_id: str, user: AuthenticatedUser
+) -> tuple[dict, dict]:
     task = await repo.get_task(task_id, org_id=org_id)
     if not task:
         raise HTTPException(404, "Task not found")
-    req = await repo.get_request(str(task["request_id"]), org_id)
+    req = await _get_visible_request(repo, str(task["request_id"]), user)
     if not req:
         raise HTTPException(404, "Task not found")
     return task, req
 
 
 async def _require_task_mutation(repo, task_id: str, org_id: str, user: AuthenticatedUser) -> dict:
-    task, req = await _get_task_and_request(repo, task_id, org_id)
+    task, req = await _get_task_and_request(repo, task_id, org_id, user)
     if _is_matching_sandbox_task_actor(task_id, user):
         return task
     _require_request_mutation(req, user)
@@ -81,6 +83,23 @@ def _effective_memory_user_id(user: AuthenticatedUser) -> UUID:
 
 def _memory_admin_override(user: AuthenticatedUser) -> bool:
     return user.role >= Role.ADMIN and not user.is_memory_scoped
+
+
+def _request_visibility_args(user: AuthenticatedUser) -> dict:
+    if _is_daemon_user(user) and not user.is_memory_scoped:
+        return {}
+    return {
+        "requester_user_id": str(user.effective_memory_user_id),
+        "include_system": user.role >= Role.ADMIN and not user.is_memory_scoped,
+    }
+
+
+async def _get_visible_request(repo, request_id: str, user: AuthenticatedUser):
+    return await repo.get_request(
+        request_id,
+        str(user.organization_id),
+        **_request_visibility_args(user),
+    )
 
 
 def _build_memory_access(pool, user: AuthenticatedUser):
@@ -260,7 +279,12 @@ async def list_requests(
 
     repo = RequestRepository(pool)
     return await repo.list_requests(
-        str(user.organization_id), status=status, source=source, limit=limit, offset=offset
+        str(user.organization_id),
+        status=status,
+        source=source,
+        limit=limit,
+        offset=offset,
+        **_request_visibility_args(user),
     )
 
 
@@ -355,7 +379,9 @@ async def request_summary(user: AuthenticatedUser, pool=Depends(get_pool)):
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
-    return await repo.get_active_summary(str(user.organization_id))
+    return await repo.get_active_summary(
+        str(user.organization_id), **_request_visibility_args(user)
+    )
 
 
 @router.get("/events")
@@ -363,7 +389,9 @@ async def recent_events(user: AuthenticatedUser, limit: int = 50, pool=Depends(g
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
-    return await repo.get_recent_events(str(user.organization_id), limit=limit)
+    return await repo.get_recent_events(
+        str(user.organization_id), limit=limit, **_request_visibility_args(user)
+    )
 
 
 @router.get("/{request_id}/memories")
@@ -371,7 +399,7 @@ async def request_memories(request_id: UUID, user: AuthenticatedUser, pool=Depen
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
-    req = await repo.get_request(str(request_id), str(user.organization_id))
+    req = await _get_visible_request(repo, str(request_id), user)
     if not req:
         raise HTTPException(404, "Request not found")
     async with pool.acquire() as conn:
@@ -403,7 +431,11 @@ async def get_request(request_id: UUID, user: AuthenticatedUser, pool=Depends(ge
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
-    result = await repo.get_request_with_tasks(str(request_id), str(user.organization_id))
+    result = await repo.get_request_with_tasks(
+        str(request_id),
+        str(user.organization_id),
+        **_request_visibility_args(user),
+    )
     if not result:
         raise HTTPException(404, "Request not found")
     memory_access = _build_memory_access(pool, user)
@@ -425,7 +457,7 @@ async def update_request_status(
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
-    req = await repo.get_request(str(request_id), str(user.organization_id))
+    req = await _get_visible_request(repo, str(request_id), user)
     if not req:
         raise HTTPException(404, "Request not found")
     _require_request_mutation(req, user)
@@ -464,7 +496,7 @@ async def approve_request_review(
         raise HTTPException(403, "Admin or owner role required")
 
     repo = RequestRepository(pool)
-    req = await repo.get_request(str(request_id), str(user.organization_id))
+    req = await _get_visible_request(repo, str(request_id), user)
     if not req:
         raise HTTPException(404, "Request not found")
     if req["status"] != "review":
@@ -527,7 +559,7 @@ async def reject_request_review(
         raise HTTPException(403, "Admin or owner role required")
 
     repo = RequestRepository(pool)
-    req = await repo.get_request(str(request_id), str(user.organization_id))
+    req = await _get_visible_request(repo, str(request_id), user)
     if not req:
         raise HTTPException(404, "Request not found")
     if req["status"] != "review":
@@ -579,7 +611,7 @@ async def create_task(
 
     org_id = str(user.organization_id)
     repo = RequestRepository(pool)
-    req = await repo.get_request(str(request_id), org_id)
+    req = await _get_visible_request(repo, str(request_id), user)
     if not req:
         raise HTTPException(404, "Request not found")
     _require_request_mutation(req, user)
@@ -725,7 +757,9 @@ async def update_task_model(
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
-    task, req = await _get_task_and_request(repo, str(task_id), str(user.organization_id))
+    task, req = await _get_task_and_request(
+        repo, str(task_id), str(user.organization_id), user
+    )
     _require_request_mutation(req, user)
     from lucent.model_registry import validate_model, validate_reasoning_effort
 

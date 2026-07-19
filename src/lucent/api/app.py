@@ -367,14 +367,15 @@ def create_app() -> FastAPI:
                     user = await validate_session(pool, session_token)
                     if user:
                         org_id = user.get("organization_id")
+                        from lucent.db.requests import RequestRepository
+
+                        request_repo = RequestRepository(pool)
+                        count = await request_repo.count_pending_approvals(
+                            org_id=str(org_id),
+                            requester_user_id=str(user["id"]),
+                            include_system=user.get("role") in {"admin", "owner"},
+                        )
                         async with pool.acquire() as conn:
-                            count = await conn.fetchval(
-                                """SELECT COUNT(*) FROM requests
-                                   WHERE organization_id = $1
-                                     AND approval_status = 'pending_approval'
-                                     AND status NOT IN ('cancelled', 'rejection_processing')""",
-                                org_id,
-                            )
                             definition_count = await conn.fetchval(
                                 """
                                 SELECT
@@ -391,7 +392,7 @@ def create_app() -> FastAPI:
                                 """,
                                 org_id,
                             )
-                        request.state.pending_approval_count = count or 0
+                        request.state.pending_approval_count = count
                         request.state.definition_proposal_count = definition_count or 0
                         try:
                             from lucent.db.user_interactions import UserInteractionRepository
