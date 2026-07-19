@@ -632,12 +632,38 @@ class ScheduleRepository:
             )
             return dict(row)
 
-    async def get_schedule(self, schedule_id: str, org_id: str) -> dict | None:
+    async def get_schedule(
+        self,
+        schedule_id: str,
+        org_id: str,
+        created_by: str | None = None,
+        include_daemon_created: bool = False,
+    ) -> dict | None:
         async with self.pool.acquire() as conn:
+            creator_clause = ""
+            params = [schedule_id, org_id]
+            if created_by:
+                creator_clause = """
+                    AND (
+                        schedules.created_by = $3::uuid
+                        OR ($4::boolean AND (
+                            schedules.is_system
+                            OR EXISTS (
+                                SELECT 1 FROM users creator
+                                WHERE creator.id = schedules.created_by
+                                  AND (
+                                      creator.role = 'daemon'
+                                      OR creator.external_id = 'daemon-service'
+                                      OR creator.external_id LIKE 'daemon-service:%'
+                                  )
+                            )
+                        ))
+                    )"""
+                params.extend([created_by, include_daemon_created])
             row = await conn.fetchrow(
-                "SELECT * FROM schedules WHERE id = $1::uuid AND organization_id = $2::uuid",
-                schedule_id,
-                org_id,
+                "SELECT * FROM schedules WHERE id = $1::uuid AND organization_id = $2::uuid"
+                + creator_clause,
+                *params,
             )
             return dict(row) if row else None
 
@@ -669,6 +695,8 @@ class ScheduleRepository:
         org_id: str,
         status: str | None = None,
         enabled: bool | None = None,
+        created_by: str | None = None,
+        include_daemon_created: bool = False,
         limit: int = 25,
         offset: int = 0,
     ) -> dict:
@@ -677,6 +705,26 @@ class ScheduleRepository:
             params: list[Any] = [org_id]
             idx = 2
 
+            if created_by:
+                conditions.append(
+                    f"""(
+                        schedules.created_by = ${idx}::uuid
+                        OR (${idx + 1}::boolean AND (
+                            schedules.is_system
+                            OR EXISTS (
+                                SELECT 1 FROM users creator
+                                WHERE creator.id = schedules.created_by
+                                  AND (
+                                      creator.role = 'daemon'
+                                      OR creator.external_id = 'daemon-service'
+                                      OR creator.external_id LIKE 'daemon-service:%'
+                                  )
+                            )
+                        ))
+                    )"""
+                )
+                params.extend([created_by, include_daemon_created])
+                idx += 2
             if status:
                 conditions.append(f"status = ${idx}")
                 params.append(status)
@@ -695,7 +743,17 @@ class ScheduleRepository:
 
             params.extend([limit, offset])
             rows = await conn.fetch(
-                f"""SELECT * FROM schedules
+                f"""SELECT schedules.*,
+                           EXISTS (
+                               SELECT 1 FROM users creator
+                               WHERE creator.id = schedules.created_by
+                                 AND (
+                                     creator.role = 'daemon'
+                                     OR creator.external_id = 'daemon-service'
+                                     OR creator.external_id LIKE 'daemon-service:%'
+                                 )
+                           ) AS is_daemon_created
+                    FROM schedules
                     WHERE {where}
                     ORDER BY
                         CASE WHEN enabled AND status = 'active' THEN 0 ELSE 1 END,
@@ -1245,9 +1303,20 @@ class ScheduleRepository:
                 "has_more": offset + len(rows) < total_count,
             }
 
-    async def get_schedule_with_runs(self, schedule_id: str, org_id: str) -> dict | None:
+    async def get_schedule_with_runs(
+        self,
+        schedule_id: str,
+        org_id: str,
+        created_by: str | None = None,
+        include_daemon_created: bool = False,
+    ) -> dict | None:
         """Load a schedule with its recent run history."""
-        sched = await self.get_schedule(schedule_id, org_id)
+        sched = await self.get_schedule(
+            schedule_id,
+            org_id,
+            created_by=created_by,
+            include_daemon_created=include_daemon_created,
+        )
         if not sched:
             return None
         sched["runs"] = (await self.list_runs(schedule_id))["items"]
@@ -1255,8 +1324,33 @@ class ScheduleRepository:
 
     # ── Summary ───────────────────────────────────────────────────────────
 
-    async def get_summary(self, org_id: str) -> dict:
+    async def get_summary(
+        self,
+        org_id: str,
+        created_by: str | None = None,
+        include_daemon_created: bool = False,
+    ) -> dict:
         async with self.pool.acquire() as conn:
+            creator_clause = ""
+            params = [org_id]
+            if created_by:
+                creator_clause = """
+                    AND (
+                        schedules.created_by = $2::uuid
+                        OR ($3::boolean AND (
+                            schedules.is_system
+                            OR EXISTS (
+                                SELECT 1 FROM users creator
+                                WHERE creator.id = schedules.created_by
+                                  AND (
+                                      creator.role = 'daemon'
+                                      OR creator.external_id = 'daemon-service'
+                                      OR creator.external_id LIKE 'daemon-service:%'
+                                  )
+                            )
+                        ))
+                    )"""
+                params.extend([created_by, include_daemon_created])
             row = await conn.fetchrow(
                 """SELECT
                    count(*) as total,
@@ -1274,7 +1368,8 @@ class ScheduleRepository:
                    count(*) FILTER (WHERE trigger_type = 'webhook') as webhook,
                    count(*) FILTER (WHERE trigger_type = 'manual') as manual,
                    count(*) FILTER (WHERE trigger_type = 'integration_event') as integration_event
-                   FROM schedules WHERE organization_id = $1::uuid""",
-                org_id,
+                         FROM schedules WHERE organization_id = $1::uuid"""
+                     + creator_clause,
+                     *params,
             )
             return dict(row)

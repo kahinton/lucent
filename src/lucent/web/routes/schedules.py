@@ -9,12 +9,18 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from lucent.auth_providers import CSRF_COOKIE_NAME
 from lucent.db import get_pool
+from lucent.rbac import Role
 
 from ._shared import _check_csrf, get_user_context, templates
 
 router = APIRouter()
 
 ALLOWED_PER_PAGE = {10, 25, 50, 100}
+
+
+def _include_daemon_workflows(user) -> bool:
+    role = user.role if isinstance(user.role, Role) else Role(str(user.role))
+    return role >= Role.ADMIN
 
 
 def _annotate_workflow_execution(sched: dict[str, Any]) -> None:
@@ -80,7 +86,13 @@ async def schedules_list(
     org_id = str(user.organization_id)
     enabled_filter = True if enabled == "true" else (False if enabled == "false" else None)
     result = await repo.list_schedules(
-        org_id, status=status, enabled=enabled_filter, limit=per_page, offset=offset
+        org_id,
+        status=status,
+        enabled=enabled_filter,
+        created_by=str(user.id),
+        include_daemon_created=_include_daemon_workflows(user),
+        limit=per_page,
+        offset=offset,
     )
     schedules = result["items"]
     for sched in schedules:
@@ -95,7 +107,11 @@ async def schedules_list(
     total_count = result["total_count"]
     total_pages = ceil(total_count / per_page) if total_count > 0 else 1
     page = min(page, total_pages)
-    summary = await repo.get_summary(org_id)
+    summary = await repo.get_summary(
+        org_id,
+        created_by=str(user.id),
+        include_daemon_created=_include_daemon_workflows(user),
+    )
     base_path = "/workflows" if request.url.path.startswith("/workflows") else "/schedules"
 
     return templates.TemplateResponse(
@@ -324,7 +340,12 @@ async def schedule_detail(
     repo = ScheduleRepository(pool)
 
     org_id = str(user.organization_id)
-    sched = await repo.get_schedule(schedule_id, org_id)
+    sched = await repo.get_schedule(
+        schedule_id,
+        org_id,
+        created_by=str(user.id),
+        include_daemon_created=_include_daemon_workflows(user),
+    )
     if not sched:
         raise HTTPException(404, "Workflow not found")
 
@@ -432,6 +453,15 @@ async def workflow_trigger_now(request: Request, schedule_id: str):
     user = await get_user_context(request)
     pool = await get_pool()
     from lucent.api.routers.schedules import _trigger_schedule_execution
+    from lucent.db.schedules import ScheduleRepository
+
+    if not await ScheduleRepository(pool).get_schedule(
+        schedule_id,
+        str(user.organization_id),
+        created_by=str(user.id),
+        include_daemon_created=_include_daemon_workflows(user),
+    ):
+        raise HTTPException(404, "Workflow not found")
 
     await _trigger_schedule_execution(
         schedule_id,
@@ -456,7 +486,12 @@ async def schedule_toggle(request: Request, schedule_id: str):
     repo = ScheduleRepository(pool)
     org_id = str(user.organization_id)
 
-    sched = await repo.get_schedule(schedule_id, org_id)
+    sched = await repo.get_schedule(
+        schedule_id,
+        org_id,
+        created_by=str(user.id),
+        include_daemon_created=_include_daemon_workflows(user),
+    )
     if not sched:
         raise HTTPException(404, "Schedule not found")
 
@@ -483,6 +518,14 @@ async def schedule_delete(request: Request, schedule_id: str):
     repo = ScheduleRepository(pool)
     org_id = str(user.organization_id)
 
+    if not await repo.get_schedule(
+        schedule_id,
+        org_id,
+        created_by=str(user.id),
+        include_daemon_created=_include_daemon_workflows(user),
+    ):
+        raise HTTPException(404, "Workflow not found")
+
     try:
         deleted = await repo.delete_schedule(schedule_id, org_id)
     except ValueError:
@@ -506,7 +549,12 @@ async def schedule_edit(request: Request, schedule_id: str):
     repo = ScheduleRepository(pool)
     org_id = str(user.organization_id)
 
-    sched = await repo.get_schedule(schedule_id, org_id)
+    sched = await repo.get_schedule(
+        schedule_id,
+        org_id,
+        created_by=str(user.id),
+        include_daemon_created=_include_daemon_workflows(user),
+    )
     if not sched:
         raise HTTPException(404, "Schedule not found")
 

@@ -128,7 +128,7 @@ async def client(db_pool, web_user):
 @pytest_asyncio.fixture
 async def schedule(db_pool, web_user):
     """Create a test schedule and return it."""
-    _user, org, _token = web_user
+    user, org, _token = web_user
     repo = ScheduleRepository(db_pool)
     return await repo.create_schedule(
         title="Web Test Schedule",
@@ -137,6 +137,7 @@ async def schedule(db_pool, web_user):
         interval_seconds=3600,
         description="Hourly web test",
         agent_type="code",
+        created_by=str(user["id"]),
     )
 
 
@@ -185,6 +186,80 @@ class TestSchedulesList:
         assert resp.status_code == 200
         assert "Workflows" in resp.text
         assert "Web Test Schedule" in resp.text
+
+    async def test_user_cannot_list_or_open_another_users_workflow(
+        self, client, schedule, db_pool, web_user, web_prefix
+    ):
+        _user, org, _token = web_user
+        other_user = await UserRepository(db_pool).create(
+            external_id=f"{web_prefix}other-user",
+            provider="local",
+            organization_id=org["id"],
+            email=f"{web_prefix}other-user@test.com",
+            display_name="Other User",
+        )
+        other_token = await create_session(db_pool, other_user["id"])
+        app = create_app()
+        transport = ASGITransport(app=app, raise_app_exceptions=False)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+            cookies={SESSION_COOKIE_NAME: other_token},
+        ) as other_client:
+            listing = await other_client.get("/workflows")
+            detail = await other_client.get(f"/workflows/{schedule['id']}")
+
+        assert listing.status_code == 200
+        assert "Web Test Schedule" not in listing.text
+        assert detail.status_code == 404
+
+    async def test_owner_sees_daemon_workflow_but_not_another_humans_workflow(
+        self, client, db_pool, web_user, web_prefix
+    ):
+        owner, org, _token = web_user
+        async with db_pool.acquire() as conn:
+            await conn.execute("UPDATE users SET role = 'owner' WHERE id = $1", owner["id"])
+            daemon = await conn.fetchrow(
+                """SELECT * FROM users
+                   WHERE organization_id = $1
+                     AND (role = 'daemon' OR external_id LIKE 'daemon-service:%')
+                   LIMIT 1""",
+                org["id"],
+            )
+        assert daemon is not None
+        user_repo = UserRepository(db_pool)
+        other_user = await user_repo.create(
+            external_id=f"{web_prefix}other-human",
+            provider="local",
+            organization_id=org["id"],
+            email=f"{web_prefix}other-human@test.com",
+            display_name="Other Human",
+        )
+        repo = ScheduleRepository(db_pool)
+        daemon_workflow = await repo.create_schedule(
+            title="Daemon Workflow",
+            org_id=str(org["id"]),
+            schedule_type="manual",
+            created_by=str(daemon["id"]),
+        )
+        human_workflow = await repo.create_schedule(
+            title="Other Human Workflow",
+            org_id=str(org["id"]),
+            schedule_type="manual",
+            created_by=str(other_user["id"]),
+        )
+
+        listing = await client.get("/workflows")
+        daemon_detail = await client.get(f"/workflows/{daemon_workflow['id']}")
+        human_detail = await client.get(f"/workflows/{human_workflow['id']}")
+
+        assert listing.status_code == 200
+        assert "Daemon Workflow" in listing.text
+        assert "Other Human Workflow" not in listing.text
+        assert "Daemon Workflows" in listing.text
+        assert "Your Workflows" not in listing.text
+        assert daemon_detail.status_code == 200
+        assert human_detail.status_code == 404
 
 
 class TestWorkflowWizard:
