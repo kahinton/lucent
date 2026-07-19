@@ -338,6 +338,11 @@ class TestDefinitionsList:
         assert "definition-engineer" not in resp.text
         assert f'data-agent-id="{definition_engineer["id"]}"' in resp.text
         assert "Created proposals appear in the Pending tab" in resp.text
+        assert '/static/chat-message-ui.css' in resp.text
+        assert '/static/chat-message-ui.js' in resp.text
+        assert "LucentChatMessageUI.renderMarkdown" in resp.text
+        assert "LucentChatMessageUI.appendToolCall" in resp.text
+        assert "appendToolNote" not in resp.text
 
     async def test_new_agent_button_uses_nonce_backed_script(self, client):
         resp = await client.get("/definitions", params={"tab": "agents"})

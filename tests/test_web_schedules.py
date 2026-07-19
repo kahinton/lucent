@@ -194,6 +194,8 @@ class TestWorkflowWizard:
         assert "Workflow Wizard" in resp.text
         assert "Build workflows by conversation" in resp.text
         assert "Incoming webhook" in resp.text
+        assert '/static/chat-message-ui.css' in resp.text
+        assert '/static/chat-message-ui.js' in resp.text
 
     async def test_workflow_assistant_uses_workflow_composer(self, client, db_pool, web_user):
         user, org, _token = web_user
@@ -216,6 +218,9 @@ class TestWorkflowWizard:
         assert "Webhook" in resp.text
         assert f'data-agent-id="{workflow_composer["id"]}"' in resp.text
         assert "Ask for a draft first" in resp.text
+        assert "LucentChatMessageUI.renderMarkdown" in resp.text
+        assert "LucentChatMessageUI.appendToolCall" in resp.text
+        assert "appendToolNote" not in resp.text
 
     async def test_wizard_creates_webhook_workflow(self, client, db_pool, web_user):
         _user, org, _token = web_user

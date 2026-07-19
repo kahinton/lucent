@@ -405,6 +405,7 @@ async def test_dispatch_memory_server_config_carries_user_scope_headers(monkeypa
     assert headers["X-Lucent-Org-Id"] == org_id
     assert headers["X-Lucent-Task-Id"] == task_id
     assert headers["X-Lucent-Request-Id"] == request_id
+    assert captured_mcp["memory-server"]["tools"] == ["*"]
 
 
 @pytest.mark.asyncio

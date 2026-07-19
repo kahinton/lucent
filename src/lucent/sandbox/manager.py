@@ -152,6 +152,43 @@ class SandboxManager:
 
         return info
 
+    async def get_or_create_for_request(
+        self,
+        config: SandboxConfig,
+        *,
+        sequence_order: int,
+    ) -> tuple[SandboxInfo, bool]:
+        """Return a compatible live sandbox for a later request task or create one.
+
+        A sandbox is reusable only when the caller opts in, supplies request and
+        organization linkage, and is at a later sequence level than the task
+        that created it. This preserves a single mutable workspace without
+        allowing parallel task batches to race inside the same container.
+        """
+        if (
+            config.reuse_within_request
+            and config.request_id
+            and config.organization_id
+            and config.reuse_key
+        ):
+            try:
+                repo = await self._repo()
+                existing = await repo.find_reusable_for_request(
+                    request_id=config.request_id,
+                    organization_id=config.organization_id,
+                    reuse_key=config.reuse_key,
+                    before_sequence_order=sequence_order,
+                )
+                if existing:
+                    sandbox_id = str(existing["id"])
+                    live = await self.get_live(sandbox_id)
+                    if live and live.status in {SandboxStatus.READY, SandboxStatus.RUNNING}:
+                        self._touch(sandbox_id)
+                        return live, True
+            except Exception as exc:
+                logger.warning("Failed to look up reusable request sandbox: %s", exc)
+        return await self.create(config), False
+
     async def exec(
         self,
         sandbox_id: str,
@@ -408,57 +445,10 @@ class SandboxManager:
 
     async def _ensure_daemon_service_user(self, organization_id: str | None) -> dict:
         pool = await self._pool()
-        org_uuid = UUID(organization_id) if organization_id else None
-        service_external_id = (
-            "daemon-service" if org_uuid is None else f"daemon-service:{org_uuid}"
-        )
         async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                SELECT id, organization_id
-                FROM users
-                WHERE (external_id = $2 OR external_id = 'daemon-service')
-                  AND is_active = true
-                  AND ($1::uuid IS NULL OR organization_id = $1)
-                ORDER BY created_at ASC
-                LIMIT 1
-                """,
-                org_uuid,
-                service_external_id,
-            )
-            if row:
-                return dict(row)
+            from lucent.daemon_identity import resolve_daemon_service_user
 
-            if org_uuid is None:
-                org = await conn.fetchrow(
-                    "SELECT id FROM organizations ORDER BY created_at ASC LIMIT 1"
-                )
-                if not org:
-                    raise RuntimeError("No organization available for sandbox API key provisioning")
-                org_uuid = org["id"]
-
-            created = await conn.fetchrow(
-                """
-                INSERT INTO users (
-                    external_id,
-                    provider,
-                    organization_id,
-                    email,
-                    display_name,
-                    role
-                )
-                                VALUES ($2, 'local', $1, $3, 'Lucent Daemon', 'member')
-                RETURNING id, organization_id
-                """,
-                org_uuid,
-                service_external_id,
-                (
-                    "daemon@lucent.local"
-                    if org_uuid is None
-                    else f"daemon+{str(org_uuid)[:8]}@lucent.local"
-                ),
-            )
-            return dict(created)
+            return await resolve_daemon_service_user(conn, organization_id)
 
 
 # Global singleton

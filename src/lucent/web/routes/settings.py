@@ -37,6 +37,7 @@ from lucent.auth_providers import (
 from lucent.db import (
     AdminAuditRepository,
     ApiKeyRepository,
+    ModelRepository,
     OrganizationRepository,
     RuntimeSettingsRepository,
     UserRepository,
@@ -121,6 +122,24 @@ def _runtime_setting_payload(organization_id, setting_key: str, message: str) ->
             "form_value": snapshot["form_value"],
         },
     }
+
+
+async def _runtime_setting_option_sets(pool, organization_id) -> dict[str, list[dict]]:
+    """Load typed option catalogs used by runtime setting controls."""
+    result = await ModelRepository(pool).list_models(
+        enabled_only=True,
+        org_id=str(organization_id),
+        limit=500,
+    )
+    model_options = [
+        {
+            "value": model["id"],
+            "label": f"{model['name']} — {model['provider']}",
+            "description": model.get("category") or "general",
+        }
+        for model in result["items"]
+    ]
+    return {"models": model_options}
 
 
 def _runtime_settings_error_response(
@@ -624,13 +643,15 @@ async def settings_runtime(
         pool,
         organization_id=user.organization_id,
     )
+    option_sets = await _runtime_setting_option_sets(pool, user.organization_id)
     return templates.TemplateResponse(
         request,
         "settings/runtime.html",
         {
             "user": user,
             "settings_by_section": runtime_settings.runtime_settings_by_section(
-                user.organization_id
+                user.organization_id,
+                option_sets=option_sets,
             ),
             "error": error,
             "success": success,
@@ -719,9 +740,16 @@ async def settings_runtime_update(request: Request, setting_key: str):
         )
 
     form = await request.form()
-    raw_value = form.get("value", "")
+    raw_value = form.get("value", "false" if definition.value_type == "boolean" else "")
+    pool = await get_pool()
+    option_sets = (
+        await _runtime_setting_option_sets(pool, user.organization_id)
+        if definition.option_source
+        else {}
+    )
     try:
         value = runtime_settings.validate_runtime_setting_value(setting_key, raw_value)
+        runtime_settings.validate_runtime_setting_semantics(setting_key, value, option_sets)
     except ValueError as exc:
         return _runtime_settings_error_response(
             request,
@@ -737,7 +765,6 @@ async def settings_runtime_update(request: Request, setting_key: str):
         organization_id=user.organization_id,
     )
 
-    pool = await get_pool()
     repo = RuntimeSettingsRepository(pool)
     await repo.upsert_setting(
         organization_id=user.organization_id,

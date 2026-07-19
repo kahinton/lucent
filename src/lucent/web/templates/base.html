@@ -13,6 +13,8 @@
     
     <!-- DOMPurify for HTML sanitization -->
     <script src="/static/vendor/purify-3.2.4.min.js"></script>
+    <link rel="stylesheet" href="/static/chat-message-ui.css">
+    <script src="/static/chat-message-ui.js"></script>
     <!-- Tailwind CSS (self-hosted) -->
     <script src="/static/vendor/tailwindcss-3.4.17.js"></script>
     <script nonce="{{ request.state.csp_nonce }}">
@@ -161,13 +163,11 @@
         <div class="fixed inset-y-0 left-0 z-50 w-64 bg-white dark:bg-gray-900 border-r border-gray-200 dark:border-gray-800">
             <div class="flex flex-col h-full">
                 <!-- Logo -->
-                <div class="flex items-center gap-3 px-6 py-5 border-b border-gray-100 dark:border-gray-800">
-                    <img src="/static/lucent_logo_64.png" alt="Lucent Logo" class="h-10 object-contain">
-                    <div>
-                        <h1 class="text-lg font-bold text-gray-900 dark:text-gray-100">Lucent</h1>
-                        <p class="text-xs text-gray-500 dark:text-gray-400">AI Teammate</p>
-                    </div>
-                </div>
+                <a href="/chat" aria-label="Lucent chat" class="group flex items-center border-b border-gray-100 px-5 py-5 dark:border-gray-800">
+                    <img src="/static/lucent_logo_64.png" alt="" class="h-auto w-14 shrink-0 object-contain transition-opacity group-hover:opacity-80">
+                    <span class="mx-4 h-8 w-px bg-gray-200 dark:bg-gray-700" aria-hidden="true"></span>
+                    <span class="text-2xl font-semibold leading-none text-gray-900 dark:text-gray-100">Lucent</span>
+                </a>
                 
                 <!-- Navigation -->
                 {% set context_definition_proposal_count = 0 %}

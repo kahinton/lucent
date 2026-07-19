@@ -59,7 +59,12 @@ async def def_repo(db_pool):
     return DefinitionRepository(db_pool)
 
 
-def _write_agent(agents_dir: Path, name: str, description: str, skill_names: list[str] | None = None) -> Path:
+def _write_agent(
+    agents_dir: Path,
+    name: str,
+    description: str,
+    skill_names: list[str] | None = None,
+) -> Path:
     """Write an AGENT.md file in the expected directory structure."""
     agent_dir = agents_dir / name
     agent_dir.mkdir(parents=True, exist_ok=True)
@@ -88,7 +93,9 @@ class TestSyncSkillNames:
     """Test that sync_built_in_agents parses skill_names and syncs junction table."""
 
     @pytest.mark.asyncio
-    async def test_agent_gets_skills_from_frontmatter(self, db_pool, def_repo, sync_org, sync_prefix):
+    async def test_agent_gets_skills_from_frontmatter(
+        self, db_pool, def_repo, sync_org, sync_prefix
+    ):
         """Skills declared in AGENT.md frontmatter are granted to the agent."""
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)
@@ -171,7 +178,9 @@ class TestSyncSkillNames:
             assert skill_b not in skill_names_result
 
     @pytest.mark.asyncio
-    async def test_agent_without_skill_names_gets_none(self, db_pool, def_repo, sync_org, sync_prefix):
+    async def test_agent_without_skill_names_gets_none(
+        self, db_pool, def_repo, sync_org, sync_prefix
+    ):
         """Agent with no skill_names in frontmatter has no grants."""
         with tempfile.TemporaryDirectory() as tmpdir:
             agents_dir = Path(tmpdir) / "agents"
@@ -211,7 +220,9 @@ class TestSyncSkillNames:
             assert len(skills) == 0
 
     @pytest.mark.asyncio
-    async def test_user_created_agent_not_overwritten(self, db_pool, def_repo, sync_org, sync_prefix):
+    async def test_user_created_agent_not_overwritten(
+        self, db_pool, def_repo, sync_org, sync_prefix
+    ):
         """User-created agents (non built-in scope) are not touched by sync."""
         agent_name = f"{sync_prefix}user-agent"
 
@@ -252,8 +263,10 @@ class TestSyncSkillNames:
         # The user agent should still be 'instance' scope, no skill grants
         async with db_pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT scope, description FROM agent_definitions WHERE name = $1 AND organization_id = $2",
-                agent_name, sync_org,
+                """SELECT scope, description FROM agent_definitions
+                   WHERE name = $1 AND organization_id = $2""",
+                agent_name,
+                sync_org,
             )
             assert row["scope"] == "instance"
             assert row["description"] == "user agent"
@@ -334,4 +347,72 @@ class TestSyncForAllRealOrgs:
                 )
                 await conn.execute(
                     "DELETE FROM organizations WHERE id = $1", system_id
+                )
+
+
+class TestShippedBuiltins:
+    """The on-disk catalog includes capabilities required by product UI."""
+
+    @pytest.mark.asyncio
+    async def test_workflow_wizard_assistant_is_seeded_for_new_org(
+        self, db_pool, sync_org
+    ):
+        repo = DefinitionRepository(db_pool)
+        github_dir = Path(__file__).resolve().parents[1] / ".github"
+        try:
+            skill_count = await repo.sync_built_in_skills(
+                sync_org, str(github_dir / "skills")
+            )
+            agent_count = await repo.sync_built_in_agents(
+                sync_org, str(github_dir / "agents" / "definitions")
+            )
+
+            async with db_pool.acquire() as conn:
+                agent = await conn.fetchrow(
+                    """SELECT id, status, scope
+                       FROM agent_definitions
+                       WHERE organization_id = $1 AND name = 'workflow-composer'""",
+                    sync_org,
+                )
+                skill = await conn.fetchrow(
+                    """SELECT id, status, scope
+                       FROM skill_definitions
+                       WHERE organization_id = $1 AND name = 'workflow-design'""",
+                    sync_org,
+                )
+                granted_skills = await conn.fetch(
+                    """SELECT s.name
+                       FROM agent_skills agent_skill
+                       JOIN skill_definitions s ON s.id = agent_skill.skill_id
+                       WHERE agent_skill.agent_id = $1
+                       ORDER BY s.name""",
+                    agent["id"],
+                )
+
+            assert agent_count >= 1
+            assert skill_count >= 1
+            assert agent["status"] == "active"
+            assert agent["scope"] == "built-in"
+            assert skill["status"] == "active"
+            assert skill["scope"] == "built-in"
+            assert [row["name"] for row in granted_skills] == [
+                "model-selection",
+                "workflow-design",
+            ]
+        finally:
+            async with db_pool.acquire() as conn:
+                await conn.execute(
+                    """DELETE FROM agent_skills
+                       WHERE agent_id IN (
+                           SELECT id FROM agent_definitions WHERE organization_id = $1
+                       )""",
+                    sync_org,
+                )
+                await conn.execute(
+                    "DELETE FROM agent_definitions WHERE organization_id = $1",
+                    sync_org,
+                )
+                await conn.execute(
+                    "DELETE FROM skill_definitions WHERE organization_id = $1",
+                    sync_org,
                 )

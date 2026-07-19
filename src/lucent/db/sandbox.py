@@ -110,6 +110,36 @@ class SandboxRepository:
             row = await conn.fetchrow("SELECT * FROM sandboxes WHERE id = $1", UUID(sandbox_id))
             return dict(row) if row else None
 
+    async def find_reusable_for_request(
+        self,
+        *,
+        request_id: str,
+        organization_id: str,
+        reuse_key: str,
+        before_sequence_order: int,
+    ) -> dict | None:
+        """Find the latest live request sandbox created by an earlier task.
+
+        Requiring an earlier sequence level prevents two parallel tasks in the
+        same batch from accidentally sharing a mutable workspace.
+        """
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """SELECT * FROM sandboxes
+                   WHERE request_id = $1
+                     AND organization_id = $2
+                     AND status IN ('ready', 'running')
+                     AND config->>'reuse_key' = $3
+                     AND COALESCE((config->>'reuse_sequence_order')::int, -1) < $4
+                   ORDER BY created_at DESC
+                   LIMIT 1""",
+                UUID(request_id),
+                UUID(organization_id),
+                reuse_key,
+                before_sequence_order,
+            )
+            return dict(row) if row else None
+
     async def list_all(
         self,
         organization_id: str | None = None,

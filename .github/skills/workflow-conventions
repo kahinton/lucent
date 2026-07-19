@@ -241,6 +241,6 @@ These conventions are implemented across:
 - `/src/lucent/tools/memories.py` — Memory creation with daemon shared logic
 - `/src/lucent/web/routes/daemon.py` — Review queue and feedback processing
 - `/daemon/daemon.py` — Cognitive loop and task dispatch
-- `/daemon/cognitive.md` — Daemon operating protocol
+- `/daemon/prompts/cognitive.md` — Daemon operating protocol
 
 **Last Updated**: 2026-03-18 (Phase 2 gap analysis)

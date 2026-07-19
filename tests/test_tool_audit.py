@@ -128,6 +128,49 @@ def test_classify_tool_result():
     assert failure_class == "tool_error"
     assert "search_memories" in message
     assert classify_tool_result("Tool write_file blocked by hook.")[0] == "blocked"
+    assert classify_tool_result(
+        '{"result": "The task describes a tool that was blocked by hook."}'
+    ) == ("success", None, None)
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        '{"items": [{"description": "Investigate Unauthorized: Invalid or expired credentials"}]}',
+        '{"patterns": [{"failure_class": "auth_error", "sample": "HTTP 401"}]}',
+        '{"result": "A historical call returned status_code=401"}',
+        "Inspection output: Unauthorized failures were observed last week",
+        "A report says failed to fetch while describing an earlier incident",
+    ],
+)
+def test_classify_tool_result_does_not_fail_successful_payloads_quoting_errors(result):
+    assert classify_tool_result(result) == ("success", None, None)
+
+
+@pytest.mark.parametrize(
+    ("result", "expected_class"),
+    [
+        ("Unauthorized: Invalid or expired credentials", "auth_error"),
+        ('{"jsonrpc":"2.0","error":{"code":-32001,"message":"HTTP 401"}}', "auth_error"),
+        ("Error calling tool search_memories: failed to fetch", "fetch_error"),
+        ("Unexpected user permission response from provider", "permission_protocol_error"),
+    ],
+)
+def test_classify_tool_result_keeps_direct_failures(result, expected_class):
+    status, failure_class, message = classify_tool_result(result)
+    assert status == "failed"
+    assert failure_class == expected_class
+    assert message == result
+
+
+def test_classify_tool_result_respects_mcp_protocol_error_flag():
+    status, failure_class, message = classify_tool_result(
+        "Domain-specific validation failed",
+        is_error=True,
+    )
+    assert status == "failed"
+    assert failure_class == "tool_error"
+    assert message == "Domain-specific validation failed"
 
 
 @pytest.mark.asyncio

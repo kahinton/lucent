@@ -250,15 +250,14 @@ services:
         condition: service_started
     restart: unless-stopped
 
-  # Daemon worker examples. daemon-1 belongs to both the single-daemon and
-  # multi-daemon profiles, so it runs alone or alongside daemon-2:
-  #   docker compose --profile single-daemon up   # daemon-1 only
+  # Default daemon worker. A plain `docker compose up` starts daemon-1 with the
+  # rest of Lucent. The multi-daemon profile adds daemon-2 alongside it:
+  #   docker compose up                            # daemon-1 only
   #   docker compose --profile multi-daemon up     # daemon-1 + daemon-2
   daemon-1:
     build:
       context: .
       dockerfile: Dockerfile.dev
-    profiles: ["single-daemon", "multi-daemon"]
     depends_on:
       lucent:
         condition: service_healthy

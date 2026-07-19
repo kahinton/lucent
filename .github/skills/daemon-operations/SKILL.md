@@ -222,7 +222,7 @@ When changing environment variables:
 The daemon watches source files for changes and auto-reloads (`run_forever()` watches file modification times). If auto-reload fails:
 1. Check logs for reload errors
 2. Manual restart may be needed for breaking changes
-3. Verify the `adaptation.py` templates still render correctly if agent/skill templates changed
+3. Verify the adaptation pipeline templates still render correctly if agent/skill templates changed
 
 ## Anti-Patterns
 

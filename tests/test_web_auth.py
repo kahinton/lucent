@@ -282,6 +282,43 @@ class TestLoginSubmit:
         assert resp.status_code == 401
         assert "Invalid credentials" in resp.text
 
+    async def test_login_retry_succeeds_without_reloading_form(
+        self,
+        unauthenticated_client,
+        web_user,
+    ):
+        """A failed login response must contain the CSRF token needed to retry."""
+        _reset_login_limiter()
+        user, _org, _token = web_user
+        csrf_token = unauthenticated_client._csrf_token
+
+        failed = await unauthenticated_client.post(
+            "/login",
+            data=_csrf_data(
+                unauthenticated_client,
+                {"username": user["email"], "password": "WrongPass1"},
+            ),
+            follow_redirects=False,
+        )
+
+        assert failed.status_code == 401
+        assert f'value="{csrf_token}"' in failed.text
+        assert failed.cookies.get(CSRF_COOKIE_NAME) == csrf_token
+
+        retried = await unauthenticated_client.post(
+            "/login",
+            data={
+                CSRF_FIELD_NAME: csrf_token,
+                "username": user["email"],
+                "password": TEST_PASSWORD,
+            },
+            follow_redirects=False,
+        )
+
+        assert retried.status_code == 303
+        assert retried.headers.get("location") == "/"
+        assert SESSION_COOKIE_NAME in retried.cookies
+
     async def test_login_nonexistent_user(self, unauthenticated_client, web_user):
         _reset_login_limiter()
         resp = await unauthenticated_client.post(
@@ -329,6 +366,8 @@ class TestLoginSubmit:
             )
         assert resp.status_code == 429
         assert "Too many login attempts" in resp.text
+        assert f'value="{unauthenticated_client._csrf_token}"' in resp.text
+        assert resp.cookies.get(CSRF_COOKIE_NAME) == unauthenticated_client._csrf_token
 
     async def test_login_empty_credentials(self, unauthenticated_client, web_user):
         _reset_login_limiter()
@@ -454,6 +493,77 @@ class TestSetupPage:
         assert resp.status_code == 303
         assert resp.headers.get("location") == "/setup"
 
+    async def test_setup_lists_discovered_models_for_explicit_selection(self, monkeypatch):
+        import lucent.web.routes.auth as auth_routes
+
+        async def first_run(_pool):
+            return True
+
+        async def get_pool():
+            return object()
+
+        async def list_setup_models(_repo):
+            return [
+                {
+                    "id": "ollama:test-model",
+                    "name": "Test Model",
+                    "provider": "ollama",
+                    "is_enabled": False,
+                }
+            ]
+
+        monkeypatch.setattr(auth_routes, "is_first_run", first_run)
+        monkeypatch.setattr(auth_routes, "get_pool", get_pool)
+        monkeypatch.setattr(
+            auth_routes.ModelRepository,
+            "list_initial_setup_models",
+            list_setup_models,
+        )
+
+        app = create_app()
+        transport = ASGITransport(app=app, raise_app_exceptions=False)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/setup")
+
+        assert resp.status_code == 200
+        assert 'name="enabled_models"' in resp.text
+        assert 'value="ollama:test-model"' in resp.text
+        assert "Select at least one model" in resp.text
+
+    async def test_setup_retries_discovery_when_no_models_are_available(self, monkeypatch):
+        import lucent.model_discovery as model_discovery
+        import lucent.web.routes.auth as auth_routes
+
+        list_calls = 0
+        discovery_calls = 0
+
+        async def list_setup_models(_repo):
+            nonlocal list_calls
+            list_calls += 1
+            if list_calls == 1:
+                return []
+            return [{"id": "ollama:new-model"}]
+
+        class FakeDiscoveryService:
+            def __init__(self, _pool):
+                pass
+
+            async def sync(self):
+                nonlocal discovery_calls
+                discovery_calls += 1
+
+        monkeypatch.setattr(
+            auth_routes.ModelRepository,
+            "list_initial_setup_models",
+            list_setup_models,
+        )
+        monkeypatch.setattr(model_discovery, "ModelDiscoveryService", FakeDiscoveryService)
+
+        models = await auth_routes._list_initial_setup_models(object())
+
+        assert models == [{"id": "ollama:new-model"}]
+        assert discovery_calls == 1
+
 
 # ============================================================================
 # POST /setup
@@ -571,6 +681,67 @@ class TestSetupSubmit:
             assert resp.status_code == 400
             assert "do not match" in resp.text
 
+    async def test_setup_password_mismatch_allows_immediate_retry(self, monkeypatch):
+        """The setup error response keeps form and cookie CSRF values synchronized."""
+        import lucent.web.routes.auth as auth_routes
+
+        enable_attempted = False
+
+        async def first_run(_pool):
+            return True
+
+        async def get_pool():
+            return object()
+
+        async def list_setup_models(_pool):
+            return []
+
+        async def enable_models(_pool, _model_ids):
+            nonlocal enable_attempted
+            enable_attempted = True
+            return "Retry reached model validation."
+
+        monkeypatch.setattr(auth_routes, "is_first_run", first_run)
+        monkeypatch.setattr(auth_routes, "get_pool", get_pool)
+        monkeypatch.setattr(auth_routes, "_list_initial_setup_models", list_setup_models)
+        monkeypatch.setattr(auth_routes, "_enable_initial_setup_models", enable_models)
+
+        csrf_token = "setup-mismatch-retry"
+        app = create_app()
+        transport = ASGITransport(app=app, raise_app_exceptions=False)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+            cookies={CSRF_COOKIE_NAME: csrf_token},
+        ) as c:
+            mismatch = await c.post(
+                "/setup",
+                data={
+                    CSRF_FIELD_NAME: csrf_token,
+                    "display_name": "Admin",
+                    "password": "ValidPass1",
+                    "password_confirm": "DifferentPass1",
+                },
+            )
+            assert mismatch.status_code == 400
+            assert "Passwords do not match" in mismatch.text
+            assert f'value="{csrf_token}"' in mismatch.text
+            assert mismatch.cookies.get(CSRF_COOKIE_NAME) == csrf_token
+
+            retry = await c.post(
+                "/setup",
+                data={
+                    CSRF_FIELD_NAME: csrf_token,
+                    "display_name": "Admin",
+                    "password": "ValidPass1",
+                    "password_confirm": "ValidPass1",
+                },
+            )
+
+        assert retry.status_code == 400
+        assert "Retry reached model validation" in retry.text
+        assert enable_attempted is True
+
     async def test_setup_weak_password(self, db_pool):
         """Setup with password missing complexity returns 400."""
         from lucent.auth_providers import is_first_run
@@ -596,6 +767,129 @@ class TestSetupSubmit:
                 follow_redirects=False,
             )
             assert resp.status_code == 400
+
+    async def test_setup_requires_at_least_one_model(self, monkeypatch):
+        import lucent.web.routes.auth as auth_routes
+
+        account_created = False
+
+        async def first_run(_pool):
+            return True
+
+        async def get_pool():
+            return object()
+
+        async def list_setup_models(_repo):
+            return [
+                {
+                    "id": "ollama:test-model",
+                    "name": "Test Model",
+                    "provider": "ollama",
+                    "is_enabled": False,
+                }
+            ]
+
+        async def create_user(*_args):
+            nonlocal account_created
+            account_created = True
+            raise AssertionError("Account creation must wait for a model selection")
+
+        monkeypatch.setattr(auth_routes, "is_first_run", first_run)
+        monkeypatch.setattr(auth_routes, "get_pool", get_pool)
+        monkeypatch.setattr(auth_routes, "create_initial_user", create_user)
+        monkeypatch.setattr(
+            auth_routes.ModelRepository,
+            "list_initial_setup_models",
+            list_setup_models,
+        )
+
+        csrf = "setup-model-required"
+        app = create_app()
+        transport = ASGITransport(app=app, raise_app_exceptions=False)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+            cookies={CSRF_COOKIE_NAME: csrf},
+        ) as c:
+            resp = await c.post(
+                "/setup",
+                data={
+                    CSRF_FIELD_NAME: csrf,
+                    "display_name": "Admin",
+                    "password": "ValidPass1",
+                    "password_confirm": "ValidPass1",
+                },
+            )
+
+        assert resp.status_code == 400
+        assert "Select at least one model to continue" in resp.text
+        assert account_created is False
+
+    async def test_setup_enables_selected_model_before_creating_account(self, monkeypatch):
+        import lucent.web.routes.auth as auth_routes
+
+        enabled_model_ids: list[str] = []
+
+        async def first_run(_pool):
+            return True
+
+        async def get_pool():
+            return object()
+
+        async def list_setup_models(_repo):
+            return [
+                {
+                    "id": "ollama:test-model",
+                    "name": "Test Model",
+                    "provider": "ollama",
+                    "is_enabled": False,
+                }
+            ]
+
+        async def enable_models(_repo, model_ids):
+            enabled_model_ids.extend(model_ids)
+            return set(model_ids)
+
+        async def create_user(*_args):
+            assert enabled_model_ids == ["ollama:test-model"]
+            return {"id": uuid4()}, "hs_setup_test_key"
+
+        async def create_user_session(*_args):
+            return "setup-session-token"
+
+        monkeypatch.setattr(auth_routes, "is_first_run", first_run)
+        monkeypatch.setattr(auth_routes, "get_pool", get_pool)
+        monkeypatch.setattr(auth_routes, "create_initial_user", create_user)
+        monkeypatch.setattr(auth_routes, "create_session", create_user_session)
+        monkeypatch.setattr(
+            auth_routes.ModelRepository,
+            "list_initial_setup_models",
+            list_setup_models,
+        )
+        monkeypatch.setattr(auth_routes.ModelRepository, "enable_models", enable_models)
+
+        csrf = "setup-model-selected"
+        app = create_app()
+        transport = ASGITransport(app=app, raise_app_exceptions=False)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+            cookies={CSRF_COOKIE_NAME: csrf},
+        ) as c:
+            resp = await c.post(
+                "/setup",
+                data={
+                    CSRF_FIELD_NAME: csrf,
+                    "display_name": "Admin",
+                    "password": "ValidPass1",
+                    "password_confirm": "ValidPass1",
+                    "enabled_models": "ollama:test-model",
+                },
+            )
+
+        assert resp.status_code == 200
+        assert "Account created successfully" in resp.text
+        assert enabled_model_ids == ["ollama:test-model"]
 
 
 # ============================================================================

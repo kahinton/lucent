@@ -45,6 +45,8 @@ class SandboxCreateRequest(BaseModel):
     timeout_seconds: int = Field(default=1800, ge=60, le=86400)
     task_id: str | None = None
     request_id: str | None = None
+    reuse_within_request: bool = False
+    reuse_key: str | None = Field(default=None, max_length=128)
 
 
 class SandboxExecRequest(BaseModel):
@@ -73,6 +75,9 @@ class SandboxResponse(BaseModel):
     created_at: str | None = None
     ready_at: str | None = None
     error: str | None = None
+    task_id: str | None = None
+    request_id: str | None = None
+    reuse_within_request: bool = False
 
 
 class ExecResponse(BaseModel):
@@ -138,6 +143,9 @@ def _to_response(info) -> SandboxResponse:
             created_at=info["created_at"].isoformat() if info.get("created_at") else None,
             ready_at=info["ready_at"].isoformat() if info.get("ready_at") else None,
             error=info.get("error"),
+            task_id=str(info["task_id"]) if info.get("task_id") else None,
+            request_id=str(info["request_id"]) if info.get("request_id") else None,
+            reuse_within_request=bool((info.get("config") or {}).get("reuse_within_request")),
         )
     return SandboxResponse(
         id=info.id,
@@ -147,6 +155,9 @@ def _to_response(info) -> SandboxResponse:
         created_at=info.created_at.isoformat() if info.created_at else None,
         ready_at=info.ready_at.isoformat() if info.ready_at else None,
         error=info.error,
+        task_id=info.config.task_id,
+        request_id=info.config.request_id,
+        reuse_within_request=info.config.reuse_within_request,
     )
 
 
@@ -180,6 +191,8 @@ async def create_sandbox(
         timeout_seconds=body.timeout_seconds,
         task_id=body.task_id,
         request_id=body.request_id,
+        reuse_within_request=body.reuse_within_request,
+        reuse_key=body.reuse_key,
         organization_id=str(user.organization_id),
     )
     manager = get_sandbox_manager()

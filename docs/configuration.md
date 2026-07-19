@@ -14,6 +14,10 @@ Resetting a runtime setting in the UI deletes the database value and returns it 
 
 Admins and owners can manage allowlisted settings in **Settings → Runtime Settings**. Editable saved values are stored in PostgreSQL, included in normal database backups, and loaded by the API/daemon at startup. The catalog includes model defaults, chat behavior, daemon timing, request/review gates, memory lifecycle/search rollout flags, server rate limits, and read-only visibility for bootstrap/credential settings.
 
+Controls are generated from the setting catalog rather than treated as arbitrary strings. Boolean settings use explicit on/off switches, bounded numbers use numeric inputs, fixed choices use selectors, and URL settings use URL inputs. Model settings list the enabled models visible to the workspace, display their names and providers, and save the stable model ID. A configured model that is no longer available is shown as unavailable so it can be repaired or reset; it cannot be selected as a new value.
+
+Validation is enforced in layers: the web route checks source-backed choices such as model IDs, the repository verifies each key and primitive type against the code-owned catalog, and PostgreSQL verifies that the JSON value shape matches its declared type. Environment variables remain supported as fallbacks and are coerced through the same primitive type definitions.
+
 The UI shows the active source for each value:
 
 - **Saved in DB** — workspace value takes precedence and is backed up with the database.
@@ -230,7 +234,11 @@ For observability setup details, see [Observability](observability.md).
 
 ### Multi-Daemon
 
-Enable with `docker compose --profile multi-daemon up`:
+Plain `docker compose up` starts `daemon-1` by default. Enable the multi-daemon profile to add `daemon-2`:
+
+```bash
+docker compose --profile multi-daemon up
+```
 
 Uses the same daemon environment variables listed above. See `docker-compose.yml` for the `daemon-1` and `daemon-2` service definitions.
 
@@ -238,7 +246,7 @@ Uses the same daemon environment variables listed above. See `docker-compose.yml
 
 ### Full Stack
 
-Run PostgreSQL, OpenBao, and the Lucent server:
+Run PostgreSQL, OpenBao, the Lucent server, and one daemon worker:
 
 ```bash
 docker compose up -d

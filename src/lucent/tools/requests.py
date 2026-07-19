@@ -574,8 +574,12 @@ Args:
         tasks that need a sandbox; use list_sandbox_templates to discover IDs).
     sandbox_overrides: Optional dict of fields to override on top of the
         template (currently supports: ``repo_url``, ``branch``,
-        ``timeout_seconds``, ``output_mode``, ``commit_approved``). All other
+        ``timeout_seconds``, ``output_mode``, ``commit_approved``,
+        ``reuse_within_request``). All other
         sandbox parameters come from the template and cannot be overridden.
+        Set ``reuse_within_request`` to true only for sequential tasks in the
+        same request that intentionally need the same workspace. Give those
+        tasks increasing ``sequence_order`` values.
     output_contract: Optional structured output contract dict:
         {json_schema: {...}, on_failure: fail|fallback|retry_then_fallback, max_retries: int}
 
@@ -695,6 +699,7 @@ if the agent type is not approved or the sandbox template is invalid."""
                 "timeout_seconds",
                 "output_mode",
                 "commit_approved",
+                "reuse_within_request",
             }
             if sandbox_overrides:
                 bad = set(sandbox_overrides) - allowed_overrides
@@ -1039,7 +1044,7 @@ Returns: JSON with exit_code, stdout, stderr, duration_ms, timed_out, and sandbo
                     """SELECT metadata
                        FROM task_events
                        WHERE task_id = $1::uuid
-                         AND event_type = 'sandbox_created'
+                         AND event_type IN ('sandbox_created', 'sandbox_reused')
                        ORDER BY created_at DESC
                        LIMIT 1""",
                     task_id,
