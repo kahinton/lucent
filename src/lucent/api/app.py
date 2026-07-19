@@ -375,23 +375,15 @@ def create_app() -> FastAPI:
                             requester_user_id=str(user["id"]),
                             include_system=user.get("role") in {"admin", "owner"},
                         )
-                        async with pool.acquire() as conn:
-                            definition_count = await conn.fetchval(
-                                """
-                                SELECT
-                                    (SELECT COUNT(*) FROM agent_definitions
-                                     WHERE organization_id = $1 AND status = 'proposed')
-                                  + (SELECT COUNT(*) FROM skill_definitions
-                                     WHERE organization_id = $1 AND status = 'proposed')
-                                  + (SELECT COUNT(*) FROM mcp_server_configs
-                                     WHERE organization_id = $1 AND status = 'proposed')
-                                  + (SELECT COUNT(*) FROM hook_definitions
-                                     WHERE organization_id = $1 AND status = 'proposed')
-                                  + (SELECT COUNT(*) FROM managed_tool_definitions
-                                     WHERE organization_id = $1 AND status = 'proposed')
-                                """,
-                                org_id,
-                            )
+                        from lucent.db.definitions import DefinitionRepository
+
+                        definition_count = await DefinitionRepository(
+                            pool
+                        ).count_pending_proposals(
+                            org_id=str(org_id),
+                            requester_user_id=str(user["id"]),
+                            requester_role=user.get("role"),
+                        )
                         request.state.pending_approval_count = count
                         request.state.definition_proposal_count = definition_count or 0
                         try:

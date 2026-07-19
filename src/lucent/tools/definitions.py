@@ -246,12 +246,19 @@ and sandbox templates awaiting approval).
 Returns: JSON with agents, skills, mcp_servers, sandbox_templates arrays and total count."""
     )
     async def list_proposals() -> str:
-        _, org_id, _, _, _ = await _get_current_user_context()
+        user_id, org_id, role, memory_scope, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
 
         repo = await _get_definition_repository()
-        result = await repo.get_pending_proposals(str(org_id))
+        if role == "daemon" and memory_scope != "user":
+            result = await repo.get_pending_proposals(str(org_id))
+        else:
+            result = await repo.get_pending_proposals(
+                str(org_id),
+                requester_user_id=str(user_id) if user_id else None,
+                requester_role="member" if memory_scope == "user" else role,
+            )
 
         # Include proposed sandbox templates so the planner sees what's
         # already been proposed (and won't duplicate) and admins can review
