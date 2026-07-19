@@ -130,6 +130,11 @@ class TestDashboard:
         assert "Admin attention queue" not in resp.text
         assert "Processing events" not in resp.text
         assert "Daemon Status" not in resp.text
+        assert 'aria-label="Lucent chat"' in resp.text
+        assert 'src="/static/lucent_logo_64.png"' in resp.text
+        assert "Memory</span>" not in resp.text
+        assert "Agency</span>" not in resp.text
+        assert "AI Teammate" not in resp.text
 
     @pytest.mark.asyncio
     async def test_dashboard_shows_active_goal_progress(
