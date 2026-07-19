@@ -22,6 +22,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Agent hook definitions, approval workflow, agent grants, and runtime hook execution for model/tool call events. Hooks can inject context, block execution, or rewrite tool arguments/results. **Migration 076**.
 - Managed Tool Builder for Lucent-hosted custom tools with proposal/approval flow, agent grants, sandboxed Python execution, JSON schemas, credential references, resource limits, and per-run audit records. **Migration 087**.
 - Definition proposal evidence fields and org-shared ownership support for definition resources. **Migrations 077 and 080**.
+- Built-in Workflow Assistant agent and workflow-design skill for drafting typed workflow triggers, requests, actions, and review instructions through guided chat.
 
 #### Model and Runtime Settings
 - Selectable model reasoning-effort metadata in the model registry, provider discovery, task/workflow creation, and LLM engine calls. **Migrations 073 and 074**.
@@ -31,15 +32,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 #### Request and Activity Tracking
 - Dedicated task outputs table and request output APIs for durable deliverables linked to tasks, requests, and external URLs. **Migration 078**.
 - Request view helpers for activity/query performance. **Migration 081**.
+- Event-driven request decomposition for every new request source. The daemon now wakes for focused decomposition immediately instead of waiting for the periodic cognitive cycle, while retaining backfill recovery. **Migration 092**.
+
+#### Setup and User Experience
+- First-run setup now discovers available provider models and requires at least one explicit model selection before account creation can complete.
+- Shared Markdown, streaming, and expandable tool-call presentation across normal Chat, Workflow Assistant, and Agent Composer wizard conversations.
 
 ### Changed
 - Legacy schedules now read and write workflow-capable rows while preserving compatibility APIs and built-in schedule behavior.
 - Built-in daemon maintenance cycles now prefer workflow/server-function execution and no-op skip records when there is no eligible work.
+- Docker Compose now starts one daemon worker by default; additional workers remain opt-in.
+- The daemon monolith was decomposed into focused API, decomposition, dispatch, observability, prompt, review, runtime, sandbox, and validation packages while preserving its public entry points.
+- Daemon identity resolution, MCP connection configuration, and tool policy are now centralized across chat, daemon, and sandbox paths to remove divergent authorization and connection behavior.
+- Sequential tasks in the same request can opt into a shared live sandbox, preserving workspace state without allowing parallel tasks to share a mutable container.
 - MCP tool annotations classify read-only, create-only, and mutating tools for safer runtime/tool-call handling.
 - Model validation now validates `reasoning_effort` against the selected model when provided.
+- Runtime Settings now use typed control metadata, model-backed options, value-shape validation, and clearer effective-value/source presentation. **Migration 091**.
 - The Settings and Definitions UI now expose runtime settings, proposal evidence, hooks, custom tools, and external provider grants in the unified review/agent-composer flow.
+- The shared sidebar brand lockup now presents the existing Lucent logo and name without the former `AI Teammate` tagline.
 
 ### Fixed
+- Login errors and rate-limit responses now issue a synchronized CSRF form token and cookie, so retrying directly from the rendered error page no longer fails CSRF validation.
+- MCP tool auditing now uses explicit protocol error signals and direct error payloads instead of treating quoted error text in successful output as a failure, eliminating false authentication and capability-failure telemetry.
 - Fixed goal milestones not advancing when a request completed through the review/approval flow. Completing a goal-milestone request via `RequestRepository.update_request_status` correctly marked the milestone `completed` (which lets the planner move on to the next milestone), but the parallel review-completion path (`ReviewRepository.mark_request_completed`, used by the reviews API and the daemon's internal review loop) did a bare `UPDATE requests SET status='completed'` and skipped that side effect. As a result, on deployments where work flows through review, the first milestone's request would finish but its milestone stayed `active`, so the cognitive planner kept seeing the same milestone as the next target and never created a request for milestone 2. `mark_request_completed` now fires the same milestone-completion side effect at the single completion chokepoint, so every review-approval caller advances the goal. Regression test: `tests/test_db_requests.py::TestListPlanningTargets::test_milestone_advances_when_request_completed_via_review`.
 - First-login/session setup flow now preserves the intended target path and handles authenticated redirects more consistently.
 - Daemon dispatch and request-scoped planning now carry per-user/request context through task creation, LLM sessions, workflow runs, and handoff references.
@@ -56,7 +70,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Fixed daemon-run Copilot sessions failing with `Session was not created with authentication info or custom provider` on container deployments, which left cognitive/decomposition requests stuck `pending` with zero tasks even after the SDK pin above. Three container-only gaps caused it: (1) the `daemon-1`/`daemon-2` compose services had no OpenBao/Vault configuration (`LUCENT_SECRET_PROVIDER`, `VAULT_ADDR`, `VAULT_TOKEN_FILE`, and the shared token volume), so the daemon fell back to the `builtin` secret provider and could not decrypt the org's transit-encrypted Copilot `github_token`; (2) the daemon never initialized the secret provider at startup (the API server did, but the daemon runs its own LLM sessions), leaving `SecretRegistry` empty; and (3) `run_session` did not pass the daemon's bound `organization_id` in the session `audit_context`, so the engine had no org to resolve the stored provider credential against. The host daemon was unaffected because its Copilot CLI is interactively logged in. All three are fixed: both daemon services now mirror the server's Vault config, the daemon initializes the secret provider on startup, and `run_session` injects the bound org id when a caller hasn't already supplied org scope.
 
 ### Documentation
-- Added/updated API, architecture, configuration, security, troubleshooting, workflow, runtime settings, and managed tools documentation for the v5 surfaces.
+- Added/updated README, API, architecture, configuration, security, troubleshooting, workflow, sandbox reuse, runtime settings, and managed tools documentation through the current Unreleased surfaces.
 
 ## [0.4.0] - 2026-04-30
 

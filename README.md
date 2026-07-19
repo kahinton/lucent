@@ -28,6 +28,7 @@ Lucent brings those pieces together behind a Model Context Protocol (MCP) server
 | **Learns the organization** | Builds durable knowledge about people, projects, goals, procedures, decisions, and technical systems. |
 | **Works between conversations** | Keeps planning, scheduling, dispatching, and background learning going without requiring an open chat session. |
 | **Takes assigned work** | Turns requests into tracked tasks with ownership, status, event history, review, and rework paths. |
+| **Plans work immediately** | Wakes the daemon when a request is created and decomposes eligible work into tasks without waiting for the periodic cognitive cycle. |
 | **Acts safely** | Runs code in isolated sandboxes, stores credentials securely, and keeps agent capabilities behind approval gates. |
 | **Uses the right model for the job** | Orchestrates across GitHub Copilot, OpenAI, Anthropic, Google, Ollama, and other LangChain-backed providers. |
 | **Avoids vendor lock-in** | Exposes capabilities through MCP and REST while supporting both hosted and self-hosted model paths. |
@@ -68,7 +69,7 @@ Lucent runs as an application server plus a long-running agent process. The defa
 └─────────────────────────────────────────────────────┘
 ```
 
-The server keeps durable state and exposes the dashboard, API, and MCP interface. The agent process plans work, dispatches tasks, runs schedules, validates outputs, and records what it learns back into Lucent.
+The server keeps durable state and exposes the dashboard, API, and MCP interface. The agent process plans work, dispatches tasks, runs schedules, validates outputs, and records what it learns back into Lucent. New requests notify the agent process immediately for focused task decomposition, while periodic cognitive cycles handle broader planning and maintenance.
 Built-in daemon schedules run cheap pre-flight eligibility checks first, so an idle maintenance cycle records a `schedule.skipped` no-work event instead of creating empty model-backed work.
 
 ## Enterprise operating model
@@ -96,7 +97,8 @@ git clone https://github.com/kahinton/lucent.git
 cd lucent
 docker compose up -d
 
-# 2. Open http://localhost:8766 — create your account and copy the API key
+# 2. Open http://localhost:8766 — create your account, select at least one
+#    discovered model, and copy the API key
 
 # 3. Add Lucent to your MCP client
 ```
@@ -123,10 +125,10 @@ For other clients and setup paths, see [Getting Started](docs/getting-started.md
 
 - **MCP server** — exposes memory, requests, schedules, definitions, reviews, models, import/export, and operational tools to AI clients.
 - **REST API** — provides programmatic access to Lucent resources, admin operations, integrations, sandboxes, secrets, audit, and web UI backing endpoints.
-- **Web dashboard** — manages memories, requests, review queues, definitions, schedules, sandboxes, settings, users, groups, audit logs, secrets, and integrations.
+- **Web dashboard** — manages memories, requests, review queues, agent definitions, workflow and agent wizards, sandboxes, runtime settings, users, groups, audit logs, secrets, and integrations.
 - **Autonomous daemon** — runs cognitive, dispatch, scheduler, and autonomic loops for long-running work.
 - **PostgreSQL persistence** — stores durable state, access controls, versions, audit logs, request/task history, and operational metadata.
-- **Sandbox manager** — provisions isolated Docker execution environments for code and tool work.
+- **Sandbox manager** — provisions isolated Docker execution environments for code and tool work, with opt-in reuse across sequential tasks in the same request.
 - **LLM engine layer** — supports GitHub Copilot SDK and LangChain-backed providers including OpenAI, Anthropic, Google, and Ollama.
 
 ## Example use cases
@@ -134,6 +136,7 @@ For other clients and setup paths, see [Getting Started](docs/getting-started.md
 - Maintain institutional memory across teams, projects, and model providers.
 - Queue work for AI agents with tracked status, review, and rework instead of ad hoc chat follow-ups.
 - Run scheduled audits, dependency checks, documentation reviews, or release-prep tasks.
+- Draft workflows and agent definitions through guided chat wizards before approving them for use.
 - Let agents inspect and modify code inside controlled sandboxes rather than on host machines.
 - Govern which agent definitions, skills, MCP servers, integrations, and secrets are available.
 - Give engineering leaders visibility into AI activity, decisions, and outcomes over time.
