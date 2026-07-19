@@ -939,8 +939,15 @@ Returns:
             if old_memory is None:
                 return _error_response(f"Memory not found or not accessible: {memory_id}")
 
-            # Check ownership - owner or daemon role in same org can update
-            if old_memory.get("user_id") != user_id and user_role != "daemon":
+            # Scoped daemon agents retain their existing update authority.
+            # Unscoped admins/owners may maintain daemon-authored memories,
+            # but not ordinary memories belonging to another human.
+            can_maintain_daemon_memory = user_role == "daemon" or (
+                user_role in {"admin", "owner"}
+                and memory_scope is None
+                and await repo.is_daemon_authored(old_memory)
+            )
+            if old_memory.get("user_id") != user_id and not can_maintain_daemon_memory:
                 return _error_response("Permission denied: only the owner can update this memory")
 
             # Validate metadata if provided

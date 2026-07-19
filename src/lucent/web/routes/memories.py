@@ -36,6 +36,12 @@ def _build_memory_access(pool, user) -> MemoryAccessService:
     )
 
 
+async def _can_edit_memory(repo: MemoryRepository, memory: dict, user) -> bool:
+    if memory.get("user_id") == user.id:
+        return True
+    return user.role in (Role.ADMIN, Role.OWNER) and await repo.is_daemon_authored(memory)
+
+
 def _repo_root_memory_priority(memory: dict) -> float:
     """Rank candidate repo-root memories for Knowledge Tree display.
 
@@ -366,7 +372,12 @@ async def memory_detail(request: Request, memory_id: UUID):
     user = await get_user_context(request)
     pool = await get_pool()
 
-    memory_access = _build_memory_access(pool, user)
+    repo = MemoryRepository(pool)
+    memory_access = MemoryAccessService(
+        repo,
+        GitHubRepoAccessService(pool),
+        is_admin=user.role in (Role.ADMIN, Role.OWNER),
+    )
     audit_repo = AuditRepository(pool)
     access_repo = AccessRepository(pool)
 
@@ -399,6 +410,7 @@ async def memory_detail(request: Request, memory_id: UUID):
     memory["access_count"] = counts.get(memory_id, 0)
 
     is_owner = memory.get("user_id") == user.id
+    can_edit = await _can_edit_memory(repo, memory, user)
 
     return templates.TemplateResponse(
         request,
@@ -409,6 +421,7 @@ async def memory_detail(request: Request, memory_id: UUID):
             "audit_entries": audit["entries"],
             "version_entries": versions["versions"],
             "is_owner": is_owner,
+            "can_edit": can_edit,
             "csrf_token": request.cookies.get(CSRF_COOKIE_NAME, ""),
         },
     )
@@ -419,7 +432,12 @@ async def memory_edit_form(request: Request, memory_id: UUID):
     """Edit memory form."""
     user = await get_user_context(request)
     pool = await get_pool()
-    memory_access = _build_memory_access(pool, user)
+    repo = MemoryRepository(pool)
+    memory_access = MemoryAccessService(
+        repo,
+        GitHubRepoAccessService(pool),
+        is_admin=user.role in (Role.ADMIN, Role.OWNER),
+    )
     user_repo = UserRepository(pool)
 
     memory = await memory_access.get_accessible(
@@ -431,8 +449,8 @@ async def memory_edit_form(request: Request, memory_id: UUID):
     if memory is None or memory.get("_access_denied"):
         raise HTTPException(status_code=404, detail="Memory not found")
 
-    if memory.get("user_id") != user.id:
-        raise HTTPException(status_code=403, detail="You can only edit your own memories")
+    if not await _can_edit_memory(repo, memory, user):
+        raise HTTPException(status_code=403, detail="You cannot edit this memory")
 
     # Get users in the organization for linking individual memories
     org_users = (
@@ -514,8 +532,8 @@ async def memory_edit_submit(
     if existing is None or existing.get("_access_denied"):
         raise HTTPException(status_code=404, detail="Memory not found")
 
-    if existing.get("user_id") != user.id:
-        raise HTTPException(status_code=403, detail="You can only edit your own memories")
+    if not await _can_edit_memory(repo, existing, user):
+        raise HTTPException(status_code=403, detail="You cannot edit this memory")
 
     # Parse tags
     tag_list = normalize_tags([t for t in tags.split(",") if t.strip()])
@@ -852,7 +870,8 @@ async def knowledge_tree(request: Request):
     pool = await get_pool()
 
     # Query technical memories with repo metadata, grouped into tree structure
-    query = """
+    memory_access = MemoryRepository.user_memory_access_condition("$2", "$1")
+    query = f"""
         SELECT id, metadata->>'repo' as repo,
                metadata->>'directory' as directory,
                metadata->>'filename' as filename,
@@ -866,7 +885,7 @@ async def knowledge_tree(request: Request):
                     AND COALESCE(lifecycle_stage, 'active') = 'active'
                     AND NOT ('superseded' = ANY(tags))
           AND metadata->>'repo' IS NOT NULL
-          AND (user_id = $1 OR (organization_id = $2 AND shared = true))
+          AND {memory_access}
                 ORDER BY metadata->>'repo',
                                  metadata->>'directory' NULLS FIRST,
                                  metadata->>'filename' NULLS FIRST

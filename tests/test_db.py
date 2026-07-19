@@ -145,6 +145,97 @@ class TestMemoryRepository:
 
         assert accessible is not None
 
+    async def test_daemon_owned_shared_memory_requires_admin_or_owner(
+        self, db_pool, test_user, test_organization, clean_test_data
+    ):
+        repo = MemoryRepository(db_pool)
+        user_repo = UserRepository(db_pool)
+        daemon_user = await user_repo.create(
+            external_id=f"{clean_test_data}daemon-service",
+            provider="local",
+            organization_id=test_organization["id"],
+            email=f"{clean_test_data}daemon@test.com",
+            display_name=f"{clean_test_data}Daemon",
+            role="daemon",
+        )
+        admin_user = await user_repo.create(
+            external_id=f"{clean_test_data}admin",
+            provider="local",
+            organization_id=test_organization["id"],
+            email=f"{clean_test_data}admin@test.com",
+            role="admin",
+        )
+        owner_user = await user_repo.create(
+            external_id=f"{clean_test_data}owner",
+            provider="local",
+            organization_id=test_organization["id"],
+            email=f"{clean_test_data}owner@test.com",
+            role="owner",
+        )
+        memory = await repo.create(
+            username=f"{clean_test_data}daemon",
+            type="experience",
+            content=f"{clean_test_data} daemon-only shared memory",
+            user_id=daemon_user["id"],
+            organization_id=test_organization["id"],
+            shared=True,
+        )
+
+        member_result = await repo.get_accessible(
+            memory["id"], test_user["id"], test_organization["id"]
+        )
+        assert member_result is None
+        member_scoped_result = await repo.get_accessible(
+            memory["id"],
+            test_user["id"],
+            test_organization["id"],
+            memory_scope="org_shared_only",
+        )
+        assert member_scoped_result is None
+
+        member_search = await repo.search(
+            query=f"{clean_test_data} daemon-only",
+            requesting_user_id=test_user["id"],
+            requesting_org_id=test_organization["id"],
+        )
+        assert member_search["memories"] == []
+
+        scoped_daemon_memory = await repo.create(
+            username="Lucent Daemon",
+            type="experience",
+            content=f"{clean_test_data} scoped daemon memory",
+            tags=["daemon", "review-outcome"],
+            user_id=test_user["id"],
+            organization_id=test_organization["id"],
+            shared=True,
+        )
+        member_scoped_daemon_result = await repo.get_accessible(
+            scoped_daemon_memory["id"],
+            test_user["id"],
+            test_organization["id"],
+        )
+        assert member_scoped_daemon_result is None
+        admin_scoped_daemon_result = await repo.get_accessible(
+            scoped_daemon_memory["id"],
+            admin_user["id"],
+            test_organization["id"],
+        )
+        assert admin_scoped_daemon_result is not None
+
+        for privileged_user in (admin_user, owner_user, daemon_user):
+            accessible = await repo.get_accessible(
+                memory["id"], privileged_user["id"], test_organization["id"]
+            )
+            assert accessible is not None
+
+        admin_scoped_result = await repo.get_accessible(
+            memory["id"],
+            admin_user["id"],
+            test_organization["id"],
+            memory_scope="org_shared_only",
+        )
+        assert admin_scoped_result is not None
+
     async def test_update_memory(self, db_pool, test_memory):
         """Test updating a memory."""
         repo = MemoryRepository(db_pool)

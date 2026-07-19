@@ -104,6 +104,88 @@ class MemoryRepository:
         "organization_id, shared, last_accessed_at, version, "
         "lifecycle_stage, vitality_score, vitality_computed_at"
     )
+
+    @staticmethod
+    def _daemon_authored_condition() -> str:
+        return """
+            (
+                EXISTS (
+                    SELECT 1 FROM users memory_owner
+                    WHERE memory_owner.id = memories.user_id
+                      AND (
+                          memory_owner.role = 'daemon'
+                          OR memory_owner.external_id = 'daemon-service'
+                          OR memory_owner.external_id LIKE 'daemon-service:%'
+                      )
+                )
+                OR (
+                    memories.username = 'Lucent Daemon'
+                    AND 'daemon' = ANY(memories.tags)
+                )
+            )
+        """
+
+    @staticmethod
+    def _daemon_reader_condition(org_param: str, user_param: str) -> str:
+        return f"""
+            EXISTS (
+                SELECT 1 FROM users memory_requester
+                WHERE memory_requester.id = {user_param}::uuid
+                  AND memory_requester.organization_id = {org_param}::uuid
+                  AND memory_requester.role IN ('admin', 'owner', 'daemon')
+            )
+        """
+
+    @classmethod
+    def owned_memory_access_condition(cls, org_param: str, user_param: str) -> str:
+        """Allow scoped daemon output only to privileged readers."""
+        return (
+            f"(memories.user_id = {user_param}::uuid AND "
+            f"(NOT ({cls._daemon_authored_condition()}) "
+            f"OR ({cls._daemon_reader_condition(org_param, user_param)})))"
+        )
+
+    @classmethod
+    def shared_memory_access_condition(cls, org_param: str, user_param: str) -> str:
+        """Allow daemon-authored shared memories only to privileged readers."""
+        return (
+            f"(memories.organization_id = {org_param}::uuid AND memories.shared IS TRUE "
+            f"AND (NOT ({cls._daemon_authored_condition()}) "
+            f"OR ({cls._daemon_reader_condition(org_param, user_param)})))"
+        )
+
+    @classmethod
+    def user_memory_access_condition(cls, org_param: str, user_param: str) -> str:
+        """Return the complete owner-or-shared visibility condition."""
+        owned = cls.owned_memory_access_condition(org_param, user_param)
+        shared = cls.shared_memory_access_condition(org_param, user_param)
+        return f"({owned} OR {shared})"
+
+    async def is_daemon_authored(self, memory: Mapping[str, Any]) -> bool:
+        """Return whether a memory was authored by a daemon principal."""
+        if memory.get("username") == "Lucent Daemon" and "daemon" in (
+            memory.get("tags") or []
+        ):
+            return True
+
+        owner_id = memory.get("user_id")
+        if owner_id is None:
+            return False
+        async with self.pool.acquire() as conn:
+            return bool(
+                await conn.fetchval(
+                    """SELECT EXISTS (
+                           SELECT 1 FROM users
+                           WHERE id = $1::uuid
+                             AND (
+                                 role = 'daemon'
+                                 OR external_id = 'daemon-service'
+                                 OR external_id LIKE 'daemon-service:%'
+                             )
+                       )""",
+                    str(owner_id),
+                )
+            )
     _SEARCH_COLUMNS = (
         "id, username, type, content, tags, importance, related_memory_ids, "
         "metadata, created_at, updated_at, user_id, organization_id, shared, last_accessed_at, "
@@ -349,19 +431,28 @@ class MemoryRepository:
 
         normalized_scope = memory_scope if memory_scope in {"user", "org_shared_only"} else None
         if normalized_scope == "user":
-            conditions.append(f"user_id = ${param_idx}")
+            conditions.append(
+                self.owned_memory_access_condition(
+                    f"${param_idx + 1}", f"${param_idx}"
+                )
+            )
             params.append(str(requesting_user_id))
-            param_idx += 1
+            params.append(str(requesting_org_id))
+            param_idx += 2
         elif normalized_scope == "org_shared_only":
             conditions.append(
-                f"(organization_id = ${param_idx}::uuid AND shared IS TRUE)"
+                self.shared_memory_access_condition(
+                    f"${param_idx}", f"${param_idx + 1}"
+                )
             )
             params.append(str(requesting_org_id))
-            param_idx += 1
+            params.append(str(requesting_user_id))
+            param_idx += 2
         else:
             conditions.append(
-                f"(user_id = ${param_idx}::uuid OR "
-                f"(organization_id = ${param_idx + 1}::uuid AND shared IS TRUE))"
+                self.user_memory_access_condition(
+                    f"${param_idx + 1}", f"${param_idx}"
+                )
             )
             params.append(str(requesting_user_id))
             params.append(str(requesting_org_id))
@@ -497,15 +588,17 @@ class MemoryRepository:
 
         # Keep placeholder numbering stable to avoid scope-dependent
         # bind count mismatches in prepared statement execution paths.
+        owned_access = self.owned_memory_access_condition("$3", "$2")
+        shared_access = self.shared_memory_access_condition("$3", "$2")
         query = f"""
             SELECT {self._FULL_COLUMNS}
             FROM memories
             WHERE id = $1
               AND deleted_at IS NULL
               AND (
-                    ($4 = 'user' AND user_id = $2)
-                 OR ($4 = 'org_shared_only' AND organization_id = $3 AND shared = true)
-                 OR ($4 IS NULL AND (user_id = $2 OR (organization_id = $3 AND shared = true)))
+                    ($4 = 'user' AND {owned_access})
+                     OR ($4 = 'org_shared_only' AND {shared_access})
+                     OR ($4 IS NULL AND ({owned_access} OR {shared_access}))
               )
         """
 
@@ -1026,19 +1119,28 @@ class MemoryRepository:
         # Add access control condition if user context is provided
         if requesting_user_id is not None and requesting_org_id is not None:
             if memory_scope == "user":
-                conditions.append(f"user_id = ${param_idx}")
+                conditions.append(
+                    self.owned_memory_access_condition(
+                        f"${param_idx + 1}", f"${param_idx}"
+                    )
+                )
                 params.append(str(requesting_user_id))
-                param_idx += 1
+                params.append(str(requesting_org_id))
+                param_idx += 2
             elif memory_scope == "org_shared_only":
                 conditions.append(
-                    f"(organization_id = ${param_idx} AND shared = true)"
+                    self.shared_memory_access_condition(
+                        f"${param_idx}", f"${param_idx + 1}"
+                    )
                 )
                 params.append(str(requesting_org_id))
-                param_idx += 1
+                params.append(str(requesting_user_id))
+                param_idx += 2
             else:
                 conditions.append(
-                    f"(user_id = ${param_idx} OR "
-                    f"(organization_id = ${param_idx + 1} AND shared = true))"
+                    self.user_memory_access_condition(
+                        f"${param_idx + 1}", f"${param_idx}"
+                    )
                 )
                 params.append(str(requesting_user_id))
                 params.append(str(requesting_org_id))
@@ -1243,19 +1345,28 @@ class MemoryRepository:
         # Add access control condition if user context is provided
         if requesting_user_id is not None and requesting_org_id is not None:
             if memory_scope == "user":
-                conditions.append(f"user_id = ${param_idx}")
+                conditions.append(
+                    self.owned_memory_access_condition(
+                        f"${param_idx + 1}", f"${param_idx}"
+                    )
+                )
                 params.append(str(requesting_user_id))
-                param_idx += 1
+                params.append(str(requesting_org_id))
+                param_idx += 2
             elif memory_scope == "org_shared_only":
                 conditions.append(
-                    f"(organization_id = ${param_idx} AND shared = true)"
+                    self.shared_memory_access_condition(
+                        f"${param_idx}", f"${param_idx + 1}"
+                    )
                 )
                 params.append(str(requesting_org_id))
-                param_idx += 1
+                params.append(str(requesting_user_id))
+                param_idx += 2
             else:
                 conditions.append(
-                    f"(user_id = ${param_idx} OR "
-                    f"(organization_id = ${param_idx + 1} AND shared = true))"
+                    self.user_memory_access_condition(
+                        f"${param_idx + 1}", f"${param_idx}"
+                    )
                 )
                 params.append(str(requesting_user_id))
                 params.append(str(requesting_org_id))
@@ -1428,8 +1539,9 @@ class MemoryRepository:
         # Add access control condition if user context is provided
         if requesting_user_id is not None and requesting_org_id is not None:
             conditions.append(
-                f"(user_id = ${param_idx} OR "
-                f"(organization_id = ${param_idx + 1} AND shared = true))"
+                self.user_memory_access_condition(
+                    f"${param_idx + 1}", f"${param_idx}"
+                )
             )
             params.append(str(requesting_user_id))
             params.append(str(requesting_org_id))
@@ -1501,8 +1613,9 @@ class MemoryRepository:
         # Add access control condition if user context is provided
         if requesting_user_id is not None and requesting_org_id is not None:
             conditions.append(
-                f"(user_id = ${param_idx} OR "
-                f"(organization_id = ${param_idx + 1} AND shared = true))"
+                self.user_memory_access_condition(
+                    f"${param_idx + 1}", f"${param_idx}"
+                )
             )
             params.append(str(requesting_user_id))
             params.append(str(requesting_org_id))
@@ -1583,19 +1696,28 @@ class MemoryRepository:
 
         if requesting_user_id is not None and requesting_org_id is not None:
             if memory_scope == "user":
-                conditions.append(f"user_id = ${param_idx}")
+                conditions.append(
+                    self.owned_memory_access_condition(
+                        f"${param_idx + 1}", f"${param_idx}"
+                    )
+                )
                 params.append(str(requesting_user_id))
-                param_idx += 1
+                params.append(str(requesting_org_id))
+                param_idx += 2
             elif memory_scope == "org_shared_only":
                 conditions.append(
-                    f"(organization_id = ${param_idx} AND shared = true)"
+                    self.shared_memory_access_condition(
+                        f"${param_idx}", f"${param_idx + 1}"
+                    )
                 )
                 params.append(str(requesting_org_id))
-                param_idx += 1
+                params.append(str(requesting_user_id))
+                param_idx += 2
             else:
                 conditions.append(
-                    f"(user_id = ${param_idx} OR "
-                    f"(organization_id = ${param_idx + 1} AND shared = true))"
+                    self.user_memory_access_condition(
+                        f"${param_idx + 1}", f"${param_idx}"
+                    )
                 )
                 params.append(str(requesting_user_id))
                 params.append(str(requesting_org_id))
