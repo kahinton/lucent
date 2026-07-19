@@ -33,6 +33,15 @@ async def _get_schedule_repository() -> ScheduleRepository:
     return ScheduleRepository(pool)
 
 
+async def _get_pool():
+    from lucent.db import init_db
+
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url:
+        raise RuntimeError("DATABASE_URL environment variable is required")
+    return await init_db(database_url)
+
+
 def register_schedule_tools(mcp: FastMCP) -> None:
     """Register schedule management tools with the MCP server."""
 
@@ -120,6 +129,12 @@ Returns: JSON with the created schedule including its ID and next_run_at."""
             error = validate_model(model)
             if error:
                 return json.dumps({"error": error})
+            from lucent.access_control import AccessControlService
+
+            if not user_id or not await AccessControlService(await _get_pool()).can_access(
+                str(user_id), "model", model, str(org_id)
+            ):
+                return json.dumps({"error": "Model is not available to this user"})
             effort_error = validate_reasoning_effort(model, reasoning_effort)
             if effort_error:
                 return json.dumps({"error": effort_error})

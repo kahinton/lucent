@@ -94,6 +94,10 @@ async def _fake_system_prompt(_user, _pool, _page_context):
     return "system"
 
 
+async def _allow_model(_user, _pool, _model_id):
+    return True
+
+
 @pytest.mark.asyncio
 async def test_chat_stream_uses_engine_for_selected_model(monkeypatch):
     seen: dict[str, str] = {}
@@ -104,6 +108,7 @@ async def test_chat_stream_uses_engine_for_selected_model(monkeypatch):
 
     monkeypatch.setattr(chat, "_get_session_user", _fake_session_user)
     monkeypatch.setattr(chat, "_build_system_prompt", _fake_system_prompt)
+    monkeypatch.setattr(chat, "_can_user_access_model", _allow_model)
     monkeypatch.setattr("lucent.model_registry.validate_model", lambda _model: None)
     monkeypatch.setattr("lucent.llm.get_engine_for_model", _fake_get_engine_for_model)
 
@@ -143,8 +148,31 @@ async def test_chat_stream_rejects_disabled_model(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_chat_stream_rejects_inaccessible_model(monkeypatch):
+    async def deny_model(_user, _pool, _model_id):
+        return False
+
+    monkeypatch.setattr(chat, "_get_session_user", _fake_session_user)
+    monkeypatch.setattr(chat, "_can_user_access_model", deny_model)
+    monkeypatch.setattr("lucent.model_registry.validate_model", lambda _model: None)
+
+    with pytest.raises(HTTPException) as exc:
+        await chat.chat_stream(
+            _FakeRequest(),
+            chat.ChatRequest(
+                messages=[chat.ChatMessage(role="user", content="hello")],
+                model="private-model",
+            ),
+        )
+
+    assert exc.value.status_code == 403
+    assert exc.value.detail == "Model is not available to this user"
+
+
+@pytest.mark.asyncio
 async def test_chat_stream_v2_surfaces_langchain_tool_input(monkeypatch):
     monkeypatch.setattr(chat, "_get_session_user", _fake_session_user)
+    monkeypatch.setattr(chat, "_can_user_access_model", _allow_model)
     monkeypatch.setattr("lucent.model_registry.validate_model", lambda _model: None)
     monkeypatch.setattr("lucent.llm.get_engine_for_model", lambda _model: _FakeStreamingEngine())
 

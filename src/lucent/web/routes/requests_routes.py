@@ -352,16 +352,23 @@ async def request_detail(request: Request, request_id: str):
     )
     if has_editable_task:
         from lucent.db.definitions import DefinitionRepository
-        from lucent.model_registry import list_models
+        from lucent.db.models import ModelRepository
 
+        model_rows = (
+            await ModelRepository(pool).list_models_accessible_by(
+                str(user.id),
+                str(user.organization_id),
+                requester_role=role_value,
+            )
+        )["items"]
         available_models = [
             {
-                "id": m.id,
-                "name": m.name or m.id,
-                "tags": list(m.tags or []),
-                "reasoning_efforts": list(m.reasoning_efforts or []),
+                "id": model["id"],
+                "name": model["name"] or model["id"],
+                "tags": list(model.get("tags") or []),
+                "reasoning_efforts": list(model.get("reasoning_efforts") or []),
             }
-            for m in list_models(include_disabled=False)
+            for model in model_rows
         ]
         available_models.sort(key=lambda m: m["id"])
 
@@ -506,11 +513,16 @@ async def edit_task(request: Request, task_id: str):
 
     # Validate model + agent against the allowed sets
     if model:
+        from lucent.access_control import AccessControlService
         from lucent.model_registry import validate_model, validate_reasoning_effort
 
         err = validate_model(model)
         if err:
             raise HTTPException(422, err)
+        if not await AccessControlService(pool).can_access(
+            str(user.id), "model", model, org_id
+        ):
+            raise HTTPException(403, "Model is not available to this user")
         effort_err = validate_reasoning_effort(model, reasoning_effort)
         if effort_err:
             raise HTTPException(422, effort_err)

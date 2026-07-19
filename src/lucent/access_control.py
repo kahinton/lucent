@@ -23,6 +23,8 @@ RESOURCE_TABLE_MAP: dict[str, str] = {
     "tools": "managed_tool_definitions",
     "sandbox_template": "sandbox_templates",
     "sandbox_templates": "sandbox_templates",
+    "model": "models",
+    "models": "models",
     "secret": "secrets",
     "secrets": "secrets",
 }
@@ -32,6 +34,9 @@ _TABLES_WITH_SCOPE = {
     "agent_definitions", "skill_definitions", "mcp_server_configs",
     "hook_definitions", "managed_tool_definitions", "sandbox_templates",
 }
+
+_TABLES_WITH_TEXT_IDS = {"models"}
+_TABLES_WITH_GLOBAL_ROWS = {"models"}
 
 
 def normalize_resource_type(resource_type: str) -> str:
@@ -89,17 +94,25 @@ class AccessControlService:
             return False
 
         group_ids = [UUID(g) for g in await self.get_user_group_ids(user_id)]
+        resource_id_param = resource_id if table in _TABLES_WITH_TEXT_IDS else UUID(resource_id)
+        org_clause = (
+            "(organization_id IS NULL OR organization_id = $2)"
+            if table in _TABLES_WITH_GLOBAL_ROWS
+            else "organization_id = $2"
+        )
         builtin_clause = "scope = 'built-in' OR " if table in _TABLES_WITH_SCOPE else ""
         org_shared_clause = (
             "OR (scope = 'instance' AND owner_user_id IS NULL AND owner_group_id IS NULL) "
             if table in _TABLES_WITH_SCOPE else ""
         )
+        if table == "models":
+            org_shared_clause = "OR (owner_user_id IS NULL AND owner_group_id IS NULL) "
         query = f"""
             SELECT EXISTS(
                 SELECT 1
                 FROM {table}
                 WHERE id = $1
-                  AND organization_id = $2
+                                    AND {org_clause}
                   AND (
                       {builtin_clause}owner_user_id = $3
                       OR owner_group_id = ANY($4::uuid[])
@@ -111,7 +124,7 @@ class AccessControlService:
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 query,
-                UUID(resource_id),
+                resource_id_param,
                 UUID(org_id),
                 UUID(user_id),
                 group_ids,
@@ -131,11 +144,19 @@ class AccessControlService:
         if role in ("admin", "owner"):
             # Admin/owner can modify any resource in their org (verify it exists)
             async with self.pool.acquire() as conn:
+                resource_id_param = (
+                    resource_id if table in _TABLES_WITH_TEXT_IDS else UUID(resource_id)
+                )
+                org_clause = (
+                    "(organization_id IS NULL OR organization_id = $2)"
+                    if table in _TABLES_WITH_GLOBAL_ROWS
+                    else "organization_id = $2"
+                )
                 row = await conn.fetchrow(
                     f"SELECT EXISTS("
-                    f"SELECT 1 FROM {table} WHERE id = $1 AND organization_id = $2"
+                    f"SELECT 1 FROM {table} WHERE id = $1 AND {org_clause}"
                     f") AS e",
-                    UUID(resource_id),
+                    resource_id_param,
                     UUID(org_id),
                 )
             return bool(row["e"]) if row else False
@@ -143,17 +164,23 @@ class AccessControlService:
         # modify resources owned by their group. Org-shared resources are
         # intentionally admin/owner-only for writes.
         group_ids = [UUID(g) for g in await self.get_user_group_ids(user_id)]
+        resource_id_param = resource_id if table in _TABLES_WITH_TEXT_IDS else UUID(resource_id)
+        org_clause = (
+            "(organization_id IS NULL OR organization_id = $2)"
+            if table in _TABLES_WITH_GLOBAL_ROWS
+            else "organization_id = $2"
+        )
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 f"SELECT EXISTS("
                 f"SELECT 1 FROM {table}"
-                f" WHERE id = $1 AND organization_id = $2"
+                f" WHERE id = $1 AND {org_clause}"
                 f" AND (owner_user_id = $3 OR owner_group_id IN ("
                 f"SELECT group_id FROM user_groups"
                 f" WHERE user_id = $3 AND role = 'admin'"
                 f" AND group_id = ANY($4::uuid[])))"
                 f") AS e",
-                UUID(resource_id),
+                resource_id_param,
                 UUID(org_id),
                 UUID(user_id),
                 group_ids,
@@ -169,15 +196,22 @@ class AccessControlService:
             return []
 
         group_ids = [UUID(g) for g in await self.get_user_group_ids(user_id)]
+        org_clause = (
+            "(organization_id IS NULL OR organization_id = $1)"
+            if table in _TABLES_WITH_GLOBAL_ROWS
+            else "organization_id = $1"
+        )
         builtin_clause = "scope = 'built-in' OR " if table in _TABLES_WITH_SCOPE else ""
         org_shared_clause = (
             "OR (scope = 'instance' AND owner_user_id IS NULL AND owner_group_id IS NULL) "
             if table in _TABLES_WITH_SCOPE else ""
         )
+        if table == "models":
+            org_shared_clause = "OR (owner_user_id IS NULL AND owner_group_id IS NULL) "
         query = f"""
             SELECT id
             FROM {table}
-            WHERE organization_id = $1
+            WHERE {org_clause}
               AND (
                   {builtin_clause}owner_user_id = $2
                   OR owner_group_id = ANY($3::uuid[])

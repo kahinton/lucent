@@ -26,6 +26,15 @@ def _is_privileged_request_actor(user: AuthenticatedUser) -> bool:
     return user.role >= Role.ADMIN or _is_daemon_user(user)
 
 
+async def _require_model_access(pool, model_id: str, user: AuthenticatedUser) -> None:
+    from lucent.access_control import AccessControlService
+
+    if not await AccessControlService(pool).can_access(
+        str(user.id), "model", model_id, str(user.organization_id)
+    ):
+        raise HTTPException(403, "Model is not available to this user")
+
+
 def _can_mutate_request(req: dict, user: AuthenticatedUser) -> bool:
     if _is_privileged_request_actor(user):
         return True
@@ -599,6 +608,7 @@ async def create_task(
         error = validate_model(body.model, require_tools=True)
         if error:
             raise HTTPException(422, error)
+        await _require_model_access(pool, body.model, user)
         effort_error = validate_reasoning_effort(body.model, body.reasoning_effort)
         if effort_error:
             raise HTTPException(422, effort_error)
@@ -722,6 +732,7 @@ async def update_task_model(
     error = validate_model(body.model, require_tools=True)
     if error:
         raise HTTPException(422, error)
+    await _require_model_access(pool, body.model, user)
     effort_error = validate_reasoning_effort(body.model, body.reasoning_effort)
     if effort_error:
         raise HTTPException(422, effort_error)
@@ -780,6 +791,7 @@ async def edit_pending_task(
         error = validate_model(body.model, require_tools=True)
         if error:
             raise HTTPException(422, error)
+        await _require_model_access(pool, body.model, user)
         effort_error = validate_reasoning_effort(body.model, body.reasoning_effort)
         if effort_error:
             raise HTTPException(422, effort_error)

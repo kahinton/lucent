@@ -616,6 +616,12 @@ if the agent type is not approved or the sandbox template is invalid."""
             error = validate_model(model, require_tools=True)
             if error:
                 return json.dumps({"error": error})
+            from lucent.access_control import AccessControlService
+
+            if not await AccessControlService(await _get_pool()).can_access(
+                str(user_id), "model", model, str(org_id)
+            ):
+                return json.dumps({"error": "Model is not available to this user"})
             effort_error = validate_reasoning_effort(model, reasoning_effort)
             if effort_error:
                 return json.dumps({"error": effort_error})
@@ -1733,10 +1739,34 @@ provided, the recommended model plus a selection reason."""
         category: str | None = None,
         agent_type: str | None = None,
     ) -> str:
-        from lucent.model_registry import get_default_model_id, list_models, select_model_for_task
+        from lucent.model_registry import (
+            get_default_model_id,
+            get_model,
+            list_models,
+            select_model_for_task,
+        )
 
-        models = list_models(category=category)
-        default_model = get_default_model_id(models if models else None)
+        user_id, org_id, _, _, _ = await _get_current_user_context()
+        if user_id and org_id:
+            from lucent.db import UserRepository
+            from lucent.db.models import ModelRepository
+
+            effective_user = await UserRepository(await _get_pool()).get_by_id(user_id)
+            if not effective_user or str(effective_user["organization_id"]) != str(org_id):
+                return json.dumps({"error": "No user context"})
+            rows = (
+                await ModelRepository(await _get_pool()).list_models_accessible_by(
+                    str(user_id),
+                    str(org_id),
+                    requester_role=str(effective_user.get("role") or "member"),
+                )
+            )["items"]
+            models = [model for row in rows if (model := get_model(row["id"]))]
+            if category:
+                models = [model for model in models if model.category == category]
+        else:
+            models = list_models(category=category)
+        default_model = get_default_model_id(models) if models else None
         result: dict = {
             "default_model": default_model,
             "guidance": (
@@ -1765,10 +1795,10 @@ provided, the recommended model plus a selection reason."""
                 for m in models
             ]
         }
-        if agent_type:
+        if agent_type and models:
             selection = select_model_for_task(
                 agent_type=agent_type,
-                models=models or None,
+                models=models,
                 require_tools=True,
             )
             result["recommended"] = selection.model_id

@@ -119,7 +119,7 @@ async def schedules_list(
 
 async def _workflow_form_options(pool, user) -> dict[str, Any]:
     from lucent.db.definitions import DefinitionRepository
-    from lucent.model_registry import list_models
+    from lucent.db.models import ModelRepository
 
     role_value = user.role if isinstance(user.role, str) else user.role.value
     def_repo = DefinitionRepository(pool)
@@ -136,13 +136,20 @@ async def _workflow_form_options(pool, user) -> dict[str, Any]:
         (agent for agent in active_agents if agent.get("name") == "workflow-composer"),
         None,
     )
+    model_rows = (
+        await ModelRepository(pool).list_models_accessible_by(
+            str(user.id),
+            str(user.organization_id),
+            requester_role=role_value,
+        )
+    )["items"]
     available_models = [
         {
-            "id": m.id,
-            "name": m.name or m.id,
-            "reasoning_efforts": list(m.reasoning_efforts or []),
+            "id": model["id"],
+            "name": model["name"] or model["id"],
+            "reasoning_efforts": list(model.get("reasoning_efforts") or []),
         }
-        for m in list_models(include_disabled=False)
+        for model in model_rows
     ]
     available_models.sort(key=lambda m: m["id"])
     return {
@@ -222,6 +229,9 @@ async def workflow_create_from_wizard(request: Request):
     action_agents = _form_list(form, "action_agent_type")
     action_models = _form_list(form, "action_model")
     action_efforts = _form_list(form, "action_reasoning_effort")
+    from lucent.access_control import AccessControlService
+
+    access_control = AccessControlService(pool)
     actions = []
     max_actions = max(len(action_titles), len(action_prompts), 1)
     for idx in range(max_actions):
@@ -229,13 +239,18 @@ async def workflow_create_from_wizard(request: Request):
         action_prompt = _form_value(action_prompts, idx, description)
         if not action_title and not action_prompt:
             continue
+        action_model = _form_value(action_models, idx) or None
+        if action_model and not await access_control.can_access(
+            str(user.id), "model", action_model, str(user.organization_id)
+        ):
+            raise HTTPException(403, "Model is not available to this user")
         actions.append(
             {
                 "action_type": "task",
                 "title": action_title or f"{title} action {idx + 1}",
                 "description": action_prompt or description,
                 "agent_type": _form_value(action_agents, idx, "code") or "code",
-                "model": _form_value(action_models, idx) or None,
+                "model": action_model,
                 "reasoning_effort": _form_value(action_efforts, idx) or None,
                 "priority": str(form.get("priority", "medium")).strip() or "medium",
                 "sequence_order": idx,
@@ -358,15 +373,20 @@ async def schedule_detail(
         )
     )["items"]
 
-    from lucent.model_registry import list_models
+    from lucent.db.models import ModelRepository
 
+    model_rows = (
+        await ModelRepository(pool).list_models_accessible_by(
+            str(user.id), org_id, requester_role=role_value
+        )
+    )["items"]
     available_models = [
         {
-            "id": m.id,
-            "name": m.name or m.id,
-            "reasoning_efforts": list(m.reasoning_efforts or []),
+            "id": model["id"],
+            "name": model["name"] or model["id"],
+            "reasoning_efforts": list(model.get("reasoning_efforts") or []),
         }
-        for m in list_models(include_disabled=False)
+        for model in model_rows
     ]
     available_models.sort(key=lambda m: m["id"])
 
@@ -568,11 +588,16 @@ async def schedule_edit(request: Request, schedule_id: str):
     effective_model = updates.get("model", sched.get("model"))
     effective_effort = updates.get("reasoning_effort", sched.get("reasoning_effort"))
     if effective_model:
+        from lucent.access_control import AccessControlService
         from lucent.model_registry import validate_model, validate_reasoning_effort
 
         model_error = validate_model(effective_model, require_tools=True)
         if model_error:
             raise HTTPException(422, model_error)
+        if not await AccessControlService(pool).can_access(
+            str(user.id), "model", effective_model, org_id
+        ):
+            raise HTTPException(403, "Model is not available to this user")
         effort_error = validate_reasoning_effort(effective_model, effective_effort)
         if effort_error:
             raise HTTPException(422, effort_error)

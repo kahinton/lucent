@@ -82,7 +82,7 @@ Lucent is designed for teams that need AI work to fit existing enterprise expect
 | **Scale beyond one chat session** | Multiple workers can process queued work in parallel while preserving shared state and task ownership. |
 | **Choose your model strategy** | Use hosted providers, self-hosted models, or a mix; route work by task complexity, cost, data sensitivity, and latency. |
 | **Reduce repeated context spend** | Durable memory, procedures, goals, and prior outcomes help avoid paying repeatedly for the same discovery work. |
-| **Control who can do what** | Roles, groups, ownership, permissions, and approval workflows keep access aligned with organizational policy. |
+| **Control who can do what** | Roles, groups, ownership, model audiences, permissions, and approval workflows keep access aligned with organizational policy. |
 | **Prevent arbitrary agent action** | Agent capabilities, connected tools, integrations, and sandbox templates can require review before use. |
 | **Protect credentials and code** | Secrets are encrypted, code runs in isolated sandboxes, and execution can be constrained by resource and network policy. |
 | **Operate with visibility** | Dashboards, timelines, handoffs, logs, reviews, and audit records make agent work inspectable after the fact. |

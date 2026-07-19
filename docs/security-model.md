@@ -294,6 +294,7 @@ The following resource types support ownership tracking:
 | MCP Server Configs    | `mcp_server_configs`  | ✓           | ✓                   | ✓                   |
 | Hook Definitions      | `hook_definitions`    | ✓           | ✓                   | ✓                   |
 | Sandbox Templates     | `sandbox_templates`   | ✓           | ✓                   | ✓                   |
+| Models                | `models`              | —           | ✓                   | ✓                   |
 | Secrets               | `secrets`             | —           | ✓                   | ✓                   |
 
 ### Ownership Types
@@ -318,6 +319,15 @@ are shared with the entire organization. All organization members can read/use
 them, but only organization `admin`/`owner` users can modify them. Daemon-created
 instance definitions default to this state so the daemon is recorded as the actor
 (`created_by`) without becoming the human-facing owner.
+
+**Model audiences** (both owner columns NULL, or one owner set):
+Models use the same user/group ownership checks without a `scope` column. An
+unowned model is available to the whole organization, a user-owned model is
+available only to that user, and a group-owned model is available to group
+members. Admins and owners can manage all models in their organization. Global
+unowned catalog rows (`organization_id IS NULL`) remain visible across
+organizations for backward compatibility; assigning an audience binds the model
+to the administrator's organization.
 
 ### Database Constraints
 

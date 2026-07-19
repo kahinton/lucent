@@ -72,6 +72,11 @@ async def wf_prefix(db_pool):
             "(SELECT id FROM users WHERE external_id LIKE $1)",
             f"{prefix}%",
         )
+        await conn.execute(
+            "DELETE FROM models WHERE organization_id IN ("
+            "SELECT id FROM organizations WHERE name LIKE $1)",
+            f"{prefix}%",
+        )
         await conn.execute("DELETE FROM users WHERE external_id LIKE $1", f"{prefix}%")
         await conn.execute("DELETE FROM organizations WHERE name LIKE $1", f"{prefix}%")
 
@@ -461,21 +466,30 @@ class TestModelValidation:
         req = await wf_repo.create_request(title="Model R1", org_id=org)
         await _create_active_agent_definition(db_pool, wf_org["id"], "code")
 
-        good = ModelInfo(id="good-model", provider="openai", name="Good", category="general")
+        model_id = f"good-model-{wf_org['id']}"
+        good = ModelInfo(id=model_id, provider="openai", name="Good", category="general")
         monkeypatch.setattr(model_registry, "_db_models", [good])
-        monkeypatch.setattr(model_registry, "_db_model_by_id", {"good-model": good})
-        monkeypatch.setattr(model_registry, "_db_enabled_ids", {"good-model"})
+        monkeypatch.setattr(model_registry, "_db_model_by_id", {model_id: good})
+        monkeypatch.setattr(model_registry, "_db_enabled_ids", {model_id})
+        from lucent.db.models import ModelRepository
+
+        await ModelRepository(db_pool).create_model(
+            model_id,
+            "openai",
+            "Good",
+            org_id=org,
+        )
 
         resp = await wf_client.post(
             f"/api/requests/{req['id']}/tasks",
             json={
                 "title": "with valid model",
                 "agent_type": "code",
-                "model": "good-model",
+                "model": model_id,
             },
         )
         assert resp.status_code == 200
-        assert resp.json()["model"] == "good-model"
+        assert resp.json()["model"] == model_id
 
     @pytest.mark.asyncio
     async def test_invalid_models_rejected(self, wf_client, wf_repo, wf_org, db_pool, monkeypatch):

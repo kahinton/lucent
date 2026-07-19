@@ -582,6 +582,7 @@ class TestListAvailableModels:
     async def test_unknown_category_returns_empty(self, mcp, auth_user):
         result = await _call(mcp, "list_available_models", {"category": "nonexistent"})
         assert result["models"] == []
+        assert result["default_model"] is None
 
     @pytest.mark.asyncio
     async def test_recommended_included_when_agent_type_given(self, mcp, auth_user):
@@ -597,6 +598,56 @@ class TestListAvailableModels:
     async def test_no_recommended_without_agent_type(self, mcp, auth_user):
         result = await _call(mcp, "list_available_models")
         assert "recommended" not in result
+
+    @pytest.mark.asyncio
+    async def test_user_scoped_context_uses_effective_users_role(
+        self, mcp, db_pool, test_user, clean_test_data, monkeypatch
+    ):
+        from lucent.db.models import ModelRepository
+        from lucent.model_registry import ModelInfo
+
+        owner = await UserRepository(db_pool).create(
+            external_id=f"{clean_test_data}model_owner",
+            provider="local",
+            organization_id=test_user["organization_id"],
+            email=f"{clean_test_data}model_owner@test.com",
+        )
+        model_id = f"{clean_test_data}private-model"
+        await ModelRepository(db_pool).create_model(
+            model_id,
+            "test",
+            "Private Model",
+            org_id=str(test_user["organization_id"]),
+            owner_user_id=str(owner["id"]),
+        )
+        try:
+            model = ModelInfo(
+                id=model_id,
+                provider="test",
+                name="Private Model",
+                category="general",
+            )
+            monkeypatch.setattr(
+                "lucent.model_registry.get_model",
+                lambda candidate: model if candidate == model_id else None,
+            )
+            set_current_user(
+                {
+                    "id": owner["id"],
+                    "organization_id": test_user["organization_id"],
+                    "role": "admin",
+                    "memory_scope": "user",
+                    "memory_scope_user_id": test_user["id"],
+                }
+            )
+
+            result = await _call(mcp, "list_available_models")
+
+            assert model_id not in {item["id"] for item in result["models"]}
+        finally:
+            set_current_user(None)
+            async with db_pool.acquire() as conn:
+                await conn.execute("DELETE FROM models WHERE id = $1", model_id)
 
 
 # ============================================================================

@@ -34,6 +34,15 @@ def _require_schedule_access(sched: dict, user: AuthenticatedUser) -> None:
         raise HTTPException(404, "Schedule not found")
 
 
+async def _require_model_access(pool, model_id: str, user: AuthenticatedUser) -> None:
+    from lucent.access_control import AccessControlService
+
+    if not await AccessControlService(pool).can_access(
+        str(user.id), "model", model_id, str(user.organization_id)
+    ):
+        raise HTTPException(403, "Model is not available to this user")
+
+
 async def _schedule_owner_context(
     pool,
     sched: dict,
@@ -617,14 +626,34 @@ async def _trigger_schedule_execution(
                         task_model = None
                         task_reasoning_effort = None
                     else:
-                        effort_error = validate_reasoning_effort(task_model, task_reasoning_effort)
-                        if effort_error:
+                        from lucent.access_control import AccessControlService
+
+                        can_access_model = await AccessControlService(pool).can_access(
+                            owner_user_id,
+                            "model",
+                            task_model,
+                            org_id,
+                        )
+                        if not can_access_model:
                             logger.warning(
-                                "Workflow %s action has invalid reasoning_effort '%s': %s — "
+                                "Workflow %s action model '%s' is unavailable to its owner; "
                                 "clearing override",
-                                schedule_id, task_reasoning_effort, effort_error,
+                                schedule_id,
+                                task_model,
                             )
+                            task_model = None
                             task_reasoning_effort = None
+                        if task_model:
+                            effort_error = validate_reasoning_effort(
+                                task_model, task_reasoning_effort
+                            )
+                            if effort_error:
+                                logger.warning(
+                                    "Workflow %s action has invalid reasoning_effort '%s': %s — "
+                                    "clearing override",
+                                    schedule_id, task_reasoning_effort, effort_error,
+                                )
+                                task_reasoning_effort = None
                 else:
                     task_reasoning_effort = None
 
@@ -720,6 +749,7 @@ async def create_schedule(
         model_error = validate_model(body.model, require_tools=True)
         if model_error:
             raise HTTPException(422, model_error)
+        await _require_model_access(pool, body.model, user)
         effort_error = validate_reasoning_effort(body.model, body.reasoning_effort)
         if effort_error:
             raise HTTPException(422, effort_error)
@@ -827,6 +857,7 @@ async def update_schedule(
         model_error = validate_model(effective_model, require_tools=True)
         if model_error:
             raise HTTPException(422, model_error)
+        await _require_model_access(pool, effective_model, user)
         effort_error = validate_reasoning_effort(effective_model, effective_effort)
         if effort_error:
             raise HTTPException(422, effort_error)
@@ -950,6 +981,7 @@ async def create_workflow(
             model_error = validate_model(action["model"], require_tools=True)
             if model_error:
                 raise HTTPException(422, model_error)
+            await _require_model_access(pool, action["model"], user)
             effort_error = validate_reasoning_effort(
                 action["model"], action.get("reasoning_effort"),
             )

@@ -9,6 +9,7 @@ from lucent.access_control import AccessControlService
 from lucent.db import UserRepository
 from lucent.db.definitions import DefinitionRepository
 from lucent.db.groups import GroupRepository
+from lucent.db.models import ModelRepository
 
 
 @pytest_asyncio.fixture
@@ -60,6 +61,7 @@ async def acl_users(db_pool, test_organization, acl_prefix):
 async def cleanup_acl_data(db_pool, test_organization, acl_prefix):
     yield
     async with db_pool.acquire() as conn:
+        await conn.execute("DELETE FROM models WHERE id LIKE $1", f"{acl_prefix}%")
         await conn.execute("DELETE FROM agent_definitions WHERE name LIKE $1", f"{acl_prefix}%")
         await conn.execute(
             "DELETE FROM user_groups WHERE user_id IN "
@@ -156,6 +158,60 @@ async def test_access_control_service_resolution(db_pool, test_organization, acl
 
     await group_repo.remove_member(str(group["id"]), user2_id)
     assert await acl.can_access(user2_id, "agent", str(group_agent["id"]), org_id) is False
+
+
+@pytest.mark.asyncio
+async def test_model_access_control_resolution(
+    db_pool, test_organization, acl_users, acl_prefix
+):
+    org_id = str(test_organization["id"])
+    user1_id = str(acl_users["user1"]["id"])
+    user2_id = str(acl_users["user2"]["id"])
+    admin_id = str(acl_users["admin"]["id"])
+    group_repo = GroupRepository(db_pool)
+    model_repo = ModelRepository(db_pool)
+    acl = AccessControlService(db_pool)
+
+    group = await group_repo.create_group(
+        name=f"{acl_prefix}models", org_id=org_id, created_by=user1_id
+    )
+    await group_repo.add_member(str(group["id"]), user2_id)
+    private_model = await model_repo.create_model(
+        model_id=f"{acl_prefix}private",
+        provider="test",
+        name="Private model",
+        org_id=org_id,
+        owner_user_id=user1_id,
+    )
+    group_model = await model_repo.create_model(
+        model_id=f"{acl_prefix}group",
+        provider="test",
+        name="Group model",
+        org_id=org_id,
+        owner_group_id=str(group["id"]),
+    )
+    shared_model = await model_repo.create_model(
+        model_id=f"{acl_prefix}shared",
+        provider="test",
+        name="Shared model",
+        org_id=org_id,
+    )
+
+    assert await acl.can_access(user1_id, "model", private_model["id"], org_id) is True
+    assert await acl.can_access(user2_id, "model", private_model["id"], org_id) is False
+    assert await acl.can_access(user2_id, "model", group_model["id"], org_id) is True
+    assert await acl.can_access(user2_id, "model", shared_model["id"], org_id) is True
+    assert await acl.can_access(admin_id, "model", private_model["id"], org_id) is True
+    assert await acl.can_modify(user2_id, "model", group_model["id"], org_id) is False
+    assert await acl.can_modify(admin_id, "model", private_model["id"], org_id) is True
+
+    accessible = await acl.list_accessible(user2_id, "model", org_id)
+    assert private_model["id"] not in accessible
+    assert group_model["id"] in accessible
+    assert shared_model["id"] in accessible
+
+    await group_repo.remove_member(str(group["id"]), user2_id)
+    assert await acl.can_access(user2_id, "model", group_model["id"], org_id) is False
 
 
 @pytest.mark.asyncio

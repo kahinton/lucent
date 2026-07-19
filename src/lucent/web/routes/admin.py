@@ -593,6 +593,59 @@ async def _refresh_runtime_registry(pool) -> None:
         logger.debug("Failed to refresh model registry cache", exc_info=True)
 
 
+async def _model_owner_groups(pool, org_id: str) -> list[dict]:
+    from lucent.db.groups import GroupRepository
+
+    return (await GroupRepository(pool).list_groups(org_id, limit=1000))["items"]
+
+
+async def _model_owner_users(pool, org_id: str) -> list[dict]:
+    return await UserRepository(pool).get_by_organization(UUID(org_id))
+
+
+async def _resolve_model_owner_scope(form, user, pool) -> tuple[str | None, str | None]:
+    owner_scope = str(form.get("owner_scope", "org")).strip()
+    if owner_scope == "me":
+        return str(user.id), None
+    if owner_scope.startswith("user:"):
+        owner_user_id = owner_scope.removeprefix("user:").strip()
+        owner_user = await UserRepository(pool).get_by_id(UUID(owner_user_id))
+        if not owner_user or str(owner_user["organization_id"]) != str(user.organization_id):
+            raise HTTPException(status_code=403, detail="Permission denied")
+        return owner_user_id, None
+    if owner_scope.startswith("group:"):
+        group_id = owner_scope.removeprefix("group:").strip()
+        from lucent.db.groups import GroupRepository
+
+        group = await GroupRepository(pool).get_group(group_id, str(user.organization_id))
+        if not group:
+            raise HTTPException(status_code=403, detail="Permission denied")
+        return None, group_id
+    return None, None
+
+
+async def _model_owner_names(pool, models: list[dict]) -> tuple[dict[str, str], dict[str, str]]:
+    user_ids = {model["owner_user_id"] for model in models if model.get("owner_user_id")}
+    group_ids = {model["owner_group_id"] for model in models if model.get("owner_group_id")}
+    user_names: dict[str, str] = {}
+    group_names: dict[str, str] = {}
+    async with pool.acquire() as conn:
+        if user_ids:
+            rows = await conn.fetch(
+                "SELECT id, COALESCE(display_name, email, 'Unknown user') AS name "
+                "FROM users WHERE id = ANY($1::uuid[])",
+                list(user_ids),
+            )
+            user_names = {str(row["id"]): row["name"] for row in rows}
+        if group_ids:
+            rows = await conn.fetch(
+                "SELECT id, name FROM groups WHERE id = ANY($1::uuid[])",
+                list(group_ids),
+            )
+            group_names = {str(row["id"]): row["name"] for row in rows}
+    return user_names, group_names
+
+
 @router.get("/models", response_class=HTMLResponse)
 async def models_list(request: Request):
     """List all models with admin controls."""
@@ -602,7 +655,12 @@ async def models_list(request: Request):
     from lucent.model_discovery import ModelDiscoveryService
 
     repo = ModelRepository(pool)
-    all_models = (await repo.list_models(limit=500))["items"]
+    all_models = (
+        await repo.list_models(
+            limit=500,
+            org_id=str(user.organization_id),
+        )
+    )["items"]
 
     discovery_service = ModelDiscoveryService(pool)
     provider_statuses = await discovery_service.provider_configuration_statuses(
@@ -613,6 +671,9 @@ async def models_list(request: Request):
     )
     providers = _visible_model_providers(all_models, active_providers)
     models = [m for m in all_models if m["provider"] in providers]
+    owner_user_names, owner_group_names = await _model_owner_names(pool, models)
+    owner_groups = await _model_owner_groups(pool, str(user.organization_id))
+    owner_users = await _model_owner_users(pool, str(user.organization_id))
     enabled_count = sum(1 for m in models if m["is_enabled"])
 
     return templates.TemplateResponse(
@@ -628,6 +689,11 @@ async def models_list(request: Request):
             "all_tags": MODEL_TAGS,
             "all_providers": MODEL_PROVIDERS,
             "provider_statuses": provider_statuses,
+            "owner_groups": owner_groups,
+            "owner_users": owner_users,
+            "owner_user_names": owner_user_names,
+            "owner_group_names": owner_group_names,
+            "personal_owner_label": user.display_name or user.email or "you",
         },
     )
 
@@ -790,7 +856,7 @@ async def toggle_model(request: Request, model_id: str):
 async def edit_model(request: Request, model_id: str):
     """Edit a model's properties."""
     await _check_csrf(request)
-    await _require_admin(request)
+    user = await _require_admin(request)
     pool = await get_pool()
     from lucent.db.models import ModelRepository
 
@@ -803,6 +869,7 @@ async def edit_model(request: Request, model_id: str):
     engine, warnings, error = _validate_engine_form(provider, form.get("engine"))
     if error:
         return _models_redirect(error=error)
+    owner_user_id, owner_group_id = await _resolve_model_owner_scope(form, user, pool)
 
     await repo.update_model(
         model_id,
@@ -817,6 +884,9 @@ async def edit_model(request: Request, model_id: str):
         supports_tools="supports_tools" in form,
         supports_vision="supports_vision" in form,
         engine=engine,
+        organization_id=str(user.organization_id),
+        owner_user_id=owner_user_id,
+        owner_group_id=owner_group_id,
     )
     await _refresh_runtime_registry(pool)
     if warnings:
@@ -845,6 +915,7 @@ async def add_model(request: Request):
     engine, warnings, error = _validate_engine_form(provider, form.get("engine"))
     if error:
         return _models_redirect(error=error)
+    owner_user_id, owner_group_id = await _resolve_model_owner_scope(form, user, pool)
 
     await repo.create_model(
         model_id=model_id,
@@ -862,6 +933,8 @@ async def add_model(request: Request):
         engine=engine,
         discovery_source="manual",
         is_custom=True,
+        owner_user_id=owner_user_id,
+        owner_group_id=owner_group_id,
     )
     await _refresh_runtime_registry(pool)
     if warnings:
