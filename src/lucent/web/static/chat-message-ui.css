@@ -11,7 +11,7 @@
 .chat-streaming-cursor::after {
     content: '\258a';
     animation: chat-cursor-blink 0.8s step-end infinite;
-    color: #6366f1;
+    color: #ff3f9b;
     font-weight: 200;
 }
 
