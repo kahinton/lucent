@@ -668,18 +668,18 @@ Returns:
         limit: int = 5,
         include_archived: bool = False,
     ) -> str:
-        """Search for memories by content with fuzzy matching and filters.
+        """Search memories by hybrid relevance with optional filters.
 
-        This searches the main CONTENT field only. For searching across all fields
-        (content, tags, metadata), use search_memories_full instead.
+        Queries are ranked across content, tags, and metadata using full-text,
+        exact-phrase, and fuzzy word matching.
 
         Args:
-            query: Optional fuzzy search query to match against memory CONTENT only.
+            query: Optional natural-language search query.
             username: Optional filter to only return memories for a specific user.
             type: Optional filter by memory type
                 (experience, technical, goal, individual).
             tags: Optional list of tags to filter by
-                (memories must have all specified tags).
+                (memories may match any specified tag).
             importance_min: Optional minimum importance rating (1-10).
             importance_max: Optional maximum importance rating (1-10).
             created_after: Optional ISO datetime string to filter memories created after this date.
@@ -801,14 +801,13 @@ Returns:
         limit: int = 5,
         include_archived: bool = False,
     ) -> str:
-        """Search across ALL text fields: content, tags, and metadata.
+        """Run a required-query hybrid relevance search across all memory text.
 
-        Use this when you want to find memories where the search term might appear
-        anywhere - in the content, tags, or metadata fields. This is broader than
-        search_memories which only searches the content field.
+        This uses the same full-text, exact-phrase, and fuzzy word ranking as
+        search_memories, without its tag/date/ID filter options.
 
         Args:
-            query: Search query to match against content, tags, and metadata (required).
+            query: Natural-language search query (required).
             username: Optional filter to only return memories for a specific user.
             type: Optional filter by memory type
                 (experience, technical, goal, individual).
@@ -939,8 +938,15 @@ Returns:
             if old_memory is None:
                 return _error_response(f"Memory not found or not accessible: {memory_id}")
 
-            # Check ownership - owner or daemon role in same org can update
-            if old_memory.get("user_id") != user_id and user_role != "daemon":
+            # Scoped daemon agents retain their existing update authority.
+            # Unscoped admins/owners may maintain daemon-authored memories,
+            # but not ordinary memories belonging to another human.
+            can_maintain_daemon_memory = user_role == "daemon" or (
+                user_role in {"admin", "owner"}
+                and memory_scope is None
+                and await repo.is_daemon_authored(old_memory)
+            )
+            if old_memory.get("user_id") != user_id and not can_maintain_daemon_memory:
                 return _error_response("Permission denied: only the owner can update this memory")
 
             # Validate metadata if provided

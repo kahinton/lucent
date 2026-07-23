@@ -423,7 +423,11 @@ async def dashboard(request: Request):
     review_count = requests_in_review["total_count"]
 
     if is_admin_or_owner:
-        pending_proposals = await def_repo.get_pending_proposals(org_id)
+        pending_proposals = await def_repo.get_pending_proposals(
+            org_id,
+            requester_user_id=str(user.id),
+            requester_role=role_value,
+        )
         try:
             from lucent.db.sandbox_template import SandboxTemplateRepository
 

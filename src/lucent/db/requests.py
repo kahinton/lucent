@@ -549,6 +549,31 @@ def _validate_output_contract(output_contract: dict | None) -> None:
 class RequestRepository:
     """Manages requests, tasks, events, and memory links."""
 
+    @staticmethod
+    def _request_visibility_condition(
+        requester_param: str,
+        include_system_param: str,
+        request_alias: str = "r",
+    ) -> str:
+        return f"""(
+            {request_alias}.created_by = {requester_param}::uuid
+            OR (
+                {include_system_param}::boolean
+                AND (
+                    {request_alias}.created_by IS NULL
+                    OR EXISTS (
+                        SELECT 1 FROM users request_creator
+                        WHERE request_creator.id = {request_alias}.created_by
+                          AND (
+                              request_creator.role = 'daemon'
+                              OR request_creator.external_id = 'daemon-service'
+                              OR request_creator.external_id LIKE 'daemon-service:%'
+                          )
+                    )
+                )
+            )
+        )"""
+
     def __init__(self, pool: Pool):
         self.pool = pool
 
@@ -627,7 +652,27 @@ class RequestRepository:
                     metadata_json,
                 )
                 if not row:
-                    return None
+                    row = await conn.fetchrow(
+                        """INSERT INTO daemon_instances
+                           (instance_id, organization_id, roles, status,
+                            started_at, last_seen_at, metadata, created_at, updated_at)
+                           VALUES ($1, $2, '{}'::text[], 'active',
+                                   $3, $3, $4::jsonb, $3, $3)
+                           ON CONFLICT (instance_id, organization_id) DO UPDATE
+                           SET status = 'active',
+                               last_seen_at = EXCLUDED.last_seen_at,
+                               metadata = CASE
+                                   WHEN EXCLUDED.metadata = '{}'::jsonb
+                                   THEN daemon_instances.metadata
+                                   ELSE EXCLUDED.metadata
+                               END,
+                               updated_at = EXCLUDED.updated_at
+                           RETURNING *""",
+                        instance_id,
+                        UUID(org_id),
+                        now,
+                        metadata_json,
+                    )
                 await conn.execute(
                     """UPDATE tasks
                        SET last_heartbeat_at = $3,
@@ -878,12 +923,23 @@ class RequestRepository:
 
         return dict(row)
 
-    async def get_request(self, request_id: str, org_id: str) -> dict | None:
+    async def get_request(
+        self,
+        request_id: str,
+        org_id: str,
+        requester_user_id: str | None = None,
+        include_system: bool = False,
+    ) -> dict | None:
+        access_clause = ""
+        params: list[Any] = [UUID(request_id), UUID(org_id)]
+        if requester_user_id is not None:
+            access_clause = " AND " + self._request_visibility_condition("$3", "$4")
+            params.extend([UUID(requester_user_id), include_system])
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT * FROM requests WHERE id = $1 AND organization_id = $2",
-                UUID(request_id),
-                UUID(org_id),
+                "SELECT r.* FROM requests r "
+                "WHERE r.id = $1 AND r.organization_id = $2" + access_clause,
+                *params,
             )
         return dict(row) if row else None
 
@@ -920,9 +976,16 @@ class RequestRepository:
         offset: int = 0,
         exclude_status: str | None = None,
         viewer_user_id: str | None = None,
+        requester_user_id: str | None = None,
+        include_system: bool = False,
     ) -> dict:
         base = "FROM requests r WHERE r.organization_id = $1"
         params: list[Any] = [UUID(org_id)]
+        if requester_user_id is not None:
+            params.extend([UUID(requester_user_id), include_system])
+            base += " AND " + self._request_visibility_condition(
+                f"${len(params) - 1}", f"${len(params)}"
+            )
         if status:
             params.append(status)
             base += f" AND r.status = ${len(params)}"
@@ -1470,9 +1533,20 @@ class RequestRepository:
             "has_more": offset + len(rows) < total_count,
         }
 
-    async def get_request_with_tasks(self, request_id: str, org_id: str) -> dict | None:
+    async def get_request_with_tasks(
+        self,
+        request_id: str,
+        org_id: str,
+        requester_user_id: str | None = None,
+        include_system: bool = False,
+    ) -> dict | None:
         """Load a request with its full task tree, events, memory links, and reviews."""
-        req = await self.get_request(request_id, org_id)
+        req = await self.get_request(
+            request_id,
+            org_id,
+            requester_user_id=requester_user_id,
+            include_system=include_system,
+        )
         if not req:
             return None
         req["tasks"] = (await self.list_tasks(request_id))["items"]
@@ -3253,46 +3327,92 @@ class RequestRepository:
 
     # ── Dashboard queries ─────────────────────────────────────────────────
 
-    async def get_active_summary(self, org_id: str) -> dict:
+    async def get_active_summary(
+        self,
+        org_id: str,
+        requester_user_id: str | None = None,
+        include_system: bool = False,
+    ) -> dict:
         """Quick dashboard stats."""
+        params: list[Any] = [UUID(org_id)]
+        visibility = ""
+        if requester_user_id is not None:
+            params.extend([UUID(requester_user_id), include_system])
+            visibility = " AND " + self._request_visibility_condition("$2", "$3")
         async with self.pool.acquire() as conn:
             req_stats = await conn.fetchrow(
-                """SELECT
+                f"""SELECT
                      COUNT(*) as total,
                      COUNT(*) FILTER (
                          WHERE status IN ('in_progress', 'review', 'needs_rework')
                      ) as active,
                      COUNT(*) FILTER (WHERE status = 'pending') as pending,
                      COUNT(*) FILTER (WHERE status = 'completed') as completed
-                   FROM requests WHERE organization_id = $1""",
-                UUID(org_id),
+                         FROM requests r WHERE r.organization_id = $1{visibility}""",
+                     *params,
             )
             task_stats = await conn.fetchrow(
-                """SELECT
+                     f"""SELECT
                      COUNT(*) as total,
-                     COUNT(*) FILTER (WHERE status IN ('claimed', 'running')) as running,
-                     COUNT(*) FILTER (WHERE status IN ('pending', 'planned')) as queued,
-                     COUNT(*) FILTER (WHERE status = 'completed') as completed
-                   FROM tasks WHERE organization_id = $1""",
-                UUID(org_id),
+                            COUNT(*) FILTER (WHERE t.status IN ('claimed', 'running')) as running,
+                            COUNT(*) FILTER (WHERE t.status IN ('pending', 'planned')) as queued,
+                            COUNT(*) FILTER (WHERE t.status = 'completed') as completed
+                         FROM tasks t
+                         JOIN requests r ON r.id = t.request_id
+                         WHERE t.organization_id = $1{visibility}""",
+                     *params,
             )
         return {
             "requests": dict(req_stats) if req_stats else {},
             "tasks": dict(task_stats) if task_stats else {},
         }
 
-    async def get_recent_events(self, org_id: str, limit: int = 50) -> list[dict]:
+    async def get_recent_events(
+        self,
+        org_id: str,
+        limit: int = 50,
+        requester_user_id: str | None = None,
+        include_system: bool = False,
+    ) -> list[dict]:
         """Get recent events across all tasks for the activity feed."""
+        params: list[Any] = [UUID(org_id)]
+        visibility = ""
+        if requester_user_id is not None:
+            params.extend([UUID(requester_user_id), include_system])
+            visibility = " AND " + self._request_visibility_condition("$2", "$3")
+        params.append(limit)
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
-                """SELECT te.*, t.title as task_title, t.agent_type,
+                f"""SELECT te.*, t.title as task_title, t.agent_type,
                           r.title as request_title, r.id as request_id
                    FROM task_events te
                    JOIN tasks t ON te.task_id = t.id
                    JOIN requests r ON t.request_id = r.id
-                   WHERE t.organization_id = $1
-                   ORDER BY te.created_at DESC LIMIT $2""",
-                UUID(org_id),
-                limit,
+                   WHERE t.organization_id = $1{visibility}
+                   ORDER BY te.created_at DESC LIMIT ${len(params)}""",
+                *params,
             )
         return [dict(r) for r in rows]
+
+    async def count_pending_approvals(
+        self,
+        org_id: str,
+        requester_user_id: str,
+        include_system: bool = False,
+    ) -> int:
+        """Count visible requests waiting at the pre-work approval gate."""
+        visibility = self._request_visibility_condition("$2", "$3")
+        async with self.pool.acquire() as conn:
+            return int(
+                await conn.fetchval(
+                    f"""SELECT COUNT(*) FROM requests r
+                        WHERE r.organization_id = $1
+                          AND {visibility}
+                          AND r.approval_status = 'pending_approval'
+                          AND r.status NOT IN ('cancelled', 'rejection_processing')""",
+                    UUID(org_id),
+                    UUID(requester_user_id),
+                    include_system,
+                )
+                or 0
+            )

@@ -351,6 +351,7 @@ class TestListSchedules:
             title="Listed Schedule",
             org_id=str(test_organization["id"]),
             schedule_type="once",
+            created_by=str(auth_user["id"]),
         )
         result = await _call(mcp, "list_schedules")
         assert isinstance(result, dict)
@@ -395,11 +396,12 @@ class TestListSchedules:
 
 class TestToggleSchedule:
     @pytest_asyncio.fixture
-    async def schedule_id(self, schedule_repo, test_organization):
+    async def schedule_id(self, schedule_repo, test_organization, auth_user):
         s = await schedule_repo.create_schedule(
             title="Toggle Me",
             org_id=str(test_organization["id"]),
             schedule_type="once",
+            created_by=str(auth_user["id"]),
         )
         return str(s["id"])
 
@@ -456,13 +458,14 @@ class TestToggleSchedule:
 
 class TestGetScheduleDetails:
     @pytest_asyncio.fixture
-    async def schedule_id(self, schedule_repo, test_organization):
+    async def schedule_id(self, schedule_repo, test_organization, auth_user):
         s = await schedule_repo.create_schedule(
             title="Details Test",
             org_id=str(test_organization["id"]),
             schedule_type="interval",
             interval_seconds=3600,
             description="Test schedule with details",
+            created_by=str(auth_user["id"]),
         )
         return str(s["id"])
 

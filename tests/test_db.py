@@ -145,6 +145,97 @@ class TestMemoryRepository:
 
         assert accessible is not None
 
+    async def test_daemon_owned_shared_memory_requires_admin_or_owner(
+        self, db_pool, test_user, test_organization, clean_test_data
+    ):
+        repo = MemoryRepository(db_pool)
+        user_repo = UserRepository(db_pool)
+        daemon_user = await user_repo.create(
+            external_id=f"{clean_test_data}daemon-service",
+            provider="local",
+            organization_id=test_organization["id"],
+            email=f"{clean_test_data}daemon@test.com",
+            display_name=f"{clean_test_data}Daemon",
+            role="daemon",
+        )
+        admin_user = await user_repo.create(
+            external_id=f"{clean_test_data}admin",
+            provider="local",
+            organization_id=test_organization["id"],
+            email=f"{clean_test_data}admin@test.com",
+            role="admin",
+        )
+        owner_user = await user_repo.create(
+            external_id=f"{clean_test_data}owner",
+            provider="local",
+            organization_id=test_organization["id"],
+            email=f"{clean_test_data}owner@test.com",
+            role="owner",
+        )
+        memory = await repo.create(
+            username=f"{clean_test_data}daemon",
+            type="experience",
+            content=f"{clean_test_data} daemon-only shared memory",
+            user_id=daemon_user["id"],
+            organization_id=test_organization["id"],
+            shared=True,
+        )
+
+        member_result = await repo.get_accessible(
+            memory["id"], test_user["id"], test_organization["id"]
+        )
+        assert member_result is None
+        member_scoped_result = await repo.get_accessible(
+            memory["id"],
+            test_user["id"],
+            test_organization["id"],
+            memory_scope="org_shared_only",
+        )
+        assert member_scoped_result is None
+
+        member_search = await repo.search(
+            query=f"{clean_test_data} daemon-only",
+            requesting_user_id=test_user["id"],
+            requesting_org_id=test_organization["id"],
+        )
+        assert member_search["memories"] == []
+
+        scoped_daemon_memory = await repo.create(
+            username="Lucent Daemon",
+            type="experience",
+            content=f"{clean_test_data} scoped daemon memory",
+            tags=["daemon", "review-outcome"],
+            user_id=test_user["id"],
+            organization_id=test_organization["id"],
+            shared=True,
+        )
+        member_scoped_daemon_result = await repo.get_accessible(
+            scoped_daemon_memory["id"],
+            test_user["id"],
+            test_organization["id"],
+        )
+        assert member_scoped_daemon_result is None
+        admin_scoped_daemon_result = await repo.get_accessible(
+            scoped_daemon_memory["id"],
+            admin_user["id"],
+            test_organization["id"],
+        )
+        assert admin_scoped_daemon_result is not None
+
+        for privileged_user in (admin_user, owner_user, daemon_user):
+            accessible = await repo.get_accessible(
+                memory["id"], privileged_user["id"], test_organization["id"]
+            )
+            assert accessible is not None
+
+        admin_scoped_result = await repo.get_accessible(
+            memory["id"],
+            admin_user["id"],
+            test_organization["id"],
+            memory_scope="org_shared_only",
+        )
+        assert admin_scoped_result is not None
+
     async def test_update_memory(self, db_pool, test_memory):
         """Test updating a memory."""
         repo = MemoryRepository(db_pool)
@@ -196,6 +287,63 @@ class TestMemoryRepository:
         assert result["total_count"] >= 1
         assert any("Python" in m["content"] for m in result["memories"])
 
+    async def test_search_matches_noncontiguous_query_terms(
+        self, db_pool, test_user, clean_test_data
+    ):
+        """Natural multi-term queries retrieve memories without exact phrases."""
+        prefix = clean_test_data
+        repo = MemoryRepository(db_pool)
+        memory = await repo.create(
+            username=f"{prefix}user",
+            type="technical",
+            content=(
+                f"{prefix} Daemon credentials are scoped independently. "
+                "Tenant access remains isolated by API key ownership."
+            ),
+            tags=["daemon-auth", "security"],
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
+        )
+
+        result = await repo.search(
+            query="daemon credential isolation API",
+            requesting_user_id=test_user["id"],
+            requesting_org_id=test_user["organization_id"],
+        )
+
+        assert memory["id"] in {item["id"] for item in result["memories"]}
+
+    async def test_search_fuzzy_typo_rejects_weak_substring_matches(
+        self, db_pool, test_user, clean_test_data
+    ):
+        """Single-term typo matching excludes weakly similar unrelated words."""
+        prefix = clean_test_data
+        repo = MemoryRepository(db_pool)
+        target = await repo.create(
+            username=f"{prefix}user",
+            type="technical",
+            content=f"{prefix} Glasswing project identity notes",
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
+        )
+        decoy = await repo.create(
+            username=f"{prefix}user",
+            type="experience",
+            content=f"{prefix} West Bloomfield weather is warming today",
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
+        )
+
+        result = await repo.search(
+            query="Glaswing",
+            requesting_user_id=test_user["id"],
+            requesting_org_id=test_user["organization_id"],
+        )
+
+        ids = {item["id"] for item in result["memories"]}
+        assert target["id"] in ids
+        assert decoy["id"] not in ids
+
     async def test_search_with_type_filter(self, db_pool, test_user, clean_test_data):
         """Test searching with type filter."""
         prefix = clean_test_data
@@ -227,7 +375,7 @@ class TestMemoryRepository:
         assert all(m["type"] == "technical" for m in result["memories"])
 
     async def test_search_with_tag_filter(self, db_pool, test_user, clean_test_data):
-        """Test searching with tag filter uses containment (all tags must match)."""
+        """Test searching with tag filter matches any requested tag."""
         prefix = clean_test_data
         repo = MemoryRepository(db_pool)
 
@@ -268,14 +416,16 @@ class TestMemoryRepository:
         assert m2["id"] in ids
         assert m3["id"] not in ids
 
-        # Multi-tag filter requires ALL tags (containment)
+        # Multi-tag filters match memories containing either tag.
         result = await repo.search(
             tags=["daemon-task", "pending"],
             requesting_user_id=test_user["id"],
             requesting_org_id=test_user["organization_id"],
         )
-        assert result["total_count"] == 1
-        assert result["memories"][0]["id"] == m1["id"]
+        ids = {memory["id"] for memory in result["memories"]}
+        assert m1["id"] in ids
+        assert m2["id"] in ids
+        assert m3["id"] not in ids
 
         # Tag that doesn't exist
         result = await repo.search(

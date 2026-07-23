@@ -106,6 +106,56 @@ async def client(db_pool, web_user):
 
 
 @pytest_asyncio.fixture
+async def admin_client(db_pool, web_user, web_prefix):
+    """httpx client authenticated as an admin in the test organization."""
+    _user, org, _token = web_user
+    admin = await UserRepository(db_pool).create(
+        external_id=f"{web_prefix}admin",
+        provider="basic",
+        organization_id=org["id"],
+        email=f"{web_prefix}admin@test.com",
+        display_name=f"{web_prefix}Admin",
+        role="admin",
+    )
+    await set_user_password(db_pool, admin["id"], TEST_PASSWORD)
+    session_token = await create_session(db_pool, admin["id"])
+    csrf_token = "test-csrf-token-admin123"
+
+    app = create_app()
+    transport = ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        cookies={
+            SESSION_COOKIE_NAME: session_token,
+            CSRF_COOKIE_NAME: csrf_token,
+        },
+    ) as admin_http_client:
+        admin_http_client._csrf_token = csrf_token  # type: ignore[attr-defined]
+        yield admin_http_client
+
+
+@pytest_asyncio.fixture
+async def scoped_daemon_memory(db_pool, web_user, web_prefix):
+    """Create daemon-authored output stored in the target human's scope."""
+    user, org, _token = web_user
+    memory = await MemoryRepository(db_pool).create(
+        username="Lucent Daemon",
+        type="experience",
+        content=f"{web_prefix}Daemon memory before admin edit",
+        tags=["daemon", "review-outcome"],
+        user_id=user["id"],
+        organization_id=org["id"],
+        shared=True,
+    )
+    yield memory
+    async with db_pool.acquire() as conn:
+        await conn.execute("DELETE FROM memory_audit_log WHERE memory_id = $1", memory["id"])
+        await conn.execute("DELETE FROM memory_access_log WHERE memory_id = $1", memory["id"])
+        await conn.execute("DELETE FROM memories WHERE id = $1", memory["id"])
+
+
+@pytest_asyncio.fixture
 async def web_memory(db_pool, web_user, web_prefix):
     """Create a memory owned by the test user."""
     user, org, _token = web_user
@@ -468,6 +518,15 @@ class TestMemoryDetail:
         assert CSRF_FIELD_NAME in resp.text
         assert client._csrf_token in resp.text  # type: ignore[attr-defined]
 
+    async def test_admin_sees_edit_for_daemon_memory_without_owner_actions(
+        self, admin_client, scoped_daemon_memory
+    ):
+        resp = await admin_client.get(f"/memories/{scoped_daemon_memory['id']}")
+        assert resp.status_code == 200
+        assert f'href="/memories/{scoped_daemon_memory["id"]}/edit"' in resp.text
+        assert f'action="/memories/{scoped_daemon_memory["id"]}/delete"' not in resp.text
+        assert "Read-only" not in resp.text
+
     async def test_detail_does_not_show_legacy_feedback_for_daemon_tag(
         self, client, db_pool, web_user, web_prefix
     ):
@@ -674,6 +733,42 @@ class TestMemoryEditSubmit:
                     "tags": "",
                     "importance": "5",
                 },
+            ),
+            follow_redirects=False,
+        )
+        assert resp.status_code == 403
+
+    async def test_admin_can_edit_daemon_memory(
+        self, admin_client, scoped_daemon_memory, db_pool
+    ):
+        resp = await admin_client.post(
+            f"/memories/{scoped_daemon_memory['id']}/edit",
+            data=_csrf_data(
+                admin_client,
+                {
+                    "content": "Daemon memory updated by admin",
+                    "tags": "daemon,review-outcome",
+                    "importance": "8",
+                },
+            ),
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        async with db_pool.acquire() as conn:
+            content = await conn.fetchval(
+                "SELECT content FROM memories WHERE id = $1",
+                scoped_daemon_memory["id"],
+            )
+        assert content == "Daemon memory updated by admin"
+
+    async def test_admin_cannot_edit_ordinary_member_memory(
+        self, admin_client, other_user_memory
+    ):
+        resp = await admin_client.post(
+            f"/memories/{other_user_memory['id']}/edit",
+            data=_csrf_data(
+                admin_client,
+                {"content": "Disallowed", "tags": "", "importance": "5"},
             ),
             follow_redirects=False,
         )

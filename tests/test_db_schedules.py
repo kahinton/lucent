@@ -1698,7 +1698,7 @@ class TestBuiltInScheduleEligibility:
         assert task_row["title"] == schedule_title
         assert task_row["request_title"] == f"[Scheduled] {schedule_title}"
 
-    async def test_manual_daemon_owned_user_workflow_runs_as_triggering_user(
+    async def test_owner_can_trigger_daemon_created_workflow_as_human_fallback(
         self,
         repo,
         db_pool,
@@ -1752,16 +1752,8 @@ class TestBuiltInScheduleEligibility:
 
         result = await trigger_now(str(sched["id"]), user, force=True, pool=db_pool)
 
-        async with db_pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """SELECT r.created_by::text, t.requesting_user_id::text
-                   FROM requests r
-                   JOIN tasks t ON t.request_id = r.id
-                   WHERE r.id = $1::uuid""",
-                str(result["request"]["id"]),
-            )
-        assert row["created_by"] == user_id
-        assert row["requesting_user_id"] == user_id
+        assert result["request"]["created_by"] == test_user["id"]
+        assert result["tasks"][0]["requesting_user_id"] == test_user["id"]
 
     async def test_shadow_forget_positive_requires_feature_flag(
         self,

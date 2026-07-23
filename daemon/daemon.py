@@ -41,6 +41,7 @@ if __package__ in {None, ""}:
 import httpx
 
 from lucent.mcp_config import build_internal_mcp_server, build_scoped_internal_mcp_server
+from lucent.prompts.memory_usage import render_active_user_context
 from daemon.observability.tools import (
     _BASE_TASK_MEMORY_SERVER_TOOLS,
     _CAPABILITY_ACTIVATION_AGENT_TYPES,
@@ -1405,6 +1406,7 @@ async def build_subagent_prompt(
     resolved_agent: dict | None = None,
     resolved_skills: list[dict] | None = None,
     resolved_tools: list[dict] | None = None,
+    active_user_context: str = "",
 ) -> str:
     """Build the system message for a sub-agent session."""
     return await _build_subagent_prompt(
@@ -1415,7 +1417,49 @@ async def build_subagent_prompt(
         resolved_agent,
         resolved_skills,
         resolved_tools,
+        active_user_context,
     )
+
+
+async def _load_request_owner_context(user_id: str, org_id: str) -> str:
+    """Load prompt context for an exact request owner without widening scope."""
+    user: dict[str, Any] = {"id": user_id, "organization_id": org_id}
+    individual_memory = None
+    try:
+        import asyncpg
+
+        conn = await asyncpg.connect(DATABASE_URL)
+        try:
+            user_row = await conn.fetchrow(
+                """
+                SELECT id, organization_id, display_name, email, role
+                FROM users
+                WHERE id = $1::uuid AND organization_id = $2::uuid
+                """,
+                user_id,
+                org_id,
+            )
+            if user_row:
+                user = dict(user_row)
+                memory_row = await conn.fetchrow(
+                    """
+                    SELECT id, username, type, content, tags, importance, metadata,
+                           created_at, updated_at, user_id, organization_id, shared
+                    FROM memories
+                    WHERE type = 'individual'
+                      AND deleted_at IS NULL
+                      AND user_id = $1::uuid
+                      AND organization_id = $2::uuid
+                    """,
+                    user_id,
+                    org_id,
+                )
+                individual_memory = dict(memory_row) if memory_row else None
+        finally:
+            await conn.close()
+    except Exception:
+        log(f"Failed to load request owner context for user {user_id[:8]}", "WARN")
+    return render_active_user_context(user, individual_memory)
 
 
 # ============================================================================
@@ -2736,9 +2780,13 @@ class LucentDaemon(
                             agent_id=str(planning_agent["id"]),
                         )
                     try:
+                        active_user_context = await _load_request_owner_context(
+                            str(owner_user_id), str(org_id)
+                        )
                         system_message = await build_subagent_prompt(
                             "planning",
                             "Break a pending_approval request into a visible task list.",
+                            active_user_context=active_user_context,
                             resolved_agent=planning_agent,
                             resolved_skills=planning_skills,
                         )
@@ -3728,10 +3776,14 @@ class LucentDaemon(
                 continue
 
             try:
+                active_user_context = await _load_request_owner_context(
+                    requesting_user_id, org_id
+                )
                 system_message = await build_subagent_prompt(
                     agent_type,
                     description,
                     task_context=task_context,
+                    active_user_context=active_user_context,
                     agent_definition_id=str(agent_def_id) if agent_def_id else None,
                     resolved_agent=agent_data,
                     resolved_skills=skills,

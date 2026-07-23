@@ -2,7 +2,7 @@
 
 {% set settings_section = "models" %}
 {% set settings_title = "AI Models" %}
-{% set settings_subtitle = "Configure which models are available for daemon tasks." %}
+{% set settings_subtitle = "Configure model availability and who can use each model." %}
 
 {% block title %}Models - Lucent{% endblock %}
 
@@ -97,6 +97,7 @@
                     <th class="text-left text-xs font-medium text-gray-500 uppercase px-4 py-3 hidden sm:table-cell">Context</th>
                     <th class="text-left text-xs font-medium text-gray-500 uppercase px-4 py-3 hidden lg:table-cell">Reasoning</th>
                     <th class="text-left text-xs font-medium text-gray-500 uppercase px-4 py-3 hidden md:table-cell">Tags</th>
+                    <th class="text-left text-xs font-medium text-gray-500 uppercase px-4 py-3">Access</th>
                     <th class="text-left text-xs font-medium text-gray-500 uppercase px-4 py-3">Status</th>
                     <th class="text-right text-xs font-medium text-gray-500 uppercase px-4 py-3">Actions</th>
                 </tr>
@@ -145,6 +146,15 @@
                         {% endif %}
                     </td>
                     <td class="px-4 py-3">
+                        {% if model.owner_group_id %}
+                        <span class="px-2 py-0.5 rounded text-xs bg-cyan-100 text-cyan-700">{{ owner_group_names.get(model.owner_group_id|string, 'Group') }}</span>
+                        {% elif model.owner_user_id %}
+                        <span class="px-2 py-0.5 rounded text-xs bg-indigo-100 text-indigo-700">{{ owner_user_names.get(model.owner_user_id|string, 'Personal') }}</span>
+                        {% else %}
+                        <span class="px-2 py-0.5 rounded text-xs bg-green-100 text-green-700">Entire organization</span>
+                        {% endif %}
+                    </td>
+                    <td class="px-4 py-3">
                         {% if model.is_enabled %}
                         <span class="px-2 py-0.5 rounded text-xs bg-green-100 text-green-700">enabled</span>
                         {% else %}
@@ -169,7 +179,8 @@
                                 data-reasoning-efforts="{{ (model.reasoning_efforts or [])|join(',') }}"
                                 data-supports-tools="{{ 'true' if model.supports_tools else 'false' }}"
                                 data-supports-vision="{{ 'true' if model.supports_vision else 'false' }}"
-                                data-engine="{{ model.engine or '' }}">Edit</button>
+                                data-engine="{{ model.engine or '' }}"
+                                data-owner-scope="{% if model.owner_group_id %}group:{{ model.owner_group_id }}{% elif model.owner_user_id %}user:{{ model.owner_user_id }}{% else %}org{% endif %}">Edit</button>
                             <form method="POST" action="/settings/models/{{ model.id }}/toggle">
                                 <button type="submit" class="px-3 py-1 text-xs rounded-md font-medium
                                     {% if model.is_enabled %}bg-gray-100 text-gray-700 hover:bg-gray-200{% else %}bg-green-50 text-green-700 hover:bg-green-100{% endif %}">
@@ -237,6 +248,16 @@
                     <option value="langchain">LangChain</option>
                 </select>
                 <p class="mt-1 text-xs text-gray-500">Auto selects the best engine for this provider. Override if you want to use a specific backend (e.g. LangChain for direct API access to Anthropic).</p>
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Available to</label>
+                <select name="owner_scope" class="w-full px-3 py-2 border rounded-lg text-sm">
+                    <option value="org" selected>Entire organization</option>
+                    <option value="me">Only me ({{ personal_owner_label }})</option>
+                    {% for owner_user in owner_users %}<option value="user:{{ owner_user.id }}">User: {{ owner_user.display_name or owner_user.email }}</option>{% endfor %}
+                    {% for group in owner_groups %}<option value="group:{{ group.id }}">Group: {{ group.name }}</option>{% endfor %}
+                </select>
+                <p class="mt-1 text-xs text-gray-500">Only people in this audience will see or be able to select the model.</p>
             </div>
             <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Tags <span class="text-gray-400 font-normal">(comma-separated)</span></label>
@@ -316,6 +337,16 @@
                 <p class="mt-1 text-xs text-gray-500">Auto selects the best engine for this provider. Override if you want to use a specific backend (e.g. LangChain for direct API access to Anthropic).</p>
             </div>
             <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Available to</label>
+                <select name="owner_scope" id="edit-owner-scope" class="w-full px-3 py-2 border rounded-lg text-sm">
+                    <option value="org">Entire organization</option>
+                    <option value="me">Only me ({{ personal_owner_label }})</option>
+                    {% for owner_user in owner_users %}<option value="user:{{ owner_user.id }}">User: {{ owner_user.display_name or owner_user.email }}</option>{% endfor %}
+                    {% for group in owner_groups %}<option value="group:{{ group.id }}">Group: {{ group.name }}</option>{% endfor %}
+                </select>
+                <p class="mt-1 text-xs text-gray-500">Changes apply immediately to model pickers and chat requests.</p>
+            </div>
+            <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Tags <span class="text-gray-400 font-normal">(comma-separated)</span></label>
                 <input name="tags" id="edit-tags" class="w-full px-3 py-2 border rounded-lg text-sm">
                 <div class="mt-1 flex flex-wrap gap-1">
@@ -357,6 +388,7 @@ function openEditModal(btn) {
     document.getElementById('edit-supports-tools').checked = d.supportsTools === 'true';
     document.getElementById('edit-supports-vision').checked = d.supportsVision === 'true';
     document.getElementById('edit-engine').value = d.engine || '';
+    document.getElementById('edit-owner-scope').value = d.ownerScope || 'org';
     document.getElementById('edit-reasoning-efforts').value = (d.reasoningEfforts || '').split(',').filter(Boolean).join(', ');
     document.getElementById('edit-model-form').action = '/settings/models/' + encodeURIComponent(d.id) + '/edit';
     document.getElementById('edit-model-modal').classList.remove('hidden');

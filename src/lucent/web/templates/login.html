@@ -13,9 +13,9 @@
                 extend: {
                     colors: {
                         primary: {
-                            50: '#eef2ff', 100: '#e0e7ff', 200: '#c7d2fe', 300: '#a5b4fc',
-                            400: '#818cf8', 500: '#6366f1', 600: '#4f46e5', 700: '#4338ca',
-                            800: '#3730a3', 900: '#312e81', 950: '#1e1b4b',
+                            50: '#e6fffb', 100: '#bffaf2', 200: '#7feee4', 300: '#3ee0d6',
+                            400: '#00d4c7', 500: '#00b8ad', 600: '#00968f', 700: '#08766f',
+                            800: '#0b5d59', 900: '#0d4846', 950: '#072b2a',
                         }
                     }
                 }
@@ -23,23 +23,83 @@
         }
     </script>
     <style>
+        :root {
+            --login-black: #080808;
+            --login-panel: rgba(18, 18, 18, 0.78);
+            --login-line: rgba(255, 255, 255, 0.15);
+            --login-text: #faf9f6;
+            --login-muted: #9d9995;
+            --login-teal: #00cfc1;
+            --login-pink: #ff3f9b;
+            --login-yellow: #ffd84d;
+        }
+        html { background: var(--login-black); }
+        body {
+            position: relative;
+            overflow: hidden;
+            padding: 2rem 1rem;
+            color: var(--login-text);
+            background-color: var(--login-black) !important;
+            background-image: repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.018) 0, rgba(255, 255, 255, 0.018) 1px, transparent 1px, transparent 12px);
+        }
+        .login-shell { position: relative; z-index: 1; }
+        .login-logo { filter: drop-shadow(0 8px 16px rgba(255, 63, 155, 0.2)); }
+        .login-card {
+            position: relative;
+            overflow: hidden;
+            background: var(--login-panel) !important;
+            border-color: var(--login-line) !important;
+            border-radius: 0.5rem;
+            box-shadow: inset 0 1px rgba(255, 255, 255, 0.08), 0 6px 0 #000, 0 24px 60px rgba(0, 0, 0, 0.46);
+            backdrop-filter: blur(22px) saturate(135%);
+            -webkit-backdrop-filter: blur(22px) saturate(135%);
+        }
+        .login-title, .login-heading { color: var(--login-text) !important; }
+        .login-subtitle, .login-label { color: var(--login-muted) !important; }
+        .login-warning {
+            color: #fff0a8 !important;
+            background: rgba(255, 216, 77, 0.1) !important;
+            border-color: rgba(255, 216, 77, 0.38) !important;
+        }
+        input {
+            background-color: rgba(5, 5, 5, 0.72) !important;
+            color: var(--login-text) !important;
+            border-color: #424242 !important;
+            border-radius: 0.4rem !important;
+            box-shadow: inset 0 1px 4px rgba(0, 0, 0, 0.55);
+        }
+        input::placeholder { color: #706d6a !important; }
+        input:focus {
+            border-color: var(--login-teal) !important;
+            box-shadow: 0 0 0 3px rgba(0, 207, 193, 0.16), inset 0 1px 4px rgba(0, 0, 0, 0.55) !important;
+        }
+        .login-submit {
+            color: #050505 !important;
+            background: var(--login-pink) !important;
+            border-radius: 0.4rem;
+            box-shadow: 0 4px 0 #971950, 0 10px 22px rgba(255, 63, 155, 0.2);
+        }
+        .login-submit:hover { background: #ff5baa !important; transform: translateY(-1px); }
+        .login-submit:active { transform: translateY(2px); box-shadow: 0 1px 0 #971950; }
+        @media (max-width: 480px) {
+            body { align-items: flex-start !important; padding-top: max(2rem, env(safe-area-inset-top)); overflow-y: auto; }
+            .login-card { padding: 1.5rem !important; }
+        }
         @media (prefers-color-scheme: dark) {
-            input { background-color: #1a2233 !important; color: #e2e8f0 !important; border-color: #334155 !important; }
-            input::placeholder { color: #4b5e78 !important; }
-            input:focus { border-color: #6366f1 !important; box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2) !important; }
+            body { background-color: var(--login-black) !important; }
         }
     </style>
 </head>
-<body class="min-h-screen bg-gray-50 dark:bg-gray-950 flex items-center justify-center">
-    <div class="w-full max-w-md">
+<body class="min-h-screen flex items-center justify-center">
+    <div class="login-shell w-full max-w-md">
         <div class="flex flex-col items-center mb-8">
-            <img src="/static/lucent_logo_128.png" alt="Lucent" class="h-16 mb-4">
-            <h1 class="text-2xl font-bold text-gray-900 dark:text-gray-100">Lucent</h1>
-            <p class="text-sm text-gray-500 dark:text-gray-400 mt-1">AI Teammate</p>
+            <img src="/static/lucent_logo_128.png" alt="Lucent" class="login-logo h-16 mb-4">
+            <h1 class="login-title text-2xl font-bold">Lucent</h1>
+            <p class="login-subtitle text-sm mt-1">AI Teammate</p>
         </div>
 
-        <div class="bg-white dark:bg-gray-900 rounded-xl shadow-sm border border-gray-200 dark:border-gray-800 p-8">
-            <h2 class="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-6">Sign In</h2>
+        <div class="login-card border p-8">
+            <h2 class="login-heading text-lg font-semibold mb-6">Sign In</h2>
 
             {% if error %}
             <div class="mb-4 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-400 rounded-lg text-sm">
@@ -48,7 +108,7 @@
             {% endif %}
 
             {% if session_warning %}
-            <div class="mb-4 p-3 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 text-blue-700 dark:text-blue-400 rounded-lg text-xs">
+            <div class="login-warning mb-4 p-3 border rounded-lg text-xs">
                 {{ session_warning }}
             </div>
             {% endif %}
@@ -57,7 +117,7 @@
                 <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
                 {% for field in fields %}
                 <div>
-                    <label for="{{ field.name }}" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                    <label for="{{ field.name }}" class="login-label block text-sm font-medium mb-1">
                         {{ field.label }}
                     </label>
                     <input
@@ -71,7 +131,7 @@
                 </div>
                 {% endfor %}
 
-                <button type="submit" class="w-full py-2.5 px-4 bg-primary-600 text-white font-medium text-sm rounded-lg hover:bg-primary-700 transition-colors">
+                <button type="submit" class="login-submit w-full py-2.5 px-4 font-semibold text-sm transition-all">
                     Sign In
                 </button>
             </form>

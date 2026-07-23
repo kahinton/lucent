@@ -58,6 +58,27 @@ class DefinitionRepository:
     def _role_value(role: str | None) -> str:
         return role or "member"
 
+    @staticmethod
+    def _definition_access_condition(
+        alias: str,
+        user_param: str,
+        role_param: str,
+    ) -> str:
+        """Return the requester ACL, keeping unowned proposals system-private."""
+        prefix = f"{alias}." if alias else ""
+        return (
+            f"({prefix}scope = 'built-in' "
+            f"OR {prefix}owner_user_id = {user_param} "
+            f"OR {prefix}owner_group_id IN ("
+            f"SELECT group_id FROM user_groups WHERE user_id = {user_param}) "
+            f"OR ({prefix}scope = 'instance' "
+            f"AND {prefix}owner_user_id IS NULL "
+            f"AND {prefix}owner_group_id IS NULL "
+            f"AND ({prefix}status <> 'proposed' "
+            f"OR {role_param} IN ('admin', 'owner'))) "
+            f"OR {role_param} IN ('admin', 'owner'))"
+        )
+
     async def _default_owner_user_id(
         self,
         *,
@@ -308,14 +329,8 @@ class DefinitionRepository:
             params.extend([requester_user_id, self._role_value(requester_role)])
             uid_idx = len(params) - 1
             role_idx = len(params)
-            base += (
-                f" AND (scope = 'built-in' OR owner_user_id = ${uid_idx} "
-                "OR owner_group_id IN ("
-                f"SELECT group_id FROM user_groups WHERE user_id = ${uid_idx}"
-                ") "
-                "OR (scope = 'instance' AND owner_user_id IS NULL "
-                "AND owner_group_id IS NULL) "
-                f"OR ${role_idx} IN ('admin', 'owner'))"
+            base += " AND " + self._definition_access_condition(
+                "", f"${uid_idx}", f"${role_idx}"
             )
         if status:
             params.append(status)
@@ -355,12 +370,8 @@ class DefinitionRepository:
         params: list[Any] = [agent_id, org_id]
         if requester_user_id:
             params.extend([requester_user_id, self._role_value(requester_role)])
-            acl_sql = (
-                " AND (a.scope = 'built-in' OR a.owner_user_id = $3 "
-                "OR a.owner_group_id IN (SELECT group_id FROM user_groups WHERE user_id = $3) "
-                "OR (a.scope = 'instance' AND a.owner_user_id IS NULL "
-                "AND a.owner_group_id IS NULL) "
-                "OR $4 IN ('admin', 'owner'))"
+            acl_sql = " AND " + self._definition_access_condition(
+                "a", "$3", "$4"
             )
         query = """
             SELECT a.*,
@@ -539,14 +550,8 @@ class DefinitionRepository:
             params.extend([requester_user_id, self._role_value(requester_role)])
             uid_idx = len(params) - 1
             role_idx = len(params)
-            base += (
-                f" AND (scope = 'built-in' OR owner_user_id = ${uid_idx} "
-                "OR owner_group_id IN ("
-                f"SELECT group_id FROM user_groups WHERE user_id = ${uid_idx}"
-                ") "
-                "OR (scope = 'instance' AND owner_user_id IS NULL "
-                "AND owner_group_id IS NULL) "
-                f"OR ${role_idx} IN ('admin', 'owner'))"
+            base += " AND " + self._definition_access_condition(
+                "", f"${uid_idx}", f"${role_idx}"
             )
         if status:
             params.append(status)
@@ -595,12 +600,8 @@ class DefinitionRepository:
         params: list[Any] = [skill_id, org_id]
         if requester_user_id:
             params.extend([requester_user_id, self._role_value(requester_role)])
-            acl_sql = (
-                " AND (scope = 'built-in' OR owner_user_id = $3 "
-                "OR owner_group_id IN (SELECT group_id FROM user_groups WHERE user_id = $3) "
-                "OR (scope = 'instance' AND owner_user_id IS NULL "
-                "AND owner_group_id IS NULL) "
-                "OR $4 IN ('admin', 'owner'))"
+            acl_sql = " AND " + self._definition_access_condition(
+                "", "$3", "$4"
             )
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -721,14 +722,8 @@ class DefinitionRepository:
             params.extend([requester_user_id, self._role_value(requester_role)])
             uid_idx = len(params) - 1
             role_idx = len(params)
-            base += (
-                f" AND (scope = 'built-in' OR owner_user_id = ${uid_idx} "
-                "OR owner_group_id IN ("
-                f"SELECT group_id FROM user_groups WHERE user_id = ${uid_idx}"
-                ") "
-                "OR (scope = 'instance' AND owner_user_id IS NULL "
-                "AND owner_group_id IS NULL) "
-                f"OR ${role_idx} IN ('admin', 'owner'))"
+            base += " AND " + self._definition_access_condition(
+                "", f"${uid_idx}", f"${role_idx}"
             )
         if status:
             params.append(status)
@@ -768,12 +763,8 @@ class DefinitionRepository:
         params: list[Any] = [server_id, org_id]
         if requester_user_id:
             params.extend([requester_user_id, self._role_value(requester_role)])
-            acl_sql = (
-                " AND (scope = 'built-in' OR owner_user_id = $3 "
-                "OR owner_group_id IN (SELECT group_id FROM user_groups WHERE user_id = $3) "
-                "OR (scope = 'instance' AND owner_user_id IS NULL "
-                "AND owner_group_id IS NULL) "
-                "OR $4 IN ('admin', 'owner'))"
+            acl_sql = " AND " + self._definition_access_condition(
+                "", "$3", "$4"
             )
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -802,14 +793,8 @@ class DefinitionRepository:
             params.extend([requester_user_id, self._role_value(requester_role)])
             uid_idx = len(params) - 1
             role_idx = len(params)
-            base += (
-                f" AND (scope = 'built-in' OR owner_user_id = ${uid_idx} "
-                "OR owner_group_id IN ("
-                f"SELECT group_id FROM user_groups WHERE user_id = ${uid_idx}"
-                ") "
-                "OR (scope = 'instance' AND owner_user_id IS NULL "
-                "AND owner_group_id IS NULL) "
-                f"OR ${role_idx} IN ('admin', 'owner'))"
+            base += " AND " + self._definition_access_condition(
+                "", f"${uid_idx}", f"${role_idx}"
             )
         if status:
             params.append(status)
@@ -849,12 +834,8 @@ class DefinitionRepository:
         params: list[Any] = [hook_id, org_id]
         if requester_user_id:
             params.extend([requester_user_id, self._role_value(requester_role)])
-            acl_sql = (
-                " AND (scope = 'built-in' OR owner_user_id = $3 "
-                "OR owner_group_id IN (SELECT group_id FROM user_groups WHERE user_id = $3) "
-                "OR (scope = 'instance' AND owner_user_id IS NULL "
-                "AND owner_group_id IS NULL) "
-                "OR $4 IN ('admin', 'owner'))"
+            acl_sql = " AND " + self._definition_access_condition(
+                "", "$3", "$4"
             )
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -1041,14 +1022,8 @@ class DefinitionRepository:
             params.extend([requester_user_id, self._role_value(requester_role)])
             uid_idx = len(params) - 1
             role_idx = len(params)
-            base += (
-                f" AND (scope = 'built-in' OR owner_user_id = ${uid_idx} "
-                "OR owner_group_id IN ("
-                f"SELECT group_id FROM user_groups WHERE user_id = ${uid_idx}"
-                ") "
-                "OR (scope = 'instance' AND owner_user_id IS NULL "
-                "AND owner_group_id IS NULL) "
-                f"OR ${role_idx} IN ('admin', 'owner'))"
+            base += " AND " + self._definition_access_condition(
+                "", f"${uid_idx}", f"${role_idx}"
             )
         if status:
             params.append(status)
@@ -1090,12 +1065,8 @@ class DefinitionRepository:
         params: list[Any] = [tool_id, org_id]
         if requester_user_id:
             params.extend([requester_user_id, self._role_value(requester_role)])
-            acl_sql = (
-                " AND (scope = 'built-in' OR owner_user_id = $3 "
-                "OR owner_group_id IN (SELECT group_id FROM user_groups WHERE user_id = $3) "
-                "OR (scope = 'instance' AND owner_user_id IS NULL "
-                "AND owner_group_id IS NULL) "
-                "OR $4 IN ('admin', 'owner'))"
+            acl_sql = " AND " + self._definition_access_condition(
+                "", "$3", "$4"
             )
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -1116,12 +1087,8 @@ class DefinitionRepository:
         params: list[Any] = [name, org_id]
         if requester_user_id:
             params.extend([requester_user_id, self._role_value(requester_role)])
-            acl_sql = (
-                " AND (scope = 'built-in' OR owner_user_id = $3 "
-                "OR owner_group_id IN (SELECT group_id FROM user_groups WHERE user_id = $3) "
-                "OR (scope = 'instance' AND owner_user_id IS NULL "
-                "AND owner_group_id IS NULL) "
-                "OR $4 IN ('admin', 'owner'))"
+            acl_sql = " AND " + self._definition_access_condition(
+                "", "$3", "$4"
             )
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -2150,24 +2117,84 @@ class DefinitionRepository:
 
     # ── Bulk/convenience ──────────────────────────────────────────────────
 
-    async def get_pending_proposals(self, org_id: str) -> dict:
-        """Get all proposed (pending approval) definitions."""
-        agents = (await self.list_agents(org_id, status="proposed"))["items"]
-        skills = (await self.list_skills(org_id, status="proposed"))["items"]
-        mcp_servers = (await self.list_mcp_servers(org_id, status="proposed"))["items"]
-        hooks = (await self.list_hooks(org_id, status="proposed"))["items"]
-        managed_tools = (await self.list_managed_tools(org_id, status="proposed"))["items"]
+    async def get_pending_proposals(
+        self,
+        org_id: str,
+        requester_user_id: str | None = None,
+        requester_role: str | None = None,
+    ) -> dict:
+        """Get proposed definitions visible to the requester."""
+        visibility = {
+            "requester_user_id": requester_user_id,
+            "requester_role": requester_role,
+        }
+        agent_result = await self.list_agents(
+            org_id, status="proposed", limit=1000, **visibility
+        )
+        skill_result = await self.list_skills(
+            org_id, status="proposed", limit=1000, **visibility
+        )
+        mcp_result = await self.list_mcp_servers(
+            org_id, status="proposed", limit=1000, **visibility
+        )
+        hook_result = await self.list_hooks(
+            org_id, status="proposed", limit=1000, **visibility
+        )
+        tool_result = await self.list_managed_tools(
+            org_id, status="proposed", limit=1000, **visibility
+        )
+        agents = agent_result["items"]
+        skills = skill_result["items"]
+        mcp_servers = mcp_result["items"]
+        hooks = hook_result["items"]
+        managed_tools = tool_result["items"]
         return {
             "agents": agents,
             "skills": skills,
             "mcp_servers": mcp_servers,
             "hooks": hooks,
             "managed_tools": managed_tools,
-            "total": (
-                len(agents) + len(skills) + len(mcp_servers)
-                + len(hooks) + len(managed_tools)
+            "total": sum(
+                result["total_count"]
+                for result in (
+                    agent_result,
+                    skill_result,
+                    mcp_result,
+                    hook_result,
+                    tool_result,
+                )
             ),
         }
+
+    async def count_pending_proposals(
+        self,
+        org_id: str,
+        requester_user_id: str,
+        requester_role: str | None = None,
+    ) -> int:
+        """Count proposed definitions visible to the requester."""
+        visibility = self._definition_access_condition("d", "$2", "$3")
+        tables = (
+            "agent_definitions",
+            "skill_definitions",
+            "mcp_server_configs",
+            "hook_definitions",
+            "managed_tool_definitions",
+        )
+        counts = " UNION ALL ".join(
+            f"SELECT COUNT(*) AS total FROM {table} d "
+            f"WHERE d.organization_id = $1 AND d.status = 'proposed' "
+            f"AND {visibility}"
+            for table in tables
+        )
+        async with self.pool.acquire() as conn:
+            total = await conn.fetchval(
+                f"SELECT COALESCE(SUM(total), 0) FROM ({counts}) proposal_counts",
+                org_id,
+                requester_user_id,
+                self._role_value(requester_role),
+            )
+        return int(total or 0)
 
     async def get_active_agent_with_grants(self, agent_name: str, org_id: str) -> dict | None:
         """Get an active agent by name with its skills and MCP servers loaded."""

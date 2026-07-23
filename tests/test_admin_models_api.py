@@ -112,6 +112,50 @@ async def test_custom_reasoning_effort_values_are_allowed(models_client, mdl_pre
 
 
 @pytest.mark.asyncio
+async def test_model_owner_user_must_belong_to_organization(
+    models_client, db_pool, mdl_prefix
+):
+    from lucent.db import OrganizationRepository, UserRepository
+
+    async with db_pool.acquire() as conn:
+        organization_id = await conn.fetchval(
+            "SELECT organization_id FROM users WHERE external_id = $1",
+            f"{mdl_prefix}admin",
+        )
+    owner = await UserRepository(db_pool).create(
+        external_id=f"{mdl_prefix}owner",
+        provider="local",
+        organization_id=organization_id,
+        email=f"{mdl_prefix}owner@test.com",
+    )
+    create = await models_client.post(
+        "/api/admin/models",
+        json={
+            "model_id": f"{mdl_prefix}user-owned",
+            "provider": "openai",
+            "name": "User Owned",
+            "owner_user_id": str(owner["id"]),
+        },
+    )
+    assert create.status_code == 201
+    assert create.json()["owner_user_id"] == str(owner["id"])
+
+    other_org = await OrganizationRepository(db_pool).create(name=f"{mdl_prefix}other-org")
+    outsider = await UserRepository(db_pool).create(
+        external_id=f"{mdl_prefix}outsider",
+        provider="local",
+        organization_id=other_org["id"],
+        email=f"{mdl_prefix}outsider@test.com",
+    )
+    update = await models_client.put(
+        f"/api/admin/models/{mdl_prefix}user-owned",
+        json={"owner_user_id": str(outsider["id"])},
+    )
+    assert update.status_code == 400
+    assert update.json()["detail"] == "Owner user is not in this organization"
+
+
+@pytest.mark.asyncio
 async def test_invalid_engine_rejected(models_client, mdl_prefix):
     model_id = f"{mdl_prefix}invalid"
     resp = await models_client.post(

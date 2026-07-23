@@ -20,18 +20,17 @@ def _is_daemon_user(user: AuthenticatedUser) -> bool:
     return user.role == Role.DAEMON or user.is_daemon_service
 
 
-def _can_manage_schedule(sched: dict, user: AuthenticatedUser) -> bool:
-    if user.role >= Role.ADMIN or _is_daemon_user(user):
-        return True
-    created_by = sched.get("created_by")
-    if not created_by:
-        return True
-    return bool(created_by and str(created_by) == str(user.id))
+def _include_daemon_workflows(user: AuthenticatedUser) -> bool:
+    return user.role >= Role.ADMIN
 
 
-def _require_schedule_access(sched: dict, user: AuthenticatedUser) -> None:
-    if not _can_manage_schedule(sched, user):
-        raise HTTPException(404, "Schedule not found")
+async def _require_model_access(pool, model_id: str, user: AuthenticatedUser) -> None:
+    from lucent.access_control import AccessControlService
+
+    if not await AccessControlService(pool).can_access(
+        str(user.id), "model", model_id, str(user.organization_id)
+    ):
+        raise HTTPException(403, "Model is not available to this user")
 
 
 async def _schedule_owner_context(
@@ -40,6 +39,15 @@ async def _schedule_owner_context(
     fallback_user: AuthenticatedUser | None,
 ) -> tuple[str, str]:
     """Return (owner_user_id, owner_role) for work created by a schedule."""
+    if sched.get("is_system"):
+        from lucent.daemon_identity import ensure_daemon_service_user
+
+        async with pool.acquire() as conn:
+            daemon_user = await ensure_daemon_service_user(
+                conn, str(sched["organization_id"])
+            )
+        return str(daemon_user["id"]), "daemon"
+
     owner_id = str(sched.get("created_by") or (fallback_user.id if fallback_user else ""))
     if not owner_id:
         raise RuntimeError("Workflow has no owner user to create request work")
@@ -461,10 +469,14 @@ async def _trigger_schedule_execution(
     req_repo = RequestRepository(pool)
 
     if user is not None:
-        sched = await sched_repo.get_schedule(schedule_id, str(user.organization_id))
+        sched = await sched_repo.get_schedule(
+            schedule_id,
+            str(user.organization_id),
+            created_by=str(user.id),
+            include_daemon_created=_include_daemon_workflows(user),
+        )
         if not sched:
             raise HTTPException(404, "Workflow not found")
-        _require_schedule_access(sched, user)
         org_id = str(user.organization_id)
     else:
         sched = await sched_repo.get_schedule_by_id(schedule_id)
@@ -617,14 +629,34 @@ async def _trigger_schedule_execution(
                         task_model = None
                         task_reasoning_effort = None
                     else:
-                        effort_error = validate_reasoning_effort(task_model, task_reasoning_effort)
-                        if effort_error:
+                        from lucent.access_control import AccessControlService
+
+                        can_access_model = await AccessControlService(pool).can_access(
+                            owner_user_id,
+                            "model",
+                            task_model,
+                            org_id,
+                        )
+                        if not can_access_model:
                             logger.warning(
-                                "Workflow %s action has invalid reasoning_effort '%s': %s — "
+                                "Workflow %s action model '%s' is unavailable to its owner; "
                                 "clearing override",
-                                schedule_id, task_reasoning_effort, effort_error,
+                                schedule_id,
+                                task_model,
                             )
+                            task_model = None
                             task_reasoning_effort = None
+                        if task_model:
+                            effort_error = validate_reasoning_effort(
+                                task_model, task_reasoning_effort
+                            )
+                            if effort_error:
+                                logger.warning(
+                                    "Workflow %s action has invalid reasoning_effort '%s': %s — "
+                                    "clearing override",
+                                    schedule_id, task_reasoning_effort, effort_error,
+                                )
+                                task_reasoning_effort = None
                 else:
                     task_reasoning_effort = None
 
@@ -720,6 +752,7 @@ async def create_schedule(
         model_error = validate_model(body.model, require_tools=True)
         if model_error:
             raise HTTPException(422, model_error)
+        await _require_model_access(pool, body.model, user)
         effort_error = validate_reasoning_effort(body.model, body.reasoning_effort)
         if effort_error:
             raise HTTPException(422, effort_error)
@@ -765,7 +798,13 @@ async def list_schedules(
     from lucent.db.schedules import ScheduleRepository
 
     repo = ScheduleRepository(pool)
-    return await repo.list_schedules(str(user.organization_id), status=status, enabled=enabled)
+    return await repo.list_schedules(
+        str(user.organization_id),
+        status=status,
+        enabled=enabled,
+        created_by=str(user.id),
+        include_daemon_created=_include_daemon_workflows(user),
+    )
 
 
 @router.get("/summary")
@@ -773,7 +812,11 @@ async def schedule_summary(user: AuthenticatedUser, pool=Depends(get_pool)):
     from lucent.db.schedules import ScheduleRepository
 
     repo = ScheduleRepository(pool)
-    return await repo.get_summary(str(user.organization_id))
+    return await repo.get_summary(
+        str(user.organization_id),
+        created_by=str(user.id),
+        include_daemon_created=_include_daemon_workflows(user),
+    )
 
 
 @router.get("/due")
@@ -789,7 +832,12 @@ async def get_schedule(schedule_id: str, user: AuthenticatedUser, pool=Depends(g
     from lucent.db.schedules import ScheduleRepository
 
     repo = ScheduleRepository(pool)
-    result = await repo.get_schedule_with_runs(schedule_id, str(user.organization_id))
+    result = await repo.get_schedule_with_runs(
+        schedule_id,
+        str(user.organization_id),
+        created_by=str(user.id),
+        include_daemon_created=_include_daemon_workflows(user),
+    )
     if not result:
         raise HTTPException(404, "Schedule not found")
     return result
@@ -815,10 +863,14 @@ async def update_schedule(
         fields["reasoning_effort"] = None
     if "timezone" in fields:
         fields["timezone_str"] = fields.pop("timezone")
-    sched = await repo.get_schedule(schedule_id, str(user.organization_id))
+    sched = await repo.get_schedule(
+        schedule_id,
+        str(user.organization_id),
+        created_by=str(user.id),
+        include_daemon_created=_include_daemon_workflows(user),
+    )
     if not sched:
         raise HTTPException(404, "Schedule not found")
-    _require_schedule_access(sched, user)
     effective_model = fields.get("model", sched.get("model"))
     effective_effort = fields.get("reasoning_effort", sched.get("reasoning_effort"))
     if effective_model:
@@ -827,6 +879,7 @@ async def update_schedule(
         model_error = validate_model(effective_model, require_tools=True)
         if model_error:
             raise HTTPException(422, model_error)
+        await _require_model_access(pool, effective_model, user)
         effort_error = validate_reasoning_effort(effective_model, effective_effort)
         if effort_error:
             raise HTTPException(422, effort_error)
@@ -854,10 +907,14 @@ async def toggle_schedule(
     from lucent.db.schedules import ScheduleRepository
 
     repo = ScheduleRepository(pool)
-    sched = await repo.get_schedule(schedule_id, str(user.organization_id))
+    sched = await repo.get_schedule(
+        schedule_id,
+        str(user.organization_id),
+        created_by=str(user.id),
+        include_daemon_created=_include_daemon_workflows(user),
+    )
     if not sched:
         raise HTTPException(404, "Schedule not found")
-    _require_schedule_access(sched, user)
     try:
         result = await repo.toggle_schedule(
             schedule_id, str(user.organization_id), body.enabled,
@@ -875,10 +932,14 @@ async def delete_schedule(schedule_id: str, user: AuthenticatedUser, pool=Depend
     from lucent.db.schedules import ScheduleRepository
 
     repo = ScheduleRepository(pool)
-    sched = await repo.get_schedule(schedule_id, str(user.organization_id))
+    sched = await repo.get_schedule(
+        schedule_id,
+        str(user.organization_id),
+        created_by=str(user.id),
+        include_daemon_created=_include_daemon_workflows(user),
+    )
     if not sched:
         raise HTTPException(404, "Schedule not found")
-    _require_schedule_access(sched, user)
     try:
         ok = await repo.delete_schedule(schedule_id, str(user.organization_id))
     except ValueError as e:
@@ -894,10 +955,14 @@ async def list_runs(schedule_id: str, user: AuthenticatedUser, pool=Depends(get_
 
     repo = ScheduleRepository(pool)
     # Verify ownership
-    sched = await repo.get_schedule(schedule_id, str(user.organization_id))
+    sched = await repo.get_schedule(
+        schedule_id,
+        str(user.organization_id),
+        created_by=str(user.id),
+        include_daemon_created=_include_daemon_workflows(user),
+    )
     if not sched:
         raise HTTPException(404, "Schedule not found")
-    _require_schedule_access(sched, user)
     return await repo.list_runs(schedule_id)
 
 
@@ -950,6 +1015,7 @@ async def create_workflow(
             model_error = validate_model(action["model"], require_tools=True)
             if model_error:
                 raise HTTPException(422, model_error)
+            await _require_model_access(pool, action["model"], user)
             effort_error = validate_reasoning_effort(
                 action["model"], action.get("reasoning_effort"),
             )
@@ -995,7 +1061,13 @@ async def list_workflows(
     from lucent.db.schedules import ScheduleRepository
 
     repo = ScheduleRepository(pool)
-    result = await repo.list_schedules(str(user.organization_id), status=status, enabled=enabled)
+    result = await repo.list_schedules(
+        str(user.organization_id),
+        status=status,
+        enabled=enabled,
+        created_by=str(user.id),
+        include_daemon_created=_include_daemon_workflows(user),
+    )
     if trigger_type:
         result["items"] = [
             item for item in result["items"]
@@ -1010,7 +1082,11 @@ async def list_workflows(
 async def workflow_summary(user: AuthenticatedUser, pool=Depends(get_pool)):
     from lucent.db.schedules import ScheduleRepository
 
-    return await ScheduleRepository(pool).get_summary(str(user.organization_id))
+    return await ScheduleRepository(pool).get_summary(
+        str(user.organization_id),
+        created_by=str(user.id),
+        include_daemon_created=_include_daemon_workflows(user),
+    )
 
 
 @workflow_router.get("/{workflow_id}")
@@ -1018,10 +1094,14 @@ async def get_workflow(workflow_id: str, user: AuthenticatedUser, pool=Depends(g
     from lucent.db.schedules import ScheduleRepository
 
     repo = ScheduleRepository(pool)
-    result = await repo.get_schedule_with_runs(workflow_id, str(user.organization_id))
+    result = await repo.get_schedule_with_runs(
+        workflow_id,
+        str(user.organization_id),
+        created_by=str(user.id),
+        include_daemon_created=_include_daemon_workflows(user),
+    )
     if not result:
         raise HTTPException(404, "Workflow not found")
-    _require_schedule_access(result, user)
     return result
 
 

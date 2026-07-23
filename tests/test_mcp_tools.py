@@ -969,6 +969,55 @@ class TestUpdateMemory:
         assert "not accessible" in result["error"].lower() or "Permission denied" in result["error"]
         set_current_user(None)
 
+    async def test_admin_can_update_daemon_owned_memory(
+        self, mcp_tools, db_pool, test_organization, clean_test_data
+    ):
+        from lucent.db import MemoryRepository, UserRepository
+
+        user_repo = UserRepository(db_pool)
+        daemon = await user_repo.create(
+            external_id=f"{clean_test_data}daemon-service",
+            provider="local",
+            organization_id=test_organization["id"],
+            email=f"{clean_test_data}daemon@test.com",
+            role="daemon",
+        )
+        admin = await user_repo.create(
+            external_id=f"{clean_test_data}admin",
+            provider="local",
+            organization_id=test_organization["id"],
+            email=f"{clean_test_data}admin@test.com",
+            role="admin",
+        )
+        memory = await MemoryRepository(db_pool).create(
+            username=f"{clean_test_data}daemon",
+            type="experience",
+            content=f"{clean_test_data}Daemon memory before MCP update",
+            tags=["daemon"],
+            user_id=daemon["id"],
+            organization_id=test_organization["id"],
+            shared=True,
+        )
+        set_current_user(
+            {
+                "id": admin["id"],
+                "organization_id": admin["organization_id"],
+                "role": "admin",
+            }
+        )
+
+        result = await _call(
+            mcp_tools,
+            "update_memory",
+            {
+                "memory_id": str(memory["id"]),
+                "content": f"{clean_test_data}Updated by admin via MCP",
+            },
+        )
+
+        assert result["content"] == f"{clean_test_data}Updated by admin via MCP"
+        set_current_user(None)
+
 
 # ============================================================================
 # pin_memory / unpin_memory

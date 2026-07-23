@@ -131,6 +131,9 @@ services:
       DAEMON_DATABASE_URL: postgresql://lucent_daemon:${DAEMON_DB_PASSWORD:-change-me-insecure-daemon-password}@postgres:5432/lucent
       LUCENT_MODE: ${LUCENT_MODE:-personal}
       LUCENT_LICENSE_KEY: ${LUCENT_LICENSE_KEY:-}
+      # Local Compose serves plain HTTP, including when reached by LAN IP.
+      # Secure cookies are not returned by browsers over http://<lan-ip>.
+      LUCENT_SECURE_COOKIES: ${LUCENT_SECURE_COOKIES:-false}
       # Cookie signing is persisted via the configured secret provider at startup.
       # Set LUCENT_SIGNING_SECRET only for explicit production override/debugging.
       LUCENT_SIGNING_SECRET: ${LUCENT_SIGNING_SECRET:-}

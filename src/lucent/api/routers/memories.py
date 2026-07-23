@@ -145,8 +145,8 @@ async def create_memory(
     # Detect daemon caller for auto-sharing and auto-tagging
     is_daemon = user.is_daemon_service and not user.is_memory_scoped
 
-    # Daemon-created memories must always be shared so org members can see
-    # them in the review queue and search results (workflow-audit/phase-4)
+    # Daemon memories remain shared for organization-level administration,
+    # while repository access limits them to admins and owners.
     effective_shared = data.shared
     if is_daemon:
         effective_shared = True
@@ -392,12 +392,16 @@ async def update_memory(
             detail="Memory not found",
         )
 
-    # Check ownership (only owner can update)
+    # Owners can update their own memories. Organization admins and owners can
+    # also maintain daemon-authored memories, including scoped daemon output.
     effective_user_id = _effective_memory_user_id(user)
-    if existing.get("user_id") != effective_user_id:
+    can_edit_daemon_memory = (
+        _memory_admin_override(user) and await repo.is_daemon_authored(existing)
+    )
+    if existing.get("user_id") != effective_user_id and not can_edit_daemon_memory:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="You can only update your own memories",
+            detail="You cannot update this memory",
         )
 
     # Validate metadata if provided

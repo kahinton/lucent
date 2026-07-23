@@ -1014,7 +1014,11 @@ async def revoke_managed_tool_from_agent(agent_id: str, tool_id: str, user: Admi
 async def list_proposals(user: AuthenticatedUser):
     pool = await get_pool()
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
-    return await repo.get_pending_proposals(str(user.organization_id))
+    return await repo.get_pending_proposals(
+        str(user.organization_id),
+        requester_user_id=str(user.id),
+        requester_role=user.role.value,
+    )
 
 
 # ── Import Endpoints ──────────────────────────────────────────────────────

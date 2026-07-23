@@ -121,7 +121,7 @@ async def client(db_pool, web_user):
 @pytest_asyncio.fixture
 async def sample_request(db_pool, web_user):
     """Create a sample request and return it."""
-    _user, org, _token = web_user
+    user, org, _token = web_user
     repo = RequestRepository(db_pool)
     return await repo.create_request(
         title="Web Test Request",
@@ -129,6 +129,7 @@ async def sample_request(db_pool, web_user):
         description="A request created for web route testing",
         source="user",
         priority="medium",
+        created_by=str(user["id"]),
     )
 
 
@@ -219,6 +220,7 @@ class TestActivityList:
             title="Lane Running Request",
             org_id=str(org["id"]),
             source="user",
+            created_by=str(user["id"]),
         )
         running_task = await repo.create_task(
             request_id=str(running["id"]),
@@ -232,6 +234,7 @@ class TestActivityList:
             title="Lane Completed Request",
             org_id=str(org["id"]),
             source="user",
+            created_by=str(user["id"]),
         )
         completed_task = await repo.create_task(
             request_id=str(completed["id"]),
@@ -261,12 +264,13 @@ class TestActivityList:
         assert "1 output" in resp.text
 
     async def test_detail_marks_completed_request_viewed(self, client, db_pool, web_user):
-        _user, org, _token = web_user
+        user, org, _token = web_user
         repo = RequestRepository(db_pool)
         req = await repo.create_request(
             title="View Clears Finished Highlight",
             org_id=str(org["id"]),
             source="user",
+            created_by=str(user["id"]),
         )
         await repo.update_request_status(str(req["id"]), "completed", str(org["id"]))
 
@@ -375,7 +379,7 @@ class TestRequestDetail:
         assert 'value="reject"' in resp.text
         assert CSRF_FIELD_NAME in resp.text
 
-    async def test_detail_shows_admin_required_for_non_admin(
+    async def test_detail_allows_owner_approval_for_non_admin(
         self, client, db_pool, web_user
     ):
         user, org, _token = web_user
@@ -390,8 +394,7 @@ class TestRequestDetail:
 
         resp = await client.get(f"/requests/{req['id']}")
         assert resp.status_code == 200
-        assert "Admin or owner approval is required" in resp.text
-        assert f'action="/requests/{req["id"]}/approval"' not in resp.text
+        assert f'action="/requests/{req["id"]}/approval"' in resp.text
 
 
 class TestRequestApprovalAction:
@@ -464,11 +467,11 @@ class TestRequestApprovalAction:
 
         assert resp.status_code == 400
 
-    async def test_member_cannot_approve_request(self, client, db_pool, web_user):
+    async def test_member_can_approve_owned_request(self, client, db_pool, web_user):
         user, org, _token = web_user
         repo = RequestRepository(db_pool)
         req = await repo.create_request(
-            title="Member Cannot Approve",
+            title="Member Own Approval",
             org_id=str(org["id"]),
             source="user",
             created_by=str(user["id"]),
@@ -481,7 +484,9 @@ class TestRequestApprovalAction:
             follow_redirects=False,
         )
 
-        assert resp.status_code == 403
+        assert resp.status_code == 303
+        updated = await repo.get_request(str(req["id"]), str(org["id"]))
+        assert updated["approval_status"] == "approved"
 
 
 # ============================================================================

@@ -71,6 +71,55 @@ class ModelRepository:
             "has_more": offset + len(rows) < total_count,
         }
 
+    async def list_models_accessible_by(
+        self,
+        user_id: str,
+        org_id: str,
+        *,
+        requester_role: str = "member",
+        enabled_only: bool = True,
+        limit: int = 500,
+        offset: int = 0,
+    ) -> dict:
+        """List models visible through direct, group, org-shared, or admin access."""
+        enabled_clause = "AND is_enabled = true" if enabled_only else ""
+        base = f"""
+            FROM models
+            WHERE (
+                (organization_id IS NULL
+                 AND owner_user_id IS NULL AND owner_group_id IS NULL)
+                OR (
+                    organization_id = $1
+                    AND (
+                        owner_user_id = $2
+                        OR owner_group_id IN (
+                            SELECT group_id FROM user_groups WHERE user_id = $2
+                        )
+                        OR (owner_user_id IS NULL AND owner_group_id IS NULL)
+                        OR $3 IN ('admin', 'owner')
+                    )
+                )
+            )
+            {enabled_clause}
+        """
+        params = [UUID(org_id), UUID(user_id), requester_role]
+        async with self.pool.acquire() as conn:
+            count_row = await conn.fetchrow(f"SELECT COUNT(*) AS total{base}", *params)
+            rows = await conn.fetch(
+                f"SELECT *{base} ORDER BY provider, name LIMIT $4 OFFSET $5",
+                *params,
+                limit,
+                offset,
+            )
+        total_count = count_row["total"] if count_row else 0
+        return {
+            "items": [dict(row) for row in rows],
+            "total_count": total_count,
+            "offset": offset,
+            "limit": limit,
+            "has_more": offset + len(rows) < total_count,
+        }
+
     async def get_model(self, model_id: str) -> dict | None:
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow("SELECT * FROM models WHERE id = $1", model_id)
@@ -132,6 +181,8 @@ class ModelRepository:
         discovery_source: str = "manual",
         is_custom: bool = True,
         discovery_metadata: dict | None = None,
+        owner_user_id: str | None = None,
+        owner_group_id: str | None = None,
     ) -> dict:
         now = datetime.now(timezone.utc)
         async with self.pool.acquire() as conn:
@@ -140,9 +191,9 @@ class ModelRepository:
                    context_window, supports_tools, supports_vision, notes, tags,
                    reasoning_efforts, is_enabled, organization_id, engine,
                    discovery_source, is_custom, discovery_metadata, created_at,
-                   updated_at)
+                   updated_at, owner_user_id, owner_group_id)
                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
-                       $16,$17::jsonb,$18,$18)
+                       $16,$17::jsonb,$18,$18,$19,$20)
                    RETURNING *""",
                 model_id,
                 provider,
@@ -162,6 +213,8 @@ class ModelRepository:
                 is_custom,
                 _jsonb_param(discovery_metadata),
                 now,
+                UUID(owner_user_id) if owner_user_id else None,
+                UUID(owner_group_id) if owner_group_id else None,
             )
         return dict(row)
 
@@ -171,6 +224,7 @@ class ModelRepository:
             "supports_tools", "supports_vision", "notes", "tags", "is_enabled",
             "reasoning_efforts", "engine", "discovery_source", "is_custom",
             "last_discovered_at", "discovery_metadata",
+            "organization_id", "owner_user_id", "owner_group_id",
         }
         updates = {k: v for k, v in kwargs.items() if k in allowed}
         if not updates:
@@ -185,7 +239,11 @@ class ModelRepository:
                 params.append(_jsonb_param(val))
             else:
                 set_parts.append(f"{key} = ${i}")
-                params.append(val)
+                params.append(
+                    UUID(val)
+                    if key in {"organization_id", "owner_user_id", "owner_group_id"} and val
+                    else val
+                )
 
         params.append(model_id)
         query = f"UPDATE models SET {', '.join(set_parts)} WHERE id = ${len(params)} RETURNING *"

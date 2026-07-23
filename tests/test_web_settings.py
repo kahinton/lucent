@@ -30,6 +30,7 @@ from lucent.db import (
     RuntimeSettingsRepository,
     UserRepository,
 )
+from lucent.db.groups import GroupRepository
 
 TEST_PASSWORD = "TestPass1"
 
@@ -58,6 +59,11 @@ async def web_prefix(db_pool):
         )
         await conn.execute(
             "DELETE FROM models WHERE organization_id IN "
+            "(SELECT id FROM organizations WHERE name LIKE $1)",
+            f"{prefix}%",
+        )
+        await conn.execute(
+            "DELETE FROM groups WHERE organization_id IN "
             "(SELECT id FROM organizations WHERE name LIKE $1)",
             f"{prefix}%",
         )
@@ -425,6 +431,88 @@ async def test_runtime_model_setting_rejects_unknown_model(
     assert await RuntimeSettingsRepository(db_pool).get_setting(
         org["id"], "models.chat_model"
     ) is None
+
+
+@pytest.mark.asyncio
+async def test_models_settings_updates_and_displays_group_access(
+    client, db_pool, web_user
+):
+    user, org, _token = web_user
+    await _promote_web_user(db_pool, web_user)
+    group = await GroupRepository(db_pool).create_group(
+        "Model Reviewers",
+        str(org["id"]),
+        created_by=str(user["id"]),
+    )
+    local_user = await UserRepository(db_pool).create(
+        external_id=f"model-user-{org['id']}",
+        provider="local",
+        organization_id=org["id"],
+        email="model-user@example.com",
+        display_name="Model User",
+        role="member",
+    )
+    model_id = f"group-model-{org['id']}"
+    await ModelRepository(db_pool).create_model(
+        model_id,
+        "test-provider",
+        "Group Model",
+        org_id=str(org["id"]),
+    )
+
+    response = await client.post(
+        f"/settings/models/{model_id}/edit",
+        data=_csrf_data(
+            client,
+            {
+                "name": "Group Model",
+                "provider": "test-provider",
+                "category": "general",
+                "api_model_id": model_id,
+                "context_window": "0",
+                "owner_scope": f"group:{group['id']}",
+                "supports_tools": "true",
+            },
+        ),
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    model = await ModelRepository(db_pool).get_model(model_id)
+    assert model["owner_user_id"] is None
+    assert model["owner_group_id"] == group["id"]
+
+    page = await client.get("/settings/models")
+    assert page.status_code == 200
+    assert "Configure model availability and who can use each model." in page.text
+    assert "Model Reviewers" in page.text
+    assert f'data-owner-scope="group:{group["id"]}"' in page.text
+    assert f'value="user:{local_user["id"]}">User: Model User' in page.text
+
+    response = await client.post(
+        f"/settings/models/{model_id}/edit",
+        data=_csrf_data(
+            client,
+            {
+                "name": "Group Model",
+                "provider": "test-provider",
+                "category": "general",
+                "api_model_id": model_id,
+                "context_window": "0",
+                "owner_scope": f"user:{local_user['id']}",
+                "supports_tools": "true",
+            },
+        ),
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    model = await ModelRepository(db_pool).get_model(model_id)
+    assert model["owner_user_id"] == local_user["id"]
+    assert model["owner_group_id"] is None
+    page = await client.get("/settings/models")
+    assert "Model User" in page.text
+    assert f'data-owner-scope="user:{local_user["id"]}"' in page.text
 
 
 @pytest.mark.asyncio

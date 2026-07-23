@@ -394,42 +394,94 @@ class TestDefinitionsList:
         assert result["has_more"] is False
 
     async def test_sidebar_agent_composer_badge_counts_pending_definitions(
-        self, client, db_pool, web_user
+        self, client, db_pool, web_user, web_prefix
     ):
-        _user, org, _token = web_user
-        repo = DefinitionRepository(db_pool)
-        await repo.create_skill(
-            name="Sidebar Badge Skill One",
-            description="Needs approval",
-            content="# Sidebar Badge Skill One",
-            org_id=str(org["id"]),
-            created_by=str(_user["id"]),
+        user, org, _token = web_user
+        other_user = await UserRepository(db_pool).create(
+            external_id=f"{web_prefix}other_user",
+            provider="local",
+            organization_id=org["id"],
+            email=f"{web_prefix}other@test.com",
+            display_name="Other Definition User",
         )
-        await repo.create_skill(
-            name="Sidebar Badge Skill Two",
-            description="Needs approval too",
-            content="# Sidebar Badge Skill Two",
+        other_token = await create_session(db_pool, other_user["id"])
+        from lucent.daemon_identity import ensure_daemon_service_user
+
+        async with db_pool.acquire() as conn:
+            daemon_user = await ensure_daemon_service_user(conn, str(org["id"]))
+
+        repo = DefinitionRepository(db_pool)
+        own_proposal = await repo.create_skill(
+            name="Admin Owned Proposal",
+            description="Needs approval",
+            content="# Admin Owned Proposal",
             org_id=str(org["id"]),
-            created_by=str(_user["id"]),
+            created_by=str(user["id"]),
+        )
+        other_proposal = await repo.create_skill(
+            name="Member Owned Proposal",
+            description="Belongs only to the member",
+            content="# Member Owned Proposal",
+            org_id=str(org["id"]),
+            created_by=str(other_user["id"]),
+        )
+        daemon_proposal = await repo.create_skill(
+            name="Daemon System Proposal",
+            description="Visible only to admins and owners",
+            content="# Daemon System Proposal",
+            org_id=str(org["id"]),
+            created_by=str(daemon_user["id"]),
         )
 
-        resp = await client.get("/definitions", params={"tab": "skills"})
+        resp = await client.get("/definitions", params={"tab": "proposals"})
 
         assert resp.status_code == 200
         assert 'title="Definition proposals awaiting review"' in resp.text
         assert re.search(
-            r'title="Definition proposals awaiting review"[^>]*>\s*2\s*</span>',
+            r'title="Definition proposals awaiting review"[^>]*>\s*3\s*</span>',
             resp.text,
         )
-        assert "Sidebar Badge Skill One" in resp.text
+        assert "Admin Owned Proposal" in resp.text
+        assert "Daemon System Proposal" in resp.text
+        assert "Member Owned Proposal" in resp.text
 
         chat_resp = await client.get("/chat")
         assert chat_resp.status_code == 200
         assert 'id="agent-composer-nav-link"' in chat_resp.text
         assert re.search(
-            r'title="Definition proposals awaiting review"[^>]*>\s*2\s*</span>',
+            r'title="Definition proposals awaiting review"[^>]*>\s*3\s*</span>',
             chat_resp.text,
         )
+
+        app = create_app()
+        transport = ASGITransport(app=app, raise_app_exceptions=False)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+            cookies={SESSION_COOKIE_NAME: other_token},
+        ) as other_client:
+            member_resp = await other_client.get(
+                "/definitions", params={"tab": "proposals"}
+            )
+            assert member_resp.status_code == 200
+            assert re.search(
+                r'title="Definition proposals awaiting review"[^>]*>\s*1\s*</span>',
+                member_resp.text,
+            )
+            assert "Member Owned Proposal" in member_resp.text
+            assert "Admin Owned Proposal" not in member_resp.text
+            assert "Daemon System Proposal" not in member_resp.text
+
+            for hidden_proposal in (own_proposal, daemon_proposal):
+                detail = await other_client.get(
+                    f"/definitions/skills/{hidden_proposal['id']}"
+                )
+                assert detail.status_code == 404
+
+            own_detail = await other_client.get(
+                f"/definitions/skills/{other_proposal['id']}"
+            )
+            assert own_detail.status_code == 200
 
     async def test_list_tab_mcp(self, client, mcp_def):
         resp = await client.get("/definitions", params={"tab": "mcp"})

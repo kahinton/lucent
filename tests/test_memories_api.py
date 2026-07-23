@@ -134,6 +134,40 @@ async def mem_client_b(db_pool, mem_user_b):
     app.dependency_overrides.clear()
 
 
+@pytest_asyncio.fixture
+async def mem_admin_client(db_pool, mem_user, mem_prefix):
+    """AsyncClient authenticated as an admin in mem_user's organization."""
+    from lucent.db import UserRepository
+
+    admin = await UserRepository(db_pool).create(
+        external_id=f"{mem_prefix}admin",
+        provider="local",
+        organization_id=mem_user["organization_id"],
+        email=f"{mem_prefix}admin@test.com",
+        display_name=f"{mem_prefix}Admin",
+        role="admin",
+    )
+    app = create_app()
+    fake_user = CurrentUser(
+        id=admin["id"],
+        organization_id=admin["organization_id"],
+        role="admin",
+        email=admin["email"],
+        display_name=admin["display_name"],
+        auth_method="api_key",
+        api_key_scopes=["read", "write"],
+    )
+
+    async def override():
+        return fake_user
+
+    app.dependency_overrides[get_current_user] = override
+    transport = ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        yield client
+    app.dependency_overrides.clear()
+
+
 # Helper to create a memory via the API
 async def _create_memory(client, prefix, **overrides):
     payload = {
@@ -514,6 +548,48 @@ class TestUpdateMemory:
             },
         )
         # Should be 403 or 404 (not leaking existence)
+        assert resp.status_code in (403, 404)
+
+    async def test_admin_can_update_daemon_owned_memory(
+        self, mem_admin_client, db_pool, mem_user, mem_prefix
+    ):
+        from lucent.db import MemoryRepository, UserRepository
+
+        daemon = await UserRepository(db_pool).create(
+            external_id=f"{mem_prefix}daemon-service",
+            provider="local",
+            organization_id=mem_user["organization_id"],
+            email=f"{mem_prefix}daemon@test.com",
+            display_name="Lucent Daemon",
+            role="daemon",
+        )
+        memory = await MemoryRepository(db_pool).create(
+            username=f"{mem_prefix}daemon",
+            type="experience",
+            content=f"{mem_prefix}Daemon-owned memory",
+            tags=["daemon"],
+            user_id=daemon["id"],
+            organization_id=mem_user["organization_id"],
+            shared=True,
+        )
+
+        resp = await mem_admin_client.patch(
+            f"/api/memories/{memory['id']}",
+            json={"content": f"{mem_prefix}Updated by admin"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["content"] == f"{mem_prefix}Updated by admin"
+
+    async def test_admin_cannot_update_member_memory(
+        self, mem_client, mem_admin_client, mem_prefix
+    ):
+        create_resp = await _create_memory(mem_client, mem_prefix)
+        memory_id = create_resp.json()["id"]
+
+        resp = await mem_admin_client.patch(
+            f"/api/memories/{memory_id}",
+            json={"content": f"{mem_prefix}Disallowed admin update"},
+        )
         assert resp.status_code in (403, 404)
 
     async def test_update_repo_tagged_memory_denied_when_acl_fails(

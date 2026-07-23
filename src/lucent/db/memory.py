@@ -104,6 +104,88 @@ class MemoryRepository:
         "organization_id, shared, last_accessed_at, version, "
         "lifecycle_stage, vitality_score, vitality_computed_at"
     )
+
+    @staticmethod
+    def _daemon_authored_condition() -> str:
+        return """
+            (
+                EXISTS (
+                    SELECT 1 FROM users memory_owner
+                    WHERE memory_owner.id = memories.user_id
+                      AND (
+                          memory_owner.role = 'daemon'
+                          OR memory_owner.external_id = 'daemon-service'
+                          OR memory_owner.external_id LIKE 'daemon-service:%'
+                      )
+                )
+                OR (
+                    memories.username = 'Lucent Daemon'
+                    AND 'daemon' = ANY(memories.tags)
+                )
+            )
+        """
+
+    @staticmethod
+    def _daemon_reader_condition(org_param: str, user_param: str) -> str:
+        return f"""
+            EXISTS (
+                SELECT 1 FROM users memory_requester
+                WHERE memory_requester.id = {user_param}::uuid
+                  AND memory_requester.organization_id = {org_param}::uuid
+                  AND memory_requester.role IN ('admin', 'owner', 'daemon')
+            )
+        """
+
+    @classmethod
+    def owned_memory_access_condition(cls, org_param: str, user_param: str) -> str:
+        """Allow scoped daemon output only to privileged readers."""
+        return (
+            f"(memories.user_id = {user_param}::uuid AND "
+            f"(NOT ({cls._daemon_authored_condition()}) "
+            f"OR ({cls._daemon_reader_condition(org_param, user_param)})))"
+        )
+
+    @classmethod
+    def shared_memory_access_condition(cls, org_param: str, user_param: str) -> str:
+        """Allow daemon-authored shared memories only to privileged readers."""
+        return (
+            f"(memories.organization_id = {org_param}::uuid AND memories.shared IS TRUE "
+            f"AND (NOT ({cls._daemon_authored_condition()}) "
+            f"OR ({cls._daemon_reader_condition(org_param, user_param)})))"
+        )
+
+    @classmethod
+    def user_memory_access_condition(cls, org_param: str, user_param: str) -> str:
+        """Return the complete owner-or-shared visibility condition."""
+        owned = cls.owned_memory_access_condition(org_param, user_param)
+        shared = cls.shared_memory_access_condition(org_param, user_param)
+        return f"({owned} OR {shared})"
+
+    async def is_daemon_authored(self, memory: Mapping[str, Any]) -> bool:
+        """Return whether a memory was authored by a daemon principal."""
+        if memory.get("username") == "Lucent Daemon" and "daemon" in (
+            memory.get("tags") or []
+        ):
+            return True
+
+        owner_id = memory.get("user_id")
+        if owner_id is None:
+            return False
+        async with self.pool.acquire() as conn:
+            return bool(
+                await conn.fetchval(
+                    """SELECT EXISTS (
+                           SELECT 1 FROM users
+                           WHERE id = $1::uuid
+                             AND (
+                                 role = 'daemon'
+                                 OR external_id = 'daemon-service'
+                                 OR external_id LIKE 'daemon-service:%'
+                             )
+                       )""",
+                    str(owner_id),
+                )
+            )
     _SEARCH_COLUMNS = (
         "id, username, type, content, tags, importance, related_memory_ids, "
         "metadata, created_at, updated_at, user_id, organization_id, shared, last_accessed_at, "
@@ -349,19 +431,28 @@ class MemoryRepository:
 
         normalized_scope = memory_scope if memory_scope in {"user", "org_shared_only"} else None
         if normalized_scope == "user":
-            conditions.append(f"user_id = ${param_idx}")
+            conditions.append(
+                self.owned_memory_access_condition(
+                    f"${param_idx + 1}", f"${param_idx}"
+                )
+            )
             params.append(str(requesting_user_id))
-            param_idx += 1
+            params.append(str(requesting_org_id))
+            param_idx += 2
         elif normalized_scope == "org_shared_only":
             conditions.append(
-                f"(organization_id = ${param_idx}::uuid AND shared IS TRUE)"
+                self.shared_memory_access_condition(
+                    f"${param_idx}", f"${param_idx + 1}"
+                )
             )
             params.append(str(requesting_org_id))
-            param_idx += 1
+            params.append(str(requesting_user_id))
+            param_idx += 2
         else:
             conditions.append(
-                f"(user_id = ${param_idx}::uuid OR "
-                f"(organization_id = ${param_idx + 1}::uuid AND shared IS TRUE))"
+                self.user_memory_access_condition(
+                    f"${param_idx + 1}", f"${param_idx}"
+                )
             )
             params.append(str(requesting_user_id))
             params.append(str(requesting_org_id))
@@ -497,15 +588,17 @@ class MemoryRepository:
 
         # Keep placeholder numbering stable to avoid scope-dependent
         # bind count mismatches in prepared statement execution paths.
+        owned_access = self.owned_memory_access_condition("$3", "$2")
+        shared_access = self.shared_memory_access_condition("$3", "$2")
         query = f"""
             SELECT {self._FULL_COLUMNS}
             FROM memories
             WHERE id = $1
               AND deleted_at IS NULL
               AND (
-                    ($4 = 'user' AND user_id = $2)
-                 OR ($4 = 'org_shared_only' AND organization_id = $3 AND shared = true)
-                 OR ($4 IS NULL AND (user_id = $2 OR (organization_id = $3 AND shared = true)))
+                    ($4 = 'user' AND {owned_access})
+                     OR ($4 = 'org_shared_only' AND {shared_access})
+                     OR ($4 IS NULL AND ({owned_access} OR {shared_access}))
               )
         """
 
@@ -996,7 +1089,7 @@ class MemoryRepository:
             query: Optional fuzzy search query for content.
             username: Optional filter by username.
             type: Optional filter by memory type.
-            tags: Optional filter by tags (all must match).
+            tags: Optional filter by tags (any may match).
             importance_min: Optional minimum importance.
             importance_max: Optional maximum importance.
             created_after: Optional filter for memories created after this date.
@@ -1019,6 +1112,8 @@ class MemoryRepository:
         Returns:
             Search result with memories, total count, and pagination info.
         """
+        limit = max(1, min(limit, 50))
+        offset = max(0, offset)
         conditions = ["deleted_at IS NULL"]
         params: list[Any] = []
         param_idx = 1
@@ -1026,19 +1121,28 @@ class MemoryRepository:
         # Add access control condition if user context is provided
         if requesting_user_id is not None and requesting_org_id is not None:
             if memory_scope == "user":
-                conditions.append(f"user_id = ${param_idx}")
+                conditions.append(
+                    self.owned_memory_access_condition(
+                        f"${param_idx + 1}", f"${param_idx}"
+                    )
+                )
                 params.append(str(requesting_user_id))
-                param_idx += 1
+                params.append(str(requesting_org_id))
+                param_idx += 2
             elif memory_scope == "org_shared_only":
                 conditions.append(
-                    f"(organization_id = ${param_idx} AND shared = true)"
+                    self.shared_memory_access_condition(
+                        f"${param_idx}", f"${param_idx + 1}"
+                    )
                 )
                 params.append(str(requesting_org_id))
-                param_idx += 1
+                params.append(str(requesting_user_id))
+                param_idx += 2
             else:
                 conditions.append(
-                    f"(user_id = ${param_idx} OR "
-                    f"(organization_id = ${param_idx + 1} AND shared = true))"
+                    self.user_memory_access_condition(
+                        f"${param_idx + 1}", f"${param_idx}"
+                    )
                 )
                 params.append(str(requesting_user_id))
                 params.append(str(requesting_org_id))
@@ -1066,7 +1170,7 @@ class MemoryRepository:
             param_idx += 1
 
         if tags:
-            conditions.append(f"tags @> ${param_idx}")
+            conditions.append(f"tags && ${param_idx}")
             params.append(tags)
             param_idx += 1
 
@@ -1113,48 +1217,96 @@ class MemoryRepository:
         )
         boost_alpha = search_vitality_boost_alpha()
 
-        # Build the query with optional fuzzy matching
+        # Build the query with hybrid lexical matching.
         if query:
-            # Use pg_trgm similarity for fuzzy search
-            similarity_param = param_idx
+            query_param = param_idx
             params.append(query)
             param_idx += 1
+
+            search_input = f"""
+                WITH search_input AS (
+                    SELECT
+                        ${query_param}::text AS query_text,
+                        plainto_tsquery('english', ${query_param}) AS all_query,
+                        tsvector_to_array(to_tsvector('english', ${query_param})) AS query_terms,
+                        to_tsquery(
+                            'english',
+                            array_to_string(
+                                tsvector_to_array(to_tsvector('english', ${query_param})),
+                                ' | '
+                            )
+                        ) AS any_query
+                )
+            """
+            document = "COALESCE(search_vector, ''::tsvector)"
+            fuzzy_score = """GREATEST(
+                word_similarity(search_input.query_text, content),
+                word_similarity(search_input.query_text, array_to_string(tags, ' '))
+            )"""
+            matched_terms = f"""(
+                SELECT COUNT(*)
+                FROM unnest(search_input.query_terms) AS query_term
+                WHERE {document} @@ plainto_tsquery('english', query_term)
+            )"""
+            relevance_score = f"""(
+                0.50 * ts_rank_cd({document}, search_input.any_query, 32)
+                + 0.20 * CASE
+                    WHEN numnode(search_input.all_query) > 0
+                     AND {document} @@ search_input.all_query THEN 1.0 ELSE 0.0
+                  END
+                + 0.20 * {fuzzy_score}
+                + 0.10 * CASE
+                    WHEN content ILIKE '%' || search_input.query_text || '%'
+                    THEN 1.0 ELSE 0.0
+                  END
+            )"""
+            match_condition = f"""(
+                {matched_terms} >= CEIL(
+                    cardinality(search_input.query_terms) * 0.67
+                )::integer
+                OR (
+                    cardinality(search_input.query_terms) <= 2
+                    AND length(search_input.query_text) <= 32
+                    AND {fuzzy_score} >= 0.6
+                )
+                OR content ILIKE '%' || search_input.query_text || '%'
+                OR array_to_string(tags, ' ') ILIKE '%' || search_input.query_text || '%'
+            )"""
 
             if boost_enabled:
                 boost_alpha_param = param_idx
                 params.append(boost_alpha)
                 param_idx += 1
-                search_query = f"""
+                search_query = search_input + f"""
                     SELECT {self._SEARCH_COLUMNS},
-                           similarity(content, ${similarity_param}) as sim_score,
-                           similarity(content, ${similarity_param})
-                             + (${boost_alpha_param}
-                                * (COALESCE(vitality_score, 0.5) - 0.5)) AS final_rank
+                           {relevance_score} AS sim_score,
+                           {relevance_score} + (${boost_alpha_param}
+                             * (COALESCE(vitality_score, 0.5) - 0.5)) AS final_rank
                     FROM memories
+                    CROSS JOIN search_input
                     WHERE {where_clause}
-                      AND (content % ${similarity_param}
-                           OR content ILIKE '%' || ${similarity_param} || '%')
+                      AND {match_condition}
                     ORDER BY final_rank DESC, importance DESC, created_at DESC
                     LIMIT ${param_idx} OFFSET ${param_idx + 1}
                 """
             else:
-                search_query = f"""
+                search_query = search_input + f"""
                     SELECT {self._SEARCH_COLUMNS},
-                           similarity(content, ${similarity_param}) as sim_score
+                           {relevance_score} AS sim_score
                     FROM memories
+                    CROSS JOIN search_input
                     WHERE {where_clause}
-                      AND (content % ${similarity_param}
-                           OR content ILIKE '%' || ${similarity_param} || '%')
+                      AND {match_condition}
                     ORDER BY sim_score DESC, importance DESC, created_at DESC
                     LIMIT ${param_idx} OFFSET ${param_idx + 1}
                 """
 
-            count_query = f"""
+            count_query = search_input + f"""
                 SELECT COUNT(*) as total
                 FROM memories
+                CROSS JOIN search_input
                 WHERE {where_clause}
-                  AND (content % ${similarity_param}
-                       OR content ILIKE '%' || ${similarity_param} || '%')
+                  AND {match_condition}
             """
         else:
             search_query = f"""
@@ -1236,6 +1388,8 @@ class MemoryRepository:
         Returns:
             Search result with memories, total count, and pagination info.
         """
+        limit = max(1, min(limit, 50))
+        offset = max(0, offset)
         conditions = ["deleted_at IS NULL"]
         params: list[Any] = []
         param_idx = 1
@@ -1243,19 +1397,28 @@ class MemoryRepository:
         # Add access control condition if user context is provided
         if requesting_user_id is not None and requesting_org_id is not None:
             if memory_scope == "user":
-                conditions.append(f"user_id = ${param_idx}")
+                conditions.append(
+                    self.owned_memory_access_condition(
+                        f"${param_idx + 1}", f"${param_idx}"
+                    )
+                )
                 params.append(str(requesting_user_id))
-                param_idx += 1
+                params.append(str(requesting_org_id))
+                param_idx += 2
             elif memory_scope == "org_shared_only":
                 conditions.append(
-                    f"(organization_id = ${param_idx} AND shared = true)"
+                    self.shared_memory_access_condition(
+                        f"${param_idx}", f"${param_idx + 1}"
+                    )
                 )
                 params.append(str(requesting_org_id))
-                param_idx += 1
+                params.append(str(requesting_user_id))
+                param_idx += 2
             else:
                 conditions.append(
-                    f"(user_id = ${param_idx} OR "
-                    f"(organization_id = ${param_idx + 1} AND shared = true))"
+                    self.user_memory_access_condition(
+                        f"${param_idx + 1}", f"${param_idx}"
+                    )
                 )
                 params.append(str(requesting_user_id))
                 params.append(str(requesting_org_id))
@@ -1307,73 +1470,96 @@ class MemoryRepository:
         )
         boost_alpha = search_vitality_boost_alpha()
 
-        # Build a combined text field for searching: content + tags + metadata
+        # Use the same hybrid retrieval as search(); this endpoint remains a
+        # required-query convenience for broad discovery.
         query_param = param_idx
         params.append(query)
         param_idx += 1
 
-        # Search across content, array_to_string(tags), and metadata::text
+        search_input = f"""
+            WITH search_input AS (
+                SELECT
+                    ${query_param}::text AS query_text,
+                    plainto_tsquery('english', ${query_param}) AS all_query,
+                    tsvector_to_array(to_tsvector('english', ${query_param})) AS query_terms,
+                    to_tsquery(
+                        'english',
+                        array_to_string(
+                            tsvector_to_array(to_tsvector('english', ${query_param})),
+                            ' | '
+                        )
+                    ) AS any_query
+            )
+        """
+        document = "COALESCE(search_vector, ''::tsvector)"
+        fuzzy_score = """GREATEST(
+            word_similarity(search_input.query_text, content),
+            word_similarity(search_input.query_text, array_to_string(tags, ' '))
+        )"""
+        matched_terms = f"""(
+            SELECT COUNT(*)
+            FROM unnest(search_input.query_terms) AS query_term
+            WHERE {document} @@ plainto_tsquery('english', query_term)
+        )"""
+        relevance_score = f"""(
+            0.50 * ts_rank_cd({document}, search_input.any_query, 32)
+            + 0.20 * CASE
+                WHEN numnode(search_input.all_query) > 0
+                 AND {document} @@ search_input.all_query THEN 1.0 ELSE 0.0
+              END
+            + 0.20 * {fuzzy_score}
+            + 0.10 * CASE
+                WHEN content ILIKE '%' || search_input.query_text || '%'
+                THEN 1.0 ELSE 0.0
+              END
+        )"""
+        match_condition = f"""(
+            {matched_terms} >= CEIL(
+                cardinality(search_input.query_terms) * 0.67
+            )::integer
+            OR (
+                cardinality(search_input.query_terms) <= 2
+                AND length(search_input.query_text) <= 32
+                AND {fuzzy_score} >= 0.6
+            )
+            OR content ILIKE '%' || search_input.query_text || '%'
+            OR array_to_string(tags, ' ') ILIKE '%' || search_input.query_text || '%'
+        )"""
+
         if boost_enabled:
             boost_alpha_param = param_idx
             params.append(boost_alpha)
             param_idx += 1
-            search_query = f"""
+            search_query = search_input + f"""
                 SELECT {self._SEARCH_COLUMNS},
-                       GREATEST(
-                           similarity(content, ${query_param}),
-                           similarity(array_to_string(tags, ' '), ${query_param}),
-                           similarity(metadata::text, ${query_param})
-                       ) as sim_score,
-                       GREATEST(
-                           similarity(content, ${query_param}),
-                           similarity(array_to_string(tags, ' '), ${query_param}),
-                           similarity(metadata::text, ${query_param})
-                       ) + (${boost_alpha_param}
-                            * (COALESCE(vitality_score, 0.5) - 0.5)) AS final_rank
+                       {relevance_score} AS sim_score,
+                       {relevance_score} + (${boost_alpha_param}
+                         * (COALESCE(vitality_score, 0.5) - 0.5)) AS final_rank
                 FROM memories
+                CROSS JOIN search_input
                 WHERE {where_clause}
-                  AND (
-                      content % ${query_param} OR content ILIKE '%' || ${query_param} || '%'
-                      OR array_to_string(tags, ' ') % ${query_param}
-                      OR array_to_string(tags, ' ') ILIKE '%' || ${query_param} || '%'
-                      OR metadata::text % ${query_param}
-                      OR metadata::text ILIKE '%' || ${query_param} || '%'
-                  )
+                  AND {match_condition}
                 ORDER BY final_rank DESC, importance DESC, created_at DESC
                 LIMIT ${param_idx} OFFSET ${param_idx + 1}
             """
         else:
-            search_query = f"""
+            search_query = search_input + f"""
                 SELECT {self._SEARCH_COLUMNS},
-                       GREATEST(
-                           similarity(content, ${query_param}),
-                           similarity(array_to_string(tags, ' '), ${query_param}),
-                           similarity(metadata::text, ${query_param})
-                       ) as sim_score
+                       {relevance_score} AS sim_score
                 FROM memories
+                CROSS JOIN search_input
                 WHERE {where_clause}
-                  AND (
-                      content % ${query_param} OR content ILIKE '%' || ${query_param} || '%'
-                      OR array_to_string(tags, ' ') % ${query_param}
-                      OR array_to_string(tags, ' ') ILIKE '%' || ${query_param} || '%'
-                      OR metadata::text % ${query_param}
-                      OR metadata::text ILIKE '%' || ${query_param} || '%'
-                  )
+                  AND {match_condition}
                 ORDER BY sim_score DESC, importance DESC, created_at DESC
                 LIMIT ${param_idx} OFFSET ${param_idx + 1}
             """
 
-        count_query = f"""
+        count_query = search_input + f"""
             SELECT COUNT(*) as total
             FROM memories
+            CROSS JOIN search_input
             WHERE {where_clause}
-              AND (
-                  content % ${query_param} OR content ILIKE '%' || ${query_param} || '%'
-                  OR array_to_string(tags, ' ') % ${query_param}
-                  OR array_to_string(tags, ' ') ILIKE '%' || ${query_param} || '%'
-                  OR metadata::text % ${query_param}
-                  OR metadata::text ILIKE '%' || ${query_param} || '%'
-              )
+              AND {match_condition}
         """
 
         params.extend([limit, offset])
@@ -1428,8 +1614,9 @@ class MemoryRepository:
         # Add access control condition if user context is provided
         if requesting_user_id is not None and requesting_org_id is not None:
             conditions.append(
-                f"(user_id = ${param_idx} OR "
-                f"(organization_id = ${param_idx + 1} AND shared = true))"
+                self.user_memory_access_condition(
+                    f"${param_idx + 1}", f"${param_idx}"
+                )
             )
             params.append(str(requesting_user_id))
             params.append(str(requesting_org_id))
@@ -1501,8 +1688,9 @@ class MemoryRepository:
         # Add access control condition if user context is provided
         if requesting_user_id is not None and requesting_org_id is not None:
             conditions.append(
-                f"(user_id = ${param_idx} OR "
-                f"(organization_id = ${param_idx + 1} AND shared = true))"
+                self.user_memory_access_condition(
+                    f"${param_idx + 1}", f"${param_idx}"
+                )
             )
             params.append(str(requesting_user_id))
             params.append(str(requesting_org_id))
@@ -1583,19 +1771,28 @@ class MemoryRepository:
 
         if requesting_user_id is not None and requesting_org_id is not None:
             if memory_scope == "user":
-                conditions.append(f"user_id = ${param_idx}")
+                conditions.append(
+                    self.owned_memory_access_condition(
+                        f"${param_idx + 1}", f"${param_idx}"
+                    )
+                )
                 params.append(str(requesting_user_id))
-                param_idx += 1
+                params.append(str(requesting_org_id))
+                param_idx += 2
             elif memory_scope == "org_shared_only":
                 conditions.append(
-                    f"(organization_id = ${param_idx} AND shared = true)"
+                    self.shared_memory_access_condition(
+                        f"${param_idx}", f"${param_idx + 1}"
+                    )
                 )
                 params.append(str(requesting_org_id))
-                param_idx += 1
+                params.append(str(requesting_user_id))
+                param_idx += 2
             else:
                 conditions.append(
-                    f"(user_id = ${param_idx} OR "
-                    f"(organization_id = ${param_idx + 1} AND shared = true))"
+                    self.user_memory_access_condition(
+                        f"${param_idx + 1}", f"${param_idx}"
+                    )
                 )
                 params.append(str(requesting_user_id))
                 params.append(str(requesting_org_id))

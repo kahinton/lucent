@@ -145,7 +145,7 @@
             </div>
         </div>
         <div id="review-actions-{{ req.id }}" class="shrink-0 w-full max-w-sm border-l border-amber-100 pl-4">
-            {% if can_review_request %}
+            {% if can_review_request(req) %}
             <p class="mb-2 text-xs text-amber-700">Approve to let Lucent start this work, or reject with feedback so it can re-plan.</p>
             <div class="flex items-center gap-2">
                 <button type="button"

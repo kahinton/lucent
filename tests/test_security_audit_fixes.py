@@ -258,6 +258,14 @@ class TestDockerComposeHardening:
             "Development compose lucent service must use DOCKER_HOST via proxy"
         )
 
+    def test_dev_compose_disables_secure_cookies_for_http(self):
+        """Local HTTP must return session and CSRF cookies when accessed by LAN IP."""
+        import pathlib
+
+        compose_path = pathlib.Path(__file__).parent.parent / "docker-compose.yml"
+        content = compose_path.read_text()
+        assert "LUCENT_SECURE_COOKIES: ${LUCENT_SECURE_COOKIES:-false}" in content
+
 
 class TestProductionComposeHardening:
     """Verify production docker-compose addresses critical/high audit findings."""

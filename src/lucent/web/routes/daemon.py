@@ -11,9 +11,9 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from lucent.db import AuditRepository, MemoryRepository, get_pool
 from lucent.logging import get_logger
 from lucent.metrics import metrics
-from lucent.rbac import Role
 
 from ._shared import _check_csrf, get_user_context, templates
+from .requests_routes import can_review_request, request_visibility_context
 
 logger = get_logger("web.routes.daemon")
 _deprecation_logger = get_logger("web.routes.daemon.deprecation")
@@ -156,12 +156,6 @@ async def daemon_review_action(
 
     if action not in ("approve", "reject"):
         raise HTTPException(status_code=400, detail=f"Unknown action: {action}")
-    if (
-        user.role < Role.ADMIN
-        and user.role != Role.DAEMON
-        and not getattr(user, "is_daemon_service", False)
-    ):
-        raise HTTPException(status_code=403, detail="Admin or owner role required")
     if len(comment) > 10000:
         raise HTTPException(
             status_code=422, detail="Comments must be at most 10000 characters"
@@ -175,9 +169,17 @@ async def daemon_review_action(
     org_id = str(user.organization_id)
 
     # Fetch the request to determine which flow we're in
-    req = await req_repo.get_request(str(request_id), org_id)
+    requester_user_id, include_system = request_visibility_context(user)
+    req = await req_repo.get_request(
+        str(request_id),
+        org_id,
+        requester_user_id=requester_user_id,
+        include_system=include_system,
+    )
     if not req:
         raise HTTPException(status_code=404, detail="Request not found")
+    if not can_review_request(user, req):
+        raise HTTPException(status_code=403, detail="You cannot review this request")
 
     is_approval_gate = req.get("approval_status") == "pending_approval"
     is_post_review = req.get("status") == "review"

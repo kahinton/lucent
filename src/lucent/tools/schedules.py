@@ -33,6 +33,15 @@ async def _get_schedule_repository() -> ScheduleRepository:
     return ScheduleRepository(pool)
 
 
+async def _get_pool():
+    from lucent.db import init_db
+
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url:
+        raise RuntimeError("DATABASE_URL environment variable is required")
+    return await init_db(database_url)
+
+
 def register_schedule_tools(mcp: FastMCP) -> None:
     """Register schedule management tools with the MCP server."""
 
@@ -41,13 +50,8 @@ def register_schedule_tools(mcp: FastMCP) -> None:
             return str(value)
         return value
 
-    def _can_manage_schedule(schedule: dict, user_id: str | None, user_role: str | None) -> bool:
-        if user_role in ("admin", "owner", "daemon"):
-            return True
-        created_by = schedule.get("created_by")
-        if not created_by:
-            return True
-        return bool(user_id and created_by and str(created_by) == str(user_id))
+    def _include_daemon_workflows(user_role: str | None) -> bool:
+        return user_role in ("admin", "owner")
 
     @mcp.tool(
         description="""Create a scheduled task — either one-time or repeating.
@@ -91,6 +95,8 @@ Returns: JSON with the created schedule including its ID and next_run_at."""
         user_id, org_id, user_role, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
+        if not user_id:
+            return json.dumps({"error": "No user context"})
 
         # Validate schedule_type and required fields
         if schedule_type not in ("once", "interval", "cron"):
@@ -120,6 +126,12 @@ Returns: JSON with the created schedule including its ID and next_run_at."""
             error = validate_model(model)
             if error:
                 return json.dumps({"error": error})
+            from lucent.access_control import AccessControlService
+
+            if not user_id or not await AccessControlService(await _get_pool()).can_access(
+                str(user_id), "model", model, str(org_id)
+            ):
+                return json.dumps({"error": "Model is not available to this user"})
             effort_error = validate_reasoning_effort(model, reasoning_effort)
             if effort_error:
                 return json.dumps({"error": effort_error})
@@ -140,7 +152,7 @@ Returns: JSON with the created schedule including its ID and next_run_at."""
             priority=priority,
             max_runs=max_runs,
             sandbox_template_id=sandbox_template_id,
-            created_by=str(user_id) if user_id else None,
+            created_by=str(user_id),
         )
         return json.dumps(
             {k: str(v) if hasattr(v, "hex") else str(v) for k, v in sched.items()}, default=str
@@ -168,6 +180,8 @@ Returns: JSON array of schedules."""
             str(org_id),
             status=status,
             enabled=True if enabled_only else None,
+            created_by=str(user_id) if user_id else None,
+            include_daemon_created=_include_daemon_workflows(user_role),
         )
         serialized_items = [
             {k: str(v) if hasattr(v, "hex") else str(v) for k, v in s.items()}
@@ -194,10 +208,13 @@ Returns: JSON with the updated schedule."""
             return json.dumps({"error": "No organization context"})
 
         repo = await _get_schedule_repository()
-        schedule = await repo.get_schedule(schedule_id, str(org_id))
+        schedule = await repo.get_schedule(
+            schedule_id,
+            str(org_id),
+            created_by=str(user_id) if user_id else None,
+            include_daemon_created=_include_daemon_workflows(user_role),
+        )
         if not schedule:
-            return json.dumps({"error": "Schedule not found"})
-        if not _can_manage_schedule(schedule, str(user_id) if user_id else None, user_role):
             return json.dumps({"error": "Schedule not found"})
         try:
             result = await repo.toggle_schedule(
@@ -220,12 +237,19 @@ Args:
 Returns: JSON with the schedule details and its run history."""
     )
     async def get_schedule_details(schedule_id: str) -> str:
-        user_id, org_id, _, _, _ = await _get_current_user_context()
+        user_id, org_id, user_role, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
+        if not user_id:
+            return json.dumps({"error": "No user context"})
 
         repo = await _get_schedule_repository()
-        result = await repo.get_schedule_with_runs(schedule_id, str(org_id))
+        result = await repo.get_schedule_with_runs(
+            schedule_id,
+            str(org_id),
+            created_by=str(user_id),
+            include_daemon_created=_include_daemon_workflows(user_role),
+        )
         if not result:
             return json.dumps({"error": "Schedule not found"})
         return json.dumps(
@@ -373,7 +397,7 @@ external callers send the secret as X-Lucent-Workflow-Token, Bearer token, or
             cron_expression=cron_expression,
             interval_seconds=interval_seconds,
             priority=priority,
-            created_by=str(user_id) if user_id else None,
+            created_by=str(user_id),
             trigger_type=trigger_type,
             actions=actions,
             request_template=request_template,
@@ -395,7 +419,7 @@ external callers send the secret as X-Lucent-Workflow-Token, Bearer token, or
         enabled_only: bool = False,
         trigger_type: str | None = None,
     ) -> str:
-        user_id, org_id, _, _, _ = await _get_current_user_context()
+        user_id, org_id, user_role, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         repo = await _get_schedule_repository()
@@ -403,6 +427,8 @@ external callers send the secret as X-Lucent-Workflow-Token, Bearer token, or
             str(org_id),
             status=status,
             enabled=True if enabled_only else None,
+            created_by=str(user_id) if user_id else None,
+            include_daemon_created=_include_daemon_workflows(user_role),
         )
         items = result["items"]
         if trigger_type:

@@ -69,7 +69,9 @@
 <div class="space-y-3">
     <!-- System Workflows Section -->
     {% set system_schedules = schedules | selectattr('is_system') | list %}
-    {% set user_schedules = schedules | rejectattr('is_system') | list %}
+    {% set daemon_schedules = schedules | rejectattr('is_system') | selectattr('is_daemon_created') | list %}
+    {% set user_schedules = schedules | rejectattr('is_system') | rejectattr('is_daemon_created') | list %}
+    {% set non_system_schedules = daemon_schedules + user_schedules %}
 
     {% if system_schedules %}
     <div class="mb-2">
@@ -150,15 +152,15 @@
     </div>
     {% endif %}
 
-    <!-- User Workflows Section -->
-    {% if user_schedules %}
-    {% if system_schedules %}
+    <!-- Daemon and User Workflows Sections -->
+    {% if non_system_schedules %}
+    {% for sched in non_system_schedules %}
+    {% if loop.first or sched.is_daemon_created != loop.previtem.is_daemon_created %}
     <div class="flex items-center gap-2 mb-3 mt-6 px-1">
-        <svg class="w-4 h-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6.75 3v2.25M17.25 3v2.25M3 18.75V7.5a2.25 2.25 0 012.25-2.25h13.5A2.25 2.25 0 0121 7.5v11.25m-18 0A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75m-18 0v-7.5A2.25 2.25 0 015.25 9h13.5A2.25 2.25 0 0121 11.25v7.5" /></svg>
-        <span class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Your Workflows</span>
+        <svg class="w-4 h-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6.75 3v2.25M17.25 3v2.25M3 18.75V7.5a2.25 2.25 0 012.25-2.25h13.5A2.25 2.25 0 0021 7.5v11.25m-18 0A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75m-18 0v-7.5A2.25 2.25 0 015.25 9h13.5A2.25 2.25 0 0121 11.25v7.5" /></svg>
+        <span class="text-xs font-semibold text-gray-500 uppercase tracking-wider">{% if sched.is_daemon_created %}Daemon Workflows{% else %}Your Workflows{% endif %}</span>
     </div>
     {% endif %}
-    {% for sched in user_schedules %}
     <div class="bg-white rounded-lg border border-gray-200 hover:border-gray-300 hover:shadow-sm transition-all p-4">
         <div class="flex items-start justify-between">
             <a href="{{ base_path }}/{{ sched.id }}" class="flex-1 min-w-0">

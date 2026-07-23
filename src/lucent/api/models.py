@@ -75,7 +75,7 @@ class MemoryListResponse(BaseModel):
 class SearchRequest(BaseModel):
     """Request model for searching memories."""
 
-    query: str | None = Field(default=None, description="Search query (fuzzy match)")
+    query: str | None = Field(default=None, description="Hybrid relevance search query")
     username: str | None = Field(default=None, description="Filter by username")
     type: str | None = Field(default=None, description="Filter by memory type")
     tags: list[str] | None = Field(default=None, description="Filter by tags (any match)")
@@ -84,7 +84,7 @@ class SearchRequest(BaseModel):
     created_after: datetime | None = Field(default=None)
     created_before: datetime | None = Field(default=None)
     offset: int = Field(default=0, ge=0)
-    limit: int = Field(default=20, ge=1, le=100)
+    limit: int = Field(default=20, ge=1, le=50)
     include_archived: bool = Field(
         default=False,
         description=(

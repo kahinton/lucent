@@ -264,7 +264,11 @@ async def definitions_page(
         requester_user_id=str(user.id),
         requester_role=role_value,
     )
-    proposals = await repo.get_pending_proposals(org_id)
+    proposals = await repo.get_pending_proposals(
+        org_id,
+        requester_user_id=str(user.id),
+        requester_role=role_value,
+    )
     definition_engineer_agent = await _find_agent_composer_agent(
         repo, org_id, user, role_value,
     )

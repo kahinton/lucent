@@ -1,6 +1,7 @@
 """Tests for RequestRepository — request tracking and task queue."""
 
 import asyncio
+import json
 from uuid import UUID, uuid4
 
 import pytest
@@ -138,6 +139,60 @@ class TestListRequests:
         titles = {r["title"] for r in results["items"]}
         assert "Alpha" in titles
         assert "Beta" in titles
+
+    async def test_list_scopes_requests_to_owner_and_admin_system_visibility(
+        self, repo, db_pool, test_user, test_organization, clean_test_data
+    ):
+        from lucent.db import UserRepository
+
+        user_repo = UserRepository(db_pool)
+        other_user = await user_repo.create(
+            external_id=f"{clean_test_data}activity-other",
+            provider="local",
+            organization_id=test_organization["id"],
+            email=f"{clean_test_data}activity-other@test.com",
+        )
+        daemon_user = await user_repo.get_by_external_id(
+            f"daemon-service:{test_organization['id']}", "local"
+        )
+        assert daemon_user is not None
+        own = await _make_request(
+            repo, str(test_organization["id"]), title="Own request", created_by=str(test_user["id"])
+        )
+        other = await _make_request(
+            repo,
+            str(test_organization["id"]),
+            title="Other request",
+            created_by=str(other_user["id"]),
+        )
+        system = await _make_request(
+            repo,
+            str(test_organization["id"]),
+            title="System request",
+            source="schedule",
+            created_by=str(daemon_user["id"]),
+        )
+
+        member_result = await repo.list_requests(
+            str(test_organization["id"]),
+            requester_user_id=str(test_user["id"]),
+        )
+        assert {item["id"] for item in member_result["items"]} == {own["id"]}
+        assert await repo.get_request(
+            str(other["id"]),
+            str(test_organization["id"]),
+            requester_user_id=str(test_user["id"]),
+        ) is None
+
+        admin_result = await repo.list_requests(
+            str(test_organization["id"]),
+            requester_user_id=str(test_user["id"]),
+            include_system=True,
+        )
+        assert {item["id"] for item in admin_result["items"]} == {
+            own["id"],
+            system["id"],
+        }
 
     async def test_filter_by_status(self, repo, org_id):
         req = await _make_request(repo, org_id, title="To complete")
@@ -658,6 +713,18 @@ class TestReleaseStaleTasks:
 
 
 class TestDaemonInstanceRegistry:
+    async def test_heartbeat_registers_missing_instance(self, repo, org_id):
+        heartbeat = await repo.heartbeat_instance(
+            org_id=org_id,
+            instance_id="inst-heartbeat-first",
+            metadata={"cycle": 0},
+        )
+
+        assert heartbeat is not None
+        assert heartbeat["instance_id"] == "inst-heartbeat-first"
+        assert heartbeat["status"] == "active"
+        assert json.loads(heartbeat["metadata"]) == {"cycle": 0}
+
     async def test_register_instance_and_heartbeat(self, repo, org_id):
         instance_id = "inst-reg-1"
         reg = await repo.register_instance(

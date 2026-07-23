@@ -3,76 +3,89 @@
 
 {% block extra_head %}
 <style>
-    /* Lucent fluid vaporwave orb */
-    .lucent-orb {
-        aspect-ratio: 1;
+    .lucent-mark {
+        width: 68px;
+        height: 68px;
+        object-fit: contain;
+        filter: drop-shadow(0 7px 5px rgba(42, 50, 42, 0.2));
+        animation: mark-settle 500ms cubic-bezier(0.16, 1, 0.3, 1) both;
+    }
+    .assistant-presence {
+        width: 28px;
+        height: 28px;
+        min-width: 28px;
+        min-height: 28px;
+        transition: opacity 240ms ease, transform 320ms cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .assistant-presence.is-active {
         background:
-            radial-gradient(circle at 25% 25%, rgba(255,255,255,0.35) 0%, transparent 35%),
-            radial-gradient(circle at 70% 30%, #00d4ff 0%, transparent 50%),
-            radial-gradient(circle at 30% 70%, #ff2d95 0%, transparent 50%),
-            radial-gradient(circle at 65% 75%, #7b2dff 0%, transparent 45%),
-            radial-gradient(circle at 50% 50%, #00d4ff 0%, #ff2d95 50%, #7b2dff 100%);
+            radial-gradient(circle at 25% 25%, rgba(255, 255, 255, 0.42) 0%, transparent 35%),
+            radial-gradient(circle at 70% 30%, #00cfc1 0%, transparent 50%),
+            radial-gradient(circle at 30% 70%, #ff3f9b 0%, transparent 50%),
+            radial-gradient(circle at 65% 75%, #ffd84d 0%, transparent 45%),
+            radial-gradient(circle at 50% 50%, #00cfc1 0%, #ff3f9b 52%, #ffd84d 100%);
         background-size: 200% 200%;
         animation:
-            amoeba 12s ease-in-out infinite,
-            swirl 8s ease-in-out infinite alternate,
-            glow-pulse 4s ease-in-out infinite alternate;
+            presence-amoeba 12s ease-in-out infinite,
+            presence-swirl 8s ease-in-out infinite alternate,
+            presence-glow 4s ease-in-out infinite alternate;
         box-shadow:
-            inset -2px -2px 6px rgba(0, 0, 0, 0.15),
-            inset 2px 2px 6px rgba(255, 255, 255, 0.25),
-            0 0 12px rgba(255, 45, 149, 0.35),
-            0 0 24px rgba(0, 212, 255, 0.25),
-            0 0 40px rgba(123, 45, 255, 0.15);
+            inset -2px -2px 6px rgba(0, 0, 0, 0.18),
+            inset 2px 2px 6px rgba(255, 255, 255, 0.28),
+            0 0 12px rgba(255, 63, 155, 0.3),
+            0 0 24px rgba(0, 207, 193, 0.22);
     }
-    .lucent-orb-lg { width: 52px; height: 52px; }
-    .lucent-orb-sm { width: 28px; height: 28px; min-width: 28px; min-height: 28px; }
-
-    @keyframes amoeba {
-        0%    { border-radius: 54% 46% 42% 58% / 48% 44% 56% 52%; }
-        5%    { border-radius: 48% 52% 46% 54% / 52% 48% 50% 50%; }
-        10%   { border-radius: 46% 54% 50% 50% / 56% 44% 46% 54%; }
-        15%   { border-radius: 50% 50% 54% 46% / 44% 52% 54% 46%; }
-        20%   { border-radius: 44% 56% 48% 52% / 50% 46% 48% 54%; }
-        25%   { border-radius: 52% 48% 44% 56% / 46% 54% 52% 48%; }
-        30%   { border-radius: 56% 44% 50% 50% / 54% 42% 46% 58%; }
-        35%   { border-radius: 48% 52% 56% 44% / 42% 56% 50% 48%; }
-        40%   { border-radius: 44% 56% 52% 48% / 56% 48% 44% 52%; }
-        45%   { border-radius: 52% 48% 46% 54% / 48% 44% 56% 50%; }
-        50%   { border-radius: 46% 54% 56% 44% / 54% 50% 42% 56%; }
-        55%   { border-radius: 54% 46% 48% 52% / 46% 56% 52% 44%; }
-        60%   { border-radius: 50% 50% 42% 58% / 52% 42% 56% 48%; }
-        65%   { border-radius: 42% 58% 54% 46% / 48% 54% 44% 54%; }
-        70%   { border-radius: 56% 44% 46% 54% / 44% 48% 58% 46%; }
-        75%   { border-radius: 48% 52% 52% 48% / 56% 46% 46% 52%; }
-        80%   { border-radius: 52% 48% 44% 56% / 42% 52% 50% 54%; }
-        85%   { border-radius: 46% 54% 56% 44% / 54% 44% 48% 50%; }
-        90%   { border-radius: 50% 50% 48% 52% / 48% 56% 44% 52%; }
-        95%   { border-radius: 44% 56% 52% 48% / 52% 46% 54% 46%; }
-        100%  { border-radius: 54% 46% 42% 58% / 48% 44% 56% 52%; }
+    .assistant-presence.is-complete {
+        position: relative;
     }
-
-    @keyframes swirl {
-        0%   { background-position: 0% 0%; }
-        25%  { background-position: 100% 50%; }
-        50%  { background-position: 50% 100%; }
-        75%  { background-position: 0% 50%; }
+    .assistant-presence.is-complete::before {
+        content: '';
+        position: absolute;
+        left: 3px;
+        top: 12.5px;
+        width: 13px;
+        height: 3px;
+        border-radius: 1.5px 0 0 1.5px;
+        background: #ff3f9b;
+    }
+    .assistant-presence.is-complete::after {
+        content: '';
+        position: absolute;
+        left: 16px;
+        top: 9px;
+        width: 0;
+        height: 0;
+        border-top: 5px solid transparent;
+        border-bottom: 5px solid transparent;
+        border-left: 8px solid #ff3f9b;
+    }
+    @keyframes presence-amoeba {
+        0% { border-radius: 54% 46% 42% 58% / 48% 44% 56% 52%; }
+        10% { border-radius: 46% 54% 50% 50% / 56% 44% 46% 54%; }
+        20% { border-radius: 44% 56% 48% 52% / 50% 46% 48% 54%; }
+        30% { border-radius: 56% 44% 50% 50% / 54% 42% 46% 58%; }
+        40% { border-radius: 44% 56% 52% 48% / 56% 48% 44% 52%; }
+        50% { border-radius: 46% 54% 56% 44% / 54% 50% 42% 56%; }
+        60% { border-radius: 50% 50% 42% 58% / 52% 42% 56% 48%; }
+        70% { border-radius: 56% 44% 46% 54% / 44% 48% 58% 46%; }
+        80% { border-radius: 52% 48% 44% 56% / 42% 52% 50% 54%; }
+        90% { border-radius: 50% 50% 48% 52% / 48% 56% 44% 52%; }
+        100% { border-radius: 54% 46% 42% 58% / 48% 44% 56% 52%; }
+    }
+    @keyframes presence-swirl {
+        0% { background-position: 0% 0%; }
+        25% { background-position: 100% 50%; }
+        50% { background-position: 50% 100%; }
+        75% { background-position: 0% 50%; }
         100% { background-position: 100% 0%; }
     }
-
-    @keyframes glow-pulse {
-        0%   { box-shadow: inset -2px -2px 6px rgba(0,0,0,0.15), inset 2px 2px 6px rgba(255,255,255,0.25), 0 0 12px rgba(255,45,149,0.35), 0 0 24px rgba(0,212,255,0.25), 0 0 40px rgba(123,45,255,0.15); }
-        100% { box-shadow: inset -2px -2px 6px rgba(0,0,0,0.15), inset 2px 2px 6px rgba(255,255,255,0.25), 0 0 16px rgba(0,212,255,0.4), 0 0 30px rgba(255,45,149,0.3), 0 0 50px rgba(123,45,255,0.2); }
+    @keyframes presence-glow {
+        from { filter: saturate(0.96) brightness(0.96); }
+        to { filter: saturate(1.12) brightness(1.08); }
     }
-
-    @media (prefers-color-scheme: dark) {
-        .lucent-orb {
-            box-shadow:
-                inset -2px -2px 6px rgba(0, 0, 0, 0.35),
-                inset 2px 2px 4px rgba(255, 255, 255, 0.1),
-                0 0 16px rgba(255, 45, 149, 0.4),
-                0 0 32px rgba(0, 212, 255, 0.3),
-                0 0 52px rgba(123, 45, 255, 0.2);
-        }
+    @keyframes mark-settle {
+        from { opacity: 0; transform: translateY(-8px) rotate(-3deg); }
+        to { opacity: 1; transform: translateY(0) rotate(0); }
     }
 
     /* Override main content to be full-height for chat */
@@ -80,11 +93,18 @@
     main > div { max-width: none !important; height: 100%; }
     
     /* Chat shell keeps the conversation full-width; history overlays from the right. */
-    .chat-shell { height: 100%; min-height: 0; overflow: hidden; position: relative; }
+    .chat-shell {
+        height: 100%;
+        min-height: 0;
+        overflow: hidden;
+        position: relative;
+        background-color: #f5f3ef;
+        background-image: repeating-linear-gradient(90deg, rgba(0, 0, 0, 0.022) 0, rgba(0, 0, 0, 0.022) 1px, transparent 1px, transparent 12px);
+    }
     .session-drawer-backdrop {
         position: absolute;
         inset: 0;
-        background: rgba(15, 23, 42, 0.08);
+        background: rgba(0, 0, 0, 0.22);
         opacity: 0;
         pointer-events: none;
         transition: opacity 0.22s ease;
@@ -100,9 +120,9 @@
         right: 0;
         bottom: 0;
         width: min(360px, calc(100vw - 2rem));
-        background: rgba(255, 255, 255, 0.96);
-        border-left: 1px solid #e5e7eb;
-        box-shadow: -20px 0 45px rgba(15, 23, 42, 0.12);
+        background: rgba(255, 255, 255, 0.97);
+        border-left: 1px solid #d8d3cc;
+        box-shadow: -7px 0 0 rgba(0, 0, 0, 0.08), -24px 0 48px rgba(0, 0, 0, 0.18);
         transform: translateX(100%);
         transition: transform 0.24s cubic-bezier(0.16, 1, 0.3, 1);
         z-index: 30;
@@ -119,9 +139,10 @@
         min-height: 0;
     }
     .session-row.active {
-        background: #eef2ff;
-        color: #3730a3;
-        border-color: #c7d2fe;
+        background: #d8fffa;
+        color: #064a46;
+        border-color: #00cfc1;
+        box-shadow: 0 2px 0 rgba(0, 127, 120, 0.3);
     }
 
     /* Chat container fills the viewport below the sidebar header */
@@ -145,18 +166,17 @@
         padding-bottom: 0;
     }
     .chat-input-area.drag-active .input-glow {
-        border-color: #818cf8;
-        box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.25);
+        border-color: #00cfc1;
+        box-shadow: 0 0 0 3px rgba(0, 207, 193, 0.2), 0 5px 0 #a5a29d;
     }
     .chat-container.empty-mode .chat-input-area {
         flex: none;
         border-top: none;
-        background: transparent;
-        padding-top: 0;
-        transform: translateY(-30vh);
+        padding-top: 0.75rem;
+        transform: none;
     }
     .chat-container.empty-mode .messages-area #empty-state {
-        transform: translateY(-5vh);
+        transform: none;
     }
     .chat-container.empty-mode .input-footer {
         display: none;
@@ -211,14 +231,15 @@
     
     /* Input area glow on focus */
     .input-glow:focus-within {
-        box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1), 0 1px 2px rgba(0, 0, 0, 0.05);
+        border-color: #00cfc1;
+        box-shadow: 0 0 0 3px rgba(0, 207, 193, 0.14), 0 5px 0 #aaa7a1, 0 13px 28px rgba(0, 0, 0, 0.16);
     }
     
     /* Streaming cursor */
     .streaming-cursor::after {
         content: '▊';
         animation: blink 0.8s step-end infinite;
-        color: #6366f1;
+        color: #ff3f9b;
         font-weight: 200;
     }
     @keyframes blink {
@@ -227,19 +248,123 @@
     
     /* Dark mode overrides for chat-specific elements */
     @media (prefers-color-scheme: dark) {
-        .chat-user-bubble { background-color: #4338ca !important; }
+        .chat-shell { background-color: #080808; }
+        .chat-user-bubble { background-color: #00cfc1 !important; color: #050505 !important; }
         .chat-assistant-bg { background-color: transparent !important; }
-        .tool-chip { background-color: #1e293b !important; border-color: #334155 !important; color: #94a3b8 !important; }
-        .tool-chip:hover { background-color: #334155 !important; }
-        .tool-details-content { background-color: #111827 !important; border-color: #1e293b !important; }
-        .chat-input-area { background-color: transparent !important; border-color: #1e293b !important; }
-        .chat-input-field { background-color: #1a2233 !important; border-color: #334155 !important; color: #e2e8f0 !important; }
-        .chat-input-field::placeholder { color: #64748b !important; }
-        .config-select { background-color: #1a2233 !important; border-color: #334155 !important; color: #e2e8f0 !important; }
-        .empty-state-text { color: #64748b !important; }
-        .session-drawer { background: rgba(13, 17, 23, 0.96) !important; border-color: #1e293b !important; }
-        .session-drawer-backdrop { background: rgba(2, 6, 23, 0.18) !important; }
-        .session-row.active { background: rgba(99, 102, 241, 0.18) !important; color: #c7d2fe !important; border-color: #3730a3 !important; }
+        .tool-chip { background-color: #181818 !important; border-color: #3d3d3d !important; color: #b8b4b0 !important; }
+        .tool-chip:hover { background-color: #242424 !important; }
+        .tool-details-content { background-color: #121212 !important; border-color: #333333 !important; }
+        .chat-input-area { background-color: rgba(8, 8, 8, 0.96) !important; border-color: #333333 !important; }
+        .input-glow { background: #141414 !important; border-color: #3d3d3d !important; box-shadow: 0 5px 0 #000000, 0 14px 30px rgba(0, 0, 0, 0.36); }
+        .input-glow:focus-within { border-color: #00cfc1 !important; box-shadow: 0 0 0 3px rgba(0, 207, 193, 0.14), 0 5px 0 #000000, 0 16px 34px rgba(0, 0, 0, 0.42); }
+        .chat-input-field { background-color: transparent !important; border-color: transparent !important; color: #f7f5f1 !important; }
+        .chat-input-field::placeholder { color: #77736f !important; }
+        .config-select { background-color: #181818 !important; border-color: #3d3d3d !important; color: #d5d2ce !important; }
+        .empty-state-text { color: #94908c !important; }
+        .session-drawer { background: rgba(18, 18, 18, 0.98) !important; border-color: #333333 !important; }
+        .session-drawer-backdrop { background: rgba(10, 11, 8, 0.28) !important; }
+        .session-row.active { background: rgba(0, 207, 193, 0.14) !important; color: #7feee4 !important; border-color: #00a89f !important; }
+    }
+
+    #empty-state .grid button {
+        border-radius: 0.5rem;
+        background: rgba(255, 255, 255, 0.9);
+        border-color: #d8d3cc;
+        border-left-width: 3px;
+        box-shadow: 0 4px 0 #aaa7a1, 0 10px 22px rgba(0, 0, 0, 0.1);
+    }
+    #empty-state .grid button:nth-child(1) { border-left-color: #00cfc1 !important; }
+    #empty-state .grid button:nth-child(2) { border-left-color: #ff3f9b !important; }
+    #empty-state .grid button:nth-child(3) { border-left-color: #ffd84d !important; }
+    #empty-state .grid button:nth-child(4) { border-left-color: #00cfc1 !important; }
+    #empty-state .grid button:hover {
+        transform: translateY(-2px);
+        border-color: #00cfc1;
+        box-shadow: 0 6px 0 #008e86, 0 14px 26px rgba(0, 0, 0, 0.16);
+    }
+    #empty-state .grid button:active { transform: translateY(2px); box-shadow: 0 2px 0 #008e86; }
+    .chat-input-area {
+        background: rgba(245, 243, 239, 0.94) !important;
+        backdrop-filter: blur(12px);
+    }
+    .input-glow {
+        border-radius: 0.75rem;
+        background: #ffffff;
+        border-color: #d8d3cc;
+        box-shadow: 0 5px 0 #aaa7a1, 0 14px 30px rgba(0, 0, 0, 0.12);
+    }
+    #send-btn {
+        border-radius: 0.45rem;
+        background: #ff3f9b !important;
+        box-shadow: 0 3px 0 #971950, 0 7px 14px rgba(255, 63, 155, 0.26);
+    }
+    #send-btn:hover { background: #e72f88 !important; transform: translateY(-1px); }
+    #send-btn:active { transform: translateY(2px); box-shadow: 0 1px 0 #971950; }
+    .chat-user-bubble {
+        border-radius: 0.7rem 0.7rem 0.2rem 0.7rem;
+        background: #00cfc1 !important;
+        color: #050505 !important;
+        border: 1px solid #007f78;
+        box-shadow: 0 4px 0 #007f78, 0 10px 22px rgba(0, 207, 193, 0.22) !important;
+    }
+    #reasoning-select {
+        background: #fff3b5 !important;
+        border-color: #ffd84d !important;
+        color: #4b3900 !important;
+    }
+
+    @media (max-width: 767px) {
+        main { height: 100dvh; }
+        .chat-shell { padding-top: 3.75rem; }
+        .chat-container.empty-mode .messages-area { justify-content: flex-start; overflow-y: auto; }
+        .chat-container.empty-mode .messages-area #empty-state { transform: none; padding-top: 2rem; }
+        .chat-container.empty-mode .chat-input-area { transform: none; }
+        #empty-state { padding-left: 1rem; padding-right: 1rem; }
+        #empty-state .grid { grid-template-columns: 1fr; gap: 0.65rem; }
+        #empty-state .grid button { padding: 0.7rem 0.85rem; }
+        .lucent-mark { width: 54px; height: 54px; margin-bottom: 1rem !important; }
+        .chat-input-area { padding: 0.75rem !important; }
+        .input-glow { gap: 0.35rem; padding: 0.65rem !important; }
+        .chat-input-area .relative.flex.items-center { flex-wrap: wrap; gap: 0.4rem; }
+        .config-select { min-width: 0; max-width: calc(50vw - 1.25rem); }
+        #agent-select, #model-select { flex: 1 1 calc(50% - 0.25rem); }
+        .chat-input-area .relative.flex.items-center > .ml-auto { margin-left: 0; }
+        .input-footer { display: none; }
+        .msg-enter { padding: 0.85rem 1rem; }
+        .chat-user-bubble { max-width: 88%; }
+        .chat-assistant-bg > div { gap: 0.6rem; }
+        .session-drawer { width: calc(100vw - 1rem); }
+    }
+
+    @media (prefers-color-scheme: dark) {
+        #empty-state .grid button {
+            background: #181818;
+            border-color: #3d3d3d;
+            box-shadow: 0 4px 0 #000000, 0 12px 24px rgba(0, 0, 0, 0.3);
+        }
+        #empty-state .grid button:hover {
+            background: #202020;
+            border-color: #00cfc1;
+            box-shadow: 0 5px 0 #006f69, 0 15px 28px rgba(0, 0, 0, 0.34);
+        }
+        .chat-input-area {
+            background: rgba(8, 8, 8, 0.96) !important;
+            border-color: #333333 !important;
+        }
+        .input-glow {
+            background: #141414;
+            border-color: #3d3d3d;
+            box-shadow: 0 5px 0 #000000, 0 14px 30px rgba(0, 0, 0, 0.38);
+        }
+        #reasoning-select {
+            background: #2b260e !important;
+            border-color: #8a741d !important;
+            color: #ffe477 !important;
+        }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after { scroll-behavior: auto !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
     }
 </style>
 {% endblock %}
@@ -251,7 +376,7 @@
     <div id="messages" class="messages-area">
         <!-- Empty state -->
         <div id="empty-state" class="flex flex-col items-center px-6">
-            <div class="lucent-orb lucent-orb-lg mb-6"></div>
+            <img src="/static/lucent_logo_64.png" alt="" class="lucent-mark mb-6">
             <h2 class="text-lg font-semibold text-gray-900 mb-2">Hey — what's on your mind?</h2>
             <p class="empty-state-text text-sm text-gray-500 text-center max-w-md mb-8">
                 Pick up where we left off, start something new, or just think out loud.
@@ -324,7 +449,7 @@
                 <select id="model-select" class="config-select text-xs rounded-lg border border-gray-200 bg-white px-2 py-1 text-gray-500 focus:border-primary-300 focus:ring-1 focus:ring-primary-100 focus:outline-none cursor-pointer">
                     <option value="">Loading...</option>
                 </select>
-                <select id="reasoning-select" class="config-select hidden text-xs rounded-lg border border-purple-200 bg-purple-50 px-2 py-1 text-purple-600 focus:border-purple-300 focus:ring-1 focus:ring-purple-100 focus:outline-none cursor-pointer" title="Reasoning effort">
+                <select id="reasoning-select" class="config-select hidden text-xs rounded-lg border px-2 py-1 focus:outline-none cursor-pointer" title="Reasoning effort">
                     <option value="">Reasoning: default</option>
                 </select>
                 <div class="ml-auto flex items-center gap-2">
@@ -814,6 +939,7 @@ async function sendMessage(e) {
             hideStatus();
             state.streaming = false;
             state.abortController = null;
+            completeAssistantPresence(assistantEl);
             updateButtons();
             return;
         }
@@ -933,6 +1059,7 @@ async function sendMessage(e) {
         state.messages.push({ role: 'assistant', content: state.streamedText });
     }
     if (state.sessionId) loadSessions();
+    completeAssistantPresence(assistantEl);
     state.streaming = false;
     state.abortController = null;
     updateButtons();
@@ -1001,7 +1128,7 @@ function createAssistantMessage() {
     div.id = id;
     div.innerHTML = `
         <div class="max-w-3xl mx-auto flex gap-3">
-            <div class="lucent-orb lucent-orb-sm shrink-0 mt-1"></div>
+            <div class="assistant-presence is-active shrink-0 mt-1" aria-hidden="true"></div>
             <div class="flex-1 min-w-0">
                 <div class="tools-container mb-3 space-y-2"></div>
                 <div class="assistant-content text-sm text-gray-800 leading-relaxed prose prose-sm prose-gray max-w-none">
@@ -1018,11 +1145,30 @@ function createAssistantMessage() {
     return div;
 }
 
+function completeAssistantPresence(assistantEl) {
+    const presenceEl = assistantEl.querySelector('.assistant-presence');
+    const contentEl = assistantEl.querySelector('.assistant-content');
+    if (!presenceEl || !contentEl) return;
+    presenceEl.classList.remove('is-active');
+    presenceEl.classList.add('is-complete');
+    presenceEl.style.marginTop = '';
+    setTimeout(() => {
+        if (!presenceEl.isConnected) return;
+        const rowEl = presenceEl.parentElement;
+        const firstTextEl = contentEl.firstElementChild || contentEl;
+        const rowTop = rowEl.getBoundingClientRect().top;
+        const textTop = firstTextEl.getBoundingClientRect().top;
+        const lineHeight = Number.parseFloat(getComputedStyle(firstTextEl).lineHeight);
+        presenceEl.style.marginTop = `${textTop - rowTop + (lineHeight - presenceEl.offsetHeight) / 2}px`;
+    }, 0);
+}
+
 function appendAssistantMessage(text) {
     const assistantEl = createAssistantMessage();
     const contentEl = assistantEl.querySelector('.assistant-content');
     contentEl.classList.remove('streaming-cursor');
     contentEl.innerHTML = renderMarkdown(text || '');
+    completeAssistantPresence(assistantEl);
     scrollToBottom();
     return assistantEl;
 }
@@ -1051,18 +1197,18 @@ function createReasoningBlock(container) {
     const div = document.createElement('div');
     div.className = 'reasoning-wrapper mb-2';
     div.innerHTML = `
-        <button data-reasoning-toggle="true" class="flex items-center gap-2 w-full text-left px-3 py-2 rounded-lg border border-purple-200 bg-purple-50 hover:bg-purple-100 transition-colors text-xs group">
-            <svg class="w-3.5 h-3.5 text-purple-500 animate-pulse reasoning-icon" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+        <button data-reasoning-toggle="true" class="flex items-center gap-2 w-full text-left px-3 py-2 rounded-lg border border-amber-200 bg-amber-50 hover:bg-amber-100 transition-colors text-xs group">
+            <svg class="w-3.5 h-3.5 text-amber-600 animate-pulse reasoning-icon" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
             </svg>
-            <span class="font-medium text-purple-700">Thinking</span>
-            <span class="reasoning-preview flex-1 text-purple-400 truncate ml-1"></span>
-            <svg class="w-3 h-3 text-purple-400 transition-transform reasoning-chevron" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+            <span class="font-medium text-amber-800">Thinking</span>
+            <span class="reasoning-preview flex-1 text-amber-600 truncate ml-1"></span>
+            <svg class="w-3 h-3 text-amber-500 transition-transform reasoning-chevron" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
             </svg>
         </button>
         <div class="reasoning-block">
-            <div class="reasoning-content mt-1 ml-6 p-3 rounded-lg border border-purple-100 bg-purple-50/50 text-xs text-purple-800 leading-relaxed whitespace-pre-wrap"></div>
+            <div class="reasoning-content mt-1 ml-6 p-3 rounded-lg border border-amber-100 bg-amber-50/50 text-xs text-amber-900 leading-relaxed whitespace-pre-wrap"></div>
         </div>`;
     container.appendChild(div);
     return div;

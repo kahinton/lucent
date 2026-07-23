@@ -19,9 +19,10 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from lucent.auth_providers import SESSION_COOKIE_NAME, validate_session
-from lucent.db import get_pool
+from lucent.db import UserRepository, get_pool
 from lucent.logging import get_logger
 from lucent.mcp_config import build_internal_mcp_server
+from lucent.prompts.memory_usage import render_active_user_context
 from lucent.settings import (
     chat_mcp_url,
     chat_model_id,
@@ -45,6 +46,15 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 SESSION_EXPERIENCE_SUMMARY_ENABLED = session_experience_summary_enabled()
 SESSION_EXPERIENCE_MODEL = session_experience_model_id()
 SESSION_EXPERIENCE_TIMEOUT = session_experience_timeout_seconds()
+
+
+async def _can_user_access_model(user, pool, model_id: str) -> bool:
+    from lucent.access_control import AccessControlService
+
+    return await AccessControlService(pool).can_access(
+        str(user["id"]), "model", model_id, str(user["organization_id"])
+    )
+
 
 def _resolve_chat_model(override: str | None = None) -> str:
     from lucent.model_registry import get_default_model_id
@@ -673,6 +683,16 @@ def _chat_tool_grounding_instructions() -> str:
     )
 
 
+async def _render_active_user_context(user: dict, pool) -> str:
+    """Load and render trusted context without making chat depend on memory I/O."""
+    individual_memory = None
+    try:
+        individual_memory = await UserRepository(pool).get_individual_memory_for_user(user["id"])
+    except Exception:
+        logger.warning("Failed to load active user memory for chat", exc_info=True)
+    return render_active_user_context(user, individual_memory)
+
+
 async def _build_system_prompt(user: dict, pool, page_context: dict | None) -> str:
     """Build a system prompt with page context and relevant memories."""
     display_name = user.get("display_name", "a user")
@@ -692,6 +712,7 @@ async def _build_system_prompt(user: dict, pool, page_context: dict | None) -> s
         "and help them use the system.",
         "Format responses in markdown when helpful. Keep answers focused and practical.",
         f"Current time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}.",
+        await _render_active_user_context(user, pool),
     ]
 
     # Add page context
@@ -982,6 +1003,8 @@ async def chat_stream(
     validation_error = validate_model(selected_model)
     if validation_error:
         raise HTTPException(status_code=400, detail=validation_error)
+    if not await _can_user_access_model(user, pool, selected_model):
+        raise HTTPException(status_code=403, detail="Model is not available to this user")
     effort_error = validate_reasoning_effort(selected_model, reasoning_effort)
     if effort_error:
         raise HTTPException(status_code=400, detail=effort_error)
@@ -1119,26 +1142,37 @@ async def chat_stream(
 @router.get("/models")
 async def chat_models(request: Request):
     """List available models for the chat model picker."""
-    # Require a valid session to prevent unauthenticated probing
-    session_token = request.cookies.get(SESSION_COOKIE_NAME)
-    if not session_token:
-        raise HTTPException(status_code=401, detail="Not authenticated")
+    user, pool = await _get_session_user(request)
+    from lucent.db.models import ModelRepository
 
-    from lucent.model_registry import list_models as registry_list_models
-
-    models = registry_list_models()
+    role = user.get("role", "member")
+    if hasattr(role, "value"):
+        role = role.value
+    models = (
+        await ModelRepository(pool).list_models_accessible_by(
+            str(user["id"]),
+            str(user["organization_id"]),
+            requester_role=str(role),
+        )
+    )["items"]
+    default_model = _resolve_chat_model()
+    accessible_ids = {model["id"] for model in models}
     return {
-        "default": _resolve_chat_model(),
+        "default": (
+            default_model
+            if default_model in accessible_ids
+            else next(iter(accessible_ids), None)
+        ),
         "models": [
             {
-                "id": m.id,
-                "name": m.name,
-                "provider": m.provider,
-                "category": m.category,
-                "reasoning_efforts": m.reasoning_efforts,
-                "supports_vision": m.supports_vision,
+                "id": model["id"],
+                "name": model["name"],
+                "provider": model["provider"],
+                "category": model["category"],
+                "reasoning_efforts": model.get("reasoning_efforts") or [],
+                "supports_vision": bool(model.get("supports_vision")),
             }
-            for m in models
+            for model in models
         ],
     }
 
@@ -1217,6 +1251,8 @@ async def chat_stream_v2(
     validation_error = validate_model(selected_model)
     if validation_error:
         raise HTTPException(status_code=400, detail=validation_error)
+    if not await _can_user_access_model(user, pool, selected_model):
+        raise HTTPException(status_code=403, detail="Model is not available to this user")
     effort_error = validate_reasoning_effort(selected_model, reasoning_effort)
     if effort_error:
         raise HTTPException(status_code=400, detail=effort_error)
@@ -1332,6 +1368,7 @@ async def chat_stream_v2(
                 "actions; those are source-defined built-in maintenance workflows."
             )
 
+    system_prompt_parts.append(await _render_active_user_context(user, pool))
     system_prompt = "\n\n".join(system_prompt_parts)
     agent_hooks = await _load_agent_hooks(pool, effective_agent_id)
 

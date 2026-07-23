@@ -24,16 +24,16 @@
                 extend: {
                     colors: {
                         primary: {
-                            50: '#eef2ff',
-                            100: '#e0e7ff',
-                            200: '#c7d2fe',
-                            300: '#a5b4fc',
-                            400: '#818cf8',
-                            500: '#6366f1',
-                            600: '#4f46e5',
-                            700: '#4338ca',
-                            800: '#3730a3',
-                            900: '#312e81',
+                            50: '#e6fffb',
+                            100: '#bffaf2',
+                            200: '#7feee4',
+                            300: '#3ee0d6',
+                            400: '#00d4c7',
+                            500: '#00b8ad',
+                            600: '#00968f',
+                            700: '#08766f',
+                            800: '#0b5d59',
+                            900: '#0d4846',
                         }
                     }
                 }
@@ -45,11 +45,137 @@
     <script src="/static/vendor/htmx-1.9.10.min.js"></script>
     
     <style>
+        :root {
+            --lucent-canvas: #f5f3ef;
+            --lucent-paper: #ffffff;
+            --lucent-ink: #090909;
+            --lucent-muted: #68645f;
+            --lucent-line: #d8d3cc;
+            --lucent-teal: #00cfc1;
+            --lucent-pink: #ff3f9b;
+            --lucent-yellow: #ffd84d;
+            --lucent-shadow: rgba(0, 0, 0, 0.16);
+        }
+
+        html { background-color: var(--lucent-canvas); }
+        body {
+            color: var(--lucent-ink);
+            background-color: var(--lucent-canvas) !important;
+            background-image: repeating-linear-gradient(90deg, rgba(0, 0, 0, 0.022) 0, rgba(0, 0, 0, 0.022) 1px, transparent 1px, transparent 12px);
+        }
+        #app-sidebar {
+            isolation: isolate;
+            overflow: hidden;
+            background: rgba(255, 255, 255, 0.18) !important;
+            border-color: rgba(255, 255, 255, 0.32) !important;
+            border-radius: 0 1.5rem 1.5rem 0;
+            box-shadow:
+                inset -1px 0 rgba(255, 255, 255, 0.34),
+                inset 0 1px rgba(255, 255, 255, 0.38),
+                1px 0 rgba(0, 0, 0, 0.06),
+                10px 0 32px rgba(0, 0, 0, 0.12);
+            backdrop-filter: blur(16px) saturate(120%) brightness(1.02);
+            -webkit-backdrop-filter: blur(16px) saturate(120%) brightness(1.02);
+        }
+        #app-sidebar::before,
+        #app-sidebar::after {
+            content: '';
+            position: absolute;
+            pointer-events: none;
+            z-index: -1;
+        }
+        #app-sidebar::before {
+            inset: 0;
+            background:
+                linear-gradient(108deg, rgba(255, 255, 255, 0.1) 0%, rgba(255, 255, 255, 0.02) 28%, transparent 54%),
+                linear-gradient(180deg, rgba(255, 255, 255, 0.06), transparent 22%, transparent 76%, rgba(255, 255, 255, 0.035));
+        }
+        #app-sidebar::after {
+            top: 8%;
+            right: 0;
+            bottom: 8%;
+            width: 1px;
+            border-radius: 999px;
+            background: linear-gradient(180deg, rgba(255, 255, 255, 0.3), rgba(0, 207, 193, 0.08) 32%, rgba(255, 63, 155, 0.06) 66%, rgba(255, 255, 255, 0.22));
+            box-shadow: -1px 0 5px rgba(255, 255, 255, 0.06);
+        }
+        #app-sidebar > .flex {
+            position: relative;
+            z-index: 1;
+        }
+        #app-sidebar nav a { border: 1px solid transparent; }
+        #app-sidebar nav a:hover { transform: translateY(-1px); }
+        #app-sidebar nav a.bg-primary-50 {
+            border-color: #00cfc1;
+            box-shadow: 0 2px 0 #007f78, 0 6px 14px rgba(0, 207, 193, 0.14);
+        }
+        main .bg-white.rounded-lg.border,
+        main .bg-white.rounded-xl.border {
+            border-color: var(--lucent-line) !important;
+            box-shadow: 0 3px 0 rgba(0, 0, 0, 0.16), 0 10px 24px rgba(0, 0, 0, 0.08);
+        }
+        main button.bg-primary-600,
+        main a.bg-primary-600 {
+            box-shadow: 0 3px 0 #006f69, 0 8px 16px rgba(0, 207, 193, 0.2);
+        }
+        main button.bg-primary-600:not(:disabled):hover,
+        main a.bg-primary-600:hover { transform: translateY(-1px); }
+        main button.bg-primary-600:not(:disabled):active,
+        main a.bg-primary-600:active { transform: translateY(2px); box-shadow: 0 1px 0 #006f69; }
+        button, a, input, textarea, select { transition-duration: 160ms; }
+        button:not(:disabled):active, a:active { transform: translateY(1px); }
+
+        #mobile-nav-button {
+            position: fixed;
+            top: 0.75rem;
+            left: 0.75rem;
+            z-index: 60;
+            display: none;
+            width: 2.75rem;
+            height: 2.75rem;
+            align-items: center;
+            justify-content: center;
+            border: 1px solid rgba(255, 255, 255, 0.24);
+            border-radius: 50%;
+            color: var(--lucent-ink);
+            background: rgba(255, 255, 255, 0.24);
+            box-shadow: inset 0 1px rgba(255, 255, 255, 0.38), 0 6px 18px var(--lucent-shadow);
+            backdrop-filter: blur(12px) saturate(120%);
+            -webkit-backdrop-filter: blur(12px) saturate(120%);
+        }
+        #mobile-nav-backdrop {
+            position: fixed;
+            inset: 0;
+            z-index: 45;
+            display: none;
+            background: rgba(0, 0, 0, 0.34);
+            backdrop-filter: blur(1px);
+        }
+        @media (max-width: 767px) {
+            #mobile-nav-button { display: flex; }
+            #mobile-nav-backdrop.open { display: block; }
+            #app-sidebar {
+                width: min(18rem, calc(100vw - 3.5rem));
+                transform: translateX(-110%);
+                transition: transform 220ms cubic-bezier(0.16, 1, 0.3, 1);
+            }
+            #app-sidebar > .flex > a:first-child {
+                padding-left: 4.25rem;
+                padding-right: 0.75rem;
+            }
+            #app-sidebar > .flex > a:first-child img { width: 2.5rem; }
+            #app-sidebar > .flex > a:first-child span[aria-hidden="true"] { margin-left: 0.75rem; margin-right: 0.75rem; }
+            #app-sidebar > .flex > a:first-child span:last-child { font-size: 1.25rem; }
+            #app-sidebar.open { transform: translateX(0); }
+            #app-content { padding-left: 0 !important; }
+            #app-content main { padding: 4.75rem 1rem 1.5rem; }
+        }
+
         /* Custom scrollbar — light */
         ::-webkit-scrollbar { width: 6px; height: 6px; }
-        ::-webkit-scrollbar-track { background: #f1f5f9; }
-        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
-        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+        ::-webkit-scrollbar-track { background: #ece9e4; }
+        ::-webkit-scrollbar-thumb { background: #aaa6a0; border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: #77736e; }
         
         /* HTMX loading states */
         .htmx-request .htmx-indicator { display: inline-block; }
@@ -57,56 +183,82 @@
 
         /* ─── Dark Mode (system preference) ──────────────────────── */
         @media (prefers-color-scheme: dark) {
-            ::-webkit-scrollbar-track { background: #1e293b; }
-            ::-webkit-scrollbar-thumb { background: #475569; }
-            ::-webkit-scrollbar-thumb:hover { background: #64748b; }
+            :root {
+                --lucent-canvas: #080808;
+                --lucent-paper: #121212;
+                --lucent-ink: #f7f5f1;
+                --lucent-muted: #a7a3a0;
+                --lucent-line: #333333;
+                --lucent-shadow: rgba(0, 0, 0, 0.34);
+            }
+            ::-webkit-scrollbar-track { background: #111111; }
+            ::-webkit-scrollbar-thumb { background: #444444; }
+            ::-webkit-scrollbar-thumb:hover { background: #666666; }
 
             /* Page background */
-            html { background-color: #0a0a0f; }
-            body { background-color: #0a0a0f; color: #e2e8f0; }
+            html { background-color: #080808; }
+            body { background-color: #080808; color: #f7f5f1; }
+            #app-sidebar {
+                background: rgba(8, 8, 8, 0.22) !important;
+                border-color: rgba(255, 255, 255, 0.1) !important;
+                background:
+                    linear-gradient(145deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.008) 38%, rgba(255, 255, 255, 0.018) 100%),
+                    rgba(8, 8, 8, 0.22) !important;
+                box-shadow:
+                    inset -1px 0 rgba(255, 255, 255, 0.1),
+                    inset 0 1px rgba(255, 255, 255, 0.08),
+                    1px 0 rgba(0, 0, 0, 0.28),
+                    10px 0 32px rgba(0, 0, 0, 0.28);
+            }
+            #mobile-nav-button {
+                color: #f7f5f1;
+                background: rgba(8, 8, 8, 0.3);
+                border-color: rgba(255, 255, 255, 0.12);
+                box-shadow: inset 0 1px rgba(255, 255, 255, 0.1), 0 6px 18px rgba(0, 0, 0, 0.26);
+            }
 
             /* Invert gray backgrounds */
-            .bg-white { background-color: #111827 !important; }
-            .bg-gray-50 { background-color: #0d1117 !important; }
-            .bg-gray-100 { background-color: #1a2233 !important; }
-            .bg-gray-200 { background-color: #1e293b !important; }
+            .bg-white { background-color: #121212 !important; }
+            .bg-gray-50 { background-color: #080808 !important; }
+            .bg-gray-100 { background-color: #1a1a1a !important; }
+            .bg-gray-200 { background-color: #242424 !important; }
 
             /* Borders */
-            .border-gray-100 { border-color: #1e293b !important; }
-            .border-gray-200 { border-color: #1e293b !important; }
-            .border-gray-300 { border-color: #334155 !important; }
-            .divide-gray-100 > :not([hidden]) ~ :not([hidden]) { border-color: #1e293b !important; }
-            .divide-gray-200 > :not([hidden]) ~ :not([hidden]) { border-color: #1e293b !important; }
+            .border-gray-100 { border-color: #242424 !important; }
+            .border-gray-200 { border-color: #333333 !important; }
+            .border-gray-300 { border-color: #4a4a4a !important; }
+            .divide-gray-100 > :not([hidden]) ~ :not([hidden]) { border-color: #242424 !important; }
+            .divide-gray-200 > :not([hidden]) ~ :not([hidden]) { border-color: #333333 !important; }
 
             /* Text */
-            .text-gray-900 { color: #f1f5f9 !important; }
-            .text-gray-800 { color: #e2e8f0 !important; }
-            .text-gray-700 { color: #cbd5e1 !important; }
-            .text-gray-600 { color: #94a3b8 !important; }
-            .text-gray-500 { color: #64748b !important; }
-            .text-gray-400 { color: #4b5e78 !important; }
+            .text-gray-900 { color: #faf9f6 !important; }
+            .text-gray-800 { color: #eceae6 !important; }
+            .text-gray-700 { color: #d5d2ce !important; }
+            .text-gray-600 { color: #b8b4b0 !important; }
+            .text-gray-500 { color: #94908c !important; }
+            .text-gray-400 { color: #73706c !important; }
 
             /* Form inputs */
             input, textarea, select {
-                background-color: #1a2233 !important;
-                color: #e2e8f0 !important;
-                border-color: #334155 !important;
+                background-color: #181818 !important;
+                color: #f7f5f1 !important;
+                border-color: #444444 !important;
             }
             input::placeholder, textarea::placeholder {
-                color: #4b5e78 !important;
+                color: #77736f !important;
             }
             input:focus, textarea:focus, select:focus {
-                border-color: #6366f1 !important;
-                box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2) !important;
+                border-color: #00cfc1 !important;
+                box-shadow: 0 0 0 2px rgba(0, 207, 193, 0.22) !important;
             }
-            option { background-color: #1a2233; color: #e2e8f0; }
+            option { background-color: #181818; color: #f7f5f1; }
 
             /* Primary tinted backgrounds */
-            .bg-primary-50 { background-color: rgba(99, 102, 241, 0.12) !important; }
-            .bg-primary-100 { background-color: rgba(99, 102, 241, 0.18) !important; }
-            .text-primary-700 { color: #a5b4fc !important; }
-            .text-primary-600 { color: #818cf8 !important; }
-            .bg-primary-600 { background-color: #4f46e5 !important; }
+            .bg-primary-50 { background-color: rgba(0, 207, 193, 0.12) !important; }
+            .bg-primary-100 { background-color: rgba(0, 207, 193, 0.18) !important; }
+            .text-primary-700 { color: #60f0e5 !important; }
+            .text-primary-600 { color: #22dfd2 !important; }
+            .bg-primary-600 { background-color: #00a89f !important; }
 
             /* Status backgrounds — soften for dark */
             .bg-green-50 { background-color: rgba(34, 197, 94, 0.1) !important; }
@@ -117,21 +269,21 @@
             .bg-amber-100 { background-color: rgba(245, 158, 11, 0.15) !important; }
             .bg-blue-50 { background-color: rgba(59, 130, 246, 0.1) !important; }
             .bg-blue-100 { background-color: rgba(59, 130, 246, 0.15) !important; }
-            .bg-indigo-100 { background-color: rgba(99, 102, 241, 0.15) !important; }
-            .bg-violet-100 { background-color: rgba(139, 92, 246, 0.15) !important; }
+            .bg-indigo-100 { background-color: rgba(255, 63, 155, 0.16) !important; }
+            .bg-violet-100 { background-color: rgba(255, 216, 77, 0.16) !important; }
             .bg-cyan-100 { background-color: rgba(34, 211, 238, 0.15) !important; }
             .bg-orange-100 { background-color: rgba(249, 115, 22, 0.15) !important; }
             .bg-emerald-100 { background-color: rgba(52, 211, 153, 0.15) !important; }
 
             /* Gray tinted backgrounds used in badges/tags */
-            .bg-gray-50\/50 { background-color: rgba(30, 41, 59, 0.5) !important; }
+            .bg-gray-50\/50 { background-color: rgba(24, 24, 24, 0.6) !important; }
 
             /* Hover states */
-            .hover\:bg-gray-50:hover { background-color: #1a2233 !important; }
-            .hover\:bg-gray-100:hover { background-color: #1e293b !important; }
-            .hover\:bg-gray-200:hover { background-color: #334155 !important; }
-            .hover\:text-gray-900:hover { color: #f1f5f9 !important; }
-            .hover\:text-gray-600:hover { color: #94a3b8 !important; }
+            .hover\:bg-gray-50:hover { background-color: #1a1a1a !important; }
+            .hover\:bg-gray-100:hover { background-color: #242424 !important; }
+            .hover\:bg-gray-200:hover { background-color: #333333 !important; }
+            .hover\:text-gray-900:hover { color: #faf9f6 !important; }
+            .hover\:text-gray-600:hover { color: #b8b4b0 !important; }
             .hover\:bg-green-100:hover { background-color: rgba(34, 197, 94, 0.2) !important; }
             .hover\:bg-red-100:hover { background-color: rgba(239, 68, 68, 0.2) !important; }
 
@@ -141,18 +293,18 @@
             }
 
             /* Code/mono blocks */
-            .font-mono { color: #a5b4fc; }
-            pre, code { background-color: #1a2233 !important; color: #c7d2fe !important; }
+            .font-mono { color: #4ce9de; }
+            pre, code { background-color: #181818 !important; color: #7feee4 !important; }
 
             /* Gradient adjustments */
-            .from-primary-400 { --tw-gradient-from: #6366f1 !important; }
-            .to-primary-600 { --tw-gradient-to: #4338ca !important; }
-            .bg-gradient-to-r.from-primary-50 { background: rgba(99, 102, 241, 0.08) !important; }
+            .from-primary-400 { --tw-gradient-from: #00d4c7 !important; }
+            .to-primary-600 { --tw-gradient-to: #00968f !important; }
+            .bg-gradient-to-r.from-primary-50 { background: rgba(0, 207, 193, 0.1) !important; }
 
             /* Chat panel */
-            #chat-panel { background-color: #111827 !important; border-color: #1e293b !important; }
-            #chat-panel .border-gray-100 { border-color: #1e293b !important; }
-            #chat-input { background-color: #1a2233 !important; border-color: #334155 !important; }
+            #chat-panel { background-color: #121212 !important; border-color: #333333 !important; }
+            #chat-panel .border-gray-100 { border-color: #242424 !important; }
+            #chat-input { background-color: #181818 !important; border-color: #444444 !important; }
         }
     </style>
     {% block extra_head %}{% endblock %}
@@ -160,7 +312,13 @@
 <body class="h-full bg-gray-50 dark:bg-gray-950">
     <div class="min-h-full">
         <!-- Sidebar -->
-        <div class="fixed inset-y-0 left-0 z-50 w-64 bg-white dark:bg-gray-900 border-r border-gray-200 dark:border-gray-800">
+        <button type="button" id="mobile-nav-button" aria-label="Open navigation" aria-controls="app-sidebar" aria-expanded="false">
+            <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M4 7h16M4 12h16M4 17h16" />
+            </svg>
+        </button>
+        <div id="mobile-nav-backdrop" aria-hidden="true"></div>
+        <div id="app-sidebar" class="fixed inset-y-0 left-0 z-50 w-64 bg-white dark:bg-gray-900 border-r border-gray-200 dark:border-gray-800">
             <div class="flex flex-col h-full">
                 <!-- Logo -->
                 <a href="/chat" aria-label="Lucent chat" class="group flex items-center border-b border-gray-100 px-5 py-5 dark:border-gray-800">
@@ -296,7 +454,7 @@
         </div>
         
         <!-- Main content -->
-        <div class="pl-64">
+        <div id="app-content" class="pl-64">
             <!-- Impersonation Banner (shows on all pages) -->
             {% if user.is_impersonated %}
             <div class="bg-amber-50 border-b border-amber-200 px-8 py-3">
@@ -334,6 +492,26 @@
     <!-- Auto-inject CSRF tokens into all forms and HTMX requests -->
     <script nonce="{{ request.state.csp_nonce }}">
     document.addEventListener('DOMContentLoaded', function() {
+        const sidebar = document.getElementById('app-sidebar');
+        const button = document.getElementById('mobile-nav-button');
+        const backdrop = document.getElementById('mobile-nav-backdrop');
+        function setMobileNavigation(open) {
+            sidebar.classList.toggle('open', open);
+            backdrop.classList.toggle('open', open);
+            button.setAttribute('aria-expanded', String(open));
+            button.setAttribute('aria-label', open ? 'Close navigation' : 'Open navigation');
+        }
+        button.addEventListener('click', function() {
+            setMobileNavigation(!sidebar.classList.contains('open'));
+        });
+        backdrop.addEventListener('click', function() { setMobileNavigation(false); });
+        sidebar.addEventListener('click', function(event) {
+            if (event.target.closest('a') && window.innerWidth < 768) setMobileNavigation(false);
+        });
+        window.addEventListener('keydown', function(event) {
+            if (event.key === 'Escape') setMobileNavigation(false);
+        });
+
         const csrfCookie = document.cookie.split('; ')
             .find(c => c.startsWith('lucent_csrf='));
         if (!csrfCookie) return;
@@ -416,7 +594,7 @@
                         <select id="chat-model-select" class="text-[10px] text-gray-400 bg-transparent border-none p-0 pr-4 -ml-0.5 cursor-pointer focus:ring-0 focus:outline-none appearance-none hover:text-gray-600 transition-colors" style="background-image: url(&quot;data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='%239ca3af'%3E%3Cpath fill-rule='evenodd' d='M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z'/%3E%3C/svg%3E&quot;); background-repeat: no-repeat; background-position: right 0 center; background-size: 12px;">
                             <option value="">Loading...</option>
                         </select>
-                        <select id="chat-reasoning-select" class="hidden text-[10px] text-purple-500 bg-transparent border-none p-0 pr-4 -ml-0.5 cursor-pointer focus:ring-0 focus:outline-none appearance-none hover:text-purple-700 transition-colors" title="Reasoning effort">
+                        <select id="chat-reasoning-select" class="hidden text-[10px] text-amber-600 bg-transparent border-none p-0 pr-4 -ml-0.5 cursor-pointer focus:ring-0 focus:outline-none appearance-none hover:text-amber-700 transition-colors" title="Reasoning effort">
                             <option value="">Reasoning: default</option>
                         </select>
                     </div>
