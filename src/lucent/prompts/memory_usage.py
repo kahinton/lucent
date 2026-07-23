@@ -1,5 +1,35 @@
 """System prompt templates for Lucent memory usage."""
 
+import json
+from typing import Any
+
+
+def render_active_user_context(
+    user: dict[str, Any], individual_memory: dict[str, Any] | None
+) -> str:
+    """Render trusted user identity and individual memory for a system prompt."""
+    context = {
+        "user": {
+            "id": str(user["id"]),
+            "organization_id": (
+                str(user["organization_id"])
+                if user.get("organization_id")
+                else None
+            ),
+            "display_name": user.get("display_name"),
+            "email": user.get("email"),
+            "role": user.get("role"),
+        },
+        "individual_memory": individual_memory,
+    }
+    return (
+        "## Active User Context\n"
+        "The host loaded this context for the user who owns this conversation or request. "
+        "Apply it naturally without announcing that it was provided. Do not call "
+        "`get_current_user_context` merely to reload it.\n"
+        f"```json\n{json.dumps(context, default=str, indent=2)}\n```"
+    )
+
 
 def get_memory_system_prompt() -> str:
     """Get the behavioral guidance for using the memory system effectively.
@@ -34,13 +64,16 @@ off instead of starting over.
 
 ### At the Start of Every Conversation
 
-Call `get_current_user_context()` first. This gives you:
+The host provides an `Active User Context` system block containing:
 - Who you're talking to (name, role)
 - Their individual memory with preferences and history
 
 Apply what you learn naturally. If they prefer concise responses, be
 concise - don't announce that you're being concise because of their
 preferences.
+
+Use `get_current_user_context()` only when the host context is absent or an
+explicit refresh is needed.
 
 If relevant to the task, also search for project context with `search_memories`.
 
@@ -141,7 +174,7 @@ Default to 5-6 for most things. Reserve high importance for things that would be
 
 | Tool | When to Use |
 |------|-------------|
-| `get_current_user_context` | Start of conversation - get user info and their individual memory |
+| `get_current_user_context` | Explicitly refresh user info and individual memory when needed |
 | `search_memories` | Find memories by content |
 | `search_memories_full` | Search across all fields including tags and metadata |
 | `get_memory` | Get full content when search results are truncated |
@@ -189,7 +222,7 @@ You have persistent memory. Use it to become a real collaborator, not a stateles
 
 ## Do This Every Conversation
 
-**At the start:** Call `get_current_user_context()` to get the user's
+**At the start:** Read the host-provided `Active User Context` for the user's
 info and preferences. Apply them naturally without announcing it.
 
 **After significant work:** Log what you did, what you learned, decisions made.
@@ -230,7 +263,7 @@ def get_user_introduction_prompt() -> str:
     """
     return """## Starting a Conversation
 
-Call `get_current_user_context()` first. This returns:
+Read the host-provided `Active User Context` system block. It contains:
 - Who you're talking to (name, role)
 - Their individual memory with preferences and history
 

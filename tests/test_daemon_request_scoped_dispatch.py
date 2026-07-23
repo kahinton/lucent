@@ -11,12 +11,80 @@ from daemon.daemon import (
     LucentDaemon,
     _build_mcp_tool_summary,
     _is_operational_tool_call,
+    _load_request_owner_context,
     load_accessible_agent,
 )
+from daemon.prompts.system import build_subagent_prompt
 from lucent.db.definitions import DefinitionRepository
 from lucent.db.user import UserRepository
 from lucent.log_context import clear_log_context
 from lucent.logging import JSONFormatter
+
+
+@pytest.mark.asyncio
+async def test_subagent_prompt_includes_request_owner_context():
+    owner_context = (
+        "## Active User Context\n"
+        '{"user": {"id": "request-owner"}, '
+        '"individual_memory": {"content": "Owner-only preference"}}'
+    )
+
+    prompt = await build_subagent_prompt(
+        "research",
+        "Research the request.",
+        active_user_context=owner_context,
+        resolved_agent={
+            "id": "agent-id",
+            "name": "research",
+            "content": "Research carefully.",
+            "skill_names": [],
+        },
+        resolved_skills=[],
+        resolved_tools=[],
+    )
+
+    assert owner_context in prompt
+    assert "request-owner" in prompt
+    assert "Owner-only preference" in prompt
+
+
+@pytest.mark.asyncio
+async def test_request_owner_context_lookup_does_not_cross_users(monkeypatch):
+    calls: list[tuple[str, str]] = []
+
+    class _Connection:
+        async def fetchrow(self, query, user_id, org_id):
+            calls.append((user_id, org_id))
+            if "FROM users" in query:
+                return {
+                    "id": user_id,
+                    "organization_id": org_id,
+                    "display_name": "Request Owner",
+                    "email": "owner@example.com",
+                    "role": "member",
+                }
+            return {
+                "id": "memory-id",
+                "content": "Only the request owner's preference.",
+                "user_id": user_id,
+                "organization_id": org_id,
+            }
+
+        async def close(self):
+            return None
+
+    async def _connect(_database_url):
+        return _Connection()
+
+    monkeypatch.setattr("asyncpg.connect", _connect)
+
+    context = await _load_request_owner_context("request-owner", "owner-org")
+
+    assert calls == [
+        ("request-owner", "owner-org"),
+        ("request-owner", "owner-org"),
+    ]
+    assert "Only the request owner's preference." in context
 
 
 def test_validate_task_result_rejects_empty_consolidation_execution():

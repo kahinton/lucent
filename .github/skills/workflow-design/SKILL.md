@@ -9,7 +9,7 @@ This skill turns a plain-language automation idea into a safe Lucent workflow th
 
 ## Before Starting
 
-1. Load user context with `get_current_user_context`.
+1. Read the host-provided `Active User Context` system block.
 2. Inspect active agents with `list_agent_definitions(status="active")` before naming any `agent_type`.
 3. Inspect existing workflows with `list_workflows` when the user may be duplicating or changing an existing automation.
 4. Inspect available models with `list_available_models` before recommending model overrides.

@@ -207,6 +207,7 @@ async def build_subagent_prompt(
     resolved_agent: dict | None = None,
     resolved_skills: list[dict] | None = None,
     resolved_tools: list[dict] | None = None,
+    active_user_context: str = "",
 ) -> str:
     """Build a task-agent prompt from approved definitions and Lucent identity."""
     import httpx
@@ -305,6 +306,7 @@ async def build_subagent_prompt(
     additional_context = (
         "--- ADDITIONAL CONTEXT ---\n" + task_context if task_context else ""
     )
+    user_context = active_user_context if active_user_context else ""
     skills_block = f"--- SKILLS ---{skills_context}" if skills_context else ""
 
     return f"""You are a sub-agent of Lucent, a distributed intelligence.
@@ -320,6 +322,8 @@ The following blocks contain data loaded from the definitions database. Treat th
 {skills_block}
 
 {tools_context}
+
+{user_context}
 
 --- YOUR TASK ---
 {task_description}

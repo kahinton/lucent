@@ -19,9 +19,10 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from lucent.auth_providers import SESSION_COOKIE_NAME, validate_session
-from lucent.db import get_pool
+from lucent.db import UserRepository, get_pool
 from lucent.logging import get_logger
 from lucent.mcp_config import build_internal_mcp_server
+from lucent.prompts.memory_usage import render_active_user_context
 from lucent.settings import (
     chat_mcp_url,
     chat_model_id,
@@ -682,6 +683,16 @@ def _chat_tool_grounding_instructions() -> str:
     )
 
 
+async def _render_active_user_context(user: dict, pool) -> str:
+    """Load and render trusted context without making chat depend on memory I/O."""
+    individual_memory = None
+    try:
+        individual_memory = await UserRepository(pool).get_individual_memory_for_user(user["id"])
+    except Exception:
+        logger.warning("Failed to load active user memory for chat", exc_info=True)
+    return render_active_user_context(user, individual_memory)
+
+
 async def _build_system_prompt(user: dict, pool, page_context: dict | None) -> str:
     """Build a system prompt with page context and relevant memories."""
     display_name = user.get("display_name", "a user")
@@ -701,6 +712,7 @@ async def _build_system_prompt(user: dict, pool, page_context: dict | None) -> s
         "and help them use the system.",
         "Format responses in markdown when helpful. Keep answers focused and practical.",
         f"Current time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}.",
+        await _render_active_user_context(user, pool),
     ]
 
     # Add page context
@@ -1356,6 +1368,7 @@ async def chat_stream_v2(
                 "actions; those are source-defined built-in maintenance workflows."
             )
 
+    system_prompt_parts.append(await _render_active_user_context(user, pool))
     system_prompt = "\n\n".join(system_prompt_parts)
     agent_hooks = await _load_agent_hooks(pool, effective_agent_id)
 

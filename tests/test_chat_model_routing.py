@@ -99,6 +99,33 @@ async def _allow_model(_user, _pool, _model_id):
 
 
 @pytest.mark.asyncio
+async def test_active_user_context_contains_authenticated_users_memory(monkeypatch):
+    class _UserRepo:
+        def __init__(self, _pool):
+            pass
+
+        async def get_individual_memory_for_user(self, user_id):
+            assert user_id == "authenticated-user"
+            return {"content": "Prefers the unique Glasswing workflow."}
+
+    monkeypatch.setattr(chat, "UserRepository", _UserRepo)
+
+    context = await chat._render_active_user_context(
+        {
+            "id": "authenticated-user",
+            "organization_id": "org-id",
+            "display_name": "Active User",
+            "role": "member",
+        },
+        object(),
+    )
+
+    assert "## Active User Context" in context
+    assert '"id": "authenticated-user"' in context
+    assert "Prefers the unique Glasswing workflow." in context
+
+
+@pytest.mark.asyncio
 async def test_chat_stream_uses_engine_for_selected_model(monkeypatch):
     seen: dict[str, str] = {}
 

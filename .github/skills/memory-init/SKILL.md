@@ -7,13 +7,9 @@ description: 'Initialize conversation context by loading user preferences and re
 
 Execute this sequence at the start of every conversation. No exceptions.
 
-## Step 1: Load User Identity
+## Step 1: Read User Identity
 
-```
-get_current_user_context()
-```
-
-Returns:
+Read the host-provided `Active User Context` system block. It contains:
 - `user.display_name` — who you're talking to
 - `user.role` — their role in the organization
 - `individual_memory.content` — preferences, communication style, working relationship notes
@@ -71,9 +67,12 @@ Context windows are finite. In long conversations, the initial context — inclu
 
 **How to reload:**
 ```
-get_current_user_context()
 search_memories(query="<current topic>", limit=5)
 ```
+
+The host retains active user identity throughout the session. Call
+`get_current_user_context()` only if the system block is absent or an explicit
+identity refresh is needed.
 
 Do NOT announce the reload. Just do it and let the refreshed context shape your response. The person should experience continuity, not a visible cache miss.
 

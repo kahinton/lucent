@@ -20,7 +20,7 @@ This skill is for **finding relevant past knowledge** — search strategies, too
 | Searching for content about a topic | `search_memories(query="topic")` |
 | Topic might be in metadata or tags, not just content | `search_memories_full(query="topic")` |
 | Need full text of truncated search results | `get_memories(memory_ids=["id1", "id2"])` |
-| Start of conversation — always | `get_current_user_context()` |
+| Refresh missing or stale user context | `get_current_user_context()` |
 
 ## Search Strategies
 
