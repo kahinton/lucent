@@ -1089,7 +1089,7 @@ class MemoryRepository:
             query: Optional fuzzy search query for content.
             username: Optional filter by username.
             type: Optional filter by memory type.
-            tags: Optional filter by tags (all must match).
+            tags: Optional filter by tags (any may match).
             importance_min: Optional minimum importance.
             importance_max: Optional maximum importance.
             created_after: Optional filter for memories created after this date.
@@ -1112,6 +1112,8 @@ class MemoryRepository:
         Returns:
             Search result with memories, total count, and pagination info.
         """
+        limit = max(1, min(limit, 50))
+        offset = max(0, offset)
         conditions = ["deleted_at IS NULL"]
         params: list[Any] = []
         param_idx = 1
@@ -1168,7 +1170,7 @@ class MemoryRepository:
             param_idx += 1
 
         if tags:
-            conditions.append(f"tags @> ${param_idx}")
+            conditions.append(f"tags && ${param_idx}")
             params.append(tags)
             param_idx += 1
 
@@ -1215,48 +1217,96 @@ class MemoryRepository:
         )
         boost_alpha = search_vitality_boost_alpha()
 
-        # Build the query with optional fuzzy matching
+        # Build the query with hybrid lexical matching.
         if query:
-            # Use pg_trgm similarity for fuzzy search
-            similarity_param = param_idx
+            query_param = param_idx
             params.append(query)
             param_idx += 1
+
+            search_input = f"""
+                WITH search_input AS (
+                    SELECT
+                        ${query_param}::text AS query_text,
+                        plainto_tsquery('english', ${query_param}) AS all_query,
+                        tsvector_to_array(to_tsvector('english', ${query_param})) AS query_terms,
+                        to_tsquery(
+                            'english',
+                            array_to_string(
+                                tsvector_to_array(to_tsvector('english', ${query_param})),
+                                ' | '
+                            )
+                        ) AS any_query
+                )
+            """
+            document = "COALESCE(search_vector, ''::tsvector)"
+            fuzzy_score = """GREATEST(
+                word_similarity(search_input.query_text, content),
+                word_similarity(search_input.query_text, array_to_string(tags, ' '))
+            )"""
+            matched_terms = f"""(
+                SELECT COUNT(*)
+                FROM unnest(search_input.query_terms) AS query_term
+                WHERE {document} @@ plainto_tsquery('english', query_term)
+            )"""
+            relevance_score = f"""(
+                0.50 * ts_rank_cd({document}, search_input.any_query, 32)
+                + 0.20 * CASE
+                    WHEN numnode(search_input.all_query) > 0
+                     AND {document} @@ search_input.all_query THEN 1.0 ELSE 0.0
+                  END
+                + 0.20 * {fuzzy_score}
+                + 0.10 * CASE
+                    WHEN content ILIKE '%' || search_input.query_text || '%'
+                    THEN 1.0 ELSE 0.0
+                  END
+            )"""
+            match_condition = f"""(
+                {matched_terms} >= CEIL(
+                    cardinality(search_input.query_terms) * 0.67
+                )::integer
+                OR (
+                    cardinality(search_input.query_terms) <= 2
+                    AND length(search_input.query_text) <= 32
+                    AND {fuzzy_score} >= 0.6
+                )
+                OR content ILIKE '%' || search_input.query_text || '%'
+                OR array_to_string(tags, ' ') ILIKE '%' || search_input.query_text || '%'
+            )"""
 
             if boost_enabled:
                 boost_alpha_param = param_idx
                 params.append(boost_alpha)
                 param_idx += 1
-                search_query = f"""
+                search_query = search_input + f"""
                     SELECT {self._SEARCH_COLUMNS},
-                           similarity(content, ${similarity_param}) as sim_score,
-                           similarity(content, ${similarity_param})
-                             + (${boost_alpha_param}
-                                * (COALESCE(vitality_score, 0.5) - 0.5)) AS final_rank
+                           {relevance_score} AS sim_score,
+                           {relevance_score} + (${boost_alpha_param}
+                             * (COALESCE(vitality_score, 0.5) - 0.5)) AS final_rank
                     FROM memories
+                    CROSS JOIN search_input
                     WHERE {where_clause}
-                      AND (content % ${similarity_param}
-                           OR content ILIKE '%' || ${similarity_param} || '%')
+                      AND {match_condition}
                     ORDER BY final_rank DESC, importance DESC, created_at DESC
                     LIMIT ${param_idx} OFFSET ${param_idx + 1}
                 """
             else:
-                search_query = f"""
+                search_query = search_input + f"""
                     SELECT {self._SEARCH_COLUMNS},
-                           similarity(content, ${similarity_param}) as sim_score
+                           {relevance_score} AS sim_score
                     FROM memories
+                    CROSS JOIN search_input
                     WHERE {where_clause}
-                      AND (content % ${similarity_param}
-                           OR content ILIKE '%' || ${similarity_param} || '%')
+                      AND {match_condition}
                     ORDER BY sim_score DESC, importance DESC, created_at DESC
                     LIMIT ${param_idx} OFFSET ${param_idx + 1}
                 """
 
-            count_query = f"""
+            count_query = search_input + f"""
                 SELECT COUNT(*) as total
                 FROM memories
+                CROSS JOIN search_input
                 WHERE {where_clause}
-                  AND (content % ${similarity_param}
-                       OR content ILIKE '%' || ${similarity_param} || '%')
+                  AND {match_condition}
             """
         else:
             search_query = f"""
@@ -1338,6 +1388,8 @@ class MemoryRepository:
         Returns:
             Search result with memories, total count, and pagination info.
         """
+        limit = max(1, min(limit, 50))
+        offset = max(0, offset)
         conditions = ["deleted_at IS NULL"]
         params: list[Any] = []
         param_idx = 1
@@ -1418,73 +1470,96 @@ class MemoryRepository:
         )
         boost_alpha = search_vitality_boost_alpha()
 
-        # Build a combined text field for searching: content + tags + metadata
+        # Use the same hybrid retrieval as search(); this endpoint remains a
+        # required-query convenience for broad discovery.
         query_param = param_idx
         params.append(query)
         param_idx += 1
 
-        # Search across content, array_to_string(tags), and metadata::text
+        search_input = f"""
+            WITH search_input AS (
+                SELECT
+                    ${query_param}::text AS query_text,
+                    plainto_tsquery('english', ${query_param}) AS all_query,
+                    tsvector_to_array(to_tsvector('english', ${query_param})) AS query_terms,
+                    to_tsquery(
+                        'english',
+                        array_to_string(
+                            tsvector_to_array(to_tsvector('english', ${query_param})),
+                            ' | '
+                        )
+                    ) AS any_query
+            )
+        """
+        document = "COALESCE(search_vector, ''::tsvector)"
+        fuzzy_score = """GREATEST(
+            word_similarity(search_input.query_text, content),
+            word_similarity(search_input.query_text, array_to_string(tags, ' '))
+        )"""
+        matched_terms = f"""(
+            SELECT COUNT(*)
+            FROM unnest(search_input.query_terms) AS query_term
+            WHERE {document} @@ plainto_tsquery('english', query_term)
+        )"""
+        relevance_score = f"""(
+            0.50 * ts_rank_cd({document}, search_input.any_query, 32)
+            + 0.20 * CASE
+                WHEN numnode(search_input.all_query) > 0
+                 AND {document} @@ search_input.all_query THEN 1.0 ELSE 0.0
+              END
+            + 0.20 * {fuzzy_score}
+            + 0.10 * CASE
+                WHEN content ILIKE '%' || search_input.query_text || '%'
+                THEN 1.0 ELSE 0.0
+              END
+        )"""
+        match_condition = f"""(
+            {matched_terms} >= CEIL(
+                cardinality(search_input.query_terms) * 0.67
+            )::integer
+            OR (
+                cardinality(search_input.query_terms) <= 2
+                AND length(search_input.query_text) <= 32
+                AND {fuzzy_score} >= 0.6
+            )
+            OR content ILIKE '%' || search_input.query_text || '%'
+            OR array_to_string(tags, ' ') ILIKE '%' || search_input.query_text || '%'
+        )"""
+
         if boost_enabled:
             boost_alpha_param = param_idx
             params.append(boost_alpha)
             param_idx += 1
-            search_query = f"""
+            search_query = search_input + f"""
                 SELECT {self._SEARCH_COLUMNS},
-                       GREATEST(
-                           similarity(content, ${query_param}),
-                           similarity(array_to_string(tags, ' '), ${query_param}),
-                           similarity(metadata::text, ${query_param})
-                       ) as sim_score,
-                       GREATEST(
-                           similarity(content, ${query_param}),
-                           similarity(array_to_string(tags, ' '), ${query_param}),
-                           similarity(metadata::text, ${query_param})
-                       ) + (${boost_alpha_param}
-                            * (COALESCE(vitality_score, 0.5) - 0.5)) AS final_rank
+                       {relevance_score} AS sim_score,
+                       {relevance_score} + (${boost_alpha_param}
+                         * (COALESCE(vitality_score, 0.5) - 0.5)) AS final_rank
                 FROM memories
+                CROSS JOIN search_input
                 WHERE {where_clause}
-                  AND (
-                      content % ${query_param} OR content ILIKE '%' || ${query_param} || '%'
-                      OR array_to_string(tags, ' ') % ${query_param}
-                      OR array_to_string(tags, ' ') ILIKE '%' || ${query_param} || '%'
-                      OR metadata::text % ${query_param}
-                      OR metadata::text ILIKE '%' || ${query_param} || '%'
-                  )
+                  AND {match_condition}
                 ORDER BY final_rank DESC, importance DESC, created_at DESC
                 LIMIT ${param_idx} OFFSET ${param_idx + 1}
             """
         else:
-            search_query = f"""
+            search_query = search_input + f"""
                 SELECT {self._SEARCH_COLUMNS},
-                       GREATEST(
-                           similarity(content, ${query_param}),
-                           similarity(array_to_string(tags, ' '), ${query_param}),
-                           similarity(metadata::text, ${query_param})
-                       ) as sim_score
+                       {relevance_score} AS sim_score
                 FROM memories
+                CROSS JOIN search_input
                 WHERE {where_clause}
-                  AND (
-                      content % ${query_param} OR content ILIKE '%' || ${query_param} || '%'
-                      OR array_to_string(tags, ' ') % ${query_param}
-                      OR array_to_string(tags, ' ') ILIKE '%' || ${query_param} || '%'
-                      OR metadata::text % ${query_param}
-                      OR metadata::text ILIKE '%' || ${query_param} || '%'
-                  )
+                  AND {match_condition}
                 ORDER BY sim_score DESC, importance DESC, created_at DESC
                 LIMIT ${param_idx} OFFSET ${param_idx + 1}
             """
 
-        count_query = f"""
+        count_query = search_input + f"""
             SELECT COUNT(*) as total
             FROM memories
+            CROSS JOIN search_input
             WHERE {where_clause}
-              AND (
-                  content % ${query_param} OR content ILIKE '%' || ${query_param} || '%'
-                  OR array_to_string(tags, ' ') % ${query_param}
-                  OR array_to_string(tags, ' ') ILIKE '%' || ${query_param} || '%'
-                  OR metadata::text % ${query_param}
-                  OR metadata::text ILIKE '%' || ${query_param} || '%'
-              )
+              AND {match_condition}
         """
 
         params.extend([limit, offset])

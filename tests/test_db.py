@@ -287,6 +287,63 @@ class TestMemoryRepository:
         assert result["total_count"] >= 1
         assert any("Python" in m["content"] for m in result["memories"])
 
+    async def test_search_matches_noncontiguous_query_terms(
+        self, db_pool, test_user, clean_test_data
+    ):
+        """Natural multi-term queries retrieve memories without exact phrases."""
+        prefix = clean_test_data
+        repo = MemoryRepository(db_pool)
+        memory = await repo.create(
+            username=f"{prefix}user",
+            type="technical",
+            content=(
+                f"{prefix} Daemon credentials are scoped independently. "
+                "Tenant access remains isolated by API key ownership."
+            ),
+            tags=["daemon-auth", "security"],
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
+        )
+
+        result = await repo.search(
+            query="daemon credential isolation API",
+            requesting_user_id=test_user["id"],
+            requesting_org_id=test_user["organization_id"],
+        )
+
+        assert memory["id"] in {item["id"] for item in result["memories"]}
+
+    async def test_search_fuzzy_typo_rejects_weak_substring_matches(
+        self, db_pool, test_user, clean_test_data
+    ):
+        """Single-term typo matching excludes weakly similar unrelated words."""
+        prefix = clean_test_data
+        repo = MemoryRepository(db_pool)
+        target = await repo.create(
+            username=f"{prefix}user",
+            type="technical",
+            content=f"{prefix} Glasswing project identity notes",
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
+        )
+        decoy = await repo.create(
+            username=f"{prefix}user",
+            type="experience",
+            content=f"{prefix} West Bloomfield weather is warming today",
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
+        )
+
+        result = await repo.search(
+            query="Glaswing",
+            requesting_user_id=test_user["id"],
+            requesting_org_id=test_user["organization_id"],
+        )
+
+        ids = {item["id"] for item in result["memories"]}
+        assert target["id"] in ids
+        assert decoy["id"] not in ids
+
     async def test_search_with_type_filter(self, db_pool, test_user, clean_test_data):
         """Test searching with type filter."""
         prefix = clean_test_data
@@ -318,7 +375,7 @@ class TestMemoryRepository:
         assert all(m["type"] == "technical" for m in result["memories"])
 
     async def test_search_with_tag_filter(self, db_pool, test_user, clean_test_data):
-        """Test searching with tag filter uses containment (all tags must match)."""
+        """Test searching with tag filter matches any requested tag."""
         prefix = clean_test_data
         repo = MemoryRepository(db_pool)
 
@@ -359,14 +416,16 @@ class TestMemoryRepository:
         assert m2["id"] in ids
         assert m3["id"] not in ids
 
-        # Multi-tag filter requires ALL tags (containment)
+        # Multi-tag filters match memories containing either tag.
         result = await repo.search(
             tags=["daemon-task", "pending"],
             requesting_user_id=test_user["id"],
             requesting_org_id=test_user["organization_id"],
         )
-        assert result["total_count"] == 1
-        assert result["memories"][0]["id"] == m1["id"]
+        ids = {memory["id"] for memory in result["memories"]}
+        assert m1["id"] in ids
+        assert m2["id"] in ids
+        assert m3["id"] not in ids
 
         # Tag that doesn't exist
         result = await repo.search(

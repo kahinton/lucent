@@ -668,18 +668,18 @@ Returns:
         limit: int = 5,
         include_archived: bool = False,
     ) -> str:
-        """Search for memories by content with fuzzy matching and filters.
+        """Search memories by hybrid relevance with optional filters.
 
-        This searches the main CONTENT field only. For searching across all fields
-        (content, tags, metadata), use search_memories_full instead.
+        Queries are ranked across content, tags, and metadata using full-text,
+        exact-phrase, and fuzzy word matching.
 
         Args:
-            query: Optional fuzzy search query to match against memory CONTENT only.
+            query: Optional natural-language search query.
             username: Optional filter to only return memories for a specific user.
             type: Optional filter by memory type
                 (experience, technical, goal, individual).
             tags: Optional list of tags to filter by
-                (memories must have all specified tags).
+                (memories may match any specified tag).
             importance_min: Optional minimum importance rating (1-10).
             importance_max: Optional maximum importance rating (1-10).
             created_after: Optional ISO datetime string to filter memories created after this date.
@@ -801,14 +801,13 @@ Returns:
         limit: int = 5,
         include_archived: bool = False,
     ) -> str:
-        """Search across ALL text fields: content, tags, and metadata.
+        """Run a required-query hybrid relevance search across all memory text.
 
-        Use this when you want to find memories where the search term might appear
-        anywhere - in the content, tags, or metadata fields. This is broader than
-        search_memories which only searches the content field.
+        This uses the same full-text, exact-phrase, and fuzzy word ranking as
+        search_memories, without its tag/date/ID filter options.
 
         Args:
-            query: Search query to match against content, tags, and metadata (required).
+            query: Natural-language search query (required).
             username: Optional filter to only return memories for a specific user.
             type: Optional filter by memory type
                 (experience, technical, goal, individual).

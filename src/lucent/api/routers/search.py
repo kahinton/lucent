@@ -165,7 +165,7 @@ async def search_memories_get(
     created_after: datetime | None = Query(default=None),
     created_before: datetime | None = Query(default=None),
     offset: int = Query(default=0, ge=0),
-    limit: int = Query(default=20, ge=1, le=100),
+    limit: int = Query(default=20, ge=1, le=50),
     include_archived: bool = Query(default=False),
 ) -> SearchResponse:
     """Search memories by content (GET version for convenience)."""
