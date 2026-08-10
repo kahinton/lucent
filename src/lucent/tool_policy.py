@@ -1,30 +1,13 @@
-"""Surface-specific MCP tool policies.
+"""MCP tool discovery policies.
 
-Policies are centralized, but not shared indiscriminately: browser chat and
-daemon tasks intentionally have different authority. Callers select a policy
-by surface rather than maintaining their own literal allow-lists.
+Lucent tools remain discoverable across chat models and daemon tasks. The
+requester's bearer credential, memory scope, and repository ACLs enforce what
+each caller may actually do.
 """
 
 from __future__ import annotations
 
-
-CHAT_ALLOWED_TOOLS = (
-    "get_current_user_context", "search_memories", "search_memories_full",
-    "get_memory", "get_memories", "create_memory", "update_memory",
-    "delete_memory", "get_existing_tags", "get_tag_suggestions",
-    "create_request", "list_active_work", "list_pending_requests",
-    "list_pending_tasks", "get_request_details", "list_available_models",
-)
-DEFINITION_COMPOSER_TOOLS = (
-    "list_agent_definitions", "get_agent_definition", "list_skill_definitions",
-    "get_skill_definition", "list_mcp_server_definitions", "list_hook_definitions",
-    "list_tool_definitions", "get_tool_definition", "list_proposals",
-    "create_agent_definition", "create_skill_definition", "create_tool_definition",
-)
-WORKFLOW_COMPOSER_TOOLS = (
-    "list_workflows", "get_workflow_details", "create_workflow",
-    "list_agent_definitions", "list_skill_definitions", "list_available_models",
-)
+CHAT_ALLOWED_TOOLS = ("*",)
 
 BASE_TASK_MEMORY_SERVER_TOOLS = frozenset({
     "create_memory", "get_current_user_context", "get_existing_tags", "get_memory",
@@ -54,17 +37,8 @@ def chat_allowed_tools_for_agent(
     agent_name: str | None = None,
     skill_names: list[str] | None = None,
 ) -> list[str]:
-    """Return the least-privilege chat tool policy for an approved agent."""
-    tools = list(CHAT_ALLOWED_TOOLS)
-    normalized_agent = (agent_name or "").strip().lower()
-    normalized_skills = {name.strip().lower() for name in (skill_names or [])}
-    if skill_names:
-        tools.extend(("get_skill_definition", "list_skill_definitions"))
-    if normalized_agent == "definition-engineer" or "definition-engineering" in normalized_skills:
-        tools.extend(DEFINITION_COMPOSER_TOOLS)
-    if normalized_agent == "workflow-composer" or "workflow-design" in normalized_skills:
-        tools.extend(WORKFLOW_COMPOSER_TOOLS)
-    return list(dict.fromkeys(tools))
+    """Expose all Lucent MCP tools; the user's credential enforces authorization."""
+    return list(CHAT_ALLOWED_TOOLS)
 
 
 def memory_server_tools_for_task(
@@ -80,7 +54,7 @@ def memory_server_tools_for_task(
     produced false ``tool does not exist`` failures as new tools were added or
     a task crossed an artificial capability boundary. The task's scoped API key
     remains the authorization boundary: it can only access the requesting
-    user's permitted data and organization. Browser chat deliberately keeps its
-    separate least-privilege allow-list above.
+    user's permitted data and organization. Browser chat follows the same
+    discovery rule with its authenticated user's credential and ACLs.
     """
     return ["*"]

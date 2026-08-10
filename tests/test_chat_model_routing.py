@@ -232,43 +232,23 @@ def test_chat_prompt_blocks_invented_security_protocols():
     assert "Use `list_available_models`" in instructions
 
 
-def test_chat_mcp_config_uses_narrow_tool_allowlist():
+def test_chat_mcp_config_exposes_all_lucent_tools():
     config = chat._build_mcp_config("session-token")
     tools = config["memory-server"]["tools"]
 
-    assert "get_current_user_context" in tools
-    assert "search_memories" in tools
-    assert "list_active_work" in tools
-    assert "create_request" in tools
-    assert "list_available_models" in tools
-    assert "create_task" not in tools
-    assert "create_agent_definition" not in tools
-    assert tools != ["*"]
+    assert tools == ["*"]
 
 
-def test_definition_engineer_chat_gets_definition_proposal_tools():
+def test_definition_engineer_chat_gets_all_lucent_tools():
     tools = chat._chat_allowed_tools_for_agent("definition-engineer", [])
 
-    assert "create_agent_definition" in tools
-    assert "create_skill_definition" in tools
-    assert "list_agent_definitions" in tools
-    assert "list_proposals" in tools
-    assert "approve_agent_definition" not in tools
-    assert "grant_skill_to_agent" not in tools
-    assert tools != ["*"]
+    assert tools == ["*"]
 
 
-def test_workflow_composer_chat_gets_workflow_tools_only():
+def test_workflow_composer_chat_gets_all_lucent_tools():
     tools = chat._chat_allowed_tools_for_agent("workflow-composer", [])
 
-    assert "create_workflow" in tools
-    assert "list_workflows" in tools
-    assert "get_workflow_details" in tools
-    assert "list_available_models" in tools
-    assert "list_agent_definitions" in tools
-    assert "create_agent_definition" not in tools
-    assert "create_task" not in tools
-    assert tools != ["*"]
+    assert tools == ["*"]
 
 
 def test_copilot_restricted_session_excludes_built_in_tools():

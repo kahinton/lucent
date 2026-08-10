@@ -68,12 +68,7 @@ def _chat_allowed_tools_for_agent(
     agent_name: str | None = None,
     skill_names: list[str] | None = None,
 ) -> list[str]:
-    """Return the MCP tool allow-list for a chat session.
-
-    General chat stays intentionally narrow. Specialized composer tools are
-    added only when the selected chat agent is an approved composer role (or an
-    equivalent agent explicitly granted the corresponding skill).
-    """
+    """Return the full Lucent MCP tool surface for every chat model."""
     return chat_allowed_tools_for_agent(agent_name, skill_names)
 
 

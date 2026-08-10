@@ -49,10 +49,9 @@ def test_scoped_mcp_server_preserves_scope_and_trace_headers():
     assert config["internal"] is True
 
 
-def test_chat_and_task_policies_keep_chat_restricted_and_tasks_unrestricted():
+def test_chat_and_task_policies_expose_all_tools_with_scoped_credentials():
     chat_tools = chat_allowed_tools_for_agent("definition-engineer", ["definition-engineering"])
     task_tools = memory_server_tools_for_task("research", "Consolidate duplicates")
 
-    assert "create_agent_definition" in chat_tools
+    assert chat_tools == ["*"]
     assert task_tools == ["*"]
-    assert "exec_sandbox_command" not in chat_tools
