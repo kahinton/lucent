@@ -86,6 +86,11 @@ daemon:
     LUCENT_DAEMON_INTERVAL: "15"
     LUCENT_STALE_HEARTBEAT_MINUTES: "30"
 
+sandbox:
+  backend: kubernetes
+  kubernetes:
+    namespace: ""
+
 ollama:
   enabled: false
   mode: sidecar

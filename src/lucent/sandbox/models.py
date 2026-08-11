@@ -39,6 +39,7 @@ class SandboxConfig:
     setup_commands: list[str] = field(default_factory=list)  # Run after container start
     env_vars: dict[str, str] = field(default_factory=dict)
     working_dir: str = "/workspace"
+    docker_bind_mounts: list[dict[str, str | bool]] = field(default_factory=list)
 
     # Resources
     memory_limit: str = "2g"

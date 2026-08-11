@@ -123,7 +123,11 @@ def _validate_sandbox_path(path: str) -> str:
 
     normalized = posixpath.normpath(path)
     workspace_root = "/workspace"
-    candidate = normalized if normalized.startswith("/") else posixpath.join(workspace_root, normalized)
+    candidate = (
+        normalized
+        if normalized.startswith("/")
+        else posixpath.join(workspace_root, normalized)
+    )
     resolved_candidate = os.path.realpath(candidate)
     resolved_root = os.path.realpath(workspace_root)
     root_prefix = resolved_root.rstrip("/") + "/"
@@ -320,7 +324,9 @@ async def destroy_sandbox(sandbox_id: str, user: AuthenticatedUser) -> dict:
 
 
 class TemplateCreateRequest(BaseModel):
-    name: str = Field(..., min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
+    name: str = Field(
+        ..., min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+    )
     description: str = Field(default="", max_length=512)
     image: str = Field(default="python:3.12-slim", max_length=256)
     repo_url: str | None = Field(default=None, max_length=512)
@@ -328,6 +334,7 @@ class TemplateCreateRequest(BaseModel):
     setup_commands: list[str] = Field(default_factory=list, max_length=50)
     env_vars: dict[str, str] = Field(default_factory=dict)
     working_dir: str = "/workspace"
+    docker_bind_mounts: list[dict[str, str | bool]] = Field(default_factory=list, max_length=20)
     memory_limit: str = Field(default="2g", pattern=r"^[1-9]\d{0,4}[mgt]$")
     cpu_limit: float = Field(default=2.0, gt=0, le=16)
     disk_limit: str = Field(default="10g", pattern=r"^[1-9]\d{0,4}[mgt]$")
@@ -347,6 +354,7 @@ class TemplateUpdateRequest(BaseModel):
     setup_commands: list[str] | None = None
     env_vars: dict[str, str] | None = None
     working_dir: str | None = None
+    docker_bind_mounts: list[dict[str, str | bool]] | None = None
     memory_limit: str | None = None
     cpu_limit: float | None = None
     disk_limit: str | None = None
@@ -360,6 +368,8 @@ async def create_template(body: TemplateCreateRequest, user: AuthenticatedUser):
     """Create a reusable sandbox template."""
     from lucent.db.sandbox_template import SandboxTemplateRepository
 
+    if body.docker_bind_mounts and user.role.value not in ("admin", "owner"):
+        raise HTTPException(403, "Only administrators can configure Docker bind mounts")
     pool = await get_pool()
     repo = SandboxTemplateRepository(pool)
     return await repo.create(
@@ -372,6 +382,7 @@ async def create_template(body: TemplateCreateRequest, user: AuthenticatedUser):
         setup_commands=body.setup_commands,
         env_vars=body.env_vars,
         working_dir=body.working_dir,
+        docker_bind_mounts=body.docker_bind_mounts,
         memory_limit=body.memory_limit,
         cpu_limit=body.cpu_limit,
         disk_limit=body.disk_limit,
@@ -420,6 +431,8 @@ async def update_template(template_id: str, body: TemplateUpdateRequest, user: A
     from lucent.access_control import AccessControlService
     from lucent.db.sandbox_template import SandboxTemplateRepository
 
+    if body.docker_bind_mounts and user.role.value not in ("admin", "owner"):
+        raise HTTPException(403, "Only administrators can configure Docker bind mounts")
     pool = await get_pool()
     acl = AccessControlService(pool)
     if not await acl.can_modify(
@@ -485,8 +498,10 @@ async def launch_from_template(
         setup_commands=tpl.get("setup_commands") or [],
         env_vars=resolved_env_vars,
         working_dir=tpl.get("working_dir", "/workspace"),
+        docker_bind_mounts=tpl.get("docker_bind_mounts") or [],
         memory_limit=tpl.get("memory_limit", "2g"),
         cpu_limit=float(tpl.get("cpu_limit", 2.0)),
+        disk_limit=tpl.get("disk_limit", "10g"),
         network_mode=tpl.get("network_mode", "none"),
         allowed_hosts=tpl.get("allowed_hosts") or [],
         timeout_seconds=tpl.get("timeout_seconds", 1800),

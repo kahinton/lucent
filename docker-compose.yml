@@ -303,6 +303,8 @@ services:
       LUCENT_SECRET_PROVIDER: ${LUCENT_SECRET_PROVIDER:-auto}
       VAULT_ADDR: http://openbao:8200
       VAULT_TOKEN_FILE: /shared/vault-token
+      # Task sandbox lifecycle uses the same restricted Docker API as the server.
+      DOCKER_HOST: tcp://docker-socket-proxy:2375
     extra_hosts:
       # Required so host.docker.internal resolves on Linux hosts (Docker Desktop
       # provides it automatically, plain Docker Engine does not).
@@ -351,6 +353,8 @@ services:
       LUCENT_SECRET_PROVIDER: ${LUCENT_SECRET_PROVIDER:-auto}
       VAULT_ADDR: http://openbao:8200
       VAULT_TOKEN_FILE: /shared/vault-token
+      # Task sandbox lifecycle uses the same restricted Docker API as the server.
+      DOCKER_HOST: tcp://docker-socket-proxy:2375
     extra_hosts:
       # Required so host.docker.internal resolves on Linux hosts.
       - "host.docker.internal:host-gateway"

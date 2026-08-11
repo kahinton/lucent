@@ -319,6 +319,7 @@ class DockerBackend(SandboxBackend):
                 setup_commands=config.setup_commands,
                 env_vars=config.env_vars,
                 working_dir=config.working_dir,
+                docker_bind_mounts=config.docker_bind_mounts,
                 memory_limit=config.memory_limit,
                 cpu_limit=config.cpu_limit,
                 disk_limit=config.disk_limit,
@@ -419,6 +420,20 @@ class DockerBackend(SandboxBackend):
             storage_opt = {"size": config.disk_limit}
 
         workspace_volume = self._workspace_volume_name(sandbox_id)
+        volumes: dict[str, dict[str, str]] = {
+            workspace_volume: {"bind": "/workspace", "mode": "rw"}
+        }
+        for mount in config.docker_bind_mounts:
+            source = str(mount.get("source", "")).strip()
+            target = str(mount.get("target", "")).strip()
+            if not source or not target.startswith("/"):
+                raise ValueError("Docker bind mounts require a source and absolute target path")
+            if target == "/workspace" or target.startswith("/workspace/"):
+                raise ValueError("Docker bind mounts cannot replace the managed /workspace volume")
+            volumes[source] = {
+                "bind": target,
+                "mode": "ro" if mount.get("read_only", False) else "rw",
+            }
         container_kwargs: dict = dict(
             image=config.image,
             name=name,
@@ -438,7 +453,7 @@ class DockerBackend(SandboxBackend):
             cap_add=cap_add or None,
             security_opt=["no-new-privileges"],
             read_only=False,  # Repos need write access
-            volumes={workspace_volume: {"bind": "/workspace", "mode": "rw"}},
+            volumes=volumes,
             # Docker's default tmpfs options include `noexec`, which breaks
             # scripts we stage to /tmp (notably the git askpass helper used
             # for authenticated repo clones). Explicitly allow exec here.

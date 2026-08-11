@@ -575,6 +575,26 @@ class TestMCPServerACL:
 class TestSandboxTemplateACL:
     """ACL tests for sandbox templates."""
 
+    async def test_member_cannot_create_template_with_host_bind_mount(
+        self, db_pool, acl_prefix, org_and_users
+    ):
+        app = create_app()
+        member = org_and_users["other"]
+
+        async with _make_client(app, member) as client:
+            response = await client.post(
+                "/api/sandboxes/templates",
+                json={
+                    "name": f"{acl_prefix}mounted_tpl",
+                    "docker_bind_mounts": [
+                        {"source": "/", "target": "/host", "read_only": True}
+                    ],
+                },
+            )
+
+        assert response.status_code == 403
+        app.dependency_overrides.clear()
+
     async def test_template_list_filtered_by_access(self, db_pool, acl_prefix, org_and_users):
         """Template list_accessible_by only returns accessible templates."""
         from lucent.db.sandbox_template import SandboxTemplateRepository

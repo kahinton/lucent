@@ -56,7 +56,10 @@ class SandboxManager:
         if backend_type == "kubernetes":
             from lucent.sandbox.k8s_backend import KubernetesBackend
 
-            return KubernetesBackend()
+            return KubernetesBackend(
+                namespace=os.environ.get("LUCENT_SANDBOX_K8S_NAMESPACE", "lucent-sandboxes"),
+                kubeconfig=os.environ.get("LUCENT_SANDBOX_KUBECONFIG") or None,
+            )
         else:
             from lucent.sandbox.docker_backend import DockerBackend
 

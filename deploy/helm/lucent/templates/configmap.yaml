@@ -10,6 +10,9 @@ data:
   LUCENT_MAX_SESSIONS: {{ .Values.daemon.maxConcurrentSessions | quote }}
   OTEL_EXPORTER_OTLP_ENDPOINT: {{ .Values.server.env.OTEL_EXPORTER_OTLP_ENDPOINT | quote }}
   OTEL_ENABLED: {{ .Values.server.env.OTEL_ENABLED | quote }}
+  LUCENT_SANDBOX_BACKEND: {{ .Values.sandbox.backend | quote }}
+  LUCENT_SANDBOX_K8S_NAMESPACE: {{ default .Release.Namespace .Values.sandbox.kubernetes.namespace | quote }}
+  LUCENT_SANDBOX_BRIDGE_API_URL: {{ printf "http://%s.%s.svc:%v/api" (include "lucent.fullname" .) .Release.Namespace .Values.server.service.port | quote }}
   {{- with .Values.daemon.env }}
   {{- range $key, $value := . }}
   {{ $key }}: {{ $value | quote }}
