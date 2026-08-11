@@ -180,6 +180,48 @@ async def test_sandboxes_instances_tab_returns_200(client):
 
 
 @pytest.mark.asyncio
+async def test_launch_instance_modal_uses_nonce_backed_script(client):
+    mock_manager = AsyncMock()
+    mock_manager.list_all.return_value = {"items": [], "total_count": 0}
+    with patch("lucent.sandbox.manager.get_sandbox_manager", return_value=mock_manager):
+        response = await client.get("/sandboxes?tab=instances", follow_redirects=True)
+
+    assert response.status_code == 200
+    assert 'id="open-launch-modal"' in response.text
+    assert 'data-close-launch-modal' in response.text
+    assert 'form="launch-form"' in response.text
+    assert "onclick=\"document.getElementById('launch-modal')" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_terminal_controls_use_nonce_backed_script(client):
+    sandbox_id = str(uuid4())
+    mock_manager = AsyncMock()
+    mock_manager.list_all.return_value = {
+        "items": [{
+            "id": sandbox_id,
+            "name": "active-sandbox",
+            "status": "ready",
+            "image": "python:3.12-slim",
+            "created_at": None,
+        }],
+        "total_count": 1,
+    }
+    with patch("lucent.sandbox.manager.get_sandbox_manager", return_value=mock_manager):
+        response = await client.get("/sandboxes?tab=instances", follow_redirects=True)
+
+    assert response.status_code == 200
+    assert f'data-open-terminal="{sandbox_id}"' in response.text
+    assert 'id="terminal-run"' in response.text
+    assert 'id="terminal-close"' in response.text
+    assert 'id="terminal-input"' in response.text
+    assert 'onclick="openTerminal(' not in response.text
+    assert 'onclick="runCommand()"' not in response.text
+    assert 'onclick="closeTerminal()"' not in response.text
+    assert "onkeydown=\"if(event.key==='Enter')runCommand()\"" not in response.text
+
+
+@pytest.mark.asyncio
 async def test_sandboxes_instances_tab_active_filter(client):
     mock_manager = AsyncMock()
     mock_manager.list_active.return_value = []
