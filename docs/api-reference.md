@@ -622,6 +622,61 @@ they have enough information, or request rework when they do not.
 
 At least one of `url`, `external_id`, or `output_type: "other"` is required.
 
+### User Files
+
+Base path: `/api/files`
+
+User files are durable, private artifacts whose metadata is stored in
+PostgreSQL and whose content is stored by a configurable provider. All list,
+metadata, content, revision, and delete operations are scoped to the
+current/effective user and return `404` for files owned by another user.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/files` | Store UTF-8 or base64-encoded content |
+| `GET` | `/api/files?limit=50&offset=0` | List files owned by the current user |
+| `GET` | `/api/files/{file_id}` | Get provider-independent file metadata |
+| `PATCH` | `/api/files/{file_id}` | Replace content and create an immutable revision |
+| `GET` | `/api/files/{file_id}/revisions` | List revision metadata and source context |
+| `GET` | `/api/files/{file_id}/revisions/{revision_number}/content` | Download one historical revision |
+| `GET` | `/api/files/{file_id}/content` | Read or download file content |
+| `DELETE` | `/api/files/{file_id}` | Soft-delete metadata and remove provider content |
+
+```json
+{
+  "filename": "report.md",
+  "display_name": "Final report",
+  "content": "# Final report\n",
+  "content_encoding": "utf-8",
+  "task_id": "optional-task-uuid",
+  "is_primary": true
+}
+```
+
+Update content with:
+
+```json
+{
+  "content": "# Revised report\n",
+  "content_encoding": "utf-8",
+  "change_summary": "Incorporated reviewer feedback"
+}
+```
+
+Set `content_encoding` to `base64` for binary content. When `task_id` is set,
+Lucent verifies that the effective user owns the task's request and
+automatically creates a `file` task output pointing to `/files/{file_id}`.
+Each create and update stores a separate immutable content snapshot. Revision
+metadata includes its chat session, request, and task provenance when those
+trusted execution contexts are available; the Files UI links back to that
+source context.
+
+Agents use `store_user_file`, `edit_user_file`, `list_user_files`, and
+`read_user_file`. `edit_user_file` replaces the current content, accepts an
+optional `change_summary`, and preserves previous content in revision history.
+In task context, `store_user_file` defaults to the current task. Its returned ID
+can be attached to a handoff with `reference_type: "user_file"`.
+
 ### Task Memory Links
 
 ```
@@ -675,8 +730,8 @@ admin/owner, the daemon service user, or an API key with `daemon-tasks` scope.
 
 Supported `interaction_type` values are `message`, `clarification`, `review`,
 `decision`, `workflow_output`, and `handoff`. Supported `reference_type` values
-are `request`, `task`, `task_output`, `memory`, `workflow`, `schedule_run`,
-`llm_session`, `url`, and `other`.
+are `request`, `task`, `task_output`, `user_file`, `memory`, `workflow`,
+`schedule_run`, `llm_session`, `url`, and `other`.
 
 ### Handoff List, Thread, and Actions
 

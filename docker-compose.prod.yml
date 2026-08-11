@@ -124,6 +124,8 @@ services:
       LUCENT_DEFAULT_MODEL: ${LUCENT_DEFAULT_MODEL:-}
       LUCENT_CHAT_MODEL: ${LUCENT_CHAT_MODEL:-}
       LUCENT_LLM_ENGINE: ${LUCENT_LLM_ENGINE:-copilot}
+      LUCENT_FILE_STORAGE_PATH: /var/lib/lucent/files
+      LUCENT_MAX_USER_FILE_BYTES: ${LUCENT_MAX_USER_FILE_BYTES:-10485760}
       # MCP DNS-rebinding allowlist (comma-separated host or host:port). Loopback
       # is always allowed; set this when MCP clients reach the server by a custom
       # service name or ingress hostname (otherwise the SDK returns HTTP 421).
@@ -149,6 +151,7 @@ services:
       - ./.github/skills:/app/.github/skills:ro
       - ./.github/agents/definitions:/app/.github/agents/definitions:ro
       - ./.github/sandbox-templates:/app/.github/sandbox-templates:ro
+      - lucent_files:/var/lib/lucent/files
     ports:
       - "${LUCENT_PORT:-8766}:8766"
     healthcheck:
@@ -168,6 +171,8 @@ services:
 
 volumes:
   lucent_data:
+    driver: local
+  lucent_files:
     driver: local
   openbao_data:
     driver: local

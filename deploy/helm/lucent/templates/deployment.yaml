@@ -106,6 +106,15 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            - name: user-files
+              mountPath: /var/lib/lucent/files
       volumes:
         - name: tmp
           emptyDir: {}
+        - name: user-files
+          {{- if .Values.server.fileStorage.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ printf "%s-user-files" (include "lucent.fullname" .) }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}

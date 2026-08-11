@@ -31,11 +31,18 @@ server:
     LUCENT_CHAT_MODEL: ""
     LUCENT_RATE_LIMIT_PER_MINUTE: "100"
     LUCENT_LOGIN_RATE_LIMIT: "5"
+    LUCENT_FILE_STORAGE_PATH: /var/lib/lucent/files
+    LUCENT_MAX_USER_FILE_BYTES: "10485760"
     OTEL_ENABLED: "false"
     OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
     OTEL_SERVICE_NAME: lucent
     LUCENT_SECRET_PROVIDER: builtin
     OLLAMA_HOST: http://ollama:11434
+  fileStorage:
+    persistence:
+      enabled: true
+      size: 10Gi
+      storageClass: ""
 
 # Embedded DB may be provided by bitnami/postgresql dependency when enabled.
 database:

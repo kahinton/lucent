@@ -36,6 +36,8 @@ def _reference_url(ref: dict) -> str:
             return f"/activity/{request_id}#task-{ref_id}"
     if ref_type == "memory" and ref_id:
         return f"/memories/{ref_id}"
+    if ref_type == "user_file" and ref_id:
+        return f"/files/{ref_id}"
     if ref_type == "workflow" and ref_id:
         return f"/workflows/{ref_id}"
     if ref_type == "llm_session" and ref_id:
@@ -80,10 +82,11 @@ def _display_references(interaction: dict) -> list[dict]:
         "request": 1,
         "task": 2,
         "task_output": 3,
-        "memory": 4,
-        "llm_session": 5,
-        "url": 6,
-        "other": 7,
+        "user_file": 4,
+        "memory": 5,
+        "llm_session": 6,
+        "url": 7,
+        "other": 8,
     }
     return sorted(visible, key=lambda r: order.get(r.get("reference_type"), 99))
 

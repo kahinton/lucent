@@ -42,6 +42,14 @@ The UI shows the active source for each value:
 | `LUCENT_LOG_FILE_MAX_BYTES` | `10485760` | Max bytes per log file before rotation (10 MB) |
 | `LUCENT_LOG_FILE_BACKUP_COUNT` | `5` | Number of rotated log files to keep |
 | `LUCENT_LOG_MODULES` | *(none)* | Per-module log level overrides (comma-separated, e.g. `lucent.api=DEBUG,lucent.db=WARNING`) |
+| `LUCENT_FILE_STORAGE_PATH` | `./data/files` | Root directory for the built-in local user-file provider. Compose and Helm mount durable storage at `/var/lib/lucent/files`. |
+| `LUCENT_MAX_USER_FILE_BYTES` | `10485760` | Maximum size of one stored user file in bytes (10 MiB by default). |
+
+User-file identity, ownership, provenance, and provider keys are stored in
+PostgreSQL. File content uses the local provider by default. The provider
+boundary is independent of request outputs and handoff references so external
+backends such as Azure Blob Storage or Google Drive can be added without
+changing user-facing file IDs or authorization rules.
 
 ## Authentication
 
